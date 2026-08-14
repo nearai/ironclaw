@@ -42,7 +42,6 @@ use crate::{
     api_capacity::ApiCapacitySummary,
     capture::CapturedRun,
     child_io::{join_child_stderr_reader, spawn_child_stderr_reader},
-    db_probe::DbProbeSummary,
     process_metrics::{ProcessMetrics, ProcessMetricsSampler},
     progress::{ProgressCounters, spawn_progress_reporter, stop_progress_reporter},
     redaction::redact_libsql_path,
@@ -66,6 +65,10 @@ use ironclaw_host_api::{
     path::{MountAlias, VirtualPath},
 };
 use ironclaw_resources::{FilesystemResourceGovernor, ResourceAccount, ResourceGovernor};
+use ironclaw_stress::db_probe::{
+    DbProbeError, DbProbeSummary, DbWriteMeasurement, StatsScope,
+    summarize as summarize_db_probe, summarize_measurement,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Parser)]
@@ -891,6 +894,26 @@ struct SummaryInput {
     api_capacity: Option<ApiCapacitySummary>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CliError {
+    #[error("{0}")]
+    Message(String),
+    #[error(transparent)]
+    DbProbe(#[from] DbProbeError),
+    #[error("{primary}; database measurement cleanup also failed: {cleanup}")]
+    MeasurementCleanup {
+        #[source]
+        primary: Box<CliError>,
+        cleanup: DbProbeError,
+    },
+}
+
+impl From<String> for CliError {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
@@ -899,7 +922,7 @@ async fn main() {
     }
 }
 
-async fn run() -> Result<(), String> {
+async fn run() -> Result<(), CliError> {
     let mut args = parse_args()?;
     validate_args(&args)?;
 
@@ -920,7 +943,7 @@ async fn run() -> Result<(), String> {
         None
     };
 
-    let result = if args.child_index.is_none() && args.suite.is_some() {
+    let result: Result<(), CliError> = if args.child_index.is_none() && args.suite.is_some() {
         suite::run(&args, &run_id).await
     } else if args.child_index.is_none() && ramp::is_enabled(&args) {
         ramp::run(&args, &run_id).await
@@ -932,11 +955,14 @@ async fn run() -> Result<(), String> {
         run_once(&args, &run_id)
             .await
             .and_then(|captured| {
-                report::print_captured_run(&args, &run_id, &captured).map(|_| captured)
+                report::print_captured_run(&args, &run_id, &captured)
+                    .map(|_| captured)
+                    .map_err(CliError::from)
             })
             .and_then(|captured| {
                 let metrics = captured.metrics();
                 sweep::enforce_thresholds(&args, &[("run".to_string(), metrics)])
+                    .map_err(CliError::from)
             })
     };
 
@@ -1078,7 +1104,10 @@ fn arg_is_defaulted(matches: &ArgMatches, id: &str) -> bool {
     !matches!(matches.value_source(id), Some(ValueSource::CommandLine))
 }
 
-pub(crate) async fn run_once(args: &Args, run_id: &str) -> Result<CapturedRun, String> {
+pub(crate) async fn run_once(
+    args: &Args,
+    run_id: &str,
+) -> Result<CapturedRun, CliError> {
     if args.child_index.is_none() && args.processes > 1 {
         prewarm(args, run_id)
             .await
@@ -1087,6 +1116,7 @@ pub(crate) async fn run_once(args: &Args, run_id: &str) -> Result<CapturedRun, S
                 aggregate: report::parent_summary_value(args, run_id, &summaries),
                 summaries,
             })
+            .map_err(CliError::from)
     } else {
         run_in_process(args, run_id)
             .await
@@ -1721,7 +1751,7 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
     Ok(summaries)
 }
 
-async fn run_in_process(args: &Args, run_id: &str) -> Result<RunSummary, String> {
+async fn run_in_process(args: &Args, run_id: &str) -> Result<RunSummary, CliError> {
     eprintln!(
         "{} preparing backend={} scenario={} run_id={}",
         log_prefix(args),
@@ -1731,18 +1761,26 @@ async fn run_in_process(args: &Args, run_id: &str) -> Result<RunSummary, String>
     );
     let operation_target = args.operation_target();
     if args.scenario.is_process_local() {
-        return run_process_pressure_in_process(args, run_id, operation_target).await;
+        return run_process_pressure_in_process(args, run_id, operation_target)
+            .await
+            .map_err(CliError::from);
     }
     if args.scenario.is_api_capacity() {
-        return run_api_capacity_in_process(args, run_id, operation_target).await;
+        return run_api_capacity_in_process(args, run_id, operation_target)
+            .await
+            .map_err(CliError::from);
     }
     let identities = Arc::new(SyntheticIds::new(args)?);
 
     if args.scenario.is_resource_governor() {
-        return run_resource_governor_in_process(args, run_id, operation_target, identities).await;
+        return run_resource_governor_in_process(args, run_id, operation_target, identities)
+            .await
+            .map_err(CliError::from);
     }
     if args.scenario.is_secret_control_plane() {
-        return run_secret_consume_in_process(args, run_id, operation_target, identities).await;
+        return run_secret_consume_in_process(args, run_id, operation_target, identities)
+            .await
+            .map_err(CliError::from);
     }
 
     run_user_turn_in_process(args, run_id, operation_target, identities).await
@@ -1959,7 +1997,7 @@ async fn run_resource_governor_in_process(
     })??;
     let elapsed = started.elapsed();
     let process = metrics.finish();
-    let db_probe = db_probe::summarize(db_probe_before, db_probe::capture(args).await);
+    let db_probe = summarize_db_probe(db_probe_before, db_probe::capture(args).await);
     let summary = summarize(
         args,
         run_id,
@@ -1990,7 +2028,7 @@ async fn run_user_turn_in_process(
     run_id: &str,
     operation_target: OperationTarget,
     identities: Arc<SyntheticIds>,
-) -> Result<RunSummary, String> {
+) -> Result<RunSummary, CliError> {
     let workload = Arc::new(build_user_turn_workload(args, run_id).await?);
     eprintln!(
         "{} running target={} concurrency={} operations_per_task={} {} warmup_seconds={} users={} tenants={} progress_interval_seconds={}",
@@ -2033,9 +2071,14 @@ async fn run_user_turn_in_process(
         Ok(samples) => samples,
         Err(error) => {
             if measurement_enabled {
-                db_probe::finish_measurement(args).await?;
+                if let Err(cleanup) = db_probe::finish_measurement(args).await {
+                    return Err(CliError::MeasurementCleanup {
+                        primary: Box::new(CliError::Message(error)),
+                        cleanup,
+                    });
+                }
             }
-            return Err(error);
+            return Err(CliError::Message(error));
         }
     };
     let elapsed = started.elapsed();
@@ -2054,29 +2097,39 @@ async fn run_user_turn_in_process(
                 tokio::time::sleep(Duration::from_secs(args.db_write_idle_seconds)).await;
                 Some(db_probe::capture_measurement(args).await?)
             };
-            Ok::<_, String>((after, idle_after))
+            Ok::<_, DbProbeError>((after, idle_after))
         }
         .await;
-        db_probe::finish_measurement(args).await?;
-        let (after, idle_after) = capture_result?;
-        db_probe::summarize_measurement(
+        let cleanup_result = db_probe::finish_measurement(args).await;
+        let (after, idle_after) = match (capture_result, cleanup_result) {
+            (Ok(snapshots), Ok(())) => snapshots,
+            (Err(primary), Ok(())) => return Err(primary.into()),
+            (Ok(_), Err(cleanup)) => return Err(cleanup.into()),
+            (Err(primary), Err(cleanup)) => {
+                return Err(CliError::MeasurementCleanup {
+                    primary: Box::new(primary.into()),
+                    cleanup,
+                });
+            }
+        };
+        summarize_measurement(
             db_probe_before,
             after,
             idle_after,
-            db_probe::DbWriteMeasurement {
+            DbWriteMeasurement {
                 workload: "single-tool-heavy-user-turn".to_string(),
                 tool_calls_per_turn: args.tool_calls_per_turn,
                 idle_observation_seconds: args.db_write_idle_seconds,
                 reset_stats: args.db_write_reset_stats,
                 stats_scope: if args.db_write_reset_stats {
-                    db_probe::StatsScope::ExplicitResetCurrentDatabase
+                    StatsScope::ExplicitResetCurrentDatabase
                 } else {
-                    db_probe::StatsScope::SnapshotDeltaCurrentDatabase
+                    StatsScope::SnapshotDeltaCurrentDatabase
                 },
             },
         )
     } else {
-        db_probe::summarize(db_probe_before, db_probe::capture(args).await)
+        summarize_db_probe(db_probe_before, db_probe::capture(args).await)
     };
     let summary = summarize(
         args,
@@ -2141,7 +2194,7 @@ async fn run_secret_consume_in_process(
     let samples = run_secret_consume_tasks(workload, args, identities).await?;
     let elapsed = started.elapsed();
     let process = metrics.finish();
-    let db_probe = db_probe::summarize(db_probe_before, db_probe::capture(args).await);
+    let db_probe = summarize_db_probe(db_probe_before, db_probe::capture(args).await);
     let summary = summarize(
         args,
         run_id,

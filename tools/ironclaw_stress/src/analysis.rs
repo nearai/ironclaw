@@ -8,11 +8,11 @@ use std::{
 };
 
 use serde_json::Value;
+use ironclaw_stress::db_probe::DbProbeSummary;
 
 use crate::{
     Args, RunSummary,
     capture::CapturedRun,
-    db_probe::DbProbeSummary,
     process_metrics::{ProcessMetrics, aggregate_process_metrics},
     summary::FailureCauseSummary,
     trace,

@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, fmt::Write};
+use ironclaw_stress::db_probe::{DbProbeDelta, DbProbeSnapshot, DbProbeSummary};
 
 use crate::{
     Args, RunSummary,
-    db_probe::{DbProbeSnapshot, DbProbeSummary},
     process_metrics::{ProcessMetrics, aggregate_process_metrics},
     summary::{FailureCauseSummary, LatencySummary},
     user_turn::{
@@ -615,7 +615,7 @@ fn push_libsql_table_write_table(output: &mut String, db_probe: &DbProbeSummary)
     );
 }
 
-fn push_libsql_idle_tables(output: &mut String, idle: &crate::db_probe::DbProbeDelta) {
+fn push_libsql_idle_tables(output: &mut String, idle: &DbProbeDelta) {
     let _ = writeln!(output, "\nlibSQL idle instrumented table writes");
     let _ = writeln!(
         output,
@@ -749,7 +749,7 @@ fn push_postgres_statement_table(output: &mut String, db_probe: &DbProbeSummary)
     }
 }
 
-fn push_postgres_idle_tables(output: &mut String, idle: &crate::db_probe::DbProbeDelta) {
+fn push_postgres_idle_tables(output: &mut String, idle: &DbProbeDelta) {
     let _ = writeln!(output, "\nPostgres idle table writes");
     let _ = writeln!(
         output,
@@ -769,7 +769,7 @@ fn push_postgres_idle_tables(output: &mut String, idle: &crate::db_probe::DbProb
     }
 }
 
-fn push_postgres_idle_statements(output: &mut String, idle: &crate::db_probe::DbProbeDelta) {
+fn push_postgres_idle_statements(output: &mut String, idle: &DbProbeDelta) {
     let _ = writeln!(output, "\nPostgres idle normalized statement calls");
     for statement in &idle.postgres_statement_calls {
         let _ = writeln!(

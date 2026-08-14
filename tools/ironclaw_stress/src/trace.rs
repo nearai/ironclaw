@@ -8,10 +8,11 @@ use std::{
 };
 
 use serde::Serialize;
+use ironclaw_stress::db_probe::{DbProbeDelta, DbProbeSnapshot, summarize as summarize_db_probe};
 
 use crate::{
     Args,
-    db_probe::{self, DbProbeDelta, DbProbeSnapshot},
+    db_probe,
     process_metrics::{ProcessSnapshot, capture_snapshot},
     progress::{ProgressCounters, ProgressSnapshot},
     summary::{LatencySummary, latency_summary},
@@ -154,7 +155,7 @@ fn emit_trace_sample(
     let db_probe = capture_db_snapshot(args, runtime);
     let db_delta_from_start = match (db_start, &db_probe) {
         (Some(start), Some(current)) => {
-            Some(db_probe::summarize(start.clone(), current.clone()).delta)
+            Some(summarize_db_probe(start.clone(), current.clone()).delta)
         }
         _ => None,
     };

@@ -1,5 +1,12 @@
 use super::*;
 use crate::redaction::redact_postgres_url;
+use crate::db_probe::finish_measurement;
+use ironclaw_stress::db_probe::{
+    self as db_probe, DbProbeConfig, DbProbeDelta, DbProbeSnapshot, StatsScope,
+    aggregate_statement_calls, begin as begin_db_probe, capture as capture_db_probe,
+    finish as finish_db_probe, install_libsql_write_counters, pg_stat_statements_unavailable,
+    sanitize_postgres_error, summarize_measurement, try_capture_libsql,
+};
 
 #[test]
 fn redacts_postgres_uri_credentials_but_keeps_host() {
@@ -1297,13 +1304,13 @@ fn human_summary_places_db_probe_errors_in_matching_columns() {
     summary.db_probe = Some(db_probe::DbProbeSummary {
         before: db_probe::DbProbeSnapshot {
             error: Some("before_failed".to_string()),
-            ..db_probe::DbProbeSnapshot::default()
+            ..DbProbeSnapshot::default()
         },
         after: db_probe::DbProbeSnapshot {
             error: Some("after_failed".to_string()),
-            ..db_probe::DbProbeSnapshot::default()
+            ..DbProbeSnapshot::default()
         },
-        delta: db_probe::DbProbeDelta::default(),
+        delta: DbProbeDelta::default(),
         idle_after: None,
         idle_delta: None,
         measurement: None,
@@ -1334,7 +1341,7 @@ fn postgres_probe_error_redacts_resolved_url() {
     let url = "postgresql://postgres:secret@localhost:5432/app";
     let error = format!("connection failed for {url}");
 
-    let sanitized = db_probe::sanitize_postgres_error(url, error);
+    let sanitized = sanitize_postgres_error(url, error);
 
     assert!(sanitized.contains("postgresql://<redacted>@localhost:5432/app"));
     assert!(!sanitized.contains("secret"));
@@ -1342,7 +1349,7 @@ fn postgres_probe_error_redacts_resolved_url() {
 
 #[test]
 fn missing_pg_stat_statements_error_is_actionable_and_redacted() {
-    let message = db_probe::pg_stat_statements_unavailable(
+    let message = pg_stat_statements_unavailable(
         "postgresql://postgres:secret@localhost:5432/app",
         "extension is not installed",
     );
@@ -1368,7 +1375,7 @@ fn postgres_write_delta_aggregates_tables_queries_and_totals() {
             tables: vec!["root_filesystem_entries".to_string()],
             calls: 5,
         }],
-        ..db_probe::DbProbeSnapshot::default()
+        ..DbProbeSnapshot::default()
     };
     let after = db_probe::DbProbeSnapshot {
         postgres_table_writes: vec![db_probe::PostgresTableWrites {
@@ -1383,10 +1390,10 @@ fn postgres_write_delta_aggregates_tables_queries_and_totals() {
             tables: vec!["root_filesystem_entries".to_string()],
             calls: 12,
         }],
-        ..db_probe::DbProbeSnapshot::default()
+        ..DbProbeSnapshot::default()
     };
 
-    let summary = db_probe::summarize_measurement(
+    let summary = summarize_measurement(
         before,
         after,
         None,
@@ -1395,7 +1402,7 @@ fn postgres_write_delta_aggregates_tables_queries_and_totals() {
             tool_calls_per_turn: 10,
             idle_observation_seconds: 0,
             reset_stats: false,
-            stats_scope: db_probe::StatsScope::SnapshotDeltaCurrentDatabase,
+            stats_scope: StatsScope::SnapshotDeltaCurrentDatabase,
         },
     );
 
@@ -1427,7 +1434,7 @@ fn libsql_write_delta_aggregates_instrumented_table_rows() {
             updates: 1,
             deletes: 0,
         }],
-        ..db_probe::DbProbeSnapshot::default()
+        ..DbProbeSnapshot::default()
     };
     let after = db_probe::DbProbeSnapshot {
         libsql_table_writes: vec![db_probe::LibSqlTableWrites {
@@ -1436,10 +1443,10 @@ fn libsql_write_delta_aggregates_instrumented_table_rows() {
             updates: 5,
             deletes: 1,
         }],
-        ..db_probe::DbProbeSnapshot::default()
+        ..DbProbeSnapshot::default()
     };
 
-    let summary = db_probe::summarize_measurement(
+    let summary = summarize_measurement(
         before,
         after,
         None,
@@ -1448,7 +1455,7 @@ fn libsql_write_delta_aggregates_instrumented_table_rows() {
             tool_calls_per_turn: 10,
             idle_observation_seconds: 0,
             reset_stats: false,
-            stats_scope: db_probe::StatsScope::SnapshotDeltaCurrentDatabase,
+            stats_scope: StatsScope::SnapshotDeltaCurrentDatabase,
         },
     );
 
@@ -1479,7 +1486,7 @@ async fn libsql_probe_counts_insert_update_and_delete_rows_by_table() {
     drop(connection);
     drop(db);
 
-    db_probe::install_libsql_write_counters(&path, true)
+    install_libsql_write_counters(&path, true)
         .await
         .expect("install write counters");
     let db = libsql::Builder::new_local(&path)
@@ -1511,7 +1518,7 @@ async fn libsql_probe_counts_insert_update_and_delete_rows_by_table() {
     drop(connection);
     drop(db);
 
-    let snapshot = db_probe::try_capture_libsql(path.clone())
+    let snapshot = try_capture_libsql(path.clone())
         .await
         .expect("capture libSQL counters");
     let entries = snapshot
@@ -1526,7 +1533,7 @@ async fn libsql_probe_counts_insert_update_and_delete_rows_by_table() {
     let mut args = test_args();
     args.backend = Backend::Libsql;
     args.libsql_path = Some(path.clone());
-    db_probe::finish_measurement(&args)
+    finish_measurement(&args)
         .await
         .expect("remove write counters");
     let db = libsql::Builder::new_local(&path)
@@ -1555,10 +1562,63 @@ async fn libsql_probe_counts_insert_update_and_delete_rows_by_table() {
     crate::cleanup_generated_libsql_path(&path).await;
 }
 
+#[tokio::test]
+async fn libsql_probe_rejects_negative_and_overflow_counters() {
+    for invalid_count in ["-1", "9223372036854775808"] {
+        let path = std::env::temp_dir().join(format!(
+            "ironclaw-stress-invalid-write-counter-{}.db",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let database = libsql::Builder::new_local(&path)
+            .build()
+            .await
+            .expect("build local libSQL");
+        let connection = database.connect().expect("connect local libSQL");
+        connection
+            .execute_batch("CREATE TABLE root_filesystem_entries (path TEXT PRIMARY KEY);")
+            .await
+            .expect("create measured table");
+        drop(connection);
+        drop(database);
+
+        let config = DbProbeConfig::libsql(&path, true);
+        begin_db_probe(&config)
+            .await
+            .expect("begin write measurement");
+        let database = libsql::Builder::new_local(&path)
+            .build()
+            .await
+            .expect("reopen local libSQL");
+        let connection = database.connect().expect("reconnect local libSQL");
+        connection
+            .execute_batch(&format!(
+                "INSERT INTO ironclaw_stress_write_counters(table_name, operation, row_count) \
+                 VALUES ('root_filesystem_entries', 'insert', {invalid_count});"
+            ))
+            .await
+            .expect("store invalid counter");
+        drop(connection);
+        drop(database);
+
+        let error = capture_db_probe(&config)
+            .await
+            .expect_err("invalid counter must fail capture");
+        assert!(error.to_string().contains("libsql probe failed"));
+        assert!(std::error::Error::source(&error).is_some());
+        assert_eq!(error.backend(), "libsql");
+        assert_eq!(error.operation_name(), "capture");
+
+        finish_db_probe(&config)
+            .await
+            .expect("remove write counters");
+        crate::cleanup_generated_libsql_path(&path).await;
+    }
+}
+
 #[test]
 fn human_summary_renders_libsql_write_measurement() {
     let mut summary = run_summary_with_bottlenecks();
-    summary.db_probe = Some(db_probe::summarize_measurement(
+    summary.db_probe = Some(summarize_measurement(
         db_probe::DbProbeSnapshot {
             libsql_table_writes: vec![db_probe::LibSqlTableWrites {
                 table: "root_filesystem_entries".to_string(),
@@ -1566,7 +1626,7 @@ fn human_summary_renders_libsql_write_measurement() {
                 updates: 0,
                 deletes: 0,
             }],
-            ..db_probe::DbProbeSnapshot::default()
+            ..DbProbeSnapshot::default()
         },
         db_probe::DbProbeSnapshot {
             libsql_table_writes: vec![db_probe::LibSqlTableWrites {
@@ -1575,7 +1635,7 @@ fn human_summary_renders_libsql_write_measurement() {
                 updates: 2,
                 deletes: 0,
             }],
-            ..db_probe::DbProbeSnapshot::default()
+            ..DbProbeSnapshot::default()
         },
         None,
         db_probe::DbWriteMeasurement {
@@ -1583,7 +1643,7 @@ fn human_summary_renders_libsql_write_measurement() {
             tool_calls_per_turn: 10,
             idle_observation_seconds: 0,
             reset_stats: false,
-            stats_scope: db_probe::StatsScope::SnapshotDeltaCurrentDatabase,
+            stats_scope: StatsScope::SnapshotDeltaCurrentDatabase,
         },
     ));
 
@@ -1597,7 +1657,7 @@ fn human_summary_renders_libsql_write_measurement() {
 
 #[test]
 fn postgres_statement_aggregation_groups_normalized_queries_without_sql_text() {
-    let statements = db_probe::aggregate_statement_calls([
+    let statements = aggregate_statement_calls([
         (
             42,
             "INSERT INTO root_filesystem_entries(path, contents) VALUES ($1, 'secret-value')",
@@ -1642,7 +1702,7 @@ fn human_summary_renders_postgres_write_and_idle_measurement() {
             updates: 0,
             deletes: 0,
         }],
-        ..db_probe::DbProbeSnapshot::default()
+        ..DbProbeSnapshot::default()
     };
     let after = db_probe::DbProbeSnapshot {
         postgres_table_writes: vec![db_probe::PostgresTableWrites {
@@ -1651,7 +1711,7 @@ fn human_summary_renders_postgres_write_and_idle_measurement() {
             updates: 0,
             deletes: 0,
         }],
-        ..db_probe::DbProbeSnapshot::default()
+        ..DbProbeSnapshot::default()
     };
     let idle_after = db_probe::DbProbeSnapshot {
         postgres_table_writes: vec![db_probe::PostgresTableWrites {
@@ -1660,9 +1720,9 @@ fn human_summary_renders_postgres_write_and_idle_measurement() {
             updates: 0,
             deletes: 0,
         }],
-        ..db_probe::DbProbeSnapshot::default()
+        ..DbProbeSnapshot::default()
     };
-    summary.db_probe = Some(db_probe::summarize_measurement(
+    summary.db_probe = Some(summarize_measurement(
         before,
         after,
         Some(idle_after),
@@ -1671,7 +1731,7 @@ fn human_summary_renders_postgres_write_and_idle_measurement() {
             tool_calls_per_turn: 10,
             idle_observation_seconds: 300,
             reset_stats: false,
-            stats_scope: db_probe::StatsScope::SnapshotDeltaCurrentDatabase,
+            stats_scope: StatsScope::SnapshotDeltaCurrentDatabase,
         },
     ));
 
@@ -2111,15 +2171,15 @@ fn db_probe_summary() -> db_probe::DbProbeSummary {
     db_probe::DbProbeSummary {
         before: db_probe::DbProbeSnapshot {
             libsql_file_bytes: Some(1024),
-            ..db_probe::DbProbeSnapshot::default()
+            ..DbProbeSnapshot::default()
         },
         after: db_probe::DbProbeSnapshot {
             libsql_file_bytes: Some(2048),
-            ..db_probe::DbProbeSnapshot::default()
+            ..DbProbeSnapshot::default()
         },
         delta: db_probe::DbProbeDelta {
             libsql_file_bytes: Some(1024),
-            ..db_probe::DbProbeDelta::default()
+            ..DbProbeDelta::default()
         },
         idle_after: None,
         idle_delta: None,

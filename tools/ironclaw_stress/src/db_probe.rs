@@ -62,6 +62,91 @@ impl DbProbeConfig {
     }
 }
 
+/// Failure from a measured database probe operation.
+#[derive(Debug, thiserror::Error)]
+pub enum DbProbeError {
+    #[error("{message}")]
+    Operation {
+        backend: &'static str,
+        operation: &'static str,
+        message: String,
+    },
+    #[error("{message}")]
+    OperationWithSource {
+        backend: &'static str,
+        operation: &'static str,
+        message: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("{source}")]
+    CleanupAfterBaseline {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error(
+        "{primary}; libsql measurement cleanup after baseline failure also failed: {cleanup}"
+    )]
+    BaselineCleanup {
+        #[source]
+        primary: Box<DbProbeError>,
+        cleanup: Box<DbProbeError>,
+    },
+}
+
+impl DbProbeError {
+    pub fn operation(
+        backend: &'static str,
+        operation: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::Operation {
+            backend,
+            operation,
+            message: message.into(),
+        }
+    }
+
+    fn with_source(
+        backend: &'static str,
+        operation: &'static str,
+        message: impl Into<String>,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    ) -> Self {
+        Self::OperationWithSource {
+            backend,
+            operation,
+            message: message.into(),
+            source,
+        }
+    }
+
+    pub fn backend(&self) -> &'static str {
+        match self {
+            Self::Operation { backend, .. } | Self::OperationWithSource { backend, .. } => backend,
+            Self::CleanupAfterBaseline { .. } | Self::BaselineCleanup { .. } => "libsql",
+        }
+    }
+
+    pub fn operation_name(&self) -> &'static str {
+        match self {
+            Self::Operation { operation, .. } | Self::OperationWithSource { operation, .. } => {
+                operation
+            }
+            Self::CleanupAfterBaseline { .. } | Self::BaselineCleanup { .. } => {
+                "baseline cleanup"
+            }
+        }
+    }
+
+    pub fn cleanup_error(&self) -> Option<&DbProbeError> {
+        match self {
+            Self::BaselineCleanup { cleanup, .. } => Some(cleanup),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StatsScope {
@@ -286,18 +371,32 @@ pub async fn capture_unmeasured(config: &DbProbeConfig) -> DbProbeSnapshot {
 }
 
 /// Installs or resets backend instrumentation and captures the starting counters.
-pub async fn begin(config: &DbProbeConfig) -> Result<DbProbeSnapshot, String> {
+pub async fn begin(config: &DbProbeConfig) -> Result<DbProbeSnapshot, DbProbeError> {
     match config.target() {
         DbProbeTarget::LibSql { path } => {
             install_libsql_write_counters(path, config.reset_stats())
                 .await
-                .map_err(|error| format!("libsql measurement setup failed: {error}"))?;
+                .map_err(|source| {
+                    DbProbeError::with_source(
+                        "libsql",
+                        "begin",
+                        format!("libsql measurement setup failed: {source}"),
+                        source,
+                    )
+                })?;
             retain_libsql_snapshot_or_cleanup(path, capture(config).await).await
         }
         DbProbeTarget::Postgres { url } => {
             let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
                 .await
-                .map_err(|error| sanitize_postgres_error(url, error))?;
+                .map_err(|source| {
+                    DbProbeError::with_source(
+                        "postgres",
+                        "begin",
+                        sanitize_postgres_error(url, &source),
+                        Box::new(source),
+                    )
+                })?;
             let connection_handle = tokio::spawn(async move {
                 if let Err(error) = connection.await {
                     eprintln!("[ironclaw-stress] postgres probe connection error: {error}");
@@ -316,40 +415,51 @@ pub async fn begin(config: &DbProbeConfig) -> Result<DbProbeSnapshot, String> {
 
 async fn retain_libsql_snapshot_or_cleanup(
     path: &std::path::Path,
-    capture_result: Result<DbProbeSnapshot, String>,
-) -> Result<DbProbeSnapshot, String> {
+    capture_result: Result<DbProbeSnapshot, DbProbeError>,
+) -> Result<DbProbeSnapshot, DbProbeError> {
     match capture_result {
         Ok(snapshot) => Ok(snapshot),
-        Err(capture_error) => {
-            remove_libsql_write_counters(path)
-                .await
-                .map_err(|cleanup_error| {
-                    format!(
-                        "{capture_error}; libsql measurement cleanup after baseline failure also \
-                         failed: {cleanup_error}"
-                    )
-                })?;
-            Err(capture_error)
-        }
+        Err(primary) => match remove_libsql_write_counters(path).await {
+            Ok(()) => Err(primary),
+            Err(source) => {
+                let cleanup = DbProbeError::CleanupAfterBaseline { source };
+                Err(DbProbeError::BaselineCleanup {
+                    primary: Box::new(primary),
+                    cleanup: Box::new(cleanup),
+                })
+            }
+        },
     }
 }
 
 /// Captures backend write counters for the configured target.
-pub async fn capture(config: &DbProbeConfig) -> Result<DbProbeSnapshot, String> {
+pub async fn capture(config: &DbProbeConfig) -> Result<DbProbeSnapshot, DbProbeError> {
     match config.target() {
         DbProbeTarget::LibSql { path } => try_capture_libsql(path.clone())
             .await
-            .map_err(|error| format!("libsql probe failed: {error}")),
+            .map_err(|source| {
+                DbProbeError::with_source(
+                    "libsql",
+                    "capture",
+                    format!("libsql probe failed: {source}"),
+                    source,
+                )
+            }),
         DbProbeTarget::Postgres { url } => try_capture_postgres(url, true)
             .await
-            .map_err(|error| sanitize_postgres_error(url, error)),
+            .map_err(|source| {
+                let message = sanitize_postgres_error(url, &source);
+                DbProbeError::with_source("postgres", "capture", message, source)
+            }),
     }
 }
 
 /// Waits for PostgreSQL cumulative statistics to flush, then captures write counters.
 ///
 /// libSQL counters are transactionally visible, so libSQL capture remains immediate.
-pub async fn capture_settled(config: &DbProbeConfig) -> Result<DbProbeSnapshot, String> {
+pub async fn capture_settled(
+    config: &DbProbeConfig,
+) -> Result<DbProbeSnapshot, DbProbeError> {
     if let Some(delay) = settlement_delay(config.target()) {
         tokio::time::sleep(delay).await;
     }
@@ -361,13 +471,20 @@ fn settlement_delay(target: &DbProbeTarget) -> Option<Duration> {
 }
 
 /// Removes temporary backend instrumentation installed by [`begin`].
-pub async fn finish(config: &DbProbeConfig) -> Result<(), String> {
+pub async fn finish(config: &DbProbeConfig) -> Result<(), DbProbeError> {
     let DbProbeTarget::LibSql { path } = config.target() else {
         return Ok(());
     };
     remove_libsql_write_counters(path)
         .await
-        .map_err(|error| format!("libsql measurement cleanup failed: {error}"))
+        .map_err(|source| {
+            DbProbeError::with_source(
+                "libsql",
+                "finish",
+                format!("libsql measurement cleanup failed: {source}"),
+                source,
+            )
+        })
 }
 
 #[doc(hidden)]
@@ -419,6 +536,18 @@ async fn capture_libsql(path: &std::path::Path) -> DbProbeSnapshot {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "invalid libSQL write counter row_count={value} for table={table} operation={operation}"
+)]
+struct InvalidLibSqlCounter {
+    table: String,
+    operation: String,
+    value: i64,
+    #[source]
+    source: std::num::TryFromIntError,
+}
+
 #[doc(hidden)]
 pub async fn try_capture_libsql(
     path: PathBuf,
@@ -467,7 +596,12 @@ pub async fn try_capture_libsql(
         let table: String = row.get(0)?;
         let operation: String = row.get(1)?;
         let count: i64 = row.get(2)?;
-        let count = i64_to_u64(count).unwrap_or(0);
+        let count = u64::try_from(count).map_err(|source| InvalidLibSqlCounter {
+            table: table.clone(),
+            operation: operation.clone(),
+            value: count,
+            source,
+        })?;
         let Some(table_writes) = table_writes.get_mut(&table) else {
             continue;
         };
@@ -623,43 +757,85 @@ async fn try_capture_postgres(
     Ok(normalize_snapshot(snapshot))
 }
 
-async fn ensure_pg_stat_statements(client: &Client, url: &str) -> Result<(), String> {
+async fn ensure_pg_stat_statements(
+    client: &Client,
+    url: &str,
+) -> Result<(), DbProbeError> {
     let installed: bool = client
         .query_one(
             "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_extension WHERE extname = 'pg_stat_statements')",
             &[],
         )
         .await
-        .map_err(|error| sanitize_postgres_error(url, error))?
+        .map_err(|source| {
+            DbProbeError::with_source(
+                "postgres",
+                "verify pg_stat_statements",
+                sanitize_postgres_error(url, &source),
+                Box::new(source),
+            )
+        })?
         .get(0);
     if !installed {
-        return Err(pg_stat_statements_unavailable(
-            url,
-            "the pg_stat_statements extension is not installed in this database",
+        return Err(DbProbeError::operation(
+            "postgres",
+            "verify pg_stat_statements",
+            pg_stat_statements_unavailable(
+                url,
+                "the pg_stat_statements extension is not installed in this database",
+            ),
         ));
     }
     client
         .query("SELECT calls FROM pg_stat_statements LIMIT 1", &[])
         .await
-        .map_err(|error| pg_stat_statements_unavailable(url, error))?;
+        .map_err(|source| {
+            DbProbeError::with_source(
+                "postgres",
+                "verify pg_stat_statements",
+                pg_stat_statements_unavailable(url, &source),
+                Box::new(source),
+            )
+        })?;
     Ok(())
 }
 
-async fn reset_measurement_stats(client: &Client, url: &str) -> Result<(), String> {
+async fn reset_measurement_stats(
+    client: &Client,
+    url: &str,
+) -> Result<(), DbProbeError> {
     let extension_version: String = client
         .query_one(
             "SELECT extversion FROM pg_catalog.pg_extension WHERE extname = 'pg_stat_statements'",
             &[],
         )
         .await
-        .map_err(|error| sanitize_postgres_error(url, error))?
+        .map_err(|source| {
+            DbProbeError::with_source(
+                "postgres",
+                "read pg_stat_statements version",
+                sanitize_postgres_error(url, &source),
+                Box::new(source),
+            )
+        })?
         .try_get(0)
-        .map_err(|error| sanitize_postgres_error(url, error))?;
+        .map_err(|source| {
+            DbProbeError::with_source(
+                "postgres",
+                "decode pg_stat_statements version",
+                sanitize_postgres_error(url, &source),
+                Box::new(source),
+            )
+        })?;
     if !pg_stat_statements_reset_supported(&extension_version) {
-        return Err(format!(
-            "--db-write-reset-stats requires pg_stat_statements 1.7 or newer for the scoped \
-             three-argument reset; found {extension_version}. Upgrade the extension or omit the \
-             flag to use non-destructive snapshot deltas"
+        return Err(DbProbeError::operation(
+            "postgres",
+            "reset statistics",
+            format!(
+                "--db-write-reset-stats requires pg_stat_statements 1.7 or newer for the scoped \
+                 three-argument reset; found {extension_version}. Upgrade the extension or omit the \
+                 flag to use non-destructive snapshot deltas"
+            ),
         ));
     }
     client
@@ -668,11 +844,17 @@ async fn reset_measurement_stats(client: &Client, url: &str) -> Result<(), Strin
             &[],
         )
         .await
-        .map_err(|error| {
-            format!(
+        .map_err(|source| {
+            let message = format!(
                 "{}; --db-write-reset-stats explicitly requested a current-database reset. \
                  Omit the flag to use non-destructive snapshot deltas",
-                sanitize_postgres_error(url, error)
+                sanitize_postgres_error(url, &source)
+            );
+            DbProbeError::with_source(
+                "postgres",
+                "reset pg_stat_statements",
+                message,
+                Box::new(source),
             )
         })?;
     let table_names = MEASUREMENT_TABLES.to_vec();
@@ -683,11 +865,17 @@ async fn reset_measurement_stats(client: &Client, url: &str) -> Result<(), Strin
             &[&table_names],
         )
         .await
-        .map_err(|error| {
-            format!(
+        .map_err(|source| {
+            let message = format!(
                 "{}; --db-write-reset-stats explicitly requested per-table counter resets. \
                  Omit the flag to use non-destructive snapshot deltas",
-                sanitize_postgres_error(url, error)
+                sanitize_postgres_error(url, &source)
+            );
+            DbProbeError::with_source(
+                "postgres",
+                "reset table counters",
+                message,
+                Box::new(source),
             )
         })?;
     Ok(())
@@ -1107,8 +1295,8 @@ fn counter_delta(before: u64, after: u64) -> i128 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DbProbeTarget, POSTGRES_STATS_SETTLE_DURATION, install_libsql_write_counters,
-        retain_libsql_snapshot_or_cleanup, settlement_delay,
+        DbProbeError, DbProbeTarget, POSTGRES_STATS_SETTLE_DURATION,
+        install_libsql_write_counters, retain_libsql_snapshot_or_cleanup, settlement_delay,
     };
 
     #[test]
@@ -1153,11 +1341,15 @@ mod tests {
             .expect("install measurement instrumentation");
         let error = retain_libsql_snapshot_or_cleanup(
             &path,
-            Err("forced baseline capture failure".to_string()),
+            Err(DbProbeError::operation(
+                "libsql",
+                "capture",
+                "forced baseline capture failure",
+            )),
         )
         .await
         .expect_err("forced capture failure must propagate");
-        assert_eq!(error, "forced baseline capture failure");
+        assert_eq!(error.to_string(), "forced baseline capture failure");
 
         let database = libsql::Builder::new_local(&path)
             .build()
@@ -1183,5 +1375,35 @@ mod tests {
         tokio::fs::remove_file(path)
             .await
             .expect("remove measurement database");
+    }
+
+    #[tokio::test]
+    async fn baseline_and_cleanup_failures_retain_both_sources() {
+        let path = std::env::temp_dir()
+            .join(format!(
+                "ironclaw-stress-missing-parent-{}",
+                uuid::Uuid::new_v4().simple()
+            ))
+            .join("measurement.db");
+        let primary = DbProbeError::with_source(
+            "libsql",
+            "capture",
+            "forced baseline capture failure",
+            Box::new(std::io::Error::other("baseline source")),
+        );
+
+        let error = retain_libsql_snapshot_or_cleanup(&path, Err(primary))
+            .await
+            .expect_err("cleanup must fail for a database in a missing directory");
+        let DbProbeError::BaselineCleanup {
+            primary, cleanup, ..
+        } = &error
+        else {
+            panic!("expected combined baseline and cleanup failure");
+        };
+        assert!(std::error::Error::source(primary.as_ref()).is_some());
+        assert!(std::error::Error::source(cleanup.as_ref()).is_some());
+        assert!(error.to_string().contains("forced baseline capture failure"));
+        assert!(error.to_string().contains("cleanup after baseline failure"));
     }
 }

@@ -1,17 +1,6 @@
-use ironclaw_stress::db_probe as core;
-
-pub(crate) use ironclaw_stress::db_probe::{
-    DbProbeDelta, DbProbeSnapshot, DbProbeSummary, DbWriteMeasurement, StatsScope, summarize,
-    summarize_measurement,
+use ironclaw_stress::db_probe::{
+    self as core, DbProbeConfig, DbProbeError, DbProbeSnapshot,
 };
-#[cfg(test)]
-pub(crate) use ironclaw_stress::db_probe::{
-    LibSqlTableWrites, PostgresStatementCalls, PostgresTableWrites, aggregate_statement_calls,
-    install_libsql_write_counters, pg_stat_statements_reset_supported,
-    pg_stat_statements_unavailable, sanitize_postgres_error, try_capture_libsql,
-};
-
-use core::DbProbeConfig;
 
 use crate::{Args, Backend};
 
@@ -30,6 +19,16 @@ fn config(args: &Args) -> Result<DbProbeConfig, String> {
     }
 }
 
+fn measurement_config(args: &Args) -> Result<DbProbeConfig, DbProbeError> {
+    config(args).map_err(|message| {
+        DbProbeError::operation(
+            "postgres",
+            "resolve target",
+            format!("postgres probe failed: {message}"),
+        )
+    })
+}
+
 pub(crate) async fn capture(args: &Args) -> DbProbeSnapshot {
     let config = match config(args) {
         Ok(config) => config,
@@ -43,17 +42,21 @@ pub(crate) async fn capture(args: &Args) -> DbProbeSnapshot {
     core::capture_unmeasured(&config).await
 }
 
-pub(crate) async fn begin_measurement(args: &Args) -> Result<DbProbeSnapshot, String> {
-    core::begin(&config(args)?).await
+pub(crate) async fn begin_measurement(
+    args: &Args,
+) -> Result<DbProbeSnapshot, DbProbeError> {
+    core::begin(&measurement_config(args)?).await
 }
 
-pub(crate) async fn capture_measurement(args: &Args) -> Result<DbProbeSnapshot, String> {
-    core::capture_settled(&config(args)?).await
+pub(crate) async fn capture_measurement(
+    args: &Args,
+) -> Result<DbProbeSnapshot, DbProbeError> {
+    core::capture_settled(&measurement_config(args)?).await
 }
 
-pub(crate) async fn finish_measurement(args: &Args) -> Result<(), String> {
+pub(crate) async fn finish_measurement(args: &Args) -> Result<(), DbProbeError> {
     if matches!(args.backend, Backend::Postgres) {
         return Ok(());
     }
-    core::finish(&config(args)?).await
+    core::finish(&measurement_config(args)?).await
 }
