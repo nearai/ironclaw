@@ -2121,6 +2121,11 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         // stored replay metadata for the Trace Commons envelope; it moved out
         // of composition into the turn-runner observer seam (WS6, §6.10.1).
         "crates/ironclaw_turn_runner/src/trace_capture.rs",
+        // Prepared-context seeding is a replay boundary: caller-supplied tool
+        // history persists as provider-shaped tool-call reference envelopes
+        // under the seed sentinel identity so the gateway replays it exactly
+        // like live provider history (unbound-turns follow-up, PR #7634).
+        "crates/ironclaw_threads/src/prepared_context.rs",
     ]
     .into_iter()
     .map(|entry| resolve_crate_relative(&root, entry))
