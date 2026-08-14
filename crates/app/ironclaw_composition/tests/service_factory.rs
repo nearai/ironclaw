@@ -1429,7 +1429,13 @@ async fn standalone_services_dispatch_trigger_management_through_composed_runtim
         ironclaw_host_runtime::TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Daily production summary",
-            "prompt": "Summarize production state",
+            "execution_contract": {
+                "version": 1,
+                "goal": "Summarize production state",
+                "success_criteria": ["Complete the requested task"],
+                "output_instructions": "Return a concise result",
+                "no_result_text": "No result"
+            },
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
     )

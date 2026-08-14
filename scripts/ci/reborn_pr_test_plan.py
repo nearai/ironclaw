@@ -900,6 +900,18 @@ def build_plan(
                 "shared root-test support changed; PR runs a representative partition"
             )
             continue
+        if path.startswith("tests/support/") and path not in INTEGRATION_SUPPORT_OWNERS:
+            # Direct shared root-test support (tests/support/mod.rs and the
+            # modules it declares). The integration group targets also compile
+            # this tree via `#[path = "../../support/mod.rs"]`, so schedule a
+            # representative lane of each tier.
+            root_partitions.add(0)
+            integration_lanes.add(0)
+            reasons.append(
+                "shared root-test support changed; PR runs a representative "
+                "partition and integration lane"
+            )
+            continue
         if path in integration_inventory:
             integration_lanes.add(integration_inventory[path])
             reasons.append(f"integration test changed: {path}")

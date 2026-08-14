@@ -801,9 +801,13 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // admission-probe trait, and the structured-result capability id
         // constants. Neutral authority vocabulary only: the accept door
         // lives in ironclaw_threads, validation in ironclaw_loop_host, and
-        // profile derivation in ironclaw_turns. Count read from this test's
-        // own failure message.
-        ("ironclaw_host_api", 19_274),
+        // profile derivation in ironclaw_turns.
+        // 19_086 -> 19_186 (#7532, merged from main): the provider-neutral
+        // turn execution policy and validated required-skill identity shared
+        // by trusted trigger ingress and the runner.
+        // Union re-measured on the merged tree (2026-08-14); count read from
+        // this test's own failure message.
+        ("ironclaw_host_api", 19_434),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

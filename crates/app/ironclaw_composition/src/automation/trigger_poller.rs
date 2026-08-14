@@ -480,6 +480,7 @@ mod tests {
                 agent_id: Some(AgentId::new("hook-wrapper-agent").expect("agent")),
                 project_id: None,
                 prompt: "hook wrapper test prompt".to_string(),
+                execution_policy: None,
             };
             let scope = TurnScope::new_with_owner(
                 observer_tenant(),

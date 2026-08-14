@@ -145,6 +145,8 @@ pub enum HostSkillContextBuildError {
     VisibilityDataMissing,
     #[error("skill context budget exceeded")]
     ContextBudgetExceeded,
+    #[error("required skill context unavailable: {reason}")]
+    RequiredSkillUnavailable { reason: String },
     #[error("skill context unsafe model-visible content")]
     UnsafeModelVisibleContent,
     #[error("skill context budget misconfigured")]
@@ -161,7 +163,8 @@ impl HostSkillContextBuildError {
             Self::ParseFailed => AgentLoopHostErrorKind::InvalidInvocation,
             Self::TrustDataMissing
             | Self::VisibilityDataMissing
-            | Self::UnsafeModelVisibleContent => AgentLoopHostErrorKind::PolicyDenied,
+            | Self::UnsafeModelVisibleContent
+            | Self::RequiredSkillUnavailable { .. } => AgentLoopHostErrorKind::PolicyDenied,
             Self::ContextBudgetExceeded => AgentLoopHostErrorKind::ContextOverflow,
             Self::BudgetMisconfigured | Self::Internal => AgentLoopHostErrorKind::Internal,
         };

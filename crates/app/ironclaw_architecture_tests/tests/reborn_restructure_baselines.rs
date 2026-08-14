@@ -170,7 +170,7 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// `ironclaw_assistant::UnboundPreparedTurnService`; composition's growth is
 /// the wire-DTO mapping, port adapter, and mount wiring, ratcheted to the
 /// observed count.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_093;
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_299;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

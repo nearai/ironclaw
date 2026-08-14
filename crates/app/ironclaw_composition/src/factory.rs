@@ -202,6 +202,7 @@ use auth_engine_assembly::{
 };
 mod trigger_creation_assembly;
 use trigger_creation_assembly::TriggerCreatorPairingHook;
+pub(crate) use trigger_creation_assembly::TriggerExecutionPolicyPreflight;
 #[cfg(test)]
 use trigger_creation_assembly::pair_trigger_creator;
 pub(crate) mod production_backend_assembly;
@@ -348,6 +349,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) processes: ProcessRuntimeSystem,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
+    pub(crate) trigger_create_hook: Arc<TriggerCreatorPairingHook>,
     pub(crate) resource_governor: Arc<dyn ResourceGovernor>,
     pub(crate) budget_gate_store: Arc<dyn BudgetGateStorePort>,
     pub(crate) broadcast_budget_event_sink: Arc<BroadcastBudgetEventSink>,
