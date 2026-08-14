@@ -1,19 +1,29 @@
 //! Doc-fact contract: published docs teach the current manifest schema.
 //!
-//! Asserts no published page mentions the retired v2 schema literal (fenced
-//! code included — a tutorial code block is where the drift lived), and that
-//! the tool-building tutorial names the current schema version and
-//! `origin_gate_matrix`. Scope is the published tree: `docs/` minus the
-//! `.mintignore` fence, parsed from the authoritative file so a removed
-//! fence entry widens this scan with it. Fenced areas may legitimately name
-//! the retired literal.
+//! Asserts every `reborn.extension_manifest.<version>` mention in a published
+//! page names the current schema version (fenced code included — a tutorial
+//! code block is where the drift lived), and that the tool-building tutorial
+//! names the current schema version and `origin_gate_matrix`. Both the family
+//! prefix and the expected version derive from `MANIFEST_SCHEMA_VERSION_V3`,
+//! so the next schema bump retargets this scan through the constant instead
+//! of a maintained retired-literal list. Scope is the published tree: `docs/`
+//! minus the `.mintignore` fence, parsed from the authoritative file so a
+//! removed fence entry widens this scan with it. Fenced areas may
+//! legitimately name retired versions.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use ironclaw_extension_registry::MANIFEST_SCHEMA_VERSION_V3;
 
-const RETIRED_SCHEMA_LITERAL: &str = "reborn.extension_manifest.v2";
+/// The schema family prefix (`reborn.extension_manifest.`), derived from the
+/// current-version constant so a renamed family retargets the scan too.
+fn schema_family_prefix() -> String {
+    let (family, _version) = MANIFEST_SCHEMA_VERSION_V3
+        .rsplit_once('.')
+        .expect("schema version constant ends in a `.{version}` segment");
+    format!("{family}.")
+}
 
 /// The publication fence, parsed from `docs/.mintignore`.
 struct Fence {
@@ -149,7 +159,7 @@ fn published_pages(docs_root: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-fn published_docs_never_mention_the_retired_v2_schema() {
+fn published_docs_name_only_the_current_manifest_schema_version() {
     let root = repo_root();
     let docs_root = root.join("docs");
     let pages = published_pages(&docs_root);
@@ -176,25 +186,35 @@ fn published_docs_never_mention_the_retired_v2_schema() {
          {unwalked:?} — the walker or the fence parse broke",
     );
 
+    let prefix = schema_family_prefix();
     let mut offenders = Vec::new();
     for page in &pages {
         let text = std::fs::read_to_string(page)
             .unwrap_or_else(|error| panic!("read {}: {error}", page.display()));
         for (index, line) in text.lines().enumerate() {
-            if line.contains(RETIRED_SCHEMA_LITERAL) {
-                offenders.push(format!(
-                    "{}:{}: {}",
-                    page.strip_prefix(&root).expect("page under root").display(),
-                    index + 1,
-                    line.trim()
-                ));
+            let mut rest = line;
+            while let Some(position) = rest.find(&prefix) {
+                let after = &rest[position + prefix.len()..];
+                let version: String = after
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .collect();
+                if format!("{prefix}{version}") != MANIFEST_SCHEMA_VERSION_V3 {
+                    offenders.push(format!(
+                        "{}:{}: `{prefix}{version}` — {}",
+                        page.strip_prefix(&root).expect("page under root").display(),
+                        index + 1,
+                        line.trim()
+                    ));
+                }
+                rest = after;
             }
         }
     }
     assert!(
         offenders.is_empty(),
-        "published docs still teach the retired `{RETIRED_SCHEMA_LITERAL}` schema \
-         (current: `{MANIFEST_SCHEMA_VERSION_V3}`):\n{}",
+        "published docs name a manifest schema version other than the current \
+         `{MANIFEST_SCHEMA_VERSION_V3}`:\n{}",
         offenders.join("\n"),
     );
 }
