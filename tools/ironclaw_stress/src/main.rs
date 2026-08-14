@@ -171,8 +171,8 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 300)]
     pub(crate) db_write_idle_seconds: u64,
 
-    /// Reset current-database pg_stat_statements and measured table counters before measurement.
-    /// This is destructive to shared statistics and requires --preset db-write-measurement.
+    /// Reset backend write counters before measurement.
+    /// PostgreSQL statistics are shared; use an isolated database.
     #[arg(long)]
     pub(crate) db_write_reset_stats: bool,
 
@@ -1122,9 +1122,6 @@ fn validate_args(args: &Args) -> Result<(), String> {
         );
     }
     if matches!(args.preset, Some(StressPreset::DbWriteMeasurement)) {
-        if !matches!(args.backend, Backend::Postgres) {
-            return Err("--preset db-write-measurement requires --backend postgres".to_string());
-        }
         if !matches!(args.scenario, Scenario::ToolSession)
             || args.processes != 1
             || args.concurrency != 1
@@ -2020,22 +2017,36 @@ async fn run_user_turn_in_process(
     };
     let started = Instant::now();
     let target = workload.target().to_string();
-    let samples = run_user_turn_tasks(Arc::clone(&workload), args, identities).await?;
+    let samples = match run_user_turn_tasks(Arc::clone(&workload), args, identities).await {
+        Ok(samples) => samples,
+        Err(error) => {
+            if measurement_enabled {
+                db_probe::finish_measurement(args).await?;
+            }
+            return Err(error);
+        }
+    };
     let elapsed = started.elapsed();
     let process = metrics.finish();
     let db_probe = if measurement_enabled {
-        let after = db_probe::capture_measurement(args).await?;
-        let idle_after = if args.db_write_idle_seconds == 0 {
-            None
-        } else {
-            eprintln!(
-                "{} observing idle database writes for {} seconds",
-                log_prefix(args),
-                args.db_write_idle_seconds
-            );
-            tokio::time::sleep(Duration::from_secs(args.db_write_idle_seconds)).await;
-            Some(db_probe::capture_measurement(args).await?)
-        };
+        let capture_result = async {
+            let after = db_probe::capture_measurement(args).await?;
+            let idle_after = if args.db_write_idle_seconds == 0 {
+                None
+            } else {
+                eprintln!(
+                    "{} observing idle database writes for {} seconds",
+                    log_prefix(args),
+                    args.db_write_idle_seconds
+                );
+                tokio::time::sleep(Duration::from_secs(args.db_write_idle_seconds)).await;
+                Some(db_probe::capture_measurement(args).await?)
+            };
+            Ok::<_, String>((after, idle_after))
+        }
+        .await;
+        db_probe::finish_measurement(args).await?;
+        let (after, idle_after) = capture_result?;
         db_probe::summarize_measurement(
             db_probe_before,
             after,
