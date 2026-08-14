@@ -51,15 +51,23 @@ process death, timeout cleanup, lease release, and reply persistence without
 paid API use. The same fake runs through Docker in the repository's gated
 Docker lane to pin placement parity.
 
-### Live paired evaluation (2026-08-14)
+### Live paired evaluation (corrected 2026-08-14 run)
 
 A developer-supplied `ANTHROPIC_API_KEY` was loaded from the macOS keychain and
 passed only through the explicitly configured developer environment variable.
-The evaluation used commit `9a03c1c174`, Claude Code 2.1.232, and
-`claude-agent-acp` 0.67.0, with an isolated shared clone for each task and lane.
-Both lanes received the same prompts and seeded regressions. No tests were run,
-no remote pull requests were created, and every coding change stayed inside its
-task clone.
+The corrected evaluation used commit `679ca696a3`, Claude Code 2.1.232,
+`claude-agent-acp` 0.67.0, and `claude-sonnet-4-6` in both lanes. The Claude Code
+model was pinned with `ANTHROPIC_MODEL`; every non-synthetic model-bearing ACP
+transcript record reported `claude-sonnet-4-6`.
+
+Each lane received the same task text, a task-local clone, and the same committed
+seed regression. Every turn also named its allowed workspace root and required
+`pwd` plus `git rev-parse --show-toplevel` before work. Preflight in both lanes
+observed commit `679ca696a3`, origin `https://github.com/nearai/ironclaw.git`,
+the first `Cargo.toml` line `[workspace]`, and a probe file written into the
+evaluated clone. The ACP transcript auditor found zero tool inputs that escaped
+the task checkout. No tests were run, no remote pull requests were created, and
+all coding changes remained in ignored task clones.
 
 The task set was:
 
@@ -75,61 +83,71 @@ The task set was:
 Scoring is deliberately small and auditable: 2 means the requested outcome was
 correct and complete, 1 means materially useful but missing or wrong on a key
 requirement, and 0 means no usable outcome. A timeout was 900 seconds per
-assistant reply.
+assistant reply. Because the operator requested CI-only validation, scoring
+uses response review and static diff inspection; generated tests were not
+compiled locally.
 
-| Task | ACP harness | Rust loop | Observed outcome |
+| Task | ACP harness | Rust loop | Semantic observation |
 | --- | ---: | ---: | --- |
-| Turn-path Q&A | 145 s, 2/2 | 399 s, 1/2 | Harness identified `ProfileRoutingTurnRunExecutor`; Rust cited retired top-level crate paths and missed the new executor-routing seam. |
-| Extension identity Q&A | 167 s, 2/2 | 86 s, 2/2 | Both answered correctly; Rust was faster. |
-| Small streaming fix + PR | 315 s, 2/2 | 902 s, 0/2 | Harness restored 16 ms behavior, added a timer-only regression test, committed it, and returned a PR handoff. Rust timed out without a reply or edit beyond the seed. |
-| UTF-8 debugging, two turns | 108 s, 2/2 | 137 s, 0/2 | Harness restored boundary-safe truncation and added a focused edge case. Rust described and claimed a separate `acp_chunker` crate and 12 tests that did not exist; the seeded panic remained. |
-| Profile routing, two turns | 281 s, 2/2 | 908 s, 0/2 | Harness restored claimed-profile dispatch and added caller-path coverage. Rust timed out on the diagnostic turn with the seed untouched. |
-| Four-turn continuity | 512 s, 2/2 | stopped at 687 s, 0/2 | Harness retained the session, created the note, and corrected it on the fourth turn. The Rust run produced no first reply and was stopped once the earlier failures made further waiting uninformative. Four transient Anthropic HTTP errors make this last Rust observation network-contaminated. |
-| **Total** | **6/6 tasks, 12/12; 1,528 s** | **1/6 strict task successes, 3/12; >3,118 s observed** | Harness median task time was 224 s. Two Rust tasks exhausted the 900-second reply timeout before the intentionally stopped continuity run. |
+| Turn-path Q&A | 242 s, 2/2 | 904 s, 0/2 | Harness traced the current handler, coordinator, scheduler, and `ProfileRoutingTurnRunExecutor` path. Rust exhausted the reply deadline without a final message. Its log contained four transient Anthropic HTTP retries, so this timeout is network-contaminated. |
+| Extension identity Q&A | 90 s, 2/2 | 475 s, 1/2 | Harness cited the `CredentialName`/`ExtensionName` newtypes and the shared setup-routing rule. Rust explained the storage-vs-UI distinction but incorrectly treated `extension_name` as the manifest display string and did not identify the canonical identity contract. |
+| Small streaming fix + PR | 263 s, 2/2 | 229 s, 2/2 | Both restored the 16 ms window, added caller-facing timer coverage, created a local commit, and returned a usable PR handoff. Rust was faster. |
+| UTF-8 debugging, two turns | 135 s, 2/2 | 189 s, 2/2 | Both diagnosed the byte-boundary panic and restored boundary-safe truncation in the evaluated checkout. Harness reused the existing exact regression; Rust expanded it with two edge cases. |
+| Profile routing, two turns | 704 s, 1/2 | 1,090 s, 1/2 | Both restored dispatch through `claimed.resolved_run_profile.profile_id`. Harness completed both replies, but its `NoopTransitionPort` implementation omitted the required `#[async_trait]`, so the generated coverage is statically invalid. Rust edited during the diagnose-only turn and then timed out before its second reply. This Rust timeout had no provider error. |
+| Four-turn continuity | 775 s, 2/2 | 1,343 s, 1/2 | Harness completed all four turns, wrote the note, and reviewed it against source. Rust retained the map through two turns but timed out on turn three before writing the note; its log contained nine transient Anthropic HTTP retries. |
+| **Total** | **5/6 strict; 11/12 points; 11/11 turns; 2,208 s** | **2/6 strict; 7/12 points; 7/11 turns; 4,230 s** | Harness median task time was 252 s; Rust median was 689 s. The corrected result still favors the harness, but it is not the original 12/12-vs-3/12 headline. |
 
-The harness-side Claude transcripts reported 220 uncached input tokens, 99,322
-output tokens, 1,262,214 cache-creation input tokens, and 14,209,681 cache-read
-input tokens across 125 provider messages. The Ironclaw ACP executor currently
+The harness-side Claude transcripts reported 167 uncached input tokens, 102,381
+output tokens, 954,588 cache-creation input tokens, and 12,419,380 cache-read
+input tokens across 144 provider messages. The Ironclaw ACP executor currently
 records `model_usage: None`, and the live run-artifact API did not expose native
-Rust-loop usage, so a symmetric token or USD comparison is not available. This
-is an accounting gap, not evidence that either lane used no tokens.
+Rust-loop usage, so a symmetric token or USD comparison remains unavailable.
+This is an accounting gap, not evidence that either lane used no tokens.
 
-This was an operational comparison, not a controlled model-quality A/B. The
-Rust lane was configured for `claude-sonnet-4-6`; the ACP transcripts show that
-Claude Code selected `claude-opus-5`. Each task was run once, the seeded changes
-were uncommitted working-tree mutations, and the Rust continuity task was
-stopped at the operator's direction after the preceding timeouts. These
-limitations prevent attributing the quality delta solely to loop design.
+This is a same-model, same-task operational comparison, but not a repeated
+statistical benchmark. Each task ran once. Claude Code's built-in `Agent` tool
+was disabled after an ACP run showed a completed Claude subagent whose result
+never returned to the parent session; both measured lanes therefore ran as
+single-agent loops. The 13 Rust provider retries contaminate its turn-path and
+continuity timings, while its clean profile-routing timeout still provides a
+non-network example of loop inefficiency.
 
-### Stability and placement observations
+### Evaluation-isolation findings
 
-- The maintained ACP adapter completed all 11 harness turns. Session resume
-  worked across the four-turn continuity task, and no adapter or driver failure
-  occurred.
-- Host placement was used for the live paired tasks because it exposes the
-  developer's installed `git`, Rust toolchain, and repository. The pinned
-  Docker image built successfully but does not contain `git` or `cargo`; using
-  it would have made the coding cases an image-tooling test rather than a loop
-  comparison.
-- Cumulative `ModelTextDelta` streaming and the 16 ms projection window were
-  exercised indirectly by the streaming-fix task. The benchmark measured
-  end-to-end reply latency, not time-to-first-token or per-chunk cadence.
-- The native Rust loop's two clean timeouts had no provider error in their
-  server logs. The stopped continuity run did show transient provider HTTP
-  retries, so it must not be grouped with those clean timeouts.
+The first paired run is superseded for loop-quality conclusions. It had two
+material confounders: Claude Code selected `claude-opus-5` while Rust used
+Sonnet 4.6, and the Rust file tools wrote to the durable virtual `/workspace`
+instead of the checked-out repository. The latter explains the apparent
+`acp_chunker` fix that never existed in the clone.
+
+A second attempted run exposed a different leak: although Claude Code's ACP
+session `cwd` was the task clone, read-only QA commands selected the source
+worktree by absolute path. Rewriting the clone's origin to GitHub alone did not
+prevent it. The corrected run therefore supplies the task workspace explicitly
+on every turn and rejects ACP results whose tool inputs reference the source
+worktree outside the task clone. The measured run produced zero such leaks.
+
+Host placement was retained because the coding tasks require the developer's
+installed `git` and Rust toolchain. The benchmark measured end-to-end reply
+latency, not time-to-first-text or per-chunk cadence. Cumulative
+`ModelTextDelta` streaming and the 16 ms projection window were exercised by
+the streaming-fix task but were not separately timed.
 
 ### Recommendation
 
-Keep harness routing experimental, explicit, and default-off. The v0 question
-has a positive answer for host-based developer work: the off-the-shelf ACP
-harness completed this task mix, including edits and session continuity, while
-the current Rust loop did not.
+Keep harness routing experimental, explicit, and default-off. The corrected
+same-model run still supports the core hypothesis: the ACP harness completed
+more of this repository-work task mix, preserved long-session continuity, and
+used substantially less wall time than the current Rust loop. It also found a
+real harness-side weakness in generated regression coverage, so promotion
+should remain evidence-gated rather than automatic.
 
 Unlock **#7622 only**, scoped first to the breadth/image trigger demonstrated
-here: a pinned coding-capable image, durable workspace/session behavior, and
-usage accounting that permits a symmetric rerun. Do not unlock #7621: this eval
-used only a developer credential and demonstrated no customer-credential need.
-Do not unlock #7623: it exercised neither extension-tool access nor a controlled
-same-model production-promotion benchmark. Before either later rung, repeat the
-set with the same pinned model in both lanes, record time-to-first-text and
-chunk cadence, and collect provider usage through the common run artifact.
+here: a pinned coding-capable image, durable workspace/session behavior,
+workspace-escape detection, and usage accounting that permits symmetric cost
+measurement. Do not unlock #7621: this eval used only a developer credential
+and demonstrated no customer-credential need. Do not unlock #7623: it exercised
+neither extension-tool access nor repeated production-promotion evidence.
+Before either later rung, repeat the corrected set, record time-to-first-text
+and chunk cadence, compile generated task diffs in CI, and collect provider
+usage through the common run artifact.
