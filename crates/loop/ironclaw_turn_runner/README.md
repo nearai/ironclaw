@@ -22,6 +22,11 @@ before anything durable commits. It never decides durability itself.
   with the process supervisor; `turn_scheduler.rs` is an agent-turn
   *projection* over the generic supervisor (#6696), not a scheduler of its
   own.
+- `HarnessRoutingTurnRunExecutor` (`harness_turn_run_executor.rs`) — a
+  default-off ACP adapter that diverts only explicitly configured run profiles
+  to an externally placed agent and otherwise delegates to
+  `RebornTurnRunExecutor`. `agent_placement.rs` keeps host-process and Docker
+  policy outside the ACP conversation executor.
 - `DriverRegistry` + the two production drivers: `PlannedDriver` (adapts
   `ironclaw_agent_loop`) and `text_loop_driver.rs` (smallest supported
   behavior). Fallback between them is an explicit profile/readiness decision,
@@ -42,12 +47,12 @@ before anything durable commits. It never decides durability itself.
 
 ## Depends on / consumed by
 
-- **Normal workspace deps (17):** `ironclaw_agent_loop`, `ironclaw_loop_host`,
+- **Normal workspace deps (18):** `ironclaw_agent_loop`, `ironclaw_loop_host`,
   `ironclaw_hooks` (the declared decorator chain), kernel (`ironclaw_turns`,
   `ironclaw_processes`, `ironclaw_host_runtime`, `ironclaw_approvals`),
   contracts (`ironclaw_host_api`, `ironclaw_loop_contracts`), plus
   `ironclaw_event_log`, `ironclaw_filesystem`, `ironclaw_memory`,
-  `ironclaw_observability`, `ironclaw_outbound`, `ironclaw_safety`,
+  `ironclaw_observability`, `ironclaw_outbound`, `ironclaw_safety`, `ironclaw_sandbox`,
   `ironclaw_threads`, `ironclaw_trace_commons`. **Not `ironclaw_llm`** — the
   provider cone left with the model gateway (WS3); re-adding it means provider
   behavior came back.

@@ -3047,6 +3047,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         ironhub_agent_shared_key,
         ironhub_manifest_url,
         runner,
+        harness,
         tool_disclosure,
         trigger_poller,
         credential_refresh,
@@ -3853,6 +3854,14 @@ pub(crate) async fn build_runtime_with_resource_governor(
         )),
         subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         loop_exit_evidence,
+        harness: harness.map(|settings| {
+            ironclaw_turn_runner::harness_turn_run_executor::HarnessTurnRunConfig {
+                run_profile_ids: settings.run_profile_ids,
+                timeout: settings.timeout,
+                max_update_bytes: settings.max_update_bytes,
+                placement: settings.placement,
+            }
+        }),
         config: DefaultPlannedRuntimeConfig {
             heartbeat_interval: runner.heartbeat_interval,
             poll_interval: runner.poll_interval,

@@ -20,6 +20,8 @@
 //! The CLI builds this struct from env vars / config; it does not call into
 //! `ironclaw_turn_runner` or `ironclaw_llm` directly.
 
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,6 +34,9 @@ use ironclaw_loop_host::HostSkillContextSource;
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_triggers::TriggerFireAccessChecker;
 use ironclaw_triggers::TriggerPollerWorkerConfig;
+use ironclaw_turn_runner::agent_placement::{
+    AgentPlacement, DockerAgentPlacement, HostAgentPlacement,
+};
 use ironclaw_turn_runner::runtime::{
     DEFAULT_MAX_CONCURRENT_RUNS_PER_USER, DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS,
     DEFAULT_TURN_RUNNER_WORKER_COUNT,
@@ -39,6 +44,61 @@ use ironclaw_turn_runner::runtime::{
 
 use crate::input::RebornHostBindings;
 use crate::observability::hooks::HooksActivationConfig;
+
+/// Deployment-selected location for an ACP agent process.
+pub enum HarnessPlacementSettings {
+    Host { command: String },
+    Docker { image: String },
+}
+
+/// Explicit, default-off configuration for routing selected run profiles to
+/// an ACP agent. Placement policy is resolved by the caller before composition.
+pub struct HarnessRuntimeSettings {
+    pub(crate) run_profile_ids: HashSet<String>,
+    pub(crate) timeout: Duration,
+    pub(crate) max_update_bytes: usize,
+    pub(crate) placement: Arc<dyn AgentPlacement>,
+}
+
+impl HarnessRuntimeSettings {
+    pub fn new(
+        run_profile_ids: HashSet<String>,
+        workspace_root: PathBuf,
+        placement: HarnessPlacementSettings,
+        environment: Vec<String>,
+        timeout: Duration,
+        max_update_bytes: usize,
+    ) -> Result<Self, String> {
+        if run_profile_ids.is_empty() {
+            return Err("ACP harness requires at least one routed run profile".to_string());
+        }
+        if timeout.is_zero() {
+            return Err("ACP harness timeout must be greater than zero".to_string());
+        }
+        let placement: Arc<dyn AgentPlacement> = match placement {
+            HarnessPlacementSettings::Host { command } => Arc::new(
+                HostAgentPlacement::new(
+                    workspace_root,
+                    command.into(),
+                    Vec::new(),
+                    environment,
+                    max_update_bytes,
+                )
+                .map_err(|error| error.to_string())?,
+            ),
+            HarnessPlacementSettings::Docker { image } => Arc::new(
+                DockerAgentPlacement::new(workspace_root, image, environment, max_update_bytes)
+                    .map_err(|error| error.to_string())?,
+            ),
+        };
+        Ok(Self {
+            run_profile_ids,
+            timeout,
+            max_update_bytes,
+            placement,
+        })
+    }
+}
 
 /// Caller-owned identity for an assembled Reborn runtime.
 ///
@@ -329,6 +389,7 @@ pub struct RebornRuntimeInput {
     /// Validated signed-catalog URL resolved by the CLI/config boundary.
     pub ironhub_manifest_url: ironclaw_extension_manager::ironhub::IronhubManifestUrl,
     pub runner: TurnRunnerSettings,
+    pub harness: Option<HarnessRuntimeSettings>,
     pub tool_disclosure: Option<ToolDisclosureMode>,
     pub trigger_poller: TriggerPollerSettings,
     pub credential_refresh: KeepaliveSweepSettings,
@@ -409,6 +470,7 @@ impl RebornRuntimeInput {
             ironhub_agent_shared_key: None,
             ironhub_manifest_url,
             runner: TurnRunnerSettings::default(),
+            harness: None,
             tool_disclosure: None,
             trigger_poller: TriggerPollerSettings::default(),
             credential_refresh: KeepaliveSweepSettings::default(),
@@ -431,6 +493,11 @@ impl RebornRuntimeInput {
             #[cfg(any(test, feature = "test-support"))]
             model_availability_retry_attempts_override: None,
         }
+    }
+
+    pub fn with_harness_settings(mut self, harness: HarnessRuntimeSettings) -> Self {
+        self.harness = Some(harness);
+        self
     }
 
     /// The declarative deployment config (Phase A) — the authoritative "what

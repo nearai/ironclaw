@@ -931,6 +931,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
             )
             .with_cancellation_factory(cancellation_factory.clone()),
         ),
+        harness: None,
         config: DefaultPlannedRuntimeConfig::default(),
         model_route_resolver: Some(model_route_resolver),
         cancellation_factory: Some(cancellation_factory.clone()),
@@ -1104,6 +1105,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
             subagent_await_edge_evidence,
             thread_scope.clone(),
         )),
+        harness: None,
         config: DefaultPlannedRuntimeConfig::default(),
         model_route_resolver: Some(model_route_resolver),
         cancellation_factory: Some(cancellation_factory.clone()),
@@ -1292,6 +1294,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
             subagent_await_edge_evidence,
             thread_scope,
         )),
+        harness: None,
         config: DefaultPlannedRuntimeConfig::default(),
         model_route_resolver: Some(model_route_resolver),
         cancellation_factory: Some(Arc::new(UnretainedRunCancellationFactory)),

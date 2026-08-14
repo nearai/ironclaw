@@ -17,6 +17,7 @@
 //! the boundary tests are designed to prevent.
 
 pub mod after_turn_memory;
+pub mod agent_placement;
 pub mod app_loop_family;
 pub mod driver_registry;
 /// Failure **classification** only — the category identifiers and the
@@ -27,6 +28,7 @@ pub mod failure_lane;
 /// The writer half of the checkpoint-rejection envelope; its reader and the
 /// summary tables live in `ironclaw_host_api::failure::summary`.
 mod failure_summary;
+pub mod harness_turn_run_executor;
 pub mod hook_gate_refs;
 pub mod retry_disposition;
 

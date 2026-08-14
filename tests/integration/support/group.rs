@@ -495,6 +495,7 @@ impl RebornIntegrationGroup {
             real_gate_dispatch_services: false,
             channel_connection: None,
             bound_memory: None,
+            harness: None,
         }
     }
 
@@ -889,6 +890,7 @@ pub struct RebornIntegrationGroupBuilder {
         Arc<dyn ironclaw_memory::MemoryService>,
         ironclaw_extension_contracts::memory::MemoryDescriptor,
     )>,
+    harness: Option<ironclaw_turn_runner::harness_turn_run_executor::HarnessTurnRunConfig>,
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -1232,6 +1234,7 @@ impl RebornIntegrationGroupBuilder {
             )),
             subagent_spawn_limits: SubagentSpawnLimits::default(),
             loop_exit_evidence,
+            harness: self.harness,
             config: DefaultPlannedRuntimeConfig {
                 poll_interval: Duration::from_millis(10),
                 lease_recovery_interval: self

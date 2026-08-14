@@ -223,12 +223,41 @@ pub struct DriversSection {
     pub additional: Option<Vec<String>>,
 }
 
+/// Process placement for the experimental ACP harness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessPlacement {
+    /// Spawn the pinned adapter directly on the operator's machine.
+    Host,
+    /// Spawn the pinned adapter inside the configured Docker image.
+    Docker,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessSection {
-    /// Active harness id. Composition logs the value at boot; takes
-    /// effect when the harness substrate from epic #3036 lands.
+    /// Active harness id. `claude-code-acp` is the only supported v0 value.
     pub id: Option<String>,
+    /// Run-profile ids routed to the harness. Profiles not listed here keep the
+    /// canonical Reborn executor, even while the harness is enabled.
+    pub run_profiles: Option<Vec<String>>,
+    /// Process placement. Hosted deployments fail closed unless this is
+    /// `docker`; standalone deployments may explicitly choose either value.
+    pub placement: Option<HarnessPlacement>,
+    /// Adapter executable for host placement. Defaults are resolved by the
+    /// bootstrap layer rather than by this syntax-only schema.
+    pub command: Option<String>,
+    /// Locally-built ACP adapter image. No registry/default image is implied.
+    pub image: Option<String>,
+    /// Hard wall-clock limit for one harness turn.
+    pub timeout_secs: Option<u64>,
+    /// Maximum aggregate bytes retained from ACP session updates.
+    pub max_update_bytes: Option<usize>,
+    /// Explicit host environment variable containing the developer Anthropic
+    /// credential. The value itself is never accepted in TOML.
+    pub anthropic_api_key_env: Option<String>,
+    /// Optional host environment variable containing a developer VCS token.
+    pub vcs_token_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -1006,6 +1035,50 @@ impl RebornConfigFile {
         {
             check(Cow::Borrowed("harness.id"), id)?;
         }
+        if let Some(harness) = &self.harness {
+            if let Some(run_profiles) = &harness.run_profiles {
+                if run_profiles.is_empty() {
+                    return Err(RebornConfigFileError::InvalidField {
+                        path: path_str(),
+                        field: "harness.run_profiles".to_string(),
+                        reason: "must contain at least one run profile id".to_string(),
+                    });
+                }
+                for profile in run_profiles {
+                    check(Cow::Borrowed("harness.run_profiles"), profile)?;
+                }
+            }
+            if let Some(image) = &harness.image {
+                check(Cow::Borrowed("harness.image"), image)?;
+            }
+            if let Some(command) = &harness.command {
+                check(Cow::Borrowed("harness.command"), command)?;
+            }
+            if harness.timeout_secs == Some(0) {
+                return Err(RebornConfigFileError::InvalidField {
+                    path: path_str(),
+                    field: "harness.timeout_secs".to_string(),
+                    reason: "must be greater than zero".to_string(),
+                });
+            }
+            if harness.max_update_bytes == Some(0) {
+                return Err(RebornConfigFileError::InvalidField {
+                    path: path_str(),
+                    field: "harness.max_update_bytes".to_string(),
+                    reason: "must be greater than zero".to_string(),
+                });
+            }
+            if let Some(env_name) = &harness.anthropic_api_key_env {
+                validate_env_var_reference(
+                    "harness.anthropic_api_key_env",
+                    env_name,
+                    attributed_path,
+                )?;
+            }
+            if let Some(env_name) = &harness.vcs_token_env {
+                validate_env_var_reference("harness.vcs_token_env", env_name, attributed_path)?;
+            }
+        }
         if let Some(llm) = &self.llm {
             for (slot, selection) in llm {
                 check(Cow::Borrowed("llm.<slot>"), slot)?;
@@ -1494,6 +1567,59 @@ max_concurrent_conversation_runs = 4
     fn absent_runner_leaves_new_fields_none() {
         let cfg = RebornConfigFile::parse_text("", &attributed()).expect("empty TOML is valid");
         assert!(cfg.runner.is_none());
+    }
+
+    #[test]
+    fn acp_harness_section_round_trips() {
+        let toml = r#"
+[harness]
+id = "claude-code-acp"
+run_profiles = ["reborn-planned-default"]
+placement = "host"
+command = "claude-agent-acp"
+image = "ironclaw-claude-code-acp:dev"
+timeout_secs = 600
+max_update_bytes = 1048576
+anthropic_api_key_env = "ANTHROPIC_API_KEY"
+vcs_token_env = "GH_TOKEN"
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("must parse");
+        let harness = cfg.harness.expect("harness section present");
+        assert_eq!(harness.id.as_deref(), Some("claude-code-acp"));
+        assert_eq!(
+            harness.run_profiles,
+            Some(vec!["reborn-planned-default".to_string()])
+        );
+        assert_eq!(harness.placement, Some(HarnessPlacement::Host));
+        assert_eq!(harness.command.as_deref(), Some("claude-agent-acp"));
+        assert_eq!(
+            harness.image.as_deref(),
+            Some("ironclaw-claude-code-acp:dev")
+        );
+        assert_eq!(harness.timeout_secs, Some(600));
+        assert_eq!(harness.max_update_bytes, Some(1_048_576));
+        assert_eq!(
+            harness.anthropic_api_key_env.as_deref(),
+            Some("ANTHROPIC_API_KEY")
+        );
+        assert_eq!(harness.vcs_token_env.as_deref(), Some("GH_TOKEN"));
+    }
+
+    #[test]
+    fn acp_harness_rejects_empty_routing_and_zero_limits() {
+        for (field, value) in [
+            ("run_profiles", "[]"),
+            ("timeout_secs", "0"),
+            ("max_update_bytes", "0"),
+        ] {
+            let toml = format!("[harness]\nid = \"claude-code-acp\"\n{field} = {value}\n");
+            let error = RebornConfigFile::parse_text(&toml, &attributed())
+                .expect_err("invalid harness bound must fail closed");
+            assert!(
+                error.to_string().contains(field),
+                "error must identify {field}: {error}"
+            );
+        }
     }
 
     #[test]

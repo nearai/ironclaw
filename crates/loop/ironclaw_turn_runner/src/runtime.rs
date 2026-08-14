@@ -36,6 +36,7 @@ use ironclaw_turns::{
 use crate::{
     app_loop_family::build_loop_family_registry_with_overrides,
     driver_registry::{DriverRegistry, DriverRegistryError},
+    harness_turn_run_executor::{HarnessRoutingTurnRunExecutor, HarnessTurnRunConfig},
     loop_driver_host::{
         HookDispatcherBuilderFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,
         apply_capability_surface_policy, capability_resolve_error_to_agent_host_error,
@@ -370,6 +371,8 @@ where
     pub subagent_spawn_input_codec: Arc<dyn SpawnSubagentInputCodec>,
     pub subagent_spawn_limits: SubagentSpawnLimits,
     pub loop_exit_evidence: Arc<dyn LoopExitEvidencePort>,
+    /// Optional ACP routing for explicitly selected run profiles.
+    pub harness: Option<HarnessTurnRunConfig>,
     pub config: DefaultPlannedRuntimeConfig,
     pub model_route_resolver: Option<Arc<dyn ModelRouteResolver>>,
     pub cancellation_factory: Option<Arc<dyn RunCancellationFactory>>,
@@ -478,6 +481,7 @@ pub enum DefaultPlannedRuntimeBuildError {
     RunProfile(String),
     SubagentCompletion(String),
     SteeringReconcileObserver(String),
+    Harness(String),
 }
 
 impl fmt::Display for DefaultPlannedRuntimeBuildError {
@@ -495,6 +499,7 @@ impl fmt::Display for DefaultPlannedRuntimeBuildError {
                     "steering reconcile observer wiring failed: {error}"
                 )
             }
+            Self::Harness(error) => write!(formatter, "ACP harness wiring failed: {error}"),
         }
     }
 }
@@ -861,7 +866,7 @@ where
     });
     let mut host_factory = RebornLoopDriverHostFactory::new(
         Arc::clone(&parts.thread_service),
-        parts.thread_scope,
+        parts.thread_scope.clone(),
         Arc::clone(&parts.model_gateway),
         agent_turn_runtime_port,
         Arc::clone(&parts.loop_checkpoint_store),
@@ -942,6 +947,21 @@ where
         executor = executor.with_after_turn_memory_recorder(recorder);
     }
     let executor = Arc::new(executor);
+    let executor: Arc<dyn crate::turn_scheduler::TurnRunExecutor> =
+        if let Some(harness) = parts.harness {
+            Arc::new(
+                HarnessRoutingTurnRunExecutor::new(
+                    Arc::clone(&executor),
+                    host_factory.clone() as Arc<dyn crate::turn_runner::HostFactory>,
+                    Arc::clone(&parts.thread_service),
+                    parts.thread_scope.clone(),
+                    harness,
+                )
+                .map_err(DefaultPlannedRuntimeBuildError::Harness)?,
+            )
+        } else {
+            executor
+        };
     let scheduler_config = TurnRunSchedulerConfig::default()
         .with_max_concurrent_runs(scheduler_permit_count(parts.config.worker_count))
         .with_runner_heartbeat_interval(parts.config.heartbeat_interval)

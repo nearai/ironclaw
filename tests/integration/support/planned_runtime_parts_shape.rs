@@ -74,6 +74,7 @@ where
         subagent_spawn_input_codec: _,
         subagent_spawn_limits: _,
         loop_exit_evidence: _,
+        harness: _,
         config: _,
         model_route_resolver,
         cancellation_factory,

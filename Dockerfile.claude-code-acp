@@ -1,0 +1,16 @@
+FROM node:22.18.0-bookworm-slim@sha256:752ea8a2f758c34002a0461bd9f1cee4f9a3c36d48494586f60ffce1fc708e0e
+
+# Keep the maintained Claude ACP adapter pinned. Updating it requires re-running
+# the ACP compatibility canary and the Docker integration suite.
+ARG CLAUDE_AGENT_ACP_VERSION=0.67.0
+ARG CLAUDE_CODE_VERSION=2.1.232
+
+RUN npm install --global \
+      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+      "@agentclientprotocol/claude-agent-acp@${CLAUDE_AGENT_ACP_VERSION}" \
+    && npm cache clean --force
+
+WORKDIR /workspace
+ENV HOME=/workspace/.home
+
+ENTRYPOINT ["claude-agent-acp"]

@@ -548,6 +548,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
 
     def test_user_sandbox_worker_change_selects_real_docker_lane(self) -> None:
         for path in (
+            "Dockerfile.claude-code-acp",
             "Dockerfile.sandbox-worker",
             "crates/lanes/ironclaw_sandbox/Cargo.toml",
             "crates/lanes/ironclaw_sandbox/src/lib.rs",
@@ -561,6 +562,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "crates/app/ironclaw_composition/src/factory/runtime_lane_assembly.rs",
             "crates/app/ironclaw_composition/src/input.rs",
             "crates/app/ironclaw_config/src/profile.rs",
+            "crates/app/ironclaw_config/src/config_file.rs",
             "crates/kernel/ironclaw_host_runtime/src/first_party_tools/mod.rs",
             "crates/kernel/ironclaw_host_runtime/src/invocation_services.rs",
             "crates/kernel/ironclaw_host_runtime/src/process_port.rs",
@@ -569,6 +571,13 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "crates/kernel/ironclaw_runtime_policy/src/planner.rs",
             "crates/kernel/ironclaw_runtime_policy/src/resolver.rs",
             "crates/lanes/ironclaw_sandbox/tests/user_sandbox_docker_live.rs",
+            "crates/loop/ironclaw_turn_runner/src/agent_placement.rs",
+            "crates/loop/ironclaw_turn_runner/src/harness_turn_run_executor.rs",
+            "scripts/install-claude-code-acp.sh",
+            "tests/fixtures/acp-fake/Dockerfile",
+            "tests/fixtures/acp-fake/agent.mjs",
+            "tests/fixtures/acp-claude-code/initialize-request.json",
+            "tests/integration/reborn_acp_harness.rs",
             "tests/integration/reborn_sandbox_shell_turn.rs",
             "tests/e2e_trace_runtime_policy_serde.rs",
             "tests/fixtures/llm_traces/runtime_policy/hosted_dev_no_shell.json",
@@ -634,6 +643,18 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertTrue(docker_only_plan["run_sandbox_docker"])
         self.assertEqual(docker_only_plan["root_partitions"], [])
         self.assertEqual(docker_only_plan["integration_lanes"], [])
+
+    def test_acp_fake_fixture_selects_host_integration_and_docker_parity(self) -> None:
+        integration_path = "tests/integration/reborn_acp_harness.rs"
+        integration_inventory = planner._integration_test_lanes()
+
+        plan = self.plan("pull_request", ["tests/fixtures/acp-fake/agent.mjs"])
+
+        self.assertEqual(
+            plan["integration_lanes"],
+            [integration_inventory[integration_path]],
+        )
+        self.assertTrue(plan["run_sandbox_docker"])
 
     def test_empty_diff_fails_fast(self) -> None:
         with self.assertRaisesRegex(ValueError, "empty pull-request diff"):
@@ -1904,6 +1925,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertIn("needs.changes.outputs.run_sandbox_docker", workflow)
         self.assertIn("--test user_sandbox_docker_live", workflow)
         self.assertIn("--test reborn_integration_sandbox_shell_turn", workflow)
+        self.assertIn("--test reborn_integration_acp_harness", workflow)
         self.assertIn(
             '"${feature_args[@]}" --ignore-rust-version --all-targets',
             workflow,

@@ -78,8 +78,9 @@ pub use runtime::{
     product_auth_challenge_provider,
 };
 pub use runtime_input::{
-    KeepaliveSweepSettings, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
-    TriggerFireAccessGrant, TriggerFireAccessPolicy, TriggerPollerSettings, TurnRunnerSettings,
+    HarnessPlacementSettings, HarnessRuntimeSettings, KeepaliveSweepSettings, PollSettings,
+    RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessGrant, TriggerFireAccessPolicy,
+    TriggerPollerSettings, TurnRunnerSettings,
 };
 pub use ironclaw_identity::{
     ExternalSubjectId, ProviderKind, RebornIdentityError, RebornIdentityResolver,

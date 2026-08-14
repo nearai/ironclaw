@@ -26,6 +26,7 @@ layer = "loops"
 test-support = ["ironclaw_turns/test-support"]
 
 [dependencies]
+agent-client-protocol = "=2.0.0"
 async-trait = "0.1"
 # Scope-roster shard-prefix hashing only (§4.5) — same version already used
 # by `ironclaw_filesystem` for the identical stable-hex-from-key pattern
@@ -34,6 +35,7 @@ async-trait = "0.1"
 blake3 = "1"
 chrono = "0.4"
 futures-util = { version = "0.3", default-features = false }
+hex = "0.4"
 ironclaw_agent_loop = { path = "../ironclaw_agent_loop", version = "0.1.0" }
 ironclaw_event_log = { path = "../../events/ironclaw_event_log", version = "0.1.0" }
 ironclaw_hooks = { path = "../ironclaw_hooks", version = "0.1.0" }
@@ -46,6 +48,7 @@ ironclaw_outbound = { path = "../../domains/ironclaw_outbound", version = "0.1.0
 ironclaw_processes = { path = "../../kernel/ironclaw_processes", version = "0.1.0" }
 ironclaw_approvals = { path = "../../kernel/ironclaw_approvals", version = "0.1.0" }
 ironclaw_safety = { path = "../../substrates/ironclaw_safety", version = "0.2.2" }
+ironclaw_sandbox = { path = "../../lanes/ironclaw_sandbox", version = "0.1.0" }
 ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", version = "0.1.0" }
 ironclaw_threads = { path = "../../domains/ironclaw_threads", version = "0.1.0" }
 ironclaw_loop_contracts = { path = "../../contracts/ironclaw_loop_contracts", version = "0.1.0" }
@@ -58,9 +61,10 @@ libsql = { version = "0.9", default-features = false, features = ["core", "repli
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["codec", "rt"] }
 # Message ids for the captured-transcript adaptation in `trace_capture`.
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
