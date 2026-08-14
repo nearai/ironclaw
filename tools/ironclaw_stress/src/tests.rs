@@ -1,6 +1,6 @@
 use super::*;
-use crate::redaction::redact_postgres_url;
 use crate::db_probe::finish_measurement;
+use crate::redaction::redact_postgres_url;
 use ironclaw_stress::db_probe::{
     self as db_probe, DbProbeConfig, DbProbeDelta, DbProbeSnapshot, StatsScope,
     aggregate_statement_calls, begin as begin_db_probe, capture as capture_db_probe,

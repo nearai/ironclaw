@@ -7,12 +7,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde::Serialize;
 use ironclaw_stress::db_probe::{DbProbeDelta, DbProbeSnapshot, summarize as summarize_db_probe};
+use serde::Serialize;
 
 use crate::{
-    Args,
-    db_probe,
+    Args, db_probe,
     process_metrics::{ProcessSnapshot, capture_snapshot},
     progress::{ProgressCounters, ProgressSnapshot},
     summary::{LatencySummary, latency_summary},

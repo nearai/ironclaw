@@ -1,6 +1,4 @@
-use ironclaw_stress::db_probe::{
-    self as core, DbProbeConfig, DbProbeError, DbProbeSnapshot,
-};
+use ironclaw_stress::db_probe::{self as core, DbProbeConfig, DbProbeError, DbProbeSnapshot};
 
 use crate::{Args, Backend};
 
@@ -42,15 +40,11 @@ pub(crate) async fn capture(args: &Args) -> DbProbeSnapshot {
     core::capture_unmeasured(&config).await
 }
 
-pub(crate) async fn begin_measurement(
-    args: &Args,
-) -> Result<DbProbeSnapshot, DbProbeError> {
+pub(crate) async fn begin_measurement(args: &Args) -> Result<DbProbeSnapshot, DbProbeError> {
     core::begin(&measurement_config(args)?).await
 }
 
-pub(crate) async fn capture_measurement(
-    args: &Args,
-) -> Result<DbProbeSnapshot, DbProbeError> {
+pub(crate) async fn capture_measurement(args: &Args) -> Result<DbProbeSnapshot, DbProbeError> {
     core::capture_settled(&measurement_config(args)?).await
 }
 

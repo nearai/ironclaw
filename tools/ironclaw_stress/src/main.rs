@@ -66,8 +66,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_resources::{FilesystemResourceGovernor, ResourceAccount, ResourceGovernor};
 use ironclaw_stress::db_probe::{
-    DbProbeError, DbProbeSummary, DbWriteMeasurement, StatsScope,
-    summarize as summarize_db_probe, summarize_measurement,
+    DbProbeError, DbProbeSummary, DbWriteMeasurement, StatsScope, summarize as summarize_db_probe,
+    summarize_measurement,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1104,10 +1104,7 @@ fn arg_is_defaulted(matches: &ArgMatches, id: &str) -> bool {
     !matches!(matches.value_source(id), Some(ValueSource::CommandLine))
 }
 
-pub(crate) async fn run_once(
-    args: &Args,
-    run_id: &str,
-) -> Result<CapturedRun, CliError> {
+pub(crate) async fn run_once(args: &Args, run_id: &str) -> Result<CapturedRun, CliError> {
     if args.child_index.is_none() && args.processes > 1 {
         prewarm(args, run_id)
             .await
@@ -2070,13 +2067,11 @@ async fn run_user_turn_in_process(
     let samples = match run_user_turn_tasks(Arc::clone(&workload), args, identities).await {
         Ok(samples) => samples,
         Err(error) => {
-            if measurement_enabled {
-                if let Err(cleanup) = db_probe::finish_measurement(args).await {
-                    return Err(CliError::MeasurementCleanup {
-                        primary: Box::new(CliError::Message(error)),
-                        cleanup,
-                    });
-                }
+            if measurement_enabled && let Err(cleanup) = db_probe::finish_measurement(args).await {
+                return Err(CliError::MeasurementCleanup {
+                    primary: Box::new(CliError::Message(error)),
+                    cleanup,
+                });
             }
             return Err(CliError::Message(error));
         }

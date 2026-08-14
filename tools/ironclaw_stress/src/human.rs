@@ -1,5 +1,5 @@
-use std::{collections::BTreeMap, fmt::Write};
 use ironclaw_stress::db_probe::{DbProbeDelta, DbProbeSnapshot, DbProbeSummary};
+use std::{collections::BTreeMap, fmt::Write};
 
 use crate::{
     Args, RunSummary,

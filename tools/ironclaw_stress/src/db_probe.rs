@@ -84,9 +84,7 @@ pub enum DbProbeError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    #[error(
-        "{primary}; libsql measurement cleanup after baseline failure also failed: {cleanup}"
-    )]
+    #[error("{primary}; libsql measurement cleanup after baseline failure also failed: {cleanup}")]
     BaselineCleanup {
         #[source]
         primary: Box<DbProbeError>,
@@ -133,9 +131,7 @@ impl DbProbeError {
             Self::Operation { operation, .. } | Self::OperationWithSource { operation, .. } => {
                 operation
             }
-            Self::CleanupAfterBaseline { .. } | Self::BaselineCleanup { .. } => {
-                "baseline cleanup"
-            }
+            Self::CleanupAfterBaseline { .. } | Self::BaselineCleanup { .. } => "baseline cleanup",
         }
     }
 
@@ -435,31 +431,29 @@ async fn retain_libsql_snapshot_or_cleanup(
 /// Captures backend write counters for the configured target.
 pub async fn capture(config: &DbProbeConfig) -> Result<DbProbeSnapshot, DbProbeError> {
     match config.target() {
-        DbProbeTarget::LibSql { path } => try_capture_libsql(path.clone())
-            .await
-            .map_err(|source| {
+        DbProbeTarget::LibSql { path } => {
+            try_capture_libsql(path.clone()).await.map_err(|source| {
                 DbProbeError::with_source(
                     "libsql",
                     "capture",
                     format!("libsql probe failed: {source}"),
                     source,
                 )
-            }),
-        DbProbeTarget::Postgres { url } => try_capture_postgres(url, true)
-            .await
-            .map_err(|source| {
+            })
+        }
+        DbProbeTarget::Postgres { url } => {
+            try_capture_postgres(url, true).await.map_err(|source| {
                 let message = sanitize_postgres_error(url, &source);
                 DbProbeError::with_source("postgres", "capture", message, source)
-            }),
+            })
+        }
     }
 }
 
 /// Waits for PostgreSQL cumulative statistics to flush, then captures write counters.
 ///
 /// libSQL counters are transactionally visible, so libSQL capture remains immediate.
-pub async fn capture_settled(
-    config: &DbProbeConfig,
-) -> Result<DbProbeSnapshot, DbProbeError> {
+pub async fn capture_settled(config: &DbProbeConfig) -> Result<DbProbeSnapshot, DbProbeError> {
     if let Some(delay) = settlement_delay(config.target()) {
         tokio::time::sleep(delay).await;
     }
@@ -475,16 +469,14 @@ pub async fn finish(config: &DbProbeConfig) -> Result<(), DbProbeError> {
     let DbProbeTarget::LibSql { path } = config.target() else {
         return Ok(());
     };
-    remove_libsql_write_counters(path)
-        .await
-        .map_err(|source| {
-            DbProbeError::with_source(
-                "libsql",
-                "finish",
-                format!("libsql measurement cleanup failed: {source}"),
-                source,
-            )
-        })
+    remove_libsql_write_counters(path).await.map_err(|source| {
+        DbProbeError::with_source(
+            "libsql",
+            "finish",
+            format!("libsql measurement cleanup failed: {source}"),
+            source,
+        )
+    })
 }
 
 #[doc(hidden)]
@@ -537,15 +529,13 @@ async fn capture_libsql(path: &std::path::Path) -> DbProbeSnapshot {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error(
-    "invalid libSQL write counter row_count={value} for table={table} operation={operation}"
-)]
+#[error("invalid libSQL write counter row_count={value} for table={table} operation={operation}")]
 struct InvalidLibSqlCounter {
     table: String,
     operation: String,
-    value: i64,
+    value: String,
     #[source]
-    source: std::num::TryFromIntError,
+    source: std::num::ParseIntError,
 }
 
 #[doc(hidden)]
@@ -574,7 +564,7 @@ pub async fn try_capture_libsql(
     }
     let mut rows = connection
         .query(
-            "SELECT table_name, operation, row_count \
+            "SELECT table_name, operation, CAST(row_count AS TEXT) \
              FROM ironclaw_stress_write_counters \
              ORDER BY table_name, operation",
             (),
@@ -595,13 +585,15 @@ pub async fn try_capture_libsql(
     while let Some(row) = rows.next().await? {
         let table: String = row.get(0)?;
         let operation: String = row.get(1)?;
-        let count: i64 = row.get(2)?;
-        let count = u64::try_from(count).map_err(|source| InvalidLibSqlCounter {
-            table: table.clone(),
-            operation: operation.clone(),
-            value: count,
-            source,
-        })?;
+        let count: String = row.get(2)?;
+        let count = count
+            .parse::<u64>()
+            .map_err(|source| InvalidLibSqlCounter {
+                table: table.clone(),
+                operation: operation.clone(),
+                value: count,
+                source,
+            })?;
         let Some(table_writes) = table_writes.get_mut(&table) else {
             continue;
         };
@@ -757,10 +749,7 @@ async fn try_capture_postgres(
     Ok(normalize_snapshot(snapshot))
 }
 
-async fn ensure_pg_stat_statements(
-    client: &Client,
-    url: &str,
-) -> Result<(), DbProbeError> {
+async fn ensure_pg_stat_statements(client: &Client, url: &str) -> Result<(), DbProbeError> {
     let installed: bool = client
         .query_one(
             "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_extension WHERE extname = 'pg_stat_statements')",
@@ -800,10 +789,7 @@ async fn ensure_pg_stat_statements(
     Ok(())
 }
 
-async fn reset_measurement_stats(
-    client: &Client,
-    url: &str,
-) -> Result<(), DbProbeError> {
+async fn reset_measurement_stats(client: &Client, url: &str) -> Result<(), DbProbeError> {
     let extension_version: String = client
         .query_one(
             "SELECT extversion FROM pg_catalog.pg_extension WHERE extname = 'pg_stat_statements'",
@@ -1295,8 +1281,8 @@ fn counter_delta(before: u64, after: u64) -> i128 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DbProbeError, DbProbeTarget, POSTGRES_STATS_SETTLE_DURATION,
-        install_libsql_write_counters, retain_libsql_snapshot_or_cleanup, settlement_delay,
+        DbProbeError, DbProbeTarget, POSTGRES_STATS_SETTLE_DURATION, install_libsql_write_counters,
+        retain_libsql_snapshot_or_cleanup, settlement_delay,
     };
 
     #[test]
@@ -1403,7 +1389,11 @@ mod tests {
         };
         assert!(std::error::Error::source(primary.as_ref()).is_some());
         assert!(std::error::Error::source(cleanup.as_ref()).is_some());
-        assert!(error.to_string().contains("forced baseline capture failure"));
+        assert!(
+            error
+                .to_string()
+                .contains("forced baseline capture failure")
+        );
         assert!(error.to_string().contains("cleanup after baseline failure"));
     }
 }

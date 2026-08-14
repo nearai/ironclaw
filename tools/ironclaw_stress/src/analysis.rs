@@ -7,8 +7,8 @@ use std::{
     path::PathBuf,
 };
 
-use serde_json::Value;
 use ironclaw_stress::db_probe::DbProbeSummary;
+use serde_json::Value;
 
 use crate::{
     Args, RunSummary,
