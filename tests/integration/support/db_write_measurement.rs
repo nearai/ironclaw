@@ -18,6 +18,9 @@ const REQUIRED_ROOT_FILESYSTEM_FAMILIES: [&str; 4] = [
     "root_filesystem_ordered_index_rows",
     "root_filesystem_sequences",
 ];
+// Canonical workloads fit in one journal page; this assertion intentionally
+// reads one page so a larger workload must raise the bound explicitly.
+const PROCESS_JOURNAL_ASSERTION_PAGE_SIZE: usize = 1_023;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -253,7 +256,7 @@ impl RebornIntegrationHarness {
                 &self.turn_scope.to_resource_scope(),
                 Some(&self.binding.actor_user_id),
                 None,
-                1_023,
+                PROCESS_JOURNAL_ASSERTION_PAGE_SIZE,
             )
             .await
             .map_err(|error| format!("read process journal: {error}"))?;

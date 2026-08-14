@@ -408,6 +408,8 @@ struct CaptureOutcome {
     running_observed_after: Duration,
     capture_finished_after: Duration,
     write_families: IdleWriteFamilies,
+    live_before_capture: ProcessLifecycleStatus,
+    live_after_capture: ProcessLifecycleStatus,
 }
 
 #[tokio::main]
@@ -582,6 +584,8 @@ where
         after,
         running_observed_after,
         capture_finished_after,
+        live_before_capture,
+        live_after_capture,
         mut write_families,
     } = capture;
 
@@ -620,8 +624,8 @@ where
             running_observed_after_ms: running_observed_after.as_millis(),
             capture_finished_after_ms: capture_finished_after.as_millis(),
             terminal_observed_after_ms: terminal_observed_after.as_millis(),
-            live_before_capture: true,
-            live_after_capture: true,
+            live_before_capture: live_before_capture == ProcessLifecycleStatus::Running,
+            live_after_capture: live_after_capture == ProcessLifecycleStatus::Running,
             terminal_after_capture: terminal_observed_after > capture_finished_after,
             terminal_status: terminal.status,
         },
@@ -681,11 +685,11 @@ where
     wait_for_scheduler_activity(active, lifecycle).await?;
     if matches!(probe.target(), db_probe::DbProbeTarget::Postgres { .. }) {
         tokio::time::sleep(POSTGRES_POOL_STATS_FLUSH_DELAY).await;
-        require_running(active, "after PostgreSQL stats flush delay").await?;
+        let _ = require_running(active, "after PostgreSQL stats flush delay").await?;
     }
-    require_running(active, "before counter capture").await?;
+    let live_before_capture = require_running(active, "before counter capture").await?;
     let after = db_probe::capture_settled(probe).await?;
-    require_running(active, "after counter capture").await?;
+    let live_after_capture = require_running(active, "after counter capture").await?;
     let capture_finished_after = active.started.elapsed();
 
     let write_families = IdleWriteFamilies {
@@ -720,6 +724,8 @@ where
         after,
         running_observed_after,
         capture_finished_after,
+        live_before_capture,
+        live_after_capture,
         write_families,
     })
 }
@@ -760,7 +766,7 @@ where
 async fn require_running<F>(
     active: &ActiveScenario<F>,
     phase: &'static str,
-) -> Result<(), IdleError>
+) -> Result<ProcessLifecycleStatus, IdleError>
 where
     F: RootFilesystem + Send + Sync + 'static,
 {
@@ -778,7 +784,7 @@ where
             snapshot.status, snapshot.failure
         )));
     }
-    Ok(())
+    Ok(snapshot.status)
 }
 
 async fn finish_process<F>(
@@ -905,18 +911,9 @@ fn add_database_write_families(
             .iter()
             .map(|row| (row.table.clone(), row.inserts + row.updates + row.deletes))
             .collect::<BTreeMap<_, _>>(),
-        Backend::Postgres => measurement
-            .delta
-            .postgres_table_writes
-            .iter()
-            .map(|row| {
-                let table = row
-                    .table
-                    .rsplit_once('.')
-                    .map_or(row.table.as_str(), |(_, relation)| relation);
-                (table.to_string(), row.inserts + row.updates + row.deletes)
-            })
-            .collect::<BTreeMap<_, _>>(),
+        Backend::Postgres => {
+            db_probe::postgres_relation_write_totals(&measurement.delta.postgres_table_writes)
+        }
     };
     families.event_writes = tables.get("root_filesystem_events").copied();
     families.process_store_writes = tables.get("root_filesystem_entries").copied();
@@ -1009,6 +1006,85 @@ mod tests {
             heartbeat_interval: Duration::from_millis(100),
             lease_duration: Duration::from_secs(5),
             terminal_timeout: Duration::from_secs(10),
+        }
+    }
+    fn valid_args() -> Args {
+        Args {
+            backend: Backend::Libsql,
+            libsql_path: None,
+            postgres_url: None,
+            postgres_pool_size: 1,
+            idle_seconds: 1,
+            poll_interval_ms: 20,
+            recovery_interval_ms: 50,
+            heartbeat_interval_ms: 100,
+            lease_duration_ms: 5_000,
+            terminal_timeout_ms: 10_000,
+            db_write_reset_stats: false,
+        }
+    }
+
+    #[test]
+    fn lifecycle_config_maps_cli_arguments() {
+        let config = LifecycleConfig::from_args(&valid_args()).expect("valid lifecycle");
+
+        assert_eq!(config.idle, Duration::from_secs(1));
+        assert_eq!(config.poll_interval, Duration::from_millis(20));
+        assert_eq!(config.recovery_interval, Duration::from_millis(50));
+        assert_eq!(config.heartbeat_interval, Duration::from_millis(100));
+        assert_eq!(config.lease_duration, Duration::from_millis(5_000));
+        assert_eq!(config.terminal_timeout, Duration::from_millis(10_000));
+    }
+
+    #[test]
+    fn lifecycle_config_rejects_each_zero_duration() {
+        let setters: [fn(&mut Args); 6] = [
+            |args| args.idle_seconds = 0,
+            |args| args.poll_interval_ms = 0,
+            |args| args.recovery_interval_ms = 0,
+            |args| args.heartbeat_interval_ms = 0,
+            |args| args.lease_duration_ms = 0,
+            |args| args.terminal_timeout_ms = 0,
+        ];
+
+        for set_zero in setters {
+            let mut args = valid_args();
+            set_zero(&mut args);
+            let error =
+                LifecycleConfig::from_args(&args).expect_err("each zero duration must be rejected");
+            assert!(error.to_string().contains("must be nonzero"));
+        }
+    }
+
+    #[test]
+    fn lifecycle_config_rejects_heartbeat_at_or_above_lease() {
+        for heartbeat_interval_ms in [5_000, 5_001] {
+            let mut args = valid_args();
+            args.heartbeat_interval_ms = heartbeat_interval_ms;
+            let error = LifecycleConfig::from_args(&args)
+                .expect_err("heartbeat at or above lease must be rejected");
+            assert!(
+                error
+                    .to_string()
+                    .contains("heartbeat interval must be shorter")
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_config_rejects_idle_shorter_than_each_interval() {
+        let setters: [fn(&mut Args); 3] = [
+            |args| args.poll_interval_ms = 1_001,
+            |args| args.recovery_interval_ms = 1_001,
+            |args| args.heartbeat_interval_ms = 1_001,
+        ];
+
+        for exceed_idle in setters {
+            let mut args = valid_args();
+            exceed_idle(&mut args);
+            let error = LifecycleConfig::from_args(&args)
+                .expect_err("idle shorter than a scheduler interval must be rejected");
+            assert!(error.to_string().contains("idle period must cover"));
         }
     }
 

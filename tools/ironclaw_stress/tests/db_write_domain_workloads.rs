@@ -25,7 +25,7 @@ use ironclaw_host_api::{
 use ironclaw_libsql_runtime::LibSqlRuntime;
 use ironclaw_stress::db_probe::{
     DbProbeConfig, DbProbeError, DbProbeSummary, DbWriteMeasurement, StatsScope, begin,
-    capture_settled, finish, summarize_measurement,
+    capture_settled, finish, postgres_relation_write_totals, summarize_measurement,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendCapabilityDisplayPreviewRequest,
@@ -46,7 +46,6 @@ use serde::Serialize;
 use uuid::Uuid;
 
 #[tokio::test]
-#[ignore = "fixed DB-write benchmark; run explicitly"]
 async fn trigger_history_pruning_libsql() -> Result<(), Box<dyn Error>> {
     emit(run_libsql(FixedWorkload::TriggerHistoryPruning).await?)?;
     Ok(())
@@ -60,7 +59,6 @@ async fn trigger_history_pruning_postgres() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
-#[ignore = "fixed DB-write benchmark; run explicitly"]
 async fn oauth_callback_durability_libsql() -> Result<(), Box<dyn Error>> {
     emit(run_libsql(FixedWorkload::OauthCallbackDurability).await?)?;
     Ok(())
@@ -74,7 +72,6 @@ async fn oauth_callback_durability_postgres() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
-#[ignore = "fixed DB-write benchmark; run explicitly"]
 async fn thread_activity_coalescing_libsql() -> Result<(), Box<dyn Error>> {
     emit(run_libsql(FixedWorkload::ThreadActivityCoalescing).await?)?;
     Ok(())
@@ -88,7 +85,6 @@ async fn thread_activity_coalescing_postgres() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
-#[ignore = "fixed DB-write benchmark; run explicitly"]
 async fn message_lookup_row_folding_libsql() -> Result<(), Box<dyn Error>> {
     emit(run_libsql(FixedWorkload::MessageLookupRowFolding).await?)?;
     Ok(())
@@ -102,15 +98,39 @@ async fn message_lookup_row_folding_postgres() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn outbound_cursor_api_removal_has_no_runtime_workload() {
-    let entry = workload_registry()
+fn workload_registry_metadata_is_complete() {
+    let registry = workload_registry();
+    let cursor_entry = registry
         .iter()
         .find(|entry| entry.issue == 7597)
         .expect("outbound cursor removal must stay registered");
 
-    assert_eq!(entry.workload, None);
-    assert_eq!(entry.coverage, CoverageKind::CompileOnly);
-    assert!(entry.reason.contains("zero production callers"));
+    assert_eq!(cursor_entry.workload, None);
+    assert_eq!(cursor_entry.coverage, CoverageKind::CompileOnly);
+    assert!(cursor_entry.reason.contains("does not verify API absence"));
+    assert!(cursor_entry.reason.contains("registry metadata"));
+
+    assert!(
+        registry
+            .iter()
+            .filter(|entry| entry.coverage == CoverageKind::RuntimeMeasurement)
+            .all(|entry| entry.workload.is_some())
+    );
+    for workload in [
+        FixedWorkload::TriggerHistoryPruning,
+        FixedWorkload::OauthCallbackDurability,
+        FixedWorkload::ThreadActivityCoalescing,
+        FixedWorkload::MessageLookupRowFolding,
+    ] {
+        assert_eq!(
+            registry
+                .iter()
+                .filter(|entry| entry.workload == Some(workload))
+                .count(),
+            1,
+            "{workload:?} must occur exactly once"
+        );
+    }
 }
 
 async fn run_libsql(
@@ -195,7 +215,7 @@ fn workload_registry() -> &'static [WorkloadRegistryEntry] {
             issue: 7597,
             workload: None,
             coverage: CoverageKind::CompileOnly,
-            reason: "removed outbound cursor API has zero production callers, so no runtime traffic exists to measure safely",
+            reason: "registry metadata records zero production callers; this does not verify API absence",
         },
         WorkloadRegistryEntry {
             issue: 7604,
@@ -455,6 +475,7 @@ fn assert_nonzero_baseline(
     backend: BackendName,
     summary: &DbProbeSummary,
 ) -> Result<(), FixedWorkloadError> {
+    let postgres_totals = postgres_relation_write_totals(&summary.delta.postgres_table_writes);
     for table in workload.changed_tables() {
         let writes = match backend {
             BackendName::LibSql => summary
@@ -464,13 +485,7 @@ fn assert_nonzero_baseline(
                 .find(|row| row.table == *table)
                 .map(|row| row.inserts + row.updates + row.deletes)
                 .unwrap_or_default(),
-            BackendName::Postgres => summary
-                .delta
-                .postgres_table_writes
-                .iter()
-                .find(|row| row.table == *table || row.table.ends_with(&format!(".{table}")))
-                .map(|row| row.inserts + row.updates + row.deletes)
-                .unwrap_or_default(),
+            BackendName::Postgres => postgres_totals.get(*table).copied().unwrap_or_default(),
         };
         if writes <= 0 {
             return Err(FixedWorkloadError::NonzeroBaseline {

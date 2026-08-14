@@ -1617,6 +1617,12 @@ impl<'g> RebornThreadBuilder<'g> {
     /// `'static` (does not borrow `'g`).
     pub async fn build(self) -> HarnessResult<RebornIntegrationHarness> {
         let shared = Arc::clone(&self.group.shared);
+        if self.actor_id.is_some() && shared.durable_event_log.is_some() {
+            return Err(
+                "custom-actor group threads cannot use the canonical-actor durable milestone sink"
+                    .into(),
+            );
+        }
 
         // --- product workflow + per-thread binding -----------------------------
         // A fresh adapter + ingress each time (cheap, stateless). The binding

@@ -57,12 +57,12 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Tools & tool dispatch | — | 11 | ✓ | ✓ |
 | Turn lifecycle (cancel/steer/retry/restart) | — | 8 | ✓ | ✓ |
 | WebUI surfaces & APIs | 2 | 2 | — | ✓ (largest) |
-| Durability & restart | 4 | 5 | ✓ | ✓ |
+| Durability & restart | 4 | 6 | ✓ | ✓ |
 | Security & redaction | — | 3 | ✓ | ✓ |
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **55** group scenarios · **56** flat integration bins (50 in
+Totals: **55** group scenarios · **57** flat integration bins (51 in
 `tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
 **102** Python scenario files (**869** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
@@ -164,7 +164,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 
 ---
 
-## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (56)
+## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (57)
 
 One thread, whole real turn. Grouped by what the user experiences.
 
@@ -238,6 +238,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Outbound preferences survive a process-level reopen | `outbound_store_durability.rs` |
 | Restart sequences over a gated run recover correctly | `generated_restart_sequences.rs` |
 | Odd gate sequences (double-resolve, cancel-after-finish, approve-a-done-run) behave | `generated_gate_sequences.rs` |
+| A ten-tool agent turn completes with its final reply while durable-write measurement captures process heartbeats, milestone events, and filesystem writes on libSQL and Postgres | `db_write_canonical.rs` |
 
 **Platform / wiring**
 | Behavior | Evidence |
@@ -251,7 +252,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Enroll/refresh/remove a browser for web push over the real routes — advertised VAPID key, endpoint redacted to its push-service host, undeclared push hosts rejected, and the `web-app` catalog row selectable through the same notification-channels wire as every vendor channel | `webui_v2_product_api.rs::browser_channel_notification_setup_round_trip_through_production_facade` |
 | Identity resolution runs on the coverage lane | `identity_resolution_smoke.rs` |
 
-One of the 56 registered bins, `delivery_user_journeys.rs`, holds the explicit
+One of the 57 registered bins, `delivery_user_journeys.rs`, holds the explicit
 channel-delivery journeys (two-lane model):
 
 | A user can… | Scenario |

@@ -11,6 +11,7 @@ use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
 use reborn_support::db_write_measurement::{
     CanonicalDbWriteMeasurement, MeasuredStorageBackend, measure_db_writes,
 };
+use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
@@ -32,6 +33,32 @@ async fn canonical_agent_turn_db_writes_libsql()
 async fn canonical_agent_turn_db_writes_postgres()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     run_canonical_agent_turn(StorageMode::Postgres, MeasuredStorageBackend::Postgres).await
+}
+#[tokio::test]
+async fn durable_milestones_reject_custom_actor_group_threads()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let group = RebornIntegrationGroup::builder()
+        .storage(StorageMode::LibSql)
+        .with_durable_milestone_event_store_for_test()
+        .builtin_tools()
+        .await?;
+    let result = group
+        .thread("conv-db-write-custom-actor")
+        .with_actor_id("db-write-custom-actor")
+        .script([RebornScriptedReply::text("unused")])
+        .build()
+        .await;
+
+    let error = match result {
+        Ok(_) => return Err("custom actor unexpectedly used canonical durable milestones".into()),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("custom-actor group threads cannot use")
+    );
+    Ok(())
 }
 
 async fn run_canonical_agent_turn(
