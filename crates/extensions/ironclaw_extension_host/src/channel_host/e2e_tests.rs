@@ -1652,6 +1652,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
         agent_id: None,
         project_id: None,
         prompt: "triggered approval prompt".to_string(),
+        execution_policy: None,
     };
     driver
         .on_trigger_submitted(triggered_request_from_fire(
@@ -1931,6 +1932,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
         agent_id: None,
         project_id: None,
         prompt: "triggered auth prompt".to_string(),
+        execution_policy: None,
     };
     driver
         .on_trigger_submitted(triggered_request_from_fire(&fire, run_id, foreign_scope))
@@ -2059,6 +2061,7 @@ async fn triggered_auth_prompt_to_non_dm_channel_redacts_the_link_and_parks_the_
         agent_id: None,
         project_id: None,
         prompt: "triggered auth prompt not dm".to_string(),
+        execution_policy: None,
     };
     driver
         .on_trigger_submitted(triggered_request_from_fire(&fire, run_id, foreign_scope))
@@ -5785,6 +5788,7 @@ async fn generic_triggered_hook_notifies_the_creators_notification_channels() {
         agent_id: None,
         project_id: None,
         prompt: "generic triggered delivery".to_string(),
+        execution_policy: None,
     };
     use crate::channel_triggered_delivery::PostSubmitDeliveryHook as _;
     hook.on_trigger_submitted(fire, blocked_run_id, foreign_run_scope())
@@ -5834,6 +5838,7 @@ async fn generic_triggered_hook_notifies_the_creators_notification_channels() {
         agent_id: None,
         project_id: None,
         prompt: "notification channel removed since it was chosen".to_string(),
+        execution_policy: None,
     };
     let vanished_run_id = TurnRunId::new();
     hook.on_trigger_submitted(vanished_fire, vanished_run_id, foreign_run_scope())

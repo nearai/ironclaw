@@ -843,7 +843,7 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // vocabulary. Union re-measured on the merged tree (2026-08-12);
         // count read from this test's own failure message.
         //
-        // 19_026 -> <see below> (2026-08-10, telegram-linked-device): the
+        // 19_026 -> 19_483 (2026-08-10, telegram-linked-device): the
         // `send_message.output` schema graduation (design §6.2) — a NEW `.v2`
         // schema file carrying the `sent_unverified` evidence branch, the
         // version-plural `StandardOpContract` (`StandardSchemaVersion`,
@@ -857,8 +857,13 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // `.v1`-valid output) has to be pinned because the runtime validator
         // is keyed by op, not by version.
         //
+        // 19_483 -> 19_718 (2026-08-14, merge main / #7532): add the
+        // provider-neutral turn execution
+        // policy and validated required-skill identity shared by trusted
+        // trigger ingress and the runner. Resolution, activation, and
+        // capability enforcement remain in their owning implementation crates.
         // Count read from this test's own failure message after the merge.
-        ("ironclaw_host_api", 19_483),
+        ("ironclaw_host_api", 19_718),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

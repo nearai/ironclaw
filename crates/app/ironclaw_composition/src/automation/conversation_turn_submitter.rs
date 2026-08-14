@@ -61,12 +61,19 @@ impl ConversationTurnSubmitter for CoordinatorTurnSubmitter {
 /// the product context is resolved from the classification the conversation
 /// orchestration decided, never re-derived from the adapter identity.
 fn coordinator_submit_request(submission: ConversationTurnSubmission) -> SubmitTurnRequest {
-    let product_context = product_context::resolve_inbound(
+    let is_trusted_trigger = matches!(
+        submission.classification,
+        ConversationInboundClassification::TrustedTrigger
+    );
+    let mut product_context = product_context::resolve_inbound(
         inbound_classification(submission.classification),
         submission.origin_adapter,
         submission.surface_type,
         submission.scope.product_owner(&submission.actor),
     );
+    if is_trusted_trigger {
+        product_context.execution_policy = submission.execution_policy;
+    }
     SubmitTurnRequest {
         requested_model: None,
         scope: submission.scope,
@@ -369,6 +376,7 @@ mod tests {
             classification,
             origin_adapter: RunOriginAdapter::new(adapter).expect("adapter"),
             surface_type,
+            execution_policy: None,
         }
     }
 

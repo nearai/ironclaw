@@ -112,8 +112,7 @@ export function messagesFromTimeline(records, pendingMessages = [], threadId = n
       status:
         role === "user" ? uiStatusFromRecordStatus(record.status) : record.status,
       ...(isBusyRejected && {
-        error:
-          "This message wasn't sent because Ironclaw was busy. Resend it to try again.",
+        errorKey: "chat.busyRejectedResend",
       }),
       isFinalReply: isFinalAssistantRecord(record),
       sequence: record.sequence,
