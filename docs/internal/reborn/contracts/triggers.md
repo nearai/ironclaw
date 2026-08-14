@@ -98,6 +98,26 @@ selector before writing the trigger. The scheduler continues to submit the
 frozen prompt; only the neutral execution policy crosses the trusted-trigger
 turn boundary.
 
+`execution_contract.policy.result_delivery` controls the no-result behavior:
+
+- `deliver` is the default and preserves the legacy contract. The rendered
+  prompt asks the model to return the human-readable `no_result_text`, and a
+  completed run has a normal deliverable result.
+- `suppress_when_nothing_to_report` is explicit opt-in. The rendered prompt
+  asks for exactly `[SILENT]` when the task has nothing to report. A trusted
+  completed-exit evidence adapter compares the normalized final reply for
+  exact equality; mentions, prefixes, suffixes, structured payloads, and other
+  ordinary content remain results. The trusted settlement persists
+  `TurnExecutionOutcome::NothingToReport` instead of asking delivery code to
+  inspect transcript text.
+
+Execution outcome and delivery outcome are separate durable facts. A
+`NothingToReport` completion records delivery as `Suppressed` and performs no
+transport dispatch or delivery reservation, even on replay. A result with no
+configured notification channel remains `NoDefaultConfigured`. Failed,
+cancelled, blocked, and recovery-required runs never qualify for suppression;
+their existing visible notification behavior is unchanged.
+
 Capability allowlists are intersections: absent preserves the scheduled
 surface, an empty list exposes no capabilities, and a non-empty list can only
 narrow the surface. Global and scheduled-trigger denials still win. Required

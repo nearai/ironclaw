@@ -240,7 +240,8 @@ fn trigger_create_input_accepts_structured_contract_without_legacy_prompt() {
             "no_result_text": "No failed payments",
             "policy": {
                 "allowed_capability_ids": ["stripe.list_payments"],
-                "required_skills": ["payment-operations"]
+                "required_skills": ["payment-operations"],
+                "result_delivery": "suppress_when_nothing_to_report"
             }
         },
         "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
@@ -248,6 +249,10 @@ fn trigger_create_input_accepts_structured_contract_without_legacy_prompt() {
 
     let parsed: TriggerCreateInput = serde_json::from_value(input).expect("structured input");
     assert_eq!(parsed.execution_contract.version, 1);
+    assert_eq!(
+        parsed.execution_contract.policy.result_delivery,
+        ironclaw_host_api::execution_policy::ResultDeliveryPolicy::SuppressWhenNothingToReport
+    );
 }
 
 #[test]

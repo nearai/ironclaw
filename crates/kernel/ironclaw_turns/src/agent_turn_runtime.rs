@@ -159,6 +159,8 @@ pub struct TurnRunRecord {
     /// `resolved_model_route`; `None` when no usage was reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_usage: Option<ironclaw_loop_contracts::LoopModelUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_outcome: Option<crate::TurnExecutionOutcome>,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<TurnGateRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -240,6 +242,7 @@ mod tests {
             profile,
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: None,
             checkpoint_id: None,
             gate_ref: None,
             blocked_activity_id: None,

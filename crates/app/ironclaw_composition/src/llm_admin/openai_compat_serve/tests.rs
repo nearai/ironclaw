@@ -895,6 +895,7 @@ fn turn_run_state(
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: Utc::now(),
         checkpoint_id: None,
         gate_ref: None,

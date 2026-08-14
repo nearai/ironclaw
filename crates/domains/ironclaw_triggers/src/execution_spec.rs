@@ -1,6 +1,8 @@
-use std::collections::HashSet;
+use std::{borrow::Cow, collections::HashSet};
 
-use ironclaw_host_api::execution_policy::TurnExecutionPolicy;
+use ironclaw_host_api::execution_policy::{
+    NOTHING_TO_REPORT_SENTINEL, ResultDeliveryPolicy, TurnExecutionPolicy,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{MAX_TRIGGER_PROMPT_BYTES, TriggerError, TriggerRecordValidationKind};
@@ -80,13 +82,19 @@ impl TriggerExecutionSpec {
             .map(|criterion| format!("- {criterion}"))
             .collect::<Vec<_>>()
             .join("\n");
+        let no_result_instruction = match self.policy.result_delivery {
+            ResultDeliveryPolicy::Deliver => Cow::Borrowed(self.no_result_text.as_str()),
+            ResultDeliveryPolicy::SuppressWhenNothingToReport => Cow::Owned(format!(
+                "Reply with exactly `{NOTHING_TO_REPORT_SENTINEL}` and no other text."
+            )),
+        };
         render_template(
             PROMPT_TEMPLATE,
             &[
                 ("{{goal}}", self.goal.as_str()),
                 ("{{success_criteria}}", criteria.as_str()),
                 ("{{output_instructions}}", self.output_instructions.as_str()),
-                ("{{no_result_text}}", self.no_result_text.as_str()),
+                ("{{no_result_text}}", no_result_instruction.as_ref()),
             ],
         )
     }

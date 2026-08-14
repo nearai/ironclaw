@@ -15,9 +15,11 @@ use ironclaw_loop_contracts::{
 
 use crate::{
     BlockedReason, CapabilityActivityId, GateKind, LoopExitId, LoopMessageRef, LoopResultRef,
-    SanitizedFailure, TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
+    SanitizedFailure, TurnCheckpointId, TurnError, TurnExecutionOutcome, TurnId, TurnOriginKind,
+    TurnRunId, TurnRunState, TurnScope,
     runner::{ClaimedTurnRun, TurnRunnerOutcome},
 };
+use ironclaw_host_api::execution_policy::{NOTHING_TO_REPORT_SENTINEL, ResultDeliveryPolicy};
 
 /// Evidence request for completion refs returned by a driver.
 #[derive(Debug, Clone)]
@@ -27,6 +29,17 @@ pub struct CompletionEvidenceRequest<'a> {
     pub run_id: TurnRunId,
     pub reply_message_refs: &'a [LoopMessageRef],
     pub result_refs: &'a [LoopResultRef],
+}
+
+/// Evidence request for exact normalized text of the final referenced reply.
+/// The evidence adapter performs the content comparison so raw transcript text
+/// never enters the turn kernel.
+#[derive(Debug, Clone)]
+pub struct ExactCompletionReplyEvidenceRequest<'a> {
+    pub scope: &'a TurnScope,
+    pub run_id: TurnRunId,
+    pub reply_message_refs: &'a [LoopMessageRef],
+    pub expected: &'a str,
 }
 
 /// Evidence request for a terminal final checkpoint.
@@ -68,6 +81,13 @@ pub trait LoopExitEvidencePort: Send + Sync {
         &self,
         request: CompletionEvidenceRequest<'_>,
     ) -> Result<bool, TurnError>;
+
+    async fn final_reply_matches_exact_normalized(
+        &self,
+        _request: ExactCompletionReplyEvidenceRequest<'_>,
+    ) -> Result<bool, TurnError> {
+        Ok(false)
+    }
 
     async fn verify_final_checkpoint(
         &self,
@@ -132,15 +152,53 @@ impl LoopExitApplier {
         // and collapses it to a coarse outcome; carry it so the terminal
         // transition can persist it on the run record.
         let model_usage = reported_model_usage(&exit);
+        let execution_outcome = self.execution_outcome(claimed, &exit).await?;
         let decision = validate_loop_exit(exit, policy);
         let snapshot = apply_validated_process_loop_exit(
             self.transition_port.as_ref(),
             claimed,
             decision.mapping,
             model_usage,
+            execution_outcome,
         )
         .await?;
         crate::turn_run_state_from_process_snapshot(snapshot)
+    }
+
+    async fn execution_outcome(
+        &self,
+        claimed: &ClaimedTurnRun,
+        exit: &LoopExit,
+    ) -> Result<Option<TurnExecutionOutcome>, TurnError> {
+        let LoopExit::Completed(completed) = exit else {
+            return Ok(None);
+        };
+        let suppress = claimed
+            .state
+            .product_context
+            .as_ref()
+            .filter(|context| context.origin == TurnOriginKind::ScheduledTrigger)
+            .and_then(|context| context.execution_policy.as_ref())
+            .is_some_and(|policy| {
+                policy.result_delivery == ResultDeliveryPolicy::SuppressWhenNothingToReport
+            });
+        if !suppress || completed.completion_kind != LoopCompletionKind::FinalReply {
+            return Ok(Some(TurnExecutionOutcome::ResultAvailable));
+        }
+        let matches = self
+            .evidence_port
+            .final_reply_matches_exact_normalized(ExactCompletionReplyEvidenceRequest {
+                scope: &claimed.state.scope,
+                run_id: claimed.state.run_id,
+                reply_message_refs: &completed.reply_message_refs,
+                expected: NOTHING_TO_REPORT_SENTINEL,
+            })
+            .await?;
+        Ok(Some(if matches {
+            TurnExecutionOutcome::NothingToReport
+        } else {
+            TurnExecutionOutcome::ResultAvailable
+        }))
     }
 
     pub async fn record_runner_failure(
@@ -164,6 +222,7 @@ impl LoopExitApplier {
                 metadata: Some(crate::process_projection::agent_turn_metadata_from_claimed(
                     claimed,
                     claimed.state.model_usage,
+                    None,
                 )),
             })
             .await?;
@@ -292,6 +351,7 @@ async fn apply_validated_process_loop_exit(
     claimed: &ClaimedTurnRun,
     mapping: LoopExitMapping,
     model_usage: Option<LoopModelUsage>,
+    execution_outcome: Option<TurnExecutionOutcome>,
 ) -> Result<JournaledProcessSnapshot, TurnError> {
     match mapping {
         LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Completed) => {
@@ -299,6 +359,7 @@ async fn apply_validated_process_loop_exit(
                 .complete_process(process_state_transition_request_from_claimed(
                     claimed,
                     model_usage,
+                    execution_outcome,
                 ))
                 .await
         }
@@ -307,6 +368,7 @@ async fn apply_validated_process_loop_exit(
                 .cancel_process(process_state_transition_request_from_claimed(
                     claimed,
                     model_usage,
+                    None,
                 ))
                 .await
         }
@@ -330,6 +392,7 @@ async fn apply_validated_process_loop_exit(
                     metadata: Some(crate::process_projection::agent_turn_metadata_from_claimed(
                         claimed,
                         model_usage,
+                        None,
                     )),
                 })
                 .await
@@ -357,6 +420,7 @@ async fn apply_validated_process_loop_exit(
                     metadata: Some(crate::process_projection::agent_turn_metadata_from_claimed(
                         claimed,
                         model_usage,
+                        None,
                     )),
                 })
                 .await
@@ -375,12 +439,14 @@ fn process_lease_request_from_claimed(claimed: &ClaimedTurnRun) -> ProcessLeaseR
 fn process_state_transition_request_from_claimed(
     claimed: &ClaimedTurnRun,
     model_usage: Option<LoopModelUsage>,
+    execution_outcome: Option<TurnExecutionOutcome>,
 ) -> ProcessStateTransitionRequest {
     ProcessStateTransitionRequest {
         lease: process_lease_request_from_claimed(claimed),
         metadata: Some(crate::process_projection::agent_turn_metadata_from_claimed(
             claimed,
             model_usage,
+            execution_outcome,
         )),
     }
 }

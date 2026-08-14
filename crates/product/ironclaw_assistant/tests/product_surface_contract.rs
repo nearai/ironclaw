@@ -241,6 +241,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             product_context: None,
             resume_disposition: None,
             model_usage: None,
+            execution_outcome: None,
         })
     }
 }

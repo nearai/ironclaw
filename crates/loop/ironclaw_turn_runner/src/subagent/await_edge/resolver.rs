@@ -949,6 +949,7 @@ mod tests {
             profile: ironclaw_turns::TurnRunProfile::from_resolved(resolved_run_profile),
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: None,
             checkpoint_id: None,
             gate_ref: None,
             blocked_activity_id: None,

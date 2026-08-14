@@ -220,6 +220,7 @@ fn turn_run_state_with_reply_target(target: ReplyTargetBindingRef) -> Box<TurnRu
         resolved_run_profile_version: RunProfileVersion::new(1),
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: Utc::now(),
         checkpoint_id: None,
         gate_ref: None,

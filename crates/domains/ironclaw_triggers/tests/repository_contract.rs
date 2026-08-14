@@ -84,6 +84,7 @@ async fn assert_round_trip_and_scoped_isolation(repo: &impl TriggerRepository) {
         policy: TurnExecutionPolicy {
             allowed_capability_ids: None,
             required_skills: vec![RequiredSkill::new("mail-summary").expect("skill")],
+            ..TurnExecutionPolicy::default()
         },
     };
     due.prompt = spec.render_prompt();

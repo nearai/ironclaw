@@ -25,6 +25,7 @@ use ironclaw_composition::{
 };
 use ironclaw_conversations::{AdapterInstallationId, AdapterKind};
 use ironclaw_extension_contracts::external::ExternalActorRef;
+use ironclaw_host_api::execution_policy::{ResultDeliveryPolicy, TurnExecutionPolicy};
 use ironclaw_host_api::product_adapter::AdapterInstallationId as ProductAdapterInstallationId;
 use ironclaw_host_api::{
     action::NetworkPolicy,
@@ -59,9 +60,9 @@ use ironclaw_outbound::{
 };
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerDeliveryTargetId, TriggerId,
-    TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
-    TriggerSourceKind, TriggerState,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerDeliveryTargetId, TriggerExecutionSpec,
+    TriggerId, TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository, TriggerRunStatus,
+    TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
 use serde_json::{Value, json};
@@ -85,6 +86,7 @@ const QA_9B_PROMPT: &str = "QA_9B scheduled health digest";
 const QA_9B_RESULT: &str = "QA_9B scheduled health digest complete";
 const QA_9D_PROMPT: &str = "QA_9D scheduled release digest";
 const QA_9D_RESULT: &str = "QA_9D scheduled release digest complete";
+const QA_SILENT_PROMPT: &str = "QA_SILENT scheduled no-change check";
 const SLACK_TEAM: &str = "T-TRIGGER-E2E";
 const SLACK_USER: &str = "U-TRIGGER-E2E";
 const SLACK_DEFAULT_DM: &str = "D-TRIGGER-DEFAULT";
@@ -197,6 +199,12 @@ impl HostManagedModelGateway for DeliveryJourneyGateway {
             .any(|message| message.content.contains(QA_9D_PROMPT))
         {
             QA_9D_RESULT
+        } else if request
+            .messages
+            .iter()
+            .any(|message| message.content.contains(QA_SILENT_PROMPT))
+        {
+            "[SILENT]"
         } else {
             "unexpected scheduled-trigger prompt"
         };
@@ -869,6 +877,7 @@ async fn seed_due_delivery_trigger(
     repository: &Arc<dyn TriggerRepository>,
     prompt: &str,
     delivery_target: Option<&str>,
+    execution_spec: Option<TriggerExecutionSpec>,
 ) -> TriggerId {
     let trigger_id = TriggerId::new();
     let fire_at = Utc::now() - chrono::Duration::seconds(120);
@@ -883,7 +892,7 @@ async fn seed_due_delivery_trigger(
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::once(fire_at, "UTC").expect("valid once schedule"),
             prompt: prompt.to_string(),
-            execution_spec: None,
+            execution_spec,
             delivery_target: delivery_target.map(|target| {
                 TriggerDeliveryTargetId::new(target).expect("valid trigger delivery target")
             }),
@@ -1445,15 +1454,42 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
     let delivery_store = runtime
         .triggered_run_delivery_store_for_test()
         .expect("local runtime exposes the production triggered-delivery store");
-    let default_target_trigger = seed_due_delivery_trigger(&repository, QA_9B_PROMPT, None).await;
+    let default_target_trigger =
+        seed_due_delivery_trigger(&repository, QA_9B_PROMPT, None, None).await;
     let explicit_target_trigger =
-        seed_due_delivery_trigger(&repository, QA_9D_PROMPT, Some(QA_9D_TARGET_ID)).await;
+        seed_due_delivery_trigger(&repository, QA_9D_PROMPT, Some(QA_9D_TARGET_ID), None).await;
+    let suppressed_spec = TriggerExecutionSpec {
+        version: 1,
+        goal: QA_SILENT_PROMPT.to_string(),
+        success_criteria: vec!["Report only when changes exist".to_string()],
+        output_instructions: "Return a concise change summary".to_string(),
+        no_result_text: "No changes".to_string(),
+        policy: TurnExecutionPolicy {
+            result_delivery: ResultDeliveryPolicy::SuppressWhenNothingToReport,
+            ..TurnExecutionPolicy::default()
+        },
+    };
+    let suppressed_prompt = suppressed_spec.render_prompt();
+    let suppressed_trigger = seed_due_delivery_trigger(
+        &repository,
+        &suppressed_prompt,
+        Some(QA_9B_TARGET_ID),
+        Some(suppressed_spec),
+    )
+    .await;
 
     wait_for_recorded_outcome(
         &repository,
         &delivery_store,
         default_target_trigger,
         TriggeredRunDeliveryOutcomeKind::Skipped,
+    )
+    .await;
+    wait_for_recorded_outcome(
+        &repository,
+        &delivery_store,
+        suppressed_trigger,
+        TriggeredRunDeliveryOutcomeKind::Suppressed,
     )
     .await;
     wait_for_recorded_outcome(
@@ -1483,6 +1519,13 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
         model_gateway.request_count_containing(QA_9D_PROMPT).await,
         1,
         "QA-9D must execute exactly one model run"
+    );
+    assert_eq!(
+        model_gateway
+            .request_count_containing(QA_SILENT_PROMPT)
+            .await,
+        1,
+        "the suppressible routine must execute exactly one model run"
     );
 
     tokio::time::sleep(Duration::from_millis(250)).await;
@@ -1518,6 +1561,13 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
         model_gateway.request_count_containing(QA_9D_PROMPT).await,
         1,
         "restart must not rerun QA-9D"
+    );
+    assert_eq!(
+        model_gateway
+            .request_count_containing(QA_SILENT_PROMPT)
+            .await,
+        1,
+        "restart must not rerun or dispatch the suppressed result"
     );
 }
 

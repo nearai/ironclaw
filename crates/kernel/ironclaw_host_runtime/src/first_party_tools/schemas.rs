@@ -973,6 +973,11 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                                 "required_skills": {
                                     "type": "array", "maxItems": 8,
                                     "items": { "type": "string" }
+                                },
+                                "result_delivery": {
+                                    "type": "string",
+                                    "enum": ["deliver", "suppress_when_nothing_to_report"],
+                                    "description": "Defaults to deliver. Choose suppress_when_nothing_to_report only when a no-result run should produce no ordinary result delivery; the trusted settlement boundary recognizes only the exact normalized [SILENT] response."
                                 }
                             },
                             "additionalProperties": false

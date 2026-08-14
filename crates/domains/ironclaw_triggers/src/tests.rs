@@ -2,7 +2,7 @@ use chrono::{Datelike, TimeZone};
 use serde_json::{from_value, json, to_value};
 
 use ironclaw_host_api::{
-    execution_policy::{RequiredSkill, TurnExecutionPolicy},
+    execution_policy::{RequiredSkill, ResultDeliveryPolicy, TurnExecutionPolicy},
     ids::CapabilityId,
 };
 
@@ -26,6 +26,7 @@ fn structured_execution_spec_validates_and_renders_a_frozen_prompt() {
             required_skills: vec![
                 RequiredSkill::new("payment-operations").expect("required skill"),
             ],
+            ..TurnExecutionPolicy::default()
         },
     };
 
@@ -64,6 +65,25 @@ fn structured_execution_spec_renders_placeholders_in_one_pass() {
 }
 
 #[test]
+fn structured_execution_spec_only_requests_the_sentinel_for_explicit_suppression() {
+    let mut spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Check the inbox".to_string(),
+        success_criteria: vec!["Report new messages".to_string()],
+        output_instructions: "Return Markdown".to_string(),
+        no_result_text: "No new messages.".to_string(),
+        policy: TurnExecutionPolicy::default(),
+    };
+    assert!(spec.render_prompt().contains("No new messages."));
+    assert!(!spec.render_prompt().contains("[SILENT]"));
+
+    spec.policy.result_delivery = ResultDeliveryPolicy::SuppressWhenNothingToReport;
+    let rendered = spec.render_prompt();
+    assert!(rendered.contains("Reply with exactly `[SILENT]` and no other text."));
+    assert!(!rendered.contains("No new messages."));
+}
+
+#[test]
 fn stored_structured_prompt_survives_template_revisions() {
     // `validate()` runs on stored records before every fire. The persisted
     // prompt was rendered by whatever template revision was current at
@@ -99,6 +119,7 @@ fn structured_execution_spec_rejects_duplicate_policy_references() {
         policy: TurnExecutionPolicy {
             allowed_capability_ids: Some(vec![capability.clone(), capability]),
             required_skills: vec![skill.clone(), skill],
+            ..TurnExecutionPolicy::default()
         },
     };
 
