@@ -1565,6 +1565,7 @@ registerPack("zh-CN", {
   "deviceLink.error.invalid_input": "该值未被接受。",
   "deviceLink.error.rate_limited": "尝试次数过多，请稍候再试。",
   "deviceLink.error.account_unavailable": "无法关联此账号。",
+  "deviceLink.error.identity_conflict": "此账号已关联。请先在其所连接的 IronClaw 账号中取消关联，然后重试。",
   "deviceLink.error.vendor_unavailable": "服务暂时不可用。",
   "deviceLink.error.custody_failed": "无法安全保存关联。",
   "deviceLink.error.internal": "关联时出现问题。"

@@ -60,13 +60,17 @@ function tForTest(key, params = {}) {
 function renderCard(props, stateValues = []) {
   let stateIndex = 0;
   const updates = [];
+  function OnboardingDeviceLinkPanel() {}
   const context = {
     Button() {},
+    OnboardingDeviceLinkPanel,
     PairingWebCodePanel() {},
     channelConnectionDisplayName,
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     React: {
+      lazy: () => OnboardingDeviceLinkPanel,
+      Suspense() {},
       useState: (initial) => {
         const index = stateIndex++;
         return [
@@ -80,11 +84,42 @@ function renderCard(props, stateValues = []) {
   vm.runInNewContext(sourceForTest(), context);
   return {
     Button: context.Button,
+    OnboardingDeviceLinkPanel,
     PairingWebCodePanel: context.PairingWebCodePanel,
     rendered: context.globalThis.__testExports.OnboardingPairingCard(props),
     updates,
   };
 }
+
+test("device_link renders the lazy link flow inline", () => {
+  const view = renderCard({
+    onboarding: {
+      extensionName: "telegram",
+      strategy: "device_link",
+      instructions: "Link your Telegram account here.",
+      threadId: "thread-1",
+    },
+  });
+
+  const panel = findComponent(view.rendered, view.OnboardingDeviceLinkPanel);
+  assert.ok(panel, "device-link onboarding must host the shared flow in chat");
+  const panelProps = componentProps(panel, view.OnboardingDeviceLinkPanel);
+  assert.deepEqual(
+    {
+      extensionName: panelProps.onboarding.extensionName,
+      displayName: panelProps.displayName,
+    },
+    {
+      extensionName: "telegram",
+      displayName: "Telegram",
+    },
+  );
+  assert.doesNotMatch(
+    JSON.stringify(view.rendered),
+    /from Extensions/,
+    "the inline flow must not send the user to another page",
+  );
+});
 
 test("web_generated_code renders the generic host-issued code panel", () => {
   const view = renderCard({

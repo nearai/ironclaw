@@ -1567,6 +1567,7 @@ registerPack("hi", {
   "deviceLink.error.invalid_input": "यह मान स्वीकार नहीं हुआ।",
   "deviceLink.error.rate_limited": "बहुत अधिक प्रयास। थोड़ी देर बाद फिर कोशिश करें।",
   "deviceLink.error.account_unavailable": "यह खाता लिंक नहीं किया जा सकता।",
+  "deviceLink.error.identity_conflict": "यह खाता पहले से लिंक है। जिस IronClaw खाते से यह जुड़ा है, वहाँ से इसे अनलिंक करें और फिर कोशिश करें।",
   "deviceLink.error.vendor_unavailable": "सेवा फ़िलहाल उपलब्ध नहीं है।",
   "deviceLink.error.custody_failed": "लिंक सुरक्षित रूप से सहेजा नहीं जा सका।",
   "deviceLink.error.internal": "लिंक करते समय कुछ गड़बड़ हो गई।"

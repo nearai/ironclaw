@@ -507,6 +507,10 @@ impl RebornIntegrationGroupBuilder {
                         .as_ref()
                         .map(|agent| agent.as_str().to_string())
                         .ok_or("group product scope is missing an agent id")?,
+                    project_id: scope
+                        .project_id
+                        .as_ref()
+                        .map(|project| project.as_str().to_string()),
                 },
             )?;
         self.channel_connection = Some(Arc::new(channel_connection));
@@ -550,6 +554,10 @@ impl RebornIntegrationGroupBuilder {
                         .as_ref()
                         .map(|agent| agent.as_str().to_string())
                         .ok_or("group product scope is missing an agent id")?,
+                    project_id: scope
+                        .project_id
+                        .as_ref()
+                        .map(|project| project.as_str().to_string()),
                 },
             )?;
         self.channel_connection = Some(Arc::new(channel_connection));
@@ -582,6 +590,10 @@ impl RebornIntegrationGroupBuilder {
                         .as_ref()
                         .map(|agent| agent.as_str().to_string())
                         .ok_or("group product scope is missing an agent id")?,
+                    project_id: scope
+                        .project_id
+                        .as_ref()
+                        .map(|project| project.as_str().to_string()),
                 },
             )?;
         self.channel_connection = Some(Arc::new(channel_connection));
@@ -612,6 +624,10 @@ impl RebornIntegrationGroupBuilder {
                         .as_ref()
                         .map(|agent| agent.as_str().to_string())
                         .ok_or("group product scope is missing an agent id")?,
+                    project_id: scope
+                        .project_id
+                        .as_ref()
+                        .map(|project| project.as_str().to_string()),
                 },
             )?;
         self.channel_connection = Some(Arc::new(channel_connection));
@@ -646,6 +662,10 @@ impl RebornIntegrationGroupBuilder {
                         .as_ref()
                         .map(|agent| agent.as_str().to_string())
                         .ok_or("group product scope is missing an agent id")?,
+                    project_id: scope
+                        .project_id
+                        .as_ref()
+                        .map(|project| project.as_str().to_string()),
                 },
             )?;
         self.channel_connection = Some(Arc::new(channel_connection));
@@ -676,6 +696,10 @@ impl RebornIntegrationGroupBuilder {
                         .as_ref()
                         .map(|agent| agent.as_str().to_string())
                         .ok_or("group product scope is missing an agent id")?,
+                    project_id: scope
+                        .project_id
+                        .as_ref()
+                        .map(|project| project.as_str().to_string()),
                 },
             )?;
         self.channel_connection = Some(Arc::new(channel_connection));

@@ -214,8 +214,18 @@ test("useExtensions exposes catalog errors and refetches both catalog queries", 
     "always",
   );
   assert.equal(
+    queryConfigs.find(({ queryKey }) => queryKey[0] === "extensions")?.refetchOnWindowFocus,
+    true,
+    "returning to a still-mounted registry must refresh lifecycle and account state",
+  );
+  assert.equal(
     queryConfigs.find(({ queryKey }) => queryKey[0] === "extension-registry")?.networkMode,
     "always",
+  );
+  assert.equal(
+    queryConfigs.find(({ queryKey }) => queryKey[0] === "extension-registry")?.refetchOnWindowFocus,
+    true,
+    "the available catalog should recover from a server restart without a hard reload",
   );
   await result.refetch();
   assert.deepEqual(refetched, ["extensions", "extension-registry"]);

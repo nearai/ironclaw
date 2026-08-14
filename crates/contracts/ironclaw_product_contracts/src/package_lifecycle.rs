@@ -233,6 +233,7 @@ pub enum ChannelConnectStrategy {
     InboundProofCode,
     AdminManagedChannels,
     WebGeneratedCode,
+    DeviceLink,
     QrCode,
     #[serde(rename = "oauth")]
     OAuth,
@@ -248,6 +249,7 @@ impl ChannelConnectStrategy {
             Self::InboundProofCode => "inbound_proof_code",
             Self::AdminManagedChannels => "admin_managed_channels",
             Self::WebGeneratedCode => "web_generated_code",
+            Self::DeviceLink => "device_link",
             Self::QrCode => "qr_code",
             Self::OAuth => "oauth",
         }
@@ -557,6 +559,7 @@ mod tests {
             ChannelConnectStrategy::InboundProofCode,
             ChannelConnectStrategy::AdminManagedChannels,
             ChannelConnectStrategy::WebGeneratedCode,
+            ChannelConnectStrategy::DeviceLink,
             ChannelConnectStrategy::QrCode,
             ChannelConnectStrategy::OAuth,
         ] {

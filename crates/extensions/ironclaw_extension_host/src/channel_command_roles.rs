@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{
     ids::{TenantId, UserId},
-    user_identity::{RebornUserIdentityLookup, installation_scoped_provider_user_id},
+    user_identity::RebornUserIdentityLookup,
 };
 use ironclaw_product_contracts::admin_users::{
     AdminUserError, AdminUserRole, AdminUserService, AdminUserStatus,
@@ -20,6 +20,7 @@ use std::sync::Arc;
 /// the admin-users directory maps that user to an active-account role.
 pub struct ChannelActorRoleResolver {
     provider: String,
+    identity_keyspaces: Vec<crate::channel_identity::ChannelIdentityKeyspace>,
     identity_lookup: Option<Arc<dyn RebornUserIdentityLookup>>,
     admin_users: Arc<dyn AdminUserService>,
     tenant: TenantId,
@@ -36,11 +37,20 @@ impl ChannelActorRoleResolver {
     ) -> Self {
         Self {
             provider,
+            identity_keyspaces: vec![crate::channel_identity::ChannelIdentityKeyspace::Legacy],
             identity_lookup,
             admin_users,
             tenant,
             operator_user_id,
         }
+    }
+
+    pub fn with_identity_keyspaces(
+        mut self,
+        identity_keyspaces: impl IntoIterator<Item = crate::channel_identity::ChannelIdentityKeyspace>,
+    ) -> Self {
+        self.identity_keyspaces = identity_keyspaces.into_iter().collect();
+        self
     }
 
     fn unavailable() -> ProductSurfaceError {
@@ -59,27 +69,39 @@ impl CommandActorRoleResolver for ChannelActorRoleResolver {
         context: &ProductCommandContext,
     ) -> Result<Option<AdminUserRole>, ProductSurfaceError> {
         let user_id = match &self.identity_lookup {
-            Some(lookup) => match lookup
-                .resolve_user_identity(
-                    &self.provider,
-                    &installation_scoped_provider_user_id(
-                        &context.installation_id,
-                        context.external_actor_ref.id(),
-                    ),
-                )
-                .await
-            {
-                Ok(Some(user_id)) => user_id,
-                Ok(None) => return Ok(None),
-                Err(error) => {
-                    tracing::debug!(
-                        %error,
-                        provider = %self.provider,
-                        "channel-command role resolver: identity lookup failed"
-                    );
-                    return Err(Self::unavailable());
+            Some(lookup) => {
+                let mut resolved = None;
+                for keyspace in &self.identity_keyspaces {
+                    match lookup
+                        .resolve_user_identity(
+                            &self.provider,
+                            &keyspace.provider_user_id(
+                                &context.installation_id,
+                                context.external_actor_ref.id(),
+                            ),
+                        )
+                        .await
+                    {
+                        Ok(Some(user_id)) => {
+                            resolved = Some(user_id);
+                            break;
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::debug!(
+                                %error,
+                                provider = %self.provider,
+                                "channel-command role resolver: identity lookup failed"
+                            );
+                            return Err(Self::unavailable());
+                        }
+                    }
                 }
-            },
+                let Some(user_id) = resolved else {
+                    return Ok(None);
+                };
+                user_id
+            }
             // Composition paths without the durable identity store run under
             // the operator-actor policy: the operator IS the actor.
             None => self.operator_user_id.clone(),
@@ -129,6 +151,7 @@ mod tests {
         AdapterInstallationId, ProductAdapterId, ProtocolAuthEvidence,
     };
     use ironclaw_host_api::user_identity::RebornUserIdentityLookupError;
+    use ironclaw_host_api::user_identity::installation_scoped_provider_user_id;
     use ironclaw_product_contracts::action::{
         ActionFingerprintKey, ProductActionId, SourceBindingKey,
     };
@@ -491,6 +514,61 @@ mod tests {
                 "test-provider".to_string(),
                 "install_alpha:admin-actor".to_string()
             )]
+        );
+    }
+
+    #[tokio::test]
+    async fn device_link_command_role_preserves_a_legacy_pairing_key() {
+        let operator = user("operator-a");
+        let bound_user = user("user-2");
+        let mut bindings = std::collections::HashMap::new();
+        bindings.insert(
+            installation_scoped_provider_user_id(&test_installation_id(), "admin-actor"),
+            bound_user.clone(),
+        );
+        let lookup = Arc::new(FakeLookup::new(bindings, false));
+        let mut roles = std::collections::HashMap::new();
+        roles.insert(
+            bound_user.as_str().to_string(),
+            (AdminUserRole::Admin, AdminUserStatus::Active),
+        );
+        let resolver = ChannelActorRoleResolver::new(
+            "test-provider".to_string(),
+            Some(lookup.clone()),
+            Arc::new(FakeAdminUsers {
+                roles: Mutex::new(roles),
+                fail: None,
+            }),
+            tenant("tenant-a"),
+            operator,
+        )
+        .with_identity_keyspaces(
+            crate::channel_identity::channel_identity_lookup_keyspaces(Some(
+                ironclaw_extension_contracts::channel::ChannelConnectionStrategy::DeviceLink,
+            ))
+            .iter()
+            .copied(),
+        );
+
+        assert_eq!(
+            resolver
+                .actor_role(&sample_context("admin-actor"))
+                .await
+                .expect("role lookup succeeds"),
+            Some(AdminUserRole::Admin),
+        );
+        assert_eq!(
+            lookup.calls(),
+            vec![
+                (
+                    "test-provider".to_string(),
+                    "install_alpha:device-link-v1:admin-actor".to_string()
+                ),
+                (
+                    "test-provider".to_string(),
+                    "install_alpha:admin-actor".to_string()
+                ),
+            ]
         );
     }
 

@@ -1257,6 +1257,7 @@ pub(super) async fn build_backend_production(
                 Arc::clone(&linked_sessions),
                 ironclaw_extension_host::DeviceLinkLimits::default(),
                 product_auth_services.credential_account_service(),
+                Arc::clone(&channel_identity_store),
             )
             .map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!("device-link limits are invalid: {error}"),

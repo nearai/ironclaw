@@ -72,6 +72,9 @@ use ironclaw_host_api::ids::{ExtensionId, UserId};
 use sha2::{Digest, Sha256};
 use tracing::debug;
 
+use crate::device_link_channel_identity::{
+    DeviceLinkChannelIdentityBinder, DeviceLinkChannelIdentityError,
+};
 use crate::entrypoint::declared_device_link_recipe;
 use crate::lifecycle::SnapshotWatch;
 use crate::linked_session_custody::LinkedSessionStore;
@@ -216,6 +219,7 @@ pub struct SnapshotDeviceLinkDriver {
     /// reported, and `complete_linked_device_link` is the one place that
     /// policy lives (the §4.5 ownership pin is inside it).
     accounts: Arc<dyn ironclaw_auth::CredentialAccountService>,
+    channel_identities: DeviceLinkChannelIdentityBinder,
 }
 
 impl SnapshotDeviceLinkDriver {
@@ -224,6 +228,7 @@ impl SnapshotDeviceLinkDriver {
         sessions: Arc<LinkedSessionStore>,
         limits: DeviceLinkLimits,
         accounts: Arc<dyn ironclaw_auth::CredentialAccountService>,
+        channel_identities: Arc<crate::FilesystemChannelIdentityStore>,
     ) -> Result<Self, DeviceLinkLimitsError> {
         limits.validate()?;
         Ok(Self {
@@ -232,6 +237,7 @@ impl SnapshotDeviceLinkDriver {
             limits,
             state: Mutex::new(DriverState::default()),
             accounts,
+            channel_identities: DeviceLinkChannelIdentityBinder::new(channel_identities),
         })
     }
 
@@ -322,11 +328,12 @@ impl SnapshotDeviceLinkDriver {
 
     async fn cancel_link(&self, request: &DeviceLinkRequest) -> Result<(), DriverFailure> {
         let resolved = self.resolve(&request.extension_id)?;
-        self.forget(&request.extension_id, &request.flow_id);
         let grant = self.custody_grant(request)?;
         let session = self.sessions.open(&request.extension_id, &grant);
         let context = self.context(request, &resolved, session.as_ref());
-        Ok(resolved.adapter.cancel(&context).await?)
+        let outcome = resolved.adapter.cancel(&context).await;
+        self.forget(&request.extension_id, &request.flow_id);
+        Ok(outcome?)
     }
 
     async fn begin_at(
@@ -369,7 +376,7 @@ impl SnapshotDeviceLinkDriver {
         let session = self.sessions.open(&request.extension_id, &grant);
         let context = self.context(request, &resolved, session.as_ref());
         let outcome = resolved.adapter.begin(&context, mode).await;
-        self.settle(request, outcome, now).await
+        self.settle(request, &resolved, outcome, now).await
     }
 
     async fn poll_at(
@@ -400,7 +407,7 @@ impl SnapshotDeviceLinkDriver {
                 let session = self.sessions.open(&request.extension_id, &grant);
                 let context = self.context(request, &resolved, session.as_ref());
                 let outcome = resolved.adapter.poll(&context).await;
-                self.settle(request, outcome, now).await
+                self.settle(request, &resolved, outcome, now).await
             }
         }
     }
@@ -429,7 +436,7 @@ impl SnapshotDeviceLinkDriver {
         let session = self.sessions.open(&request.extension_id, &grant);
         let context = self.context(request, &resolved, session.as_ref());
         let outcome = resolved.adapter.submit_input(&context, input).await;
-        self.settle(request, outcome, now).await
+        self.settle(request, &resolved, outcome, now).await
     }
 
     /// Resolve the bound adapter for an extension from the published snapshot.
@@ -445,10 +452,13 @@ impl SnapshotDeviceLinkDriver {
             declared_device_link_recipe(&binding.declaration).ok_or(DeviceLinkError::Internal {
                 reason: "bound device-link adapter has no declared device-link recipe",
             })?;
+        let alternate_mode_declared = recipe.alternate_mode_label.is_some();
         Ok(ResolvedDeviceLink {
             adapter: binding.adapter,
+            declaration: binding.declaration,
+            installation_id: binding.installation_id,
             config: binding.config,
-            alternate_mode_declared: recipe.alternate_mode_label.is_some(),
+            alternate_mode_declared,
         })
     }
 
@@ -495,20 +505,23 @@ impl SnapshotDeviceLinkDriver {
     async fn settle(
         &self,
         request: &DeviceLinkRequest,
+        resolved: &ResolvedDeviceLink,
         outcome: Result<DeviceLinkStep, DeviceLinkError>,
         now: Instant,
     ) -> Result<SettledDeviceLinkStep, DriverFailure> {
         let step = match outcome {
             Ok(step) => step,
             Err(error) => {
-                // A failed transition ends the flow here, so a later call
-                // cannot re-invoke a vendor step that already ran.
-                self.forget(&request.extension_id, &request.flow_id);
+                // A failed transition may have happened after the vendor
+                // accepted a login. Tear the vendor conversation down before
+                // forgetting it; dropping only the host record strands a
+                // device authorization neither side can address afterwards.
+                self.cancel_flow(request, resolved).await;
                 return Err(error.into());
             }
         };
         if let Err(error) = step.validate() {
-            self.forget(&request.extension_id, &request.flow_id);
+            self.cancel_flow(request, resolved).await;
             return Err(error.into());
         }
         let remaining = self.remaining(&request.flow_id, now);
@@ -518,9 +531,12 @@ impl SnapshotDeviceLinkDriver {
             // the mint reads. A completion the mint cannot back is reported as
             // a custody failure, never as a completion.
             match self.mint_completed_account(request, &step).await {
-                Ok(account) => Some(account),
+                Ok(account) => {
+                    self.finalize_vendor_side(request, resolved).await;
+                    Some(account)
+                }
                 Err(failure) => {
-                    self.forget(&request.extension_id, &request.flow_id);
+                    self.cancel_flow(request, resolved).await;
                     return Err(failure);
                 }
             }
@@ -581,24 +597,45 @@ impl SnapshotDeviceLinkDriver {
                 })
             })?;
         let provider = self.device_link_provider(&request.extension_id)?;
-        let account = self
+        let resolved = self.resolve(&request.extension_id)?;
+        let label = linked_account_label(account_label)?;
+        let rollback = self
+            .channel_identities
+            .begin(
+                resolved.declaration.as_ref(),
+                &resolved.installation_id,
+                provider.as_str(),
+                vendor_user_ref.as_str(),
+                request.user_id(),
+            )
+            .await
+            .map_err(map_channel_identity_error)?;
+        let account_result = self
             .accounts
             .complete_linked_device_link(ironclaw_auth::LinkedDeviceLinkCompletion {
                 scope: request.scope.clone(),
                 provider,
                 owner_extension: request.extension_id.clone(),
-                label: linked_account_label(account_label)?,
+                label,
                 material: blob,
             })
-            .await
-            .map_err(|error| {
+            .await;
+        let account = match account_result {
+            Ok(account) => account,
+            Err(error) => {
                 debug!(error = %error, "device-link completion mint failed");
-                DriverFailure::from(DeviceLinkError::Custody(
+                if let Some(rollback) = rollback
+                    && let Err(rollback_error) = rollback.rollback().await
+                {
+                    debug!(error = %rollback_error, "device-link channel identity rollback failed");
+                }
+                return Err(DriverFailure::from(DeviceLinkError::Custody(
                     ironclaw_extension_contracts::linked_session::LinkedSessionError::Unavailable {
                         reason: "device-link credential account could not be minted",
                     },
-                ))
-            })?;
+                )));
+            }
+        };
         let account_ref = LinkedAccountRef::new(account.id.to_string()).map_err(|error| {
             debug!(%error, "minted account id does not form a linked-account ref");
             DriverFailure::from(DeviceLinkError::Internal {
@@ -671,10 +708,28 @@ impl SnapshotDeviceLinkDriver {
         }
     }
 
-    /// Cancel one flow's vendor-side state, best effort, and forget it.
+    /// Accept a provisional vendor completion after all host-side state is
+    /// durable. The adapter owns no fallible work here; it only relinquishes
+    /// rollback state.
+    async fn finalize_vendor_side(
+        &self,
+        request: &DeviceLinkRequest,
+        resolved: &ResolvedDeviceLink,
+    ) {
+        let Ok(grant) = self.custody_grant(request) else {
+            return;
+        };
+        let session = self.sessions.open(&request.extension_id, &grant);
+        let context = self.context(request, resolved, session.as_ref());
+        resolved.adapter.finalize(&context).await;
+    }
+
+    /// Cancel one flow's vendor-side state, best effort, then forget its host
+    /// state. Keeping the provisional blob available until cancellation lets
+    /// adapters use the same custody context they completed with.
     async fn cancel_flow(&self, request: &DeviceLinkRequest, resolved: &ResolvedDeviceLink) {
-        self.forget(&request.extension_id, &request.flow_id);
         self.cancel_vendor_side(request, resolved).await;
+        self.forget(&request.extension_id, &request.flow_id);
     }
 
     /// The vendor half of [`Self::cancel_flow`], without forgetting the flow.
@@ -920,6 +975,8 @@ impl DriverFailure {
 /// The bound adapter plus what the host needs to decide around it.
 struct ResolvedDeviceLink {
     adapter: Arc<dyn DeviceLinkAdapter>,
+    declaration: Arc<ironclaw_extension_registry::ResolvedExtensionManifest>,
+    installation_id: String,
     config: Arc<BTreeMap<String, String>>,
     alternate_mode_declared: bool,
 }
@@ -1120,6 +1177,27 @@ fn expired_step() -> DeviceLinkStep {
     DeviceLinkStep::Failed {
         code: DeviceLinkErrorCode::Expired,
         restartable: true,
+    }
+}
+
+fn map_channel_identity_error(error: DeviceLinkChannelIdentityError) -> DriverFailure {
+    match error {
+        DeviceLinkChannelIdentityError::DifferentIdentityConnected
+        | DeviceLinkChannelIdentityError::IdentityOwnedByAnotherUser => DeviceLinkError::Vendor {
+            code: DeviceLinkErrorCode::IdentityConflict,
+            restartable: false,
+        }
+        .into(),
+        DeviceLinkChannelIdentityError::StorageUnavailable => DeviceLinkError::Custody(
+            ironclaw_extension_contracts::linked_session::LinkedSessionError::Unavailable {
+                reason: "device-link channel identity could not be stored",
+            },
+        )
+        .into(),
+        DeviceLinkChannelIdentityError::InvalidDeclaration => DeviceLinkError::Internal {
+            reason: "device-link channel declaration is inconsistent",
+        }
+        .into(),
     }
 }
 

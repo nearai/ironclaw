@@ -62,7 +62,10 @@ export const DEVICE_LINK_ERROR_CODES = Object.freeze([
   "declined",
   "invalid_input",
   "rate_limited",
+  "host_throttled",
+  "limit_reached",
   "account_unavailable",
+  "identity_conflict",
   "vendor_unavailable",
   "custody_failed",
   "internal",
@@ -72,7 +75,11 @@ export const DEVICE_LINK_ERROR_CODES = Object.freeze([
 // `DeviceLinkDriverError::restartable` in `ironclaw_auth`: the account is
 // ineligible, or host-side custody failed. Every other code is worth another
 // attempt. Used only as the fallback when the frame does not state it.
-const NON_RESTARTABLE_ERROR_CODES = Object.freeze(["account_unavailable", "custody_failed"]);
+const NON_RESTARTABLE_ERROR_CODES = Object.freeze([
+  "account_unavailable",
+  "identity_conflict",
+  "custody_failed",
+]);
 
 export function deviceLinkStepIsTerminal(step) {
   return TERMINAL_STEPS.includes(step);

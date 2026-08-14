@@ -19,8 +19,14 @@ use ironclaw_extension_contracts::device_link::{
 use ironclaw_extension_contracts::linked_session::{LinkedSessionSnapshot, LinkedSessionVersion};
 use ironclaw_extension_contracts::state::InstallationState;
 use ironclaw_extension_contracts::tool_adapter::ToolAdapter;
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::ids::InvocationId;
+use ironclaw_host_api::ids::TenantId;
 use ironclaw_host_api::resource::ResourceScope;
+use ironclaw_host_api::user_identity::{
+    RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
+    RebornUserIdentityBindingStore, RebornUserIdentityLookup,
+};
 use secrecy::SecretString;
 
 use super::*;
@@ -92,6 +98,7 @@ struct Harness {
     adapter: Arc<FakeDeviceLinkAdapter>,
     material: Arc<RecordingMaterial>,
     accounts: Arc<InMemoryAuthProductServices>,
+    identities: Arc<crate::FilesystemChannelIdentityStore>,
 }
 
 async fn harness(limits: DeviceLinkLimits) -> Harness {
@@ -102,6 +109,15 @@ async fn harness_with(
     limits: DeviceLinkLimits,
     adapter: FakeDeviceLinkAdapter,
     declares_device_link: bool,
+) -> Harness {
+    harness_with_account_service(limits, adapter, declares_device_link, None).await
+}
+
+async fn harness_with_account_service(
+    limits: DeviceLinkLimits,
+    adapter: FakeDeviceLinkAdapter,
+    declares_device_link: bool,
+    accounts_override: Option<Arc<dyn ironclaw_auth::CredentialAccountService>>,
 ) -> Harness {
     let adapter = Arc::new(adapter);
     let resolved = if declares_device_link {
@@ -153,11 +169,20 @@ async fn harness_with(
     let sessions =
         LinkedSessionStore::new(Arc::clone(&material) as Arc<dyn LinkedSessionMaterialStore>);
     let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let account_service = accounts_override.unwrap_or_else(|| {
+        Arc::clone(&accounts) as Arc<dyn ironclaw_auth::CredentialAccountService>
+    });
+    let identities = Arc::new(crate::FilesystemChannelIdentityStore::new(
+        Arc::new(InMemoryBackend::new()),
+        TenantId::new("tenant-test").expect("tenant"),
+        UserId::new("operator").expect("operator"),
+    ));
     let driver = SnapshotDeviceLinkDriver::new(
         host.snapshot_watch(),
         sessions,
         limits,
-        Arc::clone(&accounts) as Arc<dyn ironclaw_auth::CredentialAccountService>,
+        account_service,
+        Arc::clone(&identities),
     )
     .expect("valid limits");
     Harness {
@@ -166,6 +191,83 @@ async fn harness_with(
         adapter,
         material,
         accounts,
+        identities,
+    }
+}
+
+struct FailingCompletionAccounts;
+
+fn unsupported_accounts() -> ironclaw_auth::AuthProductError {
+    ironclaw_auth::AuthProductError::UnsupportedOperation {
+        operation: "test failing completion account service",
+    }
+}
+
+#[async_trait::async_trait]
+impl ironclaw_auth::CredentialAccountService for FailingCompletionAccounts {
+    async fn create_account(
+        &self,
+        _request: ironclaw_auth::NewCredentialAccount,
+    ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+        Err(unsupported_accounts())
+    }
+
+    async fn get_account(
+        &self,
+        _request: ironclaw_auth::CredentialAccountLookupRequest,
+    ) -> Result<Option<ironclaw_auth::CredentialAccount>, ironclaw_auth::AuthProductError> {
+        Err(unsupported_accounts())
+    }
+
+    async fn list_accounts(
+        &self,
+        _request: ironclaw_auth::CredentialAccountListRequest,
+    ) -> Result<ironclaw_auth::CredentialAccountListPage, ironclaw_auth::AuthProductError> {
+        Err(unsupported_accounts())
+    }
+
+    async fn update_status(
+        &self,
+        _scope: &ironclaw_auth::AuthProductScope,
+        _account_id: ironclaw_auth::CredentialAccountId,
+        _status: ironclaw_auth::CredentialAccountStatus,
+    ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+        Err(unsupported_accounts())
+    }
+
+    async fn select_unique_configured_account(
+        &self,
+        _request: ironclaw_auth::CredentialAccountSelectionRequest,
+    ) -> Result<ironclaw_auth::CredentialAccountProjection, ironclaw_auth::AuthProductError> {
+        Err(unsupported_accounts())
+    }
+
+    async fn project_credential_recovery(
+        &self,
+        _request: ironclaw_auth::CredentialRecoveryRequest,
+    ) -> Result<ironclaw_auth::CredentialRecoveryProjection, ironclaw_auth::AuthProductError> {
+        Err(unsupported_accounts())
+    }
+
+    async fn select_configured_account(
+        &self,
+        _request: ironclaw_auth::CredentialAccountChoiceRequest,
+    ) -> Result<ironclaw_auth::CredentialAccountProjection, ironclaw_auth::AuthProductError> {
+        Err(unsupported_accounts())
+    }
+
+    async fn refresh_account(
+        &self,
+        _request: ironclaw_auth::CredentialRefreshRequest,
+    ) -> Result<ironclaw_auth::CredentialRefreshReport, ironclaw_auth::AuthProductError> {
+        Err(unsupported_accounts())
+    }
+
+    async fn complete_linked_device_link(
+        &self,
+        _request: ironclaw_auth::LinkedDeviceLinkCompletion,
+    ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+        Err(unsupported_accounts())
     }
 }
 
@@ -322,6 +424,34 @@ async fn a_second_begin_never_leaves_two_vendor_conversations_running() {
     assert_eq!(kinds.len(), 3, "begin, cancel, begin: {kinds:?}");
 }
 
+#[tokio::test]
+async fn a_failed_vendor_transition_is_cancelled_before_the_host_forgets_it() {
+    let adapter = FakeDeviceLinkAdapter::default();
+    *adapter.fail_with.lock().expect("fake device-link failure") = Some(DeviceLinkError::Vendor {
+        code: DeviceLinkErrorCode::AccountUnavailable,
+        restartable: false,
+    });
+    let h = harness_with(DeviceLinkLimits::default(), adapter, true).await;
+
+    h.driver
+        .begin(&request(FLOW), DeviceLinkMode::Default)
+        .await
+        .expect_err("the scripted vendor transition fails");
+
+    assert_eq!(
+        h.adapter
+            .recorded()
+            .into_iter()
+            .map(|call| call.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            FakeDeviceLinkCallKind::Begin(DeviceLinkMode::Default),
+            FakeDeviceLinkCallKind::Cancel,
+        ],
+        "a possibly authorized device must be torn down immediately, even when cancel also fails",
+    );
+}
+
 // -------------------------------------------------------------------------
 // Completion mints the credential account
 // -------------------------------------------------------------------------
@@ -346,8 +476,37 @@ async fn a_completion_mints_a_pinned_account_and_reports_it() {
     let minted = settled
         .account
         .expect("a completed step carries the minted account");
+    assert_eq!(
+        h.adapter
+            .recorded()
+            .into_iter()
+            .map(|call| call.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            FakeDeviceLinkCallKind::Begin(DeviceLinkMode::Default),
+            FakeDeviceLinkCallKind::Finalize,
+        ],
+        "the vendor session becomes established only after host custody and identity commit",
+    );
     assert_eq!(minted.link_revision, 1, "a first link is revision 1");
     assert_eq!(minted.vendor_user_ref.as_str(), "+15550000000");
+    assert_eq!(
+        h.identities
+            .resolve_user_identity(
+                "acme-link",
+                &crate::channel_identity::ChannelIdentityKeyspace::DeviceLinkV1.provider_user_id(
+                    &ironclaw_host_api::product_adapter::AdapterInstallationId::new(
+                        "acme-link-install",
+                    )
+                    .expect("installation"),
+                    "+15550000000",
+                ),
+            )
+            .await
+            .expect("resolve linked channel identity"),
+        Some(UserId::new(USER).expect("user")),
+        "device-link completion must establish the caller's channel identity",
+    );
 
     // The account is real, pinned, and the session blob is durable custody —
     // store → mint → report held.
@@ -413,6 +572,107 @@ async fn a_completion_without_stored_custody_fails_and_mints_nothing() {
     assert!(
         accounts.is_empty(),
         "a refused completion must not leave a minted account behind"
+    );
+}
+
+#[tokio::test]
+async fn credential_completion_failure_rolls_back_the_new_channel_identity() {
+    let h = harness_with_account_service(
+        DeviceLinkLimits::default(),
+        FakeDeviceLinkAdapter::scripted([completed()]),
+        true,
+        Some(Arc::new(FailingCompletionAccounts)),
+    )
+    .await;
+    let request = request(FLOW);
+
+    let error = h
+        .driver
+        .begin(&request, DeviceLinkMode::Default)
+        .await
+        .expect_err("credential completion must fail");
+    assert!(matches!(error, DeviceLinkError::Custody(_)));
+    assert_eq!(
+        h.adapter
+            .recorded()
+            .into_iter()
+            .map(|call| call.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            FakeDeviceLinkCallKind::Begin(DeviceLinkMode::Default),
+            FakeDeviceLinkCallKind::Cancel,
+        ],
+        "a vendor-authorized provisional session must be cancelled when credential completion fails",
+    );
+    assert_eq!(
+        h.identities
+            .resolve_user_identity(
+                "acme-link",
+                &crate::channel_identity::ChannelIdentityKeyspace::DeviceLinkV1.provider_user_id(
+                    &ironclaw_host_api::product_adapter::AdapterInstallationId::new(
+                        "acme-link-install",
+                    )
+                    .expect("installation"),
+                    "+15550000000",
+                ),
+            )
+            .await
+            .expect("resolve after failed completion"),
+        None,
+        "failed credential custody must compensate the newly created channel identity"
+    );
+}
+
+#[tokio::test]
+async fn identity_conflict_cancels_the_provisional_vendor_session_and_names_the_remedy() {
+    let h = harness_with(
+        DeviceLinkLimits::default(),
+        FakeDeviceLinkAdapter::scripted([completed()]),
+        true,
+    )
+    .await;
+    h.identities
+        .bind_user_identity(RebornUserIdentityBinding {
+            provider: RebornIdentityProviderId::new("acme-link").expect("provider"),
+            provider_user_id: RebornIdentityProviderUserId::new(
+                crate::channel_identity::ChannelIdentityKeyspace::DeviceLinkV1.provider_user_id(
+                    &ironclaw_host_api::product_adapter::AdapterInstallationId::new(
+                        "acme-link-install",
+                    )
+                    .expect("installation"),
+                    "+15550000000",
+                ),
+            )
+            .expect("provider user"),
+            user_id: UserId::new("another-user").expect("other user"),
+        })
+        .await
+        .expect("pre-bind identity to another user");
+
+    let error = h
+        .driver
+        .begin(&request(FLOW), DeviceLinkMode::Default)
+        .await
+        .expect_err("an identity cannot belong to two users");
+
+    assert_eq!(
+        error,
+        DeviceLinkError::Vendor {
+            code: DeviceLinkErrorCode::IdentityConflict,
+            restartable: false,
+        }
+    );
+    assert_eq!(
+        h.adapter
+            .recorded()
+            .into_iter()
+            .map(|call| call.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            FakeDeviceLinkCallKind::Begin(DeviceLinkMode::Default),
+            FakeDeviceLinkCallKind::Cancel,
+        ],
+        "identity rejection must revoke the just-authorized provisional device",
     );
 }
 

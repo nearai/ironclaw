@@ -27,7 +27,7 @@ fields = [
   { handle = "telegram_bot_token", label = "Bot token", secret = true, required = true, description = "Issued by BotFather when you create the bot (/newbot)." },
   { handle = "telegram_webhook_secret", label = "Webhook secret token", secret = true, required = true, description = "A random string you invent (1–256 letters, digits, '_' or '-'). IronClaw registers it with Telegram and uses it to verify every incoming update." },
   { handle = "telegram_webhook_url", label = "Public webhook URL", secret = false, required = true, description = "The full public address Telegram delivers to: https://<your-host>/webhooks/extensions/telegram/updates. For a local installation, use your tunnel's hostname." },
-  { handle = "bot_username", label = "Bot username", secret = false, required = true, description = "Your bot's username without the leading @ (5–32 characters, ending in 'bot'). Used for the pairing link and group mentions." },
+  { handle = "bot_username", label = "Bot username", secret = false, required = true, description = "Your bot's username without the leading @ (5–32 characters, ending in 'bot'). Used for group mentions and bot display." },
   # MTProto application identity for the linked-device surface, operator-supplied
   # (PROPOSAL §11 decision 2): bundling one id across every deployment would pool
   # Telegram's flood limits and invite `API_ID_PUBLISHED_FLOOD`, which permanently
@@ -360,29 +360,19 @@ transport = "message"
 
 [channel.connection]
 provider = "telegram"
-strategy = "web_generated_code"
-instructions = "Pair your Telegram account from the IronClaw pairing panel by opening its link, scanning its QR code, or sending /start followed by the displayed code to the bot."
+strategy = "device_link"
+instructions = "Link your Telegram account from this extension's configuration. Once linked, message the workspace bot from the same Telegram account to start chatting."
 input_placeholder = ""
-submit_label = "Open pairing"
-error_message = "Telegram pairing failed. Get a fresh code and try again."
-# The final sentence used to read "Telegram exposes no tools and cannot read
-# messages or send on the user's behalf." The linked-device surface makes that
-# false, so it is replaced rather than deleted: the copy must still tell the
-# model which Telegram identity is in play, because pairing the BOT and linking
-# the ACCOUNT are different acts with different consequences.
-connection_success_message = "Telegram is installed as an inbound entrypoint. If WebChat shows a Telegram pairing panel, tell the user to pair via the link, the QR code, or by sending the shown code to the bot in Telegram — nothing is pasted into normal chat. Once paired the user can DM the bot directly. Separately, the user may link their own Telegram account as a device from the Telegram extension card; only then do the Telegram tools appear, and they read the user's chats and send as the user, not as the bot. Pairing the bot does not link the account."
-deep_link_template = "https://t.me/{bot_username}?start={code}"
-# `/start` is the vendor deep-link convention and stays the only prefix any
-# instruction wording suggests; `/pair` is an accepted alias for users who
-# type it from habit and must never appear in suggested wording.
-inbound_code_prefixes = ["/start", "/pair"]
+submit_label = "Link Telegram"
+error_message = "Telegram linking failed. Open the extension configuration and try again."
+connection_success_message = "Telegram is installed as an inbound entrypoint and a personal messaging integration. Link the user's Telegram account from the extension card; that single verified device link lets the same account talk to the workspace bot and enables personal Telegram tools. Bot replies still come from the workspace bot, while personal messaging actions use the linked account."
 
 [channel.connection.notices]
-connect_required = "👋 Pair your Telegram account in the IronClaw web app, then message me here again."
-paired = "✅ Telegram is paired. You can talk to IronClaw right here."
-already_paired_same_user = "✅ This Telegram account is already paired to you. You can talk to IronClaw right here."
-already_bound_to_other_user = "This Telegram account is already paired to another IronClaw user."
-expired_or_unknown = "That Telegram pairing code is invalid or expired. Get a fresh link or code from IronClaw and try again."
+connect_required = "👋 Link this Telegram account from the Telegram extension in IronClaw, then message me here again."
+paired = "✅ Telegram is linked. You can talk to IronClaw right here."
+already_paired_same_user = "✅ This Telegram account is already linked to you. You can talk to IronClaw right here."
+already_bound_to_other_user = "This Telegram account is already linked to another IronClaw user."
+expired_or_unknown = "This Telegram account is not linked. Open the Telegram extension in IronClaw and link it, then try again."
 
 [channel.ingress]
 route_suffix = "updates"

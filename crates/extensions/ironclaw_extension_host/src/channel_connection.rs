@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, ChannelAuthAccountState,
     ChannelConnectionService, CredentialAccountStatus, SecretCleanupAction, SecretCleanupReport,
-    SecretCleanupRequest,
+    SecretCleanupRequest, Timestamp,
 };
 use ironclaw_host_api::{
     ids::{ExtensionId, InvocationId, TenantId},
@@ -92,6 +92,24 @@ pub trait ChannelAccountStatusReader: Send + Sync {
     ) -> Result<Option<CredentialAccountStatus>, ProductSurfaceError>;
 }
 
+/// Select the current vendor account from retained credential history.
+///
+/// Relinking mints a fresh account record while the prior revoked record stays
+/// durable. Storage order is not lifecycle order, so taking the first provider
+/// match can leave a successful relink projected as revoked forever. The most
+/// recently updated record is the current lifecycle edge; this also ensures a
+/// later unlink wins over an older configured record.
+fn preferred_provider_account_status<'a>(
+    accounts: impl IntoIterator<Item = (&'a AuthProviderId, CredentialAccountStatus, Timestamp)>,
+    provider: &AuthProviderId,
+) -> Option<CredentialAccountStatus> {
+    accounts
+        .into_iter()
+        .filter(|(account_provider, _, _)| *account_provider == provider)
+        .max_by_key(|(_, _, updated_at)| *updated_at)
+        .map(|(_, status, _)| status)
+}
+
 #[async_trait]
 impl ChannelAccountStatusReader for ironclaw_auth::RebornProductAuthServices {
     async fn account_status_for_caller(
@@ -122,10 +140,12 @@ impl ChannelAccountStatusReader for ironclaw_auth::RebornProductAuthServices {
                     "channel account status lookup failed: {error:?}"
                 ))
             })?;
-        Ok(accounts
-            .into_iter()
-            .find(|account| account.provider == provider_id)
-            .map(|account| account.status))
+        Ok(preferred_provider_account_status(
+            accounts
+                .iter()
+                .map(|account| (&account.provider, account.status, account.updated_at)),
+            &provider_id,
+        ))
     }
 }
 
@@ -150,6 +170,7 @@ pub trait ChannelDisconnectCleanup: Send + Sync {
 pub struct ChannelConnectionEntry {
     pub extension_id: String,
     pub providers: Vec<String>,
+    pub identity_keyspaces: Vec<crate::channel_identity::ChannelIdentityKeyspace>,
     pub scope_source: Arc<dyn ChannelConnectionScopeSource>,
     pub disconnect_cleanup: Option<Arc<dyn ChannelDisconnectCleanup>>,
 }
@@ -248,6 +269,7 @@ impl GenericChannelConnectionService {
             entries.push(ChannelConnectionEntry {
                 extension_id: extension.extension_id,
                 providers: extension.providers,
+                identity_keyspaces: extension.identity_keyspaces,
                 scope_source: channel_config_connection_scope_source(
                     Arc::clone(installation_store),
                     extension_id,
@@ -276,19 +298,21 @@ impl GenericChannelConnectionService {
         caller: &ProductSurfaceCaller,
         scope: &ChannelConnectionScope,
     ) -> Result<bool, ProductSurfaceError> {
-        let prefix = scope.provider_user_id_prefix();
         for provider in &entry.providers {
-            let connected = self
-                .identity_lookup
-                .user_has_provider_binding_with_provider_user_id_prefix(
-                    provider,
-                    &caller.user_id,
-                    Some(prefix.as_str()),
-                )
-                .await
-                .map_err(|error| ProductSurfaceError::internal_from(error.to_string()))?;
-            if connected {
-                return Ok(true);
+            for keyspace in &entry.identity_keyspaces {
+                let prefix = keyspace.provider_user_id_prefix(&scope.installation_id);
+                let connected = self
+                    .identity_lookup
+                    .user_has_provider_binding_with_provider_user_id_prefix(
+                        provider,
+                        &caller.user_id,
+                        Some(prefix.as_str()),
+                    )
+                    .await
+                    .map_err(|error| ProductSurfaceError::internal_from(error.to_string()))?;
+                if connected {
+                    return Ok(true);
+                }
             }
         }
         Ok(false)
@@ -318,17 +342,29 @@ impl GenericChannelConnectionService {
         &self,
         entry: &ChannelConnectionEntry,
         caller: &ProductSurfaceCaller,
-        provider_user_id_prefix: Option<&str>,
+        scope: Option<&ChannelConnectionScope>,
     ) -> Result<(), ProductSurfaceError> {
         for provider in &entry.providers {
-            self.identity_delete_store
-                .delete_user_identity_bindings_for_user(
-                    provider,
-                    &caller.user_id,
-                    provider_user_id_prefix,
-                )
-                .await
-                .map_err(|error| ProductSurfaceError::internal_from(error.to_string()))?;
+            if let Some(scope) = scope {
+                // The legacy prefix contains the versioned key lexically, so
+                // one legacy-prefix delete removes both generations. This is
+                // exactly what explicit disconnect/removal wants.
+                let prefix = crate::channel_identity::ChannelIdentityKeyspace::Legacy
+                    .provider_user_id_prefix(&scope.installation_id);
+                self.identity_delete_store
+                    .delete_user_identity_bindings_for_user(
+                        provider,
+                        &caller.user_id,
+                        Some(prefix.as_str()),
+                    )
+                    .await
+                    .map_err(|error| ProductSurfaceError::internal_from(error.to_string()))?;
+            } else {
+                self.identity_delete_store
+                    .delete_user_identity_bindings_for_user(provider, &caller.user_id, None)
+                    .await
+                    .map_err(|error| ProductSurfaceError::internal_from(error.to_string()))?;
+            }
         }
         Ok(())
     }
@@ -492,8 +528,7 @@ impl ChannelConnectionService for GenericChannelConnectionService {
                 .await
                 .map_err(ProductSurfaceError::internal_from)?;
         }
-        let prefix = scope.provider_user_id_prefix();
-        self.delete_identity_bindings(entry, &caller, Some(prefix.as_str()))
+        self.delete_identity_bindings(entry, &caller, Some(&scope))
             .await?;
         Ok(())
     }
@@ -578,6 +613,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn configured_vendor_account_wins_over_revoked_relink_residue() {
+        let provider = AuthProviderId::new(VENDOR).expect("provider");
+        let old = Timestamp::from_timestamp(1, 0).expect("old timestamp");
+        let current = Timestamp::from_timestamp(2, 0).expect("current timestamp");
+        let statuses = [
+            (&provider, CredentialAccountStatus::Revoked, old),
+            (&provider, CredentialAccountStatus::Configured, current),
+        ];
+
+        assert_eq!(
+            preferred_provider_account_status(
+                statuses
+                    .iter()
+                    .map(|(account_provider, status, updated_at)| {
+                        (*account_provider, *status, *updated_at)
+                    }),
+                &provider,
+            ),
+            Some(CredentialAccountStatus::Configured),
+            "a successful relink must not remain disconnected merely because the retained history contains an older revoked account",
+        );
+    }
+
+    #[test]
+    fn newest_revocation_wins_over_an_older_configured_account() {
+        let provider = AuthProviderId::new(VENDOR).expect("provider");
+        let old = Timestamp::from_timestamp(1, 0).expect("old timestamp");
+        let current = Timestamp::from_timestamp(2, 0).expect("current timestamp");
+
+        assert_eq!(
+            preferred_provider_account_status(
+                [
+                    (&provider, CredentialAccountStatus::Configured, old),
+                    (&provider, CredentialAccountStatus::Revoked, current),
+                ],
+                &provider,
+            ),
+            Some(CredentialAccountStatus::Revoked),
+            "unlink must outrank retained configured history",
+        );
+    }
+
     fn service(
         scope: Option<ChannelConnectionScope>,
         identity_store: Arc<RecordingIdentityStore>,
@@ -589,6 +667,7 @@ mod tests {
             vec![ChannelConnectionEntry {
                 extension_id: EXTENSION.to_string(),
                 providers: vec![VENDOR.to_string()],
+                identity_keyspaces: vec![crate::channel_identity::ChannelIdentityKeyspace::Legacy],
                 scope_source: Arc::new(StaticScopeSource(scope)),
                 disconnect_cleanup,
             }],
@@ -685,6 +764,107 @@ mod tests {
             credential_cleanup.requests().len(),
             2,
             "the removal-retry repeat disconnect re-issues the (idempotent) credential cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_link_connection_preserves_a_legacy_pairing_binding() {
+        let identity_store = bound_identity_store("install-alpha");
+        let service = GenericChannelConnectionService::new(
+            tenant(),
+            vec![ChannelConnectionEntry {
+                extension_id: EXTENSION.to_string(),
+                providers: vec![VENDOR.to_string()],
+                identity_keyspaces: crate::channel_identity::channel_identity_lookup_keyspaces(
+                    Some(ironclaw_extension_contracts::channel::ChannelConnectionStrategy::DeviceLink),
+                )
+                .to_vec(),
+                scope_source: Arc::new(StaticScopeSource(Some(scope("install-alpha")))),
+                disconnect_cleanup: None,
+            }],
+            None,
+            identity_store.clone(),
+            identity_store,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            service
+                .caller_channel_connections(caller())
+                .await
+                .expect("connection lookup"),
+            HashMap::from([(extension_key(), true)]),
+            "an old proof-code binding must keep the existing bot channel connected after upgrade",
+        );
+    }
+
+    #[tokio::test]
+    async fn device_link_disconnect_removes_legacy_and_versioned_bindings() {
+        let installation = AdapterInstallationId::new("install-alpha").expect("installation");
+        let caller = caller();
+        let legacy_key = crate::channel_identity::ChannelIdentityKeyspace::Legacy
+            .provider_user_id(&installation, "U123");
+        let device_key = crate::channel_identity::ChannelIdentityKeyspace::DeviceLinkV1
+            .provider_user_id(&installation, "U123");
+        let identity_store = Arc::new(RecordingIdentityStore::new([
+            (legacy_key.clone(), caller.user_id.clone()),
+            (device_key.clone(), caller.user_id.clone()),
+        ]));
+        let service = GenericChannelConnectionService::new(
+            tenant(),
+            vec![ChannelConnectionEntry {
+                extension_id: EXTENSION.to_string(),
+                providers: vec![VENDOR.to_string()],
+                identity_keyspaces: crate::channel_identity::channel_identity_lookup_keyspaces(
+                    Some(
+                        ironclaw_extension_contracts::channel::ChannelConnectionStrategy::DeviceLink,
+                    ),
+                )
+                .to_vec(),
+                scope_source: Arc::new(StaticScopeSource(Some(scope("install-alpha")))),
+                disconnect_cleanup: None,
+            }],
+            None,
+            identity_store.clone(),
+            identity_store.clone(),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        service
+            .disconnect_channel_for_caller(caller.clone(), &extension_key())
+            .await
+            .expect("disconnect succeeds");
+
+        assert_eq!(
+            identity_store
+                .resolve_user_identity(VENDOR, &legacy_key)
+                .await
+                .expect("resolve legacy identity"),
+            None,
+            "explicit disconnect removes grandfathered bot authority"
+        );
+        assert_eq!(
+            identity_store
+                .resolve_user_identity(VENDOR, &device_key)
+                .await
+                .expect("resolve device identity"),
+            None,
+            "explicit disconnect removes linked-device authority"
+        );
+        assert_eq!(
+            identity_store.deletes(),
+            vec![(
+                VENDOR.to_string(),
+                caller.user_id,
+                Some("install-alpha:".to_string()),
+            )],
+            "one installation prefix covers both identity generations"
         );
     }
 
@@ -858,6 +1038,7 @@ mod tests {
             vec![ChannelConnectionEntry {
                 extension_id: EXTENSION.to_string(),
                 providers: vec![VENDOR.to_string()],
+                identity_keyspaces: vec![crate::channel_identity::ChannelIdentityKeyspace::Legacy],
                 scope_source: Arc::new(StaticScopeSource(Some(scope("install-alpha")))),
                 disconnect_cleanup: None,
             }],

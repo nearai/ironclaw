@@ -42,14 +42,15 @@
 //! value aborts its runner on drop, so a `tokio::spawn` there would be a race
 //! with shutdown that silently does nothing.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::future::Future;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL;
-use grammers_client::client::{LoginToken, PasswordToken, SignInError};
+use grammers_client::InvocationError;
+use grammers_client::client::{PasswordToken, SignInError};
 use grammers_session::Session as _;
 use grammers_session::types::PeerInfo;
 use grammers_tl_types as tl;
@@ -63,12 +64,13 @@ use tracing::debug;
 
 use crate::linked::pool::{LinkedAccountRevoker, RevokeOutcome, SessionPool};
 use crate::linked::session_store::IronclawSession;
-use crate::linked::transport::{MtprotoConnection, VendorOpKind};
-use crate::linked::{MAX_PENDING_LINKS, PENDING_LINK_TTL};
+use crate::linked::transport::{MtprotoConnection, TransportError, VendorOpKind};
 
 mod errors;
+mod pending;
 
 use errors::{custody_error, fatal_step, invocation_error, vendor_error};
+use pending::{PendingLink, PendingLinks, PendingPhase, PendingState, abandon};
 
 /// First backoff after a failed export; doubles up to [`MAX_EXPORT_BACKOFF`].
 const INITIAL_EXPORT_BACKOFF: Duration = Duration::from_secs(1);
@@ -81,9 +83,6 @@ const MAX_MIGRATIONS: u8 = 4;
 /// retry is an account-lockout vector, and an unbounded code retry burns the
 /// flood budget.
 const MAX_INPUT_ATTEMPTS: u8 = 5;
-/// How long an abort waits for `auth.logOut` before giving up on it.
-const LOGOUT_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// The operator's MTProto application identity, from `[admin_configuration]`
 /// (`telegram_api_id` / `telegram_api_hash`) — the *developer application's*
 /// credentials, not the user's. `api_hash` is declared `secret = true` because
@@ -143,7 +142,8 @@ impl TelegramDeviceLinkAdapter {
         }
     }
 
-    /// Reap links that outlived [`PENDING_LINK_TTL`], logging each out first.
+    /// Reap links that outlived [`crate::linked::PENDING_LINK_TTL`], logging
+    /// each out first.
     ///
     /// Deliberately not a background task: reaping is an *async* operation
     /// (it may have to log out), and driving it from the entry points keeps the
@@ -187,11 +187,10 @@ impl TelegramDeviceLinkAdapter {
         let identity = self.identity()?;
         self.pending.check_capacity(flow_id)?;
         let session = IronclawSession::in_memory();
-        let link = Arc::new(PendingLink {
-            connection: MtprotoConnection::open(session, identity.api_id),
-            state: tokio::sync::Mutex::new(PendingState::default()),
-            created_at: Instant::now(),
-        });
+        let link = Arc::new(PendingLink::new(MtprotoConnection::open(
+            session,
+            identity.api_id,
+        )));
         self.pending.insert(flow_id.clone(), Arc::clone(&link))?;
         Ok(link)
     }
@@ -309,16 +308,32 @@ impl TelegramDeviceLinkAdapter {
                 restartable: false,
             });
         };
-        state.accepted = true;
+        self.complete_user(ctx, link, state, authorization.user)
+            .await
+    }
 
-        let info = self_peer(&authorization.user);
+    /// Finish from a raw user after Telegram has authorized this session.
+    ///
+    /// The phone-code path normally lets grammers perform this bookkeeping.
+    /// If grammers reports a later bookkeeping failure after Telegram already
+    /// accepted the code, probing the session and landing here is what keeps a
+    /// live device from being misreported as an unavailable account.
+    async fn complete_user(
+        &self,
+        ctx: &DeviceLinkContext<'_>,
+        link: &PendingLink,
+        state: &mut PendingState,
+        user: tl::enums::User,
+    ) -> Result<DeviceLinkStep, DeviceLinkError> {
+        state.accepted = true;
+        let info = self_peer(&user);
         link.connection
             .session()
             .cache_peer(&info)
             .await
             .map_err(custody_error)?;
 
-        let (account_label, vendor_user_ref) = identity(&authorization.user);
+        let (account_label, vendor_user_ref) = identity(&user);
         self.commit(ctx, link, state, account_label, vendor_user_ref)
             .await
     }
@@ -341,18 +356,14 @@ impl TelegramDeviceLinkAdapter {
             .store_into(ctx.session)
             .await
             .map_err(custody_error)?;
-        state.stored = true;
-        // The link is dropped once custody is durable, freeing its runner and
-        // sockets immediately. A poll *after* that answers
-        // `Failed { restartable: true }` rather than `Completed` — the §4.3
-        // miss semantics — which is correct: the host has already persisted the
-        // terminal step, and a host that lost it should re-mint a link, which
-        // `store_into`'s load-then-CAS lets it do over the blob just written.
+        // Keep the authorized connection parked until the host acknowledges
+        // that credential custody and product identity both committed. A
+        // failure after this return is still provisional and `cancel` must be
+        // able to log it out rather than strand a Telegram session.
         state.phase = PendingPhase::Completed {
             account_label: account_label.clone(),
             vendor_user_ref: vendor_user_ref.clone(),
         };
-        self.pending.remove(ctx.flow_id);
         Ok(DeviceLinkStep::Completed {
             account_label,
             vendor_user_ref,
@@ -426,17 +437,67 @@ impl TelegramDeviceLinkAdapter {
                     "that login code was not accepted",
                 ))
             }
-            Err(SignInError::SignUpRequired) => Err(DeviceLinkError::Vendor {
-                code: DeviceLinkErrorCode::AccountUnavailable,
-                restartable: false,
-            }),
+            Err(SignInError::SignUpRequired) => {
+                debug!(
+                    home_dc = link.connection.session().home_dc_id().ok(),
+                    "telegram sign-in reported sign-up-required; reconciling authorization"
+                );
+                match resolve_post_sign_in_failure(PostSignInFailure::SignUpRequired, || {
+                    recover_authorized_user(link)
+                })
+                .await
+                {
+                    Ok(PostSignInResolution::Authorized(user)) => {
+                        debug!(
+                            "telegram sign-in returned sign-up-required after authorization; recovering the live session"
+                        );
+                        self.complete_user(ctx, link, state, *user).await
+                    }
+                    Ok(PostSignInResolution::Unregistered) => Err(DeviceLinkError::Vendor {
+                        code: DeviceLinkErrorCode::AccountUnavailable,
+                        restartable: false,
+                    }),
+                    Ok(PostSignInResolution::Original(_)) => Err(DeviceLinkError::Internal {
+                        reason: "sign-up-required recovery produced an impossible original failure",
+                    }),
+                    Err(error) => {
+                        // The sign-in result and the authorization probe now
+                        // disagree. Treat the device as possibly accepted so
+                        // the flow's teardown attempts auth.logOut rather than
+                        // leaving an authorization the host cannot address.
+                        state.accepted = true;
+                        Err(error)
+                    }
+                }
+            }
             Err(SignInError::InvalidPassword(_)) => Err(input_rejected(
                 DeviceLinkInputKind::Code,
                 "that login code was not accepted",
             )),
             Err(SignInError::Other(error)) => {
-                state.phase = PendingPhase::AwaitingCode { token };
-                Err(invocation_error(error))
+                match resolve_post_sign_in_failure(PostSignInFailure::Original(error), || {
+                    recover_authorized_user(link)
+                })
+                .await
+                {
+                    Ok(PostSignInResolution::Authorized(user)) => {
+                        debug!(
+                            "telegram sign-in bookkeeping failed after authorization; recovering the live session"
+                        );
+                        self.complete_user(ctx, link, state, *user).await
+                    }
+                    Ok(PostSignInResolution::Original(error)) => {
+                        state.phase = PendingPhase::AwaitingCode { token };
+                        Err(invocation_error(error))
+                    }
+                    Ok(PostSignInResolution::Unregistered) => Err(DeviceLinkError::Internal {
+                        reason: "an original sign-in failure became an unregistered account",
+                    }),
+                    Err(error) => {
+                        state.accepted = true;
+                        Err(error)
+                    }
+                }
             }
         }
     }
@@ -481,15 +542,51 @@ impl TelegramDeviceLinkAdapter {
                 ))
             }
             Err(SignInError::PasswordRequired(retry)) => Ok(self.ask_for_password(state, retry)),
-            Err(SignInError::SignUpRequired) => Err(DeviceLinkError::Vendor {
-                code: DeviceLinkErrorCode::AccountUnavailable,
-                restartable: false,
-            }),
+            Err(SignInError::SignUpRequired) => {
+                match resolve_post_sign_in_failure(PostSignInFailure::SignUpRequired, || {
+                    recover_authorized_user(link)
+                })
+                .await
+                {
+                    Ok(PostSignInResolution::Authorized(user)) => {
+                        self.complete_user(ctx, link, state, *user).await
+                    }
+                    Ok(PostSignInResolution::Unregistered) => Err(DeviceLinkError::Vendor {
+                        code: DeviceLinkErrorCode::AccountUnavailable,
+                        restartable: false,
+                    }),
+                    Ok(PostSignInResolution::Original(_)) => Err(DeviceLinkError::Internal {
+                        reason: "sign-up-required recovery produced an impossible original failure",
+                    }),
+                    Err(error) => {
+                        state.accepted = true;
+                        Err(error)
+                    }
+                }
+            }
             Err(SignInError::InvalidCode) => Err(input_rejected(
                 DeviceLinkInputKind::Password,
                 "that password was not accepted",
             )),
-            Err(SignInError::Other(error)) => Err(invocation_error(error)),
+            Err(SignInError::Other(error)) => {
+                match resolve_post_sign_in_failure(PostSignInFailure::Original(error), || {
+                    recover_authorized_user(link)
+                })
+                .await
+                {
+                    Ok(PostSignInResolution::Authorized(user)) => {
+                        self.complete_user(ctx, link, state, *user).await
+                    }
+                    Ok(PostSignInResolution::Original(error)) => Err(invocation_error(error)),
+                    Ok(PostSignInResolution::Unregistered) => Err(DeviceLinkError::Internal {
+                        reason: "an original password failure became an unregistered account",
+                    }),
+                    Err(error) => {
+                        state.accepted = true;
+                        Err(error)
+                    }
+                }
+            }
         }
     }
 }
@@ -563,6 +660,13 @@ impl DeviceLinkAdapter for TelegramDeviceLinkAdapter {
         }
     }
 
+    async fn finalize(&self, ctx: &DeviceLinkContext<'_>) {
+        // Host-side custody and identity are now durable. Dropping the parked
+        // connection without `abandon` preserves the established Telegram
+        // authorization while releasing the provisional rollback handle.
+        self.pending.remove(ctx.flow_id);
+    }
+
     async fn cancel(&self, ctx: &DeviceLinkContext<'_>) -> Result<(), DeviceLinkError> {
         if let Some(link) = self.pending.remove(ctx.flow_id) {
             abandon(link).await;
@@ -591,173 +695,84 @@ impl DeviceLinkAdapter for TelegramDeviceLinkAdapter {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Parked links
-// ---------------------------------------------------------------------------
+/// A failure from grammers' high-level sign-in call before it is reconciled
+/// with the session's actual authorization state.
+enum PostSignInFailure {
+    SignUpRequired,
+    Original(InvocationError),
+}
 
-/// The bounded, TTL'd registry of in-progress links.
+/// The reconciled answer. Telegram's session is authoritative: a replayed
+/// `SignUpRequired` after the code already landed must not override a live
+/// authorization.
+enum PostSignInResolution {
+    Authorized(Box<tl::enums::User>),
+    Unregistered,
+    Original(InvocationError),
+}
+
+async fn resolve_post_sign_in_failure<F, Fut>(
+    failure: PostSignInFailure,
+    probe: F,
+) -> Result<PostSignInResolution, DeviceLinkError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<Option<tl::enums::User>, DeviceLinkError>>,
+{
+    if let Some(user) = probe().await? {
+        return Ok(PostSignInResolution::Authorized(Box::new(user)));
+    }
+    Ok(match failure {
+        PostSignInFailure::SignUpRequired => PostSignInResolution::Unregistered,
+        PostSignInFailure::Original(error) => PostSignInResolution::Original(error),
+    })
+}
+
+/// Read back the session after an apparently failed sign-in.
 ///
-/// A [`std::sync::Mutex`], so it cannot be held across an `await` even by
-/// accident; every async abort path takes the `Arc` out first and works on it
-/// outside the lock.
-#[derive(Default)]
-struct PendingLinks {
-    entries: Mutex<HashMap<DeviceLinkFlowId, Arc<PendingLink>>>,
-}
-
-impl PendingLinks {
-    /// Whether one more link would fit. Replacing an existing flow always
-    /// fits: it consumes no additional slot.
-    fn check_capacity(&self, flow_id: &DeviceLinkFlowId) -> Result<(), DeviceLinkError> {
-        let entries = self.lock()?;
-        if entries.len() >= MAX_PENDING_LINKS && !entries.contains_key(flow_id) {
-            // Host-side capacity, not a vendor limit. `RateLimited` is the only
-            // code that means "this can work, shortly" — which is the truth.
-            return Err(DeviceLinkError::Vendor {
-                code: DeviceLinkErrorCode::RateLimited,
-                restartable: true,
-            });
-        }
-        Ok(())
-    }
-
-    fn insert(
-        &self,
-        flow_id: DeviceLinkFlowId,
-        link: Arc<PendingLink>,
-    ) -> Result<(), DeviceLinkError> {
-        self.check_capacity(&flow_id)?;
-        self.lock()?.insert(flow_id, link);
-        Ok(())
-    }
-
-    fn get(&self, flow_id: &DeviceLinkFlowId) -> Option<Arc<PendingLink>> {
-        self.entries.lock().ok()?.get(flow_id).map(Arc::clone)
-    }
-
-    fn remove(&self, flow_id: &DeviceLinkFlowId) -> Option<Arc<PendingLink>> {
-        self.entries.lock().ok()?.remove(flow_id)
-    }
-
-    fn take_expired(&self) -> Vec<Arc<PendingLink>> {
-        let Ok(mut entries) = self.entries.lock() else {
-            return Vec::new();
-        };
-        let expired = entries
-            .iter()
-            .filter(|(_, link)| link.created_at.elapsed() >= PENDING_LINK_TTL)
-            .map(|(flow_id, _)| flow_id.clone())
-            .collect::<Vec<_>>();
-        expired
-            .into_iter()
-            .filter_map(|flow_id| entries.remove(&flow_id))
-            .collect()
-    }
-
-    fn drain(&self) -> Vec<Arc<PendingLink>> {
-        let Ok(mut entries) = self.entries.lock() else {
-            return Vec::new();
-        };
-        entries.drain().map(|(_, link)| link).collect()
-    }
-
-    fn lock(
-        &self,
-    ) -> Result<
-        std::sync::MutexGuard<'_, HashMap<DeviceLinkFlowId, Arc<PendingLink>>>,
-        DeviceLinkError,
-    > {
-        self.entries.lock().map_err(|_| DeviceLinkError::Internal {
-            reason: "the pending device-link registry lock was poisoned",
-        })
-    }
-}
-
-/// One parked login: its connection, and the mutex that serializes every vendor
-/// call against it.
-struct PendingLink {
-    connection: MtprotoConnection,
-    state: tokio::sync::Mutex<PendingState>,
-    created_at: Instant,
-}
-
-struct PendingState {
-    phase: PendingPhase,
-    /// Telegram has issued an authorization for this device.
-    accepted: bool,
-    /// Custody holds the resulting session, so abandoning the link must **not**
-    /// log out — that would destroy the credential just stored.
-    stored: bool,
-    attempts: u8,
-    export_backoff: Duration,
-    /// `serverNow - localNow`, in seconds. Token expiry is server time.
-    server_offset: i64,
-}
-
-impl Default for PendingState {
-    fn default() -> Self {
-        Self {
-            phase: PendingPhase::AwaitingIdentifier,
-            accepted: false,
-            stored: false,
-            attempts: 0,
-            export_backoff: INITIAL_EXPORT_BACKOFF,
-            server_offset: 0,
-        }
-    }
-}
-
-impl PendingState {
-    fn charge_attempt(&mut self) -> Result<(), DeviceLinkError> {
-        self.attempts = self.attempts.saturating_add(1);
-        if self.attempts > MAX_INPUT_ATTEMPTS {
-            return Err(DeviceLinkError::Vendor {
-                code: DeviceLinkErrorCode::RateLimited,
-                restartable: true,
-            });
-        }
-        Ok(())
-    }
-}
-
-enum PendingPhase {
-    AwaitingScan,
-    AwaitingIdentifier,
-    AwaitingCode {
-        token: Box<LoginToken>,
-    },
-    AwaitingPassword {
-        token: Box<PasswordToken>,
-    },
-    Completed {
-        account_label: String,
-        vendor_user_ref: String,
-    },
-    Failed,
-}
-
-/// End a parked link, logging out first when Telegram authorized a device this
-/// process never made durable.
-async fn abandon(link: Arc<PendingLink>) {
-    let needs_logout = {
-        let state = link.state.lock().await;
-        state.accepted && !state.stored
-    };
-    if !needs_logout {
-        return;
-    }
-    let call = link
+/// Telegram can accept the code before grammers finishes its local peer-cache
+/// bookkeeping. The authorization read and `UserSelf` lookup turn that
+/// partially reported success into a durable completion instead of asking the
+/// user to consume the same one-time code again.
+async fn recover_authorized_user(
+    link: &PendingLink,
+) -> Result<Option<tl::enums::User>, DeviceLinkError> {
+    match link
         .connection
-        .invoke(&tl::functions::auth::LogOut {}, VendorOpKind::Write);
-    match tokio::time::timeout(LOGOUT_TIMEOUT, call).await {
-        Ok(Ok(_)) => {}
-        // Both remaining arms leave a device Telegram may still consider
-        // authorized. Nothing here can fix that — the user can, from
-        // Telegram's own device list — so it is recorded rather than
-        // swallowed, and the product copy tells them to look.
-        Ok(Err(_)) => debug!("logging out an abandoned telegram device link failed"),
-        Err(_) => debug!("logging out an abandoned telegram device link timed out"),
+        .invoke(&tl::functions::updates::GetState {}, VendorOpKind::Read)
+        .await
+    {
+        Ok(_) => {}
+        Err(TransportError::Rpc {
+            code: 401, name, ..
+        }) => {
+            debug!(
+                rpc_name = %name,
+                home_dc = link.connection.session().home_dc_id().ok(),
+                "telegram post-sign-in authorization probe was rejected"
+            );
+            return Ok(None);
+        }
+        Err(error) => return Err(vendor_error(error)),
     }
+
+    let users = link
+        .connection
+        .invoke(
+            &tl::functions::users::GetUsers {
+                id: vec![tl::enums::InputUser::UserSelf],
+            },
+            VendorOpKind::Read,
+        )
+        .await
+        .map_err(vendor_error)?;
+    users
+        .into_iter()
+        .find(|user| matches!(user, tl::enums::User::User(_)))
+        .map(Some)
+        .ok_or(DeviceLinkError::Internal {
+            reason: "telegram authorized the session but returned no current user",
+        })
 }
 
 // ---------------------------------------------------------------------------

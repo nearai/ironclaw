@@ -1567,6 +1567,7 @@ registerPack("ar", {
   "deviceLink.error.invalid_input": "لم يتم قبول هذه القيمة.",
   "deviceLink.error.rate_limited": "محاولات كثيرة جدًا. انتظر قليلاً قبل المحاولة مرة أخرى.",
   "deviceLink.error.account_unavailable": "لا يمكن ربط هذا الحساب.",
+  "deviceLink.error.identity_conflict": "هذا الحساب مرتبط بالفعل. ألغِ ربطه من حساب IronClaw المتصل به، ثم حاول مرة أخرى.",
   "deviceLink.error.vendor_unavailable": "الخدمة غير متاحة مؤقتًا.",
   "deviceLink.error.custody_failed": "تعذّر حفظ الربط بأمان.",
   "deviceLink.error.internal": "حدث خطأ ما أثناء الربط."

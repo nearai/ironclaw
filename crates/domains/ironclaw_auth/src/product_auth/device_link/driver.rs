@@ -806,7 +806,9 @@ fn auth_error_for(code: DeviceLinkErrorCode) -> AuthErrorCode {
         DeviceLinkErrorCode::InvalidInput => AuthErrorCode::InvalidRequest,
         // The account can never link — a re-prompt loop would be the wrong
         // behavior, so this reads as "no credential", not "try again".
-        DeviceLinkErrorCode::AccountUnavailable => AuthErrorCode::CredentialMissing,
+        DeviceLinkErrorCode::AccountUnavailable | DeviceLinkErrorCode::IdentityConflict => {
+            AuthErrorCode::CredentialMissing
+        }
         DeviceLinkErrorCode::RateLimited
         | DeviceLinkErrorCode::HostThrottled
         | DeviceLinkErrorCode::LimitReached

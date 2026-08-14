@@ -661,6 +661,8 @@ pub(crate) async fn build_runtime_channel_host(
                     assembly: Arc::clone(&assembly),
                     channel_config: Arc::clone(&local_runtime.channel_config_service),
                     dm_targets: local_runtime.channel_dm_target_store.clone(),
+                    identity_lookup: Arc::clone(&local_runtime.channel_identity_store)
+                        as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
                     identity: ironclaw_extension_host::channel_outbound_targets::ChannelOutboundTargetIdentity {
                         tenant_id: thread_scope.tenant_id.clone(),
                         agent_id: thread_scope.agent_id.clone(),

@@ -7,6 +7,7 @@ import { runVmModuleForTest } from "../../../test-support/vm-module-harness";
 import {
   ConfigurationGroup,
   buildConfigurationSaveMutation,
+  configurationSaveErrorMessage,
 } from "./configuration-tab";
 
 function visit(node, fn) {
@@ -153,6 +154,17 @@ test("configuration save mutation carries the loaded revision and client idempot
       { handle: "public_name", value: "fixture-bot" },
     ],
   });
+});
+
+test("revision conflicts tell the operator the form was refreshed for a safe retry", () => {
+  assert.equal(
+    configurationSaveErrorMessage({ status: 409 }),
+    "Configuration changed elsewhere. Review the refreshed values and save again.",
+  );
+  assert.equal(
+    configurationSaveErrorMessage(new Error("offline")),
+    "Unable to save configuration.",
+  );
 });
 
 test("configuration group renders generic operator fields and no lifecycle actions", () => {

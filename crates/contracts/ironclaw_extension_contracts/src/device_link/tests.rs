@@ -54,6 +54,10 @@ fn mode_input_kind_display_kind_and_error_code_round_trip_their_wire_values() {
             "\"account_unavailable\"",
         ),
         (
+            DeviceLinkErrorCode::IdentityConflict,
+            "\"identity_conflict\"",
+        ),
+        (
             DeviceLinkErrorCode::VendorUnavailable,
             "\"vendor_unavailable\"",
         ),

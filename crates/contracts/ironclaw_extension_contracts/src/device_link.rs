@@ -127,6 +127,10 @@ pub enum DeviceLinkErrorCode {
     /// The account cannot be linked at all — deactivated, banned, ineligible.
     /// Terminal: re-prompting forever is the wrong behavior.
     AccountUnavailable,
+    /// This external identity is already connected, either to another product
+    /// user or as a different identity for this user. Terminal until the
+    /// existing link is removed from the account that owns it.
+    IdentityConflict,
     /// The vendor failed transiently.
     VendorUnavailable,
     /// Host-side custody failed (see [`LinkedSessionError`]).
@@ -575,7 +579,13 @@ impl DeviceLinkError {
 ///   by re-asking has no other way to notice — but it must be safe to call at
 ///   the host's cadence, on every card that happens to be open, without
 ///   consuming a one-shot.
-/// * **`cancel` is idempotent** and safe on a flow that is already gone.
+/// * **Completion is provisional until `finalize`.** Returning
+///   [`DeviceLinkStep::Completed`] means the vendor authorized the device and
+///   custody contains the session, but the adapter must retain enough state
+///   for [`DeviceLinkAdapter::cancel`] to undo that authorization until the
+///   host calls [`DeviceLinkAdapter::finalize`].
+/// * **`cancel` and `finalize` are idempotent** and safe on a flow that is
+///   already gone.
 /// * **A `begin` naming a flow that is already live is a re-mint**, not a
 ///   second attempt: the host asks for it when a displayed frame's clock
 ///   lapses, and it must be answered with a fresh frame for the same link.
@@ -612,8 +622,15 @@ pub trait DeviceLinkAdapter: Send + Sync {
         input: DeviceLinkInput,
     ) -> Result<DeviceLinkStep, DeviceLinkError>;
 
+    /// Accept a completed provisional link after the host has durably minted
+    /// its credential account and any product identity bindings. This only
+    /// relinquishes the adapter's rollback state; it must not log the device
+    /// out.
+    async fn finalize(&self, ctx: &DeviceLinkContext<'_>);
+
     /// Abandon an in-progress link, undoing any authorization it already
-    /// obtained.
+    /// obtained, including one behind a provisional `Completed` step the host
+    /// could not commit.
     async fn cancel(&self, ctx: &DeviceLinkContext<'_>) -> Result<(), DeviceLinkError>;
 
     /// Tear down an established link: end the vendor-side authorization and

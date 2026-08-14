@@ -45,6 +45,12 @@ export function buildConfigurationSaveMutation(group, values, idempotencyKey) {
   };
 }
 
+export function configurationSaveErrorMessage(error) {
+  return error?.status === 409
+    ? "Configuration changed elsewhere. Review the refreshed values and save again."
+    : "Unable to save configuration.";
+}
+
 function configurationValuesFromFields(fields) {
   return Object.fromEntries(fields.map((field) => [
     field.handle,
@@ -163,7 +169,9 @@ export function ConfigurationGroup({ group, state }) {
           </Button>
           {saved && <span className="text-sm text-signal" role="status">Configuration saved.</span>}
           {state.saveError && state.savingGroupId === group.group_id && (
-            <span className="text-sm text-red-200" role="alert">Unable to save configuration.</span>
+            <span className="text-sm text-red-200" role="alert">
+              {configurationSaveErrorMessage(state.saveError)}
+            </span>
           )}
         </div>
       </form>

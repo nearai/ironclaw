@@ -265,6 +265,22 @@ transport = "message"
 [channel.delivery]
 transport = "message"
 
+[channel.connection]
+provider = "acme-link"
+strategy = "device_link"
+instructions = "Link your Acme account."
+input_placeholder = ""
+submit_label = "Link Acme"
+error_message = "Acme linking failed."
+connection_success_message = "Acme is linked."
+
+[channel.connection.notices]
+connect_required = "Link Acme first."
+paired = "Acme linked."
+already_paired_same_user = "Acme already linked."
+already_bound_to_other_user = "Acme is linked elsewhere."
+expired_or_unknown = "Acme is not linked."
+
 [channel.ingress]
 route_suffix = "events"
 method = "post"
@@ -613,6 +629,7 @@ pub enum FakeDeviceLinkCallKind {
     Begin(DeviceLinkMode),
     Poll,
     SubmitInput(DeviceLinkInputKind),
+    Finalize,
     Cancel,
     Revoke,
 }
@@ -746,6 +763,21 @@ impl DeviceLinkAdapter for FakeDeviceLinkAdapter {
     ) -> Result<DeviceLinkStep, DeviceLinkError> {
         self.record(FakeDeviceLinkCallKind::SubmitInput(input.kind()), ctx)
             .await
+    }
+
+    async fn finalize(&self, ctx: &DeviceLinkContext<'_>) {
+        let session_loaded = ctx.session.load().await.is_ok();
+        self.calls
+            .lock()
+            .expect("fake device-link calls")
+            .push(FakeDeviceLinkCall {
+                kind: FakeDeviceLinkCallKind::Finalize,
+                flow_id: ctx.flow_id.clone(),
+                extension_id: ctx.extension_id.clone(),
+                user_id: ctx.user_id.clone(),
+                account: ctx.account.cloned(),
+                session_loaded,
+            });
     }
 
     async fn cancel(&self, ctx: &DeviceLinkContext<'_>) -> Result<(), DeviceLinkError> {

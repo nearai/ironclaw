@@ -187,6 +187,7 @@ pub(crate) enum ScriptedDeviceLinkCall {
     Begin(String, DeviceLinkMode),
     Poll(String),
     SubmitInput(String, DeviceLinkInputKind),
+    Finalize(String),
     Cancel(String),
     Revoke(String),
 }
@@ -269,7 +270,7 @@ impl ScriptedDeviceLinkAdapter {
     fn completed_step() -> DeviceLinkStep {
         DeviceLinkStep::Completed {
             account_label: "Linked personal account".to_string(),
-            vendor_user_ref: "+15550000000".to_string(),
+            vendor_user_ref: "424242".to_string(),
         }
     }
 }
@@ -376,6 +377,15 @@ impl DeviceLinkAdapter for ScriptedDeviceLinkAdapter {
         Ok(Self::completed_step())
     }
 
+    async fn finalize(&self, ctx: &DeviceLinkContext<'_>) {
+        let flow = ctx.flow_id.to_string();
+        let mut state = self.lock_state();
+        state
+            .calls
+            .push(ScriptedDeviceLinkCall::Finalize(flow.clone()));
+        state.phases.remove(&flow);
+    }
+
     async fn cancel(&self, ctx: &DeviceLinkContext<'_>) -> Result<(), DeviceLinkError> {
         let flow = ctx.flow_id.to_string();
         let mut state = self.lock_state();
@@ -428,7 +438,7 @@ impl LinkedAccountFixtureToolAdapter {
             .clone()
     }
 
-    fn attach_resolver(
+    pub(crate) fn attach_resolver(
         &self,
         resolver: Arc<dyn ironclaw_extension_contracts::linked_session::LinkedAccountResolver>,
     ) {
@@ -554,10 +564,9 @@ fn canonical_output(op: StandardMessagingOp, caller: &str, input: &Value) -> Opt
 ///
 /// The binary's own factory
 /// (`ironclaw_cli::runtime::native_extensions::TelegramExtensionEntrypoint`)
-/// binds only the channel today — `tools: None, device_link: None` — which
-/// `check_binding` rejects with `MissingToolAdapter` for this manifest. That
-/// gap is production's, not this harness's; the shape here is what the binary
-/// needs before the package can activate.
+/// binds the same three surfaces with the real Telegram implementations; this
+/// fixture substitutes only the live MTProto edges so the contract remains
+/// hermetic.
 pub(crate) struct TelegramLinkedFixtureFactory {
     device_link: Arc<ScriptedDeviceLinkAdapter>,
     tools: Arc<LinkedAccountFixtureToolAdapter>,

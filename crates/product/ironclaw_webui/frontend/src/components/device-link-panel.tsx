@@ -130,6 +130,12 @@ export function DeviceLinkPanel({
   // not resume the link it just cancelled.
   const resumeFlowIdRef = React.useRef(initialFrame?.flowId || "");
   const completedRef = React.useRef(false);
+  // State updates do not change the closure that is already on screen. Two
+  // submit events in the same render would both observe `isSubmitting ===
+  // false` and could consume a one-time code twice, so admission needs a
+  // synchronous guard as well as the rendered loading state. The unique token
+  // prevents an old request's `finally` from unlocking a newer generation.
+  const submissionRef = React.useRef(null);
 
   const name = displayName || provider || extensionName;
 
@@ -268,8 +274,10 @@ export function DeviceLinkPanel({
   const submitInput = async (event) => {
     event?.preventDefault?.();
     const value = inputValue.trim();
-    if (!frame || !flowId || !value || isSubmitting) return;
+    if (!frame || !flowId || !value || submissionRef.current) return;
     const generation = generationRef.current;
+    const submission = {};
+    submissionRef.current = submission;
     setIsSubmitting(true);
     setError("");
     try {
@@ -287,7 +295,10 @@ export function DeviceLinkPanel({
     } catch (submitError) {
       setError(deviceLinkError(submitError, t("deviceLink.submitFailed")));
     } finally {
-      setIsSubmitting(false);
+      if (submissionRef.current === submission) {
+        submissionRef.current = null;
+        setIsSubmitting(false);
+      }
     }
   };
 

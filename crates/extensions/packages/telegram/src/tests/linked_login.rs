@@ -9,6 +9,7 @@
 //! invisible in manual testing: whether a terminal failure is reported as
 //! restartable.
 
+use super::pending::should_logout_on_abandon;
 use super::*;
 
 // ---------------------------------------------------------------------------
@@ -187,6 +188,48 @@ fn the_self_peer_is_marked_as_self_even_when_the_vendor_shape_is_not() {
             ..
         }
     ));
+}
+
+#[tokio::test]
+async fn an_authorized_session_wins_over_a_replayed_signup_required_result() {
+    let recovered = raw_user(Some("ada"), Some("Ada"), Some("Lovelace"));
+    let resolution = resolve_post_sign_in_failure(PostSignInFailure::SignUpRequired, || async {
+        Ok::<_, DeviceLinkError>(Some(recovered))
+    })
+    .await
+    .expect("the authorization probe succeeds");
+
+    assert!(matches!(
+        resolution,
+        PostSignInResolution::Authorized(user)
+            if matches!(user.as_ref(), tl::enums::User::User(user) if user.id == 4242)
+    ));
+}
+
+#[tokio::test]
+async fn signup_required_is_terminal_only_when_the_session_is_not_authorized() {
+    let resolution = resolve_post_sign_in_failure(PostSignInFailure::SignUpRequired, || async {
+        Ok::<_, DeviceLinkError>(None)
+    })
+    .await
+    .expect("the authorization probe succeeds");
+
+    assert!(matches!(resolution, PostSignInResolution::Unregistered));
+}
+
+#[test]
+fn a_completed_but_unfinalized_login_is_still_logged_out_when_abandoned() {
+    let mut state = PendingState::default();
+    state.accepted = true;
+    state.phase = PendingPhase::Completed {
+        account_label: "@ada".to_string(),
+        vendor_user_ref: "4242".to_string(),
+    };
+
+    assert!(
+        should_logout_on_abandon(&state),
+        "custody persistence alone is not host acceptance; cancellation must still revoke the provisional device",
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -12,6 +12,8 @@
   - `channel.rs` — the `TelegramChannelAdapter` implementations of
     `ChannelIngress`, `ChannelReply`, and `ChannelDelivery`.
   - `attachment_transfer.rs`, `preference_targets.rs` — attachment transfer and reply-target codec.
+  - `linked/` — MTProto device login, session handling, Telegram mappings,
+    connection pooling, and the 15 linked-account tool operations.
   - Re-derive this list with `ls crates/extensions/packages/telegram/src/`.
 - Read the contract before changing channel behavior:
   - `crates/contracts/ironclaw_extension_contracts/` — `ChannelIngress`,
@@ -32,6 +34,11 @@
 - Adapter-specific mapping between Telegram shapes and the shared channel DTOs.
 - Staying free of raw token bytes: hosts run the manifest-declared
   `shared_secret_header` verification and inject credentials on mediated egress.
+- The Telegram-specific half of linked-account access: phone/QR device login,
+  session serialization, validated MTProto transport, live reads, and personal-
+  account writes for the manifest's 15 tools. Generic device-link orchestration,
+  durable linked-session custody, authorization, and capability mediation stay
+  host-owned.
 
 ## Dependency Rule
 

@@ -1567,6 +1567,7 @@ registerPack("pt-BR", {
   "deviceLink.error.invalid_input": "Esse valor não foi aceito.",
   "deviceLink.error.rate_limited": "Tentativas demais. Aguarde um momento antes de tentar de novo.",
   "deviceLink.error.account_unavailable": "Esta conta não pode ser vinculada.",
+  "deviceLink.error.identity_conflict": "Esta conta já está vinculada. Desvincule-a da conta do IronClaw onde está conectada e tente novamente.",
   "deviceLink.error.vendor_unavailable": "O serviço está temporariamente indisponível.",
   "deviceLink.error.custody_failed": "Não foi possível salvar a vinculação com segurança.",
   "deviceLink.error.internal": "Algo deu errado durante a vinculação."

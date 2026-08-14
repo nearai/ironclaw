@@ -4,14 +4,77 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_extension_contracts::channel_identity::{
-    ChannelConnectionScope, ChannelConnectionScopeSource,
+use ironclaw_extension_contracts::{
+    channel::ChannelConnectionStrategy,
+    channel_identity::{ChannelConnectionScope, ChannelConnectionScopeSource},
 };
 use ironclaw_extension_registry::ExtensionInstallationStorePort;
 use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_host_api::product_adapter::AdapterInstallationId;
 
 use crate::ChannelConfigService;
+
+/// Durable identity-key namespace selected by the connection ceremony.
+///
+/// The original channel pairing and OAuth paths write
+/// `{installation}:{actor}`. Device-linked channels additionally write a
+/// versioned segment so the stronger proof remains distinguishable while the
+/// retired proof-code pairing row can keep authorizing its existing channel
+/// entrypoint during a zero-touch upgrade.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ChannelIdentityKeyspace {
+    #[default]
+    Legacy,
+    DeviceLinkV1,
+}
+
+impl ChannelIdentityKeyspace {
+    pub fn for_strategy(strategy: Option<ChannelConnectionStrategy>) -> Self {
+        match strategy {
+            Some(ChannelConnectionStrategy::DeviceLink) => Self::DeviceLinkV1,
+            _ => Self::Legacy,
+        }
+    }
+
+    pub fn provider_user_id(
+        self,
+        installation_id: &AdapterInstallationId,
+        external_actor_id: &str,
+    ) -> String {
+        format!(
+            "{}{external_actor_id}",
+            self.provider_user_id_prefix(installation_id)
+        )
+    }
+
+    pub fn provider_user_id_prefix(self, installation_id: &AdapterInstallationId) -> String {
+        match self {
+            Self::Legacy => format!("{}:", installation_id.as_str()),
+            Self::DeviceLinkV1 => format!("{}:device-link-v1:", installation_id.as_str()),
+        }
+    }
+}
+
+/// Lookup order for one connection strategy, strongest proof first.
+///
+/// Device linking is additive for the channel: a newly linked account binds
+/// under `DeviceLinkV1`, while a pre-cutover proof-code binding remains a
+/// valid bot-channel identity. Personal linked-account tools still require
+/// their credential account independently, so accepting the legacy channel
+/// proof cannot mint or grant personal linked-account authority.
+pub fn channel_identity_lookup_keyspaces(
+    strategy: Option<ChannelConnectionStrategy>,
+) -> &'static [ChannelIdentityKeyspace] {
+    const LEGACY: &[ChannelIdentityKeyspace] = &[ChannelIdentityKeyspace::Legacy];
+    const DEVICE_LINK: &[ChannelIdentityKeyspace] = &[
+        ChannelIdentityKeyspace::DeviceLinkV1,
+        ChannelIdentityKeyspace::Legacy,
+    ];
+    match strategy {
+        Some(ChannelConnectionStrategy::DeviceLink) => DEVICE_LINK,
+        _ => LEGACY,
+    }
+}
 
 /// The generic `[channel.config]`-backed scope source: the installation record
 /// supplies the adapter installation id; non-secret config values whose
@@ -100,6 +163,7 @@ pub fn channel_config_connection_scope_source(
 pub struct DiscoveredChannelExtension {
     pub extension_id: String,
     pub providers: Vec<String>,
+    pub identity_keyspaces: Vec<ChannelIdentityKeyspace>,
 }
 
 /// Installed extensions whose manifest declares a channel surface, excluding
@@ -124,6 +188,14 @@ pub async fn discover_channel_extensions(
         }
         discovered.push(DiscoveredChannelExtension {
             extension_id,
+            identity_keyspaces: channel_identity_lookup_keyspaces(
+                resolved
+                    .channel
+                    .as_ref()
+                    .and_then(|channel| channel.connection.as_ref())
+                    .map(|connection| connection.strategy),
+            )
+            .to_vec(),
             providers: resolved
                 .auth
                 .iter()

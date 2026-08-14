@@ -1511,6 +1511,7 @@ registerPack("en", {
   "deviceLink.error.invalid_input": "That value was not accepted.",
   "deviceLink.error.rate_limited": "Too many attempts. Wait a moment before trying again.",
   "deviceLink.error.account_unavailable": "This account cannot be linked.",
+  "deviceLink.error.identity_conflict": "This account is already linked. Unlink it from the IronClaw account where it is connected, then try again.",
   "deviceLink.error.vendor_unavailable": "The service is temporarily unavailable.",
   "deviceLink.error.custody_failed": "The link could not be saved securely.",
   "deviceLink.error.internal": "Something went wrong while linking."

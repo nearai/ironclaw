@@ -819,7 +819,10 @@ impl ironclaw_extension_host::ExtensionEntrypoint for AcmeFixtureEntrypoint {
                     .with_reply(adapter.clone())
                     .with_delivery(adapter)
             },
-            device_link: None,
+            device_link: Some(
+                Arc::new(super::device_link::ScriptedDeviceLinkAdapter::new())
+                    as Arc<dyn ironclaw_extension_contracts::device_link::DeviceLinkAdapter>,
+            ),
         })
     }
 }
@@ -1779,11 +1782,13 @@ struct TelegramFixtureEntrypoint;
 impl ironclaw_extension_host::ExtensionEntrypoint for TelegramFixtureEntrypoint {
     fn bind(
         &self,
-        _ctx: ironclaw_extension_host::BindContext,
+        ctx: ironclaw_extension_host::BindContext,
     ) -> Result<ironclaw_extension_host::ExtensionBindings, ironclaw_extension_host::BindError>
     {
+        let tools = Arc::new(super::device_link::LinkedAccountFixtureToolAdapter::new());
+        tools.attach_resolver(Arc::clone(&ctx.linked_accounts));
         Ok(ironclaw_extension_host::ExtensionBindings {
-            tools: None,
+            tools: Some(tools as Arc<dyn ironclaw_extension_contracts::tool_adapter::ToolAdapter>),
             channel: {
                 let adapter =
                     Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default());
@@ -1792,7 +1797,10 @@ impl ironclaw_extension_host::ExtensionEntrypoint for TelegramFixtureEntrypoint 
                     .with_reply(adapter.clone())
                     .with_delivery(adapter)
             },
-            device_link: None,
+            device_link: Some(
+                Arc::new(super::device_link::ScriptedDeviceLinkAdapter::new())
+                    as Arc<dyn ironclaw_extension_contracts::device_link::DeviceLinkAdapter>,
+            ),
         })
     }
 }

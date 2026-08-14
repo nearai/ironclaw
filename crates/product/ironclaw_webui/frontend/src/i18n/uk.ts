@@ -1567,6 +1567,7 @@ registerPack("uk", {
   "deviceLink.error.invalid_input": "Це значення не прийнято.",
   "deviceLink.error.rate_limited": "Забагато спроб. Зачекайте трохи перед наступною.",
   "deviceLink.error.account_unavailable": "Цей обліковий запис не можна прив'язати.",
+  "deviceLink.error.identity_conflict": "Цей обліковий запис уже прив'язано. Від'єднайте його від облікового запису IronClaw, до якого його підключено, і повторіть спробу.",
   "deviceLink.error.vendor_unavailable": "Сервіс тимчасово недоступний.",
   "deviceLink.error.custody_failed": "Не вдалося безпечно зберегти прив'язку.",
   "deviceLink.error.internal": "Під час прив'язки сталася помилка."

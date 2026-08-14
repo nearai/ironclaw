@@ -1567,6 +1567,7 @@ registerPack("de", {
   "deviceLink.error.invalid_input": "Dieser Wert wurde nicht akzeptiert.",
   "deviceLink.error.rate_limited": "Zu viele Versuche. Warte einen Moment, bevor du es erneut versuchst.",
   "deviceLink.error.account_unavailable": "Dieses Konto kann nicht verknüpft werden.",
+  "deviceLink.error.identity_conflict": "Dieses Konto ist bereits verknüpft. Trennen Sie es von dem verbundenen IronClaw-Konto und versuchen Sie es erneut.",
   "deviceLink.error.vendor_unavailable": "Der Dienst ist vorübergehend nicht verfügbar.",
   "deviceLink.error.custody_failed": "Die Verknüpfung konnte nicht sicher gespeichert werden.",
   "deviceLink.error.internal": "Beim Verknüpfen ist etwas schiefgelaufen."

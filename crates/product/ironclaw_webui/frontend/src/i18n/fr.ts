@@ -1567,6 +1567,7 @@ registerPack("fr", {
   "deviceLink.error.invalid_input": "Cette valeur a été refusée.",
   "deviceLink.error.rate_limited": "Trop de tentatives. Patientez un instant avant de réessayer.",
   "deviceLink.error.account_unavailable": "Ce compte ne peut pas être associé.",
+  "deviceLink.error.identity_conflict": "Ce compte est déjà associé. Dissociez-le du compte IronClaw auquel il est connecté, puis réessayez.",
   "deviceLink.error.vendor_unavailable": "Le service est temporairement indisponible.",
   "deviceLink.error.custody_failed": "L'association n'a pas pu être enregistrée en toute sécurité.",
   "deviceLink.error.internal": "Un problème est survenu pendant l'association."

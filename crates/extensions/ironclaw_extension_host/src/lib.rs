@@ -43,6 +43,7 @@ pub mod channel_shared_admission;
 pub mod channel_triggered_delivery;
 mod channel_vendor_calls;
 pub mod deployment_channels;
+pub mod device_link_channel_identity;
 pub mod device_link_driver;
 pub mod egress;
 pub mod entrypoint;
@@ -154,7 +155,7 @@ pub use channel_identity::{
     discover_channel_extensions, handle_declares_claim,
 };
 pub use channel_identity_store::{
-    FilesystemChannelIdentityStore, channel_identity_mount_view,
+    FilesystemChannelIdentityStore, IdentityBindingTransaction, channel_identity_mount_view,
     path_segment as channel_identity_path_segment,
 };
 pub use channel_lifecycle::{
@@ -163,6 +164,9 @@ pub use channel_lifecycle::{
 };
 pub use deployment_channels::{
     DeploymentChannelBinding, DeploymentChannelRegistry, DeploymentChannelRegistryError,
+};
+pub use device_link_channel_identity::{
+    DeviceLinkChannelIdentityBinder, DeviceLinkChannelIdentityError,
 };
 pub use device_link_driver::{
     DeviceLinkLimits, DeviceLinkLimitsError, DeviceLinkRequest, SnapshotDeviceLinkDriver,

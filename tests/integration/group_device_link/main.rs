@@ -45,16 +45,18 @@ async fn device_link_linked_account_group() {
 
     let mut report = ScenarioReport::new();
     report.record(
-        "handshake_mints_and_serves",
-        scenario_handshake_mints_and_serves::run(&group, &handles).await,
-    );
-    report.record(
         "actor_isolation",
         scenario_actor_isolation::run(&group, &handles).await,
     );
     report.record(
         "revoked_session_reauth",
         scenario_revoked_session_reauth::run(&group, &handles).await,
+    );
+    // Runs last because it proves the real extension-removal path, which
+    // intentionally removes Telegram from the shared group runtime.
+    report.record(
+        "handshake_mints_serves_and_removes",
+        scenario_handshake_mints_and_serves::run(&group, &handles).await,
     );
     report.assert_all_passed();
 }

@@ -343,6 +343,50 @@ test("DeviceLinkPanel submits an input with the revision it was rendered from an
   );
 });
 
+test("DeviceLinkPanel admits only one submit before React commits the loading state", async () => {
+  const inputFrame = wireFrame({
+    step: DEVICE_LINK_STEPS.inputRequired,
+    input_kind: DEVICE_LINK_INPUT_KINDS.code,
+    secret_label: "Login code",
+    revision: 4,
+  });
+  let releaseSubmit;
+  const pendingSubmit = new Promise((resolve) => {
+    releaseSubmit = resolve;
+  });
+  const harness = createHarness({
+    startResponses: [response(inputFrame)],
+    pollResponses: [response(inputFrame)],
+    submitResponses: [pendingSubmit],
+  });
+
+  const rendered = await harness.mount();
+  attribute(rendered, "onChange")[0]({ target: { value: "12345" } });
+  const filled = harness.render();
+  const submit = attribute(filled, "onSubmit")[0];
+
+  const first = submit({ preventDefault() {} });
+  const replay = submit({ preventDefault() {} });
+  await tick();
+
+  assert.equal(
+    harness.calls.filter((call) => call[0] === "submit").length,
+    1,
+    "two events in the same render must not consume the one-time code twice",
+  );
+
+  releaseSubmit(
+    response(
+      wireFrame({
+        step: DEVICE_LINK_STEPS.completed,
+        instructions: "Linked.",
+        revision: 5,
+      }),
+    ),
+  );
+  await Promise.all([first, replay]);
+});
+
 test("DeviceLinkPanel restarts in the alternate mode from the QR step", async () => {
   const harness = createHarness({
     startResponses: [
@@ -797,6 +841,25 @@ test("DeviceLinkPanel offers 'start again' on a restartable failure and refuses 
   const terminalView = await terminal.mount();
   assert.ok(!stringify(terminalView).includes("deviceLink.startAgain"));
   assert.ok(stringify(terminalView).includes("deviceLink.cannotRetry"));
+
+  const conflicted = createHarness({
+    startResponses: [
+      response(
+        wireFrame({
+          step: DEVICE_LINK_STEPS.failed,
+          instructions: "This account is already connected elsewhere.",
+          error_code: "identity_conflict",
+          restartable: false,
+        }),
+      ),
+    ],
+  });
+  const conflictView = await conflicted.mount();
+  assert.ok(
+    stringify(conflictView).includes("deviceLink.error.identity_conflict"),
+    "an existing owner is explained separately from an ineligible vendor account",
+  );
+  assert.ok(!stringify(conflictView).includes("deviceLink.startAgain"));
 });
 
 test("DeviceLinkPanel surfaces a failed start as a retryable error rather than a blank card", async () => {

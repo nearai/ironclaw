@@ -149,6 +149,7 @@ pub struct ResolvedToolBinding {
 pub struct ResolvedDeviceLinkBinding {
     pub adapter: Arc<dyn DeviceLinkAdapter>,
     pub declaration: Arc<ResolvedExtensionManifest>,
+    pub installation_id: String,
     pub config: Arc<BTreeMap<String, String>>,
     pub generation: Generation,
 }
@@ -243,6 +244,7 @@ impl ActiveSnapshot {
         Some(ResolvedDeviceLinkBinding {
             adapter,
             declaration: Arc::clone(&extension.resolved),
+            installation_id: extension.installation_id.clone(),
             config: Arc::clone(&extension.config),
             generation: self.generation,
         })

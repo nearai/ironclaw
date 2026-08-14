@@ -253,18 +253,23 @@ before Telegram emits the new wire value. Older binaries do not understand the
 new manifest strategy, so the package manifest and runtime consumers ship in
 one release.
 
-This branch has no production population of linked Telegram accounts. Existing
-development accounts linked before this change must unlink and relink once so
-the completion hook can establish the identity binding. A future migration for
-already-shipped accounts would require a host-mediated identity read from the
-stored session and is outside this change.
+No schema rewrite or background data migration is required. Mainline users may
+have a proof-code identity binding but cannot have this branch's linked-device
+credential. That existing binding remains valid only for the bot entrypoint and
+bot delivery it already authorized, giving the release a zero-touch channel
+upgrade. It is never reinterpreted as personal-account authority. Linking a
+personal account writes the stronger `device-link-v1` binding alongside the
+grandfathered row; identity resolution prefers that stronger namespace and
+falls back to the legacy namespace for compatibility. A cross-user collision
+in either namespace rejects the link. Fresh installations expose only device
+linking, and explicit disconnect/removal deletes both binding generations,
+revokes the personal session, and removes the DM target.
 
-Rollback must first remove identity bindings created by this flow (or retain
-the `device_link` strategy until users disconnect), then restore Telegram's
-`web_generated_code` manifest declaration and pairing registry registration.
-Reverting only the manifest is unsafe: an existing provider binding would still
-let the generic inbound resolver admit that actor even while pairing status
-reports disconnected.
+Rollback can restore Telegram's `web_generated_code` manifest declaration and
+pairing registry registration without rewriting grandfathered rows. Versioned
+device-link bindings are ignored by the legacy strategy, but linked credentials
+should be revoked or the `device_link` strategy retained until affected users
+disconnect so operators do not leave inaccessible personal sessions behind.
 
 ## 9. Test strategy
 

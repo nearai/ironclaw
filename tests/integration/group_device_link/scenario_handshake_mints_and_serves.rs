@@ -1,4 +1,5 @@
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
+use super::reborn_support::harness::profiles::device_link::ScriptedDeviceLinkCall;
 use super::reborn_support::harness::profiles::device_link::{
     LINKED_EXTENSION_ID, LINKED_VENDOR_ID, LINKED_WHOAMI_CAPABILITY_ID, LinkedFixtureHandles,
 };
@@ -42,6 +43,28 @@ pub async fn run(
     let account = linker
         .link_device_through_product_auth(LINKED_VENDOR_ID, LINKED_EXTENSION_ID, "cloud-password")
         .await?;
+    let actor = linker.binding.actor_user_id.clone();
+    let channel_connection = group
+        .channel_connection()
+        .ok_or("device-link group has no production channel-connection service")?;
+    if !channel_connection
+        .has_any_active_identity_binding(LINKED_VENDOR_ID, &actor)
+        .await?
+    {
+        return Err(
+            "device-link completion minted credentials but did not persist a channel identity"
+                .into(),
+        );
+    }
+    if !channel_connection
+        .caller_channel_connected(LINKED_EXTENSION_ID, &actor)
+        .await?
+    {
+        return Err(
+            "device-link completion minted credentials but did not connect the Telegram channel"
+                .into(),
+        );
+    }
 
     // PROPOSAL §4.5's ownership pin, asserted on the account the production
     // mint actually produced. Every clause matters: a reusable account would
@@ -114,6 +137,57 @@ pub async fn run(
     caller
         .assert_tool_result_contains(account.id.to_string().as_str())
         .await?;
+    if !handles
+        .device_link
+        .calls()
+        .iter()
+        .any(|call| matches!(call, ScriptedDeviceLinkCall::Finalize(_)))
+    {
+        return Err("completed Telegram link did not finalize its vendor session".into());
+    }
+
+    // Remove through the product lifecycle, which must invoke the same
+    // disconnect coordinator the extensions page uses: vendor/device revoke
+    // first, then target and identity cleanup, before the installation is
+    // removed. This runs last in the group because removal is deployment-wide.
+    let remover = group
+        .thread("conv-device-link-handshake-remove")
+        .with_actor_id(HANDSHAKE_ACTOR_ID)
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_remove",
+                serde_json::json!({ "extension_id": LINKED_EXTENSION_ID }),
+            ),
+            RebornScriptedReply::text("removed"),
+        ])
+        .build()
+        .await?;
+    remover.submit_turn("remove telegram for me").await?;
+    remover
+        .assert_tool_invoked("builtin.extension_remove")
+        .await?;
+    if channel_connection
+        .caller_channel_connected(LINKED_EXTENSION_ID, &actor)
+        .await?
+    {
+        return Err("Telegram remained connected after extension removal".into());
+    }
+    if channel_connection
+        .has_any_active_identity_binding(LINKED_VENDOR_ID, &actor)
+        .await?
+    {
+        return Err("Telegram identity binding survived extension removal".into());
+    }
+    if !handles
+        .device_link
+        .calls()
+        .iter()
+        .any(|call| matches!(call, ScriptedDeviceLinkCall::Revoke(_)))
+    {
+        return Err(
+            "extension removal cleared local state without revoking the linked device".into(),
+        );
+    }
 
     Ok(())
 }

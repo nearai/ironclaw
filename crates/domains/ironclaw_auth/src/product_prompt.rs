@@ -574,14 +574,15 @@ fn device_link_prompt_view(
             view.secret_label = Some(label.clone());
         }
         DeviceLinkStep::Completed {
-            vendor_user_ref, ..
+            account_label,
+            vendor_user_ref,
         } => {
             // Showing the resolved identity is the ONLY control that makes a
             // substituted login visible (PROPOSAL §3.2) — never drop it. It
             // carries its own slot: it used to ride `code`, which left a card
             // unable to tell "read this code to your phone" from "this is who
             // you linked as".
-            view.instructions = format!("Linked to {display_name} as {vendor_user_ref}.");
+            view.instructions = format!("Linked to {display_name} as {account_label}.");
             view.vendor_user_ref = Some(vendor_user_ref.clone());
         }
         DeviceLinkStep::Failed { code, restartable } => {
@@ -677,6 +678,38 @@ mod tests {
             submit_label: "Open pairing".to_string(),
             error_message: "Pairing failed.".to_string(),
         }
+    }
+
+    #[test]
+    fn completed_device_link_names_the_account_without_replacing_it_with_the_vendor_id() {
+        let provider = AuthProviderId::new("acme".to_string()).expect("provider");
+        let extension_id = ExtensionId::new("acme").expect("extension id");
+        let step = DeviceLinkStep::Completed {
+            account_label: "@friendly-account".to_string(),
+            vendor_user_ref: "vendor-user-4711".to_string(),
+        };
+
+        let view = device_link_prompt_view(
+            &provider,
+            Some(&extension_id),
+            "Acme Chat",
+            (Some("Scan a code"), Some("Use an identifier")),
+            DeviceLinkMode::Alternate,
+            &step,
+            7,
+            chrono::Utc::now(),
+            None,
+        );
+
+        assert_eq!(
+            view.instructions, "Linked to Acme Chat as @friendly-account.",
+            "the main success copy should use the human account label"
+        );
+        assert_eq!(
+            view.vendor_user_ref.as_deref(),
+            Some("vendor-user-4711"),
+            "the stable vendor id still needs its dedicated substitution-detection slot"
+        );
     }
 
     /// A pairing credential requirement MUST set `challenge_kind = Pairing`.
