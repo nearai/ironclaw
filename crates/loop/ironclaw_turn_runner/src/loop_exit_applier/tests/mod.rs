@@ -3,7 +3,9 @@ use ironclaw_turns::loop_exit::LoopExitApplier;
 use std::sync::Arc;
 
 use ironclaw_host_api::execution_policy::{ResultDeliveryPolicy, TurnExecutionPolicy};
-use ironclaw_host_api::ids::{AgentId, ApprovalRequestId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::ids::{
+    AgentId, ApprovalRequestId, CapabilityId, ProviderToolName, TenantId, ThreadId, UserId,
+};
 use ironclaw_host_api::turn::{
     LoopGateRef, LoopMessageRef, LoopResultRef, ProductTurnContext, TurnActor, TurnCheckpointId,
     TurnExecutionOutcome, TurnGateRef, TurnId, TurnOriginKind, TurnOwner, TurnRunId, TurnScope,
@@ -16,8 +18,9 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_loop_host::SpawnSubagentMode;
 use ironclaw_threads::{
-    AppendAssistantDraftRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
-    MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadMessageId,
+    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, EnsureThreadRequest,
+    InMemorySessionThreadService, MessageContent, MessageKind, MessageStatus,
+    ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadHistoryRequest, ThreadMessageId,
     ThreadMessageRecord, ThreadScope, ToolResultSafeSummary,
 };
 use ironclaw_turns::test_support::{in_memory_agent_turn_runtime, in_memory_loop_checkpoint_store};
@@ -548,6 +551,7 @@ async fn thread_checkpoint_evidence_rejects_agentless_completion_refs_explicitly
             scope: &claimed.state.scope,
             turn_id: claimed.state.turn_id,
             run_id: claimed.state.run_id,
+            completion_kind: LoopCompletionKind::FinalReply,
             reply_message_refs: &[LoopMessageRef::new("msg:reply").expect("valid")],
             result_refs: &[],
         })
@@ -627,6 +631,7 @@ async fn thread_checkpoint_evidence_accepts_result_refs_with_durable_reply_ref()
             scope: &turn_scope,
             turn_id: TurnId::new(),
             run_id,
+            completion_kind: LoopCompletionKind::ResultOnly,
             reply_message_refs: &[message_ref],
             result_refs: &[result_ref],
         })
@@ -716,6 +721,7 @@ async fn completion_evidence_reads_thread_under_the_run_caller_owner() {
             scope: &turn_scope,
             turn_id: TurnId::new(),
             run_id,
+            completion_kind: LoopCompletionKind::FinalReply,
             reply_message_refs: &[message_ref],
             result_refs: &[],
         })
@@ -769,6 +775,7 @@ async fn thread_checkpoint_evidence_rejects_missing_result_ref_records() {
             scope: &turn_scope,
             turn_id: TurnId::new(),
             run_id,
+            completion_kind: LoopCompletionKind::ResultOnly,
             reply_message_refs: &[],
             result_refs: &[result_ref],
         })
@@ -827,6 +834,7 @@ async fn thread_checkpoint_evidence_accepts_result_only_completion_with_durable_
             scope: &turn_scope,
             turn_id: TurnId::new(),
             run_id,
+            completion_kind: LoopCompletionKind::ResultOnly,
             reply_message_refs: &[],
             result_refs: &[result_ref],
         })
@@ -834,6 +842,106 @@ async fn thread_checkpoint_evidence_accepts_result_only_completion_with_durable_
         .expect("durable result evidence should verify without checkpoint I/O");
 
     assert!(verified);
+}
+
+#[tokio::test]
+async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let turn_scope = TurnScope::new(
+        TenantId::new("tenant").expect("valid"),
+        Some(AgentId::new("agent").expect("valid")),
+        None,
+        ThreadId::new("thread").expect("valid"),
+    );
+    let thread_scope = ThreadScope {
+        tenant_id: turn_scope.tenant_id.clone(),
+        agent_id: turn_scope.agent_id.clone().expect("agent id"),
+        project_id: None,
+        owner_user_id: None,
+        mission_id: None,
+    };
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(turn_scope.thread_id.clone()),
+            created_by_actor_id: "user:test".to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+    let run_id = TurnRunId::new();
+    let generic_result_ref = LoopResultRef::new("result:generic").expect("result ref");
+    append_tool_result_reference(
+        thread_service.as_ref(),
+        thread_scope.clone(),
+        turn_scope.thread_id.clone(),
+        run_id,
+        generic_result_ref.clone(),
+    )
+    .await;
+    let typed_result_ref = LoopResultRef::new("result:nothing-to-report").expect("result ref");
+    thread_service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: thread_scope.clone(),
+            thread_id: turn_scope.thread_id.clone(),
+            turn_run_id: run_id.to_string(),
+            result_ref: typed_result_ref.as_str().to_string(),
+            safe_summary: ToolResultSafeSummary::new("nothing to report").expect("safe summary"),
+            provider_call: Some(ProviderToolCallReferenceEnvelope {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                provider_turn_id: "turn-1".to_string(),
+                provider_call_id: "call-1".to_string(),
+                provider_tool_name: ProviderToolName::new("builtin__structured_result")
+                    .expect("provider tool name"),
+                capability_id: CapabilityId::new("builtin.structured_result")
+                    .expect("capability id"),
+                arguments: serde_json::json!({"outcome": "nothing_to_report"}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }),
+            model_observation: None,
+        })
+        .await
+        .expect("typed result reference");
+    let evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
+        thread_service,
+        Arc::new(in_memory_agent_turn_runtime()) as Arc<dyn AgentTurnRuntimePort>,
+        Arc::new(PanicLoopCheckpointStore),
+        empty_await_dependent_run_evidence(),
+        thread_scope,
+    );
+
+    let generic_verified = evidence
+        .verify_completion_refs(CompletionEvidenceRequest {
+            scope: &turn_scope,
+            turn_id: TurnId::new(),
+            run_id,
+            completion_kind: LoopCompletionKind::NothingToReport,
+            reply_message_refs: &[],
+            result_refs: &[generic_result_ref],
+        })
+        .await
+        .expect("generic result evidence check");
+    let typed_verified = evidence
+        .verify_completion_refs(CompletionEvidenceRequest {
+            scope: &turn_scope,
+            turn_id: TurnId::new(),
+            run_id,
+            completion_kind: LoopCompletionKind::NothingToReport,
+            reply_message_refs: &[],
+            result_refs: &[typed_result_ref],
+        })
+        .await
+        .expect("typed result evidence check");
+
+    assert!(
+        !generic_verified,
+        "generic result refs must not permit suppression"
+    );
+    assert!(typed_verified, "the exact typed no-result call is trusted");
 }
 
 // `libsql_thread_checkpoint_evidence_verifies_result_ref_after_reopen` and
@@ -894,6 +1002,7 @@ async fn thread_checkpoint_evidence_rejects_tool_result_message_as_reply_ref() {
             scope: &turn_scope,
             turn_id: TurnId::new(),
             run_id,
+            completion_kind: LoopCompletionKind::FinalReply,
             reply_message_refs: &[reply_message_ref],
             result_refs: &[],
         })
@@ -964,6 +1073,7 @@ async fn thread_checkpoint_evidence_isolates_same_result_ref_across_runs() {
                 scope: &turn_scope,
                 turn_id: TurnId::new(),
                 run_id,
+                completion_kind: LoopCompletionKind::ResultOnly,
                 reply_message_refs: &[],
                 result_refs: std::slice::from_ref(&result_ref),
             })
@@ -1085,6 +1195,7 @@ async fn thread_checkpoint_evidence_rejects_wrong_run_and_malformed_result_ref_r
             scope: &turn_scope,
             turn_id: TurnId::new(),
             run_id: expected_run_id,
+            completion_kind: LoopCompletionKind::ResultOnly,
             reply_message_refs: &[],
             result_refs: &[wrong_run_result],
         })
@@ -1214,6 +1325,7 @@ async fn thread_checkpoint_evidence_rejects_stored_thread_scope_mismatch() {
             scope: &requested_scope,
             turn_id: TurnId::new(),
             run_id,
+            completion_kind: LoopCompletionKind::FinalReply,
             reply_message_refs: &[message_ref],
             result_refs: &[],
         })

@@ -27,6 +27,7 @@ pub struct CompletionEvidenceRequest<'a> {
     pub scope: &'a TurnScope,
     pub turn_id: TurnId,
     pub run_id: TurnRunId,
+    pub completion_kind: LoopCompletionKind,
     pub reply_message_refs: &'a [LoopMessageRef],
     pub result_refs: &'a [LoopResultRef],
 }
@@ -240,6 +241,7 @@ impl LoopExitApplier {
                         scope,
                         turn_id,
                         run_id,
+                        completion_kind: completed.completion_kind,
                         reply_message_refs: &completed.reply_message_refs,
                         result_refs: &completed.result_refs,
                     })
