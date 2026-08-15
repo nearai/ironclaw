@@ -68,6 +68,17 @@ impl RebornIntegrationGroup {
         Self::builder().builtin_tools().await
     }
 
+    /// Same core built-ins, backed by the REAL `StagedCapabilityIo` and the
+    /// group's shared thread service (durable tool-result projection seam),
+    /// mirroring production's capability-port wiring. Required by scenarios
+    /// whose capability port reads run-scoped THREAD state — the unbound
+    /// structured-result tool reads the prepared-context declarations there.
+    pub async fn builtin_tools_with_durable_capability_io() -> HarnessResult<Self> {
+        Self::builder()
+            .builtin_tools_with_durable_capability_io()
+            .await
+    }
+
     /// Core built-ins plus the native memory lifecycle over one shared libSQL
     /// composite. This is the production-backend shape required for proactive
     /// cross-thread recall tests.
@@ -392,6 +403,17 @@ impl RebornIntegrationGroupBuilder {
     pub async fn builtin_tools(self) -> HarnessResult<RebornIntegrationGroup> {
         let host_runtime =
             super::super::harness::profiles::core_builtin::core_builtin_tools_default().await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
+    /// Build a core built-in tools group over the REAL durable capability io.
+    /// See [`RebornIntegrationGroup::builtin_tools_with_durable_capability_io`].
+    pub async fn builtin_tools_with_durable_capability_io(
+        self,
+    ) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime = super::super::harness::profiles::core_builtin::core_builtin_tools_with_durable_capability_io()
+            .await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }

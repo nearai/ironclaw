@@ -31,6 +31,19 @@ pub struct LoopModelCapabilityView {
     pub visible_capability_ids: Vec<CapabilityId>,
 }
 
+/// Provider tool-choice constraint attached by the loop's model strategy for
+/// ONE model call. Absent means the provider default ("auto"). The host
+/// translates the constraint into the provider's forcing vocabulary;
+/// providers without named-tool forcing degrade to their "some tool
+/// required" mode rather than dropping the constraint silently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LoopModelToolChoice {
+    /// The model must invoke exactly this capability on this call. The
+    /// capability must already be visible in the request's capability view.
+    ForcedCapability { capability_id: CapabilityId },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopModelRequest {
     pub messages: Vec<LoopModelMessage>,
@@ -46,6 +59,9 @@ pub struct LoopModelRequest {
     pub iteration: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability_view: Option<LoopModelCapabilityView>,
+    /// Strategy-imposed provider tool-choice constraint for this call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<LoopModelToolChoice>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

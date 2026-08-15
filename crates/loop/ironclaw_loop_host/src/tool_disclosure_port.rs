@@ -569,7 +569,10 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let mut surface = self.inner.visible_capabilities(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let mut surface = Box::pin(self.inner.visible_capabilities(request)).await?;
         // The inner surface is the full reachable authorized catalog *before* we
         // narrow the advertised `descriptors` below. Capture it as the call-time
         // "callable" view so the model-visible capability filter authorizes
@@ -641,11 +644,17 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
         if !is_bridge_capability_id(&request.capability_id) {
             let target_capability_id =
                 self.target_capability_id_for_input_ref(request.input_ref.as_str())?;
-            let resolution = self.inner.invoke_capability(request).await?;
+            // Chain-boxing: each port delegation is boxed so the stacked
+            // decorator chain never compiles into a single oversized poll
+            // frame (see reborn_integration_model_recovery stack-overflow).
+            let resolution = Box::pin(self.inner.invoke_capability(request)).await?;
             self.promote_target_after_resolution(target_capability_id, &resolution)?;
             return Ok(resolution);
         }
-        self.invoke_bridge(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.invoke_bridge(request)).await
     }
 
     async fn invoke_capability_batch(
@@ -678,12 +687,18 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             .iter()
             .all(|invocation| !is_bridge_capability_id(&invocation.capability_id))
         {
-            return self.invoke_inner_batch_preserving_promotions(request).await;
+            // Chain-boxing: each port delegation is boxed so the stacked
+            // decorator chain never compiles into a single oversized poll
+            // frame (see reborn_integration_model_recovery stack-overflow).
+            return Box::pin(self.invoke_inner_batch_preserving_promotions(request)).await;
         }
 
         let mut resolutions = Vec::with_capacity(request.invocations.len());
         for invocation in request.invocations {
-            let resolution = self.invoke_capability(invocation).await?;
+            // Chain-boxing: each port delegation is boxed so the stacked
+            // decorator chain never compiles into a single oversized poll
+            // frame (see reborn_integration_model_recovery stack-overflow).
+            let resolution = Box::pin(self.invoke_capability(invocation)).await?;
             let parks = resolution.parks();
             resolutions.push(resolution);
             if parks {
@@ -751,7 +766,10 @@ impl ToolDisclosureCapabilityPort {
                 self.target_capability_id_for_input_ref(invocation.input_ref.as_str())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let batch = self.inner.invoke_capability_batch(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let batch = Box::pin(self.inner.invoke_capability_batch(request)).await?;
         for (resolution, target_capability_id) in
             batch.resolutions.iter().zip(target_capability_ids)
         {

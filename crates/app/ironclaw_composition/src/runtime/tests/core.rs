@@ -720,8 +720,8 @@ use ironclaw_assistant::{
 use ironclaw_extension_contracts::state::{InstallationState, LifecyclePublicState};
 use ironclaw_host_api::ids::ProjectId;
 use ironclaw_host_api::turn::{
-    AcceptedMessageRef, IdempotencyKey, LoopResultRef, ReplyTargetBindingRef,
-    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnId, TurnRunId, TurnScope, TurnStatus,
+    AcceptedMessageRef, IdempotencyKey, LoopResultRef, SanitizedCancelReason, TurnActor, TurnId,
+    TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
     ids::{
@@ -1990,6 +1990,7 @@ fn nearai_gateway_test_request() -> HostManagedModelRequest {
         fallback_index: 0,
         run_id: TurnRunId::new(),
         turn_id: TurnId::new(),
+        tool_choice: None,
     }
 }
 
@@ -4229,8 +4230,6 @@ async fn cancel_run_propagates_to_subagent_children() {
             scope: parent_scope.clone(),
             actor: actor.clone(),
             accepted_message_ref: AcceptedMessageRef::new("msg:cancel-parent").unwrap(),
-            source_binding_ref: SourceBindingRef::new("source:cancel-parent").unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:cancel-parent").unwrap(),
             requested_run_profile: None,
             idempotency_key: IdempotencyKey::new("cancel-parent").unwrap(),
             received_at: Utc::now(),
@@ -4262,8 +4261,6 @@ async fn cancel_run_propagates_to_subagent_children() {
                 child_scope: child_scope.clone(),
                 actor,
                 accepted_message_ref: AcceptedMessageRef::new("msg:cancel-child").unwrap(),
-                source_binding_ref: SourceBindingRef::new("source:cancel-child").unwrap(),
-                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:cancel-child").unwrap(),
                 requested_run_profile: None,
                 idempotency_key: IdempotencyKey::new("cancel-child").unwrap(),
                 received_at: Utc::now(),
@@ -7150,8 +7147,6 @@ async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
             scope: scope.clone(),
             actor: actor.clone(),
             accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy-a").unwrap(),
-            source_binding_ref: SourceBindingRef::new("source:rejected-busy-a").unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:rejected-busy-a").unwrap(),
             requested_run_profile: None,
             idempotency_key: IdempotencyKey::new("rejected-busy-a").unwrap(),
             received_at: Utc::now(),

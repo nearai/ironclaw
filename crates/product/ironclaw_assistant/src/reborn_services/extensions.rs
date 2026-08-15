@@ -32,7 +32,7 @@ use crate::{
 use super::{
     ExtensionCredentialSetupService,
     extension_credentials::{
-        ExtensionCredentialReadiness, credential_scope, readiness_for_requirements,
+        ExtensionCredentialReadiness, credential_scope, presence_readiness_and_missing_scopes,
     },
     extension_onboarding,
     lifecycle_setup::validation_error,
@@ -216,6 +216,7 @@ async fn lifecycle_extension_infos(
                 )
                 .await?;
                 Ok::<_, ProductSurfaceError>((installed, readiness))
+                // tuple: (readiness, missing_recipe_scopes)
             }
         })
         .buffered(EXTENSION_READINESS_CONCURRENCY)
@@ -223,10 +224,11 @@ async fn lifecycle_extension_infos(
         .await?;
     Ok(resolved
         .into_iter()
-        .map(|(installed, readiness)| {
+        .map(|(installed, (readiness, missing_recipe_scopes))| {
             extension_info(
                 installed,
                 readiness,
+                missing_recipe_scopes,
                 &connections,
                 &account_states,
                 &activation_errors,
@@ -279,11 +281,11 @@ async fn credential_readiness_for_extension(
     extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
     caller: &ProductSurfaceCaller,
     installed: &LifecycleInstalledExtensionSummary,
-) -> Result<ExtensionCredentialReadiness, ProductSurfaceError> {
+) -> Result<(ExtensionCredentialReadiness, Vec<String>), ProductSurfaceError> {
     let extension_id = ExtensionId::new(installed.summary.package_ref.id.as_str())
         .map_err(|_| ProductSurfaceError::internal_invariant())?;
     let scope = credential_scope(caller, &installed.summary.package_ref);
-    readiness_for_requirements(
+    presence_readiness_and_missing_scopes(
         extension_credentials,
         scope,
         &extension_id,
@@ -396,7 +398,7 @@ pub(crate) async fn caller_extension_auth(
 ) -> CallerExtensionAuth {
     let readiness =
         match credential_readiness_for_extension(extension_credentials, caller, installed).await {
-            Ok(readiness) => readiness,
+            Ok((readiness, _missing_recipe_scopes)) => readiness,
             Err(error) => {
                 tracing::debug!(
                     extension = %installed.summary.package_ref.id.as_str(),
@@ -438,6 +440,7 @@ pub(crate) async fn caller_extension_auth(
 fn extension_info(
     installed: LifecycleInstalledExtensionSummary,
     readiness: ExtensionCredentialReadiness,
+    missing_recipe_scopes: Vec<String>,
     connections: &HashMap<ExtensionId, bool>,
     account_states: &HashMap<ExtensionId, ChannelAuthAccountState>,
     activation_errors: &HashMap<ExtensionId, String>,
@@ -463,7 +466,7 @@ fn extension_info(
         projected_account,
         channel_unconnected,
     } = caller_channel_connection(&summary, connections, account_states);
-    let auth_accounts = vendor_auth_accounts(&summary, projected_account);
+    let auth_accounts = vendor_auth_accounts(&summary, projected_account, missing_recipe_scopes);
     let resolved_account_id = auth_accounts
         .first()
         .and_then(|vendor| vendor.accounts.first())
@@ -632,6 +635,7 @@ fn channel_auth_vendor(summary: &LifecycleExtensionSummary) -> String {
 fn vendor_auth_accounts(
     summary: &LifecycleExtensionSummary,
     projected_account: Option<(AuthAccountState, Option<AuthAccountLastError>)>,
+    missing_recipe_scopes: Vec<String>,
 ) -> Vec<RebornVendorAuthAccounts> {
     let Some((state, last_error)) = projected_account else {
         return Vec::new();
@@ -646,6 +650,10 @@ fn vendor_auth_accounts(
             label: summary.name.clone(),
             state,
             last_error,
+            // Recipe scopes the live grant does not hold (#7660): the card
+            // renders these as an "update access" affordance on a healthy
+            // connection, never as setup_needed.
+            missing_recipe_scopes,
             is_default: true,
         }],
     }]
@@ -844,6 +852,88 @@ mod tests {
                 "{account_status:?} personal auth must prevent active projection"
             );
         }
+    }
+
+    fn summary_with_oauth_ceiling(scopes: &[&str]) -> LifecycleExtensionSummary {
+        let mut summary = summary_with_onboarding();
+        summary.credential_requirements = vec![LifecycleExtensionCredentialRequirement {
+            name: "fixture_oauth".to_string(),
+            provider: "fixture".to_string(),
+            required: true,
+            setup: LifecycleExtensionCredentialSetup::OAuth {
+                scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
+            },
+        }];
+        summary
+    }
+
+    /// #7660: a configured account whose grant predates a recipe widening is
+    /// a WORKING connection, not an unfinished one. The card must stay
+    /// `active` and surface the delta as `missing_recipe_scopes` — flipping
+    /// the whole extension back to `setup_needed` contradicts the runtime
+    /// (whose per-tool gate handles the newly-scoped tools) and every other
+    /// signal the user sees.
+    #[tokio::test]
+    async fn scope_subset_account_stays_active_and_reports_the_recipe_delta() {
+        let service = ListingService {
+            extension: LifecycleInstalledExtensionSummary {
+                summary: summary_with_oauth_ceiling(&[
+                    "read:things",
+                    "write:things",
+                    "react:things",
+                ]),
+                phase: InstallationState::Active,
+                install_scope: None,
+            },
+        };
+        let credentials = Arc::new(RecordingCredentials::with_configured_scopes(&[
+            "read:things",
+            "write:things",
+        ]));
+        let credentials_service: Arc<dyn ExtensionCredentialSetupService> = credentials.clone();
+
+        let response = list_extensions(
+            Arc::new(service),
+            Some(credentials_service),
+            no_channel_connections(),
+            None,
+            caller(),
+        )
+        .await
+        .expect("list extensions");
+        let extension = response.extensions.first().expect("one extension");
+
+        assert_eq!(
+            extension.installation_state,
+            LifecyclePublicState::Active,
+            "an outdated-but-working grant must not read as setup_needed"
+        );
+        let requests = credentials.status_requests.lock().expect("lock");
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.provider_scopes.is_empty()),
+            "readiness asks the presence question, never the recipe ceiling"
+        );
+    }
+
+    /// The wire half of #7660: the channel vendor account carries the delta.
+    #[test]
+    fn channel_vendor_account_carries_the_missing_recipe_scopes() {
+        let summary = summary_with_onboarding();
+        let accounts = vendor_auth_accounts(
+            &summary,
+            Some((AuthAccountState::Connected, None)),
+            vec!["react:things".to_string()],
+        );
+        assert_eq!(
+            accounts
+                .first()
+                .and_then(|vendor| vendor.accounts.first())
+                .map(|account| account.missing_recipe_scopes.clone()),
+            Some(vec!["react:things".to_string()]),
+            "the widened-scope delta rides the wire for the update-access affordance"
+        );
     }
 
     #[tokio::test]
@@ -1248,6 +1338,7 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingCredentials {
+        account_scopes: Vec<String>,
         status_requests: Mutex<Vec<ExtensionCredentialStatusRequest>>,
         account_status: Option<CredentialAccountStatus>,
     }
@@ -1256,6 +1347,14 @@ mod tests {
         fn with_account_status(account_status: CredentialAccountStatus) -> Self {
             Self {
                 account_status: Some(account_status),
+                ..Self::default()
+            }
+        }
+
+        fn with_configured_scopes(scopes: &[&str]) -> Self {
+            Self {
+                account_status: Some(CredentialAccountStatus::Configured),
+                account_scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
                 ..Self::default()
             }
         }
@@ -1278,6 +1377,14 @@ mod tests {
                     ownership: CredentialOwnership::UserReusable,
                     owner_extension: None,
                     granted_extensions: Vec::new(),
+                    scopes: self
+                        .account_scopes
+                        .iter()
+                        .map(|scope| {
+                            ironclaw_auth::ProviderScope::new(scope.clone())
+                                .expect("valid provider scope")
+                        })
+                        .collect(),
                     secret_handle_count: 1,
                 });
             self.status_requests.lock().expect("lock").push(request);

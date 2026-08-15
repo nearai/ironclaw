@@ -41,11 +41,12 @@ use ironclaw_threads::{
     FilesystemSessionThreadService, FinalizedAssistantMessageByRunRequest,
     InboundMessageReplayMetadata, ListThreadsForScopeRequest, LoadContextMessagesRequest,
     LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
-    ProviderToolCallReferenceEnvelope, PutToolResultRecordRequest, ReadToolResultRecordRequest,
-    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadService, SummaryKind, SummaryModelContextPolicy, ThreadHistoryRequest,
-    ThreadMessageId, ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
-    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    PREPARED_CONTEXT_METADATA_MARKER_KEY, ProviderToolCallReferenceEnvelope,
+    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
+    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 use tokio::sync::{Barrier, Mutex, OwnedMutexGuard};
 
@@ -6022,4 +6023,492 @@ async fn filesystem_mark_message_submitted_is_idempotent_for_same_run() {
         .unwrap();
     assert_eq!(history.messages[0].status, MessageStatus::Submitted);
     assert_eq!(history.messages[0].turn_run_id.as_deref(), Some("run-1"));
+}
+
+/// Taxonomy baseline for unbound turns (filesystem twin of the in-memory
+/// pin): a thread whose scope carries NO `owner_user_id` lands under scope
+/// axes without an `/owners/<user>` segment, so an owner-scoped listing —
+/// which reads the per-axes thread index — is structurally unable to surface
+/// it, and vice versa.
+#[tokio::test]
+async fn filesystem_list_threads_excludes_ownerless_threads_from_owner_scoped_listings() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+
+    let owned_scope = scope("taxonomy");
+    let ownerless_scope = ThreadScope {
+        owner_user_id: None,
+        ..owned_scope.clone()
+    };
+
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: owned_scope.clone(),
+            thread_id: Some(ThreadId::new("t-owned-001").unwrap()),
+            created_by_actor_id: "actor-taxonomy".into(),
+            title: Some("owned".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: ownerless_scope.clone(),
+            thread_id: Some(ThreadId::new("t-ownerless-001").unwrap()),
+            created_by_actor_id: "actor-taxonomy".into(),
+            title: Some("ownerless".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let owner_view = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: owned_scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let owner_ids: Vec<&str> = owner_view
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(
+        owner_ids,
+        ["t-owned-001"],
+        "an owner-scoped listing must never surface ownerless threads"
+    );
+
+    let ownerless_view = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: ownerless_scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ownerless_ids: Vec<&str> = ownerless_view
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(
+        ownerless_ids,
+        ["t-ownerless-001"],
+        "an ownerless-scope enumeration must never surface owner-scoped threads"
+    );
+}
+
+fn filesystem_prepared_request(label: &str, key: &str) -> ironclaw_threads::PreparedContextRequest {
+    ironclaw_threads::PreparedContextRequest {
+        scope: ThreadScope {
+            owner_user_id: None,
+            ..scope(label)
+        },
+        actor_id: format!("user-{label}"),
+        system_prompt: "You are a background task.".to_string(),
+        messages: vec![ironclaw_llm::agent_message::AgentMessage {
+            role: ironclaw_llm::agent_message::AgentMessageRole::User,
+            content: vec![ironclaw_llm::agent_message::ContentPart::text(
+                "do the thing",
+            )],
+        }],
+        declarations: ironclaw_host_api::prepared_context::PreparedTurnDeclarations {
+            tools: Vec::new(),
+            output: ironclaw_host_api::prepared_context::OutputContract::JsonSchema {
+                schema: serde_json::json!({ "type": "object" }),
+            },
+            limits: ironclaw_host_api::prepared_context::TurnLimits {
+                max_model_calls: Some(4),
+                max_capability_invocations: None,
+                max_wall_clock_seconds: None,
+            },
+        },
+        idempotency_key: key.to_string(),
+        thread_id: ThreadId::new(format!("unbound-{key}")).expect("thread id"),
+        title: None,
+        metadata_json: None,
+    }
+}
+
+/// One-time backfill: a legacy subagent thread (metadata
+/// `{"kind":"subagent",…}` with no marker) is stamped on the first listing
+/// and stays hidden from then on — the single-marker predicate needs no
+/// second spelling.
+#[tokio::test]
+async fn filesystem_listing_backfills_the_marker_onto_legacy_subagent_threads() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let listing_scope = scope("legacy-backfill");
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: listing_scope.clone(),
+            thread_id: Some(ThreadId::new("subagent-legacy-001").unwrap()),
+            created_by_actor_id: "actor-legacy".into(),
+            title: None,
+            metadata_json: Some(
+                serde_json::json!({"kind": "subagent", "parent_run_id": "run-1"}).to_string(),
+            ),
+        })
+        .await
+        .unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: listing_scope.clone(),
+            thread_id: Some(ThreadId::new("t-visible-legacy-001").unwrap()),
+            created_by_actor_id: "actor-legacy".into(),
+            title: Some("visible".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let view = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: listing_scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = view
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        ["t-visible-legacy-001"],
+        "the legacy subagent thread must be stamped and hidden on first listing"
+    );
+
+    // The stamp is durable — a second listing (marker predicate only, no
+    // legacy spelling consulted) still hides it.
+    let second = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: listing_scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(second.threads.len(), 1);
+
+    // The second listing hiding the thread is consistent with either the
+    // durable marker stamp OR the legacy `"kind":"subagent"` spelling still
+    // matching — prove it is actually the stamp by reading the thread record
+    // back and asserting the marker landed.
+    let stamped = service
+        .read_thread(ThreadHistoryRequest {
+            scope: listing_scope,
+            thread_id: ThreadId::new("subagent-legacy-001").unwrap(),
+        })
+        .await
+        .expect("legacy subagent thread record is readable after backfill");
+    let metadata: serde_json::Value = stamped
+        .metadata_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .expect("stamped thread carries JSON object metadata");
+    assert_eq!(
+        metadata.get(PREPARED_CONTEXT_METADATA_MARKER_KEY),
+        Some(&serde_json::Value::Bool(true)),
+        "the backfill must durably stamp the marker, not merely rely on the legacy \
+         \"kind\":\"subagent\" spelling still matching: {metadata:?}"
+    );
+}
+
+/// Two racing accepts for the SAME prepared request converge: deterministic
+/// ids make the seeds collide row-by-row (CAS Absent; losers skip), and the
+/// commit marker written last decides exactly one non-replay winner. Both
+/// callers get the same thread and pin, and the rows are not duplicated.
+#[tokio::test(flavor = "multi_thread")]
+async fn filesystem_concurrent_duplicate_prepared_accepts_converge() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = Arc::new(FilesystemSessionThreadService::new(scoped));
+    let request = filesystem_prepared_request("race-fs", "race-fs-key-1");
+
+    let left = {
+        let service = Arc::clone(&service);
+        let request = request.clone();
+        tokio::spawn(async move { service.accept_prepared_context(request).await })
+    };
+    let right = {
+        let service = Arc::clone(&service);
+        let request = request.clone();
+        tokio::spawn(async move { service.accept_prepared_context(request).await })
+    };
+    let (left, right) = tokio::join!(left, right);
+    let left = left.expect("join").expect("left accept");
+    let right = right.expect("join").expect("right accept");
+
+    assert_eq!(left.thread_id, right.thread_id);
+    assert_eq!(left.accepted_message_ref, right.accepted_message_ref);
+    assert_eq!(
+        [left.idempotent_replay, right.idempotent_replay]
+            .iter()
+            .filter(|replayed| !**replayed)
+            .count(),
+        1,
+        "exactly one racer is the non-replay winner (left={left:?} right={right:?})"
+    );
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: left.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(
+        history.messages.len(),
+        2,
+        "racing accepts must not duplicate the seeded rows: {:?}",
+        history.messages.iter().map(|m| m.kind).collect::<Vec<_>>()
+    );
+}
+
+/// A crash BEFORE the commit marker (rows seeded, record write fails) is
+/// retryable: the retry converges on the same thread, writes the marker, and
+/// reports the accept as fresh — never an orphaned half-seeded thread.
+#[tokio::test]
+async fn filesystem_prepared_accept_retries_after_a_crash_before_the_commit_marker() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request = filesystem_prepared_request("marker-crash-fs", "marker-crash-fs-key-1");
+
+    // The commit marker is the ONE write to `prepared_context.json`.
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path("prepared_context.json")
+            .nth(1)
+            .backend("crash before commit marker"),
+    );
+    let error = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect_err("the poisoned marker write must fail the accept");
+    assert!(
+        !matches!(
+            error,
+            SessionThreadError::InvalidPreparedContext { .. }
+                | SessionThreadError::PreparedContextKeyMismatch { .. }
+        ),
+        "the crash must surface as a backend failure, not a validation shape: {error:?}"
+    );
+
+    let retried = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("the retry succeeds once the fault clears");
+    assert!(
+        !retried.idempotent_replay,
+        "no commit marker landed, so the retry is the first completed accept"
+    );
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: retried.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(
+        history.messages.len(),
+        2,
+        "the crashed attempt's rows converge instead of duplicating: {:?}",
+        history.messages.iter().map(|m| m.kind).collect::<Vec<_>>()
+    );
+}
+
+/// Filesystem twin of the delete-then-re-accept pin: the journaled record
+/// lives under the thread root, so the delete removes it and the same
+/// accept re-run mints fresh.
+#[tokio::test]
+async fn filesystem_deleting_a_prepared_thread_deletes_its_replay_record() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request = filesystem_prepared_request("delete-replay-fs", "delete-replay-fs-key-1");
+    let first = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("first accept");
+    assert!(!first.idempotent_replay);
+    service
+        .delete_thread(&request.scope, &first.thread_id)
+        .await
+        .expect("delete");
+
+    let second = service
+        .accept_prepared_context(request)
+        .await
+        .expect("re-accept after delete");
+    assert!(
+        !second.idempotent_replay,
+        "a deleted prepared thread must re-mint, not replay its deleted record"
+    );
+}
+
+/// Filesystem twin of the in-memory listing-exclusion pin, plus the cursor
+/// invariant that only matters here: the page cursor advances over the
+/// FETCHED index rows, so a page consisting entirely of hidden
+/// prepared-context threads still makes progress instead of stalling.
+#[tokio::test]
+async fn filesystem_list_threads_excludes_prepared_context_threads_and_cursor_advances() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+
+    let mut listing_scope = None;
+    for index in 0..3 {
+        let request = filesystem_prepared_request("hidden-fs", &format!("hidden-fs-key-{index}"));
+        listing_scope.get_or_insert(request.scope.clone());
+        service
+            .accept_prepared_context(request)
+            .await
+            .expect("prepared-context accept succeeds");
+    }
+    let listing_scope = listing_scope.expect("at least one prepared request");
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: listing_scope.clone(),
+            thread_id: Some(ThreadId::new("t-visible-fs-001").unwrap()),
+            created_by_actor_id: "actor-hidden-fs".into(),
+            title: Some("visible".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // Walk the listing with a page size smaller than the hidden population:
+    // every page must either surface visible threads or advance the cursor.
+    let mut cursor = None;
+    let mut seen: Vec<String> = Vec::new();
+    for _ in 0..8 {
+        let view = service
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope: listing_scope.clone(),
+                limit: Some(2),
+                cursor: cursor.clone(),
+            })
+            .await
+            .unwrap();
+        seen.extend(
+            view.threads
+                .iter()
+                .map(|record| record.thread_id.as_str().to_string()),
+        );
+        match view.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(
+        seen,
+        ["t-visible-fs-001"],
+        "only the conversation thread may surface; hidden pages must advance"
+    );
+}
+
+/// Filesystem twin of the in-memory accept-door pins: mint + seed + journal
+/// land durably, the accepted ref pins the last seeded row, and the
+/// journaled declarations read back.
+#[tokio::test]
+async fn filesystem_accept_prepared_context_mints_seeds_and_journals() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request = filesystem_prepared_request("unbound-fs", "unbound-fs-key-1");
+
+    let accepted = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("prepared-context accept succeeds");
+    assert!(!accepted.idempotent_replay);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: accepted.thread_id.clone(),
+        })
+        .await
+        .expect("seeded thread history");
+    assert_eq!(history.thread.scope.owner_user_id, None);
+    assert_eq!(history.messages.len(), 2);
+    assert_eq!(history.messages[0].kind, MessageKind::System);
+    assert_eq!(history.messages[0].status, MessageStatus::Finalized);
+    assert_eq!(history.messages[1].kind, MessageKind::User);
+    assert_eq!(history.messages[1].status, MessageStatus::Accepted);
+    assert!(history.messages[0].sequence < history.messages[1].sequence);
+    assert_eq!(
+        accepted.accepted_message_ref.as_str(),
+        format!("msg:{}", history.messages[1].message_id)
+    );
+
+    let record = service
+        .read_prepared_context(&request.scope, &accepted.thread_id)
+        .await
+        .expect("declarations read-back")
+        .expect("record present");
+    assert_eq!(record.declarations, request.declarations);
+
+    let window = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: request.scope.clone(),
+            thread_id: accepted.thread_id.clone(),
+            max_messages: 16,
+        })
+        .await
+        .expect("context window over seeded thread");
+    assert_eq!(window.messages.len(), 2);
+}
+
+/// Replay discipline on the durable backend: same request → same thread and
+/// pin, no duplicate rows; cross-scope reads stay non-enumerating.
+#[tokio::test]
+async fn filesystem_accept_prepared_context_replays_without_orphans() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request = filesystem_prepared_request("unbound-fs-replay", "unbound-fs-key-replay");
+
+    let first = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("first accept");
+    let replay = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("replay accept");
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.thread_id, first.thread_id);
+    assert_eq!(replay.accepted_message_ref, first.accepted_message_ref);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: first.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages.len(), 2, "replay must not duplicate rows");
+
+    let foreign_scope = ThreadScope {
+        owner_user_id: None,
+        ..scope("unbound-fs-foreign")
+    };
+    let missing = service
+        .read_prepared_context(&foreign_scope, &first.thread_id)
+        .await;
+    assert!(
+        matches!(missing, Err(SessionThreadError::UnknownThread { .. })),
+        "cross-scope reads must stay non-enumerating, got {missing:?}"
+    );
 }

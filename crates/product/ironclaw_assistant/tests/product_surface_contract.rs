@@ -186,7 +186,6 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             resolved_run_profile_version: RunProfileVersion::new(1),
             event_cursor: EventCursor::default(),
             accepted_message_ref: request.accepted_message_ref.clone(),
-            reply_target_binding_ref: request.reply_target_binding_ref.clone(),
         };
         self.submissions.lock().expect("lock").push(request);
         Ok(response)
@@ -223,10 +222,6 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             status: TurnStatus::Running,
             accepted_message_ref: AcceptedMessageRef::new("msg:active-run")
                 .expect("accepted message ref"),
-            source_binding_ref: SourceBindingRef::new("src:active-run")
-                .expect("source binding ref"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:active-run")
-                .expect("reply target binding ref"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             allow_steering: true,

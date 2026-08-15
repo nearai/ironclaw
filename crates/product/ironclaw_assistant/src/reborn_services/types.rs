@@ -220,6 +220,12 @@ pub struct RebornAuthAccount {
     pub state: AuthAccountState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<AuthAccountLastError>,
+    /// Recipe-ceiling scopes the granted account does not hold (#7660). A
+    /// non-empty list on a `connected` account means the vendor recipe
+    /// widened after this grant: the card offers a re-consent ("update
+    /// access") affordance; it is NOT a broken or unfinished connection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_recipe_scopes: Vec<String>,
     /// Exactly one account per (user, vendor) is the default whenever any
     /// account exists. Always `true` today (list length ≤ 1).
     pub is_default: bool,

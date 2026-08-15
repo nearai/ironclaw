@@ -20,6 +20,10 @@ futures = "0.3"
 ironclaw_common = { path = "../../contracts/ironclaw_common", version = "0.4.2" }
 ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../../contracts/ironclaw_host_api", version = "0.1.0" }
+# Canonical AgentMessage vocabulary for the detached accept door — the one
+# provider-neutral message shape (defined with the model contracts it cleans
+# up; no mirror DTOs).
+ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0", default-features = false }
 ironclaw_safety = { path = "../../substrates/ironclaw_safety", version = "0.2.2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -48,6 +48,7 @@ mod skill_activation;
 mod skill_bundle_context_source;
 mod skill_bundle_source;
 mod skill_context;
+mod structured_result;
 mod subagent_prompt_port;
 mod subagent_spawn_port;
 mod surface_disclosure;
@@ -148,6 +149,7 @@ pub use skill_context::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextCandidatePayload,
     HostSkillContextSource, build_skill_run_snapshot,
 };
+pub use structured_result::structured_result_capability;
 pub use subagent_prompt_port::{
     DEFAULT_SUBAGENT_GOAL_MAX_BYTES, SubagentLoopPromptPort, SubagentPromptComposer,
     SubagentPromptGoal, SubagentPromptLimits, SubagentPromptMaterial, SubagentPromptMaterialSource,
@@ -1703,6 +1705,7 @@ where
             resolved_model_route: self.run_context.resolved_model_route.clone(),
             run_id: self.run_context.run_id,
             turn_id: self.run_context.turn_id,
+            tool_choice: request.tool_choice.clone(),
         };
         let gateway_result = if let Some(capabilities) = self.capabilities.as_ref() {
             let capabilities: Arc<dyn LoopCapabilityPort> =
@@ -2543,6 +2546,11 @@ pub struct HostManagedModelRequest {
     pub resolved_model_route: Option<HostManagedModelRouteSnapshot>,
     pub run_id: TurnRunId,
     pub turn_id: TurnId,
+    /// Loop-strategy tool-choice constraint carried through to the provider.
+    /// Only valid on tool-capable calls whose visible surface contains the
+    /// forced capability; the gateway rejects anything else as caller misuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ironclaw_loop_contracts::LoopModelToolChoice>,
 }
 
 /// Boundary alias for the route snapshot carried from turn/run state into

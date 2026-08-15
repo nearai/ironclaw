@@ -521,14 +521,6 @@ pub(super) async fn build_backend_production(
     let process_lifecycle_lookup_source = processes.lifecycle();
     let process_gate_query_source = processes.gates();
     let process_turn_state = Arc::new(processes.agent_turn_runtime());
-    // The run-state source every caller-initiated lookup of "the run this
-    // call belongs to" reads — today `builtin.outbound_deliver`'s same-origin
-    // check. One late-bindable handle so every such lookup agrees on which
-    // runs exist; production installs the runtime's own turn state and never
-    // repoints it, a `test-support` harness repoints it.
-    let trigger_source_turn_state: Arc<std::sync::RwLock<Arc<dyn AgentTurnRuntimePort>>> = Arc::new(
-        std::sync::RwLock::new(Arc::clone(&process_turn_state) as Arc<dyn AgentTurnRuntimePort>),
-    );
     let trigger_create_hook = Arc::new(TriggerCreatorPairingHook {
         scoped_filesystem: Arc::clone(&stores.scoped_filesystem),
         conversations: tokio::sync::OnceCell::new(),
@@ -713,8 +705,18 @@ pub(super) async fn build_backend_production(
     let services = apply_post_edit_check_from_env(services)?;
     let security_audit_sink = services.security_audit_sink();
 
-    let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
-        Arc::new(services.turn_coordinator_for_production()?);
+    // The prepared-context probe backs unbound-profile derivation at
+    // admission; it reads the SAME durable thread store the accept door
+    // journals into.
+    let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
+        services
+            .turn_coordinator_for_production()?
+            .with_prepared_context_source(Arc::new(
+                ironclaw_threads::ThreadServicePreparedContextSource::new(Arc::clone(
+                    &thread_service,
+                )),
+            )),
+    );
     let credential_refresh_candidate_source: Option<
         Arc<dyn ironclaw_auth::KeepaliveCandidateSource>,
     >;
@@ -1337,9 +1339,10 @@ pub(super) async fn build_backend_production(
                     target_resolver: Arc::new(ironclaw_assistant::CodecChannelTargetResolver::new(
                         target_codecs,
                     )),
-                    run_state: Arc::new(crate::factory::LateBoundAgentTurnRuntime::new(
-                        Arc::clone(&trigger_source_turn_state),
-                    )),
+                    // Same durable conversation-binding state the trigger
+                    // poller reads: the same-origin check resolves which
+                    // thread a sealed reply-target ref is bound to.
+                    binding_service: Arc::new(trigger_conversation_services.clone()),
                     // Model deliveries never carry attachments, so nothing
                     // materializes through this reader in practice; wired to
                     // the same caller-scoped workspace view the channel-host
@@ -1400,8 +1403,6 @@ pub(super) async fn build_backend_production(
         process_gate_query_source,
         #[cfg(any(test, feature = "test-support"))]
         trigger_process_lifecycle_source,
-        #[cfg(any(test, feature = "test-support"))]
-        trigger_source_turn_state,
         extension_management,
         admin_configuration,
         admin_configuration_uses: Arc::new(admin_configuration_uses),

@@ -1060,6 +1060,7 @@ pub fn test_run_context(label: &str) -> LoopRunContext {
                 .unwrap_or_else(|error| panic!("test budget tier should be valid: {error}")),
             max_model_calls: 32,
             max_capability_invocations: 64,
+            max_wall_clock_seconds: None,
         },
         personal_context_policy: ironclaw_loop_contracts::PersonalContextPolicy::Excluded,
         runtime_constraints: RuntimeProfileConstraints {

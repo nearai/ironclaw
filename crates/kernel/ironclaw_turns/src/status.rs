@@ -4,9 +4,9 @@ use thiserror::Error;
 use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
     turn::{
-        AcceptedMessageRef, CapabilityActivityId, EventCursor, ReplyTargetBindingRef, RunProfileId,
-        RunProfileVersion, SanitizedFailure, SourceBindingRef, TurnActor, TurnCheckpointId,
-        TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
+        AcceptedMessageRef, CapabilityActivityId, EventCursor, RunProfileId, RunProfileVersion,
+        SanitizedFailure, TurnActor, TurnCheckpointId, TurnGateRef, TurnId, TurnRunId, TurnScope,
+        TurnStatus,
     },
 };
 
@@ -179,8 +179,6 @@ pub struct TurnRunState {
     pub run_id: TurnRunId,
     pub status: TurnStatus,
     pub accepted_message_ref: AcceptedMessageRef,
-    pub source_binding_ref: SourceBindingRef,
-    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub resolved_run_profile_id: RunProfileId,
     pub resolved_run_profile_version: RunProfileVersion,
     /// Whether the resolved run profile admits mid-run steering input

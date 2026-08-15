@@ -190,7 +190,6 @@ use ironclaw_triggers::{
 };
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use ironclaw_turn_runner::runtime::ProcessRuntimeSystem;
-use ironclaw_turns::AgentTurnRuntimePort;
 use ironclaw_turns::{ExternalToolCatalog, InMemoryExternalToolCatalog};
 use secrecy::SecretString;
 
@@ -203,11 +202,9 @@ use auth_engine_assembly::{
 };
 mod trigger_creation_assembly;
 use trigger_creation_assembly::TriggerCreatorPairingHook;
+pub(crate) use trigger_creation_assembly::TriggerExecutionPolicyPreflight;
 #[cfg(test)]
 use trigger_creation_assembly::pair_trigger_creator;
-pub(crate) use trigger_creation_assembly::{
-    LateBoundAgentTurnRuntime, TriggerExecutionPolicyPreflight,
-};
 pub(crate) mod production_backend_assembly;
 mod production_build_assembly;
 mod runtime_lane_assembly;
@@ -308,14 +305,6 @@ pub(crate) struct RebornRuntimeStores {
             >,
         >,
     >,
-    /// Sibling read-only reply-target projection; repointed with the lifecycle
-    /// source by test-support harnesses.
-    #[cfg(any(test, feature = "test-support"))]
-    #[allow(
-        dead_code,
-        reason = "held for test-support rebinding after runtime construction"
-    )]
-    pub(crate) trigger_source_turn_state: Arc<std::sync::RwLock<Arc<dyn AgentTurnRuntimePort>>>,
     pub(crate) extension_management: Arc<RebornLocalExtensionManagementPort>,
     pub(crate) admin_configuration: Arc<ComposedAdminConfigurationService>,
     pub(crate) admin_configuration_uses: Arc<Vec<AdminConfigurationCatalogUse>>,

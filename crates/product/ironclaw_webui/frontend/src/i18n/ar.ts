@@ -1278,6 +1278,8 @@ registerPack("ar", {
   "extensions.opening": "جارٍ الفتح...",
   "extensions.authorize": "تفويض",
   "extensions.reauthorize": "إعادة التفويض",
+  "extensions.updateAccess": "تحديث الوصول",
+  "extensions.updateAccessHint": "تتوفر أذونات جديدة لهذا الاتصال. أعد الموافقة على الوصول لتفعيل أحدث الإمكانات.",
   "extensions.reconnect": "إعادة الاتصال",
   "extensions.emptyInstalledTitle": "لم يتم تثبيت أي ملحقات",
   "extensions.emptyInstalledDesc": "تصفح علامة التبويب \"التسجيل\" لاكتشاف وتثبيت أدوات وقنوات WASM وخوادم MCP.",

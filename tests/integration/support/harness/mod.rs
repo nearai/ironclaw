@@ -54,8 +54,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::HostRuntime;
 use ironclaw_loop_contracts::{
-    AgentLoopHostError, AgentLoopHostErrorKind, LoopCapabilityPort, LoopHostMilestoneSink,
-    LoopRequest, LoopRunContext,
+    AgentLoopHostError, AgentLoopHostErrorKind, LoopCapabilityPort, LoopRequest, LoopRunContext,
 };
 use ironclaw_loop_host::{
     CapabilityResolveError, CapabilitySurfaceProfileResolver, LoopCapabilityPortFactory,
@@ -174,7 +173,7 @@ impl HarnessCapabilityMode {
     /// doc (#5886).
     pub(crate) fn into_parts(
         self,
-        milestone_sink: Arc<ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink>,
+        milestone_sink: Arc<dyn ironclaw_loop_contracts::LoopHostMilestoneSink>,
         turn_thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
         process_system: ironclaw_turn_runner::runtime::ProcessRuntimeSystem,
         trajectory_observer: Option<Arc<dyn ironclaw_composition::RebornTrajectoryObserver>>,
@@ -1085,7 +1084,7 @@ impl HostRuntimeCapabilityHarness {
 
     pub(crate) fn capability_factory(
         self: &Arc<Self>,
-        milestone_sink: Arc<ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink>,
+        milestone_sink: Arc<dyn ironclaw_loop_contracts::LoopHostMilestoneSink>,
         trajectory_observer: Option<Arc<dyn ironclaw_composition::RebornTrajectoryObserver>>,
     ) -> Arc<dyn LoopCapabilityPortFactory> {
         Arc::new(HostRuntimeHarnessCapabilityPortFactory {
@@ -1215,7 +1214,6 @@ impl HostRuntimeCapabilityHarness {
         ironclaw_composition::test_support::rebind_standalone_trigger_source_turn_state_for_test(
             runtime,
             process_system.lifecycle(),
-            Arc::new(process_system.agent_turn_runtime()),
         )
         .map_err(Into::into)
     }
@@ -1795,7 +1793,7 @@ impl HostRuntimeCapabilityHarness {
     pub(crate) async fn create_recording_capability_port(
         self: &Arc<Self>,
         run_context: &LoopRunContext,
-        milestone_sink: &Arc<ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink>,
+        milestone_sink: &Arc<dyn ironclaw_loop_contracts::LoopHostMilestoneSink>,
         trajectory_observer: Option<Arc<dyn ironclaw_composition::RebornTrajectoryObserver>>,
         surface_policy: ironclaw_host_api::capability_surface::CapabilitySurfacePolicy,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
@@ -2022,7 +2020,7 @@ impl HostRuntimeCapabilityHarness {
             system_extensions_lifecycle_mounts: self.mounts.clone(),
             input_resolver,
             result_writer,
-            milestone_sink: milestone_sink.clone() as Arc<dyn LoopHostMilestoneSink>,
+            milestone_sink: milestone_sink.clone(),
             skill_activation_source: self.skill_activation_source.clone(),
             project_service,
             // result_read (durable tool-result projection seam, issue

@@ -1863,10 +1863,6 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
         actor: ironclaw_turns::TurnActor::new(owner),
         accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("configured-message-ref")
             .expect("message ref"),
-        source_binding_ref: ironclaw_turns::SourceBindingRef::new("source-web")
-            .expect("source binding"),
-        reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new("reply-web")
-            .expect("reply binding"),
         requested_run_profile: Some(
             ironclaw_turns::RunProfileRequest::new("default").expect("run profile"),
         ),
@@ -1955,10 +1951,6 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
         actor: ironclaw_turns::TurnActor::new(owner),
         accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("default-message-ref")
             .expect("message ref"),
-        source_binding_ref: ironclaw_turns::SourceBindingRef::new("source-web")
-            .expect("source binding"),
-        reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new("reply-web")
-            .expect("reply binding"),
         requested_run_profile: Some(
             ironclaw_turns::RunProfileRequest::new("default").expect("run profile"),
         ),

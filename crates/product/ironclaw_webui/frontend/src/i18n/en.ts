@@ -1377,6 +1377,8 @@ registerPack("en", {
   "extensions.opening": "Opening...",
   "extensions.authorize": "Authorize",
   "extensions.reauthorize": "Reauthorize",
+  "extensions.updateAccess": "Update access",
+  "extensions.updateAccessHint": "New permissions are available for this connection. Re-approve access to enable the latest capabilities.",
   "extensions.reconnect": "Reconnect",
   "extensions.reconnectExpired": "Reconnect",
   "extensions.accountExpired": "This connection expired — reconnect to continue.",

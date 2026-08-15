@@ -17,8 +17,8 @@ use ironclaw_auth::{
 };
 use ironclaw_auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
 use ironclaw_host_api::turn::{
-    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
-    SourceBindingRef, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
+    AcceptedMessageRef, EventCursor, RunProfileId, RunProfileVersion, TurnActor, TurnGateRef,
+    TurnId, TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
     ids::{ExtensionId, InvocationId, SecretHandle, ThreadId, UserId},
@@ -205,8 +205,6 @@ impl TurnCoordinator for LifecycleTurnCoordinator {
             run_id: self.run_id,
             status: self.status(),
             accepted_message_ref: AcceptedMessageRef::new("msg:lifecycle").unwrap(),
-            source_binding_ref: SourceBindingRef::new("src:lifecycle").unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:lifecycle").unwrap(),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             allow_steering: true,

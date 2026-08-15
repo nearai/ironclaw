@@ -6,8 +6,9 @@
 //!
 //! Shared vendors (overview §3.2): every extension using a vendor embeds the
 //! recipe; recipes for one vendor must be identical except scope and
-//! presentation metadata, the scope ceiling is the union across extensions,
-//! and an incompatible pair is a conflict.
+//! presentation metadata, OAuth resource bindings must match exactly, the
+//! scope ceiling is the union across extensions, and an incompatible pair is
+//! a conflict.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -22,8 +23,8 @@ use ironclaw_host_api::ids::{ExtensionId, UserId};
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
     "extensions `{first_extension}` and `{second_extension}` declare incompatible \
-     [auth.{vendor}] recipes (recipes for a shared vendor must be identical except \
-     scope and presentation metadata)"
+     [auth.{vendor}] recipes or OAuth resource bindings (shared-vendor recipes must be \
+     identical except scope and presentation metadata, and OAuth bindings must match)"
 )]
 pub struct VendorRecipeConflict {
     pub vendor: String,
@@ -33,14 +34,16 @@ pub struct VendorRecipeConflict {
 
 /// Unify the vendor recipes declared across `manifests` (overview §3.2):
 /// Recipes that differ only in scope or presentation metadata merge with a
-/// scope-ceiling union; anything else conflicts.
+/// scope-ceiling union. OAuth recipes must also carry identical effective
+/// resource and protected-resource metadata bindings; these fields are not
+/// meaningful for API-key recipes. Anything else conflicts.
 pub fn unified_vendor_recipes<'a>(
     manifests: impl IntoIterator<Item = &'a ResolvedExtensionManifest>,
 ) -> Result<Vec<ResolvedVendorAuthRecipe>, VendorRecipeConflict> {
     let mut unified: BTreeMap<String, (String, ResolvedVendorAuthRecipe)> = BTreeMap::new();
     for manifest in manifests {
         let extension_id = manifest.id.as_str().to_string();
-        let resource = manifest.mcp.as_ref().map(|mcp| mcp.server.clone());
+        let mcp_resource = manifest.mcp.as_ref().map(|mcp| mcp.server.clone());
         for surface in &manifest.auth {
             let Some(recipe) = &surface.recipe else {
                 // v2 manifests synthesize auth surfaces without recipes; they
@@ -48,25 +51,35 @@ pub fn unified_vendor_recipes<'a>(
                 continue;
             };
             let vendor = surface.vendor.as_str().to_string();
+            let resource = surface
+                .oauth_resource
+                .as_ref()
+                .map(|resource| resource.as_str().to_string())
+                .or_else(|| mcp_resource.clone());
+            let incoming = ResolvedVendorAuthRecipe {
+                vendor: vendor.clone(),
+                recipe: recipe.clone(),
+                token_exchange_resource: resource,
+                protected_resource_metadata_url: surface.protected_resource_metadata_url.clone(),
+            };
             match unified.get_mut(&vendor) {
                 None => {
-                    unified.insert(
-                        vendor.clone(),
-                        (
-                            extension_id.clone(),
-                            ResolvedVendorAuthRecipe {
-                                vendor,
-                                recipe: recipe.clone(),
-                                token_exchange_resource: resource.clone(),
-                                protected_resource_metadata_url: surface
-                                    .protected_resource_metadata_url
-                                    .clone(),
-                            },
-                        ),
-                    );
+                    unified.insert(vendor.clone(), (extension_id.clone(), incoming));
                 }
                 Some((first_extension, existing)) => {
-                    if !existing.recipe.compatible_for_shared_vendor(recipe) {
+                    let oauth_bindings_match = match (&existing.recipe, &incoming.recipe) {
+                        (VendorAuthRecipe::Oauth2Code(_), VendorAuthRecipe::Oauth2Code(_)) => {
+                            existing.token_exchange_resource == incoming.token_exchange_resource
+                                && existing.protected_resource_metadata_url
+                                    == incoming.protected_resource_metadata_url
+                        }
+                        _ => true,
+                    };
+                    if !existing
+                        .recipe
+                        .compatible_for_shared_vendor(&incoming.recipe)
+                        || !oauth_bindings_match
+                    {
                         return Err(VendorRecipeConflict {
                             vendor,
                             first_extension: first_extension.clone(),
@@ -76,20 +89,13 @@ pub fn unified_vendor_recipes<'a>(
                     if let (
                         VendorAuthRecipe::Oauth2Code(unified_recipe),
                         VendorAuthRecipe::Oauth2Code(incoming),
-                    ) = (&mut existing.recipe, recipe)
+                    ) = (&mut existing.recipe, &incoming.recipe)
                     {
                         for scope in &incoming.scopes {
                             if !unified_recipe.scopes.contains(scope) {
                                 unified_recipe.scopes.push(scope.clone());
                             }
                         }
-                    }
-                    if existing.token_exchange_resource.is_none() {
-                        existing.token_exchange_resource = resource.clone();
-                    }
-                    if existing.protected_resource_metadata_url.is_none() {
-                        existing.protected_resource_metadata_url =
-                            surface.protected_resource_metadata_url.clone();
                     }
                 }
             }
@@ -246,6 +252,7 @@ mod tests {
                 vendor: ironclaw_host_api::ids::VendorId::new(vendor).expect("vendor id"),
                 setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
                 recipe: Some(recipe),
+                oauth_resource: None,
                 protected_resource_metadata_url: None,
             }],
             host_apis: Vec::new(),
@@ -284,6 +291,41 @@ mod tests {
         assert_eq!(error.vendor, "vendorco");
         assert_eq!(error.first_extension, "mail-ext");
         assert_eq!(error.second_extension, "docs-ext");
+    }
+
+    #[test]
+    fn legacy_manifest_without_oauth_resource_falls_back_to_mcp_server() {
+        let mut manifest = manifest_with_recipe(
+            "mcp-ext",
+            "mcp-vendor",
+            oauth_recipe(&[], "https://auth.example/token"),
+        );
+        manifest.mcp = Some(ironclaw_extension_registry::ResolvedMcpDeclaration {
+            server: "https://mcp.example/mcp".to_string(),
+            namespace: "mcp-ext".to_string(),
+            max_tools: 16,
+            default_permission: ironclaw_host_api::capability::PermissionMode::Deny,
+            effects: Vec::new(),
+            credential_handles: Vec::new(),
+            dynamic_input_schemas: Default::default(),
+            registration_auth:
+                ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::OAuth {
+                    client_profile_id: None,
+                },
+        });
+        let legacy_wire = serde_json::to_value(&manifest).expect("legacy manifest serializes");
+        assert!(
+            legacy_wire["auth"][0].get("oauth_resource").is_none(),
+            "the compatibility fixture must exercise the pre-field wire shape"
+        );
+        let restored: ResolvedExtensionManifest =
+            serde_json::from_value(legacy_wire).expect("legacy manifest remains readable");
+
+        let recipes = unified_vendor_recipes([&restored]).expect("legacy recipe resolves");
+        assert_eq!(
+            recipes[0].token_exchange_resource.as_deref(),
+            Some("https://mcp.example/mcp")
+        );
     }
 
     #[test]

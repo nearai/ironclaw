@@ -344,6 +344,26 @@ pub struct PostgresTableWriteDelta {
     pub updates: i128,
     pub deletes: i128,
 }
+/// Aggregate PostgreSQL write deltas by unqualified relation name.
+///
+/// PostgreSQL statistics include the schema in `table`. Multiple schemas may
+/// contain the same measured relation, so matching rows are summed rather than
+/// overwritten.
+pub fn postgres_relation_write_totals(rows: &[PostgresTableWriteDelta]) -> BTreeMap<String, i128> {
+    let mut totals = BTreeMap::new();
+    for row in rows {
+        let relation = row
+            .table
+            .rsplit_once('.')
+            .map_or(row.table.as_str(), |(_, relation)| relation);
+        let writes = row.inserts + row.updates + row.deletes;
+        totals
+            .entry(relation.to_string())
+            .and_modify(|total| *total += writes)
+            .or_insert(writes);
+    }
+    totals
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PostgresStatementCallDelta {
@@ -1288,7 +1308,8 @@ fn counter_delta(before: u64, after: u64) -> i128 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DbProbeConfig, DbProbeError, DbProbeTarget, POSTGRES_STATS_SETTLE_DURATION, begin,
+        DbProbeConfig, DbProbeError, DbProbeTarget, POSTGRES_STATS_SETTLE_DURATION,
+        PostgresTableWriteDelta, begin, postgres_relation_write_totals,
         retain_libsql_snapshot_or_cleanup, settlement_delay,
     };
 
@@ -1406,5 +1427,33 @@ mod tests {
                 .contains("forced baseline capture failure")
         );
         assert!(error.to_string().contains("cleanup after baseline failure"));
+    }
+    #[test]
+    fn postgres_relation_writes_sum_duplicate_schema_relations() {
+        let rows = [
+            PostgresTableWriteDelta {
+                table: "public.root_filesystem_entries".to_string(),
+                inserts: 2,
+                updates: 3,
+                deletes: 1,
+            },
+            PostgresTableWriteDelta {
+                table: "tenant.root_filesystem_entries".to_string(),
+                inserts: 5,
+                updates: 7,
+                deletes: 0,
+            },
+            PostgresTableWriteDelta {
+                table: "root_filesystem_events".to_string(),
+                inserts: 11,
+                updates: 0,
+                deletes: 0,
+            },
+        ];
+
+        let totals = postgres_relation_write_totals(&rows);
+
+        assert_eq!(totals.get("root_filesystem_entries"), Some(&18));
+        assert_eq!(totals.get("root_filesystem_events"), Some(&11));
     }
 }

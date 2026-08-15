@@ -46,9 +46,12 @@ pub(crate) use context::{
 };
 pub(crate) use drain::{DefaultInputDrainStrategy, InputDrainStrategy};
 pub(crate) use gate::{
-    DefaultGateHandlingStrategy, GateHandlingStrategy, GateKind, GateOutcome, GateSummary,
+    DefaultGateHandlingStrategy, GateHandlingStrategy, GateKind, GateNotSupportedStrategy,
+    GateOutcome, GateSummary,
 };
-pub(crate) use model::{DefaultModelStrategy, ModelPreference, ModelStrategy};
+pub(crate) use model::{
+    DefaultModelStrategy, ModelPreference, ModelStrategy, StructuredResultModelStrategy,
+};
 pub(crate) use recovery::{
     BackoffDelayMs, CapabilityErrorSummary, DefaultRecoveryStrategy, ModelErrorClass,
     ModelErrorSummary, RecoveryOutcome, RecoveryStrategy, RetryAlteration, RetryScope,
@@ -56,10 +59,11 @@ pub(crate) use recovery::{
 };
 pub(crate) use reply_admission::{
     DefaultReplyAdmissionStrategy, ReplyAdmissionOutcome, ReplyAdmissionStrategy,
+    StructuredOutputReplyAdmissionStrategy,
 };
 pub(crate) use stop::{
     CapabilityBatchTurnSummary, DefaultStopConditionStrategy, StopConditionStrategy, StopKind,
-    StopOutcome, TurnEndKind, TurnSummary,
+    StopOutcome, StructuredResultStopStrategy, TurnEndKind, TurnSummary,
 };
 
 #[cfg(test)]
@@ -184,6 +188,7 @@ mod tests {
                 tier: ResourceBudgetTier::new("strategy_composition_test_tier").expect("valid"),
                 max_model_calls: 32,
                 max_capability_invocations: 64,
+                max_wall_clock_seconds: None,
             },
             personal_context_policy: ironclaw_loop_contracts::PersonalContextPolicy::Excluded,
             runtime_constraints: RuntimeProfileConstraints {

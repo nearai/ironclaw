@@ -92,6 +92,16 @@ export function primaryAuthAccount(item) {
 // expiry/failure notice. There is no `revoking` state on the wire: disconnect
 // and removal delete the account synchronously (overview §6.3), so no
 // in-progress revoking window is ever produced or observed here.
+// #7660: a connected account whose grant predates a recipe widening. The
+// connection WORKS — every already-granted capability keeps running — so this
+// must never render as setup_needed or a broken connection. The card offers a
+// re-consent ("Update access") affordance instead.
+export function authAccountNeedsScopeUpdate(item) {
+  const account = primaryAuthAccount(item);
+  if (!account || account.state !== "connected") return false;
+  return (account.missing_recipe_scopes || []).length > 0;
+}
+
 export function authAccountNeedsReconnect(item) {
   const account = primaryAuthAccount(item);
   if (!account) return false;

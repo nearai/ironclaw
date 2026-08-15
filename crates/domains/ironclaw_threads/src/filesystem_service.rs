@@ -46,7 +46,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::{StreamExt, future::join_all};
 use ironclaw_filesystem::{
-    CasApply, CasExpectation, CasUpdateError, ContentType, Entry, FilesystemError,
+    CasApply, CasExpectation, CasUpdateError, ContentType, Entry, FileType, FilesystemError,
     FilesystemOperation, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue,
     OrderedPage, OrderedQueryCursor, Page, RecordKind, RecordVersion, RootFilesystem,
     ScopedFilesystem, SortDirection, cas_update,
@@ -103,6 +103,7 @@ const SESSION_THREAD_KIND: &str = "session_thread";
 const THREAD_MESSAGE_KIND: &str = "thread_message";
 const THREAD_SUMMARY_KIND: &str = "thread_summary";
 const THREAD_IDEMPOTENCY_KIND: &str = "thread_idempotency";
+const THREAD_PREPARED_CONTEXT_KIND: &str = "thread_prepared_context";
 
 /// Conservative fan-out for per-thread title derivation during sidebar listing.
 const TITLE_DERIVATION_READ_CONCURRENCY: usize = 8;
@@ -410,6 +411,38 @@ where
         let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
         entry.kind = Some(kind);
         Ok(entry)
+    }
+
+    fn prepared_context_entry(
+        record: &crate::PreparedContextRecord,
+    ) -> Result<Entry, SessionThreadError> {
+        let body = serialize_pretty(record)?;
+        let kind = RecordKind::new(THREAD_PREPARED_CONTEXT_KIND).map_err(|error| {
+            SessionThreadError::Backend(format!(
+                "invalid thread_prepared_context record kind: {error}"
+            ))
+        })?;
+        let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
+        entry.kind = Some(kind);
+        Ok(entry)
+    }
+
+    async fn read_prepared_context_record(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<crate::PreparedContextRecord>, SessionThreadError> {
+        let path = prepared_context_record_path(scope, thread_id)?;
+        let Some(versioned) = self
+            .filesystem
+            .get(&scope.to_resource_scope(), &path)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(deserialize::<crate::PreparedContextRecord>(
+            &versioned.entry.body,
+        )?))
     }
 
     async fn read_thread_versioned(
@@ -1474,6 +1507,111 @@ where
     }
 }
 
+impl<F> FilesystemSessionThreadService<F>
+where
+    F: RootFilesystem,
+{
+    /// One-time, per-scope backfill: stamp the `prepared_context` marker onto
+    /// pre-marker subagent threads (their legacy metadata is
+    /// `{"kind":"subagent",…}`) so listing exclusion reads ONE spelling. The
+    /// completion marker makes the sweep run once; retention holds — the
+    /// metadata is updated, never deleted.
+    async fn ensure_prepared_markers_migrated(
+        &self,
+        scope: &ThreadScope,
+    ) -> Result<(), SessionThreadError> {
+        let marker = prepared_marker_migration_marker_path(scope)?;
+        if self
+            .filesystem
+            .get(&scope.to_resource_scope(), &marker)
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let root = scoped_path(&format!("{}/threads", scope_axes_string(scope)))?;
+        let entries = match self
+            .filesystem
+            .list_dir(&scope.to_resource_scope(), &root)
+            .await
+        {
+            Ok(entries) => entries,
+            Err(error) if is_not_found(&error) => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            if entry.file_type != FileType::Directory {
+                continue;
+            }
+            let thread_id = ThreadId::new(entry.name).map_err(invalid_path)?;
+            self.stamp_legacy_subagent_thread(scope, &thread_id).await?;
+        }
+        self.filesystem
+            .put(
+                &scope.to_resource_scope(),
+                &marker,
+                Entry::bytes(b"prepared-context-marker-v1".to_vec()),
+                CasExpectation::Any,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Stamp one thread if (and only if) its metadata carries the legacy
+    /// subagent spelling without the marker. CAS-retried against live writers.
+    async fn stamp_legacy_subagent_thread(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), SessionThreadError> {
+        let path = thread_record_path(scope, thread_id)?;
+        for _ in 0..FILESYSTEM_CAS_RETRIES {
+            let Some((mut stored, version)) = self.read_thread_versioned(scope, thread_id).await?
+            else {
+                return Ok(());
+            };
+            let needs_stamp = stored
+                .record
+                .metadata_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .is_some_and(|value| {
+                    value.get("kind").and_then(serde_json::Value::as_str) == Some("subagent")
+                        && value.get(crate::PREPARED_CONTEXT_METADATA_MARKER_KEY)
+                            != Some(&serde_json::Value::Bool(true))
+                });
+            if !needs_stamp {
+                return Ok(());
+            }
+            stored.record.metadata_json = Some(crate::prepared_context::stamped_metadata_json(
+                stored.record.metadata_json.as_deref(),
+            )?);
+            let entry = Self::thread_entry(&stored)?;
+            match put_with_cas(
+                self.filesystem.as_ref(),
+                &scope.to_resource_scope(),
+                &path,
+                entry,
+                CasExpectation::Version(version),
+            )
+            .await
+            {
+                Ok(()) => {
+                    return self
+                        .refresh_thread_index_from_source(scope, thread_id)
+                        .await;
+                }
+                Err(PutError::VersionMismatch) => continue,
+                Err(PutError::Other(error)) => return Err(error),
+            }
+        }
+        Err(SessionThreadError::Backend(format!(
+            "filesystem CAS retries exhausted stamping prepared marker at {}",
+            path.as_str()
+        )))
+    }
+}
+
 #[async_trait]
 impl<F> SessionThreadService for FilesystemSessionThreadService<F>
 where
@@ -1837,6 +1975,149 @@ where
             idempotent_replay: resuming_pending_idempotency,
             replay_metadata,
         })
+    }
+
+    async fn accept_prepared_context(
+        &self,
+        request: crate::PreparedContextRequest,
+    ) -> Result<crate::AcceptedPreparedContext, SessionThreadError> {
+        crate::prepared_context::validate_prepared_context_request(&request)?;
+        let stamped_metadata =
+            crate::prepared_context::stamped_metadata_json(request.metadata_json.as_deref())?;
+        let thread_id = request.thread_id.clone();
+        let now = Utc::now();
+        let crate::prepared_context::PreparedSeed {
+            mut rows,
+            tool_result_records,
+        } = crate::prepared_context::prepared_seed(&request, &thread_id, now)?;
+
+        // MINT (idempotent): `ensure_thread` scope-checks an existing thread
+        // and declares the listing indexes for a fresh one.
+        self.ensure_thread(EnsureThreadRequest {
+            scope: request.scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: request.actor_id.clone(),
+            title: request.title.clone(),
+            metadata_json: Some(stamped_metadata),
+        })
+        .await?;
+
+        // Commit-marker check: a completed accept replays instead of
+        // re-seeding (the record is written LAST below).
+        if let Some(record) = self
+            .read_prepared_context_record(&request.scope, &thread_id)
+            .await?
+        {
+            return crate::prepared_context::replay_prepared_context(&record, &request, &thread_id);
+        }
+
+        // SEED: deterministic message ids make a crashed retry converge on
+        // the same rows — an already-present row is skipped, not duplicated.
+        let resource_scope = request.scope.to_resource_scope();
+        for row in &mut rows {
+            row.sequence = self.reserve_sequence(&request.scope, &thread_id).await?;
+            let path = message_record_path(&request.scope, &thread_id, row.message_id)?;
+            let entry = Self::message_entry(row)?;
+            match self
+                .filesystem
+                .put(&resource_scope, &path, entry, CasExpectation::Absent)
+                .await
+            {
+                Ok(_) => {
+                    self.write_message_lookup_indexes_best_effort(
+                        &request.scope,
+                        &thread_id,
+                        row,
+                        "prepared context seed",
+                    )
+                    .await;
+                }
+                // A crashed prior attempt already landed this row; its stored
+                // sequence stays authoritative (the reservation above only
+                // burned a counter slot, which is harmless).
+                Err(FilesystemError::VersionMismatch { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        // Durable full-outcome records for seeded tool history, keyed by the
+        // deterministic seeded result refs so `builtin.result_read` paging
+        // resolves them exactly like live results. `put_tool_result_record`
+        // is CAS-idempotent, so a crashed retry converges.
+        for (result_ref, content) in tool_result_records {
+            self.put_tool_result_record(crate::PutToolResultRecordRequest {
+                scope: request.scope.clone(),
+                thread_id: thread_id.clone(),
+                result_ref,
+                content,
+            })
+            .await?;
+        }
+
+        let seeded_message_count = rows.len() as u64;
+        let last_message_id = rows.last().map(|row| row.message_id).ok_or_else(|| {
+            SessionThreadError::InvalidPreparedContext {
+                reason: "seeded rows must not be empty".to_string(),
+            }
+        })?;
+        let accepted_message_ref =
+            crate::prepared_context::accepted_prepared_message_ref(last_message_id)?;
+        let record = crate::PreparedContextRecord {
+            schema_version: crate::PREPARED_CONTEXT_RECORD_SCHEMA_VERSION,
+            idempotency_key: request.idempotency_key.clone(),
+            actor_id: request.actor_id.clone(),
+            accepted_message_ref: accepted_message_ref.as_str().to_string(),
+            declarations: request.declarations.clone(),
+            seeded_message_count,
+            created_at: now,
+        };
+        let record_path = prepared_context_record_path(&request.scope, &thread_id)?;
+        let entry = Self::prepared_context_entry(&record)?;
+        match self
+            .filesystem
+            .put(&resource_scope, &record_path, entry, CasExpectation::Absent)
+            .await
+        {
+            Ok(_) => {}
+            // Lost the race to a concurrent identical accept: replay its
+            // committed record.
+            Err(FilesystemError::VersionMismatch { .. }) => {
+                let record = self
+                    .read_prepared_context_record(&request.scope, &thread_id)
+                    .await?
+                    .ok_or_else(|| {
+                        SessionThreadError::Backend(
+                            "prepared context record missing after CAS conflict".to_string(),
+                        )
+                    })?;
+                return crate::prepared_context::replay_prepared_context(
+                    &record, &request, &thread_id,
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
+        self.invalidate_one_shot_context_window(&request.scope, &thread_id);
+
+        Ok(crate::AcceptedPreparedContext {
+            thread_id,
+            accepted_message_ref,
+            idempotent_replay: false,
+        })
+    }
+
+    async fn read_prepared_context(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<crate::PreparedContextRecord>, SessionThreadError> {
+        // Ownership probe first: missing and cross-scope threads return the
+        // same non-enumerating shape as every other read on this service.
+        self.read_thread_versioned(scope, thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            })?;
+        self.read_prepared_context_record(scope, thread_id).await
     }
 
     async fn replay_accepted_inbound_message(
@@ -3033,6 +3314,8 @@ where
             .limit
             .map(|n| (n as usize).clamp(1, LIST_THREADS_MAX_PAGE_SIZE))
             .unwrap_or(LIST_THREADS_DEFAULT_PAGE_SIZE);
+        self.ensure_prepared_markers_migrated(&request.scope)
+            .await?;
         let (listed, has_more) = self
             .list_thread_index_page(&request.scope, request.cursor.as_deref(), limit)
             .await?;
@@ -3043,6 +3326,13 @@ where
         // we don't serialize N transcript probes inline.
         let mut needs_title: Vec<(usize, ThreadId, u64)> = Vec::new();
         for index in &listed {
+            // Prepared-context (unbound/subagent) threads are working state,
+            // not conversations: excluded from listings on every backend. The
+            // cursor below advances over the FETCHED rows, so a page of
+            // hidden threads still makes progress.
+            if crate::prepared_context::record_is_prepared_context_hidden(&index.record) {
+                continue;
+            }
             let idx = page.len();
             let mut record = index.record.clone();
             if record.title.is_none() {
@@ -3112,12 +3402,14 @@ where
                 }
             }
         }
-        // The cursor is the last thread_id on this page; the next
-        // request resumes after it in the activity-sorted order. Only
-        // emit one when more records remain beyond this slice.
+        // The cursor is the last FETCHED index row (not the last returned
+        // record — hidden prepared-context rows still advance it); the next
+        // request resumes after it in the activity-sorted order. Only emit
+        // one when more records remain beyond this slice.
         let next_cursor = if has_more {
-            page.last()
-                .map(Self::encode_thread_index_cursor)
+            listed
+                .last()
+                .map(|index| Self::encode_thread_index_cursor(&index.record))
                 .transpose()?
         } else {
             None
@@ -3293,6 +3585,25 @@ fn summary_record_path(
 ) -> Result<ScopedPath, SessionThreadError> {
     scoped_path(&format!(
         "{}/summaries/{summary_id}.json",
+        thread_root_string(scope, thread_id)
+    ))
+}
+
+fn prepared_marker_migration_marker_path(
+    scope: &ThreadScope,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/index-migrations/prepared-context-marker-v1.complete",
+        scope_axes_string(scope)
+    ))
+}
+
+fn prepared_context_record_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/prepared_context.json",
         thread_root_string(scope, thread_id)
     ))
 }

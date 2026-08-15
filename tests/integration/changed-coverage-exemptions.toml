@@ -530,7 +530,7 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/loop/ironclaw_turn_runner/src/subagent/await_edge/mod.rs"
-lines = [112, 149]
+lines = [105, 142]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
@@ -1002,7 +1002,7 @@ review_after = "2026-11-01"
 
 [[exemption]]
 path = "crates/kernel/ironclaw_turns/src/process_projection/metadata.rs"
-lines = [139, 140, 141]
+lines = [130, 131, 132]
 owner = "@nearai/reborn"
 reason = "serde default fn for legacy persisted rows missing steering_allowed; integration always writes the field. Crate-tier legacy-row deserialization test covers it."
 issue = "https://github.com/nearai/ironclaw/issues/7006"

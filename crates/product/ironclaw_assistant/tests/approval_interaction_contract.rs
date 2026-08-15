@@ -29,9 +29,8 @@ use ironclaw_authorization::{
 };
 use ironclaw_event_log::InMemoryAuditSink;
 use ironclaw_host_api::turn::{
-    AcceptedMessageRef, EventCursor, IdempotencyKey, ReplyTargetBindingRef, RunProfileId,
-    RunProfileVersion, SourceBindingRef, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope,
-    TurnStatus,
+    AcceptedMessageRef, EventCursor, IdempotencyKey, RunProfileId, RunProfileVersion, TurnActor,
+    TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
     action::{Action, NetworkPolicy},
@@ -602,8 +601,6 @@ impl TurnCoordinator for FakeTurnCoordinator {
             run_id: request.run_id,
             status: *self.status.lock().expect("lock"),
             accepted_message_ref: AcceptedMessageRef::new("msg:approval").expect("valid"),
-            source_binding_ref: SourceBindingRef::new("src:approval").expect("valid"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:approval").expect("valid"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             allow_steering: true,

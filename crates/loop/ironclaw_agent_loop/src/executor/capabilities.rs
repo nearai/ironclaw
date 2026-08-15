@@ -43,7 +43,7 @@ use super::{
     push_call_signature_once, push_completed_result, sanitized_strategy_summary_or_fallback,
 };
 use crate::{
-    state::{CheckpointKind, LoopExecutionState},
+    state::{CheckpointKind, InvocationCharge, LoopExecutionState},
     strategies::{
         BatchPolicy, CapabilityBatchTurnSummary, CapabilityErrorSummary, GateKind, RecoveryOutcome,
         RetryAlteration, SanitizedStrategySummary, TurnSummary, capability_error_to_failure_kind,
@@ -477,12 +477,96 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             }
         }
 
+        // A single model turn must not admit more calls than the remaining
+        // per-run resource budget allows. `BudgetStage` only hard-stops the
+        // run between outer-loop iterations (budget.rs), so without this cap
+        // one oversized batch could dispatch (and charge)
+        // `visible_calls.len()` invocations even when the remaining
+        // allowance is smaller. `try_charge_invocations` computes and
+        // commits the admitted count in the same call; every call beyond it
+        // is not dispatched — it gets a model-visible blocked result via the
+        // same denied-calls machinery used above, so tool_use/tool_result
+        // pairing still holds for the whole batch. Once the counter reaches
+        // the cap, the next `BudgetStage` iteration hard stops the run
+        // through the existing `hard_budget_exit`.
+        let resource_budget_policy = ctx
+            .host
+            .run_context()
+            .resolved_run_profile
+            .resource_budget_policy
+            .clone();
+        let invocation_charge = state
+            .budget_ledger
+            .try_charge_invocations(visible_calls.len(), &resource_budget_policy);
+        let over_budget_calls: Vec<CapabilityCallCandidate> = match invocation_charge {
+            InvocationCharge::Charged => Vec::new(),
+            InvocationCharge::Partial { admitted } => visible_calls.split_off(admitted),
+            InvocationCharge::Exhausted => std::mem::take(&mut visible_calls),
+        };
+        if !over_budget_calls.is_empty() {
+            for call in over_budget_calls {
+                push_call_signature_once(&mut state, &mut signatures, &call)?;
+                let summary = CapabilityErrorSummary {
+                    kind: FailureKind::Resource,
+                    safe_summary: SanitizedStrategySummary::from_trusted_static(
+                        "the run's capability-invocation budget is exhausted for this turn; \
+                         stop issuing further capability calls",
+                    ),
+                };
+                state
+                    .recent_failure_kinds
+                    .push(capability_error_to_failure_kind(summary.kind));
+                match Box::pin(self.handle_capability_error(
+                    ctx,
+                    state,
+                    call,
+                    CapabilityErrorHandling {
+                        summary,
+                        model_observation: None,
+                        // Never dispatch a call this batch already decided is
+                        // over budget, even if the recovery strategy would
+                        // otherwise retry it.
+                        retry_mode: CapabilityRetryMode::Suppress,
+                    },
+                    &mut capability_batch,
+                ))
+                .await?
+                {
+                    OutcomeStep::Continue(next) => state = *next,
+                    OutcomeStep::Exit {
+                        exit,
+                        state: Some(terminal_state),
+                    } => {
+                        return finish_selected_parallel_terminal(
+                            ctx,
+                            *terminal_state,
+                            SelectedParallelTerminal::Loop(exit),
+                        )
+                        .await;
+                    }
+                    OutcomeStep::Exit { state: None, .. } => {
+                        return Err(AgentLoopExecutorError::PlannerContract {
+                            detail: "capability budget exit did not return its mutated state",
+                        });
+                    }
+                }
+            }
+            if visible_calls.is_empty() {
+                return self
+                    .completed_turn(ctx, state, result_refs_start, capability_batch)
+                    .await;
+            }
+        }
+
         // Multiple calls in one model response are the model's declaration
         // that the calls are semantically independent. The host may still
         // require ordered batch entry for operational or policy reasons.
         let policy = BatchPolicy::Parallel;
 
         capability_batch = CapabilityBatchTurnSummary::for_invocation_count(visible_calls.len());
+        // Budget accounting: every invocation that reaches dispatch counts,
+        // whatever its outcome — already charged above via
+        // `try_charge_invocations`.
 
         CheckpointStage
             .emit_progress(
@@ -1460,6 +1544,14 @@ impl CapabilityStage {
         clear_matching_pending_approval_resume(&mut state, &call);
         clear_matching_pending_auth_resume(&mut state, &call);
         clear_matching_pending_external_tool_resume(&mut state, &call);
+        // Resolved once for any retry dispatch below; the budget cannot
+        // change mid-call.
+        let resource_budget_policy = ctx
+            .host
+            .run_context()
+            .resolved_run_profile
+            .resource_budget_policy
+            .clone();
         for _ in 0..MAX_CAPABILITY_RETRIES {
             let outcome = ctx
                 .planner
@@ -1493,7 +1585,6 @@ impl CapabilityStage {
                         &call,
                         &summary,
                         model_observation.clone(),
-                        capability_batch,
                     )
                     .await?;
                     CheckpointStage
@@ -1527,7 +1618,6 @@ impl CapabilityStage {
                         &call,
                         &summary,
                         model_observation.clone(),
-                        capability_batch,
                     )
                     .await?;
                     if let Some(signal) = ctx.host.observe_cancellation() {
@@ -1574,6 +1664,53 @@ impl CapabilityStage {
                         });
                     }
                     honor_capability_retry_alteration(alter.as_ref())?;
+                    // Budget accounting: every invocation that reaches
+                    // dispatch counts, whatever its outcome (same rule as
+                    // the initial batch dispatch above) — this retry
+                    // dispatch would be a real capability invocation
+                    // against the host, not a replay. Charge it through the
+                    // same ledger chokepoint the initial batch uses,
+                    // BEFORE dispatch. When the run's capability-invocation
+                    // budget is already exhausted, do not re-dispatch at
+                    // all — fall through to the same model-visible
+                    // blocked-result path `ToolErrorResult` uses above, so
+                    // a retry can never silently exceed
+                    // `ResourceBudgetPolicy::max_capability_invocations`.
+                    // The next `BudgetStage` iteration then hard-stops the
+                    // run through the existing `CapabilityInvocationLimit`
+                    // exit — no new exit path.
+                    if state
+                        .budget_ledger
+                        .try_charge_invocations(1, &resource_budget_policy)
+                        == InvocationCharge::Exhausted
+                    {
+                        state.recovery_state = recovery;
+                        append_blocked_capability_error_result(
+                            ctx.host,
+                            &mut state,
+                            &call,
+                            &summary,
+                            model_observation.clone(),
+                        )
+                        .await?;
+                        CheckpointStage
+                            .emit_recovery(
+                                ctx,
+                                &mut state,
+                                LoopRecoveryStage::Capability,
+                                LoopRecoveryClass::Capability(summary.kind),
+                                LoopRecoveryDisposition::ModelVisible,
+                            )
+                            .await?;
+                        if let Some(signal) = ctx.host.observe_cancellation() {
+                            return self.cancelled_for_batch_drain_with_reason(
+                                ctx,
+                                state,
+                                cancelled_reason_from_signal(&signal),
+                            );
+                        }
+                        return Ok(OutcomeStep::Continue(Box::new(state)));
+                    }
                     state.recovery_state = recovery;
                     CheckpointStage
                         .emit_recovery(
@@ -1685,7 +1822,6 @@ impl CapabilityStage {
             &call,
             &summary,
             model_observation,
-            capability_batch,
         )
         .await?;
         // Route through the single failure-explanation chokepoint so the
@@ -2327,22 +2463,20 @@ async fn append_spawned_child_result(
     append_completed_capability_result(host, state, call, result, capability_batch).await
 }
 
+/// Errored calls are deliberately NOT recorded into `observed_signatures`:
+/// that list means COMPLETED calls (its only consumer is the
+/// structured-result stop strategy, which completes the run on the result
+/// tool's completed signature and aborts on all-failed batches). Recording
+/// errors here completed structured runs off a FAILED validation attempt —
+/// with no durable result — and masked the all-failed abort.
 async fn append_blocked_capability_error_result(
     host: &(dyn ironclaw_loop_contracts::AgentLoopDriverHost + Send + Sync),
     state: &mut LoopExecutionState,
     call: &CapabilityCallCandidate,
     summary: &CapabilityErrorSummary,
     model_observation: Option<ironclaw_loop_contracts::ModelVisibleToolObservation>,
-    capability_batch: &mut CapabilityBatchTurnSummary,
 ) -> Result<(), AgentLoopExecutorError> {
-    append_capability_error_ref(host, state, call, summary, model_observation).await?;
-    if capability_batch.invocation_count > 0
-        && call.provider_replay.is_some()
-        && let Ok(signature) = capability_call_signature(call)
-    {
-        capability_batch.record_result(signature, false);
-    }
-    Ok(())
+    append_capability_error_ref(host, state, call, summary, model_observation).await
 }
 
 async fn append_completed_capability_result(

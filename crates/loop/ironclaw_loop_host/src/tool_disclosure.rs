@@ -432,7 +432,7 @@ fn is_core_tool_definition(definition: &ProviderToolDefinition) -> bool {
 /// resolves whether the model emits the bare wire name, the dotted capability id,
 /// or the `__`-encoded form — for ANY provider, not just `builtin`.
 pub(crate) fn encode_provider_tool_name(capability_id: &str) -> String {
-    capability_id.replace('.', "__")
+    ironclaw_host_api::ids::ProviderToolName::encode_capability_str(capability_id)
 }
 
 pub(crate) fn definition_matches_provider_name(
@@ -454,6 +454,17 @@ pub(crate) fn definition_matches_provider_name(
     //    `__`-encoded call resolves regardless of whether the catalog stores the
     //    dotted or encoded name — for every provider (builtin, extensions, MCP).
     if encode_provider_tool_name(capability_id) == provider_name {
+        return true;
+    }
+    // 3b. Generic double-underscore encoding of an external-tool capability id
+    //    (e.g. `external_tool.lookup` -> `external_tool__lookup`). The
+    //    canonical encoding above (case 3) applies the ids.rs carve-out for
+    //    this reserved namespace and returns the bare suffix (`lookup`), but a
+    //    model that instead echoes the generic `.` -> `__` pattern against the
+    //    full capability id must still resolve to the same tool.
+    if let Some(name) = capability_id.strip_prefix("external_tool.")
+        && provider_name == format!("external_tool__{name}")
+    {
         return true;
     }
     // 4. builtin-specific leniency for the bare tool name (`read_file`).
@@ -1319,6 +1330,35 @@ mod tests {
         assert!(!definition_matches_provider_name(
             &definition,
             "gmail__send_message"
+        ));
+    }
+
+    #[test]
+    fn provider_name_matcher_resolves_generic_external_tool_double_underscore_form() {
+        // `external_tool.*` capability ids are host-minted straight onto the
+        // client-declared provider tool name (ids.rs's carve-out), so the
+        // catalog stores the bare suffix (`lookup`), not a `.`-encoded form.
+        // A model that instead echoes the generic `.` -> `__` encoding
+        // pattern against the full capability id (`external_tool__lookup`)
+        // must still resolve to the same tool.
+        let definition = ProviderToolDefinition {
+            capability_id: CapabilityId::new("external_tool.lookup").expect("valid capability id"),
+            name: ProviderToolName::new("lookup").expect("valid provider tool name"),
+            description: "Client-declared external tool.".to_string(),
+            description_trust: Default::default(),
+            parameters: medium_schema(0),
+        };
+        assert!(
+            definition_matches_provider_name(&definition, "lookup"),
+            "canonical bare name must resolve"
+        );
+        assert!(
+            definition_matches_provider_name(&definition, "external_tool__lookup"),
+            "generic double-underscore encoding must also resolve"
+        );
+        assert!(!definition_matches_provider_name(
+            &definition,
+            "external_tool__other"
         ));
     }
 

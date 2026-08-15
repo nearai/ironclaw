@@ -20,9 +20,8 @@ use ironclaw_auth::{
     TurnRunRef,
 };
 use ironclaw_host_api::turn::{
-    AcceptedMessageRef, EventCursor, IdempotencyKey, ReplyTargetBindingRef, RunProfileId,
-    RunProfileVersion, SourceBindingRef, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope,
-    TurnStatus,
+    AcceptedMessageRef, EventCursor, IdempotencyKey, RunProfileId, RunProfileVersion, TurnActor,
+    TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
     ids::{AgentId, ExtensionId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
@@ -383,8 +382,6 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             run_id: request.run_id,
             status: *self.status.lock().expect("lock"),
             accepted_message_ref: AcceptedMessageRef::new("msg:auth").expect("valid"),
-            source_binding_ref: SourceBindingRef::new("src:auth").expect("valid"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:auth").expect("valid"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             allow_steering: true,
@@ -517,6 +514,7 @@ async fn list_pending_auth_projects_challenges_to_minimal_safe_views() {
                     ownership: CredentialOwnership::UserReusable,
                     owner_extension: Some(ExtensionId::new("private.extension").unwrap()),
                     granted_extensions: vec![ExtensionId::new("granted.extension").unwrap()],
+                    scopes: Vec::new(),
                     secret_handle_count: 2,
                 }],
             },
@@ -659,8 +657,6 @@ async fn credential_provided_resumes_completed_auth_gate() {
         resumes[0].precondition,
         ResumeTurnPrecondition::BlockedAuthGate
     );
-    assert_eq!(resumes[0].source_binding_ref.as_str(), "src:auth");
-    assert_eq!(resumes[0].reply_target_binding_ref.as_str(), "reply:auth");
 }
 
 #[tokio::test]
@@ -687,6 +683,7 @@ async fn credential_selection_completes_pending_auth_gate_before_resume() {
                 ownership: CredentialOwnership::UserReusable,
                 owner_extension: None,
                 granted_extensions: vec![],
+                scopes: Vec::new(),
                 secret_handle_count: 1,
             }],
         },
@@ -719,8 +716,6 @@ async fn credential_selection_completes_pending_auth_gate_before_resume() {
         resumes[0].precondition,
         ResumeTurnPrecondition::BlockedAuthGate
     );
-    assert_eq!(resumes[0].source_binding_ref.as_str(), "src:auth");
-    assert_eq!(resumes[0].reply_target_binding_ref.as_str(), "reply:auth");
 }
 
 #[tokio::test]

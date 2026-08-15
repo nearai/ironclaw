@@ -4,9 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    AcceptedMessageRef, GateResumeDisposition, ProductTurnContext, ReplyTargetBindingRef,
-    RunProfileId, RunProfileVersion, SourceBindingRef, TurnActor, TurnExecutionOutcome,
-    TurnRunRecord, TurnRunState, runner::ClaimedTurnRun,
+    AcceptedMessageRef, GateResumeDisposition, ProductTurnContext, RunProfileId, RunProfileVersion,
+    TurnActor, TurnExecutionOutcome, TurnRunRecord, TurnRunState, runner::ClaimedTurnRun,
 };
 use ironclaw_loop_contracts::{LoopModelRouteSnapshot, LoopModelUsage, ResolvedRunProfile};
 
@@ -14,8 +13,6 @@ use ironclaw_loop_contracts::{LoopModelRouteSnapshot, LoopModelUsage, ResolvedRu
 pub struct AgentTurnProcessMetadata {
     pub turn_id: crate::TurnId,
     pub accepted_message_ref: AcceptedMessageRef,
-    pub source_binding_ref: SourceBindingRef,
-    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub resolved_run_profile_id: RunProfileId,
     pub resolved_run_profile_version: RunProfileVersion,
     /// Snapshot of the resolved profile's `SteeringPolicy::allow_steering`,
@@ -39,6 +36,12 @@ pub struct AgentTurnProcessMetadata {
         skip_serializing_if = "Option::is_none"
     )]
     pub resume_disposition: Option<GateResumeDisposition>,
+    /// True when the run's thread owner is `Ownerless` (unbound runs). The
+    /// `__system__` owner slot alone cannot distinguish ownerless runs from
+    /// actor-fallback runs without an explicit owner, so the disposition is
+    /// journaled; absent (legacy rows) means actor-fallback.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ownerless_thread: bool,
 }
 
 impl AgentTurnProcessMetadata {
@@ -46,8 +49,6 @@ impl AgentTurnProcessMetadata {
         Self {
             turn_id: record.turn_id,
             accepted_message_ref: record.accepted_message_ref.clone(),
-            source_binding_ref: record.source_binding_ref.clone(),
-            reply_target_binding_ref: record.reply_target_binding_ref.clone(),
             resolved_run_profile_id: record.profile.id.clone(),
             resolved_run_profile_version: record.profile.version,
             allow_steering: record.profile.allow_steering,
@@ -57,6 +58,8 @@ impl AgentTurnProcessMetadata {
             subagent_depth: record.subagent_depth,
             product_context: record.product_context.clone(),
             resume_disposition: record.resume_disposition.clone(),
+            ownerless_thread: record.scope.thread_owner
+                == ironclaw_host_api::turn::TurnThreadOwner::Ownerless,
         }
     }
 }
@@ -67,8 +70,6 @@ pub struct AgentTurnProcessStateMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<TurnActor>,
     pub accepted_message_ref: AcceptedMessageRef,
-    pub source_binding_ref: SourceBindingRef,
-    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub resolved_run_profile_id: RunProfileId,
     pub resolved_run_profile_version: RunProfileVersion,
     /// Snapshot of the resolved profile's `SteeringPolicy::allow_steering`.
@@ -97,6 +98,12 @@ pub struct AgentTurnProcessStateMetadata {
         skip_serializing_if = "Option::is_none"
     )]
     pub resume_disposition: Option<GateResumeDisposition>,
+    /// True when the run's thread owner is `Ownerless` (unbound runs). The
+    /// `__system__` owner slot alone cannot distinguish ownerless runs from
+    /// actor-fallback runs without an explicit owner, so the disposition is
+    /// journaled; absent (legacy rows) means actor-fallback.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ownerless_thread: bool,
 }
 
 impl AgentTurnProcessStateMetadata {
@@ -105,8 +112,6 @@ impl AgentTurnProcessStateMetadata {
             turn_id: state.turn_id,
             actor: state.actor.clone(),
             accepted_message_ref: state.accepted_message_ref.clone(),
-            source_binding_ref: state.source_binding_ref.clone(),
-            reply_target_binding_ref: state.reply_target_binding_ref.clone(),
             resolved_run_profile_id: state.resolved_run_profile_id.clone(),
             resolved_run_profile_version: state.resolved_run_profile_version,
             allow_steering: state.allow_steering,
@@ -118,6 +123,8 @@ impl AgentTurnProcessStateMetadata {
             spawn_tree_descendant_cap: None,
             product_context: state.product_context.clone(),
             resume_disposition: state.resume_disposition.clone(),
+            ownerless_thread: state.scope.thread_owner
+                == ironclaw_host_api::turn::TurnThreadOwner::Ownerless,
         }
     }
 
