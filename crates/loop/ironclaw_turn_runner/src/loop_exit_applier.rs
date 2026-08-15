@@ -297,7 +297,7 @@ where
         let results_verified = request.result_refs.iter().all(|result_ref| {
             verify_tool_result_ref(&history, result_ref, expected_run_id.as_str())
         });
-        let typed_result_verified = if request.completion_kind
+        let completion_results_verified = if request.completion_kind
             == LoopCompletionKind::NothingToReport
         {
             let message_ids = history
@@ -336,9 +336,13 @@ where
                 })
             }
         } else {
-            true
+            results_verified
         };
-        Ok(replies_verified && results_verified && typed_result_verified)
+        // A typed no-result call is the completion evidence for suppression.
+        // Other tool results are work evidence, not terminal-output evidence;
+        // the suppressed outcome neither exposes nor depends on them. Ordinary
+        // result-bearing completions still require every result ref to verify.
+        Ok(replies_verified && completion_results_verified)
     }
 
     async fn verify_final_checkpoint(

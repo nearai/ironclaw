@@ -992,10 +992,23 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
             run_id,
             completion_kind: LoopCompletionKind::NothingToReport,
             reply_message_refs: &[],
-            result_refs: &[typed_result_ref, generic_result_ref],
+            result_refs: &[typed_result_ref.clone(), generic_result_ref],
         })
         .await
         .expect("unordered result evidence check");
+    let unrelated_unverified_result_ref =
+        LoopResultRef::new("result:unrelated-unverified").expect("result ref");
+    let typed_with_unrelated_unverified_ref = evidence
+        .verify_completion_refs(CompletionEvidenceRequest {
+            scope: &turn_scope,
+            turn_id: TurnId::new(),
+            run_id,
+            completion_kind: LoopCompletionKind::NothingToReport,
+            reply_message_refs: &[],
+            result_refs: &[typed_result_ref.clone(), unrelated_unverified_result_ref],
+        })
+        .await
+        .expect("typed result with unrelated unverified ref evidence check");
 
     assert!(
         !generic_verified,
@@ -1009,6 +1022,10 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
     assert!(
         unordered_result_refs_verified,
         "result-ref ordering must not hide the exact typed no-result call"
+    );
+    assert!(
+        typed_with_unrelated_unverified_ref,
+        "unrelated work refs are not completion evidence for the typed no-result outcome"
     );
     assert!(
         !mismatched_capability_verified,
