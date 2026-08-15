@@ -81,11 +81,14 @@ impl TriggerExecutionSpec {
             .collect::<Vec<_>>()
             .join("\n");
         let no_result_instruction = match self.policy.result_delivery {
-            ResultDeliveryPolicy::Deliver => self.no_result_text.as_str(),
-            ResultDeliveryPolicy::SuppressWhenNothingToReport => {
-                "If there is nothing to report, call `builtin__structured_result` with `\
-                 {\"outcome\":\"nothing_to_report\"}` and do not return an assistant response."
-            }
+            ResultDeliveryPolicy::Deliver => self.no_result_text.clone(),
+            ResultDeliveryPolicy::SuppressWhenNothingToReport => format!(
+                "The no-result condition is: {}\n\nWhen this condition is true, call \
+                 `builtin__structured_result` with `{{\"outcome\":\"nothing_to_report\"}}` \
+                 and do not return an assistant response. This rule overrides any output \
+                 requirement to report a negative, empty, unchanged, or no-match result.",
+                self.no_result_text
+            ),
         };
         render_template(
             PROMPT_TEMPLATE,
@@ -93,7 +96,7 @@ impl TriggerExecutionSpec {
                 ("{{goal}}", self.goal.as_str()),
                 ("{{success_criteria}}", criteria.as_str()),
                 ("{{output_instructions}}", self.output_instructions.as_str()),
-                ("{{no_result_text}}", no_result_instruction),
+                ("{{no_result_text}}", no_result_instruction.as_str()),
             ],
         )
     }

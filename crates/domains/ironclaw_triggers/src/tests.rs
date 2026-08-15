@@ -70,7 +70,7 @@ fn structured_execution_spec_requests_typed_no_result_completion_for_explicit_su
         version: 1,
         goal: "Check the inbox".to_string(),
         success_criteria: vec!["Report new messages".to_string()],
-        output_instructions: "Return Markdown".to_string(),
+        output_instructions: "Return Markdown, including when no messages are found".to_string(),
         no_result_text: "No new messages.".to_string(),
         policy: TurnExecutionPolicy::default(),
     };
@@ -84,7 +84,10 @@ fn structured_execution_spec_requests_typed_no_result_completion_for_explicit_su
             r#"call `builtin__structured_result` with `{"outcome":"nothing_to_report"}`"#
         )
     );
-    assert!(!rendered.contains("No new messages."));
+    assert!(rendered.contains("The no-result condition is: No new messages."));
+    assert!(rendered.contains(
+        "This rule overrides any output requirement to report a negative, empty, unchanged, or no-match result."
+    ));
 }
 
 #[test]

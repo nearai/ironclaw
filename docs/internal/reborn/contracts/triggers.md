@@ -109,8 +109,10 @@ persisted policies still deserialize as `deliver` for compatibility.
   prompt asks the model to return the human-readable `no_result_text`, and a
   completed run has a normal deliverable result.
 - `suppress_when_nothing_to_report` is explicit opt-in. The scheduled-run
-  prompt instructs the model to call the host-provided
-  `builtin__structured_result` provider tool (capability
+  prompt names the contract's concrete `no_result_text` as the no-result
+  condition and makes that rule override any output instruction to describe a
+  negative, empty, unchanged, or no-match result. It instructs the model to
+  call the host-provided `builtin__structured_result` provider tool (capability
   `builtin.structured_result`) with the exact argument
   `{"outcome":"nothing_to_report"}` and not return an assistant response. The
   loop records the typed result reference, writes a final checkpoint, and
