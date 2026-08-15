@@ -1277,6 +1277,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "_trigger_record_count",
                 side_effect=[0, 1],
             ),
+            patch.object(
+                run_live_qa,
+                "_trigger_record_snapshot",
+                return_value={"checked": True, "record_count": 1},
+            ),
         ):
             result = asyncio.run(
                 run_live_qa._routine_creation_case(
@@ -1323,6 +1328,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "_trigger_record_count",
                 side_effect=[0, 1],
             ),
+            # Even a matching record must not upgrade a typed failure.
+            patch.object(
+                run_live_qa,
+                "_trigger_record_snapshot",
+                return_value={"checked": True, "record_count": 1},
+            ),
         ):
             result = asyncio.run(
                 run_live_qa._routine_creation_case(
@@ -1337,6 +1348,59 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertNotIn("creation_evidence_override", result.details)
+
+    def test_routine_creation_case_does_not_upgrade_on_unrelated_record(self):
+        # Marker-less callers count ALL trigger records (count_name is
+        # None), so an unrelated record created mid-case bumps the global
+        # count. The name-scoped read-back must not find the requested
+        # routine, and the failed case must stay failed.
+        async def fake_live_chat_case(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=False,
+                latency_ms=1,
+                details={
+                    "error": (
+                        "finalized assistant reply did not contain required "
+                        "marker. marker='CREATED_1234'"
+                    ),
+                },
+            )
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_live_chat_case",
+                side_effect=fake_live_chat_case,
+            ),
+            # Global count went 0 -> 1 (some OTHER routine appeared), but the
+            # requested routine has no record.
+            patch.object(
+                run_live_qa,
+                "_trigger_record_count",
+                side_effect=[0, 1],
+            ),
+            patch.object(
+                run_live_qa,
+                "_trigger_record_snapshot",
+                return_value={"checked": True, "record_count": 0},
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa._routine_creation_case(
+                    self._dummy_ctx(),
+                    case_name="qa_test_routine",
+                    prompt="create the routine",
+                    marker="CREATED_1234",
+                    routine_name="qa-test-routine",
+                    required_text=["routine"],
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertNotIn("creation_evidence_override", result.details)
+        self.assertIn("did not contain required marker", result.details["error"])
 
     def test_wait_for_trigger_record_after_count_polls_until_record_added(self):
         counts = iter([0, 0, 1])
@@ -3500,6 +3564,92 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertTrue(chat.details["inconclusive"])
         self.assertFalse(chat.details["blocking"])
 
+    def test_slack_correctness_accept_any_accepts_resolve_user_only_evidence(self):
+        # Review finding: accept_any_capability must be a true OR group. A
+        # correct qa_10h run whose only lookup capability was
+        # slack.resolve_user must pass even though slack.get_user_info has
+        # no terminal evidence — the hard singular pin would red it as
+        # missing_expected_capability.
+        async def fake_live_chat_case(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={
+                    "full_reply_text": "no email visible",
+                    "submission_identity": {
+                        "accepted_message_ref": "msg:current",
+                        "thread_id": "thread-current",
+                        "turn_id": "turn-current",
+                        "run_id": "run-current",
+                    },
+                },
+            )
+
+        def drive(statuses: dict[str, list[str]]) -> run_live_qa.ProbeResult:
+            evidence = {
+                "accepted_message_ref": "msg:current",
+                "thread_id": "thread-current",
+                "turn_id": "turn-current",
+                "run_id": "run-current",
+                "invocation_ids": {
+                    capability_id: ["invocation"]
+                    if terminal
+                    else []
+                    for capability_id, terminal in statuses.items()
+                },
+                "statuses": statuses,
+            }
+            with (
+                patch.object(
+                    run_live_qa,
+                    "_live_chat_case",
+                    side_effect=fake_live_chat_case,
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_current_turn_capability_evidence",
+                    return_value=evidence,
+                ),
+            ):
+                chat, _ = asyncio.run(
+                    run_live_qa._slack_correctness_chat_reply(
+                        self._dummy_ctx(),
+                        case_name="qa_10h_accept_any_test",
+                        started=run_live_qa.time.monotonic(),
+                        prompt="What email does the user use on Slack?",
+                        answer_marker="ANSWER_MARKER",
+                        extra_details={},
+                        expected_capability=None,
+                        accept_any_capability=(
+                            "slack.get_user_info",
+                            "slack.resolve_user",
+                        ),
+                    )
+                )
+            return chat
+
+        resolve_user_only = drive(
+            {"slack.resolve_user": ["completed"], "slack.get_user_info": []}
+        )
+        get_user_info_only = drive(
+            {"slack.get_user_info": ["completed"], "slack.resolve_user": []}
+        )
+        neither = drive(
+            {"slack.resolve_user": [], "slack.get_user_info": []}
+        )
+
+        self.assertTrue(resolve_user_only.success)
+        self.assertTrue(get_user_info_only.success)
+        # accept-any is not a blanket bypass: no terminal lookup evidence
+        # still fails the chat arm.
+        self.assertFalse(neither.success)
+        self.assertEqual(
+            neither.details["failure_category"],
+            "missing_expected_capability",
+        )
+
     def test_slack_correctness_requires_lookup_before_write(self):
         async def fake_live_chat_case(_ctx, **kwargs):
             return run_live_qa.ProbeResult(
@@ -3735,8 +3885,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "slack.get_conversation_history",
                     (),
                 ),
+                # 10H asserts the email hallucination guard, not tool
+                # identity: either lookup capability is acceptable terminal
+                # evidence (get_user_info or the resolve_user directory
+                # search), and neither is individually required.
                 "qa_10h_slack_email_hallucination_guard": (
-                    "slack.get_user_info",
+                    None,
                     ("slack.get_user_info", "slack.resolve_user"),
                 ),
             },
@@ -7369,6 +7523,31 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertFalse(
             run_live_qa._non_member_channel_claimed(
                 "no longer a member of legacy-room", "legacy-room"
+            )
+        )
+
+    def test_non_member_channel_claimed_scopes_negation_to_the_named_channel(self):
+        # Review finding: "I am a member of ironclaw-qa, but not a member of
+        # random" — the negation targets ANOTHER channel, so the positive
+        # ironclaw-qa claim must still be caught.
+        mixed = "I am a member of ironclaw-qa, but not a member of random"
+        self.assertTrue(
+            run_live_qa._non_member_channel_claimed(mixed, "ironclaw-qa")
+        )
+        self.assertFalse(
+            run_live_qa._non_member_channel_claimed(mixed, "random")
+        )
+        # "not a member of A and B" stays ONE disclaimer (and is not a
+        # clause boundary, so the negation covers both names).
+        self.assertFalse(
+            run_live_qa._non_member_channel_claimed(
+                "Not a member of general and ironclaw-qa", "ironclaw-qa"
+            )
+        )
+        self.assertFalse(
+            run_live_qa._non_member_channel_claimed(
+                "I'm not in marketing, and I'm also not in the qa-room.",
+                "qa-room",
             )
         )
 

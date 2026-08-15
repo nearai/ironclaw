@@ -5567,21 +5567,32 @@ async def _routine_creation_case(
         # 31828255762..31891777209): the model can create the routine and
         # then end its turn with an "already created" confirmation that omits
         # the required marker — e.g. after burning the turn on schedule
-        # validation retries. The trigger record proves the contract; the
-        # caller still validates the persisted prompt and schedule from the
-        # DB. Only plain content/timeout failures (no failure_category, e.g.
-        # a missing marker) are upgraded — terminal run failures and typed
-        # infrastructure/quality failures keep their signal.
+        # validation retries. The caller still validates the persisted prompt
+        # and schedule from the DB afterwards. Only plain content/timeout
+        # failures (no failure_category, e.g. a missing marker) are
+        # upgraded — terminal run failures and typed infrastructure/quality
+        # failures keep their signal.
         if (
             after_count > before_count
             and not result.details.get("failure_category")
             and not result.details.get("inconclusive")
         ):
-            result.success = True
-            result.details["creation_evidence_override"] = (
-                "trigger record exists without a successful creation reply; "
-                "durable evidence accepted over the reply-marker proxy"
-            )
+            # Read back the EXACT record before accepting the override:
+            # marker-less callers count ALL trigger records (count_name is
+            # None), so an unrelated record created mid-case must not
+            # satisfy the upgrade — only the requested routine's own record
+            # proves creation.
+            record_snapshot = _trigger_record_snapshot(ctx.reborn_home, routine_name)
+            if (
+                record_snapshot.get("checked")
+                and int(record_snapshot.get("record_count") or 0) >= 1
+            ):
+                result.success = True
+                result.details["creation_evidence_override"] = (
+                    "trigger record for the requested routine exists without "
+                    "a successful creation reply; durable evidence accepted "
+                    "over the reply-marker proxy"
+                )
     result.details["trigger_records_after"] = after_count
     result.details["trigger_record_wait_ms"] = wait_ms
     result.details["trigger_record_wait_timeout_ms"] = int(
@@ -6701,11 +6712,23 @@ NON_MEMBERSHIP_NEGATION_RE = re.compile(
 )
 
 
-def _reply_sentences(text: str) -> list[str]:
-    """Split a reply into sentence-ish units for scoped negation matching."""
+# Clause boundaries for scoped negation matching. "and" is deliberately NOT
+# a boundary: "I am a member of general and ironclaw-qa" must stay one
+# claim and "not a member of A and B" one disclaimer. Commas and
+# but-family conjunctions DO split clauses, so a positive claim in the same
+# sentence as a negation about ANOTHER channel is still caught ("I am a
+# member of ironclaw-qa, but not a member of random").
+REPLY_CLAUSE_BOUNDARY_RE = re.compile(
+    r"(?<=[.!?])\s+|\n+|,\s*|;\s*|"
+    r"\s+\b(?:but|while|yet|whereas|although|though|however)\b\s+"
+)
+
+
+def _reply_clauses(text: str) -> list[str]:
+    """Split a reply into clauses for scoped negation matching."""
     return [
         part.strip()
-        for part in re.split(r"(?<=[.!?])\s+|\n+", text or "")
+        for part in REPLY_CLAUSE_BOUNDARY_RE.split(text or "")
         if part.strip()
     ]
 
@@ -6716,15 +6739,20 @@ def _non_member_channel_claimed(reply_text: str, channel_name: str) -> bool:
 
     A channel name that appears only inside negated statements — "(Not a
     member of ironclaw-qa.)", "I'm not in marketing" — is an honest
-    disclaimer and never a membership claim. A name mentioned in any
-    non-negated sentence (e.g. the listed member channels) is a claim.
+    disclaimer and never a membership claim. The negation is scoped to the
+    clause containing the name, so a disclaimer about ANOTHER channel in
+    the same sentence never suppresses a real claim ("I am a member of
+    ironclaw-qa, but not a member of random"). A name mentioned in any
+    non-negated clause (e.g. the listed member channels) is a claim.
     """
     if not _channel_name_mentioned(reply_text, channel_name):
         return False
-    for sentence in _reply_sentences(reply_text):
-        if _channel_name_mentioned(sentence, channel_name):
-            if not NON_MEMBERSHIP_NEGATION_RE.search(sentence):
-                return True
+    for clause in _reply_clauses(reply_text):
+        if (
+            _channel_name_mentioned(clause, channel_name)
+            and not NON_MEMBERSHIP_NEGATION_RE.search(clause)
+        ):
+            return True
     return False
 
 
@@ -8594,8 +8622,9 @@ async def case_qa_10h_slack_email_hallucination_guard(
             # workspace scope cannot read emails either way — and the hard
             # get_user_info pin reddened the guard before the text arms ran.
             # The behavior under test is the absence of a fabricated address,
-            # not tool identity; accept either lookup capability.
-            expected_capability="slack.get_user_info",
+            # not tool identity; both lookups form the OR group and neither
+            # is individually required.
+            expected_capability=None,
             accept_any_capability=("slack.get_user_info", "slack.resolve_user"),
         )
         if not chat.success:
