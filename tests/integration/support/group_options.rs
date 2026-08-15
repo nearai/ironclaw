@@ -85,6 +85,13 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
+    /// Use production's durable loop-milestone event adapter and event store
+    /// over the same RootFilesystem as the group's turn workload.
+    pub fn with_durable_milestone_event_store_for_test(mut self) -> Self {
+        self.durable_milestone_event_store = true;
+        self
+    }
+
     /// Force `ToolDisclosureMode::Bridged` into the group's ONE planned
     /// runtime config (enabler (b)), regardless of `REBORN_TOOL_DISCLOSURE` —
     /// avoids the shared-process env-var race `apply_hermetic_env()` already
@@ -209,6 +216,13 @@ impl RebornIntegrationGroupBuilder {
     /// behavior byte-identical.
     pub fn with_lease_recovery_interval_for_test(mut self, interval: Duration) -> Self {
         self.lease_recovery_interval_override = Some(interval);
+        self
+    }
+
+    /// Override the scheduler heartbeat interval for a deterministic measured
+    /// workload while preserving the production scheduler and process journal.
+    pub fn with_runner_heartbeat_interval_for_test(mut self, interval: Duration) -> Self {
+        self.runner_heartbeat_interval_override = Some(interval);
         self
     }
 

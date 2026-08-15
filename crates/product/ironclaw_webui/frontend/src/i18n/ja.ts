@@ -1278,6 +1278,8 @@ registerPack("ja", {
   "extensions.opening": "開いています...",
   "extensions.authorize": "認証する",
   "extensions.reauthorize": "再認証する",
+  "extensions.updateAccess": "アクセスを更新",
+  "extensions.updateAccessHint": "この連携に新しい権限が利用可能です。最新の機能を有効にするには、アクセスを再承認してください。",
   "extensions.reconnect": "再接続",
   "extensions.emptyInstalledTitle": "拡張機能がインストールされていません",
   "extensions.emptyInstalledDesc": "レジストリタブを参照して、WASMツール、チャネル、およびMCPサーバーをインストールしてください。",

@@ -3,14 +3,14 @@ use std::sync::Arc;
 use ironclaw_host_api::ids::ThreadId;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
+    AcceptedPreparedContext, AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
     AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest, ContextMessages,
     ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
-    UpdateToolResultReferenceRequest,
+    LoadContextWindowRequest, MessageContent, PreparedContextRecord, PreparedContextRequest,
+    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
+    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 
 pub const TRANSCRIPT_FAILURE_SECRET: &str = "sk-TRANSCRIPT0123456789SECRET";
@@ -58,6 +58,21 @@ impl SessionThreadService for FailingTranscriptWriteThreadService {
         request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, SessionThreadError> {
         self.inner.accept_inbound_message(request).await
+    }
+
+    async fn accept_prepared_context(
+        &self,
+        request: PreparedContextRequest,
+    ) -> Result<AcceptedPreparedContext, SessionThreadError> {
+        self.inner.accept_prepared_context(request).await
+    }
+
+    async fn read_prepared_context(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<PreparedContextRecord>, SessionThreadError> {
+        self.inner.read_prepared_context(scope, thread_id).await
     }
 
     async fn replay_accepted_inbound_message(

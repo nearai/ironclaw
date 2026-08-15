@@ -958,6 +958,7 @@ mod tests {
                     ownership: CredentialOwnership::UserReusable,
                     owner_extension: None,
                     granted_extensions: Vec::new(),
+                    scopes: Vec::new(),
                     secret_handle_count: 1,
                 }))
         }

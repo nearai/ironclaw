@@ -19,6 +19,7 @@ use ironclaw_llm::{
     LlmProvider, ModelFallbackRoute, ModelMetadata, ToolCompletionRequest, ToolCompletionResponse,
 };
 use rust_decimal::Decimal;
+use std::time::Duration;
 use tokio::sync::oneshot;
 
 use super::reply::RebornScriptedReply;
@@ -395,6 +396,105 @@ impl LlmProvider for ParkingLlm {
         sink: Arc<dyn CompletionStreamSink>,
     ) -> Result<ToolCompletionResponse, LlmError> {
         self.gate.park().await;
+        self.inner
+            .complete_with_tools_streaming(request, sink)
+            .await
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        self.inner.list_models().await
+    }
+
+    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        self.inner.model_metadata().await
+    }
+
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        self.inner.effective_model_name(requested_model)
+    }
+
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<ModelFallbackRoute, LlmError> {
+        self.inner.fallback_route(fallback_index, requested_model)
+    }
+
+    fn active_model_name(&self) -> String {
+        self.inner.active_model_name()
+    }
+
+    fn set_model(&self, model: &str) -> Result<(), LlmError> {
+        self.inner.set_model(model)
+    }
+
+    fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
+        self.inner.calculate_cost(input_tokens, output_tokens)
+    }
+
+    fn cache_write_multiplier(&self) -> Decimal {
+        self.inner.cache_write_multiplier()
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        self.inner.cache_read_discount()
+    }
+}
+
+/// Deterministic raw-provider latency used by heartbeat-sensitive integration
+/// workloads. The production decorator chain remains above this wrapper.
+pub struct DelayedLlm {
+    inner: Arc<TraceLlm>,
+    delay: Duration,
+}
+
+pub fn delayed_trace_llm(delay: Duration, inner: Arc<TraceLlm>) -> DelayedLlm {
+    DelayedLlm { inner, delay }
+}
+
+#[async_trait]
+impl LlmProvider for DelayedLlm {
+    fn provider_id(&self) -> String {
+        self.inner.provider_id()
+    }
+
+    fn model_name(&self) -> &str {
+        self.inner.model_name()
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        self.inner.cost_per_token()
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        tokio::time::sleep(self.delay).await;
+        self.inner.complete(request).await
+    }
+
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        tokio::time::sleep(self.delay).await;
+        self.inner.complete_streaming(request, sink).await
+    }
+
+    async fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        tokio::time::sleep(self.delay).await;
+        self.inner.complete_with_tools(request).await
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        tokio::time::sleep(self.delay).await;
         self.inner
             .complete_with_tools_streaming(request, sink)
             .await

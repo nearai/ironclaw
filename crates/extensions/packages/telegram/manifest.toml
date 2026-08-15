@@ -365,7 +365,7 @@ instructions = "Link your Telegram account from this extension's configuration. 
 input_placeholder = ""
 submit_label = "Link Telegram"
 error_message = "Telegram linking failed. Open the extension configuration and try again."
-connection_success_message = "Telegram is installed as an inbound entrypoint and a personal messaging integration. Link the user's Telegram account from the extension card; that single verified device link lets the same account talk to the workspace bot and enables personal Telegram tools. Bot replies still come from the workspace bot, while personal messaging actions use the linked account."
+connection_success_message = "Telegram is installed as an inbound entrypoint and a personal messaging integration. Each user links their own Telegram account from the Telegram extension card in the Web UI — linking cannot be done from chat. That single verified device link lets the same account talk to the workspace bot and enables the personal Telegram tools; bot replies still come from the workspace bot, while personal messaging actions use the linked account."
 
 [channel.connection.notices]
 connect_required = "👋 Link this Telegram account from the Telegram extension in IronClaw, then message me here again."

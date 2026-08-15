@@ -251,3 +251,35 @@ fn a_flow_stops_accepting_input_after_a_bounded_number_of_attempts() {
         "exhausting attempts means start over, not give up forever"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Where the login code actually arrives
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_code_prompt_says_where_telegram_delivers_the_code() {
+    // QA, 2026-08-14 (two rounds): a user waited for an SMS that never came;
+    // the send itself succeeded (`auth.sentCode` returned OK in the trace)
+    // but Telegram chooses the delivery channel and the high-level login flow
+    // we call discards `sentCode.type_`, so the hint must not overclaim
+    // either channel. It names both places to look and the way to retry.
+    match code_prompt() {
+        DeviceLinkStep::InputRequired {
+            hint: Some(hint), ..
+        } => {
+            assert!(
+                hint.contains("service chat"),
+                "hint must name the in-app place to look: {hint}"
+            );
+            assert!(
+                hint.contains("SMS"),
+                "hint must admit the SMS channel: {hint}"
+            );
+            assert!(
+                hint.contains("Start again"),
+                "hint must name the retry affordance: {hint}"
+            );
+        }
+        other => panic!("the code prompt must carry a delivery hint, got {other:?}"),
+    }
+}

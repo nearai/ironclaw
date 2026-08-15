@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use common::{authorized_callback_request, hex64, new_flow_request, test_scope};
-use ironclaw_auth::AuthProviderClient;
 use ironclaw_auth::{
     AuthErrorCode, AuthFlowId, AuthProductScope, AuthProviderId, AuthSurface,
     AuthorizationCodeHash, CredentialAccountLabel, CredentialAccountListRequest,
@@ -28,6 +27,7 @@ use ironclaw_auth::{
     OAuthProviderExchangeContext, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
     PrepareOAuthFlowRequest, ProviderScope,
 };
+use ironclaw_auth::{AuthProviderClient, AuthRecipeResolver};
 use ironclaw_composition::test_support::{
     ScriptedOAuthTokenEgress, build_oauth_product_auth_for_test,
 };
@@ -344,6 +344,53 @@ async fn one_google_authorization_satisfies_every_installed_google_extension() {
     );
 }
 
+/// Shared-vendor scope union is safe only when every OAuth binding names the
+/// same protected resource and metadata document. Otherwise a resolver request
+/// for one extension could inherit another extension's binding and send its
+/// `resource` in DCR and token requests.
+#[tokio::test]
+async fn installed_resolver_rejects_conflicting_shared_vendor_oauth_bindings() {
+    let cases = [
+        (
+            "resource",
+            ("https://resource-a.example", None),
+            ("https://resource-b.example", None),
+        ),
+        (
+            "metadata URL",
+            (
+                "https://resource.example",
+                Some("https://resource.example/metadata-a"),
+            ),
+            (
+                "https://resource.example",
+                Some("https://resource.example/metadata-b"),
+            ),
+        ),
+    ];
+
+    for (conflict, gmail_binding, drive_binding) in cases {
+        let store = installed_store_from_records(vec![
+            manifest_record_with_oauth_binding("gmail", gmail_binding),
+            manifest_record_with_oauth_binding("google-drive", drive_binding),
+        ])
+        .await;
+        let resolver = ironclaw_extension_host::InstalledManifestAuthRecipeResolver::new(store);
+        let caller = UserId::new("shared-vendor-binding-user").expect("caller user");
+
+        for requester in ["gmail", "google-drive"] {
+            let requester = ExtensionId::new(requester).expect("requester extension");
+            assert!(
+                resolver
+                    .resolve(Some(&requester), Some(&caller), "google")
+                    .await
+                    .is_none(),
+                "a differing OAuth {conflict} must fail shared-vendor resolution closed for {requester}"
+            );
+        }
+    }
+}
+
 /// Registration is tenant-wide; installation is per user. The scope ceiling
 /// must follow the INSTALL, so one user's consent screen never carries scopes
 /// for an extension a DIFFERENT user installed (#7078).
@@ -653,6 +700,18 @@ async fn installed_store_for_users(packages: &[(&str, &str)]) -> Arc<ExtensionIn
 /// inventory `InstalledManifestAuthRecipeResolver` unions vendor recipes over.
 /// Same construction as `oauth_popup_journeys.rs`.
 async fn installed_store(packages: &[&str]) -> Arc<ExtensionInstallationStore> {
+    installed_store_from_records(
+        packages
+            .iter()
+            .map(|package| bundled_manifest_record(package))
+            .collect(),
+    )
+    .await
+}
+
+async fn installed_store_from_records(
+    records: Vec<ExtensionManifestRecord>,
+) -> Arc<ExtensionInstallationStore> {
     let store = ExtensionInstallationStore::load_at(
         Arc::new(InMemoryBackend::new()),
         VirtualPath::new("/system/extensions/.installations/oauth-connect")
@@ -663,14 +722,13 @@ async fn installed_store(packages: &[&str]) -> Arc<ExtensionInstallationStore> {
     )
     .await
     .expect("filesystem installation store");
-    for package in packages {
-        let record = bundled_manifest_record(package);
+    for record in records {
         let extension_id = record.extension_id().clone();
         store
             .upsert_manifest_and_installation(
                 record,
                 ExtensionInstallation::new(
-                    ExtensionInstallationId::new(format!("itest-{package}"))
+                    ExtensionInstallationId::new(format!("itest-{extension_id}"))
                         .expect("installation id"),
                     extension_id.clone(),
                     ExtensionManifestRef::new(extension_id, None),
@@ -684,6 +742,35 @@ async fn installed_store(packages: &[&str]) -> Arc<ExtensionInstallationStore> {
             .expect("persist install");
     }
     Arc::new(store)
+}
+
+fn manifest_record_with_oauth_binding(
+    package: &str,
+    binding: (&str, Option<&str>),
+) -> ExtensionManifestRecord {
+    let manifest = bundled_manifest_record(package);
+    let mut resolved = manifest.resolved().clone();
+    let auth = resolved
+        .auth
+        .iter_mut()
+        .find(|surface| surface.vendor.as_str() == "google")
+        .expect("bundled Google extension declares auth");
+    auth.oauth_resource = Some(
+        ironclaw_extension_contracts::recipe::HttpsEndpoint::new(binding.0.to_string())
+            .expect("OAuth resource"),
+    );
+    auth.protected_resource_metadata_url = binding.1.map(|url| {
+        ironclaw_extension_contracts::recipe::HttpsEndpoint::new(url.to_string())
+            .expect("protected-resource metadata URL")
+    });
+    ExtensionManifestRecord::from_resolved(
+        manifest.raw_toml(),
+        manifest.manifest().source,
+        resolved,
+        manifest.manifest_hash().cloned(),
+    )
+    .expect("modified resolved manifest remains valid")
+    .with_definition_retention(manifest.definition_retention())
 }
 
 /// Parse a real bundled package manifest the way the installation store does.

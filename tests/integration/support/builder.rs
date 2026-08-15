@@ -158,6 +158,8 @@ pub struct RebornIntegrationHarnessBuilder {
     /// Mutually exclusive raw-provider behavior for this one-thread harness.
     /// Each model-selecting builder method replaces the previous mode.
     model_mode: ThreadModelMode,
+    /// Wire production's RootFilesystem-backed durable loop milestone sink.
+    durable_milestone_event_store: bool,
     /// C-TRACECAP seam: install an in-memory `TurnEventSink` when `true`.
     turn_event_sink: bool,
     /// Tool disclosure mode for the underlying group's ONE planned runtime.
@@ -194,6 +196,8 @@ pub struct RebornIntegrationHarnessBuilder {
     /// Threaded into
     /// `RebornIntegrationGroupBuilder::with_lease_recovery_interval_for_test`.
     lease_recovery_interval: Option<Duration>,
+    /// Test-only scheduler heartbeat interval override for measured workloads.
+    runner_heartbeat_interval: Option<Duration>,
     /// Test-only canonical-loop iteration limit override.
     planned_default_iteration_limit: Option<std::num::NonZeroU32>,
     /// Test-only runtime seam that rejects final assistant transcript writes.
@@ -278,6 +282,13 @@ impl RebornIntegrationHarnessBuilder {
     /// [`RebornThreadBuilder::park_model`].
     pub fn park_model(mut self, gate: ParkingModelGate) -> Self {
         self.model_mode = ThreadModelMode::Parked(gate);
+        self
+    }
+
+    /// Add deterministic latency at the raw provider seam before every scripted
+    /// model response. The real decorator chain still wraps this provider.
+    pub fn with_model_call_delay_for_test(mut self, delay: Duration) -> Self {
+        self.model_mode = ThreadModelMode::Delayed(delay);
         self
     }
 
@@ -367,6 +378,20 @@ impl RebornIntegrationHarnessBuilder {
     /// call happens after a non-model persistence boundary fails.
     pub fn record_model_calls_for_test(mut self) -> Self {
         self.record_model_calls = true;
+        self
+    }
+
+    /// Wire the production durable loop-milestone adapter and event store over
+    /// the same `RootFilesystem` selected by [`Self::storage`].
+    pub fn with_durable_milestone_event_store_for_test(mut self) -> Self {
+        self.durable_milestone_event_store = true;
+        self
+    }
+
+    /// Override the production scheduler heartbeat interval for a deterministic
+    /// measured workload.
+    pub fn with_runner_heartbeat_interval_for_test(mut self, interval: Duration) -> Self {
+        self.runner_heartbeat_interval = Some(interval);
         self
     }
 
@@ -729,6 +754,9 @@ impl RebornIntegrationHarnessBuilder {
         if self.turn_event_sink {
             group_builder = group_builder.with_turn_event_sink();
         }
+        if self.durable_milestone_event_store {
+            group_builder = group_builder.with_durable_milestone_event_store_for_test();
+        }
         group_builder = group_builder.with_tool_disclosure_mode(self.tool_disclosure);
         if let Some(policy) = self.bridged_policy_override {
             group_builder = group_builder.with_capability_surface_policy_for_bridged_test(policy);
@@ -750,6 +778,9 @@ impl RebornIntegrationHarnessBuilder {
         }
         if let Some(interval) = self.lease_recovery_interval {
             group_builder = group_builder.with_lease_recovery_interval_for_test(interval);
+        }
+        if let Some(interval) = self.runner_heartbeat_interval {
+            group_builder = group_builder.with_runner_heartbeat_interval_for_test(interval);
         }
         if let Some(limit) = self.planned_default_iteration_limit {
             group_builder = group_builder.with_iteration_limit_for_test(limit);
@@ -870,6 +901,7 @@ impl RebornIntegrationHarness {
             shell_mode: ShellMode::default(),
             model_mode: ThreadModelMode::Normal,
             turn_event_sink: false,
+            durable_milestone_event_store: false,
             // General integration tests stay hermetic across production default
             // changes. Disclosure-specific tests opt into Bridged explicitly.
             tool_disclosure: ToolDisclosureMode::Off,
@@ -881,6 +913,7 @@ impl RebornIntegrationHarness {
             park_tool_gate: None,
             runner_lease_ttl: None,
             lease_recovery_interval: None,
+            runner_heartbeat_interval: None,
             planned_default_iteration_limit: None,
             fail_append_finalized_assistant_message: false,
             fail_append_tool_result_reference: false,
@@ -2553,7 +2586,14 @@ pub(crate) async fn start_postgres_testcontainer() -> HarnessResult<(
         .with_db_name("ironclaw_test")
         .with_user("postgres")
         .with_password("postgres")
-        .with_tag("16-alpine");
+        .with_init_sql(b"CREATE EXTENSION IF NOT EXISTS pg_stat_statements;".to_vec())
+        .with_tag("16-alpine")
+        .with_cmd([
+            "-c",
+            "fsync=off",
+            "-c",
+            "shared_preload_libraries=pg_stat_statements",
+        ]);
     let unavailable = |error: String| -> String {
         if std::env::var("CI").is_ok() {
             panic!("StorageMode::Postgres requires Docker in CI and provisioning failed: {error}");

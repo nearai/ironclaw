@@ -856,6 +856,18 @@ impl ExtensionLifecycleManager {
         Ok(requirements)
     }
 
+    /// Whether this package's channel establishes per-user identity through
+    /// the device-link ceremony — the one connection step that can only run
+    /// in the Web UI, because the card renders a scannable code that chat
+    /// surfaces cannot.
+    pub fn package_declares_device_link_user_link(
+        &self,
+        package_ref: &LifecyclePackageRef,
+    ) -> Result<bool, ProductOperationFailure> {
+        let (extension_id, _installation_id) = extension_ids_from_package_ref(package_ref)?;
+        Ok(self.device_link_channel_setup(&extension_id).is_some())
+    }
+
     fn device_link_channel_setup(
         &self,
         extension_id: &ExtensionId,

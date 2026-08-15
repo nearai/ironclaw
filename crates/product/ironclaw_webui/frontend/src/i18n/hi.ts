@@ -1278,6 +1278,8 @@ registerPack("hi", {
   "extensions.opening": "खुल रहा है...",
   "extensions.authorize": "अधिकृत करें",
   "extensions.reauthorize": "पुनः अधिकृत करें",
+  "extensions.updateAccess": "एक्सेस अपडेट करें",
+  "extensions.updateAccessHint": "इस कनेक्शन के लिए नई अनुमतियाँ उपलब्ध हैं। नवीनतम क्षमताएँ सक्षम करने के लिए एक्सेस फिर से स्वीकृत करें।",
   "extensions.reconnect": "पुनः कनेक्ट करें",
   "extensions.emptyInstalledTitle": "कोई एक्सटेंशन इंस्टॉल नहीं है",
   "extensions.emptyInstalledDesc": "WASM टूल, चैनल और MCP सर्वर को खोजने और इंस्टॉल करने के लिए रजिस्ट्री टैब ब्राउज़ करें।",

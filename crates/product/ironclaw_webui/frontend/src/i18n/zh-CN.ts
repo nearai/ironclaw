@@ -1277,6 +1277,8 @@ registerPack("zh-CN", {
   "extensions.opening": "打开中...",
   "extensions.authorize": "去授权",
   "extensions.reauthorize": "重新授权",
+  "extensions.updateAccess": "更新访问权限",
+  "extensions.updateAccessHint": "此连接有新的权限可用。请重新授权访问以启用最新功能。",
   "extensions.reconnect": "重新连接",
   "extensions.emptyInstalledTitle": "还未安装任何扩展",
   "extensions.emptyInstalledDesc": "浏览扩展注册表去发现并安装 WASM 工具、服务通道 和各种 MCP 协议服务服务器。",
