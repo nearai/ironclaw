@@ -814,6 +814,38 @@ fn no_reply_with_empty_refs_maps_to_completed_when_policy_allows_it() {
 }
 
 #[test]
+fn nothing_to_report_with_empty_refs_requires_host_verified_transcript_evidence() {
+    let exit = LoopExit::Completed(LoopCompleted {
+        completion_kind: LoopCompletionKind::NothingToReport,
+        reply_message_refs: vec![],
+        result_refs: vec![],
+        final_checkpoint_id: None,
+        model_usage: None,
+        exit_id: exit_id("exit:nothing-to-report-empty"),
+    });
+    let policy = LoopExitValidationPolicy {
+        allow_nothing_to_report_completion: true,
+        ..LoopExitValidationPolicy::default()
+    };
+
+    let rejected = exit.clone().validate(policy);
+    assert_eq!(
+        rejected
+            .violation
+            .as_ref()
+            .map(|violation| violation.kind()),
+        Some(LoopExitViolationKind::MissingCompletionReference)
+    );
+
+    let accepted = exit.validate(LoopExitValidationPolicy {
+        completion_refs_verified: true,
+        ..policy
+    });
+    assert_eq!(accepted.violation, None);
+    assert_eq!(accepted.mapping, TurnRunnerOutcome::Completed.into());
+}
+
+#[test]
 fn delegated_result_with_result_refs_maps_to_trusted_completed() {
     let decision = LoopExit::Completed(LoopCompleted {
         completion_kind: LoopCompletionKind::DelegatedResult,

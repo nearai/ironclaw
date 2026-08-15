@@ -30,17 +30,16 @@ pub(super) fn completed_exit(
     let model_usage = state.cumulative_model_usage;
     // Earlier model iterations may have emitted progress text and ordinary
     // tool results before the terminal structured result. Retain those
-    // transcript rows, but expose only the terminal result ref as completion
-    // evidence for a deliberately suppressed run. The structured-result call
-    // ends its capability turn, so its durable ref is the final appended ref;
-    // settlement independently verifies its exact provider call and arguments.
+    // transcript rows, but do not expose any of their refs as deliverable
+    // completion output. Settlement independently verifies the exact typed
+    // terminal call and arguments from the durable transcript.
     let reply_message_refs = if typed_nothing_to_report {
         Vec::new()
     } else {
         state.assistant_refs
     };
     let result_refs = if typed_nothing_to_report {
-        state.result_refs.last().cloned().into_iter().collect()
+        Vec::new()
     } else {
         state.result_refs
     };

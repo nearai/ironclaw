@@ -3670,10 +3670,7 @@ async fn typed_structured_result_terminalizes_suppressed_schedule_without_reply_
         LoopCompletionKind::NothingToReport
     );
     assert!(completed.reply_message_refs.is_empty());
-    assert_eq!(
-        completed.result_refs,
-        vec![LoopResultRef::new("result:nothing-to-report").expect("result ref")]
-    );
+    assert!(completed.result_refs.is_empty());
     assert!(host.finalized_assistant_messages().is_empty());
 }
 

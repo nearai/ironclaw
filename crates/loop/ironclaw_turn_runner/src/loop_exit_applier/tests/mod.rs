@@ -1145,7 +1145,7 @@ async fn applier_accepts_durable_typed_nothing_to_report_when_driver_omits_its_r
             LoopExit::Completed(LoopCompleted {
                 completion_kind: LoopCompletionKind::NothingToReport,
                 reply_message_refs: Vec::new(),
-                result_refs: vec![generic_result_ref],
+                result_refs: Vec::new(),
                 final_checkpoint_id: Some(checkpoint_id),
                 model_usage: None,
                 exit_id: test_exit_id(),

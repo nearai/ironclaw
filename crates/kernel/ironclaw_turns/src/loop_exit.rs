@@ -824,12 +824,15 @@ fn completion_kind_ref_violation(
             }
         }
         LoopCompletionKind::NothingToReport => {
-            if exit.result_refs.is_empty() {
-                Some(LoopExitViolationKind::MissingCompletionReference)
-            } else if !exit.reply_message_refs.is_empty() {
+            if !exit.reply_message_refs.is_empty() {
                 Some(LoopExitViolationKind::MismatchedCompletionReferenceKind)
             } else if !policy.allow_nothing_to_report_completion {
                 Some(LoopExitViolationKind::NothingToReportNotAllowed)
+            } else if exit.result_refs.is_empty() && !policy.completion_refs_verified {
+                // Suppressed exits intentionally carry no delivery refs. The
+                // host must instead verify the exact typed terminal call from
+                // the durable transcript before accepting the completion.
+                Some(LoopExitViolationKind::MissingCompletionReference)
             } else {
                 None
             }
