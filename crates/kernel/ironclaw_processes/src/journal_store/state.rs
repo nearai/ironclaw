@@ -16,7 +16,7 @@ use crate::{
     ProcessInputRecord, ProcessJournalCursor, ProcessJournalEntry, ProcessJournalKind, ProcessKind,
     ProcessLeaseSnapshot, ProcessLeaseToken, ProcessLifecycleStatus, ProcessSubmissionEdge,
     ProcessTreeReservation, RecoverExpiredProcessLeasesResponse, SubmitProcessAtEdgeRequest,
-    types::same_scope_owner,
+    SubmitProcessRequest, types::same_scope_owner,
 };
 
 /// Point a process at a new resume checkpoint.
@@ -431,6 +431,38 @@ impl ProcessJournalMaterializedState {
         Ok(StoredCommandOutcome::Submitted(snapshot, true))
     }
 
+    fn edge_replay_matches(
+        submission: &SubmitProcessRequest,
+        edge: &ProcessSubmissionEdge,
+        snapshot: &JournaledProcessSnapshot,
+    ) -> bool {
+        let edge_matches = match edge {
+            ProcessSubmissionEdge::Suspended { suspension } => {
+                snapshot.status == ProcessLifecycleStatus::Suspended
+                    && snapshot.suspension.as_ref() == Some(suspension)
+                    && snapshot.failure.is_none()
+            }
+            ProcessSubmissionEdge::Completed => {
+                snapshot.status == ProcessLifecycleStatus::Completed
+                    && snapshot.suspension.is_none()
+                    && snapshot.failure.is_none()
+            }
+            ProcessSubmissionEdge::Failed { failure } => {
+                snapshot.status == ProcessLifecycleStatus::Failed
+                    && snapshot.suspension.is_none()
+                    && snapshot.failure.as_ref() == Some(failure)
+            }
+        };
+        edge_matches
+            && snapshot.process_id == submission.process_id
+            && snapshot.process_kind == submission.process_kind
+            && snapshot.scope == submission.scope
+            && snapshot.checkpoint_ref == submission.checkpoint_ref
+            && snapshot.owner_user_id == submission.owner_user_id
+            && snapshot.concurrency_class == submission.concurrency_class
+            && snapshot.metadata == submission.metadata
+    }
+
     fn apply_submit_at_edge(
         &mut self,
         request: SubmitProcessAtEdgeRequest,
@@ -453,6 +485,11 @@ impl ProcessJournalMaterializedState {
             .as_ref()
             .and_then(|key| self.submission_idempotency.get(key))
         {
+            if !Self::edge_replay_matches(&submission, &request.edge, snapshot) {
+                return Err(ProcessJournalStoreError::InvalidRequest(
+                    "edge submission replay does not match the original request".to_string(),
+                ));
+            }
             return Ok(StoredCommandOutcome::Submitted(snapshot.clone(), false));
         }
         if self.processes.contains_key(&submission.process_id) {
@@ -503,6 +540,9 @@ impl ProcessJournalMaterializedState {
             }
         };
         let cursor = self.next_cursor();
+        // `checkpoint_kind` remains unknown intentionally. If a later lease
+        // expires, recovery must fail closed rather than redispatching work
+        // whose side effect may already have been attempted.
         let snapshot = JournaledProcessSnapshot {
             process_id: submission.process_id,
             process_kind: submission.process_kind,

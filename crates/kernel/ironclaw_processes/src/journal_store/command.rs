@@ -228,3 +228,52 @@ fn add_dependency_references(
         .dependencies
         .push((dependent_process_id, dependency_process_id));
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use ironclaw_host_api::{ids::ProcessId, resource::ResourceScope};
+    use serde_json::json;
+
+    use super::StoredProcessCommand;
+    use crate::{
+        ProcessKind, ProcessOperationId, ProcessSubmissionEdge, SubmitProcessAtEdgeRequest,
+        SubmitProcessRequest,
+    };
+
+    #[test]
+    fn submit_at_edge_command_round_trips() {
+        let request = SubmitProcessAtEdgeRequest {
+            submission: SubmitProcessRequest {
+                process_id: ProcessId::new(),
+                process_kind: ProcessKind::CapabilityInvocationState,
+                scope: ResourceScope::system(),
+                exclusive_within_scope: false,
+                operation_id: Some(ProcessOperationId::from_trusted("edge-round-trip")),
+                owner_user_id: None,
+                concurrency_class: None,
+                parent_process_id: None,
+                root_process_id: None,
+                spawn_tree_descendant_cap: None,
+                dependency: None,
+                checkpoint_ref: None,
+                input: None,
+                created_at: Utc::now(),
+                metadata: json!({"record_type": "capability_run"}),
+            },
+            edge: ProcessSubmissionEdge::Completed,
+        };
+        let encoded = serde_json::to_string(&StoredProcessCommand::SubmitAtEdge(Box::new(
+            request.clone(),
+        )))
+        .expect("serialize edge command");
+        assert!(encoded.contains(r#""type":"submit_at_edge""#));
+
+        let decoded: StoredProcessCommand =
+            serde_json::from_str(&encoded).expect("deserialize edge command");
+        let StoredProcessCommand::SubmitAtEdge(decoded) = decoded else {
+            panic!("expected edge command");
+        };
+        assert_eq!(*decoded, request);
+    }
+}
