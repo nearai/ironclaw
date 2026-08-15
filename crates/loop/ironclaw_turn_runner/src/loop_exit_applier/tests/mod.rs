@@ -985,7 +985,7 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
         })
         .await
         .expect("prior tool result evidence check");
-    let trailing_generic_result_verified = evidence
+    let unordered_result_refs_verified = evidence
         .verify_completion_refs(CompletionEvidenceRequest {
             scope: &turn_scope,
             turn_id: TurnId::new(),
@@ -995,7 +995,7 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
             result_refs: &[typed_result_ref, generic_result_ref],
         })
         .await
-        .expect("trailing generic result evidence check");
+        .expect("unordered result evidence check");
 
     assert!(
         !generic_verified,
@@ -1007,8 +1007,8 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
         "ordinary tool results may precede the terminal typed no-result call"
     );
     assert!(
-        !trailing_generic_result_verified,
-        "the typed no-result call must be the final result"
+        unordered_result_refs_verified,
+        "result-ref ordering must not hide the exact typed no-result call"
     );
     assert!(
         !mismatched_tool_verified,

@@ -302,12 +302,11 @@ where
         let typed_result_verified = if request.completion_kind
             == LoopCompletionKind::NothingToReport
         {
-            let terminal_result_ref = request.result_refs.last();
             let message_ids = history
                 .messages
                 .iter()
                 .filter(|message| {
-                    terminal_result_ref.is_some_and(|result_ref| {
+                    request.result_refs.iter().any(|result_ref| {
                         verify_tool_result_message(message, result_ref, expected_run_id.as_str())
                     })
                 })
@@ -316,7 +315,6 @@ where
             if message_ids.is_empty() {
                 false
             } else {
-                let expected_message_count = message_ids.len();
                 let thread_scope = self
                     .resolve_thread_scope_for_turn(request.scope, request.run_id)
                     .await?;
@@ -332,13 +330,12 @@ where
                         reason: error.to_string(),
                     })?
                     .messages;
-                messages.len() == expected_message_count
-                    && messages.iter().all(|message| {
-                        message
-                            .tool_result_provider_call
-                            .as_ref()
-                            .is_some_and(is_nothing_to_report_provider_call)
-                    })
+                messages.iter().any(|message| {
+                    message
+                        .tool_result_provider_call
+                        .as_ref()
+                        .is_some_and(is_nothing_to_report_provider_call)
+                })
             }
         } else {
             true

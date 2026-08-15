@@ -220,15 +220,39 @@ impl HostManagedModelGateway for DeliveryJourneyGateway {
         {
             return self.stream_model(request).await;
         }
-        self.requests.lock().await.push(request);
+        let request_number = {
+            let mut requests = self.requests.lock().await;
+            requests.push(request);
+            requests
+                .iter()
+                .filter(|request| {
+                    request
+                        .messages
+                        .iter()
+                        .any(|message| message.content.contains(QA_SILENT_PROMPT))
+                })
+                .count()
+        };
+        let (call_id, tool_name, arguments) = if request_number == 1 {
+            (
+                "scheduled-suppression-prior-tool",
+                "builtin__trigger_list",
+                json!({}),
+            )
+        } else {
+            (
+                "scheduled-suppression-result",
+                STRUCTURED_RESULT_PROVIDER_TOOL_NAME,
+                json!({"outcome": "nothing_to_report"}),
+            )
+        };
         let call = ProviderToolCall {
             provider_id: "scheduled-suppression-e2e-provider".to_string(),
             provider_model_id: "scheduled-suppression-e2e-model".to_string(),
             turn_id: Some("scheduled-suppression-e2e-turn".to_string()),
-            id: "scheduled-suppression-result".to_string(),
-            name: ProviderToolName::new(STRUCTURED_RESULT_PROVIDER_TOOL_NAME)
-                .expect("structured result provider tool name"),
-            arguments: json!({"outcome": "nothing_to_report"}),
+            id: call_id.to_string(),
+            name: ProviderToolName::new(tool_name).expect("provider tool name"),
+            arguments,
             response_reasoning: None,
             reasoning: None,
             signature: None,
@@ -1591,8 +1615,8 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
         model_gateway
             .request_count_containing(QA_SILENT_PROMPT)
             .await,
-        1,
-        "the suppressible routine must execute exactly one model run"
+        2,
+        "the suppressible routine must perform prior tool work before its typed result"
     );
 
     tokio::time::sleep(Duration::from_millis(250)).await;
@@ -1633,7 +1657,7 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
         model_gateway
             .request_count_containing(QA_SILENT_PROMPT)
             .await,
-        1,
+        2,
         "restart must not rerun or dispatch the suppressed result"
     );
 }
