@@ -17,7 +17,8 @@ pub(super) fn completed_exit(
     state: LoopExecutionState,
     final_checkpoint_id: Option<ironclaw_host_api::turn::TurnCheckpointId>,
 ) -> Result<LoopExit, AgentLoopExecutorError> {
-    let completion_kind = if is_typed_nothing_to_report(host, &state) {
+    let typed_nothing_to_report = is_typed_nothing_to_report(host, &state);
+    let completion_kind = if typed_nothing_to_report {
         LoopCompletionKind::NothingToReport
     } else if !state.assistant_refs.is_empty() {
         LoopCompletionKind::FinalReply
@@ -27,9 +28,17 @@ pub(super) fn completed_exit(
         LoopCompletionKind::NoReply
     };
     let model_usage = state.cumulative_model_usage;
+    // Earlier model iterations may have emitted progress text before the
+    // terminal structured result. Retain those transcript rows, but do not
+    // expose their refs as the completion of a deliberately suppressed run.
+    let reply_message_refs = if typed_nothing_to_report {
+        Vec::new()
+    } else {
+        state.assistant_refs
+    };
     Ok(LoopExit::Completed(LoopCompleted {
         completion_kind,
-        reply_message_refs: state.assistant_refs,
+        reply_message_refs,
         result_refs: state.result_refs,
         final_checkpoint_id,
         model_usage,
@@ -41,8 +50,7 @@ pub(super) fn is_typed_nothing_to_report(
     host: &(dyn AgentLoopDriverHost + Send + Sync),
     state: &LoopExecutionState,
 ) -> bool {
-    state.assistant_refs.is_empty()
-        && !state.result_refs.is_empty()
+    !state.result_refs.is_empty()
         && state.stop_state.structured_result_recorded
         && host
             .run_context()

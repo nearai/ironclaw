@@ -3646,13 +3646,16 @@ async fn stopped_on_suspension_completed_outcome_still_appends_result() {
 }
 
 #[tokio::test]
-async fn typed_structured_result_terminalizes_suppressed_schedule_without_finalizing_reply() {
+async fn typed_structured_result_terminalizes_suppressed_schedule_without_reply_refs() {
     let host = MockHost::new(Vec::new()).with_suppressed_scheduled_context();
     let mut state = LoopExecutionState::initial_for_run(host.run_context());
     state.stop_state.structured_result_recorded = true;
     state
         .result_refs
         .push(LoopResultRef::new("result:nothing-to-report").expect("result ref"));
+    state
+        .assistant_refs
+        .push(message_ref("msg:intermediate-progress"));
 
     let exit = completed_exit(&host, state, None).expect("completed exit");
 
