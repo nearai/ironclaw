@@ -3982,18 +3982,26 @@ async fn filesystem_list_threads_orders_by_last_activity_not_creation() {
         .unwrap();
 
     // This touch follows earlier activity on the same thread inside the
-    // coalescing window. Wait for the configured trailing flush before
-    // asserting the cross-thread sidebar order.
-    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-
-    let final_list = service
-        .list_threads_for_scope(ListThreadsForScopeRequest {
-            scope: scope_a,
-            limit: None,
-            cursor: None,
-        })
-        .await
-        .unwrap();
+    // coalescing window. Poll until the detached trailing flush makes the
+    // expected cross-thread order observable.
+    let final_list = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let listed = service
+                .list_threads_for_scope(ListThreadsForScopeRequest {
+                    scope: scope_a.clone(),
+                    limit: None,
+                    cursor: None,
+                })
+                .await
+                .unwrap();
+            if listed.threads[0].thread_id.as_str() == "t-older" {
+                break listed;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the trailing touch reaches the sidebar after the flush interval");
     let final_ids: Vec<&str> = final_list
         .threads
         .iter()
@@ -4016,7 +4024,7 @@ async fn filesystem_thread_activity_burst_coalesces_index_touches_and_orders_aft
         "alice",
     );
     let service = FilesystemSessionThreadService::new(scoped)
-        .with_thread_index_touch_flush_interval(std::time::Duration::from_millis(50));
+        .with_thread_index_touch_flush_interval(std::time::Duration::from_millis(500));
     let request_scope = scope("coalesced-index-touch");
 
     let older = service
@@ -4083,7 +4091,7 @@ async fn filesystem_thread_activity_burst_coalesces_index_touches_and_orders_aft
         .await
         .unwrap();
 
-    let listed = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+    let listed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             let listed = service
                 .list_threads_for_scope(ListThreadsForScopeRequest {
@@ -4110,6 +4118,94 @@ async fn filesystem_thread_activity_burst_coalesces_index_touches_and_orders_aft
         listed.threads[0].thread_id, older.thread_id,
         "the finalized thread must lead the activity-sorted sidebar"
     );
+}
+
+#[tokio::test]
+async fn filesystem_failed_deferred_thread_index_touch_is_retried() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-deferred-index-retry", "alice");
+    let service = FilesystemSessionThreadService::new(scoped)
+        .with_thread_index_touch_flush_interval(std::time::Duration::from_secs(1));
+    let request_scope = scope("deferred-index-retry");
+    let older = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-deferred-retry-older").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("older".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: request_scope.clone(),
+            thread_id: older.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: Some("binding-deferred-index-retry".into()),
+            reply_target_binding_id: None,
+            external_event_id: Some("event-deferred-index-retry".into()),
+            content: MessageContent::text("start activity tracking"),
+        })
+        .await
+        .unwrap();
+    let draft = service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: request_scope.clone(),
+            thread_id: older.thread_id.clone(),
+            turn_run_id: "run-deferred-index-retry".into(),
+            content: MessageContent::text("working"),
+        })
+        .await
+        .unwrap();
+    wait_until_after(draft.updated_at.expect("draft activity stamp")).await;
+    let newer = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-deferred-retry-newer").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("newer".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    wait_until_after(newer.updated_at.expect("newer creation stamp")).await;
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path("/thread_index/")
+            .nth(1)
+            .backend("deferred thread-index write fails once"),
+    );
+
+    service
+        .update_assistant_draft(UpdateAssistantDraftRequest {
+            scope: request_scope.clone(),
+            thread_id: older.thread_id.clone(),
+            message_id: draft.message_id,
+            content: MessageContent::text("newest activity"),
+        })
+        .await
+        .unwrap();
+
+    let listed = tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        loop {
+            let listed = service
+                .list_threads_for_scope(ListThreadsForScopeRequest {
+                    scope: request_scope.clone(),
+                    limit: None,
+                    cursor: None,
+                })
+                .await
+                .unwrap();
+            if listed.threads[0].thread_id == older.thread_id {
+                break listed;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the failed deferred touch is retried");
+    assert_eq!(listed.threads[0].thread_id, older.thread_id);
 }
 
 #[tokio::test]

@@ -245,11 +245,8 @@ where
     }
 
     fn mark_thread_index_known(&self, scope: &ThreadScope, thread_id: &ThreadId) {
-        if let Ok(mut known) = self.known_thread_index_rows.lock() {
-            let key = thread_index_record_cache_key(scope, thread_id);
-            known.insert(key.clone());
-            evict_entry_over_limit(&mut known, THREAD_INDEX_KNOWN_ROW_MAX, &key);
-        }
+        let key = thread_index_record_cache_key(scope, thread_id);
+        mark_thread_index_known_key(&self.known_thread_index_rows, &key);
     }
 
     pub(super) fn is_thread_index_known(&self, scope: &ThreadScope, thread_id: &ThreadId) -> bool {
@@ -416,8 +413,16 @@ where
             Ok(state) => state,
             Err(_) => return ThreadIndexTouchAction::FlushNow(touch),
         };
-        evict_thread_index_touch_state_over_limit(&mut state, key);
+        if state.len() >= THREAD_INDEX_TOUCH_STATE_MAX && !state.contains_key(key) {
+            return ThreadIndexTouchAction::FlushNow(touch);
+        }
         let entry = state.entry(key.to_string()).or_default();
+        if touch.derived_title.is_some() {
+            // A derived title copies user text. Persist it synchronously so a
+            // later redaction can never race a buffered copy back into view.
+            entry.last_flushed_at = Some(now);
+            return ThreadIndexTouchAction::FlushNow(touch);
+        }
         let can_flush_now = entry
             .last_flushed_at
             .is_none_or(|last| now.duration_since(last) >= self.thread_index_touch_flush_interval);
@@ -439,6 +444,7 @@ where
             tokio::spawn(flush_thread_index_touch_loop(
                 Arc::clone(&self.filesystem),
                 Arc::clone(&self.thread_index_touch_state),
+                Arc::clone(&self.known_thread_index_rows),
                 key.to_string(),
                 self.thread_index_touch_flush_interval,
                 delay,
@@ -481,12 +487,12 @@ where
                 let thread_id = thread_id_for_retry.clone();
                 let resource_scope = resource_scope.clone();
                 async move {
-                    let mut index = match current {
+                    let (mut index, mut changed) = match current {
                         Some(index) => {
                             if index.record.scope != scope || index.record.thread_id != thread_id {
                                 return Err(SessionThreadError::ThreadScopeMismatch { thread_id });
                             }
-                            index
+                            (index, false)
                         }
                         None => {
                             let source_path = super::thread_record_path(&scope, &thread_id)?;
@@ -505,10 +511,9 @@ where
                                 return Err(SessionThreadError::ThreadScopeMismatch { thread_id });
                             }
                             stored.record.updated_at = Some(updated_at);
-                            Self::thread_index_record(&stored)
+                            (Self::thread_index_record(&stored), true)
                         }
                     };
-                    let mut changed = false;
                     if index
                         .record
                         .updated_at
@@ -783,26 +788,18 @@ fn merge_pending_thread_index_touch(
     }
 }
 
-fn evict_thread_index_touch_state_over_limit(
-    state: &mut HashMap<String, ThreadIndexTouchEntry>,
-    keep: &str,
-) {
-    if state.len() < THREAD_INDEX_TOUCH_STATE_MAX || state.contains_key(keep) {
-        return;
-    }
-    let victim = state
-        .iter()
-        .filter(|(_, entry)| entry.pending.is_none() && !entry.worker_running)
-        .min_by_key(|(_, entry)| entry.last_flushed_at)
-        .map(|(key, _)| key.clone());
-    if let Some(victim) = victim {
-        state.remove(&victim);
+fn mark_thread_index_known_key(known_rows: &Mutex<HashSet<String>>, key: &str) {
+    if let Ok(mut known) = known_rows.lock() {
+        let key = key.to_string();
+        known.insert(key.clone());
+        evict_entry_over_limit(&mut known, THREAD_INDEX_KNOWN_ROW_MAX, &key);
     }
 }
 
 async fn flush_thread_index_touch_loop<F>(
     filesystem: Arc<ScopedFilesystem<F>>,
     state: Arc<ThreadIndexTouchState>,
+    known_rows: Arc<Mutex<HashSet<String>>>,
     key: String,
     flush_interval: Duration,
     mut delay: Duration,
@@ -827,17 +824,29 @@ async fn flush_thread_index_touch_loop<F>(
             touch
         };
 
-        if let Err(error) = FilesystemSessionThreadService::<F>::write_thread_index_touch(
+        match FilesystemSessionThreadService::<F>::write_thread_index_touch(
             filesystem.as_ref(),
             &touch,
         )
         .await
         {
-            tracing::debug!(
-                ?error,
-                thread_id = %touch.thread_id.as_str(),
-                "coalesced thread recency touch failed",
-            );
+            Ok(true) => mark_thread_index_known_key(&known_rows, &key),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::debug!(
+                    ?error,
+                    thread_id = %touch.thread_id.as_str(),
+                    "coalesced thread recency touch failed",
+                );
+                let mut entries = match state.entries.lock() {
+                    Ok(entries) => entries,
+                    Err(_) => return,
+                };
+                let Some(entry) = entries.get_mut(&key) else {
+                    return;
+                };
+                merge_pending_thread_index_touch(&mut entry.pending, touch);
+            }
         }
 
         let has_pending = match state.entries.lock() {
@@ -995,7 +1004,10 @@ mod tests {
     };
 
     use super::super::thread_record_path;
-    use super::{ThreadIndexFlags, ThreadIndexRecord};
+    use super::{
+        PendingThreadIndexTouch, THREAD_INDEX_TOUCH_STATE_MAX, ThreadIndexFlags, ThreadIndexRecord,
+        ThreadIndexTouchAction, ThreadIndexTouchEntry,
+    };
 
     #[test]
     fn merge_thread_index_records_prefers_present_source_fields() {
@@ -1164,6 +1176,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filesystem_thread_index_touch_recreates_a_missing_projection_row() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = scoped_threads_fs_at(backend, "tenant-missing-projection-touch", "alice");
+        let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+        let request_scope = scope("missing-projection-touch");
+        let thread_id = ThreadId::new("thread-missing-projection-touch").unwrap();
+        let created = service
+            .ensure_thread(EnsureThreadRequest {
+                scope: request_scope.clone(),
+                thread_id: Some(thread_id.clone()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some("projection source".into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        scoped
+            .delete(
+                &request_scope.to_resource_scope(),
+                &super::thread_index_record_path(&request_scope, &thread_id).unwrap(),
+            )
+            .await
+            .expect("test setup removes only the projection row");
+        let touched_at =
+            created.updated_at.expect("creation timestamp") + chrono::Duration::seconds(1);
+
+        service
+            .touch_thread_index_updated_at(&request_scope, &thread_id, touched_at)
+            .await
+            .unwrap();
+
+        let recreated = service
+            .read_thread_index_record(&request_scope, &thread_id)
+            .await
+            .unwrap()
+            .expect("touch recreates the missing projection from its source");
+        assert_eq!(recreated.record.updated_at, Some(touched_at));
+    }
+    #[tokio::test]
     async fn filesystem_thread_index_recreate_does_not_reuse_stale_metadata() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = scoped_threads_fs_at(backend, "tenant-stale-index", "alice");
@@ -1220,6 +1271,83 @@ mod tests {
         assert_eq!(
             recreated.metadata_json.as_deref(),
             Some("{\"recreated\":true}")
+        );
+    }
+
+    #[tokio::test]
+    async fn derived_title_touch_is_never_buffered() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = scoped_threads_fs_at(backend, "tenant-derived-title-touch", "alice");
+        let service = FilesystemSessionThreadService::new(scoped);
+        let request_scope = scope("derived-title-touch");
+        let thread_id = ThreadId::new("thread-derived-title-touch").unwrap();
+        let key = "derived-title-touch";
+        let first = service.buffer_thread_index_touch(
+            key,
+            PendingThreadIndexTouch {
+                scope: request_scope.clone(),
+                thread_id: thread_id.clone(),
+                updated_at: chrono::Utc::now(),
+                derived_title: None,
+            },
+        );
+        assert!(matches!(first, ThreadIndexTouchAction::FlushNow(_)));
+
+        let title_touch = service.buffer_thread_index_touch(
+            key,
+            PendingThreadIndexTouch {
+                scope: request_scope,
+                thread_id,
+                updated_at: chrono::Utc::now(),
+                derived_title: Some("private sidebar text".into()),
+            },
+        );
+
+        assert!(
+            matches!(title_touch, ThreadIndexTouchAction::FlushNow(_)),
+            "user text must persist synchronously so later redaction cannot race a buffered copy"
+        );
+    }
+    #[test]
+    fn thread_index_touch_state_flushes_directly_when_all_entries_are_active() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = scoped_threads_fs_at(backend, "tenant-touch-cap", "alice");
+        let service = FilesystemSessionThreadService::new(scoped);
+        {
+            let mut entries = match service.thread_index_touch_state.entries.lock() {
+                Ok(entries) => entries,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            for index in 0..THREAD_INDEX_TOUCH_STATE_MAX {
+                entries.insert(
+                    format!("active-{index}"),
+                    ThreadIndexTouchEntry {
+                        worker_running: true,
+                        ..ThreadIndexTouchEntry::default()
+                    },
+                );
+            }
+        }
+        let request_scope = scope("touch-cap");
+        let thread_id = ThreadId::new("thread-touch-cap").unwrap();
+        let action = service.buffer_thread_index_touch(
+            "new-touch-over-cap",
+            PendingThreadIndexTouch {
+                scope: request_scope,
+                thread_id,
+                updated_at: chrono::Utc::now(),
+                derived_title: None,
+            },
+        );
+
+        assert!(matches!(action, ThreadIndexTouchAction::FlushNow(_)));
+        let retained = match service.thread_index_touch_state.entries.lock() {
+            Ok(entries) => entries.len(),
+            Err(poisoned) => poisoned.into_inner().len(),
+        };
+        assert_eq!(
+            retained, THREAD_INDEX_TOUCH_STATE_MAX,
+            "active touch state must stay within its hard cap"
         );
     }
 }

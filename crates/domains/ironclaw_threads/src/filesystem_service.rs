@@ -183,7 +183,7 @@ where
     F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
-    known_thread_index_rows: Mutex<HashSet<String>>,
+    known_thread_index_rows: Arc<Mutex<HashSet<String>>>,
     ready_thread_index_scopes: Mutex<HashSet<String>>,
     /// Mounts whose `/threads`-root index specs are already declared, keyed by
     /// `tenant:user` — the pair the alias resolves through. Keeps thread create
@@ -216,7 +216,7 @@ where
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
             filesystem,
-            known_thread_index_rows: Mutex::new(HashSet::new()),
+            known_thread_index_rows: Arc::new(Mutex::new(HashSet::new())),
             ready_thread_index_scopes: Mutex::new(HashSet::new()),
             ready_index_mounts: Mutex::new(HashSet::new()),
             thread_index_declaration_lock: tokio::sync::Mutex::new(()),
