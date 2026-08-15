@@ -25,9 +25,8 @@ use ironclaw_composition::{
 };
 use ironclaw_conversations::{AdapterInstallationId, AdapterKind};
 use ironclaw_extension_contracts::external::ExternalActorRef;
-use ironclaw_host_api::execution_policy::{
-    NOTHING_TO_REPORT_SENTINEL, ResultDeliveryPolicy, TurnExecutionPolicy,
-};
+use ironclaw_host_api::execution_policy::{ResultDeliveryPolicy, TurnExecutionPolicy};
+use ironclaw_host_api::prepared_context::STRUCTURED_RESULT_PROVIDER_TOOL_NAME;
 use ironclaw_host_api::product_adapter::AdapterInstallationId as ProductAdapterInstallationId;
 use ironclaw_host_api::{
     action::NetworkPolicy,
@@ -50,8 +49,8 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
-    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse,
+    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -212,7 +211,7 @@ impl HostManagedModelGateway for DeliveryJourneyGateway {
     async fn stream_model_with_capabilities(
         &self,
         request: HostManagedModelRequest,
-        _capabilities: Arc<dyn LoopCapabilityPort>,
+        capabilities: Arc<dyn LoopCapabilityPort>,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         if !request
             .messages
@@ -222,8 +221,30 @@ impl HostManagedModelGateway for DeliveryJourneyGateway {
             return self.stream_model(request).await;
         }
         self.requests.lock().await.push(request);
-        Ok(HostManagedModelResponse::assistant_reply(
-            NOTHING_TO_REPORT_SENTINEL,
+        let call = ProviderToolCall {
+            provider_id: "scheduled-suppression-e2e-provider".to_string(),
+            provider_model_id: "scheduled-suppression-e2e-model".to_string(),
+            turn_id: Some("scheduled-suppression-e2e-turn".to_string()),
+            id: "scheduled-suppression-result".to_string(),
+            name: ProviderToolName::new(STRUCTURED_RESULT_PROVIDER_TOOL_NAME)
+                .expect("structured result provider tool name"),
+            arguments: json!({"outcome": "nothing_to_report"}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        };
+        let candidate = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
+            .await
+            .map_err(|error| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    error.safe_summary,
+                )
+            })?;
+        Ok(HostManagedModelResponse::capability_calls(
+            vec![candidate],
+            "",
         ))
     }
 }

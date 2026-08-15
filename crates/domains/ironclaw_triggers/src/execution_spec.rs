@@ -1,8 +1,6 @@
-use std::{borrow::Cow, collections::HashSet};
+use std::collections::HashSet;
 
-use ironclaw_host_api::execution_policy::{
-    NOTHING_TO_REPORT_SENTINEL, ResultDeliveryPolicy, TurnExecutionPolicy,
-};
+use ironclaw_host_api::execution_policy::{ResultDeliveryPolicy, TurnExecutionPolicy};
 use serde::{Deserialize, Serialize};
 
 use crate::{MAX_TRIGGER_PROMPT_BYTES, TriggerError, TriggerRecordValidationKind};
@@ -83,10 +81,11 @@ impl TriggerExecutionSpec {
             .collect::<Vec<_>>()
             .join("\n");
         let no_result_instruction = match self.policy.result_delivery {
-            ResultDeliveryPolicy::Deliver => Cow::Borrowed(self.no_result_text.as_str()),
-            ResultDeliveryPolicy::SuppressWhenNothingToReport => Cow::Owned(format!(
-                "Return exactly `{NOTHING_TO_REPORT_SENTINEL}` and nothing else."
-            )),
+            ResultDeliveryPolicy::Deliver => self.no_result_text.as_str(),
+            ResultDeliveryPolicy::SuppressWhenNothingToReport => {
+                "If there is nothing to report, call `builtin__structured_result` with `\
+                 {\"outcome\":\"nothing_to_report\"}` and do not return an assistant response."
+            }
         };
         render_template(
             PROMPT_TEMPLATE,
@@ -94,7 +93,7 @@ impl TriggerExecutionSpec {
                 ("{{goal}}", self.goal.as_str()),
                 ("{{success_criteria}}", criteria.as_str()),
                 ("{{output_instructions}}", self.output_instructions.as_str()),
-                ("{{no_result_text}}", no_result_instruction.as_ref()),
+                ("{{no_result_text}}", no_result_instruction),
             ],
         )
     }

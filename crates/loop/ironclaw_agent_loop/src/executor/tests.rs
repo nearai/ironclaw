@@ -54,7 +54,7 @@ use super::{
     BudgetInput, BudgetStage, BudgetStep, CanonicalAgentLoopExecutor, CapabilityInput,
     CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, GateInput, GateStage,
     HostStage, InputStage, InputStep, ModelInput, ModelStage, ModelStep, PromptInput, PromptStage,
-    PromptStep, StageContext, TurnCompletedStep, UserFacingInputDrainMode,
+    PromptStep, StageContext, TurnCompletedStep, UserFacingInputDrainMode, completed_exit,
     consume_drainable_inputs, sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
 };
 
@@ -3560,15 +3560,15 @@ async fn stopped_on_suspension_completed_outcome_still_appends_result() {
 }
 
 #[tokio::test]
-async fn exact_silent_reply_terminalizes_suppressed_schedule_without_finalizing_reply() {
-    let host = MockHost::new(vec![reply_response_with_text("  [SILENT]\n")])
-        .with_suppressed_scheduled_context();
-    let state = LoopExecutionState::initial_for_run(host.run_context());
+async fn typed_structured_result_terminalizes_suppressed_schedule_without_finalizing_reply() {
+    let host = MockHost::new(Vec::new()).with_suppressed_scheduled_context();
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.stop_state.structured_result_recorded = true;
+    state
+        .result_refs
+        .push(LoopResultRef::new("result:nothing-to-report").expect("result ref"));
 
-    let exit = CanonicalAgentLoopExecutor
-        .execute_family(&crate::families::default(), &host, state)
-        .await
-        .expect("execute");
+    let exit = completed_exit(&host, state, None).expect("completed exit");
 
     let LoopExit::Completed(completed) = exit else {
         panic!("expected completed exit");
@@ -3578,33 +3578,46 @@ async fn exact_silent_reply_terminalizes_suppressed_schedule_without_finalizing_
         LoopCompletionKind::NothingToReport
     );
     assert!(completed.reply_message_refs.is_empty());
-    assert!(completed.result_refs.is_empty());
-    assert!(completed.final_checkpoint_id.is_some());
+    assert_eq!(
+        completed.result_refs,
+        vec![LoopResultRef::new("result:nothing-to-report").expect("result ref")]
+    );
     assert!(host.finalized_assistant_messages().is_empty());
-    assert!(host.single_invocations().is_empty());
-    assert!(host.batch_invocations().is_empty());
 }
 
 #[tokio::test]
-async fn exact_silent_reply_honors_cancellation_after_final_checkpoint() {
-    let host = MockHost::new(vec![reply_response_with_text("[SILENT]")])
+async fn typed_nothing_to_report_honors_cancellation_after_final_checkpoint() {
+    let host = MockHost::new(Vec::new())
         .with_suppressed_scheduled_context()
         .cancel_after_checkpoint(LoopCheckpointKind::Final);
-    let state = LoopExecutionState::initial_for_run(host.run_context());
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.stop_state.structured_result_recorded = true;
+    state
+        .result_refs
+        .push(LoopResultRef::new("result:nothing-to-report-cancelled").expect("result ref"));
 
-    let exit = CanonicalAgentLoopExecutor
-        .execute_family(&crate::families::default(), &host, state)
+    let exit = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::GracefulStop,
+            },
+        )
         .await
-        .expect("execute");
+        .expect("exit stage");
 
     assert!(matches!(exit, LoopExit::Cancelled(_)));
     assert!(host.finalized_assistant_messages().is_empty());
-    assert!(host.single_invocations().is_empty());
-    assert!(host.batch_invocations().is_empty());
 }
 
 #[tokio::test]
-async fn exact_silent_reply_is_visible_outside_scheduled_suppression_context() {
+async fn silent_text_has_no_special_meaning_outside_typed_completion() {
     let host = MockHost::new(vec![reply_response_with_text("[SILENT]")]);
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
@@ -3646,7 +3659,7 @@ async fn reply_that_mentions_silent_is_delivered_normally() {
 }
 
 #[tokio::test]
-async fn exact_silent_reply_preserves_a_pending_external_tool_resume() {
+async fn silent_text_is_visible_with_a_pending_external_tool_resume() {
     let host = MockHost::new(Vec::new()).with_suppressed_scheduled_context();
     let family = crate::families::default();
     let ctx = StageContext {

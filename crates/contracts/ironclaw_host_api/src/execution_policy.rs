@@ -8,15 +8,10 @@ use crate::{error::HostApiError, ids::CapabilityId};
 
 const MAX_REQUIRED_SKILL_NAME_BYTES: usize = 64;
 
-/// Reserved exact final response for a scheduled run that has no result to
-/// deliver. The loop recognizes it only for an explicit suppression policy and
-/// converts it to the typed durable outcome before transcript finalization.
-pub const NOTHING_TO_REPORT_SENTINEL: &str = "[SILENT]";
-
 /// How a successful run's ordinary result is handled after settlement.
 ///
 /// This is explicit and defaults to delivery so legacy callers cannot acquire
-/// suppression merely by mentioning the compatibility sentinel in content.
+/// suppression when the policy field is absent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResultDeliveryPolicy {

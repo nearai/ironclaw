@@ -977,7 +977,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                                 "result_delivery": {
                                     "type": "string",
                                     "enum": ["deliver", "suppress_when_nothing_to_report"],
-                                    "description": "Required explicit choice. Choose suppress_when_nothing_to_report only when the user wants no ordinary delivery for a no-result run. If the user's intent is unclear, ask the user before calling trigger_create rather than guess."
+                                    "description": "Derive this from the user's wording. Use suppress_when_nothing_to_report when the user asks to be notified only on a match, change, or actionable result; otherwise use deliver."
                                 }
                             },
                             "required": ["result_delivery"],
@@ -1248,8 +1248,8 @@ mod tests {
             schema["properties"]["execution_contract"]["properties"]["policy"]["properties"]
                 ["result_delivery"]["description"]
                 .as_str()
-                .is_some_and(|description| description.contains("ask the user before calling")),
-            "ambiguous no-result delivery must be clarified before trigger creation"
+                .is_some_and(|description| description.contains("otherwise use deliver")),
+            "neutral wording must have the safe delivery fallback"
         );
         let goal_description =
             schema["properties"]["execution_contract"]["properties"]["goal"]["description"]

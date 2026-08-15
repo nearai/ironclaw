@@ -1,4 +1,7 @@
-use ironclaw_host_api::turn::{LoopExitId, LoopMessageRef, SanitizedFailure};
+use ironclaw_host_api::{
+    execution_policy::ResultDeliveryPolicy,
+    turn::{LoopExitId, LoopMessageRef, SanitizedFailure, TurnOriginKind},
+};
 use ironclaw_loop_contracts::{
     AgentLoopDriverHost, LoopCancelReasonKind, LoopCancellationSignal, LoopCancelled,
     LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopExit, LoopFailed,
@@ -14,7 +17,9 @@ pub(super) fn completed_exit(
     state: LoopExecutionState,
     final_checkpoint_id: Option<ironclaw_host_api::turn::TurnCheckpointId>,
 ) -> Result<LoopExit, AgentLoopExecutorError> {
-    let completion_kind = if !state.assistant_refs.is_empty() {
+    let completion_kind = if is_typed_nothing_to_report(host, &state) {
+        LoopCompletionKind::NothingToReport
+    } else if !state.assistant_refs.is_empty() {
         LoopCompletionKind::FinalReply
     } else if !state.result_refs.is_empty() {
         LoopCompletionKind::ResultOnly
@@ -32,20 +37,22 @@ pub(super) fn completed_exit(
     }))
 }
 
-pub(super) fn nothing_to_report_completed_exit(
+pub(super) fn is_typed_nothing_to_report(
     host: &(dyn AgentLoopDriverHost + Send + Sync),
-    state: LoopExecutionState,
-    final_checkpoint_id: ironclaw_host_api::turn::TurnCheckpointId,
-) -> Result<LoopExit, AgentLoopExecutorError> {
-    let model_usage = state.cumulative_model_usage;
-    Ok(LoopExit::Completed(LoopCompleted {
-        completion_kind: LoopCompletionKind::NothingToReport,
-        reply_message_refs: Vec::new(),
-        result_refs: Vec::new(),
-        final_checkpoint_id: Some(final_checkpoint_id),
-        model_usage,
-        exit_id: exit_id(host, "nothing-to-report")?,
-    }))
+    state: &LoopExecutionState,
+) -> bool {
+    state.assistant_refs.is_empty()
+        && !state.result_refs.is_empty()
+        && state.stop_state.structured_result_recorded
+        && host
+            .run_context()
+            .product_context
+            .as_ref()
+            .filter(|context| context.origin == TurnOriginKind::ScheduledTrigger)
+            .and_then(|context| context.execution_policy.as_ref())
+            .is_some_and(|policy| {
+                policy.result_delivery == ResultDeliveryPolicy::SuppressWhenNothingToReport
+            })
 }
 
 pub(super) fn failed_exit(

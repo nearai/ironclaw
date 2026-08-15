@@ -65,7 +65,7 @@ fn structured_execution_spec_renders_placeholders_in_one_pass() {
 }
 
 #[test]
-fn structured_execution_spec_only_requests_exact_sentinel_for_explicit_suppression() {
+fn structured_execution_spec_requests_typed_no_result_completion_for_explicit_suppression() {
     let mut spec = TriggerExecutionSpec {
         version: 1,
         goal: "Check the inbox".to_string(),
@@ -75,11 +75,15 @@ fn structured_execution_spec_only_requests_exact_sentinel_for_explicit_suppressi
         policy: TurnExecutionPolicy::default(),
     };
     assert!(spec.render_prompt().contains("No new messages."));
-    assert!(!spec.render_prompt().contains("[SILENT]"));
+    assert!(!spec.render_prompt().contains("builtin__structured_result"));
 
     spec.policy.result_delivery = ResultDeliveryPolicy::SuppressWhenNothingToReport;
     let rendered = spec.render_prompt();
-    assert!(rendered.contains("Return exactly `[SILENT]` and nothing else."));
+    assert!(
+        rendered.contains(
+            r#"call `builtin__structured_result` with `{"outcome":"nothing_to_report"}`"#
+        )
+    );
     assert!(!rendered.contains("No new messages."));
 }
 

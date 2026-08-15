@@ -822,7 +822,9 @@ fn completion_kind_ref_violation(
             }
         }
         LoopCompletionKind::NothingToReport => {
-            if exit.has_durable_completion_ref() {
+            if exit.result_refs.is_empty() {
+                Some(LoopExitViolationKind::MissingCompletionReference)
+            } else if !exit.reply_message_refs.is_empty() {
                 Some(LoopExitViolationKind::MismatchedCompletionReferenceKind)
             } else if !policy.allow_nothing_to_report_completion {
                 Some(LoopExitViolationKind::NothingToReportNotAllowed)

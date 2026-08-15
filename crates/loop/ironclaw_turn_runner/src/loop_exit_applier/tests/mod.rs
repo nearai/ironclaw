@@ -81,7 +81,7 @@ async fn typed_completion_is_settled_as_durable_nothing_to_report() {
             LoopExit::Completed(LoopCompleted {
                 completion_kind: LoopCompletionKind::NothingToReport,
                 reply_message_refs: Vec::new(),
-                result_refs: Vec::new(),
+                result_refs: vec![LoopResultRef::new("result:nothing-to-report").expect("result")],
                 final_checkpoint_id: Some(TurnCheckpointId::new()),
                 model_usage: None,
                 exit_id: ironclaw_host_api::turn::LoopExitId::new("exit:nothing-to-report")
@@ -142,7 +142,7 @@ async fn typed_nothing_to_report_completion_requires_explicit_scheduled_policy()
     let exit = LoopExit::Completed(LoopCompleted {
         completion_kind: LoopCompletionKind::NothingToReport,
         reply_message_refs: Vec::new(),
-        result_refs: Vec::new(),
+        result_refs: vec![LoopResultRef::new("result:unapproved-nothing").expect("result")],
         final_checkpoint_id: None,
         model_usage: None,
         exit_id: ironclaw_host_api::turn::LoopExitId::new("exit:unapproved-nothing")
@@ -184,7 +184,7 @@ async fn typed_nothing_to_report_completion_always_requires_final_checkpoint_evi
     let exit = LoopExit::Completed(LoopCompleted {
         completion_kind: LoopCompletionKind::NothingToReport,
         reply_message_refs: Vec::new(),
-        result_refs: Vec::new(),
+        result_refs: vec![LoopResultRef::new("result:missing-final-checkpoint").expect("result")],
         final_checkpoint_id: None,
         model_usage: None,
         exit_id: ironclaw_host_api::turn::LoopExitId::new("exit:missing-final-checkpoint")

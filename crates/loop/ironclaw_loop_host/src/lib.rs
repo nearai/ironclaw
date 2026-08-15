@@ -149,7 +149,7 @@ pub use skill_context::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextCandidatePayload,
     HostSkillContextSource, build_skill_run_snapshot,
 };
-pub use structured_result::structured_result_capability;
+pub use structured_result::{nothing_to_report_result_capability, structured_result_capability};
 pub use subagent_prompt_port::{
     DEFAULT_SUBAGENT_GOAL_MAX_BYTES, SubagentLoopPromptPort, SubagentPromptComposer,
     SubagentPromptGoal, SubagentPromptLimits, SubagentPromptMaterial, SubagentPromptMaterialSource,
