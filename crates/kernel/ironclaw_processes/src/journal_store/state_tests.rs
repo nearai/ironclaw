@@ -279,6 +279,69 @@ fn submit_at_edge_rejects_incompatible_submissions() {
 }
 
 #[test]
+fn edge_submissions_keep_only_compact_bindings_not_persisted_snapshots() {
+    let mut state = ProcessJournalMaterializedState::default();
+    let request_scope = scope("edge-bindings");
+    let process_id = ProcessId::new();
+    let mut submission = submit_request(process_id, request_scope);
+    submission.process_kind = ProcessKind::CapabilityInvocationState;
+    submission.operation_id = Some(ProcessOperationId::from_trusted("edge-op"));
+    let command = || {
+        StoredProcessCommand::SubmitAtEdge(Box::new(SubmitProcessAtEdgeRequest {
+            submission: submission.clone(),
+            edge: ProcessSubmissionEdge::Completed,
+        }))
+    };
+
+    let StoredCommandOutcome::Submitted(_, true) = state
+        .apply_command(command())
+        .expect("initial edge submission")
+    else {
+        panic!("expected initial edge submission");
+    };
+    // The perf contract: an edge submission must not persist a full-snapshot
+    // idempotency record that every later journal command re-serializes.
+    // Only the compact in-memory binding is retained.
+    assert!(
+        state.submission_idempotency.is_empty(),
+        "edge submissions must not grow the persisted idempotency map"
+    );
+    assert_eq!(
+        state
+            .edge_submission_bindings
+            .values()
+            .filter(|bound| **bound == process_id)
+            .count(),
+        1,
+        "compact op-id binding must be recorded"
+    );
+
+    // Replay semantics are unchanged: the identical submission resolves from
+    // the durable process row without a second journal entry, and a
+    // same-operation submission for a different process is still rejected.
+    let StoredCommandOutcome::Submitted(_, false) = state
+        .apply_command(command())
+        .expect("idempotent edge replay")
+    else {
+        panic!("expected idempotent edge replay");
+    };
+    assert_eq!(state.journal.len(), 1);
+
+    let mut different_process = submission.clone();
+    different_process.process_id = ProcessId::new();
+    assert_error(
+        state.apply_command(StoredProcessCommand::SubmitAtEdge(Box::new(
+            SubmitProcessAtEdgeRequest {
+                submission: different_process,
+                edge: ProcessSubmissionEdge::Completed,
+            },
+        ))),
+        "request",
+    );
+    assert_eq!(state.journal.len(), 1, "rejected replay must not write");
+}
+
+#[test]
 fn submit_at_edge_replay_requires_matching_submission_and_writes_once() {
     let mut state = ProcessJournalMaterializedState::default();
     let mut submission = submit_request(ProcessId::new(), scope("edge-replay"));

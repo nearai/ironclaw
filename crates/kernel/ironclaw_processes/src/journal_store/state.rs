@@ -56,6 +56,18 @@ pub(super) struct ProcessJournalMaterializedState {
     pub(super) submission_idempotency: HashMap<String, JournaledProcessSnapshot>,
     #[serde(default)]
     pub(super) submission_idempotency_order: VecDeque<String>,
+    /// op-id → process-id binding for edge submissions, kept in memory only.
+    ///
+    /// Edge submissions deliberately do not persist full-snapshot idempotency
+    /// records (see [`Self::apply_submit_at_edge`]); replay validation is
+    /// answered from the durable process row instead. This compact binding
+    /// retains the same-operation-different-process rejection for the life of
+    /// the store without re-serializing a full snapshot per record on every
+    /// journal command.
+    #[serde(default)]
+    pub(super) edge_submission_bindings: HashMap<String, ProcessId>,
+    #[serde(default)]
+    pub(super) edge_submission_bindings_order: VecDeque<String>,
     #[serde(default)]
     pub(super) tree_reservations: HashMap<ProcessId, ProcessTreeReservation>,
     #[serde(default)]
@@ -78,6 +90,8 @@ impl Default for ProcessJournalMaterializedState {
             control_idempotency_order: VecDeque::new(),
             submission_idempotency: HashMap::new(),
             submission_idempotency_order: VecDeque::new(),
+            edge_submission_bindings: HashMap::new(),
+            edge_submission_bindings_order: VecDeque::new(),
             tree_reservations: HashMap::new(),
             dependencies: HashMap::new(),
             checkpoints: HashMap::new(),
@@ -492,7 +506,38 @@ impl ProcessJournalMaterializedState {
             }
             return Ok(StoredCommandOutcome::Submitted(snapshot.clone(), false));
         }
-        if self.processes.contains_key(&submission.process_id) {
+        // Edge submissions keep only a compact in-memory binding, so the
+        // durable process row is the replay authority: a retry of the same
+        // operation after a restart must return the committed terminal state
+        // rather than failing, and a same-operation submission with a
+        // different process id must still be rejected.
+        if let Some(bound_process_id) = replay_key
+            .as_ref()
+            .and_then(|key| self.edge_submission_bindings.get(key))
+        {
+            if *bound_process_id != submission.process_id {
+                return Err(ProcessJournalStoreError::InvalidRequest(
+                    "edge submission replay does not match the original request".to_string(),
+                ));
+            }
+            let existing = self.processes.get(&submission.process_id).ok_or(
+                ProcessJournalStoreError::ProcessAlreadyExists {
+                    process_id: submission.process_id,
+                },
+            )?;
+            if !Self::edge_replay_matches(&submission, &request.edge, existing) {
+                return Err(ProcessJournalStoreError::InvalidRequest(
+                    "edge submission replay does not match the original request".to_string(),
+                ));
+            }
+            return Ok(StoredCommandOutcome::Submitted(existing.clone(), false));
+        }
+        if let Some(existing) = self.processes.get(&submission.process_id) {
+            // No binding survived (restart), but the process row is durable:
+            // accept an identical replay, reject anything else.
+            if Self::edge_replay_matches(&submission, &request.edge, existing) {
+                return Ok(StoredCommandOutcome::Submitted(existing.clone(), false));
+            }
             return Err(ProcessJournalStoreError::ProcessAlreadyExists {
                 process_id: submission.process_id,
             });
@@ -565,7 +610,9 @@ impl ProcessJournalMaterializedState {
         };
         self.push_entry(ProcessJournalEntry::from_snapshot(&snapshot, cursor, kind));
         self.processes.insert(snapshot.process_id, snapshot.clone());
-        self.remember_submission_result(replay_key, snapshot.clone());
+        if let Some(key) = replay_key {
+            self.remember_edge_submission(key, snapshot.process_id);
+        }
         Ok(StoredCommandOutcome::Submitted(snapshot, true))
     }
 
@@ -1269,6 +1316,29 @@ impl ProcessJournalMaterializedState {
         }
         self.submission_idempotency_order.push_back(key.clone());
         self.submission_idempotency.insert(key, snapshot);
+    }
+
+    /// Remembers which process an edge submission's operation id was applied
+    /// to, in memory only.
+    ///
+    /// Edge submissions do not persist full-snapshot idempotency records: the
+    /// durable process row is the replay authority (see
+    /// [`Self::apply_submit_at_edge`]). This compact op-id → process-id binding
+    /// keeps rejecting same-operation replays with a different process id
+    /// without re-serializing a full snapshot per record on every journal
+    /// command. It is bounded like the persisted idempotency maps; losing it
+    /// across a restart only weakens the cross-process rejection, never replay
+    /// safety (the process row still answers identical replays).
+    pub(super) fn remember_edge_submission(&mut self, key: String, process_id: ProcessId) {
+        while self.edge_submission_bindings_order.len() >= MAX_IDEMPOTENCY_RECORDS {
+            let Some(oldest) = self.edge_submission_bindings_order.pop_front() else {
+                self.edge_submission_bindings.clear();
+                break;
+            };
+            self.edge_submission_bindings.remove(&oldest);
+        }
+        self.edge_submission_bindings_order.push_back(key.clone());
+        self.edge_submission_bindings.insert(key, process_id);
     }
 
     pub(super) fn process_mut(
