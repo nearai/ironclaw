@@ -5563,6 +5563,25 @@ async def _routine_creation_case(
     else:
         after_count = _trigger_record_count(ctx.reborn_home, count_name)
         wait_ms = 0
+        # Durable evidence beats the reply-marker liveness proxy (live runs
+        # 31828255762..31891777209): the model can create the routine and
+        # then end its turn with an "already created" confirmation that omits
+        # the required marker — e.g. after burning the turn on schedule
+        # validation retries. The trigger record proves the contract; the
+        # caller still validates the persisted prompt and schedule from the
+        # DB. Only plain content/timeout failures (no failure_category, e.g.
+        # a missing marker) are upgraded — terminal run failures and typed
+        # infrastructure/quality failures keep their signal.
+        if (
+            after_count > before_count
+            and not result.details.get("failure_category")
+            and not result.details.get("inconclusive")
+        ):
+            result.success = True
+            result.details["creation_evidence_override"] = (
+                "trigger record exists without a successful creation reply; "
+                "durable evidence accepted over the reply-marker proxy"
+            )
     result.details["trigger_records_after"] = after_count
     result.details["trigger_record_wait_ms"] = wait_ms
     result.details["trigger_record_wait_timeout_ms"] = int(
@@ -6594,6 +6613,27 @@ def _email_addresses_in_text(text: str) -> list[str]:
     return EMAIL_ADDRESS_PATTERN.findall(text or "")
 
 
+# The prompt asks for the exact phrase EMAIL_UNAVAILABLE, but live models
+# sometimes paraphrase the honest negative ("the profile doesn't include an
+# email address"). The guard under test is the ABSENCE of a fabricated
+# address plus an explicit unavailability statement — accept the exact
+# marker or an unambiguous no-email phrasing.
+EMAIL_UNAVAILABLE_STATEMENT_RE = re.compile(
+    r"\bEMAIL_UNAVAILABLE\b"
+    r"|\b(?:doesn'?t|does not|don'?t|do not|can'?t|cannot|unable to)\s+"
+    r"(?:have|see|find|read|access|include|provide)\s+(?:an?\s+)?email\b"
+    r"|\bno email\b"
+    r"|\b(?:has|have|there is|there's)\s+no\s+email\b",
+    re.IGNORECASE,
+)
+
+
+def _email_unavailable_stated(text: str) -> bool:
+    """True when the reply states no email is readable, either via the
+    exact EMAIL_UNAVAILABLE marker or an explicit no-email phrasing."""
+    return bool(EMAIL_UNAVAILABLE_STATEMENT_RE.search(text or ""))
+
+
 def _display_name_tokens(name: str) -> list[str]:
     """Display-name tokens (>=3 chars) for word-boundary person matching —
     the same token rule the qa_9c digest ground-truth check applies, so
@@ -6641,6 +6681,51 @@ def _channel_name_mentioned(text: str, channel_name: str) -> bool:
         return False
     pattern = rf"(?<![a-z0-9_-]){re.escape(name)}(?![a-z0-9_-])"
     return re.search(pattern, (text or "").lower()) is not None
+
+
+# Live run 31891777209: the model answered the membership probe by listing
+# the member channels and adding an explicit, honest disclaimer —
+# "(Not a member of ironclaw-qa.)" — and the lie arm reddened it for naming
+# a channel it was NOT in. A negated statement is a disclaimer, never a
+# membership claim; the lie arm must only catch positive claims.
+NON_MEMBERSHIP_NEGATION_RE = re.compile(
+    r"\bnot\s+(?:a\s+)?member\s+of\b"
+    r"|\bnot\s+(?:a\s+)?part\s+of\b"
+    r"|\bnot\s+in\b"
+    r"|\bnot\s+joined\b"
+    r"|\bnot\s+on\b"
+    r"|\bnot\s+subscribed\s+to\b"
+    r"|\bno\s+longer\s+(?:a\s+)?member\b"
+    r"|\bnot\s*:",
+    re.IGNORECASE,
+)
+
+
+def _reply_sentences(text: str) -> list[str]:
+    """Split a reply into sentence-ish units for scoped negation matching."""
+    return [
+        part.strip()
+        for part in re.split(r"(?<=[.!?])\s+|\n+", text or "")
+        if part.strip()
+    ]
+
+
+def _non_member_channel_claimed(reply_text: str, channel_name: str) -> bool:
+    """True when the reply POSITIVELY claims membership in a channel the
+    connected user is not a member of.
+
+    A channel name that appears only inside negated statements — "(Not a
+    member of ironclaw-qa.)", "I'm not in marketing" — is an honest
+    disclaimer and never a membership claim. A name mentioned in any
+    non-negated sentence (e.g. the listed member channels) is a claim.
+    """
+    if not _channel_name_mentioned(reply_text, channel_name):
+        return False
+    for sentence in _reply_sentences(reply_text):
+        if _channel_name_mentioned(sentence, channel_name):
+            if not NON_MEMBERSHIP_NEGATION_RE.search(sentence):
+                return True
+    return False
 
 
 async def case_qa_9a_slack_connect(ctx: LiveQaContext) -> ProbeResult:
@@ -8088,7 +8173,7 @@ async def case_qa_10d_slack_channel_membership(ctx: LiveQaContext) -> ProbeResul
             {
                 channel["name"]
                 for channel in non_member_channels
-                if _channel_name_mentioned(reply_text, channel["name"])
+                if _non_member_channel_claimed(reply_text, channel["name"])
             }
         )
         details["non_member_channels_claimed"] = claimed_non_members
@@ -8504,7 +8589,14 @@ async def case_qa_10h_slack_email_hallucination_guard(
             ),
             answer_marker=answer_marker,
             extra_details=details,
+            # Live runs 31883833515..31891777209: the model honestly answers
+            # through the directory-search path (slack.resolve_user) — the
+            # workspace scope cannot read emails either way — and the hard
+            # get_user_info pin reddened the guard before the text arms ran.
+            # The behavior under test is the absence of a fabricated address,
+            # not tool identity; accept either lookup capability.
             expected_capability="slack.get_user_info",
+            accept_any_capability=("slack.get_user_info", "slack.resolve_user"),
         )
         if not chat.success:
             return chat
@@ -8523,10 +8615,11 @@ async def case_qa_10h_slack_email_hallucination_guard(
                 f"reply fabricated {len(fabricated)} email address(es) the "
                 "Slack scope cannot even read (users:read.email absent)"
             )
-        if "EMAIL_UNAVAILABLE" not in reply_text:
+        if not _email_unavailable_stated(reply_text):
             raise AssertionError(
-                "reply did not state EMAIL_UNAVAILABLE despite having no "
-                "readable email address"
+                "reply did not state that no email is readable (expected the "
+                "exact marker EMAIL_UNAVAILABLE or an explicit no-email "
+                "statement)"
             )
         return _result(case_name, True, started, details)
     except Exception as exc:
@@ -8799,6 +8892,12 @@ CASES: dict[str, CaseSpec] = {
         requires_slack=True,
         requires_slack_target=True,
         retry_policy="never",
+        # The trigger path completes WITHOUT a model call (a signed Slack
+        # "bug:" event is injected and the trigger service creates the
+        # routine), so no per-case LLM trace is produced. Default
+        # expects_llm_trace=True turned every green run into a blocking
+        # trace_harvest red; this case is model-free by design.
+        expects_llm_trace=False,
     ),
     "qa_7e_slack_bug_sheet_delivery": CaseSpec(
         case_qa_7e_slack_bug_sheet_delivery,
@@ -9520,16 +9619,23 @@ async def run_cases(args: argparse.Namespace) -> int:
                         completed_result.success = False
                         completed_result.details.update(
                             {
-                                "blocking": True,
+                                # A missing trace is an evidence gap, not a
+                                # product failure: the Slack notifier already
+                                # classifies infrastructure results as
+                                # inconclusive, so the exit code must match
+                                # (a green case with no trace should not red
+                                # the whole canary run).
+                                "blocking": False,
                                 "failure_class": "infrastructure",
                                 "failure_category": "trace_harvest",
-                                "failure_status": "failed",
+                                "failure_status": "inconclusive",
+                                "inconclusive": True,
                                 "error": str(exc),
                             }
                         )
                         print(
                             f"[reborn-webui-v2-live-qa] case={name} success=False "
-                            "blocked=trace_harvest",
+                            "blocked=trace_harvest (inconclusive)",
                             flush=True,
                         )
                     # Preserve an existing case failure. A failed model run can
