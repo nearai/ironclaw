@@ -307,4 +307,19 @@ mod tests {
             "resume_disposition must be Some(Denied) when legacy key auth_resume_disposition is present"
         );
     }
+
+    #[test]
+    fn legacy_turn_run_record_defaults_execution_outcome_to_none() {
+        let record = minimal_turn_run_record();
+        let mut json = serde_json::to_value(&record).expect("serialize turn run record");
+        let object = json
+            .as_object_mut()
+            .expect("turn run record must serialize to an object");
+        object.remove("execution_outcome");
+
+        let decoded: TurnRunRecord =
+            serde_json::from_value(json).expect("deserialize legacy turn run record");
+
+        assert_eq!(decoded.execution_outcome, None);
+    }
 }

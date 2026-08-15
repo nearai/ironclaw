@@ -482,13 +482,16 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         // run between outer-loop iterations (budget.rs), so without this cap
         // one oversized batch could dispatch (and charge)
         // `visible_calls.len()` invocations even when the remaining
-        // allowance is smaller. `try_charge_invocations` computes and
+        // allowance is smaller. `try_charge_invocations` reserves and
         // commits the admitted count in the same call; every call beyond it
         // is not dispatched — it gets a model-visible blocked result via the
         // same denied-calls machinery used above, so tool_use/tool_result
-        // pairing still holds for the whole batch. Once the counter reaches
-        // the cap, the next `BudgetStage` iteration hard stops the run
-        // through the existing `hard_budget_exit`.
+        // pairing still holds for the whole batch. After dispatch, the
+        // reservation is settled against the host's authoritative launched
+        // count so a truncated launch window does not consume budget for its
+        // unlaunched suffix. Once the counter reaches the cap, the next
+        // `BudgetStage` iteration hard stops the run through the existing
+        // `hard_budget_exit`.
         let resource_budget_policy = ctx
             .host
             .run_context()
@@ -564,9 +567,8 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         let policy = BatchPolicy::Parallel;
 
         capability_batch = CapabilityBatchTurnSummary::for_invocation_count(visible_calls.len());
-        // Budget accounting: every invocation that reaches dispatch counts,
-        // whatever its outcome — already charged above via
-        // `try_charge_invocations`.
+        // Budget accounting: reserve the admitted launch window above, then
+        // settle it against the authoritative launched count below.
 
         CheckpointStage
             .emit_progress(
@@ -730,6 +732,14 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         {
             return Err(AgentLoopExecutorError::PlannerContract {
                 detail: "capability batch outcome count does not match invocations",
+            });
+        }
+        if !state
+            .budget_ledger
+            .settle_invocation_reservation(visible_calls.len(), outcomes.len())
+        {
+            return Err(AgentLoopExecutorError::PlannerContract {
+                detail: "capability batch launch count cannot settle its budget reservation",
             });
         }
 

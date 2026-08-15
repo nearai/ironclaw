@@ -5647,6 +5647,13 @@ async fn ordered_middleware_preserves_the_complete_model_batch_contract() {
     let batch_invocations = host.batch_invocations();
     assert_eq!(batch_invocations.len(), 1);
     assert!(batch_invocations[0].stop_on_first_suspension);
+    assert_eq!(
+        final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock)
+            .budget_ledger
+            .capability_invocations_made(),
+        1,
+        "only the first call reached the ordered host before suspension"
+    );
 }
 
 #[tokio::test]
