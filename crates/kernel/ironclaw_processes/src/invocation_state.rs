@@ -1,11 +1,14 @@
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use crate::{
     ClaimProcessesRequest, FailProcessRequest, GetProcessSnapshotRequest, JournaledProcessSnapshot,
     ProcessCheckpointRef, ProcessJournalStoreError, ProcessKind, ProcessLeaseRequest,
-    ProcessLifecycleStatus, ProcessRuntimePort, ProcessStateTransitionRequest, ProcessSuspension,
-    ProcessSuspensionKind, ProcessWorkerId, ResumeProcessRequest, SubmitProcessRequest,
-    SuspendProcessRequest,
+    ProcessLifecycleStatus, ProcessOperationId, ProcessRuntimePort, ProcessStateTransitionRequest,
+    ProcessSubmissionEdge, ProcessSuspension, ProcessSuspensionKind, ProcessWorkerId,
+    ResumeProcessRequest, SubmitProcessAtEdgeRequest, SubmitProcessRequest, SuspendProcessRequest,
 };
 use async_trait::async_trait;
 use ironclaw_event_log::sanitize_error_kind;
@@ -123,11 +126,15 @@ struct CapabilityRunMetadata {
 
 pub struct ProcessInvocationStore {
     processes: Arc<dyn ProcessRuntimePort>,
+    pending: Mutex<HashMap<InvocationId, ProcessInvocationStart>>,
 }
 
 impl ProcessInvocationStore {
     pub fn new(processes: Arc<dyn ProcessRuntimePort>) -> Self {
-        Self { processes }
+        Self {
+            processes,
+            pending: Mutex::new(HashMap::new()),
+        }
     }
 
     fn process_id(invocation_id: InvocationId) -> ProcessId {
@@ -207,6 +214,88 @@ impl ProcessInvocationStore {
             approval_request_id: metadata.approval_request_id,
             error_kind: metadata.error_kind,
         }))
+    }
+
+    fn pending_record(start: &ProcessInvocationStart) -> ProcessInvocationRecord {
+        ProcessInvocationRecord {
+            invocation_id: start.invocation_id,
+            capability_id: start.capability_id.clone(),
+            scope: start.scope.clone(),
+            authenticated_actor_user_id: start.authenticated_actor_user_id.clone(),
+            status: ProcessInvocationStatus::Running,
+            approval_request_id: None,
+            error_kind: None,
+        }
+    }
+
+    fn pending_start(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<Option<ProcessInvocationStart>, ProcessInvocationError> {
+        let pending = self
+            .pending
+            .lock()
+            .map_err(|error| ProcessInvocationError::Backend(error.to_string()))?;
+        Ok(pending
+            .get(&invocation_id)
+            .filter(|start| start.scope == *scope)
+            .cloned())
+    }
+
+    fn remove_pending(&self, invocation_id: InvocationId) -> Result<(), ProcessInvocationError> {
+        self.pending
+            .lock()
+            .map_err(|error| ProcessInvocationError::Backend(error.to_string()))?
+            .remove(&invocation_id);
+        Ok(())
+    }
+
+    fn edge_submission(
+        start: &ProcessInvocationStart,
+        checkpoint_ref: Option<ProcessCheckpointRef>,
+        metadata: CapabilityRunMetadata,
+    ) -> Result<SubmitProcessRequest, ProcessInvocationError> {
+        Ok(SubmitProcessRequest {
+            process_id: Self::process_id(start.invocation_id),
+            process_kind: ProcessKind::CapabilityInvocationState,
+            scope: start.scope.clone(),
+            exclusive_within_scope: false,
+            operation_id: Some(ProcessOperationId::from_trusted(format!(
+                "capability-invocation-{}",
+                start.invocation_id
+            ))),
+            owner_user_id: start.authenticated_actor_user_id.clone(),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref,
+            input: None,
+            created_at: chrono::Utc::now(),
+            metadata: Self::encode_metadata(&metadata)?,
+        })
+    }
+
+    async fn submit_pending_edge(
+        &self,
+        start: ProcessInvocationStart,
+        metadata: CapabilityRunMetadata,
+        checkpoint_ref: Option<ProcessCheckpointRef>,
+        edge: ProcessSubmissionEdge,
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
+        let invocation_id = start.invocation_id;
+        let snapshot = self
+            .processes
+            .submit_process_at_edge(SubmitProcessAtEdgeRequest {
+                submission: Self::edge_submission(&start, checkpoint_ref, metadata)?,
+                edge,
+            })
+            .await
+            .map_err(|error| map_process_error(error, invocation_id))?;
+        self.remove_pending(invocation_id)?;
+        Self::record(snapshot)?.ok_or(ProcessInvocationError::UnknownInvocation { invocation_id })
     }
 
     async fn snapshot(
@@ -321,31 +410,19 @@ impl ProcessInvocationStatePort for ProcessInvocationStore {
         start: ProcessInvocationStart,
     ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         let invocation_id = start.invocation_id;
-        let scope = start.scope.clone();
-        let owner_user_id = start.authenticated_actor_user_id.clone();
-        let metadata = Self::encode_metadata(&Self::metadata(start))?;
-        self.processes
-            .submit_process(SubmitProcessRequest {
-                process_id: Self::process_id(invocation_id),
-                process_kind: ProcessKind::CapabilityInvocationState,
-                scope: scope.clone(),
-                exclusive_within_scope: false,
-                operation_id: None,
-                owner_user_id,
-                concurrency_class: None,
-                parent_process_id: None,
-                root_process_id: None,
-                spawn_tree_descendant_cap: None,
-                dependency: None,
-                checkpoint_ref: None,
-                input: None,
-                created_at: chrono::Utc::now(),
-                metadata,
-            })
-            .await
-            .map_err(|error| map_process_error(error, invocation_id))?;
-        let snapshot = self.claim(scope, invocation_id).await?;
-        Self::record(snapshot)?.ok_or(ProcessInvocationError::UnknownInvocation { invocation_id })
+        if self.get(&start.scope, invocation_id).await?.is_some() {
+            return Err(ProcessInvocationError::InvocationAlreadyExists { invocation_id });
+        }
+        let record = Self::pending_record(&start);
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|error| ProcessInvocationError::Backend(error.to_string()))?;
+        if pending.contains_key(&invocation_id) {
+            return Err(ProcessInvocationError::InvocationAlreadyExists { invocation_id });
+        }
+        pending.insert(invocation_id, start);
+        Ok(record)
     }
 
     async fn block_approval(
@@ -354,6 +431,30 @@ impl ProcessInvocationStatePort for ProcessInvocationStore {
         invocation_id: InvocationId,
         approval: ApprovalRequest,
     ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
+        if let Some(start) = self.pending_start(scope, invocation_id)? {
+            let mut metadata = Self::metadata(start.clone());
+            metadata.approval_request_id = Some(approval.id);
+            metadata.error_kind = None;
+            return self
+                .submit_pending_edge(
+                    start,
+                    metadata,
+                    Some(Self::checkpoint_ref(invocation_id)),
+                    ProcessSubmissionEdge::Suspended {
+                        suspension: ProcessSuspension {
+                            kind: ProcessSuspensionKind::Approval,
+                            gate_ref: Some(
+                                TurnGateRef::new(format!("gate:approval-{}", approval.id))
+                                    .map_err(ProcessInvocationError::Backend)?,
+                            ),
+                            activity_id: None,
+                            credential_requirements: Vec::new(),
+                            detail: None,
+                        },
+                    },
+                )
+                .await;
+        }
         let snapshot = self.snapshot(scope, invocation_id).await?;
         let mut metadata = Self::decode_metadata(&snapshot)?
             .ok_or(ProcessInvocationError::UnknownInvocation { invocation_id })?;
@@ -383,6 +484,27 @@ impl ProcessInvocationStatePort for ProcessInvocationStore {
         invocation_id: InvocationId,
         error_kind: String,
     ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
+        if let Some(start) = self.pending_start(scope, invocation_id)? {
+            let mut metadata = Self::metadata(start.clone());
+            metadata.approval_request_id = None;
+            metadata.error_kind = Some(error_kind.clone());
+            return self
+                .submit_pending_edge(
+                    start,
+                    metadata,
+                    Some(Self::checkpoint_ref(invocation_id)),
+                    ProcessSubmissionEdge::Suspended {
+                        suspension: ProcessSuspension {
+                            kind: ProcessSuspensionKind::Authorization,
+                            gate_ref: None,
+                            activity_id: None,
+                            credential_requirements: Vec::new(),
+                            detail: None,
+                        },
+                    },
+                )
+                .await;
+        }
         let snapshot = self.snapshot(scope, invocation_id).await?;
         let mut metadata = Self::decode_metadata(&snapshot)?
             .ok_or(ProcessInvocationError::UnknownInvocation { invocation_id })?;
@@ -408,6 +530,14 @@ impl ProcessInvocationStatePort for ProcessInvocationStore {
         scope: &ResourceScope,
         invocation_id: InvocationId,
     ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
+        if let Some(start) = self.pending_start(scope, invocation_id)? {
+            let mut metadata = Self::metadata(start.clone());
+            metadata.approval_request_id = None;
+            metadata.error_kind = None;
+            return self
+                .submit_pending_edge(start, metadata, None, ProcessSubmissionEdge::Completed)
+                .await;
+        }
         let snapshot = self.running_snapshot(scope, invocation_id).await?;
         let mut metadata = Self::decode_metadata(&snapshot)?
             .ok_or(ProcessInvocationError::UnknownInvocation { invocation_id })?;
@@ -430,6 +560,21 @@ impl ProcessInvocationStatePort for ProcessInvocationStore {
         invocation_id: InvocationId,
         error_kind: String,
     ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
+        if let Some(start) = self.pending_start(scope, invocation_id)? {
+            let mut metadata = Self::metadata(start.clone());
+            metadata.approval_request_id = None;
+            metadata.error_kind = Some(error_kind.clone());
+            let failure = SanitizedFailure::new(sanitize_error_kind(error_kind))
+                .unwrap_or_else(|_| SanitizedFailure::from_trusted_static("unknown_failure"));
+            return self
+                .submit_pending_edge(
+                    start,
+                    metadata,
+                    None,
+                    ProcessSubmissionEdge::Failed { failure },
+                )
+                .await;
+        }
         let snapshot = self.running_snapshot(scope, invocation_id).await?;
         let mut metadata = Self::decode_metadata(&snapshot)?
             .ok_or(ProcessInvocationError::UnknownInvocation { invocation_id })?;
@@ -461,7 +606,9 @@ impl ProcessInvocationStatePort for ProcessInvocationStore {
     ) -> Result<Option<ProcessInvocationRecord>, ProcessInvocationError> {
         match self.snapshot(scope, invocation_id).await {
             Ok(snapshot) => Self::record(snapshot),
-            Err(ProcessInvocationError::UnknownInvocation { .. }) => Ok(None),
+            Err(ProcessInvocationError::UnknownInvocation { .. }) => self
+                .pending_start(scope, invocation_id)
+                .map(|start| start.as_ref().map(Self::pending_record)),
             Err(error) => Err(error),
         }
     }
@@ -481,6 +628,18 @@ impl ProcessInvocationStatePort for ProcessInvocationStore {
                 && let Some(record) = Self::record(snapshot)?
             {
                 records.push(record);
+            }
+        }
+        let pending = self
+            .pending
+            .lock()
+            .map_err(|error| ProcessInvocationError::Backend(error.to_string()))?;
+        for start in pending.values().filter(|start| start.scope == *scope) {
+            if !records
+                .iter()
+                .any(|record| record.invocation_id == start.invocation_id)
+            {
+                records.push(Self::pending_record(start));
             }
         }
         records.sort_by_key(|record| record.invocation_id.as_uuid());
@@ -546,7 +705,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blocked_auth_and_completion_are_process_journal_transitions() {
+    async fn fresh_completion_writes_only_the_terminal_edge() {
         let (store, journal) = process_store();
         let invocation_id = InvocationId::new();
         let scope = scope(invocation_id);
@@ -561,35 +720,68 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(running.status, ProcessInvocationStatus::Running);
-
-        let blocked = store
-            .block_auth(&scope, invocation_id, "credential_required".to_string())
-            .await
-            .unwrap();
-        assert_eq!(blocked.status, ProcessInvocationStatus::BlockedAuth);
+        assert_eq!(
+            store.get(&scope, invocation_id).await.unwrap(),
+            Some(running)
+        );
+        assert!(
+            journal
+                .read_process_journal_after(&scope, None, None, 16)
+                .await
+                .unwrap()
+                .entries
+                .is_empty()
+        );
 
         let completed = store.complete(&scope, invocation_id).await.unwrap();
         assert_eq!(completed.status, ProcessInvocationStatus::Completed);
-
         let page = journal
             .read_process_journal_after(&scope, None, None, 16)
             .await
             .unwrap();
-        let kinds = page
-            .entries
-            .iter()
-            .map(|entry| entry.kind)
-            .collect::<Vec<_>>();
-        assert!(
-            page.entries
-                .iter()
-                .all(|entry| entry.process_kind == ProcessKind::CapabilityInvocationState)
-        );
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].kind, crate::ProcessJournalKind::Completed);
+    }
+
+    #[tokio::test]
+    async fn fresh_suspension_is_resumable_from_a_second_store() {
+        let (first_store, journal) = process_store();
+        let invocation_id = InvocationId::new();
+        let scope = scope(invocation_id);
+        first_store
+            .start(ProcessInvocationStart {
+                invocation_id,
+                capability_id: CapabilityId::new("echo.say").unwrap(),
+                scope: scope.clone(),
+                authenticated_actor_user_id: Some(scope.user_id.clone()),
+            })
+            .await
+            .unwrap();
+        first_store
+            .block_auth(&scope, invocation_id, "credential_required".to_string())
+            .await
+            .unwrap();
+
+        let runtime = Arc::clone(&journal) as Arc<dyn ProcessRuntimePort>;
+        let second_store = ProcessInvocationStore::new(runtime);
+        let blocked = second_store
+            .get(&scope, invocation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(blocked.status, ProcessInvocationStatus::BlockedAuth);
+        let completed = second_store.complete(&scope, invocation_id).await.unwrap();
+        assert_eq!(completed.status, ProcessInvocationStatus::Completed);
         assert_eq!(
-            kinds,
+            journal
+                .read_process_journal_after(&scope, None, None, 16)
+                .await
+                .unwrap()
+                .entries
+                .iter()
+                .map(|entry| entry.kind)
+                .collect::<Vec<_>>(),
             vec![
-                crate::ProcessJournalKind::Submitted,
-                crate::ProcessJournalKind::Claimed,
                 crate::ProcessJournalKind::Suspended,
                 crate::ProcessJournalKind::Resumed,
                 crate::ProcessJournalKind::Claimed,

@@ -33,8 +33,8 @@ use crate::journal::{
     ProcessTreeReservation, PruneReleasedProcessRequest, RecordProcessCheckpointRequest,
     RecoverExpiredProcessLeasesRequest, RecoverExpiredProcessLeasesResponse,
     ReleaseProcessTreeRequest, ReserveProcessTreeRequest, ResumeProcessRequest,
-    SettleProcessDependencyRequest, StopProcessRequest, SubmitProcessRequest,
-    SubmitProcessWithCheckpointRequest, SuspendProcessRequest,
+    SettleProcessDependencyRequest, StopProcessRequest, SubmitProcessAtEdgeRequest,
+    SubmitProcessRequest, SubmitProcessWithCheckpointRequest, SuspendProcessRequest,
 };
 use crate::types::{invalid_path, same_scope_owner};
 
@@ -668,6 +668,19 @@ where
         // funnel, so it happens before this call returns without the wrapper
         // replaying each outcome.
         let (snapshot, _changed) = self.submit_process_inner(request).await?;
+        Ok(snapshot)
+    }
+
+    async fn submit_process_at_edge(
+        &self,
+        request: SubmitProcessAtEdgeRequest,
+    ) -> Result<JournaledProcessSnapshot, Self::Error> {
+        let outcome = self
+            .execute(StoredProcessCommand::SubmitAtEdge(Box::new(request)))
+            .await?;
+        let StoredCommandOutcome::Submitted(snapshot, _changed) = outcome else {
+            return Err(unexpected_outcome("submit_process_at_edge", outcome));
+        };
         Ok(snapshot)
     }
 

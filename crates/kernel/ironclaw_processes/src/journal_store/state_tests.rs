@@ -12,10 +12,11 @@ use crate::{
     ClaimProcessesRequest, CloseProcessDependencyRequest, OpenProcessDependencyRequest,
     ProcessCheckpointPayload, ProcessDependencyState, ProcessDependencySubmission,
     ProcessInputPayload, ProcessInputRef, ProcessInputSubmission, ProcessLeaseRequest,
-    ProcessOperationId, ProcessTerminalEvidence, ProcessWorkerId, PruneReleasedProcessRequest,
+    ProcessOperationId, ProcessSubmissionEdge, ProcessSuspension, ProcessSuspensionKind,
+    ProcessTerminalEvidence, ProcessWorkerId, PruneReleasedProcessRequest,
     RecordProcessCheckpointRequest, RecoverExpiredProcessLeasesRequest, ReleaseProcessTreeRequest,
     ReserveProcessTreeRequest, SettleProcessDependencyRequest, StateTransitionCase,
-    SubmitProcessRequest, assert_state_transition_table,
+    SubmitProcessAtEdgeRequest, SubmitProcessRequest, assert_state_transition_table,
     journal_store::{ProcessControlMutation, ProcessTransitionMutation, StoredProcessCommand},
 };
 
@@ -106,6 +107,84 @@ fn assert_error(
     assert_eq!(
         error_class(result.expect_err("transition must fail")),
         expected
+    );
+}
+
+#[test]
+fn submit_at_edge_materializes_only_the_requested_lifecycle_entry() {
+    let cases = [
+        (
+            ProcessSubmissionEdge::Completed,
+            ProcessLifecycleStatus::Completed,
+            ProcessJournalKind::Completed,
+        ),
+        (
+            ProcessSubmissionEdge::Failed {
+                failure: SanitizedFailure::from_trusted_static("capability_failed"),
+            },
+            ProcessLifecycleStatus::Failed,
+            ProcessJournalKind::Failed,
+        ),
+    ];
+
+    for (edge, expected_status, expected_kind) in cases {
+        let mut state = ProcessJournalMaterializedState::default();
+        let mut submission = submit_request(ProcessId::new(), scope("edge"));
+        submission.process_kind = ProcessKind::CapabilityInvocationState;
+        let outcome = state
+            .apply_command(StoredProcessCommand::SubmitAtEdge(Box::new(
+                SubmitProcessAtEdgeRequest { submission, edge },
+            )))
+            .expect("edge submission");
+        let StoredCommandOutcome::Submitted(snapshot, true) = outcome else {
+            panic!("expected new edge submission");
+        };
+
+        assert_eq!(snapshot.status, expected_status);
+        assert_eq!(snapshot.lease, None);
+        assert_eq!(state.journal.len(), 1);
+        assert_eq!(state.journal[0].kind, expected_kind);
+    }
+
+    let mut state = ProcessJournalMaterializedState::default();
+    let checkpoint_ref = ProcessCheckpointRef::from_trusted("invocation-edge");
+    let suspension = ProcessSuspension {
+        kind: ProcessSuspensionKind::Approval,
+        gate_ref: None,
+        activity_id: None,
+        credential_requirements: Vec::new(),
+        detail: None,
+    };
+    let mut submission = submit_request(ProcessId::new(), scope("suspended-edge"));
+    submission.process_kind = ProcessKind::CapabilityInvocationState;
+    submission.checkpoint_ref = Some(checkpoint_ref.clone());
+    let outcome = state
+        .apply_command(StoredProcessCommand::SubmitAtEdge(Box::new(
+            SubmitProcessAtEdgeRequest {
+                submission,
+                edge: ProcessSubmissionEdge::Suspended {
+                    suspension: suspension.clone(),
+                },
+            },
+        )))
+        .expect("suspended edge submission");
+    let StoredCommandOutcome::Submitted(snapshot, true) = outcome else {
+        panic!("expected new suspended edge submission");
+    };
+    assert_eq!(snapshot.status, ProcessLifecycleStatus::Suspended);
+    assert_eq!(snapshot.checkpoint_ref, Some(checkpoint_ref));
+    assert_eq!(snapshot.suspension, Some(suspension));
+    assert_eq!(state.journal.len(), 1);
+    assert_eq!(state.journal[0].kind, ProcessJournalKind::Suspended);
+
+    assert_error(
+        ProcessJournalMaterializedState::default().apply_command(
+            StoredProcessCommand::SubmitAtEdge(Box::new(SubmitProcessAtEdgeRequest {
+                submission: submit_request(ProcessId::new(), scope("invalid-edge-kind")),
+                edge: ProcessSubmissionEdge::Completed,
+            })),
+        ),
+        "request",
     );
 }
 

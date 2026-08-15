@@ -14,8 +14,9 @@ use crate::{
     ClaimedProcess, JournaledProcessSnapshot, ProcessCheckpointId, ProcessCheckpointKind,
     ProcessCheckpointRecord, ProcessCheckpointRef, ProcessControlResult, ProcessFailureRecovery,
     ProcessInputRecord, ProcessJournalCursor, ProcessJournalEntry, ProcessJournalKind, ProcessKind,
-    ProcessLeaseSnapshot, ProcessLeaseToken, ProcessLifecycleStatus, ProcessTreeReservation,
-    RecoverExpiredProcessLeasesResponse, types::same_scope_owner,
+    ProcessLeaseSnapshot, ProcessLeaseToken, ProcessLifecycleStatus, ProcessSubmissionEdge,
+    ProcessTreeReservation, RecoverExpiredProcessLeasesResponse, SubmitProcessAtEdgeRequest,
+    types::same_scope_owner,
 };
 
 /// Point a process at a new resume checkpoint.
@@ -198,6 +199,7 @@ impl ProcessJournalMaterializedState {
                 Ok(StoredCommandOutcome::Imported)
             }
             StoredProcessCommand::Submit(request) => self.apply_submit(*request),
+            StoredProcessCommand::SubmitAtEdge(request) => self.apply_submit_at_edge(*request),
             StoredProcessCommand::SubmitWithCheckpoint {
                 request,
                 checkpoint,
@@ -425,6 +427,104 @@ impl ProcessJournalMaterializedState {
                 },
             );
         }
+        self.remember_submission_result(replay_key, snapshot.clone());
+        Ok(StoredCommandOutcome::Submitted(snapshot, true))
+    }
+
+    fn apply_submit_at_edge(
+        &mut self,
+        request: SubmitProcessAtEdgeRequest,
+    ) -> Result<StoredCommandOutcome, ProcessJournalStoreError> {
+        let submission = request.submission;
+        if submission.process_kind != ProcessKind::CapabilityInvocationState
+            || submission.exclusive_within_scope
+            || submission.parent_process_id.is_some()
+            || submission.root_process_id.is_some()
+            || submission.spawn_tree_descendant_cap.is_some()
+            || submission.dependency.is_some()
+            || submission.input.is_some()
+        {
+            return Err(ProcessJournalStoreError::InvalidRequest(
+                "edge submission only supports standalone bookkeeping processes".to_string(),
+            ));
+        }
+        let replay_key = super::command::submission_replay_key(&submission)?;
+        if let Some(snapshot) = replay_key
+            .as_ref()
+            .and_then(|key| self.submission_idempotency.get(key))
+        {
+            return Ok(StoredCommandOutcome::Submitted(snapshot.clone(), false));
+        }
+        if self.processes.contains_key(&submission.process_id) {
+            return Err(ProcessJournalStoreError::ProcessAlreadyExists {
+                process_id: submission.process_id,
+            });
+        }
+
+        let (status, kind, suspension, failure) = match request.edge {
+            ProcessSubmissionEdge::Suspended { suspension } => {
+                if submission.checkpoint_ref.is_none() {
+                    return Err(ProcessJournalStoreError::InvalidRequest(
+                        "suspended edge submission requires a checkpoint reference".to_string(),
+                    ));
+                }
+                (
+                    ProcessLifecycleStatus::Suspended,
+                    ProcessJournalKind::Suspended,
+                    Some(suspension),
+                    None,
+                )
+            }
+            ProcessSubmissionEdge::Completed => {
+                if submission.checkpoint_ref.is_some() {
+                    return Err(ProcessJournalStoreError::InvalidRequest(
+                        "terminal edge submission cannot carry a checkpoint reference".to_string(),
+                    ));
+                }
+                (
+                    ProcessLifecycleStatus::Completed,
+                    ProcessJournalKind::Completed,
+                    None,
+                    None,
+                )
+            }
+            ProcessSubmissionEdge::Failed { failure } => {
+                if submission.checkpoint_ref.is_some() {
+                    return Err(ProcessJournalStoreError::InvalidRequest(
+                        "terminal edge submission cannot carry a checkpoint reference".to_string(),
+                    ));
+                }
+                (
+                    ProcessLifecycleStatus::Failed,
+                    ProcessJournalKind::Failed,
+                    None,
+                    Some(failure),
+                )
+            }
+        };
+        let cursor = self.next_cursor();
+        let snapshot = JournaledProcessSnapshot {
+            process_id: submission.process_id,
+            process_kind: submission.process_kind,
+            scope: submission.scope,
+            status,
+            suspension,
+            checkpoint_ref: submission.checkpoint_ref,
+            checkpoint_kind: None,
+            input_ref: None,
+            failure,
+            journal_cursor: cursor,
+            lease: None,
+            crash_reclaim_count: 0,
+            created_at: submission.created_at,
+            owner_user_id: submission.owner_user_id,
+            concurrency_class: submission.concurrency_class,
+            parent_process_id: None,
+            root_process_id: None,
+            metadata: submission.metadata,
+        };
+        self.push_entry(ProcessJournalEntry::from_snapshot(&snapshot, cursor, kind));
+        self.processes.insert(snapshot.process_id, snapshot.clone());
         self.remember_submission_result(replay_key, snapshot.clone());
         Ok(StoredCommandOutcome::Submitted(snapshot, true))
     }
