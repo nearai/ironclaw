@@ -726,6 +726,92 @@ async fn capability_stage_trims_batch_to_remaining_capability_budget() {
     }
 }
 
+#[tokio::test]
+async fn stale_surface_batch_releases_unlaunched_invocation_budget() {
+    let result = |suffix: &str| {
+        resolution::completed(
+            LoopResultRef::new(format!("result:stale-budget-{suffix}")).expect("valid"),
+            format!("{suffix} completed"),
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        )
+    };
+    let host = MockHost::new(Vec::new())
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
+            resolutions: vec![result("first"), result("second")],
+            stopped_on_suspension: false,
+        }])
+        .fail_batch_with(AgentLoopHostErrorKind::StaleSurface);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let policy = host
+        .run_context()
+        .resolved_run_profile
+        .resource_budget_policy
+        .clone();
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state
+        .budget_ledger
+        .set_capability_invocations_made_for_test(policy.max_capability_invocations - 2);
+    let surface = ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
+        &host,
+        VisibleCapabilityRequest,
+    )
+    .await
+    .expect("visible surface");
+    let calls = || match two_calls_response().output {
+        ParentLoopOutput::CapabilityCalls(calls) => calls,
+        ParentLoopOutput::AssistantReply(_) => panic!("expected capability calls"),
+    };
+
+    let first = CapabilityStage
+        .process(
+            ctx,
+            CapabilityInput {
+                state,
+                surface: surface.clone(),
+                calls: calls(),
+            },
+        )
+        .await
+        .expect("stale batch remains model-visible");
+    let TurnCompletedStep::Continue { state, .. } = first else {
+        panic!("stale batch must continue");
+    };
+    assert_eq!(
+        state.budget_ledger.capability_invocations_made(),
+        policy.max_capability_invocations - 2,
+        "a stale surface launches no calls and must release the full reservation"
+    );
+
+    host.clear_batch_failure();
+    let second = CapabilityStage
+        .process(
+            ctx,
+            CapabilityInput {
+                state: *state,
+                surface,
+                calls: calls(),
+            },
+        )
+        .await
+        .expect("the next batch retains the remaining budget");
+    let TurnCompletedStep::Continue { state, .. } = second else {
+        panic!("successful batch must continue");
+    };
+    assert_eq!(
+        state.budget_ledger.capability_invocations_made(),
+        policy.max_capability_invocations
+    );
+    assert_eq!(host.batch_invocations().len(), 2);
+}
+
 /// Behavior tightening absorbed by the `BudgetLedger` refactor: a capability
 /// retry dispatch now charges the invocation budget through the same
 /// chokepoint the initial batch dispatch uses, BEFORE re-dispatching. Before

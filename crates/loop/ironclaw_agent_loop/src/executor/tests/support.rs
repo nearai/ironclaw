@@ -322,6 +322,10 @@ impl MockHost {
         self
     }
 
+    pub(super) fn clear_batch_failure(&self) {
+        *self.fail_batch_with.lock().expect("lock") = None;
+    }
+
     pub(super) fn fail_transcript_with(self, kind: AgentLoopHostErrorKind) -> Self {
         *self.fail_transcript_with.lock().expect("lock") = Some(kind);
         self
