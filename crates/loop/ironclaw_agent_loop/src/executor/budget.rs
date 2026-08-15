@@ -82,6 +82,13 @@ impl ExecutorStage<BudgetInput> for BudgetStage {
             (Some(policy_cap), Some(strategy_cap)) => Some(policy_cap.min(strategy_cap)),
             (policy_cap, strategy_cap) => policy_cap.or(strategy_cap),
         };
+        // Boundary check: the wall-clock ceiling is evaluated only on stage
+        // entry (once per loop iteration), not continuously. A single
+        // in-flight model or capability call that overruns the ceiling is
+        // not interrupted mid-call — the run only stops once control returns
+        // to this stage on the NEXT iteration. This is consistent with the
+        // budget stage's enforcement granularity generally (a hard stop
+        // after the next checkpoint boundary, not a preemptive cutoff).
         if let Some(limit_seconds) = wall_clock_limit_seconds {
             let now = chrono::Utc::now();
             // First pass arms the clock (initial state carries no timestamp

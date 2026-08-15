@@ -135,9 +135,8 @@ pub struct OpenAiChatCompletionsWorkflow {
     /// onto the non-streaming #4444 workflow.
     projection_streamer: Option<Arc<dyn OpenAiCompatProjectionStreamer>>,
     /// Prepared-context door for structured-output / tool-history requests.
-    /// When `None`, prepared-lane requests fail closed with 501 (same staged
-    /// posture as the streamer above).
-    prepared_turn_port: Option<Arc<dyn crate::OpenAiCompatPreparedTurnPort>>,
+    /// Production always wires this; it is a required dependency.
+    prepared_turn_port: Arc<dyn crate::OpenAiCompatPreparedTurnPort>,
     wait_timeout: Duration,
 }
 
@@ -146,23 +145,16 @@ impl OpenAiChatCompletionsWorkflow {
         product_surface: Arc<dyn ProductSurface>,
         ref_store: Arc<dyn OpenAiCompatRefStorePort>,
         projection_reader: Arc<dyn OpenAiChatCompletionProjectionReader>,
+        prepared_turn_port: Arc<dyn crate::OpenAiCompatPreparedTurnPort>,
     ) -> Self {
         Self {
             product_surface,
             ref_store,
             projection_reader,
             projection_streamer: None,
-            prepared_turn_port: None,
+            prepared_turn_port,
             wait_timeout: DEFAULT_CHAT_WAIT_TIMEOUT,
         }
-    }
-
-    pub fn with_prepared_turn_port(
-        mut self,
-        prepared_turn_port: Arc<dyn crate::OpenAiCompatPreparedTurnPort>,
-    ) -> Self {
-        self.prepared_turn_port = Some(prepared_turn_port);
-        self
     }
 
     pub fn with_wait_timeout(mut self, wait_timeout: Duration) -> Self {
@@ -527,16 +519,9 @@ impl OpenAiChatCompletionsWorkflow {
         output: ironclaw_host_api::prepared_context::OutputContract,
         seed: (String, Vec<ironclaw_threads::agent_message::AgentMessage>),
     ) -> Result<ProductInboundAck, OpenAiCompatHttpError> {
-        let Some(port) = self.prepared_turn_port.as_ref() else {
-            return Err(OpenAiCompatHttpError::from_kind(
-                501,
-                false,
-                crate::OpenAiCompatErrorKind::Unsupported,
-                Some("structured output is not enabled on this deployment".to_string()),
-            ));
-        };
         let (system_prompt, messages) = seed;
-        let ack = port
+        let ack = self
+            .prepared_turn_port
             .accept_and_submit(crate::OpenAiCompatPreparedTurnRequest {
                 scope: caller.scope().clone(),
                 public_id: public_id.as_str().to_string(),

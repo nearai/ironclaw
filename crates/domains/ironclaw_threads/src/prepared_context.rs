@@ -456,6 +456,9 @@ fn seeded_tool_result_row_parts(
 ) -> Result<(String, ProviderToolCallReferenceEnvelope, Vec<u8>), SessionThreadError> {
     let (full_bytes, preview) = seeded_outcome_bytes_and_preview(&result.outcome)?;
     let summary_text = format!("seeded tool result ({} bytes)", full_bytes.len());
+    // silent-ok: a summary that fails strict safe-summary validation degrades
+    // to the fixed redaction-marker label; the real tool output still reaches
+    // the model via the result reference / observation.
     let safe_summary = ToolResultSafeSummary::new(summary_text.clone())
         .unwrap_or_else(|_| ToolResultSafeSummary::redacted_tool_result_summary());
     let observation = serde_json::json!({

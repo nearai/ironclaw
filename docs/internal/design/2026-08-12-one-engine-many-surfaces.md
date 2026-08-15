@@ -149,7 +149,7 @@ engine behaves accordingly through profiles:
 | Steering mid-run | yes (profile-gated), drained by the running loop | no (profile-disabled) |
 | Gates | allowed — approval/auth surfaces exist (WebUI `gate.resolve`, channel approval replies) | not supported — non-gating surface; a gate is a typed `GateNotSupported` failure |
 | Run profile | conversation profiles (interactive, scheduled trigger, …) | `unbound_default` / `unbound_structured` (derived from `output`) |
-| Thread transcript | written by the run's thread-backed machinery, lease-fenced (exactly as today) | its own unbound, ownerless thread — same machinery; internal, never listed |
+| Thread transcript | written by the run's thread-backed machinery, lease-fenced (exactly as today) | its own unbound, ownerless thread (✎ landed: caller-owned; see delta) — same machinery; internal, never listed |
 | Subagents | per profile | denied |
 | Typical `output` | `AssistantMessage` | either; suggestions use `JsonSchema` |
 
@@ -435,8 +435,9 @@ no vendor anything.
 8. **Thread transcripts are written by the run, not by output handlers.**
    The engine's thread-backed machinery persists messages lease-fenced
    during the run (exactly as today) — for every run: an unbound turn's
-   transcript is its own unbound, ownerless thread, seeded at admission and
-   written by the same machinery, internal to the coordinator and never
+   transcript is its own unbound, ownerless thread (✎ landed: caller-owned;
+   see delta), seeded at admission and written by the same machinery,
+   internal to the coordinator and never
    enumerated by conversation surfaces (those query by owner and binding).
    Output handling is about reply, never persistence.
 

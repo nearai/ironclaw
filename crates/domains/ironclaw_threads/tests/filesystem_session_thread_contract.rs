@@ -41,11 +41,12 @@ use ironclaw_threads::{
     FilesystemSessionThreadService, FinalizedAssistantMessageByRunRequest,
     InboundMessageReplayMetadata, ListThreadsForScopeRequest, LoadContextMessagesRequest,
     LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
-    ProviderToolCallReferenceEnvelope, PutToolResultRecordRequest, ReadToolResultRecordRequest,
-    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadService, SummaryKind, SummaryModelContextPolicy, ThreadHistoryRequest,
-    ThreadMessageId, ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
-    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    PREPARED_CONTEXT_METADATA_MARKER_KEY, ProviderToolCallReferenceEnvelope,
+    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
+    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 use tokio::sync::{Barrier, Mutex, OwnedMutexGuard};
 
@@ -6191,13 +6192,36 @@ async fn filesystem_listing_backfills_the_marker_onto_legacy_subagent_threads() 
     // legacy spelling consulted) still hides it.
     let second = service
         .list_threads_for_scope(ListThreadsForScopeRequest {
-            scope: listing_scope,
+            scope: listing_scope.clone(),
             limit: None,
             cursor: None,
         })
         .await
         .unwrap();
     assert_eq!(second.threads.len(), 1);
+
+    // The second listing hiding the thread is consistent with either the
+    // durable marker stamp OR the legacy `"kind":"subagent"` spelling still
+    // matching — prove it is actually the stamp by reading the thread record
+    // back and asserting the marker landed.
+    let stamped = service
+        .read_thread(ThreadHistoryRequest {
+            scope: listing_scope,
+            thread_id: ThreadId::new("subagent-legacy-001").unwrap(),
+        })
+        .await
+        .expect("legacy subagent thread record is readable after backfill");
+    let metadata: serde_json::Value = stamped
+        .metadata_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .expect("stamped thread carries JSON object metadata");
+    assert_eq!(
+        metadata.get(PREPARED_CONTEXT_METADATA_MARKER_KEY),
+        Some(&serde_json::Value::Bool(true)),
+        "the backfill must durably stamp the marker, not merely rely on the legacy \
+         \"kind\":\"subagent\" spelling still matching: {metadata:?}"
+    );
 }
 
 /// Two racing accepts for the SAME prepared request converge: deterministic

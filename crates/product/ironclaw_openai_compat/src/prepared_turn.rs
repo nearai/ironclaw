@@ -113,6 +113,16 @@ pub(crate) fn prepared_lane_output(
         .tools
         .as_ref()
         .is_some_and(|tools| !tools.is_empty());
+    // `tool_choice` with no `tools` declared has nothing to route on either
+    // lane: the conversation lane's client-tool park/resume flow needs a
+    // declared tool, and the prepared lane never consumes model_only_tools
+    // at all. Silently taking the prepared lane here would drop the
+    // caller's tool_choice entirely, so reject loudly instead.
+    if !declares_tools && request.tool_choice.is_some() {
+        return Err(OpenAiCompatHttpError::invalid_request(Some(
+            "tool_choice without tools is not supported".to_string(),
+        )));
+    }
     if output.is_some() && declares_tools {
         return Err(OpenAiCompatHttpError::invalid_request(Some(
             "response_format with tools is not supported yet".to_string(),
@@ -152,12 +162,17 @@ pub(crate) fn agent_messages_from_chat(
                 let mut sections = Vec::new();
                 for part in parts {
                     match part.get("type").and_then(serde_json::Value::as_str) {
-                        Some("text") => sections.push(
-                            part.get("text")
+                        Some("text") => {
+                            let text = part
+                                .get("text")
                                 .and_then(serde_json::Value::as_str)
-                                .unwrap_or_default()
-                                .to_string(),
-                        ),
+                                .ok_or_else(|| {
+                                    OpenAiCompatHttpError::invalid_request(Some(
+                                        "messages[].content[].text".to_string(),
+                                    ))
+                                })?;
+                            sections.push(text.to_string());
+                        }
                         _ => {
                             return Err(OpenAiCompatHttpError::invalid_request(Some(
                                 "only text content parts are supported on this request shape"
@@ -216,8 +231,19 @@ pub(crate) fn agent_messages_from_chat(
                     parts.push(ContentPart::text(text));
                 }
                 for call in message.tool_calls.iter().flatten() {
-                    let arguments = serde_json::from_str(&call.function.arguments)
-                        .unwrap_or(serde_json::Value::String(call.function.arguments.clone()));
+                    // silent-ok: caller-authored replay args are
+                    // display-degradable — a non-JSON arguments string still
+                    // carries useful content as a raw string, so this falls
+                    // back rather than rejecting the whole message.
+                    let arguments =
+                        serde_json::from_str(&call.function.arguments).unwrap_or_else(|error| {
+                            tracing::debug!(
+                                ?error,
+                                call_id = %call.id,
+                                "tool call arguments are not valid JSON; carrying as a raw string"
+                            );
+                            serde_json::Value::String(call.function.arguments.clone())
+                        });
                     parts.push(ContentPart::ToolCall(ToolCallContent {
                         call_id: call.id.clone(),
                         capability: external_capability(&call.function.name)?,
@@ -479,6 +505,56 @@ mod tests {
         let error =
             parse_response_format(Some(&response_format)).expect_err("over-deep schema rejected");
         assert_eq!(error.status_code(), 400);
+    }
+
+    #[test]
+    fn declared_tool_choice_without_tools_is_rejected_loudly() {
+        let mut request = base_request(vec![user_message("go")]);
+        request.tool_choice = Some(json!("auto"));
+        let error = prepared_lane_output(&request).expect_err("tool_choice without tools rejected");
+        assert_eq!(error.status_code(), 400);
+    }
+
+    #[test]
+    fn text_part_missing_text_field_is_rejected_not_degraded() {
+        let messages = vec![OpenAiChatMessage {
+            role: OpenAiChatMessageRole::User,
+            content: Some(json!([{"type": "text"}])),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        let error = agent_messages_from_chat(&messages)
+            .expect_err("a text part without a text field is malformed input");
+        assert_eq!(error.status_code(), 400);
+    }
+
+    #[test]
+    fn non_json_tool_call_arguments_carry_as_a_raw_string() {
+        let messages = vec![
+            user_message("go"),
+            OpenAiChatMessage {
+                role: OpenAiChatMessageRole::Assistant,
+                content: None,
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![crate::chat::OpenAiChatToolCall {
+                    id: "call_1".to_string(),
+                    kind: crate::chat::OpenAiChatToolKind::Function,
+                    function: crate::chat::OpenAiChatToolCallFunction {
+                        name: "lookup".to_string(),
+                        arguments: "not json".to_string(),
+                    },
+                }]),
+            },
+        ];
+        let (_, mapped) = agent_messages_from_chat(&messages).expect("degraded, not rejected");
+        match &mapped[1].content[0] {
+            ContentPart::ToolCall(call) => {
+                assert_eq!(call.arguments, json!("not json"));
+            }
+            other => panic!("expected a tool call, got {other:?}"),
+        }
     }
 
     #[test]

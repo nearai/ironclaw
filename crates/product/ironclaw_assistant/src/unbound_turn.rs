@@ -56,6 +56,14 @@ pub enum UnboundTurnError {
     Internal { reason: String },
 }
 
+/// Multiplier applied to the effective per-chunk `read_tool_result_record`
+/// cap ([`effective_tool_result_read_max_bytes`]) to bound the TOTAL bytes
+/// the structured-result paging loop will accumulate. Chosen as a few
+/// chunks' worth of headroom for a model-produced JSON result — generous for
+/// legitimate payloads, small enough that a misbehaving backend (or a
+/// pagination bug) cannot grow the buffer without limit.
+const STRUCTURED_RESULT_TOTAL_BYTES_FACTOR: u64 = 8;
+
 impl UnboundTurnError {
     fn internal(reason: impl Into<String>) -> Self {
         Self::Internal {
@@ -181,7 +189,10 @@ impl UnboundTurnService {
                 SessionThreadError::InvalidPreparedContext { reason } => {
                     UnboundTurnError::InvalidRequest { reason }
                 }
-                _ => UnboundTurnError::Unavailable,
+                _ => {
+                    tracing::debug!(%error, "unbound accept_prepared_context failed");
+                    UnboundTurnError::Unavailable
+                }
             })?;
         let response = self
             .coordinator
@@ -196,7 +207,7 @@ impl UnboundTurnService {
                     submission.idempotency_key
                 ))
                 .map_err(|error| {
-                    UnboundTurnError::internal(format!("invalid thread id: {error}"))
+                    UnboundTurnError::internal(format!("invalid submit idempotency key: {error}"))
                 })?,
                 received_at: chrono::Utc::now(),
                 requested_run_id: None,
@@ -210,7 +221,10 @@ impl UnboundTurnService {
                 TurnErrorCategory::InvalidRequest => UnboundTurnError::InvalidRequest {
                     reason: error.to_string(),
                 },
-                _ => UnboundTurnError::Unavailable,
+                _ => {
+                    tracing::debug!(%error, "unbound submit_turn failed");
+                    UnboundTurnError::Unavailable
+                }
             })?;
         let SubmitTurnResponse::Accepted {
             run_id,
@@ -360,6 +374,15 @@ impl UnboundTurnService {
             .and_then(|message| message.tool_result_ref.clone())
             .ok_or_else(|| UnboundTurnError::internal("expected row is missing"))?;
 
+        let per_chunk_bytes = effective_tool_result_read_max_bytes();
+        // Bound the accumulated structured-result payload to a small multiple
+        // of the effective per-chunk read cap. A structured result is a
+        // model-produced JSON payload, not an arbitrary large blob, so a few
+        // chunks' worth of headroom is generous while still preventing an
+        // unbounded backend (or an offset that never advances) from growing
+        // this buffer forever.
+        let max_total_bytes =
+            (per_chunk_bytes as u64).saturating_mul(STRUCTURED_RESULT_TOTAL_BYTES_FACTOR);
         let mut payload = Vec::new();
         let mut offset = 0u64;
         loop {
@@ -370,14 +393,24 @@ impl UnboundTurnService {
                     thread_id: thread_id.clone(),
                     result_ref: result_ref.clone(),
                     offset,
-                    max_bytes: effective_tool_result_read_max_bytes(),
+                    max_bytes: per_chunk_bytes,
                 })
                 .await
                 .map_err(map_thread_read_error)?
                 .ok_or_else(|| UnboundTurnError::internal("expected row is missing"))?;
             payload.extend_from_slice(&chunk.content);
+            if payload.len() as u64 > max_total_bytes {
+                return Err(UnboundTurnError::internal(format!(
+                    "structured result payload exceeded the {max_total_bytes}-byte total cap"
+                )));
+            }
             match chunk.next_offset {
-                Some(next) => offset = next,
+                Some(next) if next > offset => offset = next,
+                Some(next) => {
+                    return Err(UnboundTurnError::internal(format!(
+                        "tool result record pagination did not advance: offset={offset}, next_offset={next}"
+                    )));
+                }
                 None => break,
             }
         }
@@ -417,6 +450,411 @@ fn map_thread_read_error(error: SessionThreadError) -> UnboundTurnError {
         SessionThreadError::UnknownThread { .. } => {
             UnboundTurnError::internal("unbound thread is missing")
         }
-        _ => UnboundTurnError::Unavailable,
+        _ => {
+            tracing::debug!(%error, "unbound thread read failed");
+            UnboundTurnError::Unavailable
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use ironclaw_host_api::ids::CapabilityId;
+    use ironclaw_host_api::turn::{TurnRunId, TurnScope};
+    use ironclaw_threads::{
+        AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
+        AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
+        AppendToolResultReferenceRequest, ContextMessage, ContextMessages, ContextWindow,
+        CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextWindowRequest,
+        MessageContent, MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
+        SessionThreadRecord, ThreadHistory, ToolResultRecordChunk, UpdateAssistantDraftRequest,
+        UpdateToolResultReferenceRequest,
+    };
+
+    use super::*;
+
+    fn tenant_id() -> TenantId {
+        TenantId::from_trusted("tenant-1".to_string())
+    }
+
+    fn agent_id() -> AgentId {
+        AgentId::from_trusted("agent-1".to_string())
+    }
+
+    fn owner_id() -> UserId {
+        UserId::from_trusted("user-1".to_string())
+    }
+
+    fn thread_id() -> ThreadId {
+        ThreadId::from_trusted("thread-1".to_string())
+    }
+
+    fn thread_scope() -> ThreadScope {
+        ThreadScope {
+            tenant_id: tenant_id(),
+            agent_id: agent_id(),
+            project_id: None,
+            owner_user_id: Some(owner_id()),
+            mission_id: None,
+        }
+    }
+
+    fn structured_result_message() -> ThreadMessageRecord {
+        ThreadMessageRecord {
+            message_id: ThreadMessageId::new(),
+            thread_id: thread_id(),
+            sequence: 1,
+            kind: MessageKind::ToolResultReference,
+            status: MessageStatus::Finalized,
+            created_at: None,
+            updated_at: None,
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: Some(RUN_REF.to_string()),
+            tool_result_ref: Some("result-ref-1".to_string()),
+            tool_result_provider_call: None,
+            content: None,
+            attachments: Vec::new(),
+            redaction_ref: None,
+        }
+    }
+
+    const RUN_REF: &str = "11111111-1111-1111-1111-111111111111";
+
+    fn run_id() -> TurnRunId {
+        TurnRunId::parse(RUN_REF).expect("valid run id")
+    }
+
+    /// Minimal `SessionThreadService` double that only implements the reads
+    /// `structured_result_payload` exercises (`list_thread_history`,
+    /// `load_context_messages`, `read_tool_result_record`); every other
+    /// method panics because the paging-loop tests below never reach it.
+    struct PagingStubThreadService {
+        message: ThreadMessageRecord,
+        /// Queue of `read_tool_result_record` outcomes, consumed in order.
+        chunks: Mutex<Vec<Result<Option<ToolResultRecordChunk>, SessionThreadError>>>,
+    }
+
+    #[async_trait]
+    impl SessionThreadService for PagingStubThreadService {
+        async fn ensure_thread(
+            &self,
+            _request: EnsureThreadRequest,
+        ) -> Result<SessionThreadRecord, SessionThreadError> {
+            unimplemented!("not exercised by structured-result paging tests")
+        }
+
+        async fn accept_inbound_message(
+            &self,
+            _request: AcceptInboundMessageRequest,
+        ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+            unimplemented!("not exercised by structured-result paging tests")
+        }
+
+        async fn replay_accepted_inbound_message(
+            &self,
+            _request: ReplayAcceptedInboundMessageRequest,
+        ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+            unimplemented!("not exercised by structured-result paging tests")
+        }
+
+        async fn mark_message_submitted(
+            &self,
+            _scope: &ThreadScope,
+            _thread_id: &ThreadId,
+            _message_id: ThreadMessageId,
+            _turn_id: String,
+            _turn_run_id: String,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not exercised by structured-result paging tests")
+        }
+
+        async fn mark_message_rejected_busy(
+            &self,
+            _scope: &ThreadScope,
+            _thread_id: &ThreadId,
+            _message_id: ThreadMessageId,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not exercised by structured-result paging tests")
+        }
+
+        async fn append_assistant_draft(
+            &self,
+            _request: AppendAssistantDraftRequest,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not exercised by structured-result paging tests")
+        }
+
+        async fn append_tool_result_reference(
+            &self,
+            _request: AppendToolResultReferenceRequest,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not exercised by structured-result paging tests")
+        }
+
+        async fn append_capability_display_preview(
+            &self,
+            _request: AppendCapabilityDisplayPreviewRequest,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not exercised by structured-result paging tests")
+        }
+
+        async fn update_tool_result_reference(
+            &self,
+            _request: UpdateToolResultReferenceRequest,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not exercised by structured-result paging tests")
+        }
+
+        async fn update_assistant_draft(
+            &self,
+            _request: UpdateAssistantDraftRequest,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not exercised by structured-result paging tests")
+        }
+
+        async fn finalize_assistant_message(
+            &self,
+            _scope: &ThreadScope,
+            _thread_id: &ThreadId,
+            _message_id: ThreadMessageId,
+            _content: MessageContent,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not exercised by structured-result paging tests")
+        }
+
+        async fn redact_message(
+            &self,
+            _request: RedactMessageRequest,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not exercised by structured-result paging tests")
+        }
+
+        async fn load_context_window(
+            &self,
+            _request: LoadContextWindowRequest,
+        ) -> Result<ContextWindow, SessionThreadError> {
+            unimplemented!("not exercised by structured-result paging tests")
+        }
+
+        async fn load_context_messages(
+            &self,
+            request: LoadContextMessagesRequest,
+        ) -> Result<ContextMessages, SessionThreadError> {
+            let capability_id =
+                CapabilityId::new(STRUCTURED_RESULT_CAPABILITY_ID).expect("valid capability id");
+            Ok(ContextMessages {
+                thread_id: request.thread_id,
+                messages: request
+                    .message_ids
+                    .into_iter()
+                    .map(|message_id| ContextMessage {
+                        message_id: Some(message_id),
+                        summary_id: None,
+                        sequence: 1,
+                        kind: MessageKind::ToolResultReference,
+                        tool_result_provider_call: Some(ProviderToolCallReferenceEnvelope {
+                            provider_id: "test-provider".to_string(),
+                            provider_model_id: "test-model".to_string(),
+                            provider_turn_id: "turn-1".to_string(),
+                            provider_call_id: "call-1".to_string(),
+                            provider_tool_name: ironclaw_host_api::ids::ProviderToolName::new(
+                                "structured_result",
+                            )
+                            .expect("valid provider tool name"),
+                            capability_id: capability_id.clone(),
+                            arguments: serde_json::Value::Null,
+                            response_reasoning: None,
+                            reasoning: None,
+                            signature: None,
+                        }),
+                        content: String::new(),
+                        image_attachments: Vec::new(),
+                    })
+                    .collect(),
+            })
+        }
+
+        async fn list_thread_history(
+            &self,
+            request: ThreadHistoryRequest,
+        ) -> Result<ThreadHistory, SessionThreadError> {
+            Ok(ThreadHistory {
+                thread: SessionThreadRecord {
+                    scope: request.scope,
+                    thread_id: request.thread_id,
+                    created_by_actor_id: "actor-1".to_string(),
+                    title: None,
+                    metadata_json: None,
+                    goal: None,
+                    created_at: None,
+                    updated_at: None,
+                },
+                messages: vec![self.message.clone()],
+                summary_artifacts: Vec::new(),
+            })
+        }
+
+        async fn read_tool_result_record(
+            &self,
+            _request: ReadToolResultRecordRequest,
+        ) -> Result<Option<ToolResultRecordChunk>, SessionThreadError> {
+            let mut chunks = self.chunks.lock().expect("chunk queue lock");
+            if chunks.is_empty() {
+                panic!(
+                    "read_tool_result_record called more times than the test staged \
+                     responses for — the paging loop must terminate on the guard \
+                     conditions instead of looping forever"
+                );
+            }
+            chunks.remove(0)
+        }
+
+        async fn create_summary_artifact(
+            &self,
+            _request: CreateSummaryArtifactRequest,
+        ) -> Result<ironclaw_threads::SummaryArtifact, SessionThreadError> {
+            unimplemented!("not exercised by structured-result paging tests")
+        }
+    }
+
+    struct StubTurnCoordinator;
+
+    #[async_trait]
+    impl TurnCoordinator for StubTurnCoordinator {
+        async fn prepare_turn(
+            &self,
+            _scope: TurnScope,
+        ) -> Result<TurnRunId, ironclaw_turns::TurnError> {
+            unimplemented!("not exercised by structured-result paging tests")
+        }
+
+        async fn submit_turn(
+            &self,
+            _request: SubmitTurnRequest,
+        ) -> Result<SubmitTurnResponse, ironclaw_turns::TurnError> {
+            unimplemented!("not exercised by structured-result paging tests")
+        }
+
+        async fn resume_turn(
+            &self,
+            _request: ironclaw_turns::ResumeTurnRequest,
+        ) -> Result<ironclaw_turns::ResumeTurnResponse, ironclaw_turns::TurnError> {
+            unimplemented!("not exercised by structured-result paging tests")
+        }
+
+        async fn retry_turn(
+            &self,
+            _request: ironclaw_turns::RetryTurnRequest,
+        ) -> Result<ironclaw_turns::RetryTurnResponse, ironclaw_turns::TurnError> {
+            unimplemented!("not exercised by structured-result paging tests")
+        }
+
+        async fn cancel_run(
+            &self,
+            _request: ironclaw_turns::CancelRunRequest,
+        ) -> Result<ironclaw_turns::CancelRunResponse, ironclaw_turns::TurnError> {
+            unimplemented!("not exercised by structured-result paging tests")
+        }
+
+        async fn get_run_state(
+            &self,
+            _request: GetRunStateRequest,
+        ) -> Result<ironclaw_turns::TurnRunState, ironclaw_turns::TurnError> {
+            unimplemented!("not exercised by structured-result paging tests")
+        }
+    }
+
+    fn service_with_chunks(
+        chunks: Vec<Result<Option<ToolResultRecordChunk>, SessionThreadError>>,
+    ) -> UnboundTurnService {
+        UnboundTurnService::new(
+            Arc::new(PagingStubThreadService {
+                message: structured_result_message(),
+                chunks: Mutex::new(chunks),
+            }),
+            Arc::new(StubTurnCoordinator),
+            tenant_id(),
+            agent_id(),
+            None,
+        )
+    }
+
+    fn chunk(content: &[u8], next_offset: Option<u64>) -> ToolResultRecordChunk {
+        ToolResultRecordChunk {
+            content: content.to_vec(),
+            total_bytes: content.len() as u64,
+            next_offset,
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_result_paging_rejects_non_advancing_offset() {
+        // The first chunk reports `next_offset` equal to the offset it was
+        // read at — a backend bug that would otherwise spin the loop
+        // forever re-reading the same page.
+        let service = service_with_chunks(vec![Ok(Some(chunk(b"{}", Some(0))))]);
+
+        let error = service
+            .structured_result_payload(&thread_scope(), &thread_id(), run_id())
+            .await
+            .expect_err("a non-advancing offset must be rejected");
+
+        match error {
+            UnboundTurnError::Internal { reason } => {
+                assert!(
+                    reason.contains("did not advance"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected Internal error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_result_paging_rejects_oversized_total() {
+        // Each chunk individually advances the offset and stays within the
+        // per-chunk cap, but enough of them together exceed the total-bytes
+        // bound the loop enforces.
+        let per_chunk = effective_tool_result_read_max_bytes();
+        let max_total = (per_chunk as u64) * STRUCTURED_RESULT_TOTAL_BYTES_FACTOR;
+        let oversized_chunk_len = (max_total + 1) as usize;
+        let content = vec![b'a'; oversized_chunk_len];
+
+        let service = service_with_chunks(vec![Ok(Some(chunk(&content, Some(1))))]);
+
+        let error = service
+            .structured_result_payload(&thread_scope(), &thread_id(), run_id())
+            .await
+            .expect_err("an oversized total payload must be rejected");
+
+        match error {
+            UnboundTurnError::Internal { reason } => {
+                assert!(reason.contains("total cap"), "unexpected reason: {reason}");
+            }
+            other => panic!("expected Internal error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_result_paging_accumulates_across_pages() {
+        // Sanity check that well-behaved, strictly-advancing pagination still
+        // works and terminates on `next_offset: None`.
+        let service = service_with_chunks(vec![
+            Ok(Some(chunk(b"ab", Some(2)))),
+            Ok(Some(chunk(b"cd", None))),
+        ]);
+
+        let payload = service
+            .structured_result_payload(&thread_scope(), &thread_id(), run_id())
+            .await
+            .expect("well-behaved pagination succeeds");
+
+        assert_eq!(payload, "abcd");
     }
 }

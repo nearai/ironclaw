@@ -156,7 +156,8 @@ become `Option`** — a conversation submission passes `Some` (today's values,
 unchanged); everything else passes `None`. The thread is the required unit
 of work; the binding is the optional relation that makes it a conversation.
 Unbound callers get a sibling of `accept_user_message` on the accept side:
-**`accept_prepared_context`** mints an **unbound, ownerless thread**, seeds
+**`accept_prepared_context`** mints an **unbound, ownerless thread**
+(✎ superseded: caller-owned — see the caller-owned delta above), seeds
 the caller's content (system prompt + messages) as its rows, journals the
 per-run declarations (tools, output contract, limits) beside it, and returns
 the thread + accepted ref — which then go through the *same* `submit_turn`
@@ -391,6 +392,9 @@ pub struct SubmitTurnRequest {
     /// ("subagent-source:{run_id}") only because these are required.
     pub source_binding_ref: Option<SourceBindingRef>,
     pub reply_target_binding_ref: Option<ReplyTargetBindingRef>,
+    // (✎ superseded: deleted, not optionalized — see deltas; these two
+    // fields carry no `Option` at all in the shipped request family. Reply
+    // routing lives purely in product-side conversation state.)
 
     pub requested_run_profile: Option<RunProfileRequest>,   // unchanged
     pub requested_model: Option<String>,                    // unchanged
@@ -468,7 +472,8 @@ pub struct PreparedContextRequest {
 pub struct AcceptedUnboundContext {
     /// Held transiently by the trusted workflow to build the TurnScope for
     /// submit — never exposed to untrusted surfaces (ProductSurface
-    /// payloads cannot carry or name it), and unbound + ownerless, so no
+    /// payloads cannot carry or name it), and unbound + ownerless
+    /// (✎ superseded: caller-owned — see the caller-owned delta above), so no
     /// conversation surface can list it and no follow-up can route to it.
     pub thread_id: ThreadId,
     pub accepted_message_ref: AcceptedMessageRef,
@@ -534,7 +539,8 @@ one shared stack for both.
 
 **The helper is mint-seed-journal; the workflow then submits the ref.**
 Callers pass ordinary messages — inline text, attachments as `ArtifactRef`
-parts. The helper mints an **unbound, ownerless thread**, lands content
+parts. The helper mints an **unbound, ownerless thread**
+(✎ superseded: caller-owned — see the caller-owned delta above), lands content
 exactly the way accepted conversation messages land today (content refs
 into the transcript/content store — I5), seeds the messages as the thread's
 rows, journals the declarations beside them, and returns the pin. The
@@ -1090,7 +1096,7 @@ convention.
 | State | Owner |
 |---|---|
 | Conversation transcript and continuity | Thread store, via its binding (unchanged) |
-| Unbound turn transcript (seeded request + run output) | Its own unbound, ownerless thread — the same thread store as every run |
+| Unbound turn transcript (seeded request + run output) | Its own unbound, ownerless thread (✎ superseded: caller-owned — see the caller-owned delta above) — the same thread store as every run |
 | Run lifecycle, resolved profile, idempotency, result settlement | Process journal (unchanged — as every run today) |
 | Artifact bytes and authorization | Artifact/filesystem store (unchanged) |
 | Output schema | The execution request (journaled with it) |
@@ -1151,7 +1157,9 @@ convention.
   optional hygiene.
 - **`TurnLimits` maps onto the existing budget machinery** (iteration
   limit, wall clock, USD accountant, max output tokens) — nothing invented;
-  ceilings come from the profile.
+  ceilings come from the profile. (✎ superseded: not built — see deltas;
+  the shipped limit set is call/invocation/wall-clock ceilings only, and no
+  output-token engine seam exists.)
 - **Observation live-hint buffers reuse existing sizing** (the thread ring).
 - **Crate placement as tabled in §7**, finalized in PR review.
 - **Message bounds mirror today's transcript/content bounds** (§4.4) — no
@@ -1173,7 +1181,10 @@ convention.
    the same way so a burst of them cannot occupy every worker and delay live
    chats. Open: the default value, and whether interactive unbound callers
    (a user waiting on a panel) ever need a priority path — deferred until
-   there is latency data.
+   there is latency data. (✎ superseded: shipped with config default — see
+   deltas; the `unbound` per-class concurrency cap defaults to 4, configurable
+   via `[runner] max_concurrent_unbound_runs` /
+   `IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_UNBOUND_RUNS`.)
 3. **Gate-resolve affordance:** a design sketch for the future revision that
    allows gating tools on unbound turns (actor model, rendering
    surface, lease semantics) — deliberately unresolved here.

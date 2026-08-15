@@ -43,7 +43,7 @@ async fn chat_completion_route_submits_product_surface_and_returns_projection() 
     let router = test_router(workflow.clone(), projection_reader);
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "hello"}]
@@ -101,7 +101,10 @@ async fn chat_completion_idempotency_replays_same_id_and_conflicts_on_different_
     let first = json_body(
         router
             .clone()
-            .oneshot(chat_request(body.clone(), Some("same-key")))
+            .oneshot(conversation_lane_chat_request(
+                body.clone(),
+                Some("same-key"),
+            ))
             .await
             .expect("first"),
     )
@@ -109,7 +112,7 @@ async fn chat_completion_idempotency_replays_same_id_and_conflicts_on_different_
     let replay = json_body(
         router
             .clone()
-            .oneshot(chat_request(body, Some("same-key")))
+            .oneshot(conversation_lane_chat_request(body, Some("same-key")))
             .await
             .expect("replay"),
     )
@@ -124,7 +127,7 @@ async fn chat_completion_idempotency_replays_same_id_and_conflicts_on_different_
     );
 
     let conflict = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "different"}]
@@ -148,7 +151,7 @@ async fn invalid_chat_completion_does_not_reserve_idempotency_key() {
 
     let invalid = router
         .clone()
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": []
@@ -162,7 +165,7 @@ async fn invalid_chat_completion_does_not_reserve_idempotency_key() {
     assert_eq!(workflow.accepted_count(), 0);
 
     let valid = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "hello"}]
@@ -200,6 +203,7 @@ async fn chat_completion_rejects_oversized_raw_body_before_fingerprint_or_workfl
         workflow.clone(),
         in_memory_openai_compat_ref_store(),
         Arc::new(StaticChatProjectionReader::text("unused")),
+        Arc::new(RecordingPreparedTurnPort::new()),
     );
     let oversized = "x".repeat(4 * 1024 * 1024 + 1);
 
@@ -232,7 +236,7 @@ async fn chat_completion_rejects_invalid_model_before_product_surface() {
         );
 
         let response = router
-            .oneshot(chat_request(
+            .oneshot(conversation_lane_chat_request(
                 json!({
                     "model": model,
                     "messages": [{"role": "user", "content": "hello"}]
@@ -267,7 +271,7 @@ async fn chat_completion_rejects_invalid_idempotency_key_header() {
     );
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "hello"}]
@@ -290,7 +294,7 @@ async fn chat_completion_deferred_busy_ack_returns_429() {
     );
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "hello"}]
@@ -314,7 +318,7 @@ async fn chat_completion_rejected_busy_ack_returns_429() {
     );
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "hello"}]
@@ -342,7 +346,7 @@ async fn chat_completion_duplicate_ack_unwraps_to_accepted() {
     );
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "hello"}]
@@ -366,7 +370,7 @@ async fn chat_completion_noop_ack_returns_internal_error() {
     );
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "hello"}]
@@ -395,7 +399,7 @@ async fn chat_completion_command_result_ack_returns_internal_error() {
     );
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "hello"}]
@@ -424,11 +428,14 @@ async fn chat_completion_idempotency_retries_after_busy_without_500() {
 
     let first = router
         .clone()
-        .oneshot(chat_request(body.clone(), Some("busy-key")))
+        .oneshot(conversation_lane_chat_request(
+            body.clone(),
+            Some("busy-key"),
+        ))
         .await
         .expect("first response");
     let retry = router
-        .oneshot(chat_request(body, Some("busy-key")))
+        .oneshot(conversation_lane_chat_request(body, Some("busy-key")))
         .await
         .expect("retry response");
 
@@ -446,6 +453,7 @@ async fn chat_completion_replayed_pending_ref_submits_and_records_accepted_ack()
         workflow.clone(),
         ref_store.clone(),
         Arc::new(StaticChatProjectionReader::text("ok")),
+        Arc::new(RecordingPreparedTurnPort::new()),
     );
     let router = openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(
         Arc::new(service),
@@ -506,7 +514,7 @@ async fn chat_completion_binding_required_rejection_returns_404() {
     );
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "hello"}]
@@ -536,7 +544,7 @@ async fn chat_completion_access_denied_rejection_returns_403() {
     );
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "hello"}]
@@ -561,7 +569,7 @@ async fn chat_completion_unknown_installation_rejection_returns_503_retryable() 
     );
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "hello"}]
@@ -588,7 +596,7 @@ async fn chat_completion_invalid_request_rejection_returns_400() {
     );
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "hello"}]
@@ -618,7 +626,7 @@ async fn chat_completion_policy_denied_rejection_returns_403() {
     );
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "hello"}]
@@ -648,7 +656,7 @@ async fn chat_completion_ambiguous_resolution_rejection_returns_409() {
     );
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "hello"}]
@@ -680,7 +688,7 @@ async fn chat_completion_projection_reader_error_is_propagated_as_response() {
     );
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "hello"}]
@@ -704,7 +712,7 @@ async fn chat_completion_product_surface_error_redacts_request_and_backend_detai
     );
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{
@@ -748,7 +756,7 @@ async fn chat_completion_array_content_messages_are_rendered_to_text() {
     );
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{
@@ -792,7 +800,7 @@ async fn chat_completion_accepts_inline_image_over_webui_legacy_cap() {
     let image_base64 = base64::engine::general_purpose::STANDARD.encode(image);
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{
@@ -826,7 +834,7 @@ async fn chat_completion_sanitizes_tool_call_id_and_message_content() {
     );
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 // Declared client tools keep this request on the
@@ -883,7 +891,7 @@ async fn chat_completion_rejects_excessive_message_count_before_product_surface(
         .collect();
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({"model": "gpt-reborn", "messages": messages}),
             None,
         ))
@@ -901,13 +909,14 @@ async fn wired_chat_completion_requires_authenticated_caller_before_product_surf
         workflow.clone(),
         in_memory_openai_compat_ref_store(),
         Arc::new(StaticChatProjectionReader::text("unused")),
+        Arc::new(RecordingPreparedTurnPort::new()),
     );
     let router = openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(
         Arc::new(service),
     ));
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "hello"}]
@@ -986,7 +995,7 @@ async fn streaming_chat_completion_requires_streamer_before_product_surface() {
     );
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "stream": true,
@@ -1008,6 +1017,7 @@ async fn chat_completion_wait_timeout_returns_retryable_error_without_resubmitti
         workflow.clone(),
         in_memory_openai_compat_ref_store(),
         Arc::new(NeverChatProjectionReader),
+        Arc::new(RecordingPreparedTurnPort::new()),
     )
     .with_wait_timeout(Duration::from_millis(1));
     let router = openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(
@@ -1016,7 +1026,7 @@ async fn chat_completion_wait_timeout_returns_retryable_error_without_resubmitti
     .layer(axum::Extension(caller()));
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "hello"}]
@@ -1040,6 +1050,7 @@ async fn projection_reader_receives_canonical_product_surface_read_request() {
         workflow.clone(),
         in_memory_openai_compat_ref_store(),
         projection_reader.clone(),
+        Arc::new(RecordingPreparedTurnPort::new()),
     );
     let router = openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(
         Arc::new(service),
@@ -1047,7 +1058,7 @@ async fn projection_reader_receives_canonical_product_surface_read_request() {
     .layer(axum::Extension(caller()));
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "hello"}]
@@ -1113,7 +1124,7 @@ async fn model_only_tool_call_output_shape_is_preserved() {
     let router = test_router(workflow, projection_reader);
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "call tool if needed"}],
@@ -1147,7 +1158,7 @@ async fn requested_model_and_projection_read_are_forwarded_to_projection_reader(
     let router = test_router(workflow.clone(), projection_reader.clone());
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn-model-hint",
                 "messages": [{"role": "user", "content": "hello"}]
@@ -1181,7 +1192,7 @@ async fn client_tools_are_forwarded_as_model_only_projection_reader_metadata() {
     let router = test_router(workflow.clone(), projection_reader.clone());
 
     let response = router
-        .oneshot(chat_request(
+        .oneshot(conversation_lane_chat_request(
             json!({
                 "model": "gpt-reborn",
                 "messages": [{"role": "user", "content": "hello"}],
@@ -1245,6 +1256,7 @@ fn test_router_with_workflow(
         workflow,
         in_memory_openai_compat_ref_store(),
         projection_reader,
+        Arc::new(RecordingPreparedTurnPort::new()),
     );
     openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(Arc::new(
         service,
@@ -1257,7 +1269,7 @@ fn test_router_with_workflow(
 /// tool (the prepared lane owns every non-streaming tool-less request):
 /// these tests pin conversation-lane ack, idempotency, and flatten
 /// semantics, which live behind declared tools and streaming today.
-fn chat_request(mut body: Value, idempotency_key: Option<&str>) -> Request<Body> {
+fn conversation_lane_chat_request(mut body: Value, idempotency_key: Option<&str>) -> Request<Body> {
     if body.get("tools").is_none() && body.get("messages").is_some() {
         body["tools"] = serde_json::json!([
             {"type": "function", "function": {"name": "anchor_tool"}}
@@ -1522,8 +1534,8 @@ async fn oversized_prepared_request_fails_before_reserving_the_idempotency_key()
         surface.clone(),
         in_memory_openai_compat_ref_store(),
         reader.clone(),
-    )
-    .with_prepared_turn_port(port.clone());
+        port.clone(),
+    );
 
     // 129 seeded messages exceed the accept door's 128-message budget; the
     // pre-reservation mirror must reject it so the idempotency key stays
@@ -1568,6 +1580,66 @@ async fn oversized_prepared_request_fails_before_reserving_the_idempotency_key()
 }
 
 #[tokio::test]
+async fn tool_choice_without_tools_is_rejected_before_reserving_the_idempotency_key() {
+    // `tool_choice` with no `tools` declared would otherwise silently take
+    // the prepared lane (declares_tools is false), dropping the caller's
+    // tool_choice entirely: OpenAiChatModelOnlyTools::from_request still
+    // returns Some for it, but the prepared lane never consumes
+    // model_only_tools at all. Must be a typed 400 before the idempotency
+    // reservation, not a silently-degraded prepared-lane submission.
+    let surface = Arc::new(FakeProductSurface::new());
+    let port = Arc::new(RecordingPreparedTurnPort::new());
+    let reader = Arc::new(RecordingChatProjectionReader::new(
+        OpenAiChatCompletionProjection::text("hello"),
+    ));
+    let service = OpenAiChatCompletionsWorkflow::new(
+        surface.clone(),
+        in_memory_openai_compat_ref_store(),
+        reader.clone(),
+        port.clone(),
+    );
+
+    let body = serde_json::to_vec(&serde_json::json!({
+        "model": "gpt-reborn",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tool_choice": "auto"
+    }))
+    .expect("body");
+    let error = service
+        .complete_chat(
+            caller(),
+            &body,
+            Some(OpenAiCompatIdempotencyKey::new("tool-choice-retry-key").expect("key")),
+        )
+        .await
+        .expect_err("tool_choice without tools must be rejected");
+    assert_eq!(error.status_code(), 400);
+    assert_eq!(port.requests().len(), 0, "the door must not be reached");
+    assert_eq!(surface.accepted_count(), 0);
+
+    // The corrected request reuses the SAME idempotency key and succeeds —
+    // proof the failed attempt reserved nothing.
+    let corrected = serde_json::to_vec(&serde_json::json!({
+        "model": "gpt-reborn",
+        "messages": [{"role": "user", "content": "hi"}]
+    }))
+    .expect("body");
+    let response = service
+        .complete_chat(
+            caller(),
+            &corrected,
+            Some(OpenAiCompatIdempotencyKey::new("tool-choice-retry-key").expect("key")),
+        )
+        .await
+        .expect("corrected retry succeeds on the same key");
+    assert_eq!(
+        response.choices[0].message.content,
+        Some(serde_json::Value::String("hello".to_string()))
+    );
+    assert_eq!(port.requests().len(), 1);
+}
+
+#[tokio::test]
 async fn oversized_declared_json_schema_fails_before_reserving_the_idempotency_key() {
     let surface = Arc::new(FakeProductSurface::new());
     let port = Arc::new(RecordingPreparedTurnPort::new());
@@ -1578,8 +1650,8 @@ async fn oversized_declared_json_schema_fails_before_reserving_the_idempotency_k
         surface.clone(),
         in_memory_openai_compat_ref_store(),
         reader.clone(),
-    )
-    .with_prepared_turn_port(port.clone());
+        port.clone(),
+    );
 
     // A `response_format.json_schema.schema` big enough to exceed the accept
     // door's serialized-size cap; the in-process pre-reservation call must
@@ -1639,8 +1711,8 @@ async fn json_schema_chat_routes_through_the_prepared_door() {
         surface.clone(),
         in_memory_openai_compat_ref_store(),
         reader.clone(),
-    )
-    .with_prepared_turn_port(port.clone());
+        port.clone(),
+    );
 
     let body = serde_json::to_vec(&json_schema_chat_body()).expect("body");
     let response = service
@@ -1682,8 +1754,8 @@ async fn tool_history_chat_routes_through_the_prepared_door() {
         surface.clone(),
         in_memory_openai_compat_ref_store(),
         reader.clone(),
-    )
-    .with_prepared_turn_port(port.clone());
+        port.clone(),
+    );
 
     let body = serde_json::to_vec(&tool_history_chat_body()).expect("body");
     let response = service
@@ -1721,8 +1793,8 @@ async fn plain_chat_takes_the_prepared_door() {
         surface.clone(),
         in_memory_openai_compat_ref_store(),
         reader.clone(),
-    )
-    .with_prepared_turn_port(port.clone());
+        port.clone(),
+    );
 
     let body = serde_json::to_vec(&serde_json::json!({
         "model": "gpt-reborn",
@@ -1752,25 +1824,6 @@ async fn plain_chat_takes_the_prepared_door() {
 }
 
 #[tokio::test]
-async fn prepared_lane_fails_closed_without_a_wired_port() {
-    let surface = Arc::new(FakeProductSurface::new());
-    let service = OpenAiChatCompletionsWorkflow::new(
-        surface.clone(),
-        in_memory_openai_compat_ref_store(),
-        Arc::new(StaticChatProjectionReader::text("unused")),
-    );
-
-    let body = serde_json::to_vec(&json_schema_chat_body()).expect("body");
-    let error = service
-        .complete_chat(caller(), &body, None)
-        .await
-        .expect_err("prepared lane must fail closed");
-
-    assert_eq!(error.status_code(), 501);
-    assert_eq!(surface.accepted_count(), 0);
-}
-
-#[tokio::test]
 async fn complete_chat_rejects_stream_true_before_the_prepared_lane() {
     // complete_chat/complete_chat_request is the non-streaming entry point;
     // it rejects any `stream: true` body outright before ever consulting
@@ -1785,8 +1838,8 @@ async fn complete_chat_rejects_stream_true_before_the_prepared_lane() {
         surface.clone(),
         in_memory_openai_compat_ref_store(),
         Arc::new(StaticChatProjectionReader::text("unused")),
-    )
-    .with_prepared_turn_port(port.clone());
+        port.clone(),
+    );
 
     let mut body = json_schema_chat_body();
     body["stream"] = serde_json::Value::Bool(true);

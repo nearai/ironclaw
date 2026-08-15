@@ -737,6 +737,7 @@ fn router_with_options(
         workflow.clone(),
         ref_store.clone(),
         Arc::new(StaticChatReader),
+        Arc::new(UnusedPreparedTurnPort),
     )
     .with_wait_timeout(wait_timeout);
     let mut responses =
@@ -751,6 +752,21 @@ fn router_with_options(
             .with_chat_completions_workflow(Arc::new(chat))
             .with_responses_workflow(Arc::new(responses)),
     )
+}
+
+/// All requests exercised in this file are either `stream: true` (rejected
+/// before the prepared lane is ever consulted) or driven at the streamer
+/// seam directly, so the prepared-turn port is wired but never invoked here.
+struct UnusedPreparedTurnPort;
+
+#[async_trait]
+impl ironclaw_openai_compat::OpenAiCompatPreparedTurnPort for UnusedPreparedTurnPort {
+    async fn accept_and_submit(
+        &self,
+        _request: ironclaw_openai_compat::OpenAiCompatPreparedTurnRequest,
+    ) -> Result<ProductInboundAck, OpenAiCompatHttpError> {
+        panic!("prepared-turn port unexpectedly invoked in streaming_handlers_contract tests");
+    }
 }
 
 fn fake_workflow() -> Arc<FakeProductSurface> {

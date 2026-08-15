@@ -109,10 +109,10 @@ pub async fn build_openai_compat_route_mount(
             _default_project_id.clone(),
         )),
     });
-    let chat_projection_reader = Arc::new(
-        OpenAiChatCompletionThreadProjectionReader::new(product_surface.clone())
-            .with_prepared_lane(Arc::clone(&prepared_turn_gateway)),
-    );
+    let chat_projection_reader = Arc::new(OpenAiChatCompletionThreadProjectionReader::new(
+        product_surface.clone(),
+        Arc::clone(&prepared_turn_gateway),
+    ));
     // The external-tool catalog is the run-scoped seam shared with the loop
     // host: the host records parked calls + completes them from submitted
     // outputs; the Responses surface registers specs, submits outputs, and reads
@@ -140,7 +140,7 @@ pub async fn build_openai_compat_route_mount(
             coordinator: runtime.product_turn_coordinator(),
         }),
         llm_config: crate::product_surface::build_llm_config_service(runtime),
-        prepared_turn_port: Some(prepared_turn_gateway),
+        prepared_turn_port: prepared_turn_gateway,
     }))
 }
 
@@ -150,21 +150,19 @@ struct OpenAiChatCompletionThreadProjectionReader {
     /// Prepared-lane resolver: unbound runs live on stamped-hidden threads the
     /// caller-scoped timeline projection never surfaces, so their outcome is
     /// read from run state + the unbound thread directly.
-    prepared_lane: Option<Arc<OpenAiCompatPreparedTurnGateway>>,
+    prepared_lane: Arc<OpenAiCompatPreparedTurnGateway>,
 }
 
 impl OpenAiChatCompletionThreadProjectionReader {
-    fn new(product_surface: Arc<dyn ProductSurface>) -> Self {
+    fn new(
+        product_surface: Arc<dyn ProductSurface>,
+        prepared_lane: Arc<OpenAiCompatPreparedTurnGateway>,
+    ) -> Self {
         Self {
             product_surface,
             poll_interval: OPENAI_COMPAT_PROJECTION_POLL_INTERVAL,
-            prepared_lane: None,
+            prepared_lane,
         }
-    }
-
-    fn with_prepared_lane(mut self, gateway: Arc<OpenAiCompatPreparedTurnGateway>) -> Self {
-        self.prepared_lane = Some(gateway);
-        self
     }
 }
 
@@ -181,15 +179,8 @@ impl OpenAiChatCompletionProjectionReader for OpenAiChatCompletionThreadProjecti
             _ => return Err(OpenAiCompatHttpError::internal()),
         };
         if request.prepared {
-            let Some(lane) = self.prepared_lane.as_ref() else {
-                return Err(OpenAiCompatHttpError::from_kind(
-                    501,
-                    false,
-                    OpenAiCompatErrorKind::Unsupported,
-                    Some("structured output is not enabled on this deployment".to_string()),
-                ));
-            };
-            return lane
+            return self
+                .prepared_lane
                 .wait_for_unbound_completion(&request, self.poll_interval)
                 .await;
         }

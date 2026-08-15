@@ -713,12 +713,25 @@ async fn unbound_service_threads_caller_as_thread_owner() -> HarnessResult<()> {
             thread_id: thread_id.clone(),
         })
         .await;
-    assert!(
-        ownerless_history
-            .map(|history| history.messages.is_empty())
-            .unwrap_or(true),
-        "no unbound rows may land in the tenant __system__ slot"
-    );
+    match ownerless_history {
+        Ok(history) => assert!(
+            history.messages.is_empty(),
+            "no unbound rows may land in the tenant __system__ slot"
+        ),
+        Err(ironclaw_threads::SessionThreadError::UnknownThread { .. }) => {
+            // The thread does not exist under the ownerless (tenant
+            // __system__) scope — the non-enumerating "unknown thread" shape
+            // `SessionThreadService::read_thread`/`list_thread_history`
+            // return for both "does not exist" and "exists under a
+            // different scope" per their documented contract.
+        }
+        Err(other) => {
+            return Err(format!(
+                "expected UnknownThread reading the unbound thread under the ownerless scope, got: {other:?}"
+            )
+            .into());
+        }
+    }
 
     // Cross-user isolation is now ENFORCED, not just structural: a foreign
     // caller's run-state read under its own owner scope is rejected.

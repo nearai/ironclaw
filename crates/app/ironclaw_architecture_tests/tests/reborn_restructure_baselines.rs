@@ -170,7 +170,13 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// `ironclaw_assistant::UnboundPreparedTurnService`; composition's growth is
 /// the wire-DTO mapping, port adapter, and mount wiring, ratcheted to the
 /// observed count.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_086;
+/// ✎ Re-measured 42_086 -> 41_991 on 2026-08-14 (post-merge re-measure, same
+/// day): the changelog, the prior manifest figure, and a live `--print` run
+/// had drifted out of agreement; `bash scripts/ci/check-composition-budget.sh
+/// --print` is the single authoritative re-capture, and this record moves
+/// with `scripts/ci/composition-budget.toml`'s `loc_ceiling`/`loc_observed`
+/// to the same figure in this commit.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_991;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

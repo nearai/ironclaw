@@ -377,16 +377,14 @@ mod openai_compat_mount_tests {
     async fn openai_chat_completions_mount_uses_webui_auth_and_product_surface() {
         let workflow = Arc::new(GatewayOpenAiSurface::default());
         let prepared_port = Arc::new(CountingPreparedTurnPort::default());
-        let chat = Arc::new(
-            OpenAiChatCompletionsWorkflow::new(
-                workflow.clone(),
-                in_memory_openai_compat_ref_store(),
-                Arc::new(StaticChatProjectionReader::text(
-                    "hello through composition",
-                )),
-            )
-            .with_prepared_turn_port(prepared_port.clone()),
-        );
+        let chat = Arc::new(OpenAiChatCompletionsWorkflow::new(
+            workflow.clone(),
+            in_memory_openai_compat_ref_store(),
+            Arc::new(StaticChatProjectionReader::text(
+                "hello through composition",
+            )),
+            prepared_port.clone(),
+        ));
         let mount = ProtectedRouteMount::new(
             openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(chat)),
             openai_compat_routes(),

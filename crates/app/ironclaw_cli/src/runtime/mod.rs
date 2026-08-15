@@ -1927,15 +1927,16 @@ mod tests {
         );
     }
 
-    /// Clear all four runner env knobs so an ambient value in the dev/CI
+    /// Clear all five runner env knobs so an ambient value in the dev/CI
     /// environment cannot leak into a test asserting config-file/default
     /// behavior. Returns the guards; keep them alive for the test body.
-    fn clear_runner_env() -> [EnvGuard; 4] {
+    fn clear_runner_env() -> [EnvGuard; 5] {
         [
             EnvGuard::clear("IRONCLAW_REBORN_RUNNER_WORKER_COUNT"),
             EnvGuard::clear("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER"),
             EnvGuard::clear("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_TRIGGER_RUNS"),
             EnvGuard::clear("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_CONVERSATION_RUNS"),
+            EnvGuard::clear("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_UNBOUND_RUNS"),
         ]
     }
 

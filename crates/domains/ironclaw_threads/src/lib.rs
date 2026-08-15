@@ -71,9 +71,9 @@ pub use prepared_context::{
 // reach `AttachmentRef` through this crate without a direct `ironclaw_common`
 // dependency.
 pub use ironclaw_common::{AttachmentKind, AttachmentRef};
-// The prepared-context seed vocabulary (`PreparedContextRequest.messages` is
-// `Vec<AgentMessage>`); re-exposed for the same reason so accept-door callers
-// build seed messages without a direct `ironclaw_llm` dependency.
+// The accept door's own request type (`PreparedContextRequest.messages`) is
+// `Vec<AgentMessage>`; re-exposed so accept-door callers build seed messages
+// in the door's own vocabulary rather than reaching past it into `ironclaw_llm`.
 pub use ironclaw_llm::agent_message;
 pub use service::SessionThreadService;
 pub use tool_result_reference::{

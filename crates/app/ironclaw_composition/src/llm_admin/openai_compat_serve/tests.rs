@@ -1630,7 +1630,7 @@ async fn prepared_gateway_resolves_the_structured_result_payload() {
         .await
         .expect("tool row");
 
-    let mut state = TurnRunState {
+    let state = TurnRunState {
         scope: test_unbound_turn_scope("sres", &thread_id),
         actor: Some(TurnActor::new(UserId::new("user-sres").expect("user"))),
         turn_id: ironclaw_host_api::turn::TurnId::new(),
@@ -1653,7 +1653,6 @@ async fn prepared_gateway_resolves_the_structured_result_payload() {
         product_context: None,
         resume_disposition: None,
     };
-    state.scope = test_unbound_turn_scope("sres", &thread_id);
     let coordinator = Arc::new(StaticTurnCoordinator::new(state));
     let gateway = OpenAiCompatPreparedTurnGateway {
         service: Arc::new(ironclaw_assistant::UnboundTurnService::new(
