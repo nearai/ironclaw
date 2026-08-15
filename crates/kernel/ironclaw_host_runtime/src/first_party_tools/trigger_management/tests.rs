@@ -48,6 +48,9 @@ fn trigger_create_description_teaches_contract_owned_delivery_with_no_stored_tar
     assert!(
         TRIGGER_CREATE_DESCRIPTION
             .contains("Derive execution_contract.policy.result_delivery from the user's wording")
+            && TRIGGER_CREATE_DESCRIPTION.contains(
+                "use suppress_when_nothing_to_report when the user says to notify only on a match, change, or actionable result",
+            )
             && TRIGGER_CREATE_DESCRIPTION.contains("otherwise use deliver"),
         "trigger_create must derive no-result delivery with a deterministic deliver fallback: {TRIGGER_CREATE_DESCRIPTION}"
     );

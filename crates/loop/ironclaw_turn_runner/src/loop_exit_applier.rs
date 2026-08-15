@@ -313,10 +313,12 @@ where
             if message_ids.is_empty() {
                 false
             } else {
+                let expected_message_count = message_ids.len();
                 let thread_scope = self
                     .resolve_thread_scope_for_turn(request.scope, request.run_id)
                     .await?;
-                self.thread_service
+                let messages = self
+                    .thread_service
                     .load_context_messages(LoadContextMessagesRequest {
                         scope: thread_scope,
                         thread_id: request.scope.thread_id.clone(),
@@ -326,9 +328,9 @@ where
                     .map_err(|error| TurnError::Unavailable {
                         reason: error.to_string(),
                     })?
-                    .messages
-                    .iter()
-                    .any(|message| {
+                    .messages;
+                messages.len() == expected_message_count
+                    && messages.iter().all(|message| {
                         message
                             .tool_result_provider_call
                             .as_ref()

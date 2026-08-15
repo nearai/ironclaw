@@ -944,6 +944,124 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
     assert!(typed_verified, "the exact typed no-result call is trusted");
 }
 
+#[tokio::test]
+async fn applier_rejects_mixed_generic_and_typed_nothing_to_report_evidence() {
+    let mut claimed = claimed_run();
+    claimed.state.scope = TurnScope::new(
+        TenantId::new("tenant").expect("valid"),
+        Some(AgentId::new("agent").expect("valid")),
+        None,
+        ThreadId::new("thread").expect("valid"),
+    );
+    let mut product_context = ProductTurnContext::new(
+        TurnOriginKind::ScheduledTrigger,
+        None,
+        None,
+        TurnOwner::Personal {
+            user: UserId::new("automation-owner").expect("user"),
+        },
+    );
+    product_context.execution_policy = Some(TurnExecutionPolicy {
+        result_delivery: ResultDeliveryPolicy::SuppressWhenNothingToReport,
+        ..TurnExecutionPolicy::default()
+    });
+    claimed.state.product_context = Some(product_context);
+
+    let thread_scope = ThreadScope {
+        tenant_id: claimed.state.scope.tenant_id.clone(),
+        agent_id: claimed.state.scope.agent_id.clone().expect("agent id"),
+        project_id: None,
+        owner_user_id: None,
+        mission_id: None,
+    };
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(claimed.state.scope.thread_id.clone()),
+            created_by_actor_id: "user:test".to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+    let generic_result_ref = LoopResultRef::new("result:generic").expect("result ref");
+    append_tool_result_reference(
+        thread_service.as_ref(),
+        thread_scope.clone(),
+        claimed.state.scope.thread_id.clone(),
+        claimed.state.run_id,
+        generic_result_ref.clone(),
+    )
+    .await;
+    let typed_result_ref = LoopResultRef::new("result:nothing-to-report").expect("result ref");
+    thread_service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: thread_scope.clone(),
+            thread_id: claimed.state.scope.thread_id.clone(),
+            turn_run_id: claimed.state.run_id.to_string(),
+            result_ref: typed_result_ref.as_str().to_string(),
+            safe_summary: ToolResultSafeSummary::new("nothing to report").expect("safe summary"),
+            provider_call: Some(ProviderToolCallReferenceEnvelope {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                provider_turn_id: "turn-1".to_string(),
+                provider_call_id: "call-1".to_string(),
+                provider_tool_name: ProviderToolName::new("builtin__structured_result")
+                    .expect("provider tool name"),
+                capability_id: CapabilityId::new("builtin.structured_result")
+                    .expect("capability id"),
+                arguments: serde_json::json!({"outcome": "nothing_to_report"}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }),
+            model_observation: None,
+        })
+        .await
+        .expect("typed result reference");
+
+    let checkpoint_id = TurnCheckpointId::new();
+    let checkpoint = loop_checkpoint_record(
+        &claimed,
+        checkpoint_id,
+        LoopCheckpointStateRef::new("checkpoint:mixed-result-evidence").expect("state ref"),
+        LoopCheckpointKind::Final,
+    );
+    let evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
+        thread_service,
+        Arc::new(in_memory_agent_turn_runtime()) as Arc<dyn AgentTurnRuntimePort>,
+        Arc::new(StaticLoopCheckpointStore::new(checkpoint)),
+        empty_await_dependent_run_evidence(),
+        thread_scope,
+    );
+    let transition = Arc::new(RecordingTransitionPort::new());
+    let applier = LoopExitApplier::new(transition, Arc::new(evidence));
+
+    let state = applier
+        .apply(
+            &claimed,
+            LoopExit::Completed(LoopCompleted {
+                completion_kind: LoopCompletionKind::NothingToReport,
+                reply_message_refs: Vec::new(),
+                result_refs: vec![generic_result_ref, typed_result_ref],
+                final_checkpoint_id: Some(checkpoint_id),
+                model_usage: None,
+                exit_id: test_exit_id(),
+            }),
+        )
+        .await
+        .expect("applied");
+
+    assert_eq!(state.status, TurnStatus::Failed);
+    assert_eq!(
+        state
+            .failure
+            .and_then(|failure| failure.detail().map(str::to_string)),
+        Some("loop exit violation: unverified_completion_reference".to_string())
+    );
+}
+
 // `libsql_thread_checkpoint_evidence_verifies_result_ref_after_reopen` and
 // `postgres_thread_checkpoint_evidence_verifies_result_ref_after_reopen_when_configured`
 // have been removed alongside the legacy `LibSqlSessionThreadService` and
