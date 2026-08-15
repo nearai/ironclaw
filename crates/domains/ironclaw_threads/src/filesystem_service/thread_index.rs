@@ -1,10 +1,14 @@
-use std::collections::HashSet;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use chrono::{DateTime, Utc};
 use ironclaw_filesystem::{
     CasApply, CasExpectation, ContentType, Entry, FileType, Filter, IndexKey, IndexKind, IndexName,
     IndexSpec, IndexValue, OrderedPage, OrderedQueryCursor, Page, RecordKind, RootFilesystem,
-    SortDirection, cas_update,
+    ScopedFilesystem, SortDirection, cas_update,
 };
 use ironclaw_host_api::{ids::ThreadId, path::ScopedPath};
 use serde::{Deserialize, Serialize};
@@ -22,6 +26,7 @@ const THREAD_SCOPE_INDEX_KEY: &str = "scope_key";
 const THREAD_ACTIVITY_SORT_KEY: &str = "activity_sort";
 const THREAD_ID_INDEX_KEY: &str = "thread_id";
 const THREAD_INDEX_KNOWN_ROW_MAX: usize = 100_000;
+const THREAD_INDEX_TOUCH_STATE_MAX: usize = 100_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct ThreadIndexRecord {
@@ -43,6 +48,31 @@ struct ThreadIndexFlags {
     title_present: bool,
     metadata_present: bool,
     goal_present: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PendingThreadIndexTouch {
+    scope: ThreadScope,
+    thread_id: ThreadId,
+    updated_at: DateTime<Utc>,
+    derived_title: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct ThreadIndexTouchEntry {
+    last_flushed_at: Option<Instant>,
+    pending: Option<PendingThreadIndexTouch>,
+    worker_running: bool,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct ThreadIndexTouchState {
+    entries: Mutex<HashMap<String, ThreadIndexTouchEntry>>,
+}
+
+enum ThreadIndexTouchAction {
+    FlushNow(PendingThreadIndexTouch),
+    Buffered,
 }
 
 impl<F> FilesystemSessionThreadService<F>
@@ -183,8 +213,12 @@ where
     }
 
     pub(super) fn forget_thread_index_row(&self, scope: &ThreadScope, thread_id: &ThreadId) {
+        let key = thread_index_record_cache_key(scope, thread_id);
         if let Ok(mut known) = self.known_thread_index_rows.lock() {
-            known.remove(&thread_index_record_cache_key(scope, thread_id));
+            known.remove(&key);
+        }
+        if let Ok(mut state) = self.thread_index_touch_state.entries.lock() {
+            state.remove(&key);
         }
     }
 
@@ -324,7 +358,10 @@ where
         scope: &ThreadScope,
         thread_id: &ThreadId,
         updated_at: DateTime<Utc>,
-    ) -> Result<(), SessionThreadError> {
+    ) -> Result<(), SessionThreadError>
+    where
+        F: 'static,
+    {
         self.touch_thread_index_updated_at_with_derived_title(scope, thread_id, updated_at, None)
             .await
     }
@@ -339,15 +376,102 @@ where
         thread_id: &ThreadId,
         updated_at: DateTime<Utc>,
         derived_title: Option<String>,
-    ) -> Result<(), SessionThreadError> {
+    ) -> Result<(), SessionThreadError>
+    where
+        F: 'static,
+    {
         self.ensure_thread_index_query(scope, false).await?;
+        let touch = PendingThreadIndexTouch {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            updated_at,
+            derived_title,
+        };
+        let key = thread_index_record_cache_key(scope, thread_id);
+        let ThreadIndexTouchAction::FlushNow(touch) = self.buffer_thread_index_touch(&key, touch)
+        else {
+            return Ok(());
+        };
+        match Self::write_thread_index_touch(self.filesystem.as_ref(), &touch).await {
+            Ok(true) => self.mark_thread_index_known(scope, thread_id),
+            Ok(false) => {}
+            Err(error) => {
+                self.release_failed_thread_index_touch(&key);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn buffer_thread_index_touch(
+        &self,
+        key: &str,
+        touch: PendingThreadIndexTouch,
+    ) -> ThreadIndexTouchAction
+    where
+        F: 'static,
+    {
+        let now = Instant::now();
+        let mut state = match self.thread_index_touch_state.entries.lock() {
+            Ok(state) => state,
+            Err(_) => return ThreadIndexTouchAction::FlushNow(touch),
+        };
+        evict_thread_index_touch_state_over_limit(&mut state, key);
+        let entry = state.entry(key.to_string()).or_default();
+        let can_flush_now = entry
+            .last_flushed_at
+            .is_none_or(|last| now.duration_since(last) >= self.thread_index_touch_flush_interval);
+        if can_flush_now && !entry.worker_running {
+            entry.last_flushed_at = Some(now);
+            return ThreadIndexTouchAction::FlushNow(touch);
+        }
+
+        merge_pending_thread_index_touch(&mut entry.pending, touch);
+        if !entry.worker_running {
+            entry.worker_running = true;
+            let delay = entry
+                .last_flushed_at
+                .map(|last| {
+                    self.thread_index_touch_flush_interval
+                        .saturating_sub(now.duration_since(last))
+                })
+                .unwrap_or(self.thread_index_touch_flush_interval);
+            tokio::spawn(flush_thread_index_touch_loop(
+                Arc::clone(&self.filesystem),
+                Arc::clone(&self.thread_index_touch_state),
+                key.to_string(),
+                self.thread_index_touch_flush_interval,
+                delay,
+            ));
+        }
+        ThreadIndexTouchAction::Buffered
+    }
+
+    fn release_failed_thread_index_touch(&self, key: &str) {
+        if let Ok(mut state) = self.thread_index_touch_state.entries.lock()
+            && let Some(entry) = state.get_mut(key)
+        {
+            entry.last_flushed_at = None;
+            if entry.pending.is_none() && !entry.worker_running {
+                state.remove(key);
+            }
+        }
+    }
+
+    async fn write_thread_index_touch(
+        filesystem: &ScopedFilesystem<F>,
+        touch: &PendingThreadIndexTouch,
+    ) -> Result<bool, SessionThreadError> {
+        let scope = &touch.scope;
+        let thread_id = &touch.thread_id;
         let path = thread_index_record_path(scope, thread_id)?;
         let resource_scope = scope.to_resource_scope();
         let scope_for_retry = scope.clone();
         let thread_id_for_retry = thread_id.clone();
-        let derived_title = &derived_title;
+        let updated_at = touch.updated_at;
+        let derived_title = &touch.derived_title;
         let row_known = cas_update(
-            self.filesystem.as_ref(),
+            filesystem,
             &resource_scope,
             &path,
             |bytes: &[u8]| deserialize::<ThreadIndexRecord>(bytes),
@@ -355,6 +479,7 @@ where
             |current: Option<ThreadIndexRecord>| {
                 let scope = scope_for_retry.clone();
                 let thread_id = thread_id_for_retry.clone();
+                let resource_scope = resource_scope.clone();
                 async move {
                     let mut index = match current {
                         Some(index) => {
@@ -364,21 +489,40 @@ where
                             index
                         }
                         None => {
-                            let Some((mut stored, _)) =
-                                self.read_thread_versioned(&scope, &thread_id).await?
+                            let source_path = super::thread_record_path(&scope, &thread_id)?;
+                            let Some(versioned) =
+                                filesystem.get(&resource_scope, &source_path).await?
                             else {
                                 return Ok(CasApply::no_op(
                                     no_op_thread_index_record(scope, thread_id),
                                     false,
                                 ));
                             };
+                            let mut stored =
+                                deserialize::<StoredThreadRecord>(&versioned.entry.body)?;
+                            if stored.record.scope != scope || stored.record.thread_id != thread_id
+                            {
+                                return Err(SessionThreadError::ThreadScopeMismatch { thread_id });
+                            }
                             stored.record.updated_at = Some(updated_at);
                             Self::thread_index_record(&stored)
                         }
                     };
-                    index.record.updated_at = Some(updated_at);
+                    let mut changed = false;
+                    if index
+                        .record
+                        .updated_at
+                        .is_none_or(|current| current < updated_at)
+                    {
+                        index.record.updated_at = Some(updated_at);
+                        changed = true;
+                    }
                     if index.record.title.is_none() && index.derived_title.is_none() {
                         index.derived_title = derived_title.as_ref().cloned();
+                        changed |= index.derived_title.is_some();
+                    }
+                    if !changed {
+                        return Ok(CasApply::no_op(index, true));
                     }
                     Ok(CasApply::new(index, true))
                 }
@@ -386,10 +530,7 @@ where
         )
         .await
         .map_err(map_cas_error)?;
-        if row_known {
-            self.mark_thread_index_known(scope, thread_id);
-        }
-        Ok(())
+        Ok(row_known)
     }
 
     /// Drop the cached sidebar label for a thread.
@@ -622,6 +763,101 @@ where
             }
         }
         Ok(stored.record)
+    }
+}
+
+fn merge_pending_thread_index_touch(
+    pending: &mut Option<PendingThreadIndexTouch>,
+    incoming: PendingThreadIndexTouch,
+) {
+    match pending {
+        Some(current) => {
+            if incoming.updated_at > current.updated_at {
+                current.updated_at = incoming.updated_at;
+            }
+            if current.derived_title.is_none() {
+                current.derived_title = incoming.derived_title;
+            }
+        }
+        None => *pending = Some(incoming),
+    }
+}
+
+fn evict_thread_index_touch_state_over_limit(
+    state: &mut HashMap<String, ThreadIndexTouchEntry>,
+    keep: &str,
+) {
+    if state.len() < THREAD_INDEX_TOUCH_STATE_MAX || state.contains_key(keep) {
+        return;
+    }
+    let victim = state
+        .iter()
+        .filter(|(_, entry)| entry.pending.is_none() && !entry.worker_running)
+        .min_by_key(|(_, entry)| entry.last_flushed_at)
+        .map(|(key, _)| key.clone());
+    if let Some(victim) = victim {
+        state.remove(&victim);
+    }
+}
+
+async fn flush_thread_index_touch_loop<F>(
+    filesystem: Arc<ScopedFilesystem<F>>,
+    state: Arc<ThreadIndexTouchState>,
+    key: String,
+    flush_interval: Duration,
+    mut delay: Duration,
+) where
+    F: RootFilesystem + 'static,
+{
+    loop {
+        tokio::time::sleep(delay).await;
+        let touch = {
+            let mut entries = match state.entries.lock() {
+                Ok(entries) => entries,
+                Err(_) => return,
+            };
+            let Some(entry) = entries.get_mut(&key) else {
+                return;
+            };
+            let Some(touch) = entry.pending.take() else {
+                entry.worker_running = false;
+                return;
+            };
+            entry.last_flushed_at = Some(Instant::now());
+            touch
+        };
+
+        if let Err(error) = FilesystemSessionThreadService::<F>::write_thread_index_touch(
+            filesystem.as_ref(),
+            &touch,
+        )
+        .await
+        {
+            tracing::debug!(
+                ?error,
+                thread_id = %touch.thread_id.as_str(),
+                "coalesced thread recency touch failed",
+            );
+        }
+
+        let has_pending = match state.entries.lock() {
+            Ok(mut entries) => {
+                let Some(entry) = entries.get_mut(&key) else {
+                    return;
+                };
+                if entry.pending.is_none() {
+                    entry.worker_running = false;
+                    false
+                } else {
+                    true
+                }
+            }
+            Err(_) => return,
+        };
+        if !has_pending {
+            return;
+        }
+        delay = flush_interval;
     }
 }
 
@@ -881,6 +1117,49 @@ mod tests {
                 .iter()
                 .any(|record| record.thread_id == thread_id),
             "a no-op touch for a missing row must not suppress index creation after recreate"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_thread_index_touch_is_monotonic_across_service_instances() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = scoped_threads_fs_at(backend, "tenant-monotonic-touch", "alice");
+        let service_a = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+        let service_b = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+        let request_scope = scope("monotonic-touch");
+        let thread_id = ThreadId::new("thread-monotonic-touch").unwrap();
+        let created = service_a
+            .ensure_thread(EnsureThreadRequest {
+                scope: request_scope.clone(),
+                thread_id: Some(thread_id.clone()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some("monotonic".into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        let created_at = created.updated_at.expect("thread creation timestamp");
+        let newer = created_at + chrono::Duration::seconds(20);
+        let stale = created_at + chrono::Duration::seconds(10);
+
+        service_a
+            .touch_thread_index_updated_at(&request_scope, &thread_id, newer)
+            .await
+            .unwrap();
+        service_b
+            .touch_thread_index_updated_at(&request_scope, &thread_id, stale)
+            .await
+            .unwrap();
+
+        let index = service_b
+            .read_thread_index_record(&request_scope, &thread_id)
+            .await
+            .unwrap()
+            .expect("thread index exists");
+        assert_eq!(
+            index.record.updated_at,
+            Some(newer),
+            "a stale worker touch must not move sidebar activity backward"
         );
     }
 

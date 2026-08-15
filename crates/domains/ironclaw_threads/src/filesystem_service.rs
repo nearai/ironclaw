@@ -40,6 +40,7 @@ mod transcript_migration;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -110,6 +111,10 @@ const TITLE_DERIVATION_READ_CONCURRENCY: usize = 8;
 /// One-shot first-turn context windows are a hot-path handoff from inbound
 /// accept to prompt construction; keep the cache bounded if a turn never runs.
 const ONE_SHOT_CONTEXT_WINDOW_CACHE_MAX_ENTRIES: usize = 4096;
+/// Activity projection writes are advisory and bursty. Keep the default short
+/// enough for sidebar freshness while collapsing the message/draft/finalize
+/// writes produced by a typical turn.
+const DEFAULT_THREAD_INDEX_TOUCH_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 
 struct MaterializedMessageRange {
     thread: StoredThreadRecord,
@@ -185,6 +190,8 @@ where
     /// off the index-DDL path after a mount's first thread.
     ready_index_mounts: Mutex<HashSet<(TenantId, UserId)>>,
     thread_index_declaration_lock: tokio::sync::Mutex<()>,
+    thread_index_touch_state: Arc<thread_index::ThreadIndexTouchState>,
+    thread_index_touch_flush_interval: Duration,
     one_shot_context_windows: Mutex<HashMap<String, ContextWindow>>,
 }
 
@@ -213,8 +220,19 @@ where
             ready_thread_index_scopes: Mutex::new(HashSet::new()),
             ready_index_mounts: Mutex::new(HashSet::new()),
             thread_index_declaration_lock: tokio::sync::Mutex::new(()),
+            thread_index_touch_state: Arc::new(thread_index::ThreadIndexTouchState::default()),
+            thread_index_touch_flush_interval: DEFAULT_THREAD_INDEX_TOUCH_FLUSH_INTERVAL,
             one_shot_context_windows: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Configure how frequently one service instance may rewrite a thread's
+    /// activity projection. Production uses the short default; tests and
+    /// specialized compositions may tune the trade-off between write volume
+    /// and sidebar freshness.
+    pub fn with_thread_index_touch_flush_interval(mut self, interval: Duration) -> Self {
+        self.thread_index_touch_flush_interval = interval;
+        self
     }
 
     pub fn clear_thread_index_cache_for_scope(&self, _scope: &ThreadScope) {}
@@ -1381,7 +1399,10 @@ where
         scope: &ThreadScope,
         thread_id: &ThreadId,
         updated_at: DateTime<Utc>,
-    ) -> Result<(), SessionThreadError> {
+    ) -> Result<(), SessionThreadError>
+    where
+        F: 'static,
+    {
         self.touch_thread_index_updated_at(scope, thread_id, updated_at)
             .await
     }
@@ -1398,7 +1419,9 @@ where
         scope: &ThreadScope,
         thread_id: &ThreadId,
         updated_at: DateTime<Utc>,
-    ) {
+    ) where
+        F: 'static,
+    {
         if let Err(error) = self
             .touch_thread_updated_at(scope, thread_id, updated_at)
             .await
@@ -1615,7 +1638,7 @@ where
 #[async_trait]
 impl<F> SessionThreadService for FilesystemSessionThreadService<F>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + 'static,
 {
     async fn ensure_thread(
         &self,
