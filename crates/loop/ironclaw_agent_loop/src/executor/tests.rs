@@ -3652,6 +3652,9 @@ async fn typed_structured_result_terminalizes_suppressed_schedule_without_reply_
     state.stop_state.structured_result_recorded = true;
     state
         .result_refs
+        .push(LoopResultRef::new("result:prior-tool").expect("result ref"));
+    state
+        .result_refs
         .push(LoopResultRef::new("result:nothing-to-report").expect("result ref"));
     state
         .assistant_refs

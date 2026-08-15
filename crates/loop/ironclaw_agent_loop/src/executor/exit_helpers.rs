@@ -28,18 +28,26 @@ pub(super) fn completed_exit(
         LoopCompletionKind::NoReply
     };
     let model_usage = state.cumulative_model_usage;
-    // Earlier model iterations may have emitted progress text before the
-    // terminal structured result. Retain those transcript rows, but do not
-    // expose their refs as the completion of a deliberately suppressed run.
+    // Earlier model iterations may have emitted progress text and ordinary
+    // tool results before the terminal structured result. Retain those
+    // transcript rows, but expose only the terminal result ref as completion
+    // evidence for a deliberately suppressed run. The structured-result call
+    // ends its capability turn, so its durable ref is the final appended ref;
+    // settlement independently verifies its exact provider call and arguments.
     let reply_message_refs = if typed_nothing_to_report {
         Vec::new()
     } else {
         state.assistant_refs
     };
+    let result_refs = if typed_nothing_to_report {
+        state.result_refs.last().cloned().into_iter().collect()
+    } else {
+        state.result_refs
+    };
     Ok(LoopExit::Completed(LoopCompleted {
         completion_kind,
         reply_message_refs,
-        result_refs: state.result_refs,
+        result_refs,
         final_checkpoint_id,
         model_usage,
         exit_id: exit_id(host, "completed")?,
