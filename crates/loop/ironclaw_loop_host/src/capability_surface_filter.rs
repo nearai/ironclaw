@@ -123,7 +123,10 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
             |capability_id| self.permits(capability_id),
             "provider tool call is outside the model-visible capability view",
         )?;
-        let candidate = self.inner.register_provider_tool_call(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let candidate = Box::pin(self.inner.register_provider_tool_call(request)).await?;
         validate_provider_tool_call_capability_scope(
             candidate_capability_ids(&candidate),
             |capability_id| self.permits(capability_id),
@@ -137,7 +140,10 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let mut surface = self.inner.visible_capabilities(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let mut surface = Box::pin(self.inner.visible_capabilities(request)).await?;
         apply_policy_filter_to_surface(&mut surface, |capability_id| self.permits(capability_id));
         Ok(surface)
     }
@@ -151,7 +157,10 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
         })? {
             return Ok(model_view_denied_outcome());
         }
-        self.inner.invoke_capability(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.inner.invoke_capability(request)).await
     }
 
     async fn invoke_capability_batch(
@@ -224,7 +233,10 @@ impl LoopCapabilityPort for CapabilitySurfacePolicyFilter {
             |capability_id| self.permits(capability_id),
             "provider tool call is outside the resolved capability surface",
         )?;
-        let candidate = self.inner.register_provider_tool_call(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let candidate = Box::pin(self.inner.register_provider_tool_call(request)).await?;
         validate_provider_tool_call_capability_scope(
             candidate_capability_ids(&candidate),
             |capability_id| self.permits(capability_id),
@@ -238,7 +250,10 @@ impl LoopCapabilityPort for CapabilitySurfacePolicyFilter {
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let mut surface = self.inner.visible_capabilities(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let mut surface = Box::pin(self.inner.visible_capabilities(request)).await?;
         apply_policy_filter_to_surface(&mut surface, |capability_id| self.permits(capability_id));
         Ok(surface)
     }
@@ -252,7 +267,10 @@ impl LoopCapabilityPort for CapabilitySurfacePolicyFilter {
         })? {
             return Ok(surface_profile_denied_outcome());
         }
-        self.inner.invoke_capability(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.inner.invoke_capability(request)).await
     }
 
     async fn invoke_capability_batch(
@@ -299,12 +317,14 @@ async fn invoke_filtered_batch(
     let (inner_outcomes, stopped_on_suspension) = if allowed.is_empty() {
         (Vec::new(), false)
     } else {
-        let inner_batch = inner
-            .invoke_capability_batch(LoopRequestBatch {
-                invocations: allowed,
-                stop_on_first_suspension: request.stop_on_first_suspension,
-            })
-            .await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let inner_batch = Box::pin(inner.invoke_capability_batch(LoopRequestBatch {
+            invocations: allowed,
+            stop_on_first_suspension: request.stop_on_first_suspension,
+        }))
+        .await?;
         (inner_batch.resolutions, inner_batch.stopped_on_suspension)
     };
 

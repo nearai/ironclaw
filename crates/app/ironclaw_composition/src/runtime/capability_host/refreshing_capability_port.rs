@@ -402,8 +402,11 @@ impl RefreshingCapabilityPort {
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<(Arc<dyn LoopCapabilityPort>, VisibleCapabilitySurface), AgentLoopHostError> {
-        let port = self.build_inner().await?;
-        let surface = port.visible_capabilities(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let port = Box::pin(self.build_inner()).await?;
+        let surface = Box::pin(port.visible_capabilities(request)).await?;
         Ok((port, surface))
     }
 
@@ -430,7 +433,10 @@ impl RefreshingCapabilityPort {
         request: VisibleCapabilityRequest,
     ) -> Result<(Arc<dyn LoopCapabilityPort>, VisibleCapabilitySurface), AgentLoopHostError> {
         let _guard = self.refresh_lock.lock().await;
-        let (port, surface) = self.refresh_with_surface(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let (port, surface) = Box::pin(self.refresh_with_surface(request)).await?;
         self.replace_current(port.clone())?;
         Ok((port, surface))
     }
@@ -478,17 +484,21 @@ impl LoopCapabilityPort for RefreshingCapabilityPort {
         &self,
         request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.current_or_refresh()
-            .await?
-            .register_provider_tool_call(request)
-            .await
+        let port = self.current_or_refresh().await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(port.register_provider_tool_call(request)).await
     }
 
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let (_, surface) = self.refresh_current(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let (_, surface) = Box::pin(self.refresh_current(request)).await?;
         Ok(surface)
     }
 
@@ -496,20 +506,22 @@ impl LoopCapabilityPort for RefreshingCapabilityPort {
         &self,
         request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
-        self.current_or_refresh()
-            .await?
-            .invoke_capability(request)
-            .await
+        let port = self.current_or_refresh().await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(port.invoke_capability(request)).await
     }
 
     async fn invoke_capability_batch(
         &self,
         request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
-        self.current_or_refresh()
-            .await?
-            .invoke_capability_batch(request)
-            .await
+        let port = self.current_or_refresh().await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(port.invoke_capability_batch(request)).await
     }
 }
 

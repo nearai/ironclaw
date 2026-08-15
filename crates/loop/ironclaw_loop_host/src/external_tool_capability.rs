@@ -377,7 +377,10 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let mut surface = self.inner.visible_capabilities(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let mut surface = Box::pin(self.inner.visible_capabilities(request)).await?;
         let specs = self
             .catalog
             .specs(self.run_id)
@@ -437,10 +440,16 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
         request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         if !self.owns_capability(&request.capability_id) {
-            return self.inner.invoke_capability(request).await;
+            // Chain-boxing: each port delegation is boxed so the stacked
+            // decorator chain never compiles into a single oversized poll
+            // frame (see reborn_integration_model_recovery stack-overflow).
+            return Box::pin(self.inner.invoke_capability(request)).await;
         }
         // `complete_or_park` emits the host `Resolution` directly (§5.3 Stage 2b).
-        self.complete_or_park(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.complete_or_park(request)).await
     }
 
     async fn invoke_capability_batch(
@@ -450,7 +459,10 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
         let mut resolutions = Vec::new();
         let mut stopped_on_suspension = false;
         for invocation in request.invocations {
-            let resolution = self.invoke_capability(invocation).await?;
+            // Chain-boxing: each port delegation is boxed so the stacked
+            // decorator chain never compiles into a single oversized poll
+            // frame (see reborn_integration_model_recovery stack-overflow).
+            let resolution = Box::pin(self.invoke_capability(invocation)).await?;
             // `parks()` is the batch-stop predicate (gates + suspensions), the
             // Resolution-side successor to `CapabilityOutcome::is_suspension`. An
             // external-tool park still forces a stop even when the caller did not

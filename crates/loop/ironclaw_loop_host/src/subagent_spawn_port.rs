@@ -1178,19 +1178,27 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 .register_spawn_provider_tool_call(tool_call, activity_id)
                 .await;
         }
-        self.inner
-            .register_provider_tool_call(RegisterProviderToolCallRequest {
-                tool_call,
-                activity_id,
-            })
-            .await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(
+            self.inner
+                .register_provider_tool_call(RegisterProviderToolCallRequest {
+                    tool_call,
+                    activity_id,
+                }),
+        )
+        .await
     }
 
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let mut surface = self.inner.visible_capabilities(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let mut surface = Box::pin(self.inner.visible_capabilities(request)).await?;
         if !surface
             .descriptors
             .iter()
@@ -1223,7 +1231,10 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 .handle_spawn_with_gate(&request, args, None, provider_call_id)
                 .await;
         }
-        self.inner.invoke_capability(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.inner.invoke_capability(request)).await
     }
 
     async fn invoke_capability_batch(
@@ -1356,13 +1367,14 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
             {
                 index += 1;
             }
-            let inner = self
-                .inner
-                .invoke_capability_batch(LoopRequestBatch {
-                    invocations: request.invocations[start..index].to_vec(),
-                    stop_on_first_suspension: request.stop_on_first_suspension,
-                })
-                .await;
+            // Chain-boxing: each port delegation is boxed so the stacked
+            // decorator chain never compiles into a single oversized poll
+            // frame (see reborn_integration_model_recovery stack-overflow).
+            let inner = Box::pin(self.inner.invoke_capability_batch(LoopRequestBatch {
+                invocations: request.invocations[start..index].to_vec(),
+                stop_on_first_suspension: request.stop_on_first_suspension,
+            }))
+            .await;
             let inner = match inner {
                 Ok(inner) => inner,
                 Err(error) => {
