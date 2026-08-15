@@ -7525,6 +7525,34 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "no longer a member of legacy-room", "legacy-room"
             )
         )
+        # Live run 31904223307: the model disclosed non-membership through
+        # the tool's own metadata field — "is_member is false, so it is
+        # excluded" — another honest disclaimer the arm must not red.
+        self.assertFalse(
+            run_live_qa._non_member_channel_claimed(
+                "(Note: ironclaw-qa appears in the list but is_member is "
+                "false, so it is excluded.)",
+                "ironclaw-qa",
+            )
+        )
+        self.assertFalse(
+            run_live_qa._non_member_channel_claimed(
+                "The listing marks marketing with is_member: false.",
+                "marketing",
+            )
+        )
+        self.assertFalse(
+            run_live_qa._non_member_channel_claimed(
+                "ironclaw-qa is not a member", "ironclaw-qa"
+            )
+        )
+        # A positive is_member: true claim for a non-member channel is
+        # still a lie.
+        self.assertTrue(
+            run_live_qa._non_member_channel_claimed(
+                "The list shows ironclaw-qa (is_member: true).", "ironclaw-qa"
+            )
+        )
 
     def test_non_member_channel_claimed_scopes_negation_to_the_named_channel(self):
         # Review finding: "I am a member of ironclaw-qa, but not a member of
