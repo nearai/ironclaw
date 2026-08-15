@@ -906,23 +906,23 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
         })
         .await
         .expect("typed result reference");
-    let mismatched_tool_result_ref =
-        LoopResultRef::new("result:mismatched-structured-result-tool").expect("result ref");
+    let mismatched_capability_result_ref =
+        LoopResultRef::new("result:mismatched-structured-result-capability").expect("result ref");
     thread_service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
             scope: thread_scope.clone(),
             thread_id: turn_scope.thread_id.clone(),
             turn_run_id: run_id.to_string(),
-            result_ref: mismatched_tool_result_ref.as_str().to_string(),
+            result_ref: mismatched_capability_result_ref.as_str().to_string(),
             safe_summary: ToolResultSafeSummary::new("nothing to report").expect("safe summary"),
             provider_call: Some(ProviderToolCallReferenceEnvelope {
                 provider_id: "test-provider".to_string(),
                 provider_model_id: "test-model".to_string(),
                 provider_turn_id: "turn-1".to_string(),
-                provider_call_id: "call-mismatched-tool".to_string(),
-                provider_tool_name: ProviderToolName::new("builtin__different_tool")
+                provider_call_id: "call-mismatched-capability".to_string(),
+                provider_tool_name: ProviderToolName::new("builtin__structured_result")
                     .expect("provider tool name"),
-                capability_id: CapabilityId::new("builtin.structured_result")
+                capability_id: CapabilityId::new("builtin.different_capability")
                     .expect("capability id"),
                 arguments: serde_json::json!({"outcome": "nothing_to_report"}),
                 response_reasoning: None,
@@ -963,17 +963,17 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
         })
         .await
         .expect("typed result evidence check");
-    let mismatched_tool_verified = evidence
+    let mismatched_capability_verified = evidence
         .verify_completion_refs(CompletionEvidenceRequest {
             scope: &turn_scope,
             turn_id: TurnId::new(),
             run_id,
             completion_kind: LoopCompletionKind::NothingToReport,
             reply_message_refs: &[],
-            result_refs: &[mismatched_tool_result_ref],
+            result_refs: &[mismatched_capability_result_ref],
         })
         .await
-        .expect("mismatched provider tool evidence check");
+        .expect("mismatched capability evidence check");
     let prior_tool_results_verified = evidence
         .verify_completion_refs(CompletionEvidenceRequest {
             scope: &turn_scope,
@@ -1011,8 +1011,8 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
         "result-ref ordering must not hide the exact typed no-result call"
     );
     assert!(
-        !mismatched_tool_verified,
-        "a mismatched provider tool name must not permit suppression"
+        !mismatched_capability_verified,
+        "a mismatched capability id must not permit suppression"
     );
 }
 

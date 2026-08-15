@@ -6,9 +6,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_host_api::prepared_context::{
-    STRUCTURED_RESULT_CAPABILITY_ID, STRUCTURED_RESULT_PROVIDER_TOOL_NAME,
-};
+use ironclaw_host_api::prepared_context::STRUCTURED_RESULT_CAPABILITY_ID;
 use ironclaw_loop_contracts::{LoopBlockedKind, LoopCheckpointKind, LoopCompletionKind};
 use ironclaw_loop_host::RunCancellationFactory;
 use ironclaw_threads::{
@@ -692,8 +690,7 @@ fn verify_tool_result_ref(
 fn is_nothing_to_report_provider_call(
     provider_call: &ironclaw_threads::ProviderToolCallReferenceEnvelope,
 ) -> bool {
-    provider_call.provider_tool_name.as_str() == STRUCTURED_RESULT_PROVIDER_TOOL_NAME
-        && provider_call.capability_id.as_str() == STRUCTURED_RESULT_CAPABILITY_ID
+    provider_call.capability_id.as_str() == STRUCTURED_RESULT_CAPABILITY_ID
         && provider_call.arguments == serde_json::json!({"outcome": "nothing_to_report"})
 }
 
