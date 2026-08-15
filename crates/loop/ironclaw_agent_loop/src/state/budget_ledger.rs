@@ -138,27 +138,34 @@ impl BudgetLedger {
             }
         }
     }
+}
 
-    #[cfg(test)]
-    pub(crate) fn set_model_calls_made_for_test(&mut self, value: u32) {
-        self.model_calls_made = value;
-    }
+/// Test seams live in a test-gated module (struct-debt ratchet: production
+/// struct code carries no test-support members). The impl still attaches to
+/// [`BudgetLedger`] crate-wide under `cfg(test)`.
+#[cfg(test)]
+mod test_seams {
+    use super::*;
 
-    #[cfg(test)]
-    pub(crate) fn set_capability_invocations_made_for_test(&mut self, value: u32) {
-        self.capability_invocations_made = value;
-    }
+    impl BudgetLedger {
+        pub(crate) fn set_model_calls_made_for_test(&mut self, value: u32) {
+            self.model_calls_made = value;
+        }
 
-    #[cfg(test)]
-    pub(crate) fn set_run_started_at_for_test(&mut self, value: Option<DateTime<Utc>>) {
-        self.run_started_at = value;
-    }
+        pub(crate) fn set_capability_invocations_made_for_test(&mut self, value: u32) {
+            self.capability_invocations_made = value;
+        }
 
-    /// Test-only accessor: production code reads the wall-clock start only
-    /// through `arm_wall_clock`, which both arms and returns it in one call.
-    #[cfg(test)]
-    pub(crate) fn run_started_at(&self) -> Option<DateTime<Utc>> {
-        self.run_started_at
+        pub(crate) fn set_run_started_at_for_test(&mut self, value: Option<DateTime<Utc>>) {
+            self.run_started_at = value;
+        }
+
+        /// Test-only accessor: production code reads the wall-clock start
+        /// only through `arm_wall_clock`, which arms and returns it in one
+        /// call.
+        pub(crate) fn run_started_at(&self) -> Option<DateTime<Utc>> {
+            self.run_started_at
+        }
     }
 }
 
