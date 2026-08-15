@@ -302,11 +302,12 @@ where
         let typed_result_verified = if request.completion_kind
             == LoopCompletionKind::NothingToReport
         {
+            let terminal_result_ref = request.result_refs.last();
             let message_ids = history
                 .messages
                 .iter()
                 .filter(|message| {
-                    request.result_refs.iter().any(|result_ref| {
+                    terminal_result_ref.is_some_and(|result_ref| {
                         verify_tool_result_message(message, result_ref, expected_run_id.as_str())
                     })
                 })

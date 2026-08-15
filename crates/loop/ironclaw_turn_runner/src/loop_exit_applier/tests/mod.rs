@@ -948,7 +948,7 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
             run_id,
             completion_kind: LoopCompletionKind::NothingToReport,
             reply_message_refs: &[],
-            result_refs: &[generic_result_ref],
+            result_refs: std::slice::from_ref(&generic_result_ref),
         })
         .await
         .expect("generic result evidence check");
@@ -959,7 +959,7 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
             run_id,
             completion_kind: LoopCompletionKind::NothingToReport,
             reply_message_refs: &[],
-            result_refs: &[typed_result_ref],
+            result_refs: std::slice::from_ref(&typed_result_ref),
         })
         .await
         .expect("typed result evidence check");
@@ -974,6 +974,28 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
         })
         .await
         .expect("mismatched provider tool evidence check");
+    let prior_tool_results_verified = evidence
+        .verify_completion_refs(CompletionEvidenceRequest {
+            scope: &turn_scope,
+            turn_id: TurnId::new(),
+            run_id,
+            completion_kind: LoopCompletionKind::NothingToReport,
+            reply_message_refs: &[],
+            result_refs: &[generic_result_ref.clone(), typed_result_ref.clone()],
+        })
+        .await
+        .expect("prior tool result evidence check");
+    let trailing_generic_result_verified = evidence
+        .verify_completion_refs(CompletionEvidenceRequest {
+            scope: &turn_scope,
+            turn_id: TurnId::new(),
+            run_id,
+            completion_kind: LoopCompletionKind::NothingToReport,
+            reply_message_refs: &[],
+            result_refs: &[typed_result_ref, generic_result_ref],
+        })
+        .await
+        .expect("trailing generic result evidence check");
 
     assert!(
         !generic_verified,
@@ -981,13 +1003,21 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
     );
     assert!(typed_verified, "the exact typed no-result call is trusted");
     assert!(
+        prior_tool_results_verified,
+        "ordinary tool results may precede the terminal typed no-result call"
+    );
+    assert!(
+        !trailing_generic_result_verified,
+        "the typed no-result call must be the final result"
+    );
+    assert!(
         !mismatched_tool_verified,
         "a mismatched provider tool name must not permit suppression"
     );
 }
 
 #[tokio::test]
-async fn applier_rejects_mixed_generic_and_typed_nothing_to_report_evidence() {
+async fn applier_accepts_prior_tool_results_when_final_result_is_typed_nothing_to_report() {
     let mut claimed = claimed_run();
     claimed.state.scope = TurnScope::new(
         TenantId::new("tenant").expect("valid"),
@@ -1095,12 +1125,10 @@ async fn applier_rejects_mixed_generic_and_typed_nothing_to_report_evidence() {
         .await
         .expect("applied");
 
-    assert_eq!(state.status, TurnStatus::Failed);
+    assert_eq!(state.status, TurnStatus::Completed);
     assert_eq!(
-        state
-            .failure
-            .and_then(|failure| failure.detail().map(str::to_string)),
-        Some("loop exit violation: unverified_completion_reference".to_string())
+        state.execution_outcome,
+        Some(ironclaw_turns::TurnExecutionOutcome::NothingToReport)
     );
 }
 
