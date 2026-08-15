@@ -88,6 +88,7 @@ fn structured_execution_spec_requests_typed_no_result_completion_for_explicit_su
     assert!(rendered.contains(
         "This rule overrides any output requirement to report a negative, empty, unchanged, or no-match result."
     ));
+    assert!(rendered.contains("and do not return an assistant response."));
 }
 
 #[test]

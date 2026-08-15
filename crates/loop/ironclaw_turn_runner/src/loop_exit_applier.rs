@@ -288,8 +288,11 @@ where
         {
             return Ok(true);
         }
+        let thread_scope = self
+            .resolve_thread_scope_for_turn(request.scope, request.run_id)
+            .await?;
         let history = self
-            .load_thread_history_for_turn(request.scope, request.run_id)
+            .load_thread_history_in_scope(request.scope, thread_scope.clone())
             .await?;
         let expected_run_id = request.run_id.to_string();
         let verified_reply_ids = verified_reply_message_ids(&history, expected_run_id.as_str());
@@ -300,7 +303,7 @@ where
         let results_verified = request.result_refs.iter().all(|result_ref| {
             verify_tool_result_ref(&history, result_ref, expected_run_id.as_str())
         });
-        let completion_results_verified =
+        let typed_nothing_to_report_verified =
             if request.completion_kind == LoopCompletionKind::NothingToReport {
                 let message_ids = history
                     .messages
@@ -313,9 +316,6 @@ where
                 if message_ids.is_empty() {
                     false
                 } else {
-                    let thread_scope = self
-                        .resolve_thread_scope_for_turn(request.scope, request.run_id)
-                        .await?;
                     let messages = self
                         .thread_service
                         .load_context_messages(LoadContextMessagesRequest {
@@ -336,13 +336,13 @@ where
                     })
                 }
             } else {
-                results_verified
+                true
             };
-        // A typed no-result call is the completion evidence for suppression.
-        // Other tool results are work evidence, not terminal-output evidence;
-        // the suppressed outcome neither exposes nor depends on them. Ordinary
-        // result-bearing completions still require every result ref to verify.
-        Ok(replies_verified && completion_results_verified)
+        // A typed no-result call is mandatory evidence for suppression, and
+        // every result ref declared by the driver must still be finalized for
+        // this run. An empty result-ref list remains valid when the durable
+        // transcript itself contains the typed terminal call.
+        Ok(replies_verified && results_verified && typed_nothing_to_report_verified)
     }
 
     async fn verify_final_checkpoint(
@@ -566,6 +566,14 @@ where
         // authenticated owner (`owners/<caller>`), so evidence reads must use
         // the same owner or they will look in the wrong subtree.
         let thread_scope = self.resolve_thread_scope_for_turn(scope, run_id).await?;
+        self.load_thread_history_in_scope(scope, thread_scope).await
+    }
+
+    async fn load_thread_history_in_scope(
+        &self,
+        scope: &TurnScope,
+        thread_scope: ThreadScope,
+    ) -> Result<ThreadHistory, TurnError> {
         self.thread_service
             .list_thread_history(ThreadHistoryRequest {
                 scope: thread_scope,

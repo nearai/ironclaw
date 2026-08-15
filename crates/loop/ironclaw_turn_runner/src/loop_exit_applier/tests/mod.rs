@@ -1036,8 +1036,8 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
         "result-ref ordering must not hide the exact typed no-result call"
     );
     assert!(
-        typed_with_unrelated_unverified_ref,
-        "unrelated work refs are not completion evidence for the typed no-result outcome"
+        !typed_with_unrelated_unverified_ref,
+        "every declared result ref must be durable evidence from the same run"
     );
     assert!(
         !mismatched_capability_verified,

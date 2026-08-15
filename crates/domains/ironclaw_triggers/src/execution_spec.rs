@@ -14,6 +14,8 @@ const MAX_NO_RESULT_TEXT_BYTES: usize = 2 * 1024;
 const MAX_ALLOWED_CAPABILITIES: usize = 64;
 const MAX_REQUIRED_SKILLS: usize = 8;
 const PROMPT_TEMPLATE: &str = include_str!("prompts/trigger_execution.md");
+const SUPPRESSED_NO_RESULT_TEMPLATE: &str =
+    include_str!("prompts/suppress_when_nothing_to_report.md");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -82,13 +84,12 @@ impl TriggerExecutionSpec {
             .join("\n");
         let no_result_instruction = match self.policy.result_delivery {
             ResultDeliveryPolicy::Deliver => self.no_result_text.clone(),
-            ResultDeliveryPolicy::SuppressWhenNothingToReport => format!(
-                "The no-result condition is: {}\n\nWhen this condition is true, call \
-                 `builtin__structured_result` with `{{\"outcome\":\"nothing_to_report\"}}` \
-                 and do not return an assistant response. This rule overrides any output \
-                 requirement to report a negative, empty, unchanged, or no-match result.",
-                self.no_result_text
-            ),
+            ResultDeliveryPolicy::SuppressWhenNothingToReport => render_template(
+                SUPPRESSED_NO_RESULT_TEMPLATE,
+                &[("{{no_result_text}}", self.no_result_text.as_str())],
+            )
+            .trim_end()
+            .to_string(),
         };
         render_template(
             PROMPT_TEMPLATE,
