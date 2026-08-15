@@ -700,9 +700,12 @@ mod tests {
     use crate::ProcessJournalSource;
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
-        ids::TenantId,
+        action::Action,
+        ids::{CorrelationId, TenantId},
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
+        resource::ResourceEstimate,
+        scope::Principal,
     };
 
     fn process_store() -> (
@@ -820,5 +823,137 @@ mod tests {
                 crate::ProcessJournalKind::Completed,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn fresh_approval_block_is_durable_and_reloadable_from_a_second_store() {
+        let (first_store, journal) = process_store();
+        let invocation_id = InvocationId::new();
+        let scope = scope(invocation_id);
+        let capability_id = CapabilityId::new("echo.say").unwrap();
+        first_store
+            .start(ProcessInvocationStart {
+                invocation_id,
+                capability_id: capability_id.clone(),
+                scope: scope.clone(),
+                authenticated_actor_user_id: Some(scope.user_id.clone()),
+            })
+            .await
+            .unwrap();
+
+        let approval = ApprovalRequest {
+            id: ApprovalRequestId::new(),
+            correlation_id: CorrelationId::new(),
+            requested_by: Principal::User(scope.user_id.clone()),
+            action: Box::new(Action::Dispatch {
+                capability: capability_id.clone(),
+                estimated_resources: ResourceEstimate::default(),
+            }),
+            invocation_fingerprint: None,
+            reason: format!("approval for {invocation_id}"),
+            reusable_scope: None,
+        };
+        let blocked = first_store
+            .block_approval(&scope, invocation_id, approval.clone())
+            .await
+            .unwrap();
+        assert_eq!(blocked.status, ProcessInvocationStatus::BlockedApproval);
+        assert_eq!(blocked.approval_request_id.as_ref(), Some(&approval.id));
+
+        let runtime = Arc::clone(&journal) as Arc<dyn ProcessRuntimePort>;
+        let second_store = ProcessInvocationStore::new(runtime);
+        let reloaded = second_store
+            .get(&scope, invocation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.status, ProcessInvocationStatus::BlockedApproval);
+        assert_eq!(reloaded.approval_request_id.as_ref(), Some(&approval.id));
+        assert_eq!(reloaded.capability_id, capability_id);
+        assert_eq!(reloaded.scope, scope);
+        assert_eq!(reloaded.invocation_id, invocation_id);
+        assert_eq!(
+            reloaded.authenticated_actor_user_id,
+            Some(scope.user_id.clone())
+        );
+
+        let durable = journal
+            .get_process_snapshot(GetProcessSnapshotRequest {
+                scope: scope.clone(),
+                process_id: ProcessInvocationStore::process_id(invocation_id),
+            })
+            .await
+            .unwrap();
+        let durable_suspension = durable
+            .suspension
+            .expect("approval block must persist a suspension");
+        assert_eq!(
+            durable_suspension.gate_ref,
+            Some(
+                TurnGateRef::new(format!("gate:approval-{}", approval.id))
+                    .expect("approval gate ref must be valid")
+            )
+        );
+
+        let page = journal
+            .read_process_journal_after(&scope, None, None, 16)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|entry| entry.kind)
+                .collect::<Vec<_>>(),
+            vec![crate::ProcessJournalKind::Suspended]
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_failure_is_reloadable_from_a_second_store() {
+        let (first_store, journal) = process_store();
+        let invocation_id = InvocationId::new();
+        let scope = scope(invocation_id);
+        let capability_id = CapabilityId::new("echo.say").unwrap();
+
+        let running = first_store
+            .start(ProcessInvocationStart {
+                invocation_id,
+                capability_id: capability_id.clone(),
+                scope: scope.clone(),
+                authenticated_actor_user_id: Some(scope.user_id.clone()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(running.status, ProcessInvocationStatus::Running);
+
+        let failed = first_store
+            .fail(&scope, invocation_id, "capability_failed".to_string())
+            .await
+            .unwrap();
+        assert_eq!(failed.status, ProcessInvocationStatus::Failed);
+        assert_eq!(failed.error_kind.as_deref(), Some("capability_failed"));
+
+        let runtime = Arc::clone(&journal) as Arc<dyn ProcessRuntimePort>;
+        let second_store = ProcessInvocationStore::new(runtime);
+        let reloaded = second_store
+            .get(&scope, invocation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.status, ProcessInvocationStatus::Failed);
+        assert_eq!(reloaded.error_kind.as_deref(), Some("capability_failed"));
+        assert_eq!(reloaded.capability_id, capability_id);
+        assert_eq!(reloaded.scope, scope);
+        assert_eq!(
+            reloaded.authenticated_actor_user_id,
+            Some(scope.user_id.clone())
+        );
+
+        let page = journal
+            .read_process_journal_after(&scope, None, None, 16)
+            .await
+            .unwrap();
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].kind, crate::ProcessJournalKind::Failed);
     }
 }
