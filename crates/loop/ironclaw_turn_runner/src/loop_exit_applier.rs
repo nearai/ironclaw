@@ -282,7 +282,10 @@ where
         &self,
         request: CompletionEvidenceRequest<'_>,
     ) -> Result<bool, TurnError> {
-        if request.reply_message_refs.is_empty() && request.result_refs.is_empty() {
+        if request.completion_kind != LoopCompletionKind::NothingToReport
+            && request.reply_message_refs.is_empty()
+            && request.result_refs.is_empty()
+        {
             return Ok(true);
         }
         let history = self
@@ -297,47 +300,44 @@ where
         let results_verified = request.result_refs.iter().all(|result_ref| {
             verify_tool_result_ref(&history, result_ref, expected_run_id.as_str())
         });
-        let completion_results_verified = if request.completion_kind
-            == LoopCompletionKind::NothingToReport
-        {
-            let message_ids = history
-                .messages
-                .iter()
-                .filter(|message| {
-                    request.result_refs.iter().any(|result_ref| {
-                        verify_tool_result_message(message, result_ref, expected_run_id.as_str())
+        let completion_results_verified =
+            if request.completion_kind == LoopCompletionKind::NothingToReport {
+                let message_ids = history
+                    .messages
+                    .iter()
+                    .filter(|message| {
+                        verify_intrinsic_tool_result_message(message, expected_run_id.as_str())
                     })
-                })
-                .map(|message| message.message_id)
-                .collect::<Vec<_>>();
-            if message_ids.is_empty() {
-                false
+                    .map(|message| message.message_id)
+                    .collect::<Vec<_>>();
+                if message_ids.is_empty() {
+                    false
+                } else {
+                    let thread_scope = self
+                        .resolve_thread_scope_for_turn(request.scope, request.run_id)
+                        .await?;
+                    let messages = self
+                        .thread_service
+                        .load_context_messages(LoadContextMessagesRequest {
+                            scope: thread_scope,
+                            thread_id: request.scope.thread_id.clone(),
+                            message_ids,
+                        })
+                        .await
+                        .map_err(|error| TurnError::Unavailable {
+                            reason: error.to_string(),
+                        })?
+                        .messages;
+                    messages.iter().any(|message| {
+                        message
+                            .tool_result_provider_call
+                            .as_ref()
+                            .is_some_and(is_nothing_to_report_provider_call)
+                    })
+                }
             } else {
-                let thread_scope = self
-                    .resolve_thread_scope_for_turn(request.scope, request.run_id)
-                    .await?;
-                let messages = self
-                    .thread_service
-                    .load_context_messages(LoadContextMessagesRequest {
-                        scope: thread_scope,
-                        thread_id: request.scope.thread_id.clone(),
-                        message_ids,
-                    })
-                    .await
-                    .map_err(|error| TurnError::Unavailable {
-                        reason: error.to_string(),
-                    })?
-                    .messages;
-                messages.iter().any(|message| {
-                    message
-                        .tool_result_provider_call
-                        .as_ref()
-                        .is_some_and(is_nothing_to_report_provider_call)
-                })
-            }
-        } else {
-            results_verified
-        };
+                results_verified
+            };
         // A typed no-result call is the completion evidence for suppression.
         // Other tool results are work evidence, not terminal-output evidence;
         // the suppressed outcome neither exposes nor depends on them. Ordinary
@@ -708,6 +708,24 @@ fn verify_tool_result_message(
         && message.turn_run_id.as_deref() == Some(expected_run_id)
         && message.tool_result_ref.as_deref() == Some(result_ref.as_str())
         && message_content_matches_result_ref(message, result_ref)
+}
+
+fn verify_intrinsic_tool_result_message(
+    message: &ThreadMessageRecord,
+    expected_run_id: &str,
+) -> bool {
+    message.kind == MessageKind::ToolResultReference
+        && message.status == MessageStatus::Finalized
+        && message.turn_run_id.as_deref() == Some(expected_run_id)
+        && message
+            .tool_result_ref
+            .as_deref()
+            .is_some_and(|result_ref| {
+                message.content.as_deref().is_some_and(|content| {
+                    ToolResultReferenceEnvelope::from_json_str(content)
+                        .is_ok_and(|envelope| envelope.result_ref == result_ref)
+                })
+            })
 }
 
 fn message_content_matches_result_ref(

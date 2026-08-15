@@ -870,14 +870,25 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
         })
         .await
         .expect("thread");
-    let run_id = TurnRunId::new();
+    let generic_run_id = TurnRunId::new();
     let generic_result_ref = LoopResultRef::new("result:generic").expect("result ref");
     append_tool_result_reference(
         thread_service.as_ref(),
         thread_scope.clone(),
         turn_scope.thread_id.clone(),
-        run_id,
+        generic_run_id,
         generic_result_ref.clone(),
+    )
+    .await;
+    let typed_run_id = TurnRunId::new();
+    let typed_generic_result_ref =
+        LoopResultRef::new("result:typed-run-generic").expect("result ref");
+    append_tool_result_reference(
+        thread_service.as_ref(),
+        thread_scope.clone(),
+        turn_scope.thread_id.clone(),
+        typed_run_id,
+        typed_generic_result_ref.clone(),
     )
     .await;
     let typed_result_ref = LoopResultRef::new("result:nothing-to-report").expect("result ref");
@@ -885,7 +896,7 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
         .append_tool_result_reference(AppendToolResultReferenceRequest {
             scope: thread_scope.clone(),
             thread_id: turn_scope.thread_id.clone(),
-            turn_run_id: run_id.to_string(),
+            turn_run_id: typed_run_id.to_string(),
             result_ref: typed_result_ref.as_str().to_string(),
             safe_summary: ToolResultSafeSummary::new("nothing to report").expect("safe summary"),
             provider_call: Some(ProviderToolCallReferenceEnvelope {
@@ -908,11 +919,12 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
         .expect("typed result reference");
     let mismatched_capability_result_ref =
         LoopResultRef::new("result:mismatched-structured-result-capability").expect("result ref");
+    let mismatched_run_id = TurnRunId::new();
     thread_service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
             scope: thread_scope.clone(),
             thread_id: turn_scope.thread_id.clone(),
-            turn_run_id: run_id.to_string(),
+            turn_run_id: mismatched_run_id.to_string(),
             result_ref: mismatched_capability_result_ref.as_str().to_string(),
             safe_summary: ToolResultSafeSummary::new("nothing to report").expect("safe summary"),
             provider_call: Some(ProviderToolCallReferenceEnvelope {
@@ -945,7 +957,7 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
         .verify_completion_refs(CompletionEvidenceRequest {
             scope: &turn_scope,
             turn_id: TurnId::new(),
-            run_id,
+            run_id: generic_run_id,
             completion_kind: LoopCompletionKind::NothingToReport,
             reply_message_refs: &[],
             result_refs: std::slice::from_ref(&generic_result_ref),
@@ -956,7 +968,7 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
         .verify_completion_refs(CompletionEvidenceRequest {
             scope: &turn_scope,
             turn_id: TurnId::new(),
-            run_id,
+            run_id: typed_run_id,
             completion_kind: LoopCompletionKind::NothingToReport,
             reply_message_refs: &[],
             result_refs: std::slice::from_ref(&typed_result_ref),
@@ -967,7 +979,7 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
         .verify_completion_refs(CompletionEvidenceRequest {
             scope: &turn_scope,
             turn_id: TurnId::new(),
-            run_id,
+            run_id: mismatched_run_id,
             completion_kind: LoopCompletionKind::NothingToReport,
             reply_message_refs: &[],
             result_refs: &[mismatched_capability_result_ref],
@@ -978,10 +990,10 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
         .verify_completion_refs(CompletionEvidenceRequest {
             scope: &turn_scope,
             turn_id: TurnId::new(),
-            run_id,
+            run_id: typed_run_id,
             completion_kind: LoopCompletionKind::NothingToReport,
             reply_message_refs: &[],
-            result_refs: &[generic_result_ref.clone(), typed_result_ref.clone()],
+            result_refs: &[typed_generic_result_ref.clone(), typed_result_ref.clone()],
         })
         .await
         .expect("prior tool result evidence check");
@@ -989,10 +1001,10 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
         .verify_completion_refs(CompletionEvidenceRequest {
             scope: &turn_scope,
             turn_id: TurnId::new(),
-            run_id,
+            run_id: typed_run_id,
             completion_kind: LoopCompletionKind::NothingToReport,
             reply_message_refs: &[],
-            result_refs: &[typed_result_ref.clone(), generic_result_ref],
+            result_refs: &[typed_result_ref.clone(), typed_generic_result_ref],
         })
         .await
         .expect("unordered result evidence check");
@@ -1002,7 +1014,7 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
         .verify_completion_refs(CompletionEvidenceRequest {
             scope: &turn_scope,
             turn_id: TurnId::new(),
-            run_id,
+            run_id: typed_run_id,
             completion_kind: LoopCompletionKind::NothingToReport,
             reply_message_refs: &[],
             result_refs: &[typed_result_ref.clone(), unrelated_unverified_result_ref],
@@ -1034,7 +1046,7 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
 }
 
 #[tokio::test]
-async fn applier_accepts_prior_tool_results_when_final_result_is_typed_nothing_to_report() {
+async fn applier_accepts_durable_typed_nothing_to_report_when_driver_omits_its_result_ref() {
     let mut claimed = claimed_run();
     claimed.state.scope = TurnScope::new(
         TenantId::new("tenant").expect("valid"),
@@ -1133,7 +1145,7 @@ async fn applier_accepts_prior_tool_results_when_final_result_is_typed_nothing_t
             LoopExit::Completed(LoopCompleted {
                 completion_kind: LoopCompletionKind::NothingToReport,
                 reply_message_refs: Vec::new(),
-                result_refs: vec![generic_result_ref, typed_result_ref],
+                result_refs: vec![generic_result_ref],
                 final_checkpoint_id: Some(checkpoint_id),
                 model_usage: None,
                 exit_id: test_exit_id(),
