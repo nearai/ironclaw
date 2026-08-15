@@ -623,21 +623,41 @@ where
     assert_eq!(page.entries[0].kind, ProcessJournalKind::Completed);
 }
 
+fn postgres_test_url() -> Option<String> {
+    let primary = std::env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL");
+    match primary {
+        Ok(url) => Some(url),
+        Err(std::env::VarError::NotUnicode(value)) => {
+            panic!("IRONCLAW_FILESYSTEM_POSTGRES_URL is configured but not valid UTF-8: {value:?}")
+        }
+        Err(std::env::VarError::NotPresent) => match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(url),
+            Err(std::env::VarError::NotUnicode(value)) => {
+                panic!("DATABASE_URL is configured but not valid UTF-8: {value:?}")
+            }
+            Err(std::env::VarError::NotPresent) => None,
+        },
+    }
+}
+
 async fn postgres_backend() -> Option<PostgresRootFilesystem> {
     if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
         return None;
     }
-    let url = std::env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .ok()?;
-    let config = url.parse::<tokio_postgres::Config>().ok()?;
+    let url = postgres_test_url()?;
+    let config = url
+        .parse::<tokio_postgres::Config>()
+        .expect("parse configured PostgreSQL test URL");
     let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
     let pool = deadpool_postgres::Pool::builder(manager)
         .max_size(4)
         .build()
-        .ok()?;
+        .expect("build PostgreSQL test pool");
     let backend = PostgresRootFilesystem::new(pool);
-    backend.run_migrations().await.ok()?;
+    backend
+        .run_migrations()
+        .await
+        .expect("migrate configured PostgreSQL filesystem");
     Some(backend)
 }
 

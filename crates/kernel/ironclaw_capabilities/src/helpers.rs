@@ -10,7 +10,7 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_processes::{ProcessInvocationError, ProcessInvocationStatePort};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::{CapabilityInvocationError, ResumeContextMismatchKind};
 
@@ -230,7 +230,7 @@ pub(crate) async fn apply_invocation_state_transition_if_configured(
         // path, so remove only fresh worker-local state without materializing a
         // durable terminal transition.
         if let Err(error) = invocation_state.discard_pending(scope, invocation_id).await {
-            warn!(
+            debug!(
                 invocation_id = %invocation_id,
                 transition_error_kind = invocation_state_error_kind(&error),
                 "process-invocation pending cleanup failed; original business error is being returned to caller",
