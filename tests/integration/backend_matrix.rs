@@ -16,6 +16,16 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+use ironclaw_filesystem::{Filter, Page, RootFilesystem};
+use ironclaw_host_api::{
+    ids::{CapabilityId, ProviderToolName},
+    path::VirtualPath,
+};
+use ironclaw_threads::{
+    AppendToolResultReferenceRequest, FinalizedAssistantMessageByRunRequest,
+    ListThreadsForScopeRequest, ProviderToolCallReferenceEnvelope, SessionThreadService,
+    ToolResultSafeSummary, UpdateToolResultReferenceRequest,
+};
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
 use reborn_support::reply::RebornScriptedReply;
 use rstest::rstest;
@@ -43,6 +53,171 @@ async fn backend_parity_replies_to_greeting(#[case] storage: StorageMode) {
         .assert_reply_contains("Hello! How can I help?")
         .await
         .expect("reply finalized in thread history");
+}
+
+/// Message hot-path parity: exact lookups resolve the same source message on
+/// each production database backend without materializing sibling entry rows.
+#[rstest]
+#[case(StorageMode::LibSql)]
+#[case(StorageMode::Postgres)]
+#[tokio::test]
+async fn message_lookup_indexes_share_the_message_row(#[case] storage: StorageMode) {
+    let harness = RebornIntegrationHarness::test_default()
+        .storage(storage)
+        .script([RebornScriptedReply::text("indexed reply")])
+        .build()
+        .await
+        .expect("harness builds");
+    let run_id = harness
+        .submit_turn("first user message")
+        .await
+        .expect("turn completes");
+    let service = harness
+        .thread_service_for_test()
+        .expect("thread service is available");
+    let scope = harness.thread_harness.scope.clone();
+    let thread_id = harness.binding.thread_id.clone();
+
+    let assistant = service
+        .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            turn_run_id: run_id.to_string(),
+        })
+        .await
+        .expect("assistant lookup by run succeeds")
+        .expect("assistant lookup finds the finalized row");
+    assert_eq!(assistant.content.as_deref(), Some("indexed reply"));
+
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .expect("first-user lookup derives the title");
+    assert_eq!(
+        listed.threads[0].title.as_deref(),
+        Some("first user message")
+    );
+
+    let generic = service
+        .append_tool_result_reference(tool_result_request(
+            &scope,
+            &thread_id,
+            run_id.to_string(),
+            "result:generic",
+            None,
+        ))
+        .await
+        .expect("generic tool result is appended");
+    let generic_replay = service
+        .append_tool_result_reference(tool_result_request(
+            &scope,
+            &thread_id,
+            run_id.to_string(),
+            "result:generic",
+            None,
+        ))
+        .await
+        .expect("generic tool-result lookup deduplicates the replay");
+    assert_eq!(generic_replay.message_id, generic.message_id);
+
+    let provider_call = provider_call_reference("call-1");
+    let provider = service
+        .append_tool_result_reference(tool_result_request(
+            &scope,
+            &thread_id,
+            run_id.to_string(),
+            "result:provider",
+            Some(provider_call.clone()),
+        ))
+        .await
+        .expect("provider-call tool result is appended");
+    let provider_replay = service
+        .append_tool_result_reference(tool_result_request(
+            &scope,
+            &thread_id,
+            run_id.to_string(),
+            "result:provider",
+            Some(provider_call),
+        ))
+        .await
+        .expect("provider-call lookup deduplicates the replay");
+    assert_eq!(provider_replay.message_id, provider.message_id);
+    let updated = service
+        .update_tool_result_reference(UpdateToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            turn_run_id: run_id.to_string(),
+            result_ref: "result:provider".to_string(),
+            provider_call_id: Some("call-1".to_string()),
+            safe_summary: ToolResultSafeSummary::new("provider result updated")
+                .expect("valid summary"),
+        })
+        .await
+        .expect("provider-call lookup targets the exact row");
+    assert_eq!(updated.message_id, provider.message_id);
+
+    let owner = scope
+        .owner_user_id
+        .as_ref()
+        .expect("integration thread scope has an owner");
+    let rows = harness
+        ._shared
+        .composite
+        .query(
+            &VirtualPath::new(format!(
+                "/tenants/{}/users/{}/threads",
+                scope.tenant_id.as_str(),
+                owner.as_str()
+            ))
+            .expect("valid threads root"),
+            &Filter::All,
+            Page::new(0, Page::MAX_LIMIT),
+        )
+        .await
+        .expect("database entry rows can be inspected");
+    assert!(
+        rows.iter()
+            .all(|row| !row.path.as_str().contains("/indexes/")),
+        "message lookup must not write sibling entry rows"
+    );
+}
+
+fn tool_result_request(
+    scope: &ironclaw_threads::ThreadScope,
+    thread_id: &ironclaw_host_api::ids::ThreadId,
+    turn_run_id: String,
+    result_ref: &str,
+    provider_call: Option<ProviderToolCallReferenceEnvelope>,
+) -> AppendToolResultReferenceRequest {
+    AppendToolResultReferenceRequest {
+        scope: scope.clone(),
+        thread_id: thread_id.clone(),
+        turn_run_id,
+        result_ref: result_ref.to_string(),
+        safe_summary: ToolResultSafeSummary::new("tool result").expect("valid summary"),
+        provider_call,
+        model_observation: None,
+    }
+}
+
+fn provider_call_reference(call_id: &str) -> ProviderToolCallReferenceEnvelope {
+    ProviderToolCallReferenceEnvelope {
+        provider_id: "test-provider".to_string(),
+        provider_model_id: "test-model".to_string(),
+        provider_turn_id: "provider-turn".to_string(),
+        provider_call_id: call_id.to_string(),
+        provider_tool_name: ProviderToolName::new("builtin__result_read")
+            .expect("valid provider tool name"),
+        capability_id: CapabilityId::new("builtin.result_read").expect("valid capability id"),
+        arguments: serde_json::json!({"offset": 0}),
+        response_reasoning: None,
+        reasoning: None,
+        signature: None,
+    }
 }
 
 /// Persistence correctness (design §3.8): the reply must survive to the

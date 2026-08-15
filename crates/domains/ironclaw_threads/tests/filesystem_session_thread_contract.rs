@@ -904,7 +904,7 @@ async fn filesystem_delete_thread_removes_inbound_idempotency_records() {
 #[tokio::test]
 async fn filesystem_finalized_assistant_lookup_by_run_uses_persisted_message() {
     let backend = Arc::new(InMemoryBackend::new());
-    let scoped = scoped_threads_fs_at(backend, "tenant-finalized-by-run", "alice");
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-finalized-by-run", "alice");
     let service = FilesystemSessionThreadService::new(scoped);
     let scope = scope("finalized-by-run");
     let thread = service
@@ -949,7 +949,7 @@ async fn filesystem_finalized_assistant_lookup_by_run_uses_persisted_message() {
 
     let finalized = service
         .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
-            scope,
+            scope: scope.clone(),
             thread_id: thread.thread_id,
             turn_run_id: "run-finalized-lookup".into(),
         })
@@ -959,6 +959,21 @@ async fn filesystem_finalized_assistant_lookup_by_run_uses_persisted_message() {
     assert_eq!(finalized.message_id, draft.message_id);
     assert_eq!(finalized.status, MessageStatus::Finalized);
     assert_eq!(finalized.content.as_deref(), Some("final"));
+
+    let stored_rows = backend
+        .query(
+            &VirtualPath::new("/tenants/tenant-finalized-by-run/users/alice/threads").unwrap(),
+            &Filter::All,
+            Page::new(0, Page::MAX_LIMIT),
+        )
+        .await
+        .unwrap();
+    assert!(
+        stored_rows
+            .iter()
+            .all(|row| !row.path.as_str().contains("/indexes/")),
+        "message lookup must not amplify one message row into sibling index entries"
+    );
 }
 
 #[tokio::test]
@@ -1438,8 +1453,8 @@ async fn filesystem_redacts_append_only_finalized_assistant_message() {
 }
 
 #[tokio::test]
-async fn filesystem_lookup_index_write_failure_rolls_back_source_message() {
-    let backend = Arc::new(lookup_index_write_failure_backend());
+async fn filesystem_message_row_write_failure_rejects_source_message() {
+    let backend = Arc::new(message_row_write_failure_backend());
     let scoped = scoped_threads_fs_at(backend, "tenant-lookup-index-failure", "alice");
     let service = FilesystemSessionThreadService::new(scoped);
     let scope = scope("lookup-index-failure");
@@ -1461,7 +1476,7 @@ async fn filesystem_lookup_index_write_failure_rolls_back_source_message() {
             content: MessageContent::text("draft"),
         })
         .await
-        .expect_err("required lookup projection failure must reject the atomic append");
+        .expect_err("message-row projection failure must reject the append");
 
     let history = service
         .list_thread_history(ThreadHistoryRequest {
@@ -2853,9 +2868,8 @@ async fn filesystem_thread_create_declares_indexes_once_per_mount() {
     create("ddl-000").await;
     let after_first = backend.count(FilesystemOperation::EnsureIndex);
     assert_eq!(
-        after_first, 4,
-        "a mount's first thread declares exactly the four root specs \
-         (message sequence, message kind/status, summary, thread activity)"
+        after_first, 9,
+        "a mount's first thread declares four transcript specs and five message lookup specs"
     );
 
     for index in 1..5 {
@@ -3196,7 +3210,7 @@ async fn filesystem_transcript_migration_retries_writer_admission_contention() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -3255,7 +3269,7 @@ async fn filesystem_transcript_migration_retries_a_lost_cas_race() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -3279,7 +3293,7 @@ async fn filesystem_transcript_migration_retries_a_lost_cas_race() {
     let marker_writes = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .filter(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .filter(|path| path.as_str().contains("transcript-index-v2.complete"))
         .count();
     assert_eq!(
         marker_writes, 2,
@@ -3318,7 +3332,7 @@ async fn filesystem_transcript_migration_conflict_retries_are_bounded() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -4532,7 +4546,7 @@ fn thread_index_migration_marker_path_for_test(scope: &ThreadScope) -> ScopedPat
 
 fn transcript_index_migration_marker_path_for_test(scope: &ThreadScope) -> ScopedPath {
     ScopedPath::new(format!(
-        "/threads/agents/{}/projects/{}/owners/{}/index-migrations/transcript-index-v1.complete",
+        "/threads/agents/{}/projects/{}/owners/{}/index-migrations/transcript-index-v2.complete",
         scope.agent_id.as_str(),
         scope
             .project_id
@@ -4614,29 +4628,19 @@ where
     Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
 }
 
-/// Real thread store backend that fails every write to a message lookup-index
-/// row (`/indexes/assistant-runs/…`, `/indexes/tool-results/…`) so the store
-/// runs its genuine "lookup-index backfill is best-effort, fall back to a
-/// transcript scan" path. Folds the former hand-rolled
-/// `LookupIndexWriteFailureBackend` onto `FaultInjecting` — two path-scoped
-/// `WriteFile` faults, one per lookup-index family.
-fn lookup_index_write_failure_backend() -> FaultInjecting<InMemoryBackend> {
-    FaultInjecting::new(InMemoryBackend::new())
-        .with_fault(
-            Fault::on(FilesystemOperation::WriteFile)
-                .path("/indexes/assistant-runs/")
-                .backend("lookup index writes disabled by contract test"),
-        )
-        .with_fault(
-            Fault::on(FilesystemOperation::WriteFile)
-                .path("/indexes/tool-results/")
-                .backend("lookup index writes disabled by contract test"),
-        )
+/// Real thread store backend that fails message-row writes. Lookup projections
+/// share that row, so projection failure cannot leave a source message without
+/// its exact-lookup keys.
+fn message_row_write_failure_backend() -> FaultInjecting<InMemoryBackend> {
+    FaultInjecting::new(InMemoryBackend::new()).with_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path("/messages/")
+            .backend("message row writes disabled by contract test"),
+    )
 }
 
-/// As [`lookup_index_write_failure_backend`], but fails every lookup-index
-/// *read* so the store must fall back to a transcript scan. Folds the former
-/// hand-rolled `LookupIndexReadFailureBackend`.
+/// Fails every legacy lookup-index read so a missing message-row projection
+/// cannot silently degrade into a transcript scan.
 fn lookup_index_read_failure_backend() -> FaultInjecting<InMemoryBackend> {
     FaultInjecting::new(InMemoryBackend::new())
         .with_fault(

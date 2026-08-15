@@ -91,10 +91,7 @@ where
                         break;
                     }
                     let received = rows.len();
-                    match self
-                        .migrate_transcript_page(scope, &thread_id, messages, rows)
-                        .await?
-                    {
+                    match self.migrate_transcript_page(scope, messages, rows).await? {
                         TranscriptPageOutcome::Committed => {
                             conflict_attempts = 0;
                             migrated = migrated.saturating_add(received);
@@ -136,7 +133,6 @@ where
     async fn migrate_transcript_page(
         &self,
         scope: &ThreadScope,
-        thread_id: &ThreadId,
         messages: bool,
         rows: Vec<ironclaw_filesystem::VersionedEntry>,
     ) -> Result<TranscriptPageOutcome, SessionThreadError> {
@@ -182,40 +178,6 @@ where
             }
             let entry = if messages {
                 let record = deserialize::<ThreadMessageRecord>(&row.entry.body)?;
-                for (lookup_path, lookup_entry, expectation) in
-                    crate::filesystem_service::message_lookup_index::MessageLookupIndexStore::<F>::entries_for_message(
-                        scope,
-                        thread_id,
-                        &record,
-                    )?
-                {
-                    let virtual_path = self
-                        .filesystem
-                        .resolve(&scope.to_resource_scope(), &lookup_path)?;
-                    if matches!(expectation, CasExpectation::Absent) {
-                        // This read can lose the same writer race as the
-                        // writes below (BackendBusy under contention on both
-                        // SQL backends); classify it the same way or the
-                        // bounded-retry contract has a hole.
-                        match txn.get(&virtual_path).await {
-                            Ok(Some(_)) => continue,
-                            Ok(None) => {}
-                            Err(error) if transcript_migration_conflict(&error) => {
-                                txn.rollback().await;
-                                return Ok(TranscriptPageOutcome::Conflict(error));
-                            }
-                            Err(error) => return Err(error.into()),
-                        }
-                    }
-                    match txn.put(&virtual_path, lookup_entry, expectation).await {
-                        Ok(_) => {}
-                        Err(error) if transcript_migration_conflict(&error) => {
-                            txn.rollback().await;
-                            return Ok(TranscriptPageOutcome::Conflict(error));
-                        }
-                        Err(error) => return Err(error.into()),
-                    }
-                }
                 // Refresh the projection, keep the stored body. Rebuilding the
                 // entry from `record` would round-trip the row through the
                 // current struct, so any field a newer binary wrote and this
@@ -271,7 +233,7 @@ where
             .put(
                 &scope.to_resource_scope(),
                 &marker,
-                Entry::bytes(b"transcript-index-v1".to_vec()),
+                Entry::bytes(b"transcript-index-v2".to_vec()),
                 CasExpectation::Any,
             )
             .await?;
@@ -293,7 +255,7 @@ fn transcript_index_migration_marker_path(
     scope: &ThreadScope,
 ) -> Result<ScopedPath, SessionThreadError> {
     scoped_path(&format!(
-        "{}/index-migrations/transcript-index-v1.complete",
+        "{}/index-migrations/transcript-index-v2.complete",
         scope_axes_string(scope)
     ))
 }
