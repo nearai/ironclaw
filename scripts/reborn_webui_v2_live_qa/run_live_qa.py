@@ -6328,7 +6328,14 @@ async def case_qa_7e_slack_bug_sheet_delivery(ctx: LiveQaContext) -> ProbeResult
             access_token=access_token,
             spreadsheet_id=spreadsheet_id,
             marker=row_marker,
-            timeout=360.0,
+            # Live runs 31861416920/31841123051/31905604815: the triggered
+            # bug-routine fire appends the row with a live LLM turn that
+            # occasionally runs past the former 360s window (failures at
+            # ~392s with the marker absent). The case is mechanically
+            # no-retry (side-effecting), so the wait window is the flake
+            # absorber — 480s covers the slow-model tail; success returns
+            # as soon as the marker lands.
+            timeout=480.0,
         )
         return _result(
             "qa_7e_slack_bug_sheet_delivery",
