@@ -2,6 +2,7 @@ use chrono::Utc;
 use ironclaw_host_api::{
     ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
     resource::ResourceScope,
+    turn::TurnExecutionOutcome,
 };
 use ironclaw_processes::{GetProcessSnapshotRequest, ProcessJournalPage, ProcessSnapshotSource};
 use std::sync::Arc;
@@ -848,7 +849,7 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
         resolved_run_profile: None,
         resolved_model_route: None,
         model_usage: None,
-        execution_outcome: Some(crate::TurnExecutionOutcome::NothingToReport),
+        execution_outcome: Some(TurnExecutionOutcome::NothingToReport),
         subagent_depth: 0,
         spawn_tree_descendant_cap: None,
         product_context: None,

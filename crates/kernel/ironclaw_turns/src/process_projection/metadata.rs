@@ -5,8 +5,9 @@ use serde_json::{Value, json};
 
 use crate::{
     AcceptedMessageRef, GateResumeDisposition, ProductTurnContext, RunProfileId, RunProfileVersion,
-    TurnActor, TurnExecutionOutcome, TurnRunRecord, TurnRunState, runner::ClaimedTurnRun,
+    TurnActor, TurnRunRecord, TurnRunState, runner::ClaimedTurnRun,
 };
+use ironclaw_host_api::turn::TurnExecutionOutcome;
 use ironclaw_loop_contracts::{LoopModelRouteSnapshot, LoopModelUsage, ResolvedRunProfile};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
