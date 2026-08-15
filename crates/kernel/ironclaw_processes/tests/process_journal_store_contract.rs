@@ -627,13 +627,13 @@ fn postgres_test_url() -> Option<String> {
     let primary = std::env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL");
     match primary {
         Ok(url) => Some(url),
-        Err(std::env::VarError::NotUnicode(value)) => {
-            panic!("IRONCLAW_FILESYSTEM_POSTGRES_URL is configured but not valid UTF-8: {value:?}")
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("IRONCLAW_FILESYSTEM_POSTGRES_URL is configured but not valid UTF-8")
         }
         Err(std::env::VarError::NotPresent) => match std::env::var("DATABASE_URL") {
             Ok(url) => Some(url),
-            Err(std::env::VarError::NotUnicode(value)) => {
-                panic!("DATABASE_URL is configured but not valid UTF-8: {value:?}")
+            Err(std::env::VarError::NotUnicode(_)) => {
+                panic!("DATABASE_URL is configured but not valid UTF-8")
             }
             Err(std::env::VarError::NotPresent) => None,
         },
