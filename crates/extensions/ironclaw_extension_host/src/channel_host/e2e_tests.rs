@@ -2572,10 +2572,14 @@ async fn slack_unpaired_mention_gets_a_threaded_pairing_notice() {
         Some(slack_manifest_connect_required_notice().as_str()),
         "the notice is this wiring's connect_required copy, verbatim"
     );
-    assert_eq!(
-        messages[0]["thread_ts"], "1710000005.000001",
-        "the nudge threads on the sender's own ping — same anchored \
-         placement as replies"
+    // Deliberately un-threaded: Slack renders an ephemeral message in a thread
+    // only when that thread is already active, and a top-level mention
+    // self-roots its own. Threading it makes Slack answer `ok` and show
+    // nothing (verified live), so the nudge posts at channel level.
+    assert!(
+        messages[0].get("thread_ts").is_none(),
+        "an ephemeral nudge must not be threaded: {:?}",
+        messages[0]
     );
 
     // A second mention from the same unpaired sender inside the SAME thread
@@ -2688,9 +2692,10 @@ async fn slack_pairing_mid_thread_runs_in_carols_own_thread() {
         nudges[0]["text"].as_str(),
         Some(slack_manifest_connect_required_notice().as_str()),
     );
-    assert_eq!(
-        nudges[0]["thread_ts"], "1710000007.000001",
-        "the nudge is threaded into A's active thread"
+    assert!(
+        nudges[0].get("thread_ts").is_none(),
+        "ephemeral nudges post at channel level, never threaded: {:?}",
+        nudges[0]
     );
 
     // Carol pairs (the harness identity-binding seam), then messages in the

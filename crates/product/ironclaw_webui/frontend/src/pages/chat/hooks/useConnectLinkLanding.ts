@@ -12,9 +12,23 @@ import {
   openAuthPopup,
   subscribeProductAuthOAuthCompletion,
 } from "../../../lib/product-auth-oauth-events";
-import { fetchExtensionSetup, startExtensionOauth } from "../../extensions/lib/extensions-api";
+import {
+  fetchExtensionSetup,
+  fetchOauthFlowStatus,
+  installExtension,
+  startExtensionOauth,
+} from "../../extensions/lib/extensions-api";
 
 const CONNECT_LINK_QUERY_PARAM = "connect";
+// Watcher bounds, mirroring the in-chat onboarding watcher so an abandoned
+// popup cannot leave the card polling forever.
+const CONNECT_OAUTH_TIMEOUT_MS = 10 * 60 * 1000;
+const CONNECT_OAUTH_POLL_MS = 2000;
+const CONNECT_OAUTH_STATUS_ERROR_KEYS = Object.freeze({
+  failed: "extensions.oauthFailed",
+  canceled: "extensions.oauthCanceled",
+  expired: "extensions.oauthExpired",
+});
 
 // #7681: an OAuth-strategy channel's "connect your account" chat notice can
 // carry a one-click link — `/chat?connect=<extension>`. `/chat` is an
@@ -30,6 +44,7 @@ export function useConnectLinkLanding() {
   const location = useLocation();
   const navigate = useNavigate();
   const [connectLanding, setConnectLanding] = React.useState(null);
+  const [pendingFlow, setPendingFlow] = React.useState(null);
   const flowIdRef = React.useRef(null);
 
   // First render only: `navigate` below rewrites `location.search`, so
@@ -54,16 +69,60 @@ export function useConnectLinkLanding() {
   }, []);
 
   // Clear the card on real backend evidence, never optimistically on click.
+  //
+  // Two signals, because neither alone is sufficient. The broadcast is the
+  // fast path but is same-origin only: when the OAuth callback lands on a
+  // different origin than the opener (a tunnelled callback against a
+  // 127.0.0.1 app, or split app/callback domains), it never arrives and the
+  // card would spin forever. Polling the durable flow status closes that gap
+  // and is also what recovers the card after a reload mid-flow.
   React.useEffect(() => {
-    if (!connectLanding) return undefined;
-    return subscribeProductAuthOAuthCompletion(window, (payload) => {
-      if (!completionMatchesFlow(payload, flowIdRef.current)) return;
+    if (!pendingFlow) return undefined;
+
+    const settle = async () => {
+      if (flowIdRef.current !== pendingFlow.flowId) return;
       flowIdRef.current = null;
+      setPendingFlow(null);
       queryClient.invalidateQueries?.({ queryKey: ["extensions"] });
-      notifyChannelConnected({ channel: connectLanding.extensionName, source: "connect-link" });
+      await notifyChannelConnected({
+        channel: pendingFlow.channel,
+        source: "connect-link",
+      });
       setConnectLanding(null);
+    };
+    const fail = (messageKey) => {
+      if (flowIdRef.current !== pendingFlow.flowId) return;
+      flowIdRef.current = null;
+      setPendingFlow(null);
+      // The card exits its spinner and shows a retry-able error when the
+      // onboarding it renders carries `oauthError`.
+      setConnectLanding((current) =>
+        current ? { ...current, oauthError: t(messageKey) } : current,
+      );
+    };
+
+    const unsubscribe = subscribeProductAuthOAuthCompletion(window, (payload) => {
+      if (completionMatchesFlow(payload, flowIdRef.current)) void settle();
     });
-  }, [connectLanding]);
+    const timer = window.setInterval(async () => {
+      if (Date.now() - pendingFlow.startedAt > CONNECT_OAUTH_TIMEOUT_MS) {
+        fail("extensions.oauthTimedOut");
+        return;
+      }
+      const result = await fetchOauthFlowStatus(pendingFlow.flowId, pendingFlow.invocationId);
+      if (result?.status === "completed") {
+        void settle();
+        return;
+      }
+      const errorKey = CONNECT_OAUTH_STATUS_ERROR_KEYS[result?.status];
+      if (errorKey) fail(errorKey);
+    }, CONNECT_OAUTH_POLL_MS);
+
+    return () => {
+      window.clearInterval(timer);
+      unsubscribe();
+    };
+  }, [pendingFlow, t]);
 
   const startConnectLinkOAuth = React.useCallback(async () => {
     if (!connectLanding) throw new Error("connection is no longer pending");
@@ -75,6 +134,13 @@ export function useConnectLinkLanding() {
     if (!popup) throw new Error(t("authGate.popupBlocked"));
     popup.opener = null;
     try {
+      // Install first. Someone arriving from a channel nudge has, by
+      // definition, not connected this extension — and usually has not
+      // installed it either, which makes `setup/oauth/start` fail closed
+      // (`require_installed_extension` -> 409). Install is idempotent, so an
+      // already-installed extension costs one no-op call rather than a
+      // pre-flight inventory read.
+      await installExtension(packageRef);
       const setup = await fetchExtensionSetup(packageRef);
       const secret = (setup?.secrets || []).find(
         (item) => (item?.setup?.kind || "manual_token") === "oauth",
@@ -96,6 +162,17 @@ export function useConnectLinkLanding() {
         );
       }
       flowIdRef.current = response.flow_id;
+      setPendingFlow({
+        flowId: response.flow_id,
+        // The caller-scoped backend needs this to locate its own flow when
+        // reconciling status; absent on responses that mint no callback scope.
+        invocationId:
+          response?.callback_scope?.invocation_id ||
+          response?.callbackScope?.invocationId ||
+          null,
+        channel: connectLanding.extensionName,
+        startedAt: Date.now(),
+      });
       return response;
     } catch (error) {
       if (!popup.closed) popup.close();
@@ -105,6 +182,7 @@ export function useConnectLinkLanding() {
 
   const dismissConnectLanding = React.useCallback(() => {
     flowIdRef.current = null;
+    setPendingFlow(null);
     setConnectLanding(null);
   }, []);
 

@@ -31,11 +31,15 @@ use ironclaw_product_contracts::account_setup::AccountConnectionStatusSource;
 use ironclaw_product_contracts::admin_users::AdminUserService;
 use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;
 
-/// The deployment's public web app origin (e.g. `https://ironclaw.example.com`,
-/// no trailing slash required). Backs the one-click OAuth-strategy connect
-/// link appended to the `connect_required` channel notice (#7681); unset
-/// deployments keep the static, link-free notice text.
-const CONNECT_LINK_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_PUBLIC_URL";
+/// The deployment's public web app origin — the SAME variable that already
+/// builds Reborn's OAuth callback URLs (resolved for that purpose by
+/// `ironclaw_cli`'s `webui_public_base_url_from_env`). Reused deliberately
+/// rather than introducing a second "what is our public host" setting: a
+/// deployment whose OAuth callbacks work is exactly one whose connect link
+/// resolves. Unset (the local-dev default, where Reborn falls back to the
+/// bound listener address) keeps the notice at its static, link-free text
+/// rather than advertising an unreachable loopback URL into a channel.
+const CONNECT_LINK_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
 
 pub(crate) struct BackendExtensionHostAssemblyInput {
     pub(crate) binder: ExtensionLaneToolBinder,

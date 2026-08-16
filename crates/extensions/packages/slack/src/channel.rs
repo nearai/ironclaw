@@ -387,11 +387,18 @@ async fn post_slack_chunk(
         "chat.postMessage"
     };
     let mut body = serde_json::json!({ "channel": channel, "text": text });
-    if let Some(thread_ts) = thread_ts {
-        body["thread_ts"] = serde_json::Value::String(thread_ts.to_string());
-    }
     if let Some(user) = ephemeral_user {
         body["user"] = serde_json::Value::String(user.to_string());
+        // Deliberately NOT threaded. Slack renders an ephemeral message in a
+        // thread only when that thread is already active, and a top-level
+        // mention self-roots its thread — so `thread_ts` would point at a
+        // thread with no replies yet. Slack answers `ok: true` and displays
+        // nothing, which reads as a silent drop (verified against a live
+        // workspace: the attempt recorded `delivered` while the recipient saw
+        // no message). Posting at channel level is always rendered, and stays
+        // visible only to `user`.
+    } else if let Some(thread_ts) = thread_ts {
+        body["thread_ts"] = serde_json::Value::String(thread_ts.to_string());
     }
     let body = match serde_json::to_vec(&body) {
         Ok(body) => body,
@@ -2201,6 +2208,13 @@ mod tests {
         let body = body_json(&requests[0]);
         assert_eq!(body["channel"], "D123");
         assert_eq!(body["user"], "U999");
+        // The envelope carries a thread anchor, but an ephemeral post must
+        // drop it: Slack renders ephemeral-in-thread only for an already
+        // active thread, otherwise answering `ok` and showing nothing.
+        assert!(
+            body.get("thread_ts").is_none(),
+            "ephemeral posts must not thread: {body}"
+        );
     }
 
     #[tokio::test]

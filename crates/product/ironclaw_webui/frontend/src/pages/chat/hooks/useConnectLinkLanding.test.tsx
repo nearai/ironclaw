@@ -17,6 +17,8 @@ import { I18nProvider } from "../../../lib/i18n";
 
 const api = vi.hoisted(() => ({
   fetchExtensionSetup: vi.fn(),
+  fetchOauthFlowStatus: vi.fn(),
+  installExtension: vi.fn(),
   startExtensionOauth: vi.fn(),
 }));
 
@@ -106,6 +108,7 @@ test("no connect param means no landing state", async () => {
 test("starting the connect flow drives setup, oauth start, and popup in order", async () => {
   const popup = fakePopup();
   window.open = vi.fn(() => popup);
+  api.installExtension.mockResolvedValue({ success: true });
   api.fetchExtensionSetup.mockResolvedValue({
     secrets: [{ name: "slack_oauth", setup: { kind: "oauth" } }],
   });
@@ -123,10 +126,80 @@ test("starting the connect flow drives setup, oauth start, and popup in order", 
   });
 
   assert.equal(window.open.mock.calls[0][0], "about:blank");
+  // Install must precede setup: the backend fails `oauth/start` closed for an
+  // extension absent from the caller's inventory, which is the normal state
+  // for someone arriving from a channel nudge (#7681 manual verification).
+  assert.equal(api.installExtension.mock.calls[0][0].id, "slack");
+  assert.ok(
+    api.installExtension.mock.invocationCallOrder[0] <
+      api.fetchExtensionSetup.mock.invocationCallOrder[0],
+    "installExtension must be called before fetchExtensionSetup",
+  );
   assert.equal(api.fetchExtensionSetup.mock.calls[0][0].id, "slack");
   assert.equal(api.startExtensionOauth.mock.calls[0][0].id, "slack");
   assert.equal(api.startExtensionOauth.mock.calls[0][1].name, "slack_oauth");
   assert.equal(popup.location.href, "https://slack.com/oauth/authorize?client_id=abc");
+});
+
+// The OAuth callback commonly lands on a different origin than the opener (a
+// tunnelled callback against a 127.0.0.1 app), where the same-origin
+// broadcast never arrives. Without the durable status poll the card spins
+// forever — observed live before this backstop existed.
+async function startFlow() {
+  const popup = fakePopup();
+  window.open = vi.fn(() => popup);
+  api.installExtension.mockResolvedValue({ success: true });
+  api.fetchExtensionSetup.mockResolvedValue({
+    secrets: [{ name: "slack_oauth", setup: { kind: "oauth" } }],
+  });
+  api.startExtensionOauth.mockResolvedValue({
+    success: true,
+    authorization_url: "https://slack.com/oauth/authorize?client_id=abc",
+    flow_id: "flow-1",
+    callback_scope: { invocation_id: "inv-1" },
+  });
+  renderAt("/chat?connect=slack");
+  await flush();
+  await act(async () => {
+    await latest.startConnectLinkOAuth();
+  });
+}
+
+test("polled completion closes the card when no same-origin broadcast arrives", async () => {
+  vi.useFakeTimers();
+  try {
+    await startFlow();
+    assert.ok(latest.connectLanding, "card is still open while connecting");
+
+    api.fetchOauthFlowStatus.mockResolvedValue({ status: "completed" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+
+    assert.deepEqual(api.fetchOauthFlowStatus.mock.calls[0], ["flow-1", "inv-1"]);
+    assert.equal(latest.connectLanding, null, "card closes on polled completion");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a terminal failure status stops the spinner with a retryable error", async () => {
+  vi.useFakeTimers();
+  try {
+    await startFlow();
+    api.fetchOauthFlowStatus.mockResolvedValue({ status: "failed" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+
+    assert.ok(latest.connectLanding, "the card stays so the user can retry");
+    assert.ok(
+      latest.connectLanding.oauthError,
+      "oauthError is what makes the card exit its spinner and show the error",
+    );
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("dismissing clears the landing state", async () => {
