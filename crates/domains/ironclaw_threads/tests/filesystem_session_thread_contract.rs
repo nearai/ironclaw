@@ -45,8 +45,8 @@ use ironclaw_threads::{
     PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
     SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
-    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
-    UpdateToolResultReferenceRequest,
+    ToolResultIntrinsicOutcome, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 use tokio::sync::{Barrier, Mutex, OwnedMutexGuard};
 
@@ -66,8 +66,17 @@ fn provider_call_reference(call_id: &str) -> ProviderToolCallReferenceEnvelope {
     }
 }
 
+fn structured_result_provider_call_reference(call_id: &str) -> ProviderToolCallReferenceEnvelope {
+    let mut provider_call = provider_call_reference(call_id);
+    provider_call.provider_tool_name =
+        ProviderToolName::new("builtin__structured_result").expect("provider tool name");
+    provider_call.capability_id = CapabilityId::new("builtin.structured_result").unwrap();
+    provider_call.arguments = serde_json::json!({"outcome": "nothing_to_report"});
+    provider_call
+}
+
 #[tokio::test]
-async fn filesystem_exact_provider_call_lookup_bypasses_history_projection() {
+async fn filesystem_history_preserves_typed_intrinsic_outcome_without_provider_metadata() {
     let backend = Arc::new(InMemoryBackend::new());
     let scoped = scoped_threads_fs_at(backend, "tenant-provider-evidence", "alice");
     let service = FilesystemSessionThreadService::new(scoped);
@@ -89,7 +98,7 @@ async fn filesystem_exact_provider_call_lookup_bypasses_history_projection() {
             turn_run_id: "run-1".into(),
             result_ref: "result:provider-evidence".into(),
             safe_summary: ToolResultSafeSummary::new("structured result recorded").unwrap(),
-            provider_call: Some(provider_call_reference("structured-call")),
+            provider_call: Some(structured_result_provider_call_reference("structured-call")),
             model_observation: None,
         })
         .await
@@ -110,17 +119,19 @@ async fn filesystem_exact_provider_call_lookup_bypasses_history_projection() {
         "ordinary history must keep host-only provider metadata redacted"
     );
 
-    let provider_call = service
-        .find_tool_result_provider_call(
-            &scope,
-            &thread.thread_id,
-            "run-1",
-            "result:provider-evidence",
-        )
-        .await
+    let envelope = history
+        .messages
+        .first()
+        .and_then(|message| message.content.as_deref())
+        .map(ToolResultReferenceEnvelope::from_json_str)
+        .transpose()
         .unwrap()
-        .expect("exact evidence lookup preserves provider metadata");
-    assert_eq!(provider_call.provider_call_id, "structured-call");
+        .expect("history contains the result envelope");
+    assert_eq!(
+        envelope.intrinsic_outcome,
+        Some(ToolResultIntrinsicOutcome::NothingToReport),
+        "host-validated intrinsic evidence must survive the redacted history projection"
+    );
 }
 
 #[tokio::test]

@@ -77,5 +77,6 @@ pub use ironclaw_common::{AttachmentKind, AttachmentRef};
 pub use ironclaw_llm::agent_message;
 pub use service::SessionThreadService;
 pub use tool_result_reference::{
-    ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+    ProviderToolCallReferenceEnvelope, ToolResultIntrinsicOutcome, ToolResultReferenceEnvelope,
+    ToolResultSafeSummary,
 };

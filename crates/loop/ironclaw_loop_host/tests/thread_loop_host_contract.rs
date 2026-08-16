@@ -4903,6 +4903,7 @@ async fn model_port_round_trips_tool_result_reference_context_as_typed_model_inp
         result_ref: "result:round-trip".to_string(),
         safe_summary: ToolResultSafeSummary::new("tool result content").unwrap(),
         model_observation: None,
+        intrinsic_outcome: None,
     };
     let envelope_content = serde_json::to_string(&envelope).unwrap();
     let thread_service = Arc::new(StaticContextThreadService::new(ContextMessage {

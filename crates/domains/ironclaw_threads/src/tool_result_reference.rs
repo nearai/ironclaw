@@ -2,6 +2,7 @@
 use ironclaw_host_api::{
     dispatch::INPUT_ENCODE_HUMAN_SUMMARY,
     ids::{CapabilityId, ProviderToolName},
+    prepared_context::{STRUCTURED_RESULT_CAPABILITY_ID, STRUCTURED_RESULT_PROVIDER_TOOL_NAME},
 };
 use ironclaw_safety::{
     PROVIDER_METADATA_TEXT_MAX_BYTES, validate_optional_provider_metadata_text,
@@ -135,6 +136,14 @@ pub struct ToolResultReferenceEnvelope {
     pub safe_summary: ToolResultSafeSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_observation: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intrinsic_outcome: Option<ToolResultIntrinsicOutcome>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResultIntrinsicOutcome {
+    NothingToReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,7 +212,24 @@ impl ToolResultReferenceEnvelope {
             result_ref,
             safe_summary,
             model_observation: None,
+            intrinsic_outcome: None,
         })
+    }
+
+    /// Record the narrow host-validated outcome needed by settlement without
+    /// exposing raw provider replay metadata through ordinary history.
+    pub fn with_provider_call_evidence(
+        mut self,
+        provider_call: Option<&ProviderToolCallReferenceEnvelope>,
+    ) -> Self {
+        if provider_call.is_some_and(|provider_call| {
+            provider_call.capability_id.as_str() == STRUCTURED_RESULT_CAPABILITY_ID
+                && provider_call.provider_tool_name.as_str() == STRUCTURED_RESULT_PROVIDER_TOOL_NAME
+                && provider_call.arguments == serde_json::json!({"outcome": "nothing_to_report"})
+        }) {
+            self.intrinsic_outcome = Some(ToolResultIntrinsicOutcome::NothingToReport);
+        }
+        self
     }
 
     pub fn with_model_observation(
@@ -346,6 +372,20 @@ impl ToolResultReferenceEnvelope {
             return Ok(None);
         }
         serde_json::to_string(&merged)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn merge_intrinsic_outcome_content_if_absent(
+        content: &str,
+        intrinsic_outcome: ToolResultIntrinsicOutcome,
+    ) -> Result<Option<String>, String> {
+        let mut envelope = Self::from_json_str(content)?;
+        if envelope.intrinsic_outcome.is_some() {
+            return Ok(None);
+        }
+        envelope.intrinsic_outcome = Some(intrinsic_outcome);
+        serde_json::to_string(&envelope)
             .map(Some)
             .map_err(|error| error.to_string())
     }

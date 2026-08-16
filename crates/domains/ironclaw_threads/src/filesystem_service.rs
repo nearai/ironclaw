@@ -1617,19 +1617,6 @@ impl<F> SessionThreadService for FilesystemSessionThreadService<F>
 where
     F: RootFilesystem,
 {
-    async fn find_tool_result_provider_call(
-        &self,
-        scope: &ThreadScope,
-        thread_id: &ThreadId,
-        turn_run_id: &str,
-        result_ref: &str,
-    ) -> Result<Option<crate::ProviderToolCallReferenceEnvelope>, SessionThreadError> {
-        Ok(self
-            .find_tool_result_reference_message(scope, thread_id, turn_run_id, result_ref, None)
-            .await?
-            .and_then(|message| message.tool_result_provider_call))
-    }
-
     async fn ensure_thread(
         &self,
         request: EnsureThreadRequest,
@@ -2502,7 +2489,8 @@ where
             request.safe_summary,
             request.model_observation,
         )
-        .map_err(SessionThreadError::Serialization)?;
+        .map_err(SessionThreadError::Serialization)?
+        .with_provider_call_evidence(provider_call.as_ref());
         if let Some(existing) = self
             .find_tool_result_reference_message(
                 &request.scope,
@@ -2533,7 +2521,11 @@ where
                 None
             };
             let model_observation = envelope.model_observation.clone();
-            if provider_call_update.is_some() || model_observation.is_some() {
+            let intrinsic_outcome = envelope.intrinsic_outcome;
+            if provider_call_update.is_some()
+                || model_observation.is_some()
+                || intrinsic_outcome.is_some()
+            {
                 let now = Utc::now();
                 let updated = self
                     .apply_message_update(
@@ -2555,6 +2547,22 @@ where
                                 if let Some(content) = ToolResultReferenceEnvelope::merge_model_observation_content_if_absent(
                                     content,
                                     model_observation.clone(),
+                                )
+                                .map_err(SessionThreadError::Serialization)?
+                                {
+                                    message.content = Some(content);
+                                    changed = true;
+                                }
+                            }
+                            if let Some(intrinsic_outcome) = intrinsic_outcome {
+                                let content = message.content.as_deref().ok_or_else(|| {
+                                    SessionThreadError::Serialization(
+                                        "tool result reference content is missing".to_string(),
+                                    )
+                                })?;
+                                if let Some(content) = ToolResultReferenceEnvelope::merge_intrinsic_outcome_content_if_absent(
+                                    content,
+                                    intrinsic_outcome,
                                 )
                                 .map_err(SessionThreadError::Serialization)?
                                 {

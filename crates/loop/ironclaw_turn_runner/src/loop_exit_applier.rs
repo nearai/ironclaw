@@ -6,12 +6,12 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_host_api::prepared_context::STRUCTURED_RESULT_CAPABILITY_ID;
 use ironclaw_loop_contracts::{LoopBlockedKind, LoopCheckpointKind, LoopCompletionKind};
 use ironclaw_loop_host::RunCancellationFactory;
 use ironclaw_threads::{
     MessageKind, MessageStatus, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
-    ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
+    ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultIntrinsicOutcome,
+    ToolResultReferenceEnvelope,
 };
 use ironclaw_turns::{
     AgentTurnRuntimePort, GetLoopCheckpointRequest, GetRunStateRequest, LoopGateRef,
@@ -302,38 +302,11 @@ where
         let results_verified = request.result_refs.iter().all(|result_ref| {
             verify_tool_result_ref(&history, result_ref, expected_run_id.as_str())
         });
-        let typed_nothing_to_report_verified =
-            if request.completion_kind == LoopCompletionKind::NothingToReport {
-                let mut verified = false;
-                for result_ref in history.messages.iter().filter_map(|message| {
-                    verify_intrinsic_tool_result_message(message, expected_run_id.as_str())
-                        .then_some(message.tool_result_ref.as_deref())
-                        .flatten()
-                }) {
-                    let provider_call = self
-                        .thread_service
-                        .find_tool_result_provider_call(
-                            &thread_scope,
-                            &request.scope.thread_id,
-                            expected_run_id.as_str(),
-                            result_ref,
-                        )
-                        .await
-                        .map_err(|error| TurnError::Unavailable {
-                            reason: error.to_string(),
-                        })?;
-                    if provider_call
-                        .as_ref()
-                        .is_some_and(is_nothing_to_report_provider_call)
-                    {
-                        verified = true;
-                        break;
-                    }
-                }
-                verified
-            } else {
-                true
-            };
+        let typed_nothing_to_report_verified = request.completion_kind
+            != LoopCompletionKind::NothingToReport
+            || history.messages.iter().any(|message| {
+                verify_intrinsic_tool_result_message(message, expected_run_id.as_str())
+            });
         // A typed no-result call is mandatory evidence for suppression, and
         // every result ref declared by the driver must still be finalized for
         // this run. An empty result-ref list remains valid when the durable
@@ -695,13 +668,6 @@ fn verify_tool_result_ref(
         .any(|message| verify_tool_result_message(message, result_ref, expected_run_id))
 }
 
-fn is_nothing_to_report_provider_call(
-    provider_call: &ironclaw_threads::ProviderToolCallReferenceEnvelope,
-) -> bool {
-    provider_call.capability_id.as_str() == STRUCTURED_RESULT_CAPABILITY_ID
-        && provider_call.arguments == serde_json::json!({"outcome": "nothing_to_report"})
-}
-
 fn verify_tool_result_message(
     message: &ThreadMessageRecord,
     result_ref: &LoopResultRef,
@@ -726,8 +692,11 @@ fn verify_intrinsic_tool_result_message(
             .as_deref()
             .is_some_and(|result_ref| {
                 message.content.as_deref().is_some_and(|content| {
-                    ToolResultReferenceEnvelope::from_json_str(content)
-                        .is_ok_and(|envelope| envelope.result_ref == result_ref)
+                    ToolResultReferenceEnvelope::from_json_str(content).is_ok_and(|envelope| {
+                        envelope.result_ref == result_ref
+                            && envelope.intrinsic_outcome
+                                == Some(ToolResultIntrinsicOutcome::NothingToReport)
+                    })
                 })
             })
 }
