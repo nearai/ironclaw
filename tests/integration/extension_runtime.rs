@@ -50,7 +50,7 @@ async fn acme_channel_adapter_satisfies_the_conformance_contract() {
     use std::sync::Arc;
 
     use ironclaw_extension_contracts::channel_adapter::{
-        OutboundEnvelope, OutboundPart, OutboundTarget,
+        OutboundEnvelope, OutboundPart, OutboundTarget, OutboundVisibility,
     };
     use ironclaw_extension_contracts::external::ExternalConversationRef;
     use ironclaw_extension_contracts::test_support::conformance::{
@@ -95,6 +95,7 @@ async fn acme_channel_adapter_satisfies_the_conformance_contract() {
             parts: vec![OutboundPart::Text("conformance reply".to_string())],
             reply_context: None,
             registrations: Vec::new(),
+            visibility: OutboundVisibility::Public,
         },
         vendor_responses: Arc::new(|_request| {
             ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {

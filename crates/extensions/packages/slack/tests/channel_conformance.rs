@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use ironclaw_extension_contracts::channel_adapter::ChannelSurfaces;
 use ironclaw_extension_contracts::channel_adapter::{
-    OutboundEnvelope, OutboundPart, OutboundTarget,
+    OutboundEnvelope, OutboundPart, OutboundTarget, OutboundVisibility,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::test_support::conformance::{
@@ -76,6 +76,7 @@ async fn slack_channel_adapter_satisfies_the_conformance_contract() {
             ],
             reply_context: None,
             registrations: Vec::new(),
+            visibility: OutboundVisibility::Public,
         },
         vendor_responses: Arc::new(scripted_slack_api),
         config: Vec::new(),

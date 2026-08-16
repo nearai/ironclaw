@@ -414,6 +414,12 @@ impl Harness {
         self.egress.bodies_for("/api/chat.postMessage")
     }
 
+    /// Sender-visible-only posts (#7681). Deliberately separate from
+    /// `slack_messages()` above, which stays the room-visible log.
+    fn slack_ephemeral_messages(&self) -> Vec<serde_json::Value> {
+        self.egress.bodies_for("/api/chat.postEphemeral")
+    }
+
     fn slack_deletes(&self) -> Vec<serde_json::Value> {
         self.egress.bodies_for("/api/chat.delete")
     }
@@ -679,6 +685,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         dm_targets: Some(Arc::clone(&dm_targets)),
         channel_pairing: None,
         admin_users: Arc::new(FakeAdminUsers::seeded(USER, options.actor_role)),
+        connect_link_base_url: None,
     };
     let assembly = GenericChannelHostAssembly::start(deps);
     let command_executions = Arc::new(RecordingCommandExecutionSurface::new(model_preferences));
@@ -2542,13 +2549,24 @@ async fn slack_unpaired_mention_gets_a_threaded_pairing_notice() {
         harness.coordinator.submitted_scopes().is_empty(),
         "an unpaired sender must not execute a run"
     );
-    let messages = harness.slack_messages();
+    // #7681: the nudge reaches only the unpaired sender, so it rides
+    // `chat.postEphemeral` and never the room-visible `chat.postMessage`.
+    assert!(
+        harness.slack_messages().is_empty(),
+        "the nudge must not post publicly: {:?}",
+        harness.slack_messages()
+    );
+    let messages = harness.slack_ephemeral_messages();
     assert_eq!(
         messages.len(),
         1,
         "exactly one connect notice: {messages:?}"
     );
     assert_eq!(messages[0]["channel"], "C889");
+    assert_eq!(
+        messages[0]["user"], "U999",
+        "the ephemeral notice is scoped to the unpaired sender"
+    );
     assert_eq!(
         messages[0]["text"].as_str(),
         Some(slack_manifest_connect_required_notice().as_str()),
@@ -2568,7 +2586,7 @@ async fn slack_unpaired_mention_gets_a_threaded_pairing_notice() {
     harness.drain().await;
     assert!(harness.coordinator.submitted_scopes().is_empty());
     assert_eq!(
-        harness.slack_messages().len(),
+        harness.slack_ephemeral_messages().len(),
         1,
         "the per-conversation throttle suppresses the repeat nudge"
     );
@@ -2644,7 +2662,8 @@ async fn slack_pairing_mid_thread_runs_in_carols_own_thread() {
     assert_eq!(harness.coordinator.submitted_scopes().len(), 1);
 
     // Unpaired carol mentions inside A's active thread: NO run, one connect
-    // nudge threaded at the same T.
+    // nudge threaded at the same T — visible only to carol (#7681), so A's
+    // room-visible reply is unaffected.
     let response = harness.post_event(MIDTHREAD_UNPAIRED_MENTION_CAROL).await;
     assert_eq!(response.status(), StatusCode::OK);
     harness.drain().await;
@@ -2653,14 +2672,24 @@ async fn slack_pairing_mid_thread_runs_in_carols_own_thread() {
         1,
         "an unpaired sender must not execute a run"
     );
-    let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 2, "A's reply + carol's nudge: {messages:?}");
     assert_eq!(
-        messages[1]["text"].as_str(),
+        harness.slack_messages().len(),
+        1,
+        "carol's nudge must not post publicly: {:?}",
+        harness.slack_messages()
+    );
+    let nudges = harness.slack_ephemeral_messages();
+    assert_eq!(nudges.len(), 1, "carol's connect nudge: {nudges:?}");
+    assert_eq!(
+        nudges[0]["user"], "U457",
+        "the ephemeral nudge is scoped to carol"
+    );
+    assert_eq!(
+        nudges[0]["text"].as_str(),
         Some(slack_manifest_connect_required_notice().as_str()),
     );
     assert_eq!(
-        messages[1]["thread_ts"], "1710000007.000001",
+        nudges[0]["thread_ts"], "1710000007.000001",
         "the nudge is threaded into A's active thread"
     );
 
@@ -2683,11 +2712,12 @@ async fn slack_pairing_mid_thread_runs_in_carols_own_thread() {
     let actors = harness.coordinator.submitted_actors();
     assert_eq!(actors[1].user_id.as_str(), "user:slack-carol");
 
-    // Both replies (A's and carol's) are threaded on A's root ping.
+    // Both replies (A's and carol's) are threaded on A's root ping; carol's
+    // earlier nudge stays off this room-visible log.
     let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 3, "A reply + nudge + carol reply");
-    assert_eq!(messages[2]["text"], "midthread reply");
-    assert_eq!(messages[2]["thread_ts"], "1710000007.000001");
+    assert_eq!(messages.len(), 2, "A reply + carol reply");
+    assert_eq!(messages[1]["text"], "midthread reply");
+    assert_eq!(messages[1]["thread_ts"], "1710000007.000001");
 }
 
 /// Added with the run-acts-as-invoker ruling (#7377): shared-channel pings
@@ -4123,7 +4153,7 @@ fn slack_response_for_approved(
             return response(br#"{"ok":false,"error":"missing_post_type"}"#);
         }
     }
-    if path == "/api/chat.postMessage" {
+    if path == "/api/chat.postMessage" || path == "/api/chat.postEphemeral" {
         let body: serde_json::Value = match serde_json::from_slice(&approved.body) {
             Ok(body) => body,
             Err(_) => {
@@ -4132,15 +4162,14 @@ fn slack_response_for_approved(
         };
         let channel = body["channel"].as_str().unwrap_or("DTEST");
         let ts_seed = stable_slack_test_ts(&approved.body);
-        return response(
-            serde_json::json!({
-                "ok": true,
-                "channel": channel,
-                "ts": ts_seed,
-            })
-            .to_string()
-            .as_bytes(),
-        );
+        // `chat.postEphemeral` returns `message_ts`, not `ts` — see
+        // `SlackChatPostMessageResponse`'s `#[serde(alias = "message_ts")]`.
+        let payload = if path == "/api/chat.postEphemeral" {
+            serde_json::json!({ "ok": true, "channel": channel, "message_ts": ts_seed })
+        } else {
+            serde_json::json!({ "ok": true, "channel": channel, "ts": ts_seed })
+        };
+        return response(payload.to_string().as_bytes());
     }
     // Channel-context hydration fixture (#7377): only C892 has scripted
     // channel history (NEWEST-first, as `conversations.history` returns it;

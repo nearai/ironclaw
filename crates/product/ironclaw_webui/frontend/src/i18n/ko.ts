@@ -1421,6 +1421,7 @@ registerPack("ko", {
   "pairing.connectInstructions": "계속하려면 {name} 연결 단계를 따르세요.",
   "pairing.connectFromExtensions": "계속하려면 확장 페이지에서 {name}을 연결하세요.",
   "pairing.connectFailedRetry": "연결에 실패했습니다. 다시 시도하세요.",
+  "pairing.continueConnect": "계속하여 {name} 연결",
   "extensions.authUrlHttpsRequired": "인증 URL은 HTTPS를 사용해야 합니다.",
   "tools.available": "사용 가능한 도구",
   "slackSetup.placeholder.keepSecret": "구성됨; 유지하려면 비워두세요",

@@ -15,8 +15,8 @@ use ironclaw_extension_contracts::auth_prompt::render_channel_auth_prompt;
 use ironclaw_extension_contracts::channel_adapter::{
     ChannelDelivery, ChannelError, ChannelIngress, ChannelReply, DeliveryReport,
     DirectTargetProvisionRequest, ImmediateResponse, InboundOutcome, NormalizedInboundMessage,
-    OutboundEnvelope, OutboundPart, PartDeliveryOutcome, ProductTriggerReason, ReactionAction,
-    RunReaction, VerifiedInbound,
+    OutboundEnvelope, OutboundPart, OutboundVisibility, PartDeliveryOutcome, ProductTriggerReason,
+    ReactionAction, RunReaction, VerifiedInbound,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::tool_adapter::{
@@ -140,6 +140,13 @@ impl SlackChannelAdapter {
             .thread_anchor
             .clone()
             .or_else(|| envelope.target.conversation.topic_id().map(str::to_string));
+        // Only the text-shaped parts honor this: `chat.postEphemeral` has no
+        // delete/react/upload counterpart, and `Retract`/`React` act on an
+        // already-posted public message either way.
+        let ephemeral_user = match &envelope.visibility {
+            OutboundVisibility::EphemeralTo(actor) => Some(actor.id().to_string()),
+            OutboundVisibility::Public => None,
+        };
 
         let mut parts = Vec::new();
         let mut part_index = 0usize;
@@ -155,6 +162,7 @@ impl SlackChannelAdapter {
                             &channel,
                             thread_ts.as_deref(),
                             &chunk,
+                            ephemeral_user.as_deref(),
                         )
                         .await;
                         let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
@@ -206,6 +214,7 @@ impl SlackChannelAdapter {
                             &channel,
                             thread_ts.as_deref(),
                             &chunk,
+                            ephemeral_user.as_deref(),
                         )
                         .await;
                         let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
@@ -356,32 +365,46 @@ struct SlackOpenedConversation {
 struct SlackChatPostMessageResponse {
     ok: bool,
     error: Option<String>,
+    // `chat.postEphemeral` answers with `message_ts` where `chat.postMessage`
+    // answers with `ts`.
+    #[serde(alias = "message_ts")]
     ts: Option<String>,
 }
 
+/// Posts one text chunk. `ephemeral_user` selects `chat.postEphemeral`
+/// (visible only to that Slack user id) over the default `chat.postMessage`.
 async fn post_slack_chunk(
     egress: &dyn RestrictedEgress,
     credential: &SecretHandle,
     channel: &str,
     thread_ts: Option<&str>,
     text: &str,
+    ephemeral_user: Option<&str>,
 ) -> PartDeliveryOutcome {
+    let method = if ephemeral_user.is_some() {
+        "chat.postEphemeral"
+    } else {
+        "chat.postMessage"
+    };
     let mut body = serde_json::json!({ "channel": channel, "text": text });
     if let Some(thread_ts) = thread_ts {
         body["thread_ts"] = serde_json::Value::String(thread_ts.to_string());
+    }
+    if let Some(user) = ephemeral_user {
+        body["user"] = serde_json::Value::String(user.to_string());
     }
     let body = match serde_json::to_vec(&body) {
         Ok(body) => body,
         Err(error) => {
             return PartDeliveryOutcome::Permanent {
-                reason: format!("chat.postMessage body did not serialize: {error}"),
+                reason: format!("{method} body did not serialize: {error}"),
             };
         }
     };
     let response = egress
         .send(RestrictedEgressRequest {
             method: NetworkMethod::Post,
-            url: format!("https://{SLACK_API_HOST}/api/chat.postMessage"),
+            url: format!("https://{SLACK_API_HOST}/api/{method}"),
             headers: vec![(
                 "content-type".to_string(),
                 "application/json; charset=utf-8".to_string(),
@@ -407,7 +430,7 @@ async fn post_slack_chunk(
         // truncated the response. Retrying would risk a duplicate.
         Err(error) => {
             return PartDeliveryOutcome::Ambiguous {
-                reason: format!("chat.postMessage response was not valid JSON: {error}"),
+                reason: format!("{method} response was not valid JSON: {error}"),
             };
         }
     };
@@ -417,14 +440,14 @@ async fn post_slack_chunk(
                 vendor_message_ref: Some(ts),
             },
             None => PartDeliveryOutcome::Ambiguous {
-                reason: "chat.postMessage response omitted message timestamp evidence".to_string(),
+                reason: format!("{method} response omitted message timestamp evidence"),
             },
         };
     }
     let error = parsed.error.unwrap_or_else(|| "unknown_error".to_string());
     part_outcome_for_kind(
         slack_error_kind(&error),
-        format!("slack rejected chat.postMessage ({error})"),
+        format!("slack rejected {method} ({error})"),
     )
 }
 
@@ -1173,6 +1196,7 @@ mod tests {
             parts,
             reply_context: None,
             registrations: Vec::new(),
+            visibility: OutboundVisibility::Public,
         }
     }
 
@@ -2142,6 +2166,41 @@ mod tests {
         assert_eq!(body["channel"], "D123");
         assert_eq!(body["thread_ts"], "1710000000.000100");
         assert_eq!(body["text"], "*bold* reply", "markdown renders to mrkdwn");
+    }
+
+    /// #7681: an `EphemeralTo` visibility request (the shared-conversation
+    /// connect nudge) posts via `chat.postEphemeral` scoped to that actor,
+    /// never the room-visible `chat.postMessage`.
+    #[tokio::test]
+    async fn deliver_posts_ephemeral_when_visibility_requests_it() {
+        use ironclaw_extension_contracts::external::ExternalActorRef;
+
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":true,"message_ts":"1710000002.000002"}"#,
+        )]);
+        let mut request = envelope(
+            vec![OutboundPart::Text("connect nudge".to_string())],
+            Some("1710000000.000100"),
+        );
+        request.visibility = OutboundVisibility::EphemeralTo(
+            ExternalActorRef::new("slack_user", "U999", None::<String>).expect("actor"),
+        );
+
+        let report = SlackChannelAdapter
+            .deliver(request, &egress)
+            .await
+            .expect("deliver drives");
+
+        assert!(matches!(
+            &report.parts[..],
+            [PartDeliveryOutcome::Sent { vendor_message_ref: Some(ts) }] if ts == "1710000002.000002"
+        ));
+        let requests = egress.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url, "https://slack.com/api/chat.postEphemeral");
+        let body = body_json(&requests[0]);
+        assert_eq!(body["channel"], "D123");
+        assert_eq!(body["user"], "U999");
     }
 
     #[tokio::test]

@@ -23,6 +23,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::channel::{
+    ChannelConnectionDescriptor, ChannelConnectionStrategy,
+};
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
 use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec;
@@ -63,6 +66,26 @@ use crate::extension_ingress::{
 };
 use ironclaw_extension_host::ChannelConfigService;
 use ironclaw_product_contracts::admin_users::AdminUserService;
+
+/// The channel's `connect_required` copy, with a one-click connect link
+/// appended when the strategy is OAuth and the deployment configured a public
+/// web origin (#7681). `/chat?connect=<extension>` is an authenticated route,
+/// so the link rides the WebUI's existing login round-trip unchanged. The
+/// other strategies carry their own `connection.deep_link_template`.
+fn connect_required_notice(
+    connection: &ChannelConnectionDescriptor,
+    extension_id: &str,
+    base_url: Option<&str>,
+) -> String {
+    let text = &connection.notices.connect_required;
+    match base_url {
+        Some(base) if connection.strategy == ChannelConnectionStrategy::OAuth => {
+            let base = base.trim_end_matches('/');
+            format!("{text} Or connect directly: {base}/chat?connect={extension_id}")
+        }
+        _ => text.clone(),
+    }
+}
 
 /// The default admission resolver, or `None` (= reject every shared
 /// conversation). Admission is presence-based: the channel's verified
@@ -268,6 +291,11 @@ pub struct GenericChannelHostDeps {
     pub channel_pairing: Option<Arc<crate::channel_pairing::ChannelPairingRegistry>>,
     /// Admin-users directory backing channel-command role gating.
     pub admin_users: Arc<dyn AdminUserService>,
+    /// The deployment's public web app origin (e.g.
+    /// `https://ironclaw.example.com`). Backs the connect link appended to an
+    /// OAuth-strategy channel's `connect_required` notice; `None` keeps that
+    /// notice at its static, link-free manifest text.
+    pub connect_link_base_url: Option<String>,
 }
 
 /// What the assembly last reconciled for one extension id.
@@ -863,7 +891,11 @@ impl GenericChannelHostAssembly {
                     .as_ref()
                     .and_then(|channel| channel.connection.as_ref())
                     .map(|connection| ChannelConnectionNoticePolicy {
-                        connect_required: connection.notices.connect_required.clone(),
+                        connect_required: connect_required_notice(
+                            connection,
+                            source.extension_id(),
+                            self.deps.connect_link_base_url.as_deref(),
+                        ),
                         paired: connection.notices.paired.clone(),
                         already_paired_same_user: connection
                             .notices

@@ -1419,6 +1419,7 @@ registerPack("zh-CN", {
   "pairing.connectInstructions": "请按照 {name} 的连接步骤操作以继续。",
   "pairing.connectFromExtensions": "请从扩展页面连接 {name} 后继续。",
   "pairing.connectFailedRetry": "连接失败。请重试。",
+  "pairing.continueConnect": "继续以连接 {name}",
   "extensions.authUrlHttpsRequired": "认证 URL 必须使用 HTTPS。",
   "tools.available": "可用工具",
   "slackSetup.placeholder.keepSecret": "已配置；留空则保留",

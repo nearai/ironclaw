@@ -1421,6 +1421,7 @@ registerPack("hi", {
   "pairing.connectInstructions": "जारी रखने के लिए {name} के कनेक्शन चरणों का पालन करें।",
   "pairing.connectFromExtensions": "जारी रखने के लिए एक्सटेंशन पेज से {name} कनेक्ट करें।",
   "pairing.connectFailedRetry": "कनेक्शन विफल रहा। फिर से प्रयास करें।",
+  "pairing.continueConnect": "{name} कनेक्ट करने के लिए जारी रखें",
   "extensions.authUrlHttpsRequired": "ऑथेंटिकेशन URL में HTTPS होना चाहिए।",
   "tools.available": "उपलब्ध उपकरण",
   "slackSetup.placeholder.keepSecret": "कॉन्फ़िगर है; बनाए रखने के लिए खाली छोड़ें",

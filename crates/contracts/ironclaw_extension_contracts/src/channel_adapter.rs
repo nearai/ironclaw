@@ -465,6 +465,21 @@ pub struct OutboundEnvelope {
     /// rely on rather than discovering the emptiness inside the vendor path.
     #[allow(clippy::doc_markdown)]
     pub registrations: Vec<DeliveryRegistration>,
+    /// Who may see this delivery.
+    pub visibility: OutboundVisibility,
+}
+
+/// Who may see an [`OutboundEnvelope`] delivery. A hint, not a guarantee: an
+/// adapter that cannot honor a non-`Public` request must still deliver
+/// publicly rather than drop the message.
+#[derive(Debug, Clone, Default)]
+pub enum OutboundVisibility {
+    /// The vendor's normal shared delivery.
+    #[default]
+    Public,
+    /// Visible only to this external actor within the target conversation
+    /// (e.g. a vendor's ephemeral-post API).
+    EphemeralTo(ExternalActorRef),
 }
 
 /// A resolved outbound target for one delivery.

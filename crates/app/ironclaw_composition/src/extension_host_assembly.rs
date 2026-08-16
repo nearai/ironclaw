@@ -31,6 +31,12 @@ use ironclaw_product_contracts::account_setup::AccountConnectionStatusSource;
 use ironclaw_product_contracts::admin_users::AdminUserService;
 use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;
 
+/// The deployment's public web app origin (e.g. `https://ironclaw.example.com`,
+/// no trailing slash required). Backs the one-click OAuth-strategy connect
+/// link appended to the `connect_required` channel notice (#7681); unset
+/// deployments keep the static, link-free notice text.
+const CONNECT_LINK_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_PUBLIC_URL";
+
 pub(crate) struct BackendExtensionHostAssemblyInput {
     pub(crate) binder: ExtensionLaneToolBinder,
     pub(crate) native_factories: Vec<Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
@@ -577,6 +583,7 @@ pub(crate) fn start_channel_host(
         dm_targets: Some(Arc::clone(dm_targets)),
         channel_pairing: channel_pairing.clone(),
         admin_users,
+        connect_link_base_url: std::env::var(CONNECT_LINK_BASE_URL_ENV).ok(),
     });
     StartedChannelHost {
         assembly,
