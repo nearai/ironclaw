@@ -12,8 +12,7 @@ use crate::{
     FinalizedAssistantMessageByRunRequest, InboundMessageReplayMetadata,
     LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent,
-    PutToolResultRecordRequest, ReadToolResultRecordRequest,
-    RecordToolResultIntrinsicOutcomeRequest, RedactMessageRequest,
+    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
     ThreadGoal, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange,
     ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, ToolResultRecordChunk,
@@ -174,16 +173,6 @@ pub trait SessionThreadService: Send + Sync {
         &self,
         request: AppendToolResultReferenceRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError>;
-
-    async fn record_tool_result_intrinsic_outcome(
-        &self,
-        _request: RecordToolResultIntrinsicOutcomeRequest,
-    ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        Err(SessionThreadError::Backend(
-            "intrinsic tool-result outcomes are not implemented by this SessionThreadService backend"
-                .to_string(),
-        ))
-    }
 
     async fn append_capability_display_preview(
         &self,
@@ -562,15 +551,6 @@ where
         request: AppendToolResultReferenceRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         self.as_ref().append_tool_result_reference(request).await
-    }
-
-    async fn record_tool_result_intrinsic_outcome(
-        &self,
-        request: RecordToolResultIntrinsicOutcomeRequest,
-    ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        self.as_ref()
-            .record_tool_result_intrinsic_outcome(request)
-            .await
     }
 
     async fn append_capability_display_preview(

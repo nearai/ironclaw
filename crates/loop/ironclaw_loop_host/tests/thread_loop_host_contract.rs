@@ -314,6 +314,7 @@ async fn task_pin_evicts_complete_tool_exchange_at_a_compactable_boundary() {
     fixture
         .thread_service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: fixture.thread_scope.clone(),
             thread_id: fixture.thread_id.clone(),
             turn_run_id: fixture.run_context.run_id.to_string(),
@@ -4828,6 +4829,7 @@ async fn model_port_preserves_provider_metadata_for_explicit_refs_outside_contex
     let tool_result = fixture
         .thread_service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: fixture.thread_scope.clone(),
             thread_id: fixture.thread_id.clone(),
             turn_run_id: fixture.run_context.run_id.to_string(),

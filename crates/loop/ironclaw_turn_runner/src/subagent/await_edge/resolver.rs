@@ -1577,6 +1577,7 @@ mod tests {
                 .expect("append child final output");
             thread_service
                 .append_tool_result_reference(AppendToolResultReferenceRequest {
+                    intrinsic_outcome: None,
                     scope: parent_thread_scope.clone(),
                     thread_id: parent_thread_id.clone(),
                     turn_run_id: parent_run_id.to_string(),

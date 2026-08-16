@@ -225,10 +225,9 @@ use ironclaw_threads::{
     AppendToolResultReferenceRequest, AttachmentKind, AttachmentRef, ContextMessage,
     FinalizedAssistantMessageByRunRequest, LoadContextMessagesRequest, LoadContextWindowRequest,
     MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
-    RecordToolResultIntrinsicOutcomeRequest, SessionThreadError, SessionThreadService,
-    SummaryArtifact, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    ToolResultIntrinsicOutcome, ToolResultReferenceEnvelope, ToolResultSafeSummary,
-    UpdateAssistantDraftRequest,
+    SessionThreadError, SessionThreadService, SummaryArtifact, ThreadHistoryRequest,
+    ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultIntrinsicOutcome,
+    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
     AgentTurnSpawnTreeRuntimePort, LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope,
@@ -1101,7 +1100,11 @@ where
                     None
                 }
             });
-        let intrinsic_outcome = request.intrinsic_outcome;
+        let intrinsic_outcome = request.intrinsic_outcome.map(|outcome| match outcome {
+            CapabilityResultIntrinsicOutcome::NothingToReport => {
+                ToolResultIntrinsicOutcome::NothingToReport
+            }
+        });
         let turn_run_id = self.run_context.run_id.to_string();
         let append_request = AppendToolResultReferenceRequest {
             scope: self.thread_scope.clone(),
@@ -1113,37 +1116,15 @@ where
             provider_call: request
                 .provider_call
                 .map(provider_call_reference_to_envelope),
+            intrinsic_outcome,
         };
-        let mut record =
+        let record =
             retry_transcript_backend_write(&turn_run_id, "append_tool_result_reference", || {
                 self.thread_service
                     .append_tool_result_reference(append_request.clone())
             })
             .await
             .map_err(transcript_write_error)?;
-        if let Some(intrinsic_outcome) = intrinsic_outcome {
-            let thread_outcome = match intrinsic_outcome {
-                CapabilityResultIntrinsicOutcome::NothingToReport => {
-                    ToolResultIntrinsicOutcome::NothingToReport
-                }
-            };
-            let outcome_request = RecordToolResultIntrinsicOutcomeRequest {
-                scope: self.thread_scope.clone(),
-                thread_id: self.run_context.thread_id.clone(),
-                message_id: record.message_id,
-                intrinsic_outcome: thread_outcome,
-            };
-            record = retry_transcript_backend_write(
-                &turn_run_id,
-                "record_tool_result_intrinsic_outcome",
-                || {
-                    self.thread_service
-                        .record_tool_result_intrinsic_outcome(outcome_request.clone())
-                },
-            )
-            .await
-            .map_err(transcript_write_error)?;
-        }
         message_ref(record.message_id)
     }
 }

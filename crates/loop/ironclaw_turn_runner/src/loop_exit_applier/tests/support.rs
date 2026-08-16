@@ -146,6 +146,7 @@ where
 {
     thread_service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: thread_scope,
             thread_id,
             turn_run_id: run_id.to_string(),

@@ -995,6 +995,7 @@ async fn append_run_output_tool_result_for_run(
 ) {
     service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread_id.clone(),
             turn_run_id: run_id.to_string(),
@@ -1604,6 +1605,7 @@ async fn prepared_gateway_resolves_the_structured_result_payload() {
         .expect("record");
     threads
         .append_tool_result_reference(ironclaw_threads::AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread_id.clone(),
             turn_run_id: run_id.to_string(),

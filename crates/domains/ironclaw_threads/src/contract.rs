@@ -445,14 +445,7 @@ pub struct AppendToolResultReferenceRequest {
     pub safe_summary: ToolResultSafeSummary,
     pub provider_call: Option<ProviderToolCallReferenceEnvelope>,
     pub model_observation: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecordToolResultIntrinsicOutcomeRequest {
-    pub scope: ThreadScope,
-    pub thread_id: ThreadId,
-    pub message_id: ThreadMessageId,
-    pub intrinsic_outcome: ToolResultIntrinsicOutcome,
+    pub intrinsic_outcome: Option<ToolResultIntrinsicOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
