@@ -1,10 +1,8 @@
 version: 1
 
-implementer:
-  network_access: true
+implementer: {}
 
 reviewer:
-  network_access: true
   auto_review:
     enabled: true
     max_runs: 10
@@ -12,10 +10,8 @@ reviewer:
     user_update: false
 
 resolver:
-  network_access: true
   auto_resolve:
     enabled: true
     max_runs: 10
 
-tester:
-  network_access: true
+tester: {}
