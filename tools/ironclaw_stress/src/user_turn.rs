@@ -1575,6 +1575,7 @@ where
                 &mut stages.append_tool_result,
                 self.thread_service.append_tool_result_reference(
                     AppendToolResultReferenceRequest {
+                        intrinsic_outcome: None,
                         scope: context.thread_scope.clone(),
                         thread_id: thread_id.clone(),
                         turn_run_id: claimed.state.run_id.to_string(),
