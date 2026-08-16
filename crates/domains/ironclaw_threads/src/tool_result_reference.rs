@@ -2,7 +2,6 @@
 use ironclaw_host_api::{
     dispatch::INPUT_ENCODE_HUMAN_SUMMARY,
     ids::{CapabilityId, ProviderToolName},
-    prepared_context::{STRUCTURED_RESULT_CAPABILITY_ID, STRUCTURED_RESULT_PROVIDER_TOOL_NAME},
 };
 use ironclaw_safety::{
     PROVIDER_METADATA_TEXT_MAX_BYTES, validate_optional_provider_metadata_text,
@@ -214,22 +213,6 @@ impl ToolResultReferenceEnvelope {
             model_observation: None,
             intrinsic_outcome: None,
         })
-    }
-
-    /// Record the narrow host-validated outcome needed by settlement without
-    /// exposing raw provider replay metadata through ordinary history.
-    pub fn with_provider_call_evidence(
-        mut self,
-        provider_call: Option<&ProviderToolCallReferenceEnvelope>,
-    ) -> Self {
-        if provider_call.is_some_and(|provider_call| {
-            provider_call.capability_id.as_str() == STRUCTURED_RESULT_CAPABILITY_ID
-                && provider_call.provider_tool_name.as_str() == STRUCTURED_RESULT_PROVIDER_TOOL_NAME
-                && provider_call.arguments == serde_json::json!({"outcome": "nothing_to_report"})
-        }) {
-            self.intrinsic_outcome = Some(ToolResultIntrinsicOutcome::NothingToReport);
-        }
-        self
     }
 
     pub fn with_model_observation(

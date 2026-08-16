@@ -311,6 +311,8 @@ pub enum MockHostCall {
         result_ref: LoopResultRef,
         /// Provider call metadata linked to the result, when the model emitted the call.
         provider_call: Box<Option<ProviderToolCallReference>>,
+        /// Host-authored intrinsic result evidence, when present.
+        intrinsic_outcome: Option<ironclaw_loop_contracts::CapabilityResultIntrinsicOutcome>,
     },
     /// A checkpoint metadata write was requested.
     SaveCheckpoint(CheckpointKind),
@@ -927,6 +929,7 @@ impl ironclaw_loop_contracts::LoopTranscriptPort for MockAgentLoopDriverHost {
         self.record_call(MockHostCall::AppendCapabilityResultRef {
             result_ref: request.result_ref.clone(),
             provider_call: Box::new(request.provider_call.clone()),
+            intrinsic_outcome: request.intrinsic_outcome,
         });
         if let Some(kind) = *lock_or_panic(&self.fail_transcript_with) {
             return Err(AgentLoopHostError::new(kind, "scripted transcript failure"));

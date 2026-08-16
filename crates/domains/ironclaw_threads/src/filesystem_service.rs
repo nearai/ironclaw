@@ -79,12 +79,12 @@ use crate::{
     InboundMessageReplayMetadata, LatestThreadMessageRequest, ListThreadsForScopeRequest,
     ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
     MessageContent, MessageKind, MessageStatus, PutToolResultRecordRequest,
-    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact,
-    SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
-    ToolResultRecordChunk, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
-    UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
+    ReadToolResultRecordRequest, RecordToolResultIntrinsicOutcomeRequest, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
+    ThreadMessageRecord, ThreadScope, ToolResultRecordChunk, ToolResultReferenceEnvelope,
+    UpdateAssistantDraftRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 use message_lookup_index::MessageLookupIndexStore;
 use message_read::{MessageReadBudget, MessageReadResult};
@@ -2489,8 +2489,7 @@ where
             request.safe_summary,
             request.model_observation,
         )
-        .map_err(SessionThreadError::Serialization)?
-        .with_provider_call_evidence(provider_call.as_ref());
+        .map_err(SessionThreadError::Serialization)?;
         if let Some(existing) = self
             .find_tool_result_reference_message(
                 &request.scope,
@@ -2521,11 +2520,7 @@ where
                 None
             };
             let model_observation = envelope.model_observation.clone();
-            let intrinsic_outcome = envelope.intrinsic_outcome;
-            if provider_call_update.is_some()
-                || model_observation.is_some()
-                || intrinsic_outcome.is_some()
-            {
+            if provider_call_update.is_some() || model_observation.is_some() {
                 let now = Utc::now();
                 let updated = self
                     .apply_message_update(
@@ -2547,22 +2542,6 @@ where
                                 if let Some(content) = ToolResultReferenceEnvelope::merge_model_observation_content_if_absent(
                                     content,
                                     model_observation.clone(),
-                                )
-                                .map_err(SessionThreadError::Serialization)?
-                                {
-                                    message.content = Some(content);
-                                    changed = true;
-                                }
-                            }
-                            if let Some(intrinsic_outcome) = intrinsic_outcome {
-                                let content = message.content.as_deref().ok_or_else(|| {
-                                    SessionThreadError::Serialization(
-                                        "tool result reference content is missing".to_string(),
-                                    )
-                                })?;
-                                if let Some(content) = ToolResultReferenceEnvelope::merge_intrinsic_outcome_content_if_absent(
-                                    content,
-                                    intrinsic_outcome,
                                 )
                                 .map_err(SessionThreadError::Serialization)?
                                 {
@@ -2622,6 +2601,49 @@ where
         )
         .await?;
         Ok(message)
+    }
+
+    async fn record_tool_result_intrinsic_outcome(
+        &self,
+        request: RecordToolResultIntrinsicOutcomeRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let now = Utc::now();
+        let updated = self
+            .apply_message_update(
+                &request.scope,
+                &request.thread_id,
+                request.message_id,
+                |message| {
+                    if message.kind != MessageKind::ToolResultReference
+                        || message.status != MessageStatus::Finalized
+                    {
+                        return Err(SessionThreadError::Serialization(
+                            "intrinsic outcome target is not a finalized tool result reference"
+                                .to_string(),
+                        ));
+                    }
+                    let content = message.content.as_deref().ok_or_else(|| {
+                        SessionThreadError::Serialization(
+                            "tool result reference content is missing".to_string(),
+                        )
+                    })?;
+                    if let Some(content) =
+                        ToolResultReferenceEnvelope::merge_intrinsic_outcome_content_if_absent(
+                            content,
+                            request.intrinsic_outcome,
+                        )
+                        .map_err(SessionThreadError::Serialization)?
+                    {
+                        message.content = Some(content);
+                        message.updated_at = Some(now);
+                    }
+                    Ok(())
+                },
+            )
+            .await?;
+        self.touch_thread_updated_at_best_effort_at(&request.scope, &request.thread_id, now)
+            .await;
+        Ok(updated)
     }
 
     async fn append_capability_display_preview(

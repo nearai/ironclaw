@@ -42,7 +42,8 @@ use ironclaw_threads::{
     InboundMessageReplayMetadata, ListThreadsForScopeRequest, LoadContextMessagesRequest,
     LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
     PREPARED_CONTEXT_METADATA_MARKER_KEY, ProviderToolCallReferenceEnvelope,
-    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    PutToolResultRecordRequest, ReadToolResultRecordRequest,
+    RecordToolResultIntrinsicOutcomeRequest, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
     SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
     ToolResultIntrinsicOutcome, ToolResultReferenceEnvelope, ToolResultSafeSummary,
@@ -91,7 +92,7 @@ async fn filesystem_history_preserves_typed_intrinsic_outcome_without_provider_m
         })
         .await
         .unwrap();
-    service
+    let record = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
@@ -100,6 +101,15 @@ async fn filesystem_history_preserves_typed_intrinsic_outcome_without_provider_m
             safe_summary: ToolResultSafeSummary::new("structured result recorded").unwrap(),
             provider_call: Some(structured_result_provider_call_reference("structured-call")),
             model_observation: None,
+        })
+        .await
+        .unwrap();
+    service
+        .record_tool_result_intrinsic_outcome(RecordToolResultIntrinsicOutcomeRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            message_id: record.message_id,
+            intrinsic_outcome: ToolResultIntrinsicOutcome::NothingToReport,
         })
         .await
         .unwrap();

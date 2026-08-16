@@ -14,9 +14,10 @@ use ironclaw_host_api::{
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
     CapabilityCallCandidate, CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRef,
-    CapabilityInputRepair, CapabilityResumeToken, LoopCancelReasonKind, LoopCancellationSignal,
-    LoopCancelledReasonKind, LoopCheckpointKind, LoopCompactionError, LoopCompactionMode,
-    LoopCompactionOutcome, LoopCompactionResponse, LoopCompletionKind, LoopContextCompactionKind,
+    CapabilityInputRepair, CapabilityResultIntrinsicOutcome, CapabilityResultMessage,
+    CapabilityResumeToken, LoopCancelReasonKind, LoopCancellationSignal, LoopCancelledReasonKind,
+    LoopCheckpointKind, LoopCompactionError, LoopCompactionMode, LoopCompactionOutcome,
+    LoopCompactionResponse, LoopCompletionKind, LoopContextCompactionKind,
     LoopContextWindowTruncation, LoopExit, LoopFailureKind, LoopInput, LoopInputAckToken,
     LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopModelCapabilityView, LoopProcessRef,
     LoopProgressEvent, LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage,
@@ -54,8 +55,9 @@ use super::{
     BudgetInput, BudgetStage, BudgetStep, CanonicalAgentLoopExecutor, CapabilityInput,
     CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, GateInput, GateStage,
     HostStage, InputStage, InputStep, ModelInput, ModelStage, ModelStep, PromptInput, PromptStage,
-    PromptStep, StageContext, TurnCompletedStep, UserFacingInputDrainMode, completed_exit,
-    consume_drainable_inputs, sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
+    PromptStep, StageContext, TurnCompletedStep, UserFacingInputDrainMode,
+    append_capability_result_ref, completed_exit, consume_drainable_inputs,
+    sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
 };
 
 #[allow(dead_code)]
@@ -3672,6 +3674,43 @@ async fn typed_structured_result_terminalizes_suppressed_schedule_without_reply_
     assert!(completed.reply_message_refs.is_empty());
     assert!(completed.result_refs.is_empty());
     assert!(host.finalized_assistant_messages().is_empty());
+}
+
+#[tokio::test]
+async fn successful_suppression_result_appends_host_authored_outcome_without_provider_replay() {
+    let host = MockHost::new(Vec::new()).with_suppressed_scheduled_context();
+    let call = CapabilityCallCandidate {
+        activity_id: CapabilityActivityId::new(),
+        surface_version: surface_version(),
+        capability_id: ironclaw_host_api::ids::CapabilityId::new(
+            ironclaw_host_api::prepared_context::STRUCTURED_RESULT_CAPABILITY_ID,
+        )
+        .expect("capability id"),
+        input_ref: CapabilityInputRef::new("input:structured-result").expect("input ref"),
+        effective_capability_ids: Vec::new(),
+        provider_replay: None,
+    };
+    let result = CapabilityResultMessage {
+        result_ref: LoopResultRef::new("result:typed-nothing-to-report").expect("result ref"),
+        safe_summary: "structured result recorded".to_string(),
+        progress: ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+        terminate_hint: true,
+        byte_len: 31,
+        output_digest: None,
+        model_observation: None,
+    };
+
+    append_capability_result_ref(&host, &call, &result)
+        .await
+        .expect("append result evidence");
+
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 1);
+    assert_eq!(appended[0].provider_call, None);
+    assert_eq!(
+        appended[0].intrinsic_outcome,
+        Some(CapabilityResultIntrinsicOutcome::NothingToReport)
+    );
 }
 
 #[tokio::test]

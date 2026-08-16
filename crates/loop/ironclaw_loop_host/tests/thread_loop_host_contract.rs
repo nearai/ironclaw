@@ -20,8 +20,8 @@ use ironclaw_host_api::{
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
     AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
-    CapabilityInputIssue, CapabilityInputRef, CapabilitySurfaceVersion,
-    EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
+    CapabilityInputIssue, CapabilityInputRef, CapabilityResultIntrinsicOutcome,
+    CapabilitySurfaceVersion, EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
     InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopCapabilityPort,
     LoopContextBundle, LoopContextCompactionKind, LoopContextMessage, LoopContextPort,
     LoopContextRequest, LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneKind,
@@ -3537,6 +3537,7 @@ async fn transcript_port_retries_transient_tool_result_backend_failure() {
             safe_summary: "tool completed once".to_string(),
             provider_call: None,
             model_observation: None,
+            intrinsic_outcome: None,
         })
         .await
         .expect("the exact tool-result reference write is retried");
@@ -3558,6 +3559,49 @@ async fn transcript_port_retries_transient_tool_result_backend_failure() {
             .count(),
         1,
         "retry must not duplicate the tool-result reference"
+    );
+}
+
+#[tokio::test]
+async fn transcript_port_persists_explicit_intrinsic_outcome_without_provider_replay() {
+    let fixture = ThreadFixture::new().await;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+
+    adapter
+        .append_capability_result_ref(AppendCapabilityResultRef {
+            result_ref: LoopResultRef::new("result:typed-nothing-to-report").unwrap(),
+            safe_summary: "structured result recorded".to_string(),
+            provider_call: None,
+            model_observation: None,
+            intrinsic_outcome: Some(CapabilityResultIntrinsicOutcome::NothingToReport),
+        })
+        .await
+        .expect("host-authored intrinsic outcome is durable");
+
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope,
+            thread_id: fixture.thread_id,
+        })
+        .await
+        .unwrap();
+    let message = history
+        .messages
+        .iter()
+        .find(|message| message.kind == MessageKind::ToolResultReference)
+        .expect("tool result reference");
+    let envelope = ToolResultReferenceEnvelope::from_json_str(
+        message.content.as_deref().expect("envelope content"),
+    )
+    .expect("valid envelope");
+    assert_eq!(
+        envelope.intrinsic_outcome,
+        Some(ironclaw_threads::ToolResultIntrinsicOutcome::NothingToReport)
     );
 }
 
@@ -3610,6 +3654,7 @@ async fn transcript_port_stops_after_bounded_backend_write_attempts() {
             safe_summary: "tool completed once".to_string(),
             provider_call: None,
             model_observation: None,
+            intrinsic_outcome: None,
         })
         .await
         .expect_err("persistent backend failure remains terminal");
@@ -3655,6 +3700,7 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
             }),
             model_observation: None,
+            intrinsic_outcome: None,
         })
         .await
         .unwrap();
@@ -3664,6 +3710,7 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
             safe_summary: "retry summary ignored".to_string(),
             provider_call: None,
             model_observation: None,
+            intrinsic_outcome: None,
         })
         .await
         .unwrap();
@@ -3764,6 +3811,7 @@ async fn transcript_port_appends_model_observation_in_tool_result_reference_enve
             safe_summary: "tool failed".to_string(),
             provider_call: None,
             model_observation: Some(observation.clone()),
+            intrinsic_outcome: None,
         })
         .await
         .unwrap();
@@ -3816,6 +3864,7 @@ async fn transcript_port_drops_invalid_model_observation_without_failing_append(
             safe_summary: "tool failed".to_string(),
             provider_call: None,
             model_observation: Some(observation),
+            intrinsic_outcome: None,
         })
         .await
         .expect("invalid model observation should not fail append");
@@ -3878,6 +3927,7 @@ async fn transcript_port_degrades_control_char_result_reference_preview_without_
             safe_summary: "tool completed".to_string(),
             provider_call: None,
             model_observation: Some(observation),
+            intrinsic_outcome: None,
         })
         .await
         .expect("control-char preview should not fail append");
@@ -3950,6 +4000,7 @@ async fn transcript_port_persists_result_reference_item_count() {
             safe_summary: "tool completed".to_string(),
             provider_call: None,
             model_observation: Some(observation),
+            intrinsic_outcome: None,
         })
         .await
         .expect("item_count observation should not fail append");
@@ -4002,6 +4053,7 @@ async fn transcript_port_degrades_unsafe_tool_result_summary_without_borking() {
             safe_summary: "raw tool input includes secret".to_string(),
             provider_call: None,
             model_observation: None,
+            intrinsic_outcome: None,
         })
         .await
         .expect("unsafe summary must degrade to a fixed label, not end the run");

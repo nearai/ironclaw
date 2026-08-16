@@ -20,8 +20,9 @@ use ironclaw_loop_host::SpawnSubagentMode;
 use ironclaw_threads::{
     AppendAssistantDraftRequest, AppendToolResultReferenceRequest, EnsureThreadRequest,
     InMemorySessionThreadService, MessageContent, MessageKind, MessageStatus,
-    ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRecord, ThreadScope, ToolResultSafeSummary,
+    ProviderToolCallReferenceEnvelope, RecordToolResultIntrinsicOutcomeRequest,
+    SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
+    ToolResultIntrinsicOutcome, ToolResultSafeSummary,
 };
 use ironclaw_turns::test_support::{in_memory_agent_turn_runtime, in_memory_loop_checkpoint_store};
 use ironclaw_turns::{
@@ -892,7 +893,7 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
     )
     .await;
     let typed_result_ref = LoopResultRef::new("result:nothing-to-report").expect("result ref");
-    thread_service
+    let typed_record = thread_service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
             scope: thread_scope.clone(),
             thread_id: turn_scope.thread_id.clone(),
@@ -917,6 +918,15 @@ async fn nothing_to_report_evidence_requires_the_typed_structured_result_call() 
         })
         .await
         .expect("typed result reference");
+    thread_service
+        .record_tool_result_intrinsic_outcome(RecordToolResultIntrinsicOutcomeRequest {
+            scope: thread_scope.clone(),
+            thread_id: turn_scope.thread_id.clone(),
+            message_id: typed_record.message_id,
+            intrinsic_outcome: ToolResultIntrinsicOutcome::NothingToReport,
+        })
+        .await
+        .expect("typed intrinsic outcome");
     let mismatched_capability_result_ref =
         LoopResultRef::new("result:mismatched-structured-result-capability").expect("result ref");
     let mismatched_run_id = TurnRunId::new();
@@ -1096,7 +1106,7 @@ async fn applier_accepts_durable_typed_nothing_to_report_when_driver_omits_its_r
     )
     .await;
     let typed_result_ref = LoopResultRef::new("result:nothing-to-report").expect("result ref");
-    thread_service
+    let typed_record = thread_service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
             scope: thread_scope.clone(),
             thread_id: claimed.state.scope.thread_id.clone(),
@@ -1121,6 +1131,15 @@ async fn applier_accepts_durable_typed_nothing_to_report_when_driver_omits_its_r
         })
         .await
         .expect("typed result reference");
+    thread_service
+        .record_tool_result_intrinsic_outcome(RecordToolResultIntrinsicOutcomeRequest {
+            scope: thread_scope.clone(),
+            thread_id: claimed.state.scope.thread_id.clone(),
+            message_id: typed_record.message_id,
+            intrinsic_outcome: ToolResultIntrinsicOutcome::NothingToReport,
+        })
+        .await
+        .expect("typed intrinsic outcome");
 
     let checkpoint_id = TurnCheckpointId::new();
     let checkpoint = loop_checkpoint_record(

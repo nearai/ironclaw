@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::capability_display_preview::CapabilityDisplayPreviewEnvelope;
 use crate::identifiers::{SummaryArtifactId, ThreadMessageId};
-use crate::tool_result_reference::{ProviderToolCallReferenceEnvelope, ToolResultSafeSummary};
+use crate::tool_result_reference::{
+    ProviderToolCallReferenceEnvelope, ToolResultIntrinsicOutcome, ToolResultSafeSummary,
+};
 
 pub const GOAL_STATEMENT_MAX_CHARS: usize = 4000;
 
@@ -443,6 +445,14 @@ pub struct AppendToolResultReferenceRequest {
     pub safe_summary: ToolResultSafeSummary,
     pub provider_call: Option<ProviderToolCallReferenceEnvelope>,
     pub model_observation: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordToolResultIntrinsicOutcomeRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub message_id: ThreadMessageId,
+    pub intrinsic_outcome: ToolResultIntrinsicOutcome,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

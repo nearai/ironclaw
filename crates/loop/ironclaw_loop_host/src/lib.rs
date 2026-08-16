@@ -205,16 +205,16 @@ use ironclaw_host_api::turn::TurnLeaseToken;
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
     AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
-    CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
-    LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind,
-    LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
-    LoopContextSnippet, LoopContextWindowTruncation, LoopDriverNoteKind, LoopHostMilestoneEmitter,
-    LoopHostMilestoneSink, LoopInlineMessageBody, LoopInputCursor, LoopModelMessage, LoopModelPort,
-    LoopModelRequest, LoopModelResponse, LoopModelUsage, LoopPromptBundleAuthority, LoopRequest,
-    LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
-    MemoryPromptContextLoad, MemoryPromptContextService, ModelProfileId, ModelStreamChunk,
-    ParentLoopOutput, PromptMode, UpdateAssistantDraft, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
+    CapabilityResultIntrinsicOutcome, CapabilitySurfaceVersion, FinalizeAssistantMessage,
+    InstructionMaterializationStore, LoopCapabilityPort, LoopContextBundle,
+    LoopContextCompactionKind, LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort,
+    LoopContextRequest, LoopContextSnippet, LoopContextWindowTruncation, LoopDriverNoteKind,
+    LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInlineMessageBody, LoopInputCursor,
+    LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopModelUsage,
+    LoopPromptBundleAuthority, LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort,
+    LoopSafeSummary, LoopTranscriptPort, MemoryPromptContextLoad, MemoryPromptContextService,
+    ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
     sort_instruction_snippets_for_prompt,
 };
 use ironclaw_outbound::{
@@ -225,9 +225,10 @@ use ironclaw_threads::{
     AppendToolResultReferenceRequest, AttachmentKind, AttachmentRef, ContextMessage,
     FinalizedAssistantMessageByRunRequest, LoadContextMessagesRequest, LoadContextWindowRequest,
     MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
-    SessionThreadError, SessionThreadService, SummaryArtifact, ThreadHistoryRequest,
-    ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
-    ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    RecordToolResultIntrinsicOutcomeRequest, SessionThreadError, SessionThreadService,
+    SummaryArtifact, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
+    ToolResultIntrinsicOutcome, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+    UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
     AgentTurnSpawnTreeRuntimePort, LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope,
@@ -1100,6 +1101,7 @@ where
                     None
                 }
             });
+        let intrinsic_outcome = request.intrinsic_outcome;
         let turn_run_id = self.run_context.run_id.to_string();
         let append_request = AppendToolResultReferenceRequest {
             scope: self.thread_scope.clone(),
@@ -1112,13 +1114,36 @@ where
                 .provider_call
                 .map(provider_call_reference_to_envelope),
         };
-        let record =
+        let mut record =
             retry_transcript_backend_write(&turn_run_id, "append_tool_result_reference", || {
                 self.thread_service
                     .append_tool_result_reference(append_request.clone())
             })
             .await
             .map_err(transcript_write_error)?;
+        if let Some(intrinsic_outcome) = intrinsic_outcome {
+            let thread_outcome = match intrinsic_outcome {
+                CapabilityResultIntrinsicOutcome::NothingToReport => {
+                    ToolResultIntrinsicOutcome::NothingToReport
+                }
+            };
+            let outcome_request = RecordToolResultIntrinsicOutcomeRequest {
+                scope: self.thread_scope.clone(),
+                thread_id: self.run_context.thread_id.clone(),
+                message_id: record.message_id,
+                intrinsic_outcome: thread_outcome,
+            };
+            record = retry_transcript_backend_write(
+                &turn_run_id,
+                "record_tool_result_intrinsic_outcome",
+                || {
+                    self.thread_service
+                        .record_tool_result_intrinsic_outcome(outcome_request.clone())
+                },
+            )
+            .await
+            .map_err(transcript_write_error)?;
+        }
         message_ref(record.message_id)
     }
 }

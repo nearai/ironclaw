@@ -1,18 +1,21 @@
 use std::collections::{HashMap, HashSet};
 
-use ironclaw_host_api::turn::LoopResultRef;
+use ironclaw_host_api::turn::{LoopResultRef, TurnOriginKind};
 use ironclaw_host_api::{
     dispatch::DispatchInputIssueCode,
+    execution_policy::ResultDeliveryPolicy,
     ids::CapabilityId,
+    prepared_context::STRUCTURED_RESULT_CAPABILITY_ID,
     result_meta::{CapabilityRecoveryHint, FailureKind, ModelDiagnostic, SameCallRetryConstraint},
 };
 use ironclaw_loop_contracts::{
     AgentLoopDriverHost, AppendCapabilityResultRef, CapabilityApprovalResume, CapabilityAuthResume,
     CapabilityCallCandidate, CapabilityDescriptorView, CapabilityFailure, CapabilityFailureDetail,
-    CapabilityInputIssue, CapabilityInputRepair, CapabilityResultMessage, CapabilitySurfaceVersion,
-    LoopRequest, ModelVisibleToolObservation, ObservationTrust, ProviderToolCall,
-    ProviderToolCallReference, RegisterProviderToolCallRequest, ToolObservationDetail,
-    ToolObservationStatus, ToolRecoveryObservation, VisibleCapabilitySurface,
+    CapabilityInputIssue, CapabilityInputRepair, CapabilityResultIntrinsicOutcome,
+    CapabilityResultMessage, CapabilitySurfaceVersion, LoopRequest, ModelVisibleToolObservation,
+    ObservationTrust, ProviderToolCall, ProviderToolCallReference, RegisterProviderToolCallRequest,
+    ToolObservationDetail, ToolObservationStatus, ToolRecoveryObservation,
+    VisibleCapabilitySurface,
 };
 
 use crate::{
@@ -263,6 +266,7 @@ pub(super) async fn append_capability_result_ref(
             .model_observation
             .clone()
             .or_else(|| model_visible_capability_success_observation(call, result)),
+        intrinsic_outcome: completed_result_intrinsic_outcome(host, call, result),
     })
     .await
     .map_err(capability_host_error)?;
@@ -344,11 +348,32 @@ async fn append_capability_safe_summary_ref_with_observation(
         safe_summary,
         provider_call: provider_tool_call_reference(call),
         model_observation,
+        intrinsic_outcome: None,
     })
     .await
     .map_err(capability_host_error)?;
     state.result_refs.push(result_ref);
     Ok(())
+}
+
+fn completed_result_intrinsic_outcome(
+    host: &(dyn AgentLoopDriverHost + Send + Sync),
+    call: &CapabilityCallCandidate,
+    result: &CapabilityResultMessage,
+) -> Option<CapabilityResultIntrinsicOutcome> {
+    let suppression_enabled = host
+        .run_context()
+        .product_context
+        .as_ref()
+        .filter(|context| context.origin == TurnOriginKind::ScheduledTrigger)
+        .and_then(|context| context.execution_policy.as_ref())
+        .is_some_and(|policy| {
+            policy.result_delivery == ResultDeliveryPolicy::SuppressWhenNothingToReport
+        });
+    (suppression_enabled
+        && result.terminate_hint
+        && call.capability_id.as_str() == STRUCTURED_RESULT_CAPABILITY_ID)
+        .then_some(CapabilityResultIntrinsicOutcome::NothingToReport)
 }
 
 pub(super) fn model_visible_capability_failure_observation(
