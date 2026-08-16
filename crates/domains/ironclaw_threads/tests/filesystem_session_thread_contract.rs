@@ -67,6 +67,63 @@ fn provider_call_reference(call_id: &str) -> ProviderToolCallReferenceEnvelope {
 }
 
 #[tokio::test]
+async fn filesystem_exact_provider_call_lookup_bypasses_history_projection() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-provider-evidence", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("fs-provider-evidence");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-provider-evidence").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:provider-evidence".into(),
+            safe_summary: ToolResultSafeSummary::new("structured result recorded").unwrap(),
+            provider_call: Some(provider_call_reference("structured-call")),
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        history
+            .messages
+            .iter()
+            .all(|message| message.tool_result_provider_call.is_none()),
+        "ordinary history must keep host-only provider metadata redacted"
+    );
+
+    let provider_call = service
+        .find_tool_result_provider_call(
+            &scope,
+            &thread.thread_id,
+            "run-1",
+            "result:provider-evidence",
+        )
+        .await
+        .unwrap()
+        .expect("exact evidence lookup preserves provider metadata");
+    assert_eq!(provider_call.provider_call_id, "structured-call");
+}
+
+#[tokio::test]
 async fn filesystem_tool_result_update_targets_the_exact_provider_call_row() {
     let backend = Arc::new(InMemoryBackend::new());
     let scoped = scoped_threads_fs_at(backend, "tenant-exact-result-update", "alice");

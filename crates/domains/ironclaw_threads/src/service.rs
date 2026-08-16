@@ -252,6 +252,45 @@ pub trait SessionThreadService: Send + Sync {
         request: LoadContextMessagesRequest,
     ) -> Result<ContextMessages, SessionThreadError>;
 
+    /// Load trusted provider-call metadata for one exact durable tool result.
+    /// Settlement uses this instead of model-context projections, which may
+    /// deliberately redact host-only call metadata.
+    async fn find_tool_result_provider_call(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        turn_run_id: &str,
+        result_ref: &str,
+    ) -> Result<Option<crate::ProviderToolCallReferenceEnvelope>, SessionThreadError> {
+        let history = self
+            .list_thread_history(ThreadHistoryRequest {
+                scope: scope.clone(),
+                thread_id: thread_id.clone(),
+            })
+            .await?;
+        let message_id = history.messages.iter().find_map(|message| {
+            (message.kind == crate::MessageKind::ToolResultReference
+                && message.status == crate::MessageStatus::Finalized
+                && message.turn_run_id.as_deref() == Some(turn_run_id)
+                && message.tool_result_ref.as_deref() == Some(result_ref))
+            .then_some(message.message_id)
+        });
+        let Some(message_id) = message_id else {
+            return Ok(None);
+        };
+        Ok(self
+            .load_context_messages(LoadContextMessagesRequest {
+                scope: scope.clone(),
+                thread_id: thread_id.clone(),
+                message_ids: vec![message_id],
+            })
+            .await?
+            .messages
+            .into_iter()
+            .next()
+            .and_then(|message| message.tool_result_provider_call))
+    }
+
     async fn list_thread_history(
         &self,
         request: ThreadHistoryRequest,
@@ -635,6 +674,18 @@ where
         request: LoadContextMessagesRequest,
     ) -> Result<ContextMessages, SessionThreadError> {
         self.as_ref().load_context_messages(request).await
+    }
+
+    async fn find_tool_result_provider_call(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        turn_run_id: &str,
+        result_ref: &str,
+    ) -> Result<Option<crate::ProviderToolCallReferenceEnvelope>, SessionThreadError> {
+        self.as_ref()
+            .find_tool_result_provider_call(scope, thread_id, turn_run_id, result_ref)
+            .await
     }
 
     async fn list_thread_history(

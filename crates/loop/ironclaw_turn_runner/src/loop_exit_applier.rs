@@ -10,9 +10,8 @@ use ironclaw_host_api::prepared_context::STRUCTURED_RESULT_CAPABILITY_ID;
 use ironclaw_loop_contracts::{LoopBlockedKind, LoopCheckpointKind, LoopCompletionKind};
 use ironclaw_loop_host::RunCancellationFactory;
 use ironclaw_threads::{
-    LoadContextMessagesRequest, MessageKind, MessageStatus, SessionThreadService, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    ToolResultReferenceEnvelope,
+    MessageKind, MessageStatus, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
+    ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
 };
 use ironclaw_turns::{
     AgentTurnRuntimePort, GetLoopCheckpointRequest, GetRunStateRequest, LoopGateRef,
@@ -305,36 +304,33 @@ where
         });
         let typed_nothing_to_report_verified =
             if request.completion_kind == LoopCompletionKind::NothingToReport {
-                let message_ids = history
-                    .messages
-                    .iter()
-                    .filter(|message| {
-                        verify_intrinsic_tool_result_message(message, expected_run_id.as_str())
-                    })
-                    .map(|message| message.message_id)
-                    .collect::<Vec<_>>();
-                if message_ids.is_empty() {
-                    false
-                } else {
-                    let messages = self
+                let mut verified = false;
+                for result_ref in history.messages.iter().filter_map(|message| {
+                    verify_intrinsic_tool_result_message(message, expected_run_id.as_str())
+                        .then_some(message.tool_result_ref.as_deref())
+                        .flatten()
+                }) {
+                    let provider_call = self
                         .thread_service
-                        .load_context_messages(LoadContextMessagesRequest {
-                            scope: thread_scope,
-                            thread_id: request.scope.thread_id.clone(),
-                            message_ids,
-                        })
+                        .find_tool_result_provider_call(
+                            &thread_scope,
+                            &request.scope.thread_id,
+                            expected_run_id.as_str(),
+                            result_ref,
+                        )
                         .await
                         .map_err(|error| TurnError::Unavailable {
                             reason: error.to_string(),
-                        })?
-                        .messages;
-                    messages.iter().any(|message| {
-                        message
-                            .tool_result_provider_call
-                            .as_ref()
-                            .is_some_and(is_nothing_to_report_provider_call)
-                    })
+                        })?;
+                    if provider_call
+                        .as_ref()
+                        .is_some_and(is_nothing_to_report_provider_call)
+                    {
+                        verified = true;
+                        break;
+                    }
                 }
+                verified
             } else {
                 true
             };

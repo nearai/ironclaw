@@ -1617,6 +1617,19 @@ impl<F> SessionThreadService for FilesystemSessionThreadService<F>
 where
     F: RootFilesystem,
 {
+    async fn find_tool_result_provider_call(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        turn_run_id: &str,
+        result_ref: &str,
+    ) -> Result<Option<crate::ProviderToolCallReferenceEnvelope>, SessionThreadError> {
+        Ok(self
+            .find_tool_result_reference_message(scope, thread_id, turn_run_id, result_ref, None)
+            .await?
+            .and_then(|message| message.tool_result_provider_call))
+    }
+
     async fn ensure_thread(
         &self,
         request: EnsureThreadRequest,
