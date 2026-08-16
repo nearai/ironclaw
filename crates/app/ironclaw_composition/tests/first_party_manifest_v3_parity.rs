@@ -760,6 +760,10 @@ fn slack_v3_declares_only_bounded_file_transfer_egress() {
         api_post.paths,
         [
             "/api/chat.postMessage",
+            // Sender-visible-only delivery for the unbound-user connect nudge
+            // (#7681). Same `chat:write` bot scope as `chat.postMessage`, so
+            // this widens the allowlist without widening the Slack grant.
+            "/api/chat.postEphemeral",
             "/api/chat.delete",
             "/api/conversations.open",
             "/api/files.completeUploadExternal",
