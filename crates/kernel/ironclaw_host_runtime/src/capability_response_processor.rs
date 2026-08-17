@@ -108,8 +108,13 @@ pub(super) async fn process_capability_response(
             }
         }
         Err(error) => {
-            let should_fail_dispatch_run = context.mode == InlineInvocationMode::Fresh
-                && matches!(error, CapabilityInvocationError::Dispatch { .. });
+            // Applies to all inline modes: a genuine Dispatch error must
+            // terminalize the durable run-state record whether it surfaces on
+            // a fresh invocation or a resumed approval/auth run, otherwise the
+            // record stays blocked forever and can match a later resume via
+            // `fail_matching_blocked_resume_run`.
+            let should_fail_dispatch_run =
+                matches!(error, CapabilityInvocationError::Dispatch { .. });
             let failure = failed_response(error, context.registry, context.capability_id);
             if should_fail_dispatch_run {
                 runtime
