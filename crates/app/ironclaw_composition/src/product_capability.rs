@@ -414,25 +414,6 @@ async fn product_resolution(
                 diagnostic,
             ))
         }
-        RuntimeCapabilityOutcome::Unknown(unknown) => {
-            let diagnostic = unknown
-                .message
-                .as_deref()
-                .map(model_diagnostic)
-                .unwrap_or_else(|| ModelFailureDiagnostic::Diagnostic {
-                    text: ModelDiagnostic::unavailable(),
-                });
-            let summary = unknown
-                .message
-                .and_then(|value| SafeSummary::new(value).ok())
-                .unwrap_or_else(SafeSummary::placeholder);
-            Ok(recoverable_failure(
-                invocation_id,
-                FailureKind::from_tag(&unknown.kind),
-                summary,
-                diagnostic,
-            ))
-        }
     }
 }
 
@@ -498,7 +479,6 @@ fn ensure_matching_capability(
         RuntimeCapabilityOutcome::ResourceBlocked(gate) => &gate.capability_id,
         RuntimeCapabilityOutcome::SpawnedProcess(process) => &process.capability_id,
         RuntimeCapabilityOutcome::Failed(failure) => &failure.capability_id,
-        RuntimeCapabilityOutcome::Unknown(unknown) => &unknown.capability_id,
     };
     if actual != requested {
         return Err(ProductSurfaceError::internal_from(
@@ -833,29 +813,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_runtime_outcome_inlines_message_before_summary_fallback() {
-        let cause = "legacy runtime failed at /workspace/project/input.json";
-        let outcome =
-            RuntimeCapabilityOutcome::Unknown(ironclaw_host_runtime::RuntimeCapabilityUnknown {
-                capability_id: CapabilityId::new("demo.legacy").unwrap(),
-                kind: "legacy_failure".to_string(),
-                message: Some(cause.to_string()),
-            });
-
-        let resolution = product_resolution(
-            &empty_product_result_filesystem(),
-            &resource_scope(),
-            InvocationId::new(),
-            outcome,
-        )
-        .await
-        .expect("unknown runtime outcome remains model-recoverable");
-
-        assert_eq!(model_visible_failure_text(&resolution), cause);
-    }
-
-    #[tokio::test]
-    async fn missing_runtime_detail_uses_explicit_fallbacks() {
+    async fn missing_runtime_failure_detail_uses_explicit_fallback() {
         let failed =
             RuntimeCapabilityOutcome::Failed(ironclaw_host_runtime::RuntimeCapabilityFailure::new(
                 CapabilityId::new("demo.read").unwrap(),
@@ -873,25 +831,6 @@ mod tests {
         assert_eq!(
             model_visible_failure_text(&failed_resolution),
             "capability invocation failed"
-        );
-
-        let unknown =
-            RuntimeCapabilityOutcome::Unknown(ironclaw_host_runtime::RuntimeCapabilityUnknown {
-                capability_id: CapabilityId::new("demo.legacy").unwrap(),
-                kind: "legacy_failure".to_string(),
-                message: None,
-            });
-        let unknown_resolution = product_resolution(
-            &empty_product_result_filesystem(),
-            &resource_scope(),
-            InvocationId::new(),
-            unknown,
-        )
-        .await
-        .expect("unknown runtime outcome remains model-recoverable");
-        assert_eq!(
-            model_visible_failure_text(&unknown_resolution),
-            ModelDiagnostic::unavailable().as_str()
         );
     }
 
