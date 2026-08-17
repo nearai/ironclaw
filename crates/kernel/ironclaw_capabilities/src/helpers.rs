@@ -341,6 +341,7 @@ pub(crate) fn claim_error_may_be_concurrent_resume(error: &CapabilityLeaseError)
 pub(crate) fn invocation_state_error_kind(error: &ProcessInvocationError) -> &'static str {
     match error {
         ProcessInvocationError::UnknownInvocation { .. } => "UnknownInvocation",
+        ProcessInvocationError::LeaseLost { .. } => "LeaseLost",
         ProcessInvocationError::InvocationAlreadyExists { .. } => "InvocationAlreadyExists",
         ProcessInvocationError::Serialization(_) => "Serialization",
         ProcessInvocationError::Deserialization(_) => "Deserialization",

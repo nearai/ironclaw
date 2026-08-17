@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     marker::PhantomData,
     panic::AssertUnwindSafe,
     sync::{Arc, Mutex, MutexGuard},
@@ -484,10 +484,26 @@ where
     }
 }
 
+/// Upper bound on reservations awaiting a retried release.
+///
+/// A release fails only when the governor's backend is unavailable, which is
+/// also when reservations pile up fastest — the queue is bounded so a wedged
+/// backend cannot grow it without limit. Dropping the oldest entry costs one
+/// leaked hold, the same outcome as before the queue existed.
+const MAX_DEFERRED_RESERVATION_RELEASES: usize = 64;
+
 #[derive(Clone)]
 pub(super) struct FirstPartyRuntimeAdapter {
     registry: Arc<FirstPartyCapabilityRegistry>,
     invocation_services: Arc<dyn InvocationServicesResolver>,
+    /// Reservations whose release failed and must be retried.
+    ///
+    /// A failed release used to be logged and forgotten, leaking the hold
+    /// permanently — the durable `Reserve` delta replays as `Active` after
+    /// restart and nothing reclaims it (issue #7714). Retrying on the next
+    /// dispatch reuses the lifecycle seam this adapter already has instead of
+    /// adding a background task.
+    deferred_releases: Arc<Mutex<VecDeque<ResourceReservationId>>>,
 }
 
 impl FirstPartyRuntimeAdapter {
@@ -498,6 +514,59 @@ impl FirstPartyRuntimeAdapter {
         Self {
             registry,
             invocation_services,
+            deferred_releases: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
+    /// Queues a reservation whose release failed, dropping the oldest entry
+    /// when the queue is full.
+    fn defer_release(&self, reservation_id: ResourceReservationId) {
+        let Ok(mut deferred) = self.deferred_releases.lock() else {
+            tracing::debug!(
+                reservation_id = %reservation_id,
+                "deferred reservation release queue poisoned; reservation leaked"
+            );
+            return;
+        };
+        deferred.push_back(reservation_id);
+        while deferred.len() > MAX_DEFERRED_RESERVATION_RELEASES {
+            if let Some(dropped) = deferred.pop_front() {
+                tracing::debug!(
+                    reservation_id = %dropped,
+                    queue_capacity = MAX_DEFERRED_RESERVATION_RELEASES,
+                    "deferred reservation release queue full; oldest reservation dropped"
+                );
+            }
+        }
+    }
+
+    /// Retries every queued release once, re-queueing the ones that fail again.
+    fn retry_deferred_releases<G>(&self, governor: &G)
+    where
+        G: ResourceGovernor,
+    {
+        let pending = match self.deferred_releases.lock() {
+            Ok(mut deferred) => std::mem::take(&mut *deferred),
+            Err(_) => {
+                tracing::debug!("deferred reservation release queue poisoned; skipping retry");
+                return;
+            }
+        };
+        for reservation_id in pending {
+            match governor.release(reservation_id) {
+                Ok(_) => tracing::debug!(
+                    reservation_id = %reservation_id,
+                    "released deferred first-party resource reservation"
+                ),
+                Err(error) => {
+                    tracing::debug!(
+                        reservation_id = %reservation_id,
+                        error = %error,
+                        "deferred first-party resource reservation release failed again"
+                    );
+                    self.defer_release(reservation_id);
+                }
+            }
         }
     }
 }
@@ -524,6 +593,9 @@ where
         let dispatch_started_at = latency_started_at();
         let used_prepared_reservation = request.resource_reservation.is_some();
         tracing::debug!("first-party runtime adapter dispatch started");
+        // Reservations whose release failed on an earlier dispatch get their
+        // retry here, on the same governor that holds them.
+        self.retry_deferred_releases(request.governor);
         let lookup_started_at = latency_started_at();
         let Some(handler) = self.registry.get(request.capability_id) else {
             if let Some(reservation) = request.resource_reservation
@@ -534,6 +606,7 @@ where
                     error = %error,
                     "failed to release prepared resource reservation after missing first-party handler"
                 );
+                self.defer_release(reservation.id);
             }
             tracing::debug!("first-party runtime adapter missing handler");
             trace_first_party_stage_and_dispatch_error(
@@ -859,6 +932,7 @@ where
                         error = %release_error,
                         "failed to release first-party resource reservation after reconcile failure"
                     );
+                    self.defer_release(reconcile_id);
                 }
                 trace_first_party_stage_and_dispatch_error(
                     "reconcile_resources",
