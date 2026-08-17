@@ -3,7 +3,7 @@ title: "Docs"
 description: "Let your agent create and edit Google Documents"
 ---
 
-The Google Docs extension allows your agent to interact with Google Docs — creating documents, reading content, inserting and formatting text, managing tables and lists, and running batch updates. It's ideal for drafting reports, editing existing documents, or automating document workflows directly from your agent.
+The Google Docs extension allows your agent to interact with Google Docs — creating documents, inspecting paragraphs and tables, applying anchored edits, creating populated tables, verifying results, and using low-level formatting or batch updates when needed. Semantic operations validate inputs and read provider state back, reducing multi-call index discovery loops.
 
 ---
 
