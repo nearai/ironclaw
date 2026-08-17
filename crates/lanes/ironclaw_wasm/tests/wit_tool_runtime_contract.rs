@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use ironclaw_wasm::{
     DenyWasmHostHttp, RecordingWasmHostHttp, WasmError, WasmHostHttp, WasmHttpRequest,
-    WasmHttpResponse, WitToolHost, WitToolOutcome, WitToolRequest, WitToolRuntime,
-    WitToolRuntimeConfig,
+    WasmHttpResponse, WitErrorKind, WitGuestFailure, WitToolHost, WitToolOutcome, WitToolRequest,
+    WitToolRuntime, WitToolRuntimeConfig,
 };
 use serde_json::json;
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
@@ -177,11 +177,120 @@ const HTTP_TOOL_WAT: &str = r#"
 )
 "#;
 
+// Encode `response` as the `failure(guest-failure)` case of the
+// near:agent@0.4.0 typed variant. Canonical ABI layout (align 8, size 56
+// bytes) for `variant response { success(string), failure(guest-failure) }`:
+//   offset 0:  discriminant (0 = success, 1 = failure)
+//   offset 8:  payload — failure case is `guest-failure` (align 8, size 48):
+//     offset 8:  kind: error-kind (auth-required=0, input=1,
+//                output-too-large=2, executor=3, network-denied=4, client=5,
+//                operation-failed=6)
+//     offset 12: code: option<string> discriminant (0=none, 1=some)
+//     offset 16: code: string ptr (when some)
+//     offset 20: code: string len (when some)
+//     offset 24: message: option<string> discriminant
+//     offset 28: message: string ptr (when some)
+//     offset 32: message: string len (when some)
+//     offset 40: retry-after-ms: option<u64> discriminant
+//     offset 48: retry-after-ms: u64 value (when some, padded to align 8)
+const FAILURE_TOOL_WAT: &str = r#"
+(module
+  (type (;0;) (func (param i32 i32 i32)))
+  (type (;1;) (func (result i64)))
+  (type (;2;) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
+  (type (;3;) (func (param i32 i32 i32 i32 i32)))
+  (type (;4;) (func (param i32 i32) (result i32)))
+  (import "near:agent/host@0.4.0" "log" (func $log (type 0)))
+  (import "near:agent/host@0.4.0" "now-millis" (func $now (type 1)))
+  (import "near:agent/host@0.4.0" "workspace-read" (func $workspace_read (type 0)))
+  (import "near:agent/host@0.4.0" "http-request" (func $http_request (type 2)))
+  (import "near:agent/host@0.4.0" "tool-invoke" (func $tool_invoke (type 3)))
+  (import "near:agent/host@0.4.0" "secret-exists" (func $secret_exists (type 4)))
+  (memory (export "memory") 1)
+  (global $heap (mut i32) (i32.const 4096))
+  (data (i32.const 1024) "{\22type\22:\22object\22}")
+  (data (i32.const 2048) "fixture description")
+  (data (i32.const 3072) "fixture_failure_code")
+  (data (i32.const 3200) "fixture failure message")
+  (func $schema (result i32)
+    i32.const 16
+    i32.const 1024
+    i32.store
+    i32.const 20
+    i32.const 17
+    i32.store
+    i32.const 16)
+  (func $description (result i32)
+    i32.const 32
+    i32.const 2048
+    i32.store
+    i32.const 36
+    i32.const 19
+    i32.store
+    i32.const 32)
+  (func $execute (param i32 i32 i32 i32 i32) (result i32)
+    i32.const 48
+    i32.const 1
+    i32.store
+    i32.const 56
+    i32.const 4
+    i32.store
+    i32.const 60
+    i32.const 1
+    i32.store
+    i32.const 64
+    i32.const 3072
+    i32.store
+    i32.const 68
+    i32.const 20
+    i32.store
+    i32.const 72
+    i32.const 1
+    i32.store
+    i32.const 76
+    i32.const 3200
+    i32.store
+    i32.const 80
+    i32.const 23
+    i32.store
+    i32.const 88
+    i32.const 1
+    i32.store
+    i32.const 96
+    i64.const 1500
+    i64.store
+    i32.const 48)
+  (func $post (param i32))
+  (func $realloc (param $old i32) (param $old_align i32) (param $new_size i32) (param $new_align i32) (result i32)
+    (local $ret i32)
+    global.get $heap
+    local.set $ret
+    global.get $heap
+    local.get $new_size
+    i32.add
+    global.set $heap
+    local.get $ret)
+  (func $_initialize)
+  (export "near:agent/tool@0.4.0#execute" (func $execute))
+  (export "cabi_post_near:agent/tool@0.4.0#execute" (func $post))
+  (export "near:agent/tool@0.4.0#schema" (func $schema))
+  (export "cabi_post_near:agent/tool@0.4.0#schema" (func $post))
+  (export "near:agent/tool@0.4.0#description" (func $description))
+  (export "cabi_post_near:agent/tool@0.4.0#description" (func $post))
+  (export "cabi_realloc" (func $realloc))
+  (export "_initialize" (func $_initialize))
+)
+"#;
+
 fn tool_component(wat_src: &str) -> Vec<u8> {
+    tool_component_with_wit(wat_src, ironclaw_wasm::TOOL_WIT)
+}
+
+fn tool_component_with_wit(wat_src: &str, wit_src: &str) -> Vec<u8> {
     let mut module = wat::parse_str(wat_src).expect("fixture WAT must parse");
     let mut resolve = Resolve::default();
     let package = resolve
-        .push_str("tool.wit", ironclaw_wasm::TOOL_WIT)
+        .push_str("tool.wit", wit_src)
         .expect("tool WIT must parse");
     let world = resolve
         .select_world(&[package], Some("sandboxed-tool"))
@@ -207,6 +316,38 @@ fn prepares_metadata_from_wit_tool_component() {
     assert_eq!(prepared.name(), "counter");
     assert_eq!(prepared.description(), "fixture description");
     assert_eq!(prepared.schema(), &json!({ "type": "object" }));
+}
+
+// Regression: `extract_metadata` retries a version-mismatch current-world
+// instantiation failure against the legacy 0.3.0 world (see
+// `is_version_mismatch_error`); when that legacy retry ALSO fails, both
+// error messages must be preserved in the combined `InstantiationFailed`
+// rather than only the last one. A component built against a THIRD WIT
+// version (0.9.9 — matching neither the current 0.4.0 world nor the frozen
+// legacy 0.3.0 world) triggers exactly that double-failure branch: the
+// current-world instantiation fails citing the missing `near:agent` import
+// (the version-mismatch signature that gates the legacy retry), and the
+// legacy-world retry then also fails for the same reason.
+#[test]
+fn double_failure_preserves_both_current_and_legacy_errors() {
+    let mismatched_wit = ironclaw_wasm::TOOL_WIT.replace("0.4.0", "0.9.9");
+    let mismatched_wat = COUNTER_TOOL_WAT.replace("0.4.0", "0.9.9");
+    let component = tool_component_with_wit(&mismatched_wat, &mismatched_wit);
+
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+    let error = runtime.prepare("mismatched", &component).unwrap_err();
+
+    let WasmError::InstantiationFailed(message) = error else {
+        panic!("expected InstantiationFailed, got: {error:?}");
+    };
+    assert!(
+        message.contains("current-world instantiation failed"),
+        "missing current-world error: {message}"
+    );
+    assert!(
+        message.contains("legacy-world fallback also failed"),
+        "missing legacy-world error: {message}"
+    );
 }
 
 #[test]
@@ -295,6 +436,35 @@ fn executes_wit_tool_with_fresh_component_instance_per_call() {
 
     assert_eq!(first.outcome, WitToolOutcome::Success("1".to_string()));
     assert_eq!(second.outcome, WitToolOutcome::Success("1".to_string()));
+}
+
+// Regression: both fixtures above (`COUNTER_TOOL_WAT`, `HTTP_TOOL_WAT`) only
+// ever encode the `success(string)` case of the typed `response` variant, so
+// nothing exercised `WitToolOutcome::Failure` decoding through the real
+// component-model lift. `FAILURE_TOOL_WAT` encodes the `failure(guest-failure)`
+// case with every field populated (kind, code, message, retry-after-ms) to
+// pin the canonical-ABI offsets documented above it.
+#[test]
+fn decodes_typed_failure_variant_from_wit_tool_component() {
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+    let prepared = runtime
+        .prepare("failing", &tool_component(FAILURE_TOOL_WAT))
+        .unwrap();
+    let host = WitToolHost::deny_all();
+
+    let executed = runtime
+        .execute(&prepared, host, WitToolRequest::new("{}"))
+        .unwrap();
+
+    assert_eq!(
+        executed.outcome,
+        WitToolOutcome::Failure(WitGuestFailure {
+            kind: WitErrorKind::NetworkDenied,
+            code: Some("fixture_failure_code".to_string()),
+            message: Some("fixture failure message".to_string()),
+            retry_after_ms: Some(1500),
+        })
+    );
 }
 
 // Regression: the host runtime offloads `WitToolRuntime::execute` to the

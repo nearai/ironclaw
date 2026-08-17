@@ -54,6 +54,15 @@ fn input_failure(code: &'static str, message: impl Into<String>) -> GuestFailure
     }
 }
 
+fn utf8_decode_failure(error: &std::string::FromUtf8Error) -> GuestFailure {
+    GuestFailure {
+        kind: ErrorKind::Executor,
+        code: Some("invalid_utf8_response".to_string()),
+        message: Some(bounded_message(&error.to_string())),
+        retry_after_ms: None,
+    }
+}
+
 /// Make a Google Docs API call.
 fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, GuestFailure> {
     let url = if path.is_empty() {
@@ -90,12 +99,7 @@ fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, Gues
         return Ok(String::new());
     }
 
-    String::from_utf8(response.body).map_err(|e| GuestFailure {
-        kind: ErrorKind::Executor,
-        code: Some("invalid_utf8_response".to_string()),
-        message: Some(bounded_message(&e.to_string())),
-        retry_after_ms: None,
-    })
+    String::from_utf8(response.body).map_err(|e| utf8_decode_failure(&e))
 }
 
 fn api_status_error(service: &str, status: u16, body: &[u8]) -> GuestFailure {
@@ -279,14 +283,10 @@ pub fn insert_text(
             }
         })
     } else if index < 0 {
-        return Err(GuestFailure {
-            kind: ErrorKind::Input,
-            code: Some("invalid_index".to_string()),
-            message: Some(format!(
-                "invalid index {index}: only -1 (append) or non-negative indexes are accepted"
-            )),
-            retry_after_ms: None,
-        });
+        return Err(input_failure(
+            "invalid_index",
+            format!("invalid index {index}: only -1 (append) or non-negative indexes are accepted"),
+        ));
     } else {
         let mut loc = serde_json::json!({ "index": index });
         if !segment_id.is_empty() {
@@ -627,6 +627,28 @@ mod tests {
         extract_text_from_elements(&elements, &mut text);
 
         assert_eq!(text, "Heading 1\n");
+    }
+
+    #[test]
+    fn api_status_error_401_maps_to_auth_required() {
+        let err = api_status_error("Google Docs", 401, b"{\"error\":\"invalid_token\"}");
+
+        assert_eq!(err.kind, ErrorKind::AuthRequired);
+        assert_eq!(err.code.as_deref(), Some(GOOGLE_API_AUTH_REQUIRED_ERROR));
+    }
+
+    #[test]
+    fn api_status_error_non_401_maps_to_client() {
+        let err = api_status_error("Google Docs", 429, b"rate limited");
+
+        assert_eq!(err.kind, ErrorKind::Client);
+        assert_eq!(err.code.as_deref(), Some("api_status_429"));
+        assert!(
+            err.message
+                .as_deref()
+                .is_some_and(|message| message.contains("rate limited")),
+            "{err:?}"
+        );
     }
 
     #[test]

@@ -45,8 +45,8 @@ use ironclaw_trust::{
     AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, TrustDecision,
 };
 use ironclaw_wasm::{
-    PreparedWitTool, RecordingWasmHostHttp, WasmHostError, WasmHttpResponse, WitGuestFailure,
-    WitToolExecution, WitToolHost, WitToolOutcome, WitToolRequest, WitToolRuntime,
+    PreparedWitTool, RecordingWasmHostHttp, WasmHostError, WasmHttpResponse, WitErrorKind,
+    WitGuestFailure, WitToolExecution, WitToolHost, WitToolOutcome, WitToolRequest, WitToolRuntime,
     WitToolRuntimeConfig,
 };
 use serde_json::json;
@@ -1873,6 +1873,48 @@ async fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
             "guest-visible failure must not leak credential material"
         );
     }
+}
+
+/// The 401 auth-required path is the one status GitHub's guest carries a
+/// provider `message` onto the typed `guest-failure` for (see
+/// `request.rs::LAST_ERROR_MESSAGE`), specifically so the auth gate has a
+/// diagnostic. That message is guest-authored, sandbox-exit-scrubbed text —
+/// unlike the generic host-transport cases above (asserted via `Debug`),
+/// this pins the scrub against the actual `guest-failure.message` field a
+/// 401 body can carry a credential-shaped token in.
+#[tokio::test]
+async fn bundled_github_wasm_scrubs_credential_shaped_token_from_401_message() {
+    let leaked_token = "ghp_fakefixturetoken1234567890abcdefghij";
+    let http = RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 401,
+        headers_json: "{}".to_string(),
+        body: format!(r#"{{"message":"Bad credentials: {leaked_token}"}}"#).into_bytes(),
+    });
+
+    let execution = execute_bundled_github_wasm(
+        "github.search_issues",
+        json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
+        Arc::new(http),
+    );
+
+    assert_eq!(
+        structured_wasm_error_code(&execution).as_deref(),
+        Some("github_api_error_status_401")
+    );
+    let failure = wasm_typed_failure(&execution).expect("401 must produce a typed failure");
+    assert_eq!(failure.kind, WitErrorKind::AuthRequired);
+    let message = failure
+        .message
+        .as_deref()
+        .expect("401 body message must be carried onto the guest-failure");
+    assert!(
+        !message.contains(leaked_token),
+        "gate diagnostic message must not leak the credential-shaped token, got: {message:?}"
+    );
+    assert!(
+        !format!("{execution:?}").contains(leaked_token),
+        "guest-visible failure must not leak credential material"
+    );
 }
 
 #[tokio::test]

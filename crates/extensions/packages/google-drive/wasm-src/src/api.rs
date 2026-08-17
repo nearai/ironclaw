@@ -645,6 +645,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn api_status_error_401_maps_to_auth_required() {
+        let err = api_status_error("Drive", 401, b"{\"error\":\"invalid_token\"}");
+
+        assert_eq!(err.kind, ErrorKind::AuthRequired);
+        assert_eq!(err.code.as_deref(), Some(GOOGLE_API_AUTH_REQUIRED_ERROR));
+    }
+
+    #[test]
+    fn api_status_error_non_401_maps_to_client() {
+        let err = api_status_error("Drive", 429, b"rate limited");
+
+        assert_eq!(err.kind, ErrorKind::Client);
+        assert_eq!(err.code.as_deref(), Some("api_status_429"));
+        assert!(
+            err.message
+                .as_deref()
+                .is_some_and(|message| message.contains("rate limited")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
     fn multipart_boundary_does_not_appear_in_metadata_or_content() {
         let metadata = r#"{"name":"ironclaw_upload_boundary_marker"}"#;
         let content = "body with ironclaw_upload_boundary_marker";
