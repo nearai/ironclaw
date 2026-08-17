@@ -61,7 +61,7 @@ use ironclaw_composition::RebornTrajectoryObserver;
 use ironclaw_composition::build_default_budget_accountant;
 use ironclaw_composition::test_support::ChannelConnectionTestBundle;
 use ironclaw_config::BudgetDefaults;
-use ironclaw_event_log::{DurableEventLog, EventSink};
+use ironclaw_event_log::{DurableEventLog, NonBlockingEventSink};
 use ironclaw_event_store::{CoalescingEventSink, EventBatchConfig};
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_registry::ExtensionInstallationStorePort;
@@ -250,7 +250,7 @@ pub(crate) struct GroupSharedStorage {
     pub(crate) durable_event_log: Option<Arc<dyn DurableEventLog>>,
     /// Production-shaped non-blocking writer for `durable_event_log`. Retained
     /// so read-back assertions can flush accepted events before replay.
-    pub(crate) durable_event_sink: Option<Arc<dyn EventSink>>,
+    pub(crate) durable_event_sink: Option<Arc<dyn NonBlockingEventSink>>,
     /// W5-WIRING-PARITY: production local-dev always wires a security-audit
     /// sink; the harness mirrors that shape with a recording sink so tests can
     /// assert events emitted through real caller paths.
@@ -1022,7 +1022,7 @@ impl RebornIntegrationGroupBuilder {
                 Arc::clone(&base.composite),
             )?
             .events;
-            let event_sink: Arc<dyn EventSink> = Arc::new(CoalescingEventSink::new(
+            let event_sink: Arc<dyn NonBlockingEventSink> = Arc::new(CoalescingEventSink::new(
                 Arc::clone(&event_log),
                 EventBatchConfig::default(),
             ));
