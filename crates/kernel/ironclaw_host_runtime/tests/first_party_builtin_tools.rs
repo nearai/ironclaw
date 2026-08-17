@@ -2826,16 +2826,21 @@ async fn builtin_trigger_remove_rejects_malformed_input() {
 #[derive(Debug)]
 struct FixedTriggerManualFireRunner {
     outcome: TriggerManualFireOutcome,
+    calls: std::sync::Mutex<Vec<(TenantId, ironclaw_triggers::TriggerId)>>,
 }
 
 #[async_trait]
 impl TriggerManualFireRunner for FixedTriggerManualFireRunner {
     async fn run_manual_fire(
         &self,
-        _tenant_id: TenantId,
-        _trigger_id: ironclaw_triggers::TriggerId,
+        tenant_id: TenantId,
+        trigger_id: ironclaw_triggers::TriggerId,
         _now: chrono::DateTime<chrono::Utc>,
     ) -> Result<TriggerManualFireOutcome, TriggerError> {
+        self.calls
+            .lock()
+            .expect("manual fire calls lock")
+            .push((tenant_id, trigger_id));
         Ok(self.outcome.clone())
     }
 }
@@ -2863,11 +2868,13 @@ async fn builtin_trigger_run_dispatches_submitted_and_replayed_through_host_runt
         },
     ] {
         let repository = Arc::new(InMemoryTriggerRepository::default());
-        let runtime = runtime_with_trigger_repository_and_manual_runner(
-            repository,
-            Arc::new(FixedTriggerManualFireRunner { outcome }),
-        );
+        let runner = Arc::new(FixedTriggerManualFireRunner {
+            outcome,
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let runtime = runtime_with_trigger_repository_and_manual_runner(repository, runner.clone());
         let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_RUN_CAPABILITY_ID]);
+        let expected_tenant_id = context.tenant_id.clone();
         let created = invoke_with_context(
             &runtime,
             TRIGGER_CREATE_CAPABILITY_ID,
@@ -2896,6 +2903,10 @@ async fn builtin_trigger_run_dispatches_submitted_and_replayed_through_host_runt
         assert_eq!(output["source"], "manual");
         assert_eq!(output["status"], expected_status);
         assert_eq!(output["run_id"], expected_run_id.to_string());
+        let calls = runner.calls.lock().expect("manual fire calls lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, expected_tenant_id);
+        assert_eq!(calls[0].1.to_string(), trigger_id);
     }
 }
 

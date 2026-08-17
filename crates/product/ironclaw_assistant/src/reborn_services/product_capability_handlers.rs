@@ -559,10 +559,13 @@ impl ProductCapabilityHandler {
             }
             Self::AutomationRun => {
                 let request: RebornAutomationRequest = product_command_input(input)?;
-                automation_run_result = services
+                let response = services
                     .run_automation(caller, request.automation_id)
-                    .await?
-                    .run_result;
+                    .await?;
+                if !response.updated {
+                    return Err(ProductSurfaceError::not_found());
+                }
+                automation_run_result = response.run_result;
                 Ok(())
             }
             Self::AutomationResume => {

@@ -146,7 +146,7 @@ async fn run_automation_is_caller_scoped_before_manual_fire_dispatch() {
 }
 
 #[tokio::test]
-async fn run_automation_authorizes_exact_target_beyond_first_list_page() {
+async fn run_automation_authorizes_target_among_many_records() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let c = caller();
     for index in 0..101 {

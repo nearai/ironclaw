@@ -1310,6 +1310,7 @@ struct AutomationMutationCall {
 struct RecordingAutomationService {
     list_calls: Mutex<Vec<ListAutomationCall>>,
     mutation_calls: Mutex<Vec<AutomationMutationCall>>,
+    run_updated: Option<bool>,
     run_result: Option<RebornAutomationRunMutationResult>,
 }
 
@@ -1317,6 +1318,13 @@ impl RecordingAutomationService {
     fn with_run_result(run_result: RebornAutomationRunMutationResult) -> Self {
         Self {
             run_result: Some(run_result),
+            ..Self::default()
+        }
+    }
+
+    fn with_missing_run_target() -> Self {
+        Self {
+            run_updated: Some(false),
             ..Self::default()
         }
     }
@@ -1402,13 +1410,11 @@ impl AutomationProductService for RecordingAutomationService {
                 action: AutomationMutationAction::Run,
             });
         Ok(RebornAutomationMutationResponse {
-            updated: true,
-            automation: Some(automation_info(
-                "trigger-running",
-                "Daily status",
-                "0 9 * * *",
-                None,
-            )),
+            updated: self.run_updated.unwrap_or(true),
+            automation: self
+                .run_updated
+                .unwrap_or(true)
+                .then(|| automation_info("trigger-running", "Daily status", "0 9 * * *", None)),
             run_result: self.run_result.clone(),
         })
     }
@@ -8214,6 +8220,26 @@ async fn automation_run_capability_distinguishes_submitted_from_replayed() {
         };
         assert_eq!(outcome.summary.as_str(), expected_summary);
     }
+
+    let services = session_services(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_service(Arc::new(
+        RecordingAutomationService::with_missing_run_target(),
+    ));
+    let error = invoke_json_product_capability(
+        &services,
+        caller(),
+        AUTOMATION_RUN_CAPABILITY_ID,
+        RebornAutomationRequest {
+            automation_id: "missing-trigger".to_string(),
+        },
+    )
+    .await
+    .expect_err("a missing automation must not report a successful run");
+    assert_eq!(error.code, ProductSurfaceErrorCode::NotFound);
+    assert_eq!(error.status_code, 404);
 }
 
 #[tokio::test]

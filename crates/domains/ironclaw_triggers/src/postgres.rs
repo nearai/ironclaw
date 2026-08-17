@@ -1392,6 +1392,7 @@ async fn upsert_run_history(
     Ok(())
 }
 
+// arch-exempt: too_many_args, repository parity helper mirrors the durable run-history row fields, plan #7193
 #[allow(
     clippy::too_many_arguments,
     reason = "repository parity helper mirrors the durable run-history row fields"

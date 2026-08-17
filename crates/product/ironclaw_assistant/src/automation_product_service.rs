@@ -266,7 +266,10 @@ impl AutomationProductService for RebornAutomationProductService {
                     run_result: None,
                 });
             }
-            TriggerManualFireOutcome::Failed { .. } => return Err(automation_run_failed()),
+            TriggerManualFireOutcome::Failed { reason } => {
+                tracing::debug!(?reason, %trigger_id, "manual automation fire failed");
+                return Err(automation_run_failed());
+            }
         };
 
         let record = tokio::time::timeout(
