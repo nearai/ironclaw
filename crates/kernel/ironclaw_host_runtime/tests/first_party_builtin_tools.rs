@@ -132,6 +132,7 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             | TRIGGER_PAUSE_CAPABILITY_ID
             | TRIGGER_REMOVE_CAPABILITY_ID
             | TRIGGER_RESUME_CAPABILITY_ID
+            | TRIGGER_RUN_CAPABILITY_ID
             | TRACE_COMMONS_ONBOARD_CAPABILITY_ID
             | TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID
             | TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID

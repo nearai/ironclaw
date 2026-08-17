@@ -63,8 +63,8 @@ use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceIn
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerDeliveryTargetId, TriggerId,
-    TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
-    TriggerSourceKind, TriggerState,
+    TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus,
+    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
 use serde_json::{Value, json};
@@ -943,6 +943,36 @@ async fn wait_for_recorded_outcome(
     }
 }
 
+async fn wait_for_trigger_run_status(
+    repository: &Arc<dyn TriggerRepository>,
+    trigger_id: TriggerId,
+    run_id: TurnRunId,
+    expected: TriggerRunHistoryStatus,
+) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let history = repository
+            .list_trigger_run_history(
+                TenantId::new(TENANT).expect("valid tenant id"),
+                trigger_id,
+                10,
+            )
+            .await
+            .expect("read trigger run history");
+        if history
+            .iter()
+            .any(|run| run.run_id == Some(run_id) && run.status == expected)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "trigger {trigger_id} run {run_id} did not reach {expected:?} within 15s: {history:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 async fn invoke_run_automation(
     runtime: &RebornRuntime,
     trigger_id: TriggerId,
@@ -1605,13 +1635,14 @@ async fn product_run_now_uses_manual_fire_path_and_reaches_delivery_settlement()
     let delivery_store = runtime
         .triggered_run_delivery_store_for_test()
         .expect("local runtime exposes the production triggered-delivery store");
-    wait_for_recorded_outcome(
+    let run_id = wait_for_recorded_outcome(
         &repository,
         &delivery_store,
         trigger_id,
-        TriggeredRunDeliveryOutcomeKind::Skipped,
+        TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured,
     )
     .await;
+    wait_for_trigger_run_status(&repository, trigger_id, run_id, TriggerRunHistoryStatus::Ok).await;
 
     let settled = repository
         .get_trigger(tenant_id.clone(), trigger_id)
