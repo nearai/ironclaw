@@ -380,8 +380,30 @@ fn sanitized_wasm_guest_code(code: Option<&str>) -> Option<String> {
 }
 
 fn typed_wasm_guest_cause(failure: &WitGuestFailure) -> Option<String> {
-    let message = bounded_wasm_guest_message(failure.message.as_deref().unwrap_or_default().trim());
-    match sanitized_wasm_guest_code(failure.code.as_deref()) {
+    provider_error_cause(failure.code.as_deref(), failure.message.as_deref())
+}
+
+fn typed_wasm_guest_provider_diagnostic(failure: &WitGuestFailure) -> Option<ProviderDiagnostic> {
+    let retry_after = failure.retry_after_ms.map(std::time::Duration::from_millis);
+    provider_error_diagnostic(
+        failure.code.as_deref(),
+        failure.message.as_deref(),
+        retry_after,
+    )
+}
+
+/// Shared decode over a guest error's `(code, message, retry_after)` trio,
+/// used by both the typed (`WitGuestFailure`) and legacy
+/// (`StructuredWasmGuestError`) guest-error paths so the two stay in lockstep
+/// instead of drifting apart as separate copies.
+///
+/// Combines the sanitized stable `code` with the bounded free-text `message`
+/// into a single model-visible cause string: `code` alone, `code; message`
+/// when both are present, or `message` alone when there is no usable code.
+/// Returns `None` when neither is present.
+fn provider_error_cause(code: Option<&str>, message: Option<&str>) -> Option<String> {
+    let message = bounded_wasm_guest_message(message.unwrap_or_default().trim());
+    match sanitized_wasm_guest_code(code) {
         Some(code) => {
             let stable_cause = format!("provider error code: {code}");
             if message.is_empty() {
@@ -394,16 +416,25 @@ fn typed_wasm_guest_cause(failure: &WitGuestFailure) -> Option<String> {
     }
 }
 
-fn typed_wasm_guest_provider_diagnostic(failure: &WitGuestFailure) -> Option<ProviderDiagnostic> {
-    let code = sanitized_wasm_guest_code(failure.code.as_deref()).map(ProviderErrorCode::new);
-    let message = bounded_wasm_guest_message(failure.message.as_deref().unwrap_or_default().trim());
-    let message = (!message.is_empty()).then(|| UntrustedProviderMessage::new(message));
-    let retry_after = failure.retry_after_ms.map(std::time::Duration::from_millis);
-    (code.is_some() || message.is_some() || retry_after.is_some()).then_some(ProviderDiagnostic {
-        code,
-        message,
-        retry_after,
-    })
+/// Shared decode over a guest error's `(code, message, retry_after)` trio
+/// into a [`ProviderDiagnostic`]; see [`provider_error_cause`] for why this is
+/// one chokepoint shared by the typed and legacy guest-error paths.
+fn provider_error_diagnostic(
+    code: Option<&str>,
+    message: Option<&str>,
+    retry_after: Option<std::time::Duration>,
+) -> Option<ProviderDiagnostic> {
+    let sanitized_code = sanitized_wasm_guest_code(code).map(ProviderErrorCode::new);
+    let bounded_message = bounded_wasm_guest_message(message.unwrap_or_default().trim());
+    let bounded_message =
+        (!bounded_message.is_empty()).then(|| UntrustedProviderMessage::new(bounded_message));
+    (sanitized_code.is_some() || bounded_message.is_some() || retry_after.is_some()).then_some(
+        ProviderDiagnostic {
+            code: sanitized_code,
+            message: bounded_message,
+            retry_after,
+        },
+    )
 }
 
 /// Extract the stable error `code` from a structured guest error payload so
@@ -421,38 +452,23 @@ fn wasm_guest_error_code(error: &str) -> Option<String> {
 }
 
 fn wasm_guest_error_code_from(payload: &StructuredWasmGuestError) -> Option<String> {
-    let code: String = payload
-        .code
-        .chars()
-        .filter(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
-        })
-        .take(64)
-        .collect();
-    (!code.is_empty()).then_some(code)
+    sanitized_wasm_guest_code(Some(&payload.code))
 }
 
+/// Legacy plain-string guest error cause, matching `wasm_guest_error_code`'s
+/// stricter "no code, no cause" contract: unlike `provider_error_cause`
+/// (the typed path's permissive message-only fallback), this returns `None`
+/// outright when the code does not sanitize to anything, rather than falling
+/// back to a message-only cause.
 fn wasm_guest_error_cause(error: &str) -> Option<String> {
     let payload = structured_wasm_guest_error(error)?;
-    let code = wasm_guest_error_code_from(&payload)?;
-    let stable_cause = format!("provider error code: {code}");
-    let message = bounded_wasm_guest_message(payload.message.as_deref().unwrap_or_default().trim());
-    if message.is_empty() {
-        return Some(stable_cause);
-    }
-    Some(format!("{stable_cause}; provider message: {message}"))
+    wasm_guest_error_code_from(&payload)?;
+    provider_error_cause(Some(&payload.code), payload.message.as_deref())
 }
 
 fn wasm_guest_provider_diagnostic(error: &str) -> Option<ProviderDiagnostic> {
     let payload = structured_wasm_guest_error(error)?;
-    let code = wasm_guest_error_code_from(&payload).map(ProviderErrorCode::new);
-    let message = bounded_wasm_guest_message(payload.message.as_deref().unwrap_or_default().trim());
-    let message = (!message.is_empty()).then(|| UntrustedProviderMessage::new(message));
-    (code.is_some() || message.is_some()).then_some(ProviderDiagnostic {
-        code,
-        message,
-        retry_after: None,
-    })
+    provider_error_diagnostic(Some(&payload.code), payload.message.as_deref(), None)
 }
 
 fn structured_wasm_guest_error(error: &str) -> Option<StructuredWasmGuestError> {

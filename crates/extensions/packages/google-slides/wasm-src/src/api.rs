@@ -675,3 +675,53 @@ pub fn batch_update(
 fn url_encode(s: &str) -> String {
     urlencoding::encode(s).into_owned()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_status_error_401_maps_to_auth_required() {
+        let err = api_status_error("Google Slides", 401, b"{\"error\":\"invalid_token\"}");
+
+        assert_eq!(err.kind, ErrorKind::AuthRequired);
+        assert_eq!(
+            err.code.as_deref(),
+            Some(GOOGLE_API_AUTH_REQUIRED_ERROR)
+        );
+    }
+
+    #[test]
+    fn api_status_error_non_401_maps_to_client() {
+        let err = api_status_error("Google Slides", 429, b"rate limited");
+
+        assert_eq!(err.kind, ErrorKind::Client);
+        assert_eq!(err.code.as_deref(), Some("api_status_429"));
+        assert!(
+            err.message
+                .as_deref()
+                .is_some_and(|message| message.contains("rate limited")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn format_text_rejects_no_formatting_options() {
+        let err = format_text(FormatTextOptions {
+            presentation_id: "presentation-1",
+            object_id: "object-1",
+            start_index: None,
+            end_index: None,
+            bold: None,
+            italic: None,
+            underline: None,
+            font_size: None,
+            font_family: None,
+            foreground_color: None,
+        })
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Input);
+        assert_eq!(err.code.as_deref(), Some("no_formatting_options"));
+    }
+}

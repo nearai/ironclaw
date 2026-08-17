@@ -252,11 +252,13 @@ impl WitToolRuntime {
             }
             // Legacy fallback — removed in PR 4. A component compiled against
             // the frozen 0.3.0 world fails the current-world instantiation on
-            // an import/version mismatch; retry against the legacy world
-            // before giving up. If the legacy attempt also fails, the
-            // current-world error is the more useful diagnostic and is what
-            // gets returned.
-            Err(current_error) => {
+            // an import/version mismatch (wasmtime's instantiation error
+            // names the missing import, e.g. `near:agent/host`); only that
+            // signature is worth retrying against the legacy world. Any
+            // other current-world failure (a real bug in the component, a
+            // resource limit, ...) is not a version issue and re-running it
+            // against a different world would just mask the real error.
+            Err(current_error) if is_version_mismatch_error(&current_error) => {
                 match self.instantiate_legacy(component, WitToolHost::deny_all(), limits) {
                     Ok((mut store, instance)) => {
                         let tool = instance.near_agent_tool();
@@ -269,9 +271,12 @@ impl WitToolRuntime {
                         let schema = parse_schema(&schema_json)?;
                         Ok((description, schema, WitBindingVersion::Legacy))
                     }
-                    Err(_legacy_error) => Err(current_error),
+                    Err(legacy_error) => Err(WasmError::InstantiationFailed(format!(
+                        "current-world instantiation failed: {current_error}; legacy-world fallback also failed: {legacy_error}"
+                    ))),
                 }
             }
+            Err(current_error) => Err(current_error),
         }
     }
 
@@ -410,6 +415,16 @@ fn create_linker_legacy(engine: &Engine) -> Result<Linker<StoreData>, WasmError>
     Ok(linker)
 }
 
+/// Whether `error` looks like a current-world instantiation failure caused by
+/// a version/import mismatch rather than a real component bug. Wasmtime
+/// names the missing import in its instantiation error text (e.g.
+/// `near:agent/host@0.4.0`), so a plain substring check on `near:agent` is
+/// enough to distinguish "this component targets a different WIT version"
+/// from "this component is broken" without a new abstraction.
+fn is_version_mismatch_error(error: &WasmError) -> bool {
+    matches!(error, WasmError::InstantiationFailed(message) if message.contains("near:agent"))
+}
+
 fn classify_instantiation_error(message: String) -> WasmError {
     if message.contains("near:agent") || message.contains("import") {
         WasmError::InstantiationFailed(format!(
@@ -459,5 +474,41 @@ mod tests {
         let scrubbed_error: Option<String> = guest_error.map(scrub_guest_error);
 
         assert!(!scrubbed_error.unwrap().contains(GITHUB_TOKEN_SHAPE));
+    }
+}
+
+#[cfg(test)]
+mod legacy_retry_gate_tests {
+    use super::*;
+
+    /// A current-world instantiation failure that names the missing
+    /// `near:agent` import is the version-mismatch signature `extract_metadata`
+    /// gates its legacy-world retry on.
+    #[test]
+    fn version_mismatch_signature_is_detected_from_instantiation_error() {
+        let error = classify_instantiation_error(
+            "unknown import: `near:agent/host@0.4.0::log` has not been defined".to_string(),
+        );
+        assert!(is_version_mismatch_error(&error));
+    }
+
+    /// A current-world instantiation failure that does NOT name a
+    /// `near:agent` import (a real component bug, not a version mismatch)
+    /// must not be treated as retry-worthy — retrying it against the legacy
+    /// world would mask the real error instead of surfacing it.
+    #[test]
+    fn non_version_instantiation_error_is_not_a_retry_signature() {
+        let error = classify_instantiation_error("trap: out of bounds memory access".to_string());
+        assert!(!is_version_mismatch_error(&error));
+    }
+
+    /// Non-instantiation `WasmError` variants (store/linker configuration
+    /// failures preceding instantiation) are never retry-worthy either —
+    /// the gate only matches `InstantiationFailed`.
+    #[test]
+    fn non_instantiation_error_variant_is_not_a_retry_signature() {
+        let error =
+            WasmError::StoreConfiguration("near:agent memory limit misconfigured".to_string());
+        assert!(!is_version_mismatch_error(&error));
     }
 }

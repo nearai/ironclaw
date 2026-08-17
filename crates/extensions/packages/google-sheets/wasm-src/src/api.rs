@@ -594,3 +594,57 @@ pub fn format_cells(opts: FormatOptions<'_>) -> Result<FormatResult, GuestFailur
 fn url_encode(s: &str) -> String {
     urlencoding::encode(s).into_owned()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_status_error_401_maps_to_auth_required() {
+        let err = api_status_error("Google Sheets", 401, b"{\"error\":\"invalid_token\"}");
+
+        assert_eq!(err.kind, ErrorKind::AuthRequired);
+        assert_eq!(
+            err.code.as_deref(),
+            Some(GOOGLE_API_AUTH_REQUIRED_ERROR)
+        );
+    }
+
+    #[test]
+    fn api_status_error_non_401_maps_to_client() {
+        let err = api_status_error("Google Sheets", 429, b"rate limited");
+
+        assert_eq!(err.kind, ErrorKind::Client);
+        assert_eq!(err.code.as_deref(), Some("api_status_429"));
+        assert!(
+            err.message
+                .as_deref()
+                .is_some_and(|message| message.contains("rate limited")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn format_cells_rejects_no_formatting_options() {
+        let err = format_cells(FormatOptions {
+            spreadsheet_id: "sheet-1",
+            sheet_id: 0,
+            start_row: 0,
+            end_row: 1,
+            start_column: 0,
+            end_column: 1,
+            bold: None,
+            italic: None,
+            font_size: None,
+            text_color: None,
+            background_color: None,
+            horizontal_alignment: None,
+            number_format: None,
+            number_format_type: None,
+        })
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Input);
+        assert_eq!(err.code.as_deref(), Some("no_formatting_options"));
+    }
+}

@@ -338,4 +338,21 @@ fn params_with_action(params: &str, action: &str) -> Result<serde_json::Value, G
     Ok(params)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn params_with_action_rejects_caller_supplied_action() {
+        let error = params_with_action(
+            r#"{"action":"delete_all","presentation_id":"presentation-1"}"#,
+            "create_slide",
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::Input);
+        assert_eq!(error.code.as_deref(), Some("invalid_parameters"));
+    }
+}
+
 export!(GoogleSlidesTool);

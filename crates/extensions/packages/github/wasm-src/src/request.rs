@@ -27,6 +27,15 @@ pub(crate) fn take_last_error_message() -> Option<String> {
     LAST_ERROR_MESSAGE.with(|cell| cell.borrow_mut().take())
 }
 
+/// Bound a free-text message to a sane length before it rides in a
+/// `guest-failure`; the host re-bounds and scrubs downstream, but the guest
+/// should never hand over an unbounded string in the first place.
+#[cfg(not(test))]
+fn bounded_message(message: &str) -> String {
+    const MAX_MESSAGE_CHARS: usize = 512;
+    message.chars().take(MAX_MESSAGE_CHARS).collect()
+}
+
 #[cfg(not(test))]
 fn set_last_error_message(body: &[u8]) {
     let message = serde_json::from_slice::<serde_json::Value>(body)
@@ -35,7 +44,7 @@ fn set_last_error_message(body: &[u8]) {
             parsed
                 .get("message")
                 .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
+                .map(bounded_message)
         });
     LAST_ERROR_MESSAGE.with(|cell| *cell.borrow_mut() = message);
 }

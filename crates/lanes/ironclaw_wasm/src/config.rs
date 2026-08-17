@@ -5,13 +5,9 @@ use crate::wasm_sandbox_core::SandboxLimits;
 /// WIT package version supported by the Reborn WASM tool runtime.
 ///
 /// The runtime also accepts components compiled against the frozen legacy
-/// [`LEGACY_WIT_TOOL_VERSION`] world through a binding-level fallback
-/// (`WitToolRuntime::prepare`), removed in PR 4.
+/// world (`0.3.0`, `wit/legacy/tool_v0_3_0.wit`) through a binding-level
+/// fallback (`WitToolRuntime::prepare`), removed in PR 4.
 pub const WIT_TOOL_VERSION: &str = "0.4.0";
-
-/// WIT package version of the frozen legacy binding fallback
-/// (`wit/legacy/tool_v0_3_0.wit`). Removed in PR 4.
-pub const LEGACY_WIT_TOOL_VERSION: &str = "0.3.0";
 
 /// Source text of the canonical tool ABI, `wit/tool.wit`, which this crate
 /// owns.
