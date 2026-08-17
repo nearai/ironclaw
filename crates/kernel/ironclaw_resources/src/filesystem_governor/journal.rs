@@ -770,7 +770,8 @@ mod tests {
             path: &VirtualPath,
             payloads: Vec<Vec<u8>>,
         ) -> Result<Vec<SeqNo>, FilesystemError> {
-            self.wait_then_busy_then_succeed_batch(path, &payloads).await
+            self.wait_then_busy_then_succeed_batch(path, &payloads)
+                .await
         }
 
         async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
@@ -977,7 +978,9 @@ mod tests {
         // outlasts the retry window, the journal gives up after that one
         // attempt (`append_attempts == 1`) instead of retrying — so a
         // transient writer hold fails the flush.
-        let backend = Arc::new(SlowBusyOnceAppendFilesystem::new(Duration::from_millis(200)));
+        let backend = Arc::new(SlowBusyOnceAppendFilesystem::new(Duration::from_millis(
+            200,
+        )));
         let journal = ResourceDeltaJournal::new_with_retry_policy(
             scoped_slow_busy_once_filesystem(Arc::clone(&backend)),
             BusyRetryPolicy {
@@ -1011,7 +1014,9 @@ mod tests {
         // The fixed contract: with the window covering one full attempt, a
         // transient busy that outlasts the legacy window still retries and
         // the flush succeeds instead of invalidating the governor.
-        let backend = Arc::new(SlowBusyOnceAppendFilesystem::new(Duration::from_millis(200)));
+        let backend = Arc::new(SlowBusyOnceAppendFilesystem::new(Duration::from_millis(
+            200,
+        )));
         let journal = ResourceDeltaJournal::new_with_retry_policy(
             scoped_slow_busy_once_filesystem(Arc::clone(&backend)),
             BusyRetryPolicy {
