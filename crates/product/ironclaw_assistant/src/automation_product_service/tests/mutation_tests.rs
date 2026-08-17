@@ -5,6 +5,7 @@ use ironclaw_host_api::{
     Timestamp,
     ids::{TenantId, UserId},
 };
+use ironclaw_product_contracts::surface::{ProductSurfaceErrorCode, ProductSurfaceErrorKind};
 use ironclaw_triggers::AutomationName;
 use ironclaw_triggers::{
     InMemoryTriggerRepository, TriggerId, TriggerManualFireOutcome, TriggerManualFireRunner,
@@ -145,6 +146,47 @@ async fn run_automation_is_caller_scoped_before_manual_fire_dispatch() {
 }
 
 #[tokio::test]
+async fn run_automation_authorizes_exact_target_beyond_first_list_page() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+    for index in 0..101 {
+        let mut record = make_record(
+            TriggerId::new(),
+            &c,
+            TriggerState::Scheduled,
+            &format!("Earlier task {index}"),
+            "0 10 * * *",
+        );
+        record.created_at = now() - chrono::Duration::minutes(200 - i64::from(index));
+        repo.upsert_trigger(record).await.expect("upsert filler");
+    }
+    let trigger_id = TriggerId::new();
+    let mut target = make_record(
+        trigger_id,
+        &c,
+        TriggerState::Scheduled,
+        "Exact target",
+        "0 11 * * *",
+    );
+    target.created_at = now();
+    repo.upsert_trigger(target).await.expect("upsert target");
+    let runner = Arc::new(RecordingManualFireRunner::new(
+        TriggerManualFireOutcome::Submitted {
+            run_id: ironclaw_turns::TurnRunId::new(),
+        },
+    ));
+    let service = service_over(repo).with_manual_fire_runner(runner.clone());
+
+    let response = service
+        .run_automation(c, trigger_id.to_string())
+        .await
+        .expect("exact target is authorized");
+
+    assert!(response.updated);
+    assert_eq!(runner.call_count(), 1);
+}
+
+#[tokio::test]
 async fn run_automation_maps_active_and_paused_to_conflict() {
     for outcome in [
         TriggerManualFireOutcome::AlreadyActive {
@@ -152,6 +194,7 @@ async fn run_automation_maps_active_and_paused_to_conflict() {
             active_run_ref: None,
         },
         TriggerManualFireOutcome::Paused,
+        TriggerManualFireOutcome::Completed,
     ] {
         let repo = Arc::new(InMemoryTriggerRepository::default());
         let c = caller();
@@ -177,6 +220,116 @@ async fn run_automation_maps_active_and_paused_to_conflict() {
             error.code,
             ironclaw_product_contracts::surface::ProductSurfaceErrorCode::Conflict
         );
+    }
+}
+
+#[tokio::test]
+async fn run_automation_distinguishes_disabled_scheduler_from_backend_outage() {
+    let service =
+        service_over(Arc::new(InMemoryTriggerRepository::default())).with_scheduler_enabled(false);
+
+    let error = service
+        .run_automation(caller(), TriggerId::new().to_string())
+        .await
+        .expect_err("disabled scheduler rejects manual fire");
+
+    assert_eq!(error.status_code, 409);
+    assert_eq!(error.code, ProductSurfaceErrorCode::Conflict);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::Conflict);
+    assert!(!error.retryable);
+}
+
+#[tokio::test]
+async fn run_automation_maps_not_found_and_failed_without_exposing_backend_reason() {
+    let c = caller();
+    let trigger_id = TriggerId::new();
+    for outcome in [
+        TriggerManualFireOutcome::NotFound,
+        TriggerManualFireOutcome::Failed {
+            reason: ironclaw_triggers::TriggerPollerFailureReason::Backend,
+        },
+    ] {
+        let repo = Arc::new(InMemoryTriggerRepository::default());
+        repo.upsert_trigger(make_record(
+            trigger_id,
+            &c,
+            TriggerState::Scheduled,
+            "Daily task",
+            "0 9 * * *",
+        ))
+        .await
+        .expect("upsert trigger");
+        let service = service_over(repo)
+            .with_manual_fire_runner(Arc::new(RecordingManualFireRunner::new(outcome.clone())));
+
+        match outcome {
+            TriggerManualFireOutcome::NotFound => {
+                let response = service
+                    .run_automation(c.clone(), trigger_id.to_string())
+                    .await
+                    .expect("not found is hidden");
+                assert!(!response.updated);
+                assert!(response.automation.is_none());
+            }
+            TriggerManualFireOutcome::Failed { .. } => {
+                let error = service
+                    .run_automation(c.clone(), trigger_id.to_string())
+                    .await
+                    .expect_err("failed run is unavailable");
+                assert_eq!(error.status_code, 503);
+                assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
+                assert_eq!(error.kind, ProductSurfaceErrorKind::ServiceUnavailable);
+                assert!(error.field.is_none());
+            }
+            _ => unreachable!("test enumerates only not-found and failed outcomes"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn run_automation_preserves_submitted_and_replayed_run_evidence() {
+    let c = caller();
+    let trigger_id = TriggerId::new();
+    for (outcome, expected_status, expected_run_id) in [
+        {
+            let run_id = ironclaw_turns::TurnRunId::new();
+            (
+                TriggerManualFireOutcome::Submitted { run_id },
+                crate::RebornAutomationRunMutationStatus::Submitted,
+                run_id,
+            )
+        },
+        {
+            let run_id = ironclaw_turns::TurnRunId::new();
+            (
+                TriggerManualFireOutcome::Replayed {
+                    original_run_id: run_id,
+                },
+                crate::RebornAutomationRunMutationStatus::Replayed,
+                run_id,
+            )
+        },
+    ] {
+        let repo = Arc::new(InMemoryTriggerRepository::default());
+        repo.upsert_trigger(make_record(
+            trigger_id,
+            &c,
+            TriggerState::Scheduled,
+            "Daily task",
+            "0 9 * * *",
+        ))
+        .await
+        .expect("upsert trigger");
+        let service = service_over(repo)
+            .with_manual_fire_runner(Arc::new(RecordingManualFireRunner::new(outcome)));
+
+        let response = service
+            .run_automation(c.clone(), trigger_id.to_string())
+            .await
+            .expect("run outcome is returned");
+        let result = response.run_result.expect("run evidence");
+        assert_eq!(result.status, expected_status);
+        assert_eq!(result.run_id, expected_run_id);
     }
 }
 

@@ -713,7 +713,7 @@ impl TriggerRepository for PostgresTriggerRepository {
         )
         .await?
         {
-            SuccessfulFireResultOutcome::NewlyRecorded(record) => record,
+            SuccessfulFireResultOutcome::NewlyRecorded { record, source } => (record, source),
             SuccessfulFireResultOutcome::AlreadyRecorded(record) => {
                 tx.rollback()
                     .await
@@ -727,11 +727,12 @@ impl TriggerRepository for PostgresTriggerRepository {
                 return Ok(None);
             }
         };
+        let (record, source) = record;
         let mut run_record = TriggerRunRecord::running(
             request.tenant_id.clone(),
             request.trigger_id,
             request.fire_slot,
-            TriggerSourceKind::Schedule,
+            source,
             Some(request.run_id),
             record.last_run_at.unwrap_or(request.submitted_at),
         );
@@ -766,7 +767,7 @@ impl TriggerRepository for PostgresTriggerRepository {
         )
         .await?
         {
-            SuccessfulFireResultOutcome::NewlyRecorded(record) => record,
+            SuccessfulFireResultOutcome::NewlyRecorded { record, source } => (record, source),
             SuccessfulFireResultOutcome::AlreadyRecorded(record) => {
                 tx.rollback()
                     .await
@@ -780,11 +781,12 @@ impl TriggerRepository for PostgresTriggerRepository {
                 return Ok(None);
             }
         };
+        let (record, source) = record;
         let mut run_record = TriggerRunRecord::running(
             request.tenant_id.clone(),
             request.trigger_id,
             request.fire_slot,
-            TriggerSourceKind::Schedule,
+            source,
             Some(request.original_run_id),
             record.last_run_at.unwrap_or(request.replayed_at),
         );
@@ -815,6 +817,8 @@ impl TriggerRepository for PostgresTriggerRepository {
         }
         reject_failed_result_after_active_run(record.active_run_ref)?;
         let fire_slot = fmt_ts(&request.fire_slot);
+        // silent-ok: this run-history read can miss only on recovery; the
+        // single-active-fire invariant keeps the active claim row reachable.
         let source = tx
             .query_opt(
                 &format!("SELECT source FROM {TRIGGER_RUN_TABLE} WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3"),
@@ -839,7 +843,7 @@ impl TriggerRepository for PostgresTriggerRepository {
         }
 
         let last_status = crate::status_text_codec(TriggerRunStatus::Error);
-        let source_text = crate::source_kind_text_codec(source);
+        let is_manual = source == TriggerSourceKind::Manual;
         let row = tx
             .query_one(
                 &format!(
@@ -851,7 +855,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                        AND trigger_id = $2
                        AND active_fire_slot = $4
                        AND active_run_ref IS NULL
-                       AND ($5 = 'manual' OR next_run_at <= $4)
+                       AND ($5 OR next_run_at <= $4)
                      RETURNING {TRIGGER_COLUMNS}"
                 ),
                 &[
@@ -859,7 +863,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                     &trigger_id,
                     &last_status,
                     &fire_slot,
-                    &source_text,
+                    &is_manual,
                 ],
             )
             .await
@@ -870,6 +874,7 @@ impl TriggerRepository for PostgresTriggerRepository {
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
+            source,
             None,
             TriggerRunHistoryStatus::Error,
             Utc::now(),
@@ -934,6 +939,7 @@ impl TriggerRepository for PostgresTriggerRepository {
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
+            TriggerSourceKind::Schedule,
             None,
             TriggerRunHistoryStatus::Error,
             Utc::now(),
@@ -1003,6 +1009,7 @@ impl TriggerRepository for PostgresTriggerRepository {
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
+            TriggerSourceKind::Schedule,
             None,
             TriggerRunHistoryStatus::Error,
             Utc::now(),
@@ -1041,6 +1048,8 @@ impl TriggerRepository for PostgresTriggerRepository {
             return Ok(None);
         }
         let fire_slot = fmt_ts(&request.fire_slot);
+        // silent-ok: this run-history read can miss only on recovery; the
+        // single-active-fire invariant keeps the active claim row reachable.
         let source = tx
             .query_opt(
                 &format!("SELECT source FROM {TRIGGER_RUN_TABLE} WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3"),
@@ -1095,6 +1104,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                     &request.tenant_id,
                     request.trigger_id,
                     request.fire_slot,
+                    source,
                     Some(request.run_id),
                     request.status,
                     Utc::now(),
@@ -1260,6 +1270,8 @@ async fn mark_successful_fire_result(
         return Ok(SuccessfulFireResultOutcome::AlreadyRecorded(current));
     }
     let fire_slot_text = fmt_ts(&update.fire_slot);
+    // silent-ok: this run-history read can miss only on recovery; the
+    // single-active-fire invariant keeps the active claim row reachable.
     let source = tx
         .query_opt(
             &format!(
@@ -1316,7 +1328,7 @@ async fn mark_successful_fire_result(
         .map_err(|error| backend_error(update.operation, error))?;
     row.map(|row| row_to_record(&row))
         .transpose()?
-        .map(SuccessfulFireResultOutcome::NewlyRecorded)
+        .map(|record| SuccessfulFireResultOutcome::NewlyRecorded { record, source })
         .ok_or_else(|| TriggerError::Backend {
             reason: "locked trigger record disappeared while marking successful fire result"
                 .to_string(),
@@ -1333,7 +1345,10 @@ struct SuccessfulFireResultUpdate<'a> {
 }
 
 enum SuccessfulFireResultOutcome {
-    NewlyRecorded(TriggerRecord),
+    NewlyRecorded {
+        record: TriggerRecord,
+        source: TriggerSourceKind,
+    },
     AlreadyRecorded(TriggerRecord),
     NotMatched,
 }
@@ -1382,6 +1397,7 @@ async fn complete_run_history(
     tenant_id: &TenantId,
     trigger_id: TriggerId,
     fire_slot: Timestamp,
+    source: TriggerSourceKind,
     run_id: Option<TurnRunId>,
     status: TriggerRunHistoryStatus,
     completed_at: Timestamp,
@@ -1392,7 +1408,7 @@ async fn complete_run_history(
     let completed_at = fmt_ts(&completed_at);
     let submitted_at_fallback = completed_at.clone();
     let thread_id: Option<&str> = None;
-    let source = crate::source_kind_text_codec(TriggerSourceKind::Schedule);
+    let source = crate::source_kind_text_codec(source);
     client
         .execute(
             &format!(

@@ -451,11 +451,12 @@ impl ProductCapabilityHandler {
         services: &RebornServices<I, V>,
         caller: ProductSurfaceCaller,
         input: serde_json::Value,
-    ) -> Result<(), ProductSurfaceError>
+    ) -> Result<Option<RebornAutomationRunMutationResult>, ProductSurfaceError>
     where
         I: ProductCapabilityInvoker + Clone + 'static,
         V: RebornViewProvider + Clone + 'static,
     {
+        let mut automation_run_result = None;
         match self {
             Self::OperatorSetupRun => services.invoke_operator_setup_run(caller, input).await,
             Self::LlmProviderUpsert => {
@@ -558,9 +559,10 @@ impl ProductCapabilityHandler {
             }
             Self::AutomationRun => {
                 let request: RebornAutomationRequest = product_command_input(input)?;
-                services
+                automation_run_result = services
                     .run_automation(caller, request.automation_id)
-                    .await?;
+                    .await?
+                    .run_result;
                 Ok(())
             }
             Self::AutomationResume => {
@@ -654,7 +656,8 @@ impl ProductCapabilityHandler {
                     .await?;
                 Ok(())
             }
-        }
+        }?;
+        Ok(automation_run_result)
     }
 }
 

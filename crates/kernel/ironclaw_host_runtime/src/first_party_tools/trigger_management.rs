@@ -745,18 +745,14 @@ async fn run_trigger(
     // scope as the other model-facing trigger mutations before crossing that
     // boundary, so a caller cannot probe or fire another user's routine.
     let is_caller_scoped = repository
-        .list_scoped_triggers(
-            scope.tenant_id.clone(),
-            scope.user_id.clone(),
-            scope.agent_id.clone(),
-            scope.project_id.clone(),
-            TRIGGER_LIST_MAX_LIMIT,
-            &[],
-        )
+        .get_trigger(scope.tenant_id.clone(), trigger_id)
         .await
-        .map_err(|error| trigger_repository_error("list_scoped_triggers", error))?
-        .iter()
-        .any(|record| record.trigger_id == trigger_id);
+        .map_err(|error| trigger_repository_error("get_trigger", error))?
+        .is_some_and(|record| {
+            record.creator_user_id == scope.user_id
+                && record.agent_id == scope.agent_id
+                && record.project_id == scope.project_id
+        });
     if !is_caller_scoped {
         return Err(trigger_run_input_error(
             DispatchInputIssueCode::InvalidValue,
@@ -770,11 +766,13 @@ async fn run_trigger(
     {
         TriggerManualFireOutcome::Submitted { run_id } => Ok(json!({
             "trigger_id": trigger_id.to_string(),
+            "source": "manual",
             "status": "submitted",
             "run_id": run_id.to_string(),
         })),
         TriggerManualFireOutcome::Replayed { original_run_id } => Ok(json!({
             "trigger_id": trigger_id.to_string(),
+            "source": "manual",
             "status": "replayed",
             "run_id": original_run_id.to_string(),
         })),
@@ -787,6 +785,10 @@ async fn run_trigger(
         TriggerManualFireOutcome::Paused => Err(FirstPartyCapabilityError::with_safe_summary(
             RuntimeDispatchErrorKind::PolicyDenied,
             "paused trigger cannot be run",
+        )),
+        TriggerManualFireOutcome::Completed => Err(FirstPartyCapabilityError::with_safe_summary(
+            RuntimeDispatchErrorKind::OperationFailed,
+            "completed trigger cannot be run",
         )),
         TriggerManualFireOutcome::NotFound => Err(trigger_run_input_error(
             DispatchInputIssueCode::InvalidValue,

@@ -502,6 +502,10 @@ mod tests {
             app_bundle_contains_encoded_automation_route("resume"),
             "served WebUI bundle must include the automation resume endpoint; run the frontend build after editing frontend/src/**"
         );
+        assert!(
+            app_bundle_contains_encoded_automation_route("run"),
+            "served WebUI bundle must include the automation run endpoint; run the frontend build after editing frontend/src/**"
+        );
         let app_bundle_contains_encoded_automation_delete = app_bundle
             .split("/automations/${encodeURIComponent(")
             .any(|tail| {

@@ -90,6 +90,7 @@ pub enum TriggerManualFireOutcome {
         active_run_ref: Option<TurnRunId>,
     },
     Paused,
+    Completed,
     NotFound,
     Failed {
         reason: TriggerPollerFailureReason,

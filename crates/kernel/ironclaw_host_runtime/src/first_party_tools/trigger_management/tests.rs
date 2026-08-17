@@ -861,6 +861,11 @@ async fn trigger_run_maps_active_and_paused_outcomes_to_safe_failures() {
             RuntimeDispatchErrorKind::PolicyDenied,
             "paused trigger cannot be run",
         ),
+        (
+            TriggerManualFireOutcome::Completed,
+            RuntimeDispatchErrorKind::OperationFailed,
+            "completed trigger cannot be run",
+        ),
     ] {
         let runner = FixedManualFireRunner { outcome };
         let error = run_trigger(

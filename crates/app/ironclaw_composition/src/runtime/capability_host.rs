@@ -1,7 +1,7 @@
 //! Capability-host adapters and assembly shared by every runtime profile.
 
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex as StdMutex},
 };
 
@@ -120,6 +120,7 @@ pub(super) fn capability_wiring(
     outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     tool_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
+    trigger_poller_enabled: bool,
 ) -> Option<CapabilityPortWiring> {
     let runtime = services.host_runtime.clone();
     let workspace_mounts = services.workspace_mounts.clone();
@@ -172,6 +173,11 @@ pub(super) fn capability_wiring(
     // run-scoped external-tool state.
     let external_tool_catalog: Arc<dyn ExternalToolCatalog> =
         services.external_tool_catalog.clone();
+    let unavailable_capability_ids = if trigger_poller_enabled {
+        HashSet::new()
+    } else {
+        HashSet::from([CapabilityId::new(ironclaw_host_runtime::TRIGGER_RUN_CAPABILITY_ID).ok()?])
+    };
     // Wire the durable gate-record and host-private replay-payload stores over
     // the composition-owned scoped filesystem (same backend + per-user mount view
     // as every other durable store; `extension_filesystem` is the shared composite
@@ -211,6 +217,7 @@ pub(super) fn capability_wiring(
             gate_record_store,
             replay_payload_store,
             external_tool_catalog,
+            unavailable_capability_ids,
         });
     Some(CapabilityPortWiring {
         capability_factory,
@@ -254,6 +261,7 @@ struct RefreshingLoopCapabilityPortFactory {
     /// all runs in this runtime so a parked external-tool call and its later
     /// client-submitted output (across a pause/resume) hit the same store.
     external_tool_catalog: Arc<dyn ExternalToolCatalog>,
+    unavailable_capability_ids: HashSet<CapabilityId>,
 }
 
 /// Make skill files readable by the ordinary filesystem tools, read-only.
@@ -356,6 +364,7 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
             capability_execution_mount_overrides: HashMap::new(),
             additional_provider_trust: BTreeMap::new(),
             capability_id_filter: None,
+            unavailable_capability_ids: self.unavailable_capability_ids.clone(),
             additional_capability_grants: Vec::new(),
         })
         .await

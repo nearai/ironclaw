@@ -1088,6 +1088,8 @@ pub trait TriggerSourceProvider: Send + Sync {
     async fn evaluate(
         &self,
         record: &TriggerRecord,
+        fire_slot: Timestamp,
+        source: TriggerSourceKind,
         now: Timestamp,
     ) -> Result<Option<TriggerFire>, TriggerError>;
 }
@@ -1100,16 +1102,22 @@ impl TriggerSourceProvider for ScheduleTriggerSourceProvider {
     async fn evaluate(
         &self,
         record: &TriggerRecord,
+        fire_slot: Timestamp,
+        source: TriggerSourceKind,
         now: Timestamp,
     ) -> Result<Option<TriggerFire>, TriggerError> {
         record.validate()?;
-        if record.source != TriggerSourceKind::Schedule || !record.is_due_at(now) {
+        if record.source != TriggerSourceKind::Schedule
+            || record.state != TriggerState::Scheduled
+            || fire_slot > now
+        {
             return Ok(None);
         }
-        let identity = TriggerFireIdentity::new(
+        let identity = TriggerFireIdentity::for_source(
+            source,
             record.tenant_id.clone(),
             record.trigger_id,
-            record.next_run_at,
+            fire_slot,
         );
         Ok(Some(TriggerFire {
             identity,

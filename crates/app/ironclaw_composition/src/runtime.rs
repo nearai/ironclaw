@@ -3497,6 +3497,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             outbound_preferences_facade.clone(),
             trajectory_observer,
             Some(tool_diagnostic_sink),
+            trigger_poller.enabled,
         )
         .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
         (

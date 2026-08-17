@@ -213,10 +213,11 @@ pub use ironclaw_product_contracts::product_wire::{
     RebornAccountBindingSource, RebornAttachmentBytes, RebornAttachmentRequest,
     RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
-    RebornChannelConnectAction, RebornCommandRejection, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornExecuteProductCommandRequest, RebornExtensionActionResponse,
+    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunMutationResult,
+    RebornAutomationRunMutationStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
+    RebornCommandRejection, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExecuteProductCommandRequest, RebornExtensionActionResponse,
     RebornExtensionCredentialSetup, RebornExtensionOnboardingPayload,
     RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
     RebornExtensionSetupField, RebornExtensionSetupSecret, RebornExtensionSurface,
@@ -3150,8 +3151,15 @@ where
         if let Some(operation) =
             product_capability_handlers::ProductCapabilityHandler::parse(&capability)
         {
-            let summary = operation.success_summary();
-            operation.invoke(self, caller, input).await?;
+            let run_result = operation.invoke(self, caller, input).await?;
+            let summary = match run_result.map(|result| result.status) {
+                Some(RebornAutomationRunMutationStatus::Replayed) => {
+                    "automation run was already submitted"
+                }
+                Some(RebornAutomationRunMutationStatus::Submitted) | None => {
+                    operation.success_summary()
+                }
+            };
             return self.api_capability_success(activity_id, summary);
         }
         self.product_capability_invoker

@@ -66,6 +66,7 @@ use ironclaw_assistant::{
     RUN_ARTIFACT_VIEW, RebornAccountTracesResponse, RebornAddMemberRequest,
     RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
     RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRequest,
+    RebornAutomationRunMutationResult, RebornAutomationRunMutationStatus,
     RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
     RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExecuteProductCommandRequest,
@@ -1309,9 +1310,17 @@ struct AutomationMutationCall {
 struct RecordingAutomationService {
     list_calls: Mutex<Vec<ListAutomationCall>>,
     mutation_calls: Mutex<Vec<AutomationMutationCall>>,
+    run_result: Option<RebornAutomationRunMutationResult>,
 }
 
 impl RecordingAutomationService {
+    fn with_run_result(run_result: RebornAutomationRunMutationResult) -> Self {
+        Self {
+            run_result: Some(run_result),
+            ..Self::default()
+        }
+    }
+
     fn list_calls(&self) -> Vec<ListAutomationCall> {
         self.list_calls.lock().expect("lock").clone()
     }
@@ -1375,6 +1384,7 @@ impl AutomationProductService for RecordingAutomationService {
                 "0 9 * * *",
                 None,
             )),
+            run_result: None,
         })
     }
 
@@ -1399,6 +1409,7 @@ impl AutomationProductService for RecordingAutomationService {
                 "0 9 * * *",
                 None,
             )),
+            run_result: self.run_result.clone(),
         })
     }
 
@@ -1423,6 +1434,7 @@ impl AutomationProductService for RecordingAutomationService {
                 "0 9 * * *",
                 None,
             )),
+            run_result: None,
         })
     }
 
@@ -1448,6 +1460,7 @@ impl AutomationProductService for RecordingAutomationService {
                 "0 9 * * *",
                 None,
             )),
+            run_result: None,
         })
     }
 
@@ -1467,6 +1480,7 @@ impl AutomationProductService for RecordingAutomationService {
         Ok(RebornAutomationMutationResponse {
             updated: true,
             automation: None,
+            run_result: None,
         })
     }
 }
@@ -8158,6 +8172,48 @@ async fn automation_mutations_are_available_as_product_capabilities() {
         }
     );
     assert_eq!(calls[4].action, AutomationMutationAction::Delete);
+}
+
+#[tokio::test]
+async fn automation_run_capability_distinguishes_submitted_from_replayed() {
+    for (status, expected_summary) in [
+        (
+            RebornAutomationRunMutationStatus::Submitted,
+            "automation started",
+        ),
+        (
+            RebornAutomationRunMutationStatus::Replayed,
+            "automation run was already submitted",
+        ),
+    ] {
+        let automation_service = Arc::new(RecordingAutomationService::with_run_result(
+            RebornAutomationRunMutationResult {
+                status,
+                run_id: TurnRunId::new(),
+            },
+        ));
+        let services = session_services(
+            Arc::new(InMemorySessionThreadService::default()),
+            Arc::new(FakeTurnCoordinator::default()),
+        )
+        .with_automation_product_service(automation_service);
+
+        let resolution = invoke_json_product_capability(
+            &services,
+            caller(),
+            AUTOMATION_RUN_CAPABILITY_ID,
+            RebornAutomationRequest {
+                automation_id: "trigger-alpha".to_string(),
+            },
+        )
+        .await
+        .expect("automation run capability");
+
+        let Resolution::Done(outcome) = resolution else {
+            panic!("automation run must return a completed outcome");
+        };
+        assert_eq!(outcome.summary.as_str(), expected_summary);
+    }
 }
 
 #[tokio::test]

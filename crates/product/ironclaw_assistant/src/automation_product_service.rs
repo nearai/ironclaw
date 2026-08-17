@@ -1,10 +1,11 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::{
-    AUTOMATION_LIST_MAX_PAGE_SIZE, AutomationListRequest, AutomationProductService,
-    ProductAgentBoundCaller, RebornAutomationActiveHold, RebornAutomationHoldReason,
-    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    AutomationListRequest, AutomationProductService, ProductAgentBoundCaller,
+    RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRunMutationResult,
+    RebornAutomationRunMutationStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, TriggerRunThreadScope,
 };
 use ironclaw_host_api::{Timestamp, ids::ThreadId};
@@ -209,33 +210,29 @@ impl AutomationProductService for RebornAutomationProductService {
         automation_id: String,
     ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
         if !self.scheduler_enabled {
-            return Err(ProductSurfaceError::service_unavailable(true));
+            return Err(scheduler_disabled());
         }
         let trigger_id = parse_trigger_id(&automation_id)?;
-        let visible = tokio::time::timeout(
+        let target = tokio::time::timeout(
             self.backend_timeout,
-            self.trigger_repository.list_scoped_triggers(
-                caller.tenant_id.clone(),
-                caller.user_id.clone(),
-                Some(caller.agent_id.clone()),
-                caller.project_id.clone(),
-                AUTOMATION_LIST_MAX_PAGE_SIZE as usize,
-                &[],
-            ),
+            self.trigger_repository
+                .get_trigger(caller.tenant_id.clone(), trigger_id),
         )
         .await
         .map_err(|_| backend_timeout_error())?
-        .map_err(map_trigger_error)?
-        .into_iter()
-        .any(|record| record.trigger_id == trigger_id);
-        if !visible {
+        .map_err(map_trigger_error)?;
+        if !target
+            .as_ref()
+            .is_some_and(|record| trigger_is_caller_visible(record, &caller))
+        {
             return Ok(RebornAutomationMutationResponse {
                 updated: false,
                 automation: None,
+                run_result: None,
             });
         }
 
-        match tokio::time::timeout(
+        let run_result = match tokio::time::timeout(
             self.backend_timeout,
             self.manual_fire_runner.run_manual_fire(
                 caller.tenant_id.clone(),
@@ -247,20 +244,30 @@ impl AutomationProductService for RebornAutomationProductService {
         .map_err(|_| backend_timeout_error())?
         .map_err(map_trigger_error)?
         {
-            TriggerManualFireOutcome::Submitted { .. }
-            | TriggerManualFireOutcome::Replayed { .. } => {}
+            TriggerManualFireOutcome::Submitted { run_id } => RebornAutomationRunMutationResult {
+                status: RebornAutomationRunMutationStatus::Submitted,
+                run_id,
+            },
+            TriggerManualFireOutcome::Replayed { original_run_id } => {
+                RebornAutomationRunMutationResult {
+                    status: RebornAutomationRunMutationStatus::Replayed,
+                    run_id: original_run_id,
+                }
+            }
             TriggerManualFireOutcome::AlreadyActive { .. } => {
                 return Err(automation_conflict(true));
             }
             TriggerManualFireOutcome::Paused => return Err(automation_conflict(false)),
+            TriggerManualFireOutcome::Completed => return Err(automation_conflict(false)),
             TriggerManualFireOutcome::NotFound => {
                 return Ok(RebornAutomationMutationResponse {
                     updated: false,
                     automation: None,
+                    run_result: None,
                 });
             }
             TriggerManualFireOutcome::Failed { .. } => return Err(automation_run_failed()),
-        }
+        };
 
         let record = tokio::time::timeout(
             self.backend_timeout,
@@ -273,6 +280,7 @@ impl AutomationProductService for RebornAutomationProductService {
         Ok(RebornAutomationMutationResponse {
             updated: true,
             automation: record.map(|record| automation_info_from_record(record, &[], None)),
+            run_result: Some(run_result),
         })
     }
 
@@ -310,6 +318,7 @@ impl AutomationProductService for RebornAutomationProductService {
         Ok(RebornAutomationMutationResponse {
             updated: record.is_some(),
             automation: record.map(|record| automation_info_from_record(record, &[], None)),
+            run_result: None,
         })
     }
 
@@ -336,6 +345,7 @@ impl AutomationProductService for RebornAutomationProductService {
         Ok(RebornAutomationMutationResponse {
             updated: removed.is_some(),
             automation: None,
+            run_result: None,
         })
     }
 
@@ -403,6 +413,7 @@ impl RebornAutomationProductService {
         Ok(RebornAutomationMutationResponse {
             updated: record.is_some(),
             automation: record.map(|record| automation_info_from_record(record, &[], None)),
+            run_result: None,
         })
     }
 }
@@ -591,6 +602,15 @@ fn backend_timeout_error() -> ProductSurfaceError {
 
 fn automation_conflict(retryable: bool) -> ProductSurfaceError {
     ProductSurfaceError::from_status(ProductSurfaceErrorCode::Conflict, 409, retryable)
+}
+
+fn scheduler_disabled() -> ProductSurfaceError {
+    services_error(
+        ProductSurfaceErrorCode::Conflict,
+        ProductSurfaceErrorKind::Conflict,
+        409,
+        false,
+    )
 }
 
 fn automation_run_failed() -> ProductSurfaceError {

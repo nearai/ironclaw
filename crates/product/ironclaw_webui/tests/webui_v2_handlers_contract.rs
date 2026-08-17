@@ -1852,6 +1852,7 @@ impl StubServices {
                         "Running status",
                         "*/5 * * * *",
                     )),
+                    run_result: None,
                 })
             }
             ProductSurfaceCallId::AutomationPause => {
@@ -1864,6 +1865,7 @@ impl StubServices {
                         "Paused status",
                         "*/5 * * * *",
                     )),
+                    run_result: None,
                 })
             }
             ProductSurfaceCallId::AutomationResume => {
@@ -1876,6 +1878,7 @@ impl StubServices {
                         "Resumed status",
                         "*/5 * * * *",
                     )),
+                    run_result: None,
                 })
             }
             ProductSurfaceCallId::AutomationRename => {
@@ -1888,6 +1891,7 @@ impl StubServices {
                         request.name.as_deref().unwrap_or("Renamed status"),
                         "*/5 * * * *",
                     )),
+                    run_result: None,
                 })
             }
             ProductSurfaceCallId::AutomationDelete => {
@@ -1896,6 +1900,7 @@ impl StubServices {
                 RecordedProductSurfaceCallResponse::json(RebornAutomationMutationResponse {
                     updated: true,
                     automation: None,
+                    run_result: None,
                 })
             }
             ProductSurfaceCallId::NotificationChannelsSet => {

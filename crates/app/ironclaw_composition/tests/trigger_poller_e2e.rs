@@ -672,7 +672,7 @@ async fn wait_for_mutator_registration_outcomes(
     loop {
         let captured_contents = gateway.captured_message_contents().await;
         let outcomes = gateway.registration_outcomes().await;
-        if outcomes.len() == 4 || Instant::now() >= stop {
+        if outcomes.len() == 5 || Instant::now() >= stop {
             return (captured_contents, outcomes);
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

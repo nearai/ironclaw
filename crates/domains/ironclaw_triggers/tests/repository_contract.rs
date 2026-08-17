@@ -4722,7 +4722,7 @@ mod manual_fire_claim_contract {
     use super::*;
     use ironclaw_triggers::{
         ClaimDueFireOutcome, ClaimManualFireRequest, ClearActiveFireRequest, FireAcceptedRequest,
-        TriggerRunHistoryStatus,
+        FireRetryableFailedRequest, TriggerRunHistoryStatus,
     };
 
     async fn assert_manual_fire_claim_contract(repo: &impl TriggerRepository) {
@@ -4811,6 +4811,82 @@ mod manual_fire_claim_contract {
             .await
             .expect("list completed manual history");
         assert_eq!(history[0].source, TriggerSourceKind::Manual);
+
+        let retry_id = TriggerId::parse("01J000000000000000000000M4").expect("ulid");
+        repo.upsert_trigger(sample_record(
+            retry_id,
+            tenant_id.clone(),
+            scheduled_next_run_at,
+        ))
+        .await
+        .expect("insert manual retry target");
+        assert!(matches!(
+            repo.claim_manual_fire(ClaimManualFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id: retry_id,
+                now,
+            })
+            .await
+            .expect("claim manual retry target"),
+            ClaimDueFireOutcome::Claimed(_)
+        ));
+        let retry_record = repo
+            .mark_fire_retryable_failed(FireRetryableFailedRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id: retry_id,
+                fire_slot: now,
+            })
+            .await
+            .expect("mark manual retryable failure")
+            .expect("manual retryable failure updates target");
+        assert_eq!(retry_record.next_run_at, scheduled_next_run_at);
+        assert_eq!(retry_record.state, TriggerState::Scheduled);
+
+        let once_id = TriggerId::parse("01J000000000000000000000M5").expect("ulid");
+        let mut once = sample_record(once_id, tenant_id.clone(), scheduled_next_run_at);
+        once.schedule = TriggerSchedule::Once {
+            at: scheduled_next_run_at,
+            timezone: "UTC".to_string(),
+        };
+        repo.upsert_trigger(once)
+            .await
+            .expect("insert one-shot manual target");
+        assert!(matches!(
+            repo.claim_manual_fire(ClaimManualFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id: once_id,
+                now,
+            })
+            .await
+            .expect("claim one-shot manually"),
+            ClaimDueFireOutcome::Claimed(_)
+        ));
+        let once_run_id = TurnRunId::new();
+        repo.mark_fire_accepted(FireAcceptedRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id: once_id,
+            fire_slot: now,
+            run_id: once_run_id,
+            thread_id: ThreadId::new("01890f0f-aa01-7000-8000-000000000071")
+                .expect("valid thread id"),
+            submitted_at: now,
+        })
+        .await
+        .expect("accept one-shot manual fire")
+        .expect("one-shot manual fire remains claimed");
+        let once_cleared = repo
+            .clear_active_fire(ClearActiveFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id: once_id,
+                fire_slot: now,
+                run_id: once_run_id,
+                status: TriggerRunHistoryStatus::Ok,
+            })
+            .await
+            .expect("clear one-shot manual fire")
+            .expect("one-shot manual fire clears");
+        assert_eq!(once_cleared.state, TriggerState::Scheduled);
+        assert_eq!(once_cleared.next_run_at, scheduled_next_run_at);
 
         let paused_id = TriggerId::parse("01J000000000000000000000M2").expect("ulid");
         let mut paused = sample_record(paused_id, tenant_id.clone(), scheduled_next_run_at);

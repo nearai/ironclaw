@@ -399,7 +399,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
         &self,
         request: FireAcceptedRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        let Some(record) = self.update_claimed_fire(
+        let Some((record, _source)) = self.update_claimed_fire(
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
@@ -440,7 +440,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
         &self,
         request: FireReplayedRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        let Some(record) = self.update_claimed_fire(
+        let Some((record, _source)) = self.update_claimed_fire(
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
@@ -481,7 +481,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
         &self,
         request: FireRetryableFailedRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        let Some(record) = self.update_claimed_fire(
+        let Some((record, source)) = self.update_claimed_fire(
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
@@ -510,6 +510,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
+            source,
             None,
             TriggerRunHistoryStatus::Error,
             Utc::now(),
@@ -521,7 +522,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
         &self,
         request: FirePermanentFailedRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        let Some(record) = self.update_claimed_fire(
+        let Some((record, source)) = self.update_claimed_fire(
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
@@ -542,6 +543,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
+            source,
             None,
             TriggerRunHistoryStatus::Error,
             Utc::now(),
@@ -553,7 +555,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
         &self,
         request: FireTerminalFailedRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        let Some(record) = self.update_claimed_fire(
+        let Some((record, source)) = self.update_claimed_fire(
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
@@ -573,6 +575,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
+            source,
             None,
             TriggerRunHistoryStatus::Error,
             Utc::now(),
@@ -588,6 +591,9 @@ impl TriggerRepository for InMemoryTriggerRepository {
         let key = TriggerRepositoryKey::new(&request.tenant_id, request.trigger_id);
         let run_key =
             TriggerRunRepositoryKey::new(&request.tenant_id, request.trigger_id, request.fire_slot);
+        // silent-ok: the run-history read can miss only on recovery; the
+        // single-active-fire invariant keeps the active claim row newest and
+        // therefore reachable during normal retention pruning.
         let source = state
             .runs
             .get(&run_key)
@@ -630,7 +636,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
                     request.tenant_id.clone(),
                     request.trigger_id,
                     request.fire_slot,
-                    TriggerSourceKind::Schedule,
+                    source,
                     Some(request.run_id),
                     completed_at,
                 );
@@ -735,9 +741,12 @@ impl InMemoryTriggerRepository {
         trigger_id: TriggerId,
         fire_slot: Timestamp,
         update: impl FnOnce(&mut TriggerRecord, TriggerSourceKind) -> Result<(), TriggerError>,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<(TriggerRecord, TriggerSourceKind)>, TriggerError> {
         let mut state = self.lock_state()?;
         let key = TriggerRepositoryKey::new(tenant_id, trigger_id);
+        // silent-ok: the run-history read can miss only on recovery; the
+        // single-active-fire invariant keeps the active claim row newest and
+        // therefore reachable during normal retention pruning.
         let run_source = state
             .runs
             .get(&TriggerRunRepositoryKey::new(
@@ -751,7 +760,7 @@ impl InMemoryTriggerRepository {
             return Ok(None);
         }
         update(record, run_source)?;
-        Ok(Some(record.clone()))
+        Ok(Some((record.clone(), run_source)))
     }
 
     pub(crate) fn upsert_running_run_history(
@@ -791,6 +800,7 @@ impl InMemoryTriggerRepository {
         tenant_id: &TenantId,
         trigger_id: TriggerId,
         fire_slot: Timestamp,
+        source: TriggerSourceKind,
         run_id: Option<TurnRunId>,
         status: TriggerRunHistoryStatus,
         completed_at: Timestamp,
@@ -813,7 +823,7 @@ impl InMemoryTriggerRepository {
                     tenant_id.clone(),
                     trigger_id,
                     fire_slot,
-                    TriggerSourceKind::Schedule,
+                    source,
                     run_id,
                     completed_at,
                 );

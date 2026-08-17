@@ -325,6 +325,7 @@ pub use reborn_services::{
     RebornAttachmentRequest, RebornAuthAccount, RebornAutomationActiveHold,
     RebornAutomationHoldReason, RebornAutomationInfo, RebornAutomationMutationResponse,
     RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRequest,
+    RebornAutomationRunMutationResult, RebornAutomationRunMutationStatus,
     RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornCommandRejection, RebornCreateProjectRequest, RebornCreateThreadResponse,

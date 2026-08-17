@@ -17,9 +17,9 @@ use crate::{
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
     FireRetryableFailedRequest, FireTerminalFailedRequest, InMemoryTriggerRepository,
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerError, TriggerFire, TriggerId,
-    TriggerInboundContentRef, TriggerMaterializedPrompt, TriggerPromptMaterializer, TriggerRecord,
-    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerError, TriggerFire, TriggerFireIdentity,
+    TriggerId, TriggerInboundContentRef, TriggerMaterializedPrompt, TriggerPromptMaterializer,
+    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
     TriggerSchedule, TriggerSourceKind, TriggerSourceProvider, TriggerState,
 };
 
@@ -1876,7 +1876,8 @@ async fn manual_fire_failure_clears_active_without_advancing_schedule() {
     ))
     .await
     .expect("insert");
-    let worker = worker(
+    let observer = Arc::new(RecordingSettlementObserver::default());
+    let worker = worker_with_observer(
         repo.clone(),
         Arc::new(RecordingMaterializer::success("content:trigger-fire")),
         Arc::new(RecordingSubmitter::with_outcomes(vec![Err(
@@ -1885,6 +1886,7 @@ async fn manual_fire_failure_clears_active_without_advancing_schedule() {
             },
         )])),
         Arc::new(RecordingActiveRunLookup::default()),
+        observer.clone(),
     );
 
     let outcome = worker
@@ -1907,6 +1909,68 @@ async fn manual_fire_failure_clears_active_without_advancing_schedule() {
     assert_eq!(persisted.last_status, Some(TriggerRunStatus::Error));
     assert_eq!(persisted.active_fire_slot, None);
     assert_eq!(persisted.active_run_ref, None);
+    let failed_events = observer.failed_events();
+    assert_eq!(failed_events.len(), 1);
+    assert_eq!(
+        failed_events[0].fire.identity,
+        TriggerFireIdentity::for_source(
+            TriggerSourceKind::Manual,
+            tenant("tenant-a"),
+            trigger_id,
+            manual_slot,
+        )
+    );
+}
+
+#[tokio::test]
+async fn manual_fire_submits_the_manual_identity_for_the_claimed_slot() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZW").expect("ulid");
+    let manual_slot = ts(1_704_067_200);
+    repo.upsert_trigger(sample_record(
+        trigger_id,
+        tenant("tenant-a"),
+        manual_slot + chrono::Duration::hours(1),
+    ))
+    .await
+    .expect("insert");
+    let run_id = TurnRunId::new();
+    let submitter = Arc::new(RecordingSubmitter::with_outcomes(vec![Ok(
+        TrustedTriggerFireSubmitOutcome::Accepted {
+            run_id,
+            submitted_at: manual_slot,
+            turn_scope: test_turn_scope(),
+        },
+    )]));
+    let worker = worker(
+        repo,
+        Arc::new(RecordingMaterializer::success("content:manual-fire")),
+        submitter.clone(),
+        Arc::new(RecordingActiveRunLookup::default()),
+    );
+
+    assert_eq!(
+        worker
+            .run_manual_fire(tenant("tenant-a"), trigger_id, manual_slot)
+            .await
+            .expect("manual fire succeeds"),
+        TriggerManualFireOutcome::Submitted { run_id }
+    );
+    let requests = submitter.requests();
+    let submitted_identity = &requests.first().expect("one request").fire().identity;
+    assert_eq!(
+        submitted_identity,
+        &TriggerFireIdentity::for_source(
+            TriggerSourceKind::Manual,
+            tenant("tenant-a"),
+            trigger_id,
+            manual_slot,
+        )
+    );
+    assert_ne!(
+        submitted_identity,
+        &TriggerFireIdentity::new(tenant("tenant-a"), trigger_id, manual_slot)
+    );
 }
 
 #[tokio::test]
@@ -3053,6 +3117,8 @@ impl TriggerSourceProvider for NullSourceProvider {
     async fn evaluate(
         &self,
         _record: &TriggerRecord,
+        _fire_slot: Timestamp,
+        _source: TriggerSourceKind,
         _now: Timestamp,
     ) -> Result<Option<TriggerFire>, TriggerError> {
         Ok(None)
@@ -3064,6 +3130,8 @@ impl TriggerSourceProvider for NotFoundSourceProvider {
     async fn evaluate(
         &self,
         _record: &TriggerRecord,
+        _fire_slot: Timestamp,
+        _source: TriggerSourceKind,
         _now: Timestamp,
     ) -> Result<Option<TriggerFire>, TriggerError> {
         Err(TriggerError::NotFound)
@@ -3075,6 +3143,8 @@ impl TriggerSourceProvider for ErrorSourceProvider {
     async fn evaluate(
         &self,
         _record: &TriggerRecord,
+        _fire_slot: Timestamp,
+        _source: TriggerSourceKind,
         _now: Timestamp,
     ) -> Result<Option<TriggerFire>, TriggerError> {
         Err(self

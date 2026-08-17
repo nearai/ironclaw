@@ -77,14 +77,10 @@ impl TriggerPollerWorker {
         now: Timestamp,
         source: TriggerSourceKind,
     ) -> Result<TriggerPollerFireOutcome, TriggerError> {
-        let mut evaluation_record = record.clone();
-        if source == TriggerSourceKind::Manual {
-            evaluation_record.next_run_at = fire_slot;
-        }
         let fire = match self
             .deps
             .source_provider
-            .evaluate(&evaluation_record, now)
+            .evaluate(&record, fire_slot, source, now)
             .await
         {
             Ok(Some(fire)) => fire,
@@ -119,13 +115,6 @@ impl TriggerPollerWorker {
                     .await;
             }
         };
-        let mut fire = fire;
-        fire.identity = crate::TriggerFireIdentity::for_source(
-            source,
-            record.tenant_id.clone(),
-            record.trigger_id,
-            fire_slot,
-        );
         let materialized_prompt = match self
             .deps
             .materializer
@@ -287,7 +276,8 @@ impl TriggerPollerWorker {
                 .map(|spec| spec.policy.clone()),
         };
         if source == TriggerSourceKind::Manual {
-            self.deps
+            let updated = self
+                .deps
                 .repository
                 .mark_fire_retryable_failed(FireRetryableFailedRequest {
                     tenant_id: record.tenant_id,
@@ -295,6 +285,15 @@ impl TriggerPollerWorker {
                     fire_slot,
                 })
                 .await?;
+            if updated.is_some() {
+                self.deps
+                    .fire_settlement_observer
+                    .on_failed_fire_settled(TriggerFailedFireSettlement {
+                        fire: failed_fire,
+                        reason,
+                    })
+                    .await;
+            }
             return Ok(TriggerPollerFireOutcome::PermanentFailed { reason });
         }
         match disposition {
@@ -394,7 +393,7 @@ impl TriggerManualFireRunner for TriggerPollerWorker {
             }
             ClaimDueFireOutcome::Paused { .. } => return Ok(TriggerManualFireOutcome::Paused),
             ClaimDueFireOutcome::NotFound => return Ok(TriggerManualFireOutcome::NotFound),
-            ClaimDueFireOutcome::NotDue { .. } => return Ok(TriggerManualFireOutcome::NotFound),
+            ClaimDueFireOutcome::NotDue { .. } => return Ok(TriggerManualFireOutcome::Completed),
         };
         Ok(match processed {
             TriggerPollerFireOutcome::Submitted { run_id } => {
@@ -409,7 +408,13 @@ impl TriggerManualFireRunner for TriggerPollerWorker {
             | TriggerPollerFireOutcome::DueFireFailed { reason } => {
                 TriggerManualFireOutcome::Failed { reason }
             }
-            _ => TriggerManualFireOutcome::Failed {
+            TriggerPollerFireOutcome::ClearedTerminalActive { .. }
+            | TriggerPollerFireOutcome::ClearedBlockedActive { .. }
+            | TriggerPollerFireOutcome::ActiveRunLookupFailed { .. }
+            | TriggerPollerFireOutcome::SkippedAlreadyCleared { .. }
+            | TriggerPollerFireOutcome::SkippedAlreadyActive { .. }
+            | TriggerPollerFireOutcome::SkippedNotDue
+            | TriggerPollerFireOutcome::SkippedNotFound => TriggerManualFireOutcome::Failed {
                 reason: TriggerPollerFailureReason::Backend,
             },
         })

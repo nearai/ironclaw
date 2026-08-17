@@ -195,7 +195,7 @@ impl LibSqlTriggerRepository {
                 .await
             {
                 let msg = error.to_string();
-                if !msg.contains("duplicate column") {
+                if !msg.contains("duplicate column") && !msg.contains("already exists") {
                     return Err(backend_error("add trigger run source column", error));
                 }
             }
@@ -1040,6 +1040,8 @@ impl TriggerRepository for LibSqlTriggerRepository {
             return Ok(None);
         }
         reject_failed_result_after_active_run(record.active_run_ref)?;
+        // silent-ok: this run-history read can miss only on recovery; the
+        // single-active-fire invariant keeps the active claim row reachable.
         let source = fetch_run_source(&conn, &tenant_id, trigger_id, fire_slot)
             .await?
             .unwrap_or(TriggerSourceKind::Schedule);
@@ -1069,7 +1071,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                            AND trigger_id = ?2
                            AND active_fire_slot = ?4
                            AND active_run_ref IS NULL
-                           AND (?5 = 'manual' OR next_run_at <= ?4)
+                           AND (?5 = 1 OR next_run_at <= ?4)
                          RETURNING {TRIGGER_COLUMNS}"
                     ),
                     params![
@@ -1077,7 +1079,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                         trigger_id.to_string(),
                         last_status,
                         fire_slot_text,
-                        crate::source_kind_text_codec(source),
+                        i64::from(source == TriggerSourceKind::Manual),
                     ],
                 )
                 .await
@@ -1092,6 +1094,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 &tenant_id,
                 trigger_id,
                 fire_slot,
+                source,
                 None,
                 TriggerRunHistoryStatus::Error,
                 Utc::now(),
@@ -1176,6 +1179,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 &tenant_id,
                 trigger_id,
                 fire_slot,
+                TriggerSourceKind::Schedule,
                 None,
                 TriggerRunHistoryStatus::Error,
                 Utc::now(),
@@ -1250,6 +1254,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 &tenant_id,
                 trigger_id,
                 fire_slot,
+                TriggerSourceKind::Schedule,
                 None,
                 TriggerRunHistoryStatus::Error,
                 Utc::now(),
@@ -1293,6 +1298,8 @@ impl TriggerRepository for LibSqlTriggerRepository {
             {
                 return Ok(None);
             }
+            // silent-ok: this run-history read can miss only on recovery; the
+            // single-active-fire invariant keeps the active claim row reachable.
             let source = fetch_run_source(
                 &transaction,
                 &request.tenant_id,
@@ -1346,6 +1353,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 &request.tenant_id,
                 request.trigger_id,
                 request.fire_slot,
+                source,
                 Some(request.run_id),
                 request.status,
                 Utc::now(),
@@ -1752,6 +1760,8 @@ async fn mark_successful_fire_result(
             reject_run_ref_rewrite(active_run_ref, update.run_id)?;
             return Ok(Some(current));
         }
+        // silent-ok: this run-history read can miss only on recovery; the
+        // single-active-fire invariant keeps the active claim row reachable.
         let source = fetch_run_source(
             &transaction,
             update.tenant_id,
@@ -1834,7 +1844,7 @@ async fn mark_successful_fire_result(
             update.tenant_id.clone(),
             update.trigger_id,
             update.fire_slot,
-            TriggerSourceKind::Schedule,
+            source,
             Some(update.run_id),
             record.last_run_at.unwrap_or(update.result_at),
         );
@@ -1998,12 +2008,13 @@ async fn complete_run_history(
     tenant_id: &TenantId,
     trigger_id: TriggerId,
     fire_slot: Timestamp,
+    source: TriggerSourceKind,
     run_id: Option<TurnRunId>,
     status: TriggerRunHistoryStatus,
     completed_at: Timestamp,
 ) -> Result<(), TriggerError> {
     let run_id_value = opt_turn_run_id(run_id.as_ref());
-    let source = crate::source_kind_text_codec(TriggerSourceKind::Schedule);
+    let source = crate::source_kind_text_codec(source);
     conn.execute(
         &format!(
             "INSERT INTO {TRIGGER_RUN_TABLE} (
