@@ -46,17 +46,38 @@ export function useNotifications({
   const query = useQuery({
     queryKey,
     queryFn: async () => {
-      try {
-        const inbox = await listNotifications({ limit: NOTIFICATION_LIMIT });
-        return { inbox, inboxSupported: true, compatibility: [] };
-      } catch (error) {
-        if (!isNotificationInboxUnsupported(error)) throw error;
+      // During the durable-inbox rollout, approval producers may land after
+      // this consumer. Read both sources so switching the UI does not make
+      // existing approval notifications disappear. Durable records win in
+      // the presentation-layer de-duplication below.
+      const [inboxResult, approvalResult] = await Promise.allSettled([
+        listNotifications({ limit: NOTIFICATION_LIMIT }),
+        listThreads({
+          limit: NOTIFICATION_THREAD_LIMIT,
+          needsApproval: true,
+        }),
+      ]);
+
+      let inboxSupported = true;
+      let inbox;
+      if (inboxResult.status === "fulfilled") {
+        inbox = inboxResult.value;
+      } else if (isNotificationInboxUnsupported(inboxResult.reason)) {
+        inboxSupported = false;
+        inbox = { notifications: [], unread_count: 0 };
+      } else {
+        throw inboxResult.reason;
       }
 
-      const approvalThreads = await listThreads({
-        limit: NOTIFICATION_THREAD_LIMIT,
-        needsApproval: true,
-      });
+      if (approvalResult.status === "rejected") {
+        // The legacy path is supplemental once the durable inbox exists. Do
+        // not hide durable notifications because the compatibility read
+        // failed; without an inbox, however, there is no usable data source.
+        if (!inboxSupported) throw approvalResult.reason;
+        return { inbox, inboxSupported, compatibility: [] };
+      }
+
+      const approvalThreads = approvalResult.value;
       const presenter = await import("../lib/notification-approval-compat");
       const seenIds = presenter.getNotificationState(scope).seenIds;
       const records = Array.isArray(approvalThreads?.threads)
@@ -70,8 +91,8 @@ export function useNotifications({
           read: seenIds.has(message.id),
         }));
       return {
-        inbox: { notifications: [], unread_count: 0 },
-        inboxSupported: false,
+        inbox,
+        inboxSupported,
         compatibility,
       };
     },

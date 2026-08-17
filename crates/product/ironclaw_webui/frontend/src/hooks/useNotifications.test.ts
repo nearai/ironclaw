@@ -198,12 +198,21 @@ function flushAsyncWork() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-test("queries only the durable inbox after profile hydration", async () => {
-  const harness = instantiate({ data: { inbox: {}, approvalThreads: {} } });
+test("queries the durable inbox and legacy approvals after profile hydration", async () => {
+  const harness = instantiate({
+    data: {
+      inbox: { notifications: [], unread_count: 0 },
+      approvalThreads: { threads: [{ id: "thread-transition" }] },
+    },
+  });
   assert.equal(harness.queryOptions.enabled, true);
-  await harness.queryOptions.queryFn();
+  const result = await harness.queryOptions.queryFn();
   assert.deepEqual(JSON.parse(JSON.stringify(harness.inboxCalls)), [{ limit: 30 }]);
-  assert.deepEqual(JSON.parse(JSON.stringify(harness.threadCalls)), []);
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.threadCalls)), [
+    { limit: 20, needsApproval: true },
+  ]);
+  assert.equal(result.compatibility[0].id, "approval:thread-transition");
+  assert.equal(result.inboxSupported, true);
 
   const pending = instantiate({ data: {}, profile: null });
   assert.equal(pending.queryOptions.enabled, false);
@@ -233,7 +242,31 @@ test("surfaces transient inbox failures without activating the compatibility pat
     inboxError,
   });
   await assert.rejects(harness.queryOptions.queryFn(), inboxError);
-  assert.deepEqual(JSON.parse(JSON.stringify(harness.threadCalls)), []);
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.threadCalls)), [
+    { limit: 20, needsApproval: true },
+  ]);
+});
+
+test("keeps durable notifications when the legacy approval query fails", async () => {
+  const harness = instantiate({
+    data: {
+      inbox: { notifications: [notification()], unread_count: 1 },
+    },
+    approvalError: new Error("legacy approvals unavailable"),
+  });
+  const result = await harness.queryOptions.queryFn();
+  assert.equal(result.inboxSupported, true);
+  assert.equal(result.inbox.notifications[0].id, "notification-1");
+  assert.deepEqual(JSON.parse(JSON.stringify(result.compatibility)), []);
+});
+
+test("surfaces the legacy approval failure when no durable inbox is available", async () => {
+  const approvalError = new Error("legacy approvals unavailable");
+  const harness = instantiate({
+    inboxError: Object.assign(new Error("inbox unavailable"), { status: 404 }),
+    approvalError,
+  });
+  await assert.rejects(harness.queryOptions.queryFn(), approvalError);
 });
 
 test("deduplicates fallback approvals when the durable inbox has the same thread", () => {
