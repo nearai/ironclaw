@@ -55,9 +55,9 @@ The trigger system is owned by `ironclaw_triggers` in implementation terms, but 
 
 ### 3.1 Source kinds
 
-V1 source kind is schedule-only.
-
-- `Schedule` is the only V1 source kind.
+- `Schedule` identifies a fire claimed from the trigger's stored cadence.
+- `Manual` identifies an on-demand fire of a scheduled trigger. It is fire
+  provenance, not a separately persisted trigger-definition kind.
 - Webhook, regex, and internal system-event sources are fast-follow and must not be accepted by the V1 contract.
 
 ### 3.2 Schedule shape and cadence
@@ -214,6 +214,21 @@ V1 has one provider: a schedule provider.
 
 - The schedule provider is cron-backed.
 - Webhook, regex, and system-event providers are fast-follow and must emit the same `TriggerFire` shape when they are later added.
+
+### 4.3 Manual fire
+
+Manual fire uses the same source evaluation, prompt materialization, trusted
+submission, and settlement path as a scheduled fire, but claims without the
+schedule due-time gate. The repository claim remains atomic and respects the
+single-active-fire lock. Paused triggers return a distinct refusal.
+
+A manual claim, successful submission, failure settlement, and terminal-run
+cleanup must preserve `next_run_at` byte-for-byte and must not complete a
+one-shot trigger. Run history records `Manual` provenance. Manual identities
+use additive manual domain labels; the scheduled identity labels and digest
+input ordering remain frozen for replay compatibility. Two manual claims in
+the same timestamp resolution cannot both mint an identity because the atomic
+active-fire claim rejects the second call.
 
 ---
 

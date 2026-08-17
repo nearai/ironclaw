@@ -1,14 +1,14 @@
 use crate::{
-    ClaimDueFireOutcome, ClaimDueFireRequest, FireAcceptedRequest, FirePermanentFailedRequest,
-    FireReplayedRequest, FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerError,
-    TriggerRecord, TriggerSchedule,
+    ClaimDueFireOutcome, ClaimDueFireRequest, ClaimManualFireRequest, FireAcceptedRequest,
+    FirePermanentFailedRequest, FireReplayedRequest, FireRetryableFailedRequest,
+    FireTerminalFailedRequest, TriggerError, TriggerRecord, TriggerSchedule, TriggerSourceKind,
 };
 use ironclaw_host_api::Timestamp;
 
 use super::{
-    TriggerAcceptedFireSettlement, TriggerFailedFireSettlement, TriggerPollerFailureReason,
-    TriggerPollerFireOutcome, TriggerPollerWorker, TrustedTriggerFireSubmitOutcome,
-    TrustedTriggerSubmitRequest,
+    TriggerAcceptedFireSettlement, TriggerFailedFireSettlement, TriggerManualFireOutcome,
+    TriggerManualFireRunner, TriggerPollerFailureReason, TriggerPollerFireOutcome,
+    TriggerPollerWorker, TrustedTriggerFireSubmitOutcome, TrustedTriggerSubmitRequest,
     failure::{SubmitFailureKind, classify_failure, classify_submit_failure},
 };
 
@@ -40,8 +40,13 @@ impl TriggerPollerWorker {
             .await?;
         let outcome = match claimed {
             ClaimDueFireOutcome::Claimed(claimed) => {
-                self.process_claimed_fire(claimed.record, claimed.fire_slot, now)
-                    .await?
+                self.process_claimed_fire(
+                    claimed.record,
+                    claimed.fire_slot,
+                    now,
+                    TriggerSourceKind::Schedule,
+                )
+                .await?
             }
             ClaimDueFireOutcome::AlreadyActive {
                 active_fire_slot,
@@ -59,6 +64,7 @@ impl TriggerPollerWorker {
                 }
             }
             ClaimDueFireOutcome::NotDue { .. } => TriggerPollerFireOutcome::SkippedNotDue,
+            ClaimDueFireOutcome::Paused { .. } => TriggerPollerFireOutcome::SkippedNotDue,
             ClaimDueFireOutcome::NotFound => TriggerPollerFireOutcome::SkippedNotFound,
         };
         Ok(outcome)
@@ -69,8 +75,18 @@ impl TriggerPollerWorker {
         record: TriggerRecord,
         fire_slot: Timestamp,
         now: Timestamp,
+        source: TriggerSourceKind,
     ) -> Result<TriggerPollerFireOutcome, TriggerError> {
-        let fire = match self.deps.source_provider.evaluate(&record, now).await {
+        let mut evaluation_record = record.clone();
+        if source == TriggerSourceKind::Manual {
+            evaluation_record.next_run_at = fire_slot;
+        }
+        let fire = match self
+            .deps
+            .source_provider
+            .evaluate(&evaluation_record, now)
+            .await
+        {
             Ok(Some(fire)) => fire,
             Ok(None) => {
                 let disposition = permanent_failure_disposition(&record.schedule, fire_slot)?;
@@ -78,6 +94,7 @@ impl TriggerPollerWorker {
                     .persist_failed_fire(
                         record,
                         fire_slot,
+                        source,
                         disposition,
                         TriggerPollerFailureReason::SourceNoFire,
                     )
@@ -92,10 +109,23 @@ impl TriggerPollerWorker {
                     }
                 };
                 return self
-                    .persist_failed_fire(record, fire_slot, disposition, classification.reason)
+                    .persist_failed_fire(
+                        record,
+                        fire_slot,
+                        source,
+                        disposition,
+                        classification.reason,
+                    )
                     .await;
             }
         };
+        let mut fire = fire;
+        fire.identity = crate::TriggerFireIdentity::for_source(
+            source,
+            record.tenant_id.clone(),
+            record.trigger_id,
+            fire_slot,
+        );
         let materialized_prompt = match self
             .deps
             .materializer
@@ -112,7 +142,13 @@ impl TriggerPollerWorker {
                     }
                 };
                 return self
-                    .persist_failed_fire(record, fire_slot, disposition, classification.reason)
+                    .persist_failed_fire(
+                        record,
+                        fire_slot,
+                        source,
+                        disposition,
+                        classification.reason,
+                    )
                     .await;
             }
         };
@@ -132,7 +168,13 @@ impl TriggerPollerWorker {
                     }
                 };
                 return self
-                    .persist_failed_fire(record, fire_slot, disposition, classification.reason)
+                    .persist_failed_fire(
+                        record,
+                        fire_slot,
+                        source,
+                        disposition,
+                        classification.reason,
+                    )
                     .await;
             }
         };
@@ -208,8 +250,14 @@ impl TriggerPollerWorker {
                         permanent_failure_disposition(&record.schedule, fire_slot)?
                     }
                 };
-                self.persist_failed_fire(record, fire_slot, disposition, classification.reason)
-                    .await
+                self.persist_failed_fire(
+                    record,
+                    fire_slot,
+                    source,
+                    disposition,
+                    classification.reason,
+                )
+                .await
             }
         }
     }
@@ -218,11 +266,13 @@ impl TriggerPollerWorker {
         &self,
         record: TriggerRecord,
         fire_slot: Timestamp,
+        source: TriggerSourceKind,
         disposition: FailedFireDisposition,
         reason: TriggerPollerFailureReason,
     ) -> Result<TriggerPollerFireOutcome, TriggerError> {
         let failed_fire = crate::TriggerFire {
-            identity: crate::TriggerFireIdentity::new(
+            identity: crate::TriggerFireIdentity::for_source(
+                source,
                 record.tenant_id.clone(),
                 record.trigger_id,
                 fire_slot,
@@ -236,6 +286,17 @@ impl TriggerPollerWorker {
                 .as_ref()
                 .map(|spec| spec.policy.clone()),
         };
+        if source == TriggerSourceKind::Manual {
+            self.deps
+                .repository
+                .mark_fire_retryable_failed(FireRetryableFailedRequest {
+                    tenant_id: record.tenant_id,
+                    trigger_id: record.trigger_id,
+                    fire_slot,
+                })
+                .await?;
+            return Ok(TriggerPollerFireOutcome::PermanentFailed { reason });
+        }
         match disposition {
             FailedFireDisposition::Retryable => {
                 self.deps
@@ -292,6 +353,66 @@ impl TriggerPollerWorker {
                 Ok(TriggerPollerFireOutcome::OncePermanentFailed { reason })
             }
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl TriggerManualFireRunner for TriggerPollerWorker {
+    async fn run_manual_fire(
+        &self,
+        tenant_id: ironclaw_host_api::ids::TenantId,
+        trigger_id: crate::TriggerId,
+        now: Timestamp,
+    ) -> Result<TriggerManualFireOutcome, TriggerError> {
+        let claimed = self
+            .deps
+            .repository
+            .claim_manual_fire(ClaimManualFireRequest {
+                tenant_id,
+                trigger_id,
+                now,
+            })
+            .await?;
+        let processed = match claimed {
+            ClaimDueFireOutcome::Claimed(claimed) => {
+                self.process_claimed_fire(
+                    claimed.record,
+                    claimed.fire_slot,
+                    now,
+                    TriggerSourceKind::Manual,
+                )
+                .await?
+            }
+            ClaimDueFireOutcome::AlreadyActive {
+                active_fire_slot,
+                active_run_ref,
+            } => {
+                return Ok(TriggerManualFireOutcome::AlreadyActive {
+                    active_fire_slot,
+                    active_run_ref,
+                });
+            }
+            ClaimDueFireOutcome::Paused { .. } => return Ok(TriggerManualFireOutcome::Paused),
+            ClaimDueFireOutcome::NotFound => return Ok(TriggerManualFireOutcome::NotFound),
+            ClaimDueFireOutcome::NotDue { .. } => return Ok(TriggerManualFireOutcome::NotFound),
+        };
+        Ok(match processed {
+            TriggerPollerFireOutcome::Submitted { run_id } => {
+                TriggerManualFireOutcome::Submitted { run_id }
+            }
+            TriggerPollerFireOutcome::Replayed { original_run_id } => {
+                TriggerManualFireOutcome::Replayed { original_run_id }
+            }
+            TriggerPollerFireOutcome::RetryableFailed { reason }
+            | TriggerPollerFireOutcome::PermanentFailed { reason }
+            | TriggerPollerFireOutcome::OncePermanentFailed { reason }
+            | TriggerPollerFireOutcome::DueFireFailed { reason } => {
+                TriggerManualFireOutcome::Failed { reason }
+            }
+            _ => TriggerManualFireOutcome::Failed {
+                reason: TriggerPollerFailureReason::Backend,
+            },
+        })
     }
 }
 

@@ -157,6 +157,7 @@ fn make_run_record(trigger_id: TriggerId, status: TriggerRunHistoryStatus) -> Tr
         tenant_id,
         trigger_id,
         fire_slot,
+        source: TriggerSourceKind::Schedule,
         run_id: Some(TurnRunId::new()),
         // Use a canonical UUID thread_id to represent a post-acceptance run.
         // Pre-acceptance rows would have thread_id: None.

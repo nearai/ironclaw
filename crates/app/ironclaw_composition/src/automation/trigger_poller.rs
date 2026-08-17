@@ -33,12 +33,48 @@ pub(crate) use active_run_lookup::{
 
 pub(crate) const TRIGGER_POLLER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[derive(Default)]
+pub(crate) struct LateBoundTriggerManualFireRunner {
+    runner: OnceLock<Arc<dyn ironclaw_triggers::TriggerManualFireRunner>>,
+}
+
+impl LateBoundTriggerManualFireRunner {
+    pub(crate) fn bind(
+        &self,
+        runner: Arc<dyn ironclaw_triggers::TriggerManualFireRunner>,
+    ) -> Result<(), TriggerError> {
+        self.runner.set(runner).map_err(|_| TriggerError::Backend {
+            reason: "manual trigger fire runner was already bound".to_string(),
+        })
+    }
+}
+
+#[async_trait]
+impl ironclaw_triggers::TriggerManualFireRunner for LateBoundTriggerManualFireRunner {
+    async fn run_manual_fire(
+        &self,
+        tenant_id: ironclaw_host_api::ids::TenantId,
+        trigger_id: ironclaw_triggers::TriggerId,
+        now: ironclaw_host_api::Timestamp,
+    ) -> Result<ironclaw_triggers::TriggerManualFireOutcome, TriggerError> {
+        let runner = self.runner.get().ok_or_else(|| TriggerError::Backend {
+            reason: "manual trigger fire runner is not available".to_string(),
+        })?;
+        runner.run_manual_fire(tenant_id, trigger_id, now).await
+    }
+}
+
 pub(crate) struct TriggerPollerRuntimeHandle {
     cancel: CancellationToken,
     handle: JoinHandle<()>,
+    manual_fire_runner: Arc<dyn ironclaw_triggers::TriggerManualFireRunner>,
 }
 
 impl TriggerPollerRuntimeHandle {
+    pub(crate) fn manual_fire_runner(&self) -> Arc<dyn ironclaw_triggers::TriggerManualFireRunner> {
+        Arc::clone(&self.manual_fire_runner)
+    }
+
     pub(crate) async fn shutdown(self, timeout: Duration) {
         self.cancel.cancel();
         self.join_with_timeout(timeout).await;
@@ -90,7 +126,7 @@ pub(crate) fn spawn_trigger_poller(
         PostSubmitHookObserver::new(deps.post_submit_hook_slot, cancel.clone()),
     );
     let trusted_submitter = deps.trusted_submitter;
-    let worker = TriggerPollerWorker::new(
+    let worker = Arc::new(TriggerPollerWorker::new(
         settings.worker.clone(),
         TriggerPollerWorkerDeps {
             repository: deps.repository,
@@ -100,12 +136,17 @@ pub(crate) fn spawn_trigger_poller(
             active_run_lookup: deps.active_run_lookup,
             fire_settlement_observer,
         },
-    )?;
+    )?);
+    let manual_fire_runner: Arc<dyn ironclaw_triggers::TriggerManualFireRunner> = worker.clone();
     let task_cancel = cancel.clone();
     let handle = tokio::spawn(async move {
         run_trigger_poller(worker, settings, task_cancel).await;
     });
-    Ok(Some(TriggerPollerRuntimeHandle { cancel, handle }))
+    Ok(Some(TriggerPollerRuntimeHandle {
+        cancel,
+        handle,
+        manual_fire_runner,
+    }))
 }
 
 const POST_SUBMIT_HOOK_PENDING_CAPACITY: usize = 256;
@@ -255,7 +296,7 @@ impl TriggerFireSettlementObserver for PostSubmitHookObserver {
 }
 
 async fn run_trigger_poller(
-    worker: TriggerPollerWorker,
+    worker: Arc<TriggerPollerWorker>,
     settings: TriggerPollerSettings,
     cancel: CancellationToken,
 ) {
@@ -349,7 +390,11 @@ mod tests {
             task_cancel.cancelled().await;
             std::future::pending::<()>().await;
         });
-        let runtime_handle = TriggerPollerRuntimeHandle { cancel, handle };
+        let runtime_handle = TriggerPollerRuntimeHandle {
+            cancel,
+            handle,
+            manual_fire_runner: Arc::new(ironclaw_triggers::MissingTriggerManualFireRunner),
+        };
 
         runtime_handle.shutdown(Duration::from_millis(1)).await;
     }

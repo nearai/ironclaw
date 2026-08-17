@@ -448,8 +448,10 @@ mod tests {
         assert!(api.contains("listAutomations"));
         assert!(api.contains("pauseAutomation"));
         assert!(api.contains("resumeAutomation"));
+        assert!(api.contains("runAutomation"));
         assert!(api.contains("deleteAutomation"));
         assert!(api.contains("/automations"));
+        assert!(api.contains("/run"));
         assert!(api.contains("/pause"));
         assert!(api.contains("/resume"));
         assert!(api.contains(r#"method: "DELETE""#));

@@ -287,6 +287,10 @@ fn trigger_enums_serialize_as_snake_case() {
         json!("schedule")
     );
     assert_eq!(
+        to_value(TriggerSourceKind::Manual).unwrap(),
+        json!("manual")
+    );
+    assert_eq!(
         to_value(TriggerState::Scheduled).unwrap(),
         json!("scheduled")
     );
@@ -320,6 +324,30 @@ fn fire_identity_is_stable_domain_separated_and_tenant_scoped() {
     assert_ne!(first.route_thread_id, other_slot.route_thread_id);
     assert_ne!(first.external_event_id, other_slot.external_event_id);
     assert_ne!(first.route_thread_id, other_tenant.route_thread_id);
+}
+
+#[test]
+fn scheduled_fire_identity_digest_is_frozen_and_manual_is_domain_separated() {
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let slot = Utc.with_ymd_and_hms(2026, 5, 30, 8, 0, 0).unwrap();
+    let scheduled = TriggerFireIdentity::new(tenant("tenant-a"), trigger_id, slot);
+    let manual = TriggerFireIdentity::for_source(
+        TriggerSourceKind::Manual,
+        tenant("tenant-a"),
+        trigger_id,
+        slot,
+    );
+
+    assert_eq!(
+        scheduled.route_thread_id.as_str(),
+        "f916bc384a37375fe079690406308ee526a206427c71e30dc7af3cc58ce8148e"
+    );
+    assert_eq!(
+        scheduled.external_event_id.as_str(),
+        "5a07cf9e557e855450d664fb433cd857d86298f056d51fb42cd83fec2bd818a8"
+    );
+    assert_ne!(manual.route_thread_id, scheduled.route_thread_id);
+    assert_ne!(manual.external_event_id, scheduled.external_event_id);
 }
 
 #[test]

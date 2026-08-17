@@ -23,6 +23,7 @@ const COPY = {
   "common.save": "Save",
   "automations.action.pause": "Pause",
   "automations.action.resume": "Resume",
+  "automations.action.runNow": "Run now",
 };
 
 function sourceForTest() {
@@ -232,6 +233,42 @@ test("AutomationDetailPanel exposes stable lifecycle action selectors", () => {
   assert.equal(actionButton["data-automation-action"], "resume");
   assert.equal(actionButton["aria-label"], "Resume: Daily status");
   assert.equal(actionButton.title, "Resume: Daily status");
+});
+
+test("AutomationDetailPanel disables Run now for an active fire or disabled scheduler", () => {
+  const calls = [];
+  const harness = createHarness();
+
+  let rendered = harness.render({
+    onRunAutomation: (automationId) => calls.push(automationId),
+  });
+  let runButton = componentProps(rendered, harness.Button).find(
+    (button) => button["data-testid"] === "automation-run-now-button",
+  );
+  assert.ok(runButton, "run-now button should render");
+  assert.equal(runButton["data-automation-id"], "automation-alpha");
+  assert.equal(runButton["aria-label"], "Run now: Daily status");
+  assert.equal(runButton.disabled, false);
+  runButton.onClick();
+  assert.deepEqual(calls, ["automation-alpha"]);
+
+  rendered = harness.render({
+    automation: { ...automation(), has_active_fire: true },
+    onRunAutomation: (automationId) => calls.push(automationId),
+  });
+  runButton = componentProps(rendered, harness.Button).find(
+    (button) => button["data-testid"] === "automation-run-now-button",
+  );
+  assert.equal(runButton.disabled, true);
+
+  rendered = harness.render({
+    schedulerEnabled: false,
+    onRunAutomation: (automationId) => calls.push(automationId),
+  });
+  runButton = componentProps(rendered, harness.Button).find(
+    (button) => button["data-testid"] === "automation-run-now-button",
+  );
+  assert.equal(runButton.disabled, true);
 });
 
 test("AutomationDetailPanel deletes only after confirming the shared dialog", () => {

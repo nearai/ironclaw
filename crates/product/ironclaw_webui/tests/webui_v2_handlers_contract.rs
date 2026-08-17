@@ -178,6 +178,7 @@ enum ProductSurfaceCallId {
     LlmCodexLogin,
     AdminUserCreate,
     AdminUserDeleteSecret,
+    AutomationRun,
     AutomationPause,
     AutomationResume,
     AutomationRename,
@@ -209,6 +210,7 @@ impl ProductSurfaceCallId {
             Self::LlmCodexLogin => "llm.codex.login",
             Self::AdminUserCreate => "admin.user.create",
             Self::AdminUserDeleteSecret => "admin.user.delete_secret",
+            Self::AutomationRun => "automation.run",
             Self::AutomationPause => "automation.pause",
             Self::AutomationResume => "automation.resume",
             Self::AutomationRename => "automation.rename",
@@ -240,6 +242,7 @@ impl ProductSurfaceCallId {
             "llm.codex.login" => Some(Self::LlmCodexLogin),
             "admin.user.create" => Some(Self::AdminUserCreate),
             "admin.user.delete_secret" => Some(Self::AdminUserDeleteSecret),
+            "automation.run" => Some(Self::AutomationRun),
             "automation.pause" => Some(Self::AutomationPause),
             "automation.resume" => Some(Self::AutomationResume),
             "automation.rename" => Some(Self::AutomationRename),
@@ -1839,6 +1842,18 @@ impl StubServices {
                     deleted: true,
                 })
             }
+            ProductSurfaceCallId::AutomationRun => {
+                let request: RebornAutomationRequest =
+                    serde_json::from_value(request.input).expect("input");
+                RecordedProductSurfaceCallResponse::json(RebornAutomationMutationResponse {
+                    updated: true,
+                    automation: Some(automation_info(
+                        request.automation_id.as_str(),
+                        "Running status",
+                        "*/5 * * * *",
+                    )),
+                })
+            }
             ProductSurfaceCallId::AutomationPause => {
                 let request: RebornAutomationRequest =
                     serde_json::from_value(request.input).expect("input");
@@ -3282,9 +3297,25 @@ async fn list_automations_omits_limits_and_forwards_none() {
 }
 
 #[tokio::test]
-async fn pause_and_resume_automation_dispatch_path_id_to_service() {
+async fn run_pause_and_resume_automation_dispatch_path_id_to_service() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
+
+    let run_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/automations/automation-alpha/run")
+                .body(Body::empty())
+                .expect("run request"),
+        )
+        .await
+        .expect("run oneshot");
+    assert_eq!(run_response.status(), StatusCode::OK);
+    let run_body = read_json(run_response).await;
+    assert_eq!(run_body["updated"], true);
+    assert_eq!(run_body["automation"]["automation_id"], "automation-alpha");
 
     let pause_response = router
         .clone()
@@ -3324,10 +3355,10 @@ async fn pause_and_resume_automation_dispatch_path_id_to_service() {
     );
 
     let calls = services.surface_calls.lock().expect("lock").clone();
-    assert_eq!(calls.len(), 2);
+    assert_eq!(calls.len(), 3);
     assert_eq!(
         calls[0].call_id,
-        ProductSurfaceCallId::AutomationPause.as_str()
+        ProductSurfaceCallId::AutomationRun.as_str()
     );
     assert_eq!(
         calls[0].input,
@@ -3335,12 +3366,51 @@ async fn pause_and_resume_automation_dispatch_path_id_to_service() {
     );
     assert_eq!(
         calls[1].call_id,
-        ProductSurfaceCallId::AutomationResume.as_str()
+        ProductSurfaceCallId::AutomationPause.as_str()
     );
     assert_eq!(
         calls[1].input,
         serde_json::json!({ "automation_id": "automation-alpha" })
     );
+    assert_eq!(
+        calls[2].call_id,
+        ProductSurfaceCallId::AutomationResume.as_str()
+    );
+    assert_eq!(
+        calls[2].input,
+        serde_json::json!({ "automation_id": "automation-alpha" })
+    );
+}
+
+#[tokio::test]
+async fn run_automation_conflict_maps_to_409() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_operation_response(Err(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Conflict,
+        kind: ProductSurfaceErrorKind::Conflict,
+        status_code: 409,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }));
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/automations/automation-alpha/run")
+                .body(Body::empty())
+                .expect("run request"),
+        )
+        .await
+        .expect("run oneshot");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "conflict");
+    assert_eq!(body["kind"], "conflict");
+    assert_eq!(body["retryable"], false);
 }
 
 #[tokio::test]

@@ -403,6 +403,9 @@ pub const PROJECT_MEMBER_REMOVE_CAPABILITY: ProductCapabilityDescriptor =
 pub const AUTOMATION_PAUSE_CAPABILITY_ID: &str = "builtin.automation_pause";
 pub const AUTOMATION_PAUSE_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(AUTOMATION_PAUSE_CAPABILITY_ID);
+pub const AUTOMATION_RUN_CAPABILITY_ID: &str = "builtin.automation_run";
+pub const AUTOMATION_RUN_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(AUTOMATION_RUN_CAPABILITY_ID);
 pub const AUTOMATION_RESUME_CAPABILITY_ID: &str = "builtin.automation_resume";
 pub const AUTOMATION_RESUME_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(AUTOMATION_RESUME_CAPABILITY_ID);
@@ -526,6 +529,11 @@ pub const AUTOMATION_PAUSE_COMMAND: ProductSurfaceCommandDescriptor<
     RebornAutomationRequest,
     RebornAutomationMutationResponse,
 > = ProductSurfaceCommandDescriptor::new(AUTOMATION_PAUSE_COMMAND_ID);
+pub const AUTOMATION_RUN_COMMAND_ID: &str = "automation.run";
+pub const AUTOMATION_RUN_COMMAND: ProductSurfaceCommandDescriptor<
+    RebornAutomationRequest,
+    RebornAutomationMutationResponse,
+> = ProductSurfaceCommandDescriptor::new(AUTOMATION_RUN_COMMAND_ID);
 pub const AUTOMATION_RESUME_COMMAND_ID: &str = "automation.resume";
 pub const AUTOMATION_RESUME_COMMAND: ProductSurfaceCommandDescriptor<
     RebornAutomationRequest,
@@ -1139,6 +1147,14 @@ pub trait AutomationProductService: Send + Sync {
         Err(automation_unavailable())
     }
 
+    async fn run_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
+        Err(automation_unavailable())
+    }
+
     async fn resume_automation(
         &self,
         _caller: ProductAgentBoundCaller,
@@ -1219,6 +1235,14 @@ impl AutomationProductService for UnsupportedAutomationProductService {
     }
 
     async fn pause_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
+        Err(automation_unavailable())
+    }
+
+    async fn run_automation(
         &self,
         _caller: ProductAgentBoundCaller,
         _automation_id: String,
@@ -5014,6 +5038,23 @@ where
         };
         self.automation_service
             .pause_automation(caller, automation_id)
+            .await
+    }
+
+    async fn run_automation(
+        &self,
+        caller: ProductSurfaceCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
+        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(ProductSurfaceError::from_status(
+                ProductSurfaceErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        self.automation_service
+            .run_automation(caller, automation_id)
             .await
     }
 

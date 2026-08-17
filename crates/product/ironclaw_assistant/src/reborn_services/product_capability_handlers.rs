@@ -32,6 +32,7 @@ pub(super) enum ProductCommandHandler {
     AdminUserCreate,
     AdminUserDeleteSecret,
     AutomationPause,
+    AutomationRun,
     AutomationResume,
     AutomationRename,
     AutomationDelete,
@@ -72,6 +73,7 @@ impl ProductCommandHandler {
             ADMIN_USER_CREATE_COMMAND_ID => Some(Self::AdminUserCreate),
             ADMIN_USER_DELETE_SECRET_COMMAND_ID => Some(Self::AdminUserDeleteSecret),
             AUTOMATION_PAUSE_COMMAND_ID => Some(Self::AutomationPause),
+            AUTOMATION_RUN_COMMAND_ID => Some(Self::AutomationRun),
             AUTOMATION_RESUME_COMMAND_ID => Some(Self::AutomationResume),
             AUTOMATION_RENAME_COMMAND_ID => Some(Self::AutomationRename),
             AUTOMATION_DELETE_COMMAND_ID => Some(Self::AutomationDelete),
@@ -284,6 +286,14 @@ impl ProductCommandHandler {
                         .await?,
                 )
             }
+            Self::AutomationRun => {
+                let request: RebornAutomationRequest = product_command_input(input)?;
+                command_output(
+                    services
+                        .run_automation(caller, request.automation_id)
+                        .await?,
+                )
+            }
             Self::AutomationResume => {
                 let request: RebornAutomationRequest = product_command_input(input)?;
                 command_output(
@@ -360,6 +370,7 @@ pub(super) enum ProductCapabilityHandler {
     ProjectMemberRemove,
     ThreadDelete,
     AutomationPause,
+    AutomationRun,
     AutomationResume,
     AutomationRename,
     AutomationDelete,
@@ -390,6 +401,7 @@ impl ProductCapabilityHandler {
             PROJECT_MEMBER_REMOVE_CAPABILITY_ID => Some(Self::ProjectMemberRemove),
             THREAD_DELETE_CAPABILITY_ID => Some(Self::ThreadDelete),
             AUTOMATION_PAUSE_CAPABILITY_ID => Some(Self::AutomationPause),
+            AUTOMATION_RUN_CAPABILITY_ID => Some(Self::AutomationRun),
             AUTOMATION_RESUME_CAPABILITY_ID => Some(Self::AutomationResume),
             AUTOMATION_RENAME_CAPABILITY_ID => Some(Self::AutomationRename),
             AUTOMATION_DELETE_CAPABILITY_ID => Some(Self::AutomationDelete),
@@ -421,6 +433,7 @@ impl ProductCapabilityHandler {
             Self::ProjectMemberRemove => "project member removed",
             Self::ThreadDelete => "thread deleted",
             Self::AutomationPause => "automation paused",
+            Self::AutomationRun => "automation started",
             Self::AutomationResume => "automation resumed",
             Self::AutomationRename => "automation renamed",
             Self::AutomationDelete => "automation deleted",
@@ -543,6 +556,13 @@ impl ProductCapabilityHandler {
                     .await?;
                 Ok(())
             }
+            Self::AutomationRun => {
+                let request: RebornAutomationRequest = product_command_input(input)?;
+                services
+                    .run_automation(caller, request.automation_id)
+                    .await?;
+                Ok(())
+            }
             Self::AutomationResume => {
                 let request: RebornAutomationRequest = product_command_input(input)?;
                 services
@@ -661,6 +681,7 @@ mod tests {
             PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
             THREAD_DELETE_CAPABILITY_ID,
             AUTOMATION_PAUSE_CAPABILITY_ID,
+            AUTOMATION_RUN_CAPABILITY_ID,
             AUTOMATION_RESUME_CAPABILITY_ID,
             AUTOMATION_RENAME_CAPABILITY_ID,
             AUTOMATION_DELETE_CAPABILITY_ID,
@@ -778,6 +799,10 @@ mod tests {
             (
                 AUTOMATION_PAUSE_COMMAND_ID,
                 ProductCommandHandler::AutomationPause,
+            ),
+            (
+                AUTOMATION_RUN_COMMAND_ID,
+                ProductCommandHandler::AutomationRun,
             ),
             (
                 AUTOMATION_RESUME_COMMAND_ID,

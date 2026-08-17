@@ -66,9 +66,9 @@ use ironclaw_host_runtime::{
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
     TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
-    ToolCallHttpEgress, TriggerCreateHook, UserSandboxProcessPort, VisibleCapabilityAccess,
-    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
-    builtin_first_party_handlers_for_process_backend,
+    TRIGGER_RUN_CAPABILITY_ID, ToolCallHttpEgress, TriggerCreateHook, UserSandboxProcessPort,
+    VisibleCapabilityAccess, VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID,
+    builtin_first_party_handlers, builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
     builtin_first_party_package_for_process_backend, native_memory_first_party_package,
     register_native_memory_tools,
@@ -339,6 +339,7 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
         HTTP_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
         TRIGGER_CREATE_CAPABILITY_ID,
+        TRIGGER_RUN_CAPABILITY_ID,
         OUTBOUND_DELIVER_CAPABILITY_ID,
     ] {
         assert_eq!(
@@ -10326,6 +10327,7 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRIGGER_REMOVE_CAPABILITY_ID,
         TRIGGER_PAUSE_CAPABILITY_ID,
         TRIGGER_RESUME_CAPABILITY_ID,
+        TRIGGER_RUN_CAPABILITY_ID,
     ]
 }
 

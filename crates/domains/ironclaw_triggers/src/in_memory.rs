@@ -336,6 +336,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
                 request.tenant_id,
                 request.trigger_id,
                 request.fire_slot,
+                TriggerSourceKind::Schedule,
                 None,
                 request.now,
             ),
@@ -347,6 +348,53 @@ impl TriggerRepository for InMemoryTriggerRepository {
         }))
     }
 
+    async fn claim_manual_fire(
+        &self,
+        request: ClaimManualFireRequest,
+    ) -> Result<ClaimDueFireOutcome, TriggerError> {
+        let mut state = self.lock_state()?;
+        let key = TriggerRepositoryKey::new(&request.tenant_id, request.trigger_id);
+        let Some(record) = state.records.get_mut(&key) else {
+            return Ok(ClaimDueFireOutcome::NotFound);
+        };
+        if record.state == TriggerState::Paused {
+            return Ok(ClaimDueFireOutcome::Paused {
+                record: record.clone(),
+            });
+        }
+        if record.state != TriggerState::Scheduled {
+            return Ok(ClaimDueFireOutcome::NotDue {
+                record: record.clone(),
+            });
+        }
+        if record.has_active_fire() {
+            return Ok(ClaimDueFireOutcome::AlreadyActive {
+                active_fire_slot: record.active_fire_slot,
+                active_run_ref: record.active_run_ref,
+            });
+        }
+
+        record.active_fire_slot = Some(request.now);
+        record.active_run_ref = None;
+        let record = record.clone();
+        state.runs.insert(
+            TriggerRunRepositoryKey::new(&request.tenant_id, request.trigger_id, request.now),
+            TriggerRunRecord::running(
+                request.tenant_id,
+                request.trigger_id,
+                request.now,
+                TriggerSourceKind::Manual,
+                None,
+                request.now,
+            ),
+        );
+        prune_run_history_locked(&mut state, &record.tenant_id, record.trigger_id);
+        Ok(ClaimDueFireOutcome::Claimed(ClaimedTriggerFire {
+            record,
+            fire_slot: request.now,
+        }))
+    }
+
     async fn mark_fire_accepted(
         &self,
         request: FireAcceptedRequest,
@@ -355,12 +403,14 @@ impl TriggerRepository for InMemoryTriggerRepository {
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
-            |record| {
+            |record, source| {
                 if let Some(active_run_ref) = record.active_run_ref {
                     reject_run_ref_rewrite(active_run_ref, request.run_id)?;
                     return Ok(());
                 }
-                if let Some(nra) = record.schedule.next_slot_after(request.fire_slot)? {
+                if source == TriggerSourceKind::Schedule
+                    && let Some(nra) = record.schedule.next_slot_after(request.fire_slot)?
+                {
                     reject_non_future_next_run_at(request.fire_slot, nra)?;
                     record.next_run_at = nra;
                 }
@@ -394,12 +444,14 @@ impl TriggerRepository for InMemoryTriggerRepository {
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
-            |record| {
+            |record, source| {
                 if let Some(active_run_ref) = record.active_run_ref {
                     reject_run_ref_rewrite(active_run_ref, request.original_run_id)?;
                     return Ok(());
                 }
-                if let Some(nra) = record.schedule.next_slot_after(request.fire_slot)? {
+                if source == TriggerSourceKind::Schedule
+                    && let Some(nra) = record.schedule.next_slot_after(request.fire_slot)?
+                {
                     reject_non_future_next_run_at(request.fire_slot, nra)?;
                     record.next_run_at = nra;
                 }
@@ -433,9 +485,10 @@ impl TriggerRepository for InMemoryTriggerRepository {
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
-            |record| {
+            |record, source| {
                 reject_failed_result_after_active_run(record.active_run_ref)?;
-                if matches!(record.schedule, TriggerSchedule::Cron { .. })
+                if source == TriggerSourceKind::Schedule
+                    && matches!(record.schedule, TriggerSchedule::Cron { .. })
                     && record.next_run_at > request.fire_slot
                 {
                     return Err(TriggerError::InvalidRecord {
@@ -472,7 +525,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
-            |record| {
+            |record, _source| {
                 reject_failed_result_after_active_run(record.active_run_ref)?;
                 reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
                 record.last_status = Some(TriggerRunStatus::Error);
@@ -504,7 +557,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
-            |record| {
+            |record, _source| {
                 reject_failed_result_after_active_run(record.active_run_ref)?;
                 record.state = TriggerState::Completed;
                 record.last_status = Some(TriggerRunStatus::Error);
@@ -533,6 +586,12 @@ impl TriggerRepository for InMemoryTriggerRepository {
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         let mut state = self.lock_state()?;
         let key = TriggerRepositoryKey::new(&request.tenant_id, request.trigger_id);
+        let run_key =
+            TriggerRunRepositoryKey::new(&request.tenant_id, request.trigger_id, request.fire_slot);
+        let source = state
+            .runs
+            .get(&run_key)
+            .map_or(TriggerSourceKind::Schedule, |run| run.source);
         let Some(record) = state.records.get_mut(&key) else {
             return Ok(None);
         };
@@ -541,7 +600,11 @@ impl TriggerRepository for InMemoryTriggerRepository {
         {
             return Ok(None);
         }
-        let next = record.schedule.next_slot_after(request.fire_slot)?;
+        let next = if source == TriggerSourceKind::Schedule {
+            record.schedule.next_slot_after(request.fire_slot)?
+        } else {
+            Some(record.next_run_at)
+        };
         record.active_fire_slot = None;
         record.active_run_ref = None;
         if let Some(t) = next {
@@ -556,11 +619,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
         let completed_at = Utc::now();
         state
             .runs
-            .entry(TriggerRunRepositoryKey::new(
-                &request.tenant_id,
-                request.trigger_id,
-                request.fire_slot,
-            ))
+            .entry(run_key)
             .and_modify(|run| {
                 run.run_id = Some(request.run_id);
                 run.status = request.status;
@@ -571,6 +630,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
                     request.tenant_id.clone(),
                     request.trigger_id,
                     request.fire_slot,
+                    TriggerSourceKind::Schedule,
                     Some(request.run_id),
                     completed_at,
                 );
@@ -674,17 +734,23 @@ impl InMemoryTriggerRepository {
         tenant_id: &TenantId,
         trigger_id: TriggerId,
         fire_slot: Timestamp,
-        update: impl FnOnce(&mut TriggerRecord) -> Result<(), TriggerError>,
+        update: impl FnOnce(&mut TriggerRecord, TriggerSourceKind) -> Result<(), TriggerError>,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         let mut state = self.lock_state()?;
         let key = TriggerRepositoryKey::new(tenant_id, trigger_id);
+        let run_source = state
+            .runs
+            .get(&TriggerRunRepositoryKey::new(
+                tenant_id, trigger_id, fire_slot,
+            ))
+            .map_or(TriggerSourceKind::Schedule, |run| run.source);
         let Some(record) = state.records.get_mut(&key) else {
             return Ok(None);
         };
         if record.active_fire_slot != Some(fire_slot) {
             return Ok(None);
         }
-        update(record)?;
+        update(record, run_source)?;
         Ok(Some(record.clone()))
     }
 
@@ -711,6 +777,7 @@ impl InMemoryTriggerRepository {
             tenant_id.clone(),
             trigger_id,
             fire_slot,
+            existing.map_or(TriggerSourceKind::Schedule, |run| run.source),
             Some(run_id),
             submitted_at,
         );
@@ -746,6 +813,7 @@ impl InMemoryTriggerRepository {
                     tenant_id.clone(),
                     trigger_id,
                     fire_slot,
+                    TriggerSourceKind::Schedule,
                     run_id,
                     completed_at,
                 );

@@ -31,24 +31,25 @@ use ironclaw_assistant::{
     ADMIN_USER_SET_STATUS_CAPABILITY_ID, ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW,
     ADMIN_USERS_VIEW, AUTOMATION_DELETE_CAPABILITY_ID, AUTOMATION_LIST_DEFAULT_PAGE_SIZE,
     AUTOMATION_LIST_MAX_PAGE_SIZE, AUTOMATION_PAUSE_CAPABILITY_ID, AUTOMATION_RENAME_CAPABILITY_ID,
-    AUTOMATION_RESUME_CAPABILITY_ID, AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE,
-    AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, AUTOMATIONS_VIEW,
-    ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
-    ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
-    AutomationListRequest, AutomationProductService, ChannelConnectionRequirement,
-    CommandResultView, EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID,
-    EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, EmptyProductCommandInput,
-    ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-    ExtensionCredentialSubmitRequest, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW,
-    FilesystemBrowseReader, FsMount, GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY_ID,
-    LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY_ID,
-    LOGS_VIEW, LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
-    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
-    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
-    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
-    ListPendingAuthInteractionsResponse, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    AUTOMATION_RESUME_CAPABILITY_ID, AUTOMATION_RUN_CAPABILITY_ID,
+    AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
+    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, AUTOMATIONS_VIEW, ApprovalInteractionActionView,
+    ApprovalInteractionDecision, ApprovalInteractionScope, ApprovalInteractionService,
+    AuthInteractionDecision, AuthInteractionService, AutomationListRequest,
+    AutomationProductService, ChannelConnectionRequirement, CommandResultView,
+    EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
+    EXTENSIONS_VIEW, EmptyProductCommandInput, ExtensionCredentialSetupService,
+    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, FS_LIST_VIEW,
+    FS_MOUNTS_VIEW, FS_STAT_VIEW, FilesystemBrowseReader, FsMount, GLOBAL_AUTO_APPROVE_VIEW,
+    LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
+    LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW, LifecycleChannelDirections,
+    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
+    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+    LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
+    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse,
+    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
     OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
     OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
     OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
@@ -1288,6 +1289,7 @@ struct ListAutomationCall {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AutomationMutationAction {
+    Run,
     Pause,
     Resume,
     Rename { name: AutomationName },
@@ -1367,6 +1369,30 @@ impl AutomationProductService for RecordingAutomationService {
             updated: true,
             automation: Some(automation_info(
                 "trigger-paused",
+                "Daily status",
+                "0 9 * * *",
+                None,
+            )),
+        })
+    }
+
+    async fn run_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
+        self.mutation_calls
+            .lock()
+            .expect("lock")
+            .push(AutomationMutationCall {
+                caller,
+                automation_id,
+                action: AutomationMutationAction::Run,
+            });
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: Some(automation_info(
+                "trigger-running",
                 "Daily status",
                 "0 9 * * *",
                 None,
@@ -7830,6 +7856,31 @@ async fn pause_automation_rejects_missing_agent_id() {
 }
 
 #[tokio::test]
+async fn run_automation_rejects_missing_agent_id() {
+    let automation_service = Arc::new(RecordingAutomationService::default());
+    let services = session_services(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_service(automation_service.clone());
+
+    let err = invoke_json_product_capability(
+        &services,
+        caller_without_agent(),
+        AUTOMATION_RUN_CAPABILITY_ID,
+        RebornAutomationRequest {
+            automation_id: "trigger-alpha".to_string(),
+        },
+    )
+    .await
+    .expect_err("missing agent id should fail closed");
+
+    assert_eq!(err.code, ProductSurfaceErrorCode::InvalidRequest);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(automation_service.mutation_calls().len(), 0);
+}
+
+#[tokio::test]
 async fn resume_automation_rejects_missing_agent_id() {
     let automation_service = Arc::new(RecordingAutomationService::default());
     let services = session_services(
@@ -7931,6 +7982,21 @@ async fn automation_mutations_forward_caller_scope_to_product_service() {
         Resolution::Done(outcome) if outcome.verdict.is_success()
     ));
 
+    let run = invoke_json_product_capability(
+        &services,
+        caller.clone(),
+        AUTOMATION_RUN_CAPABILITY_ID,
+        RebornAutomationRequest {
+            automation_id: "trigger-alpha".to_string(),
+        },
+    )
+    .await
+    .expect("run automation");
+    assert!(matches!(
+        run,
+        Resolution::Done(outcome) if outcome.verdict.is_success()
+    ));
+
     let resume = invoke_json_product_capability(
         &services,
         caller.clone(),
@@ -7978,36 +8044,42 @@ async fn automation_mutations_forward_caller_scope_to_product_service() {
     ));
 
     let calls = automation_service.mutation_calls();
-    assert_eq!(calls.len(), 4);
+    assert_eq!(calls.len(), 5);
     assert_eq!(calls[0].action, AutomationMutationAction::Pause);
     assert_eq!(calls[0].automation_id, "trigger-alpha");
     assert_eq!(calls[0].caller.tenant_id, caller.tenant_id);
     assert_eq!(calls[0].caller.user_id, caller.user_id);
     assert_eq!(calls[0].caller.agent_id, expected_agent_id);
     assert_eq!(calls[0].caller.project_id, caller.project_id);
-    assert_eq!(calls[1].action, AutomationMutationAction::Resume);
+    assert_eq!(calls[1].action, AutomationMutationAction::Run);
     assert_eq!(calls[1].automation_id, "trigger-alpha");
     assert_eq!(calls[1].caller.tenant_id, caller.tenant_id);
     assert_eq!(calls[1].caller.user_id, caller.user_id);
     assert_eq!(calls[1].caller.agent_id, expected_agent_id);
     assert_eq!(calls[1].caller.project_id, caller.project_id);
-    assert_eq!(
-        calls[2].action,
-        AutomationMutationAction::Rename {
-            name: AutomationName::new("Renamed status").expect("valid automation name")
-        }
-    );
+    assert_eq!(calls[2].action, AutomationMutationAction::Resume);
     assert_eq!(calls[2].automation_id, "trigger-alpha");
     assert_eq!(calls[2].caller.tenant_id, caller.tenant_id);
     assert_eq!(calls[2].caller.user_id, caller.user_id);
     assert_eq!(calls[2].caller.agent_id, expected_agent_id);
     assert_eq!(calls[2].caller.project_id, caller.project_id);
-    assert_eq!(calls[3].action, AutomationMutationAction::Delete);
+    assert_eq!(
+        calls[3].action,
+        AutomationMutationAction::Rename {
+            name: AutomationName::new("Renamed status").expect("valid automation name")
+        }
+    );
     assert_eq!(calls[3].automation_id, "trigger-alpha");
     assert_eq!(calls[3].caller.tenant_id, caller.tenant_id);
     assert_eq!(calls[3].caller.user_id, caller.user_id);
     assert_eq!(calls[3].caller.agent_id, expected_agent_id);
     assert_eq!(calls[3].caller.project_id, caller.project_id);
+    assert_eq!(calls[4].action, AutomationMutationAction::Delete);
+    assert_eq!(calls[4].automation_id, "trigger-alpha");
+    assert_eq!(calls[4].caller.tenant_id, caller.tenant_id);
+    assert_eq!(calls[4].caller.user_id, caller.user_id);
+    assert_eq!(calls[4].caller.agent_id, expected_agent_id);
+    assert_eq!(calls[4].caller.project_id, caller.project_id);
 }
 
 #[tokio::test]
@@ -8026,6 +8098,13 @@ async fn automation_mutations_are_available_as_product_capabilities() {
                 automation_id: "trigger-alpha".to_string(),
             })
             .expect("pause input"),
+        ),
+        (
+            AUTOMATION_RUN_CAPABILITY_ID,
+            serde_json::to_value(RebornAutomationRequest {
+                automation_id: "trigger-alpha".to_string(),
+            })
+            .expect("run input"),
         ),
         (
             AUTOMATION_RESUME_CAPABILITY_ID,
@@ -8066,16 +8145,17 @@ async fn automation_mutations_are_available_as_product_capabilities() {
     }
 
     let calls = automation_service.mutation_calls();
-    assert_eq!(calls.len(), 4);
+    assert_eq!(calls.len(), 5);
     assert_eq!(calls[0].action, AutomationMutationAction::Pause);
-    assert_eq!(calls[1].action, AutomationMutationAction::Resume);
+    assert_eq!(calls[1].action, AutomationMutationAction::Run);
+    assert_eq!(calls[2].action, AutomationMutationAction::Resume);
     assert_eq!(
-        calls[2].action,
+        calls[3].action,
         AutomationMutationAction::Rename {
             name: AutomationName::new("Renamed status").expect("valid automation name")
         }
     );
-    assert_eq!(calls[3].action, AutomationMutationAction::Delete);
+    assert_eq!(calls[4].action, AutomationMutationAction::Delete);
 }
 
 #[tokio::test]

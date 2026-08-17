@@ -62,7 +62,7 @@ alone constructs authenticated-caller evidence.
 
 - **The route table is a contract** — add a route only as handler +
   `webui_v2_routes()` entry (`tests/webui_v2_descriptors_contract.rs`).
-- **The product residue is pinned** at 100 symbols, exact-match/shrink-only:
+- **The product residue is pinned** at 104 symbols, exact-match/shrink-only:
   `reborn_transport_product_boundary.rs` (`WEBUI_PRODUCT_SYMBOL_BASELINE`).
 - **`CONTRACT.md` here is the module spec and is gate-pinned** — the 19-owner
   `handlers.rs` charter map is enforced by

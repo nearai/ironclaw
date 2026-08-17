@@ -233,7 +233,7 @@ impl TriggerPollerWorker {
             return Ok(None);
         }
 
-        self.process_claimed_fire(record, fire_slot, now)
+        self.process_claimed_fire(record, fire_slot, now, run.source)
             .await
             .map(Some)
     }

@@ -590,6 +590,7 @@ pub struct RebornRuntime {
         Arc<dyn ironclaw_product_contracts::project_service::ProjectService>,
     pub(crate) diagnostic_store: Arc<dyn ironclaw_assistant::inspector_store::DiagnosticStorePort>,
     pub(crate) trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    pub(crate) trigger_manual_fire_runner: Arc<dyn ironclaw_triggers::TriggerManualFireRunner>,
     #[cfg(any(test, feature = "test-support"))]
     #[allow(
         dead_code,
@@ -4315,6 +4316,14 @@ pub(crate) async fn build_runtime_with_resource_governor(
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("trigger poller could not be started: {error}"),
         })?;
+        if let Some(handle) = trigger_poller_handle.as_ref() {
+            services
+                .trigger_manual_fire_runner
+                .bind(handle.manual_fire_runner())
+                .map_err(|error| RebornRuntimeError::InvalidArgument {
+                    reason: format!("manual trigger fire runner could not be bound: {error}"),
+                })?;
+        }
     } else {
         trigger_poller_handle = None;
         runtime_post_submit_hook_slot = None;
@@ -4501,6 +4510,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         project_service,
         diagnostic_store,
         trigger_repository: trigger_repository.clone(),
+        trigger_manual_fire_runner: services.trigger_manual_fire_runner.clone(),
         #[cfg(any(test, feature = "test-support"))]
         trigger_process_lifecycle_source: Arc::clone(&services.trigger_process_lifecycle_source),
         broadcast_budget_event_sink,

@@ -38,7 +38,9 @@ function MetaItem({ label, value, tone = "muted" }) {
 export function AutomationDetailPanel({
   automation,
   isMutating = false,
+  schedulerEnabled = true,
   onPauseAutomation,
+  onRunAutomation,
   onResumeAutomation,
   onRenameAutomation,
   onDeleteAutomation,
@@ -72,6 +74,8 @@ export function AutomationDetailPanel({
   const canResume = automation.state === "paused";
   const canPause = automation.state === "active" || automation.state === "scheduled";
   const canRename = Boolean(onRenameAutomation);
+  const runNowLabel = t("automations.action.runNow");
+  const runNowTitle = `${runNowLabel}: ${automation.display_name}`;
   const actionLabel = canResume ? t("automations.action.resume") : t("automations.action.pause");
   const actionTitle = `${actionLabel}: ${automation.display_name}`;
   const renameTitle = `${t("automations.rename.action")}: ${automation.display_name}`;
@@ -216,6 +220,19 @@ export function AutomationDetailPanel({
               tone={automation.primary_status_tone}
               label={automation.primary_status_label}
             />
+            <Button
+              type="button"
+              variant="primary"
+              size="icon-sm"
+              data-testid="automation-run-now-button"
+              data-automation-id={automation.automation_id}
+              aria-label={runNowTitle}
+              title={runNowTitle}
+              disabled={isMutating || automation.has_active_fire || !schedulerEnabled}
+              onClick={() => onRunAutomation?.(automation.automation_id)}
+            >
+              <Icon name="play" className="h-4 w-4" />
+            </Button>
             {(canPause || canResume) &&
             (
               <Button

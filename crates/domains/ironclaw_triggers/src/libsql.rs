@@ -1,10 +1,11 @@
 use crate::{
-    ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
-    ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
-    FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerError, TriggerId, TriggerRecord,
-    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
-    TriggerSchedule, TriggerState, reject_failed_result_after_active_run,
-    reject_non_future_next_run_at, reject_run_ref_rewrite, trigger_run_history_status_text,
+    ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimManualFireRequest,
+    ClaimedTriggerFire, ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest,
+    FireReplayedRequest, FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerError,
+    TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
+    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
+    trigger_run_history_status_text,
 };
 // arch-exempt: large_file, cancellation-safe transactions stay with trigger backend, plan #6815
 use crate::AutomationName;
@@ -62,15 +63,16 @@ const SCHEDULE_AT_COL: usize = 19;
 const DELIVERY_TARGET_COL: usize = 20;
 const EXECUTION_SPEC_JSON_COL: usize = 21;
 const TRIGGER_RUN_COLUMNS: &str = "\
-    tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at";
+    tenant_id, trigger_id, fire_slot, source, run_id, thread_id, status, submitted_at, completed_at";
 const RUN_TENANT_ID_COL: usize = 0;
 const RUN_TRIGGER_ID_COL: usize = 1;
 const RUN_FIRE_SLOT_COL: usize = 2;
-const RUN_ID_COL: usize = 3;
-const RUN_THREAD_ID_COL: usize = 4;
-const RUN_STATUS_COL: usize = 5;
-const RUN_SUBMITTED_AT_COL: usize = 6;
-const RUN_COMPLETED_AT_COL: usize = 7;
+const RUN_SOURCE_COL: usize = 3;
+const RUN_ID_COL: usize = 4;
+const RUN_THREAD_ID_COL: usize = 5;
+const RUN_STATUS_COL: usize = 6;
+const RUN_SUBMITTED_AT_COL: usize = 7;
+const RUN_COMPLETED_AT_COL: usize = 8;
 
 /// Durable libSQL trigger repository.
 pub struct LibSqlTriggerRepository {
@@ -170,6 +172,7 @@ impl LibSqlTriggerRepository {
                         tenant_id TEXT NOT NULL,
                         trigger_id TEXT NOT NULL,
                         fire_slot TEXT NOT NULL,
+                        source TEXT NOT NULL DEFAULT 'schedule',
                         run_id TEXT,
                         thread_id TEXT NOT NULL,
                         status TEXT NOT NULL,
@@ -182,6 +185,20 @@ impl LibSqlTriggerRepository {
             )
             .await
             .map_err(|error| backend_error("create trigger_run_history table", error))?;
+            if let Err(error) = conn
+                .execute(
+                    &format!(
+                        "ALTER TABLE {TRIGGER_RUN_TABLE} ADD COLUMN source TEXT NOT NULL DEFAULT 'schedule'"
+                    ),
+                    (),
+                )
+                .await
+            {
+                let msg = error.to_string();
+                if !msg.contains("duplicate column") {
+                    return Err(backend_error("add trigger run source column", error));
+                }
+            }
             conn.execute(
                 &format!(
                     "CREATE INDEX IF NOT EXISTS trigger_run_history_trigger_fire_slot_idx
@@ -335,6 +352,7 @@ impl LibSqlTriggerRepository {
                         tenant_id TEXT NOT NULL,
                         trigger_id TEXT NOT NULL,
                         fire_slot TEXT NOT NULL,
+                        source TEXT NOT NULL DEFAULT 'schedule',
                         run_id TEXT,
                         thread_id TEXT,
                         status TEXT NOT NULL,
@@ -343,7 +361,7 @@ impl LibSqlTriggerRepository {
                         PRIMARY KEY (tenant_id, trigger_id, fire_slot)
                     );
                     INSERT INTO {TRIGGER_RUN_TABLE}_new
-                        SELECT tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at
+                        SELECT tenant_id, trigger_id, fire_slot, source, run_id, thread_id, status, submitted_at, completed_at
                         FROM {TRIGGER_RUN_TABLE};
                     DROP TABLE {TRIGGER_RUN_TABLE};
                     ALTER TABLE {TRIGGER_RUN_TABLE}_new RENAME TO {TRIGGER_RUN_TABLE};
@@ -842,6 +860,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                     request.tenant_id.clone(),
                     request.trigger_id,
                     request.fire_slot,
+                    TriggerSourceKind::Schedule,
                     None,
                     request.now,
                 ),
@@ -882,6 +901,83 @@ impl TriggerRepository for LibSqlTriggerRepository {
         // A competing poller can claim and clear the fire before this
         // diagnostic read. The row may be due again, but this attempt did not
         // claim it; let a later poll cycle observe it normally.
+        Ok(ClaimDueFireOutcome::NotDue { record })
+    }
+
+    async fn claim_manual_fire(
+        &self,
+        request: ClaimManualFireRequest,
+    ) -> Result<ClaimDueFireOutcome, TriggerError> {
+        let conn = self.write_connection().await?;
+        let fire_slot = fmt_ts(&request.now);
+        let transaction = begin_immediate(&conn, "begin manual trigger fire claim").await?;
+        let claim_result = async {
+            let mut rows = transaction
+                .query(
+                    &format!(
+                        "UPDATE {TRIGGER_TABLE}
+                         SET active_fire_slot = ?4, active_run_ref = NULL
+                         WHERE tenant_id = ?1 AND trigger_id = ?2 AND state = ?3
+                           AND active_fire_slot IS NULL AND active_run_ref IS NULL
+                         RETURNING {TRIGGER_COLUMNS}"
+                    ),
+                    params![
+                        request.tenant_id.as_str(),
+                        request.trigger_id.to_string(),
+                        crate::state_text_codec(TriggerState::Scheduled),
+                        fire_slot,
+                    ],
+                )
+                .await
+                .map_err(|error| backend_error("claim manual trigger fire", error))?;
+            let Some(record) =
+                returned_record(&mut rows, "read claimed manual trigger fire").await?
+            else {
+                return Ok(None);
+            };
+            upsert_run_history(
+                &transaction,
+                &TriggerRunRecord::running(
+                    request.tenant_id.clone(),
+                    request.trigger_id,
+                    request.now,
+                    TriggerSourceKind::Manual,
+                    None,
+                    request.now,
+                ),
+            )
+            .await?;
+            prune_run_history(&transaction, &request.tenant_id, request.trigger_id).await?;
+            Ok(Some(record))
+        }
+        .await;
+        match claim_result {
+            Ok(Some(record)) => {
+                commit(transaction, "commit manual trigger fire claim").await?;
+                return Ok(ClaimDueFireOutcome::Claimed(ClaimedTriggerFire {
+                    record,
+                    fire_slot: request.now,
+                }));
+            }
+            Ok(None) => rollback(transaction, "roll back missed manual trigger fire claim").await?,
+            Err(error) => return Err(error),
+        }
+        let Some(record) = fetch_record(&conn, &request.tenant_id, request.trigger_id).await?
+        else {
+            return Ok(ClaimDueFireOutcome::NotFound);
+        };
+        if record.state == TriggerState::Paused {
+            return Ok(ClaimDueFireOutcome::Paused { record });
+        }
+        if record.state != TriggerState::Scheduled {
+            return Ok(ClaimDueFireOutcome::NotDue { record });
+        }
+        if record.has_active_fire() {
+            return Ok(ClaimDueFireOutcome::AlreadyActive {
+                active_fire_slot: record.active_fire_slot,
+                active_run_ref: record.active_run_ref,
+            });
+        }
         Ok(ClaimDueFireOutcome::NotDue { record })
     }
 
@@ -944,7 +1040,12 @@ impl TriggerRepository for LibSqlTriggerRepository {
             return Ok(None);
         }
         reject_failed_result_after_active_run(record.active_run_ref)?;
-        if matches!(record.schedule, TriggerSchedule::Cron { .. }) && record.next_run_at > fire_slot
+        let source = fetch_run_source(&conn, &tenant_id, trigger_id, fire_slot)
+            .await?
+            .unwrap_or(TriggerSourceKind::Schedule);
+        if source == TriggerSourceKind::Schedule
+            && matches!(record.schedule, TriggerSchedule::Cron { .. })
+            && record.next_run_at > fire_slot
         {
             return Err(TriggerError::InvalidRecord {
                 kind: crate::TriggerRecordValidationKind::Other,
@@ -968,7 +1069,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                            AND trigger_id = ?2
                            AND active_fire_slot = ?4
                            AND active_run_ref IS NULL
-                           AND next_run_at <= ?4
+                           AND (?5 = 'manual' OR next_run_at <= ?4)
                          RETURNING {TRIGGER_COLUMNS}"
                     ),
                     params![
@@ -976,6 +1077,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                         trigger_id.to_string(),
                         last_status,
                         fire_slot_text,
+                        crate::source_kind_text_codec(source),
                     ],
                 )
                 .await
@@ -1191,8 +1293,20 @@ impl TriggerRepository for LibSqlTriggerRepository {
             {
                 return Ok(None);
             }
-            // Compute new state: None from next_slot_after → Completed, Some → preserve current state.
-            let next_slot = current.schedule.next_slot_after(request.fire_slot)?;
+            let source = fetch_run_source(
+                &transaction,
+                &request.tenant_id,
+                request.trigger_id,
+                request.fire_slot,
+            )
+            .await?
+            .unwrap_or(TriggerSourceKind::Schedule);
+            // Manual completion must not consume a once trigger or alter cadence.
+            let next_slot = if source == TriggerSourceKind::Schedule {
+                current.schedule.next_slot_after(request.fire_slot)?
+            } else {
+                Some(current.next_run_at)
+            };
             let new_state = if next_slot.is_none() {
                 crate::state_text_codec(TriggerState::Completed)
             } else {
@@ -1638,7 +1752,19 @@ async fn mark_successful_fire_result(
             reject_run_ref_rewrite(active_run_ref, update.run_id)?;
             return Ok(Some(current));
         }
-        let next_run_at = current.schedule.next_slot_after(update.fire_slot)?;
+        let source = fetch_run_source(
+            &transaction,
+            update.tenant_id,
+            update.trigger_id,
+            update.fire_slot,
+        )
+        .await?
+        .unwrap_or(TriggerSourceKind::Schedule);
+        let next_run_at = if source == TriggerSourceKind::Schedule {
+            current.schedule.next_slot_after(update.fire_slot)?
+        } else {
+            None
+        };
         if let Some(nra) = next_run_at {
             reject_non_future_next_run_at(update.fire_slot, nra)?;
         }
@@ -1708,6 +1834,7 @@ async fn mark_successful_fire_result(
             update.tenant_id.clone(),
             update.trigger_id,
             update.fire_slot,
+            TriggerSourceKind::Schedule,
             Some(update.run_id),
             record.last_run_at.unwrap_or(update.result_at),
         );
@@ -1761,6 +1888,7 @@ fn row_to_run_record(row: &libsql::Row) -> Result<TriggerRunRecord, TriggerError
         &required_text(row, RUN_FIRE_SLOT_COL, "fire_slot")?,
         "fire_slot",
     )?;
+    let source = crate::parse_source_kind_codec(&required_text(row, RUN_SOURCE_COL, "source")?)?;
     let run_id = optional_text(row, RUN_ID_COL, "run_id")?
         .map(|value| parse_turn_run_id_with_field(&value, "run_id"))
         .transpose()?;
@@ -1782,12 +1910,43 @@ fn row_to_run_record(row: &libsql::Row) -> Result<TriggerRunRecord, TriggerError
         tenant_id,
         trigger_id,
         fire_slot,
+        source,
         run_id,
         thread_id,
         status,
         submitted_at,
         completed_at,
     })
+}
+
+async fn fetch_run_source(
+    conn: &libsql::Connection,
+    tenant_id: &TenantId,
+    trigger_id: TriggerId,
+    fire_slot: Timestamp,
+) -> Result<Option<TriggerSourceKind>, TriggerError> {
+    let mut rows = conn
+        .query(
+            &format!(
+                "SELECT source FROM {TRIGGER_RUN_TABLE}
+                 WHERE tenant_id = ?1 AND trigger_id = ?2 AND fire_slot = ?3"
+            ),
+            params![
+                tenant_id.as_str(),
+                trigger_id.to_string(),
+                fmt_ts(&fire_slot)
+            ],
+        )
+        .await
+        .map_err(|error| backend_error("read claimed trigger fire source", error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| backend_error("read claimed trigger fire source row", error))?
+    else {
+        return Ok(None);
+    };
+    crate::parse_source_kind_codec(&required_text(&row, 0, "source")?).map(Some)
 }
 async fn upsert_run_history(
     conn: &libsql::Connection,
@@ -1796,8 +1955,8 @@ async fn upsert_run_history(
     conn.execute(
         &format!(
             "INSERT INTO {TRIGGER_RUN_TABLE} (
-                tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                tenant_id, trigger_id, fire_slot, source, run_id, thread_id, status, submitted_at, completed_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT (tenant_id, trigger_id, fire_slot) DO UPDATE SET
                 run_id = excluded.run_id,
                 thread_id = COALESCE(excluded.thread_id, {TRIGGER_RUN_TABLE}.thread_id),
@@ -1809,6 +1968,7 @@ async fn upsert_run_history(
             run.tenant_id.as_str(),
             run.trigger_id.to_string(),
             fmt_ts(&run.fire_slot),
+            crate::source_kind_text_codec(run.source),
             opt_turn_run_id(run.run_id.as_ref()),
             run.thread_id.as_ref().map(|t| t.as_str()),
             trigger_run_history_status_text(run.status),
@@ -1843,11 +2003,12 @@ async fn complete_run_history(
     completed_at: Timestamp,
 ) -> Result<(), TriggerError> {
     let run_id_value = opt_turn_run_id(run_id.as_ref());
+    let source = crate::source_kind_text_codec(TriggerSourceKind::Schedule);
     conn.execute(
         &format!(
             "INSERT INTO {TRIGGER_RUN_TABLE} (
-                tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at
-            ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7)
+                tenant_id, trigger_id, fire_slot, source, run_id, thread_id, status, submitted_at, completed_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8)
             ON CONFLICT (tenant_id, trigger_id, fire_slot) DO UPDATE SET
                 run_id = COALESCE(trigger_run_history.run_id, excluded.run_id),
                 status = excluded.status,
@@ -1857,6 +2018,7 @@ async fn complete_run_history(
             tenant_id.as_str(),
             trigger_id.to_string(),
             fmt_ts(&fire_slot),
+            source,
             run_id_value,
             trigger_run_history_status_text(status),
             fmt_ts(&completed_at),

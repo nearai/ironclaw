@@ -1864,6 +1864,52 @@ async fn tick_retryable_submit_failure_clears_active_and_keeps_slot_retryable() 
 }
 
 #[tokio::test]
+async fn manual_fire_failure_clears_active_without_advancing_schedule() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZX").expect("ulid");
+    let manual_slot = ts(1_704_067_200);
+    let scheduled_slot = ts(1_704_070_800);
+    repo.upsert_trigger(sample_record(
+        trigger_id,
+        tenant("tenant-a"),
+        scheduled_slot,
+    ))
+    .await
+    .expect("insert");
+    let worker = worker(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(vec![Err(
+            TriggerError::InvalidMaterialization {
+                reason: "manual submit permanent failure".to_string(),
+            },
+        )])),
+        Arc::new(RecordingActiveRunLookup::default()),
+    );
+
+    let outcome = worker
+        .run_manual_fire(tenant("tenant-a"), trigger_id, manual_slot)
+        .await
+        .expect("manual fire returns an outcome");
+
+    assert!(matches!(
+        outcome,
+        TriggerManualFireOutcome::Failed {
+            reason: TriggerPollerFailureReason::InvalidMaterialization,
+        }
+    ));
+    let persisted = repo
+        .get_trigger(tenant("tenant-a"), trigger_id)
+        .await
+        .expect("load")
+        .expect("record present");
+    assert_eq!(persisted.next_run_at, scheduled_slot);
+    assert_eq!(persisted.last_status, Some(TriggerRunStatus::Error));
+    assert_eq!(persisted.active_fire_slot, None);
+    assert_eq!(persisted.active_run_ref, None);
+}
+
+#[tokio::test]
 async fn tick_submit_not_found_clears_active_and_keeps_slot_retryable() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZY").expect("ulid");
