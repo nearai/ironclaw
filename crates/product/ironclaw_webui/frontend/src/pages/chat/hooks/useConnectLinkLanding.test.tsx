@@ -17,13 +17,31 @@ import { I18nProvider } from "../../../lib/i18n";
 
 const api = vi.hoisted(() => ({
   fetchExtensionSetup: vi.fn(),
+  fetchExtensionRegistry: vi.fn(),
+  fetchExtensions: vi.fn(),
   fetchOauthFlowStatus: vi.fn(),
   installExtension: vi.fn(),
   startExtensionOauth: vi.fn(),
 }));
 
+// The server-published inventory the `connect` param is resolved against: only
+// an extension the server lists with an OAuth channel connection may be
+// installed and connected from a link.
+function oauthChannelEntry(id, displayName) {
+  return {
+    package_ref: { kind: "extension", id },
+    display_name: displayName,
+    surfaces: [{ kind: "channel", connection: { channel: id, strategy: "oauth" } }],
+  };
+}
+
 vi.mock("../../extensions/lib/extensions-api", () => api);
 
+// The hook loads `lib/connect-link-flow` through a dynamic `import()` so the
+// machinery stays out of the eager /chat bundle. Importing it statically here
+// puts it in the module registry, so that `import()` resolves on a microtask
+// and the flush helper below stays deterministic.
+import "../lib/connect-link-flow";
 import { useConnectLinkLanding } from "./useConnectLinkLanding";
 
 function fakePopup() {
@@ -32,8 +50,7 @@ function fakePopup() {
 
 async function flush() {
   await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let i = 0; i < 6; i += 1) await Promise.resolve();
   });
 }
 
@@ -49,6 +66,10 @@ beforeEach(() => {
   root = createRoot(container);
   latest = null;
   originalOpen = window.open;
+  api.fetchExtensions.mockResolvedValue({ extensions: [] });
+  api.fetchExtensionRegistry.mockResolvedValue({
+    entries: [oauthChannelEntry("slack", "Slack")],
+  });
 });
 
 afterEach(() => {
@@ -211,4 +232,139 @@ test("dismissing clears the landing state", async () => {
   await flush();
 
   assert.equal(latest.connectLanding, null);
+});
+
+// The `connect` param arrives on a link anyone can craft, so it must not be
+// able to install an attacker-chosen extension and start its OAuth flow. Only
+// an extension the server itself lists with an OAuth channel connection is
+// accepted; everything else is ignored silently.
+test("an unknown connect param renders no card and installs nothing", async () => {
+  renderAt("/chat?connect=google-drive");
+  await flush();
+
+  assert.equal(latest.connectLanding, null);
+  assert.equal(api.installExtension.mock.calls.length, 0);
+});
+
+test("a non-OAuth channel connect param renders no card and installs nothing", async () => {
+  api.fetchExtensionRegistry.mockResolvedValue({
+    entries: [
+      {
+        package_ref: { kind: "extension", id: "telegram" },
+        display_name: "Telegram",
+        surfaces: [
+          { kind: "channel", connection: { channel: "telegram", strategy: "inbound_proof_code" } },
+        ],
+      },
+    ],
+  });
+
+  renderAt("/chat?connect=telegram");
+  await flush();
+
+  assert.equal(latest.connectLanding, null);
+  assert.equal(api.installExtension.mock.calls.length, 0);
+});
+
+test("the button label comes from the server display name, not the raw param", async () => {
+  api.fetchExtensionRegistry.mockResolvedValue({
+    entries: [oauthChannelEntry("slack", "Slack Workspace")],
+  });
+
+  renderAt("/chat?connect=slack");
+  await flush();
+
+  assert.equal(latest.connectLanding?.submitLabel, "Continue to connect Slack Workspace");
+});
+
+// Retrying after a failure must produce a visible prop change even when the
+// second failure is identical: the card only leaves its spinner when the
+// `oauthError` VALUE changes.
+test("two consecutive identical failures both surface the error state", async () => {
+  vi.useFakeTimers();
+  try {
+    await startFlow();
+    api.fetchOauthFlowStatus.mockResolvedValue({ status: "failed" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+    const firstError = latest.connectLanding?.oauthError;
+    assert.ok(firstError, "the first failure surfaces an error");
+
+    await act(async () => {
+      await latest.startConnectLinkOAuth();
+    });
+    assert.equal(
+      latest.connectLanding?.oauthError,
+      null,
+      "the retry clears the stale error so an identical second failure is a real change",
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+    assert.equal(latest.connectLanding?.oauthError, firstError, "the second failure re-surfaces");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("an abandoned flow times out and stops polling", async () => {
+  vi.useFakeTimers();
+  try {
+    await startFlow();
+    api.fetchOauthFlowStatus.mockResolvedValue({ status: "pending" });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 5000);
+    });
+
+    assert.equal(
+      latest.connectLanding?.oauthError,
+      "Authorization timed out. Try connecting again.",
+    );
+    const callsAtTimeout = api.fetchOauthFlowStatus.mock.calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10000);
+    });
+    assert.equal(
+      api.fetchOauthFlowStatus.mock.calls.length,
+      callsAtTimeout,
+      "the watcher stops polling once the flow is abandoned",
+    );
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a blocked popup fails the connect click before any install", async () => {
+  window.open = vi.fn(() => null);
+  renderAt("/chat?connect=slack");
+  await flush();
+
+  await act(async () => {
+    await assert.rejects(
+      () => latest.startConnectLinkOAuth(),
+      /Authorization popup was blocked/,
+    );
+  });
+  assert.equal(api.installExtension.mock.calls.length, 0);
+});
+
+test("a failed install closes the placeholder popup instead of leaking it", async () => {
+  const popup = fakePopup();
+  window.open = vi.fn(() => popup);
+  popup.close = () => {
+    popup.closed = true;
+  };
+  api.installExtension.mockRejectedValue(new Error("install refused"));
+
+  renderAt("/chat?connect=slack");
+  await flush();
+
+  await act(async () => {
+    await assert.rejects(() => latest.startConnectLinkOAuth(), /install refused/);
+  });
+  assert.equal(popup.closed, true, "no about:blank window is left open");
+  assert.equal(api.startExtensionOauth.mock.calls.length, 0);
 });

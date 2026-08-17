@@ -361,8 +361,12 @@ struct SlackOpenedConversation {
     id: String,
 }
 
+/// The shared `ok`/`error`/`ts` envelope every Slack write call in this module
+/// answers with — `chat.postMessage`, `chat.postEphemeral`, `chat.delete`, and
+/// `reactions.add` — hence the un-suffixed name. The `message_ts` alias below
+/// exists only for `chat.postEphemeral`.
 #[derive(Debug, Deserialize)]
-struct SlackChatPostMessageResponse {
+struct SlackChatPostResponse {
     ok: bool,
     error: Option<String>,
     // `chat.postEphemeral` answers with `message_ts` where `chat.postMessage`
@@ -431,7 +435,7 @@ async fn post_slack_chunk(
             format!("slack web api returned status {}", response.status),
         );
     }
-    let parsed: SlackChatPostMessageResponse = match serde_json::from_slice(&response.body) {
+    let parsed: SlackChatPostResponse = match serde_json::from_slice(&response.body) {
         Ok(parsed) => parsed,
         // Slack may have accepted the message even when an intermediary
         // truncated the response. Retrying would risk a duplicate.
@@ -498,7 +502,7 @@ async fn delete_slack_message(
             format!("slack web api returned status {}", response.status),
         );
     }
-    let parsed: SlackChatPostMessageResponse = match serde_json::from_slice(&response.body) {
+    let parsed: SlackChatPostResponse = match serde_json::from_slice(&response.body) {
         Ok(parsed) => parsed,
         Err(error) => {
             return PartDeliveryOutcome::Ambiguous {
@@ -576,7 +580,7 @@ async fn react_slack_message(
             format!("slack web api returned status {}", response.status),
         );
     }
-    let parsed: SlackChatPostMessageResponse = match serde_json::from_slice(&response.body) {
+    let parsed: SlackChatPostResponse = match serde_json::from_slice(&response.body) {
         Ok(parsed) => parsed,
         Err(error) => {
             return PartDeliveryOutcome::Ambiguous {

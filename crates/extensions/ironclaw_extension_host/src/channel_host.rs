@@ -67,6 +67,17 @@ use crate::extension_ingress::{
 use ironclaw_extension_host::ChannelConfigService;
 use ironclaw_product_contracts::admin_users::AdminUserService;
 
+/// Characters that must be escaped when an extension id is interpolated into
+/// the `connect` query value. Extension ids arrive as raw strings from durable
+/// installation and deployment-binding records, so the id is encoded rather
+/// than trusted to be URL-safe: a `&`, `#`, or space in an id would otherwise
+/// truncate or re-target the link the notice advertises.
+const CONNECT_QUERY_VALUE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
 /// The channel's `connect_required` copy, with a one-click connect link
 /// appended when the strategy is OAuth and the deployment configured a public
 /// web origin (#7681). `/chat?connect=<extension>` is an authenticated route,
@@ -81,6 +92,8 @@ fn connect_required_notice(
     match base_url {
         Some(base) if connection.strategy == ChannelConnectionStrategy::OAuth => {
             let base = base.trim_end_matches('/');
+            let extension_id =
+                percent_encoding::utf8_percent_encode(extension_id, CONNECT_QUERY_VALUE);
             format!("{text} Or connect directly: {base}/chat?connect={extension_id}")
         }
         _ => text.clone(),
@@ -1271,6 +1284,78 @@ mod tests {
             }
             other => panic!("expected a shared-secret-header mint, got {other:?}"),
         }
+    }
+
+    fn connection_descriptor(strategy: ChannelConnectionStrategy) -> ChannelConnectionDescriptor {
+        ChannelConnectionDescriptor {
+            provider: ironclaw_host_api::ids::VendorId::new("vendorx").expect("vendor id"),
+            strategy,
+            instructions: "connect".to_string(),
+            input_placeholder: String::new(),
+            submit_label: "Connect".to_string(),
+            error_message: "failed".to_string(),
+            notices: ironclaw_extension_contracts::channel::ChannelConnectionNotices {
+                connect_required: "Connect your account.".to_string(),
+                paired: "paired".to_string(),
+                already_paired_same_user: "already".to_string(),
+                already_bound_to_other_user: "other".to_string(),
+                expired_or_unknown: "expired".to_string(),
+            },
+            connection_success_message: "connected".to_string(),
+            deep_link_template: None,
+            inbound_code_prefixes: Vec::new(),
+        }
+    }
+
+    /// #7681: the one-click link is appended only for an OAuth-strategy channel
+    /// on a deployment that configured a public web origin. Every other
+    /// combination must return the manifest copy verbatim — a relative or
+    /// vendor-mismatched link would be posted into a customer conversation.
+    #[test]
+    fn connect_notice_appends_the_link_only_for_oauth_with_a_base_url() {
+        let oauth = connection_descriptor(ChannelConnectionStrategy::OAuth);
+
+        assert_eq!(
+            connect_required_notice(&oauth, "slack", Some("https://app.example.com")),
+            "Connect your account. Or connect directly: https://app.example.com/chat?connect=slack"
+        );
+        // A trailing slash on the configured origin must not produce `//chat`.
+        assert_eq!(
+            connect_required_notice(&oauth, "slack", Some("https://app.example.com/")),
+            "Connect your account. Or connect directly: https://app.example.com/chat?connect=slack"
+        );
+        // Unset origin ships dark: the notice stays link-free rather than
+        // advertising an unreachable relative path.
+        assert_eq!(
+            connect_required_notice(&oauth, "slack", None),
+            oauth.notices.connect_required
+        );
+        // A non-OAuth strategy carries its own deep link, so no link leaks
+        // into its copy even when an origin IS configured.
+        for strategy in [
+            ChannelConnectionStrategy::DeviceLink,
+            ChannelConnectionStrategy::WebGeneratedCode,
+            ChannelConnectionStrategy::AdminManagedChannels,
+        ] {
+            let other = connection_descriptor(strategy);
+            assert_eq!(
+                connect_required_notice(&other, "slack", Some("https://app.example.com")),
+                other.notices.connect_required,
+                "{strategy:?} must return the manifest copy verbatim"
+            );
+        }
+    }
+
+    /// The extension id comes from a durable record, so it is percent-encoded:
+    /// an unescaped `&` would truncate the query and re-target the link.
+    #[test]
+    fn connect_notice_percent_encodes_the_extension_id() {
+        let oauth = connection_descriptor(ChannelConnectionStrategy::OAuth);
+        assert_eq!(
+            connect_required_notice(&oauth, "sl ack&evil=1", Some("https://app.example.com")),
+            "Connect your account. Or connect directly: \
+             https://app.example.com/chat?connect=sl%20ack%26evil%3D1"
+        );
     }
 
     #[test]

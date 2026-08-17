@@ -7,28 +7,18 @@ import {
   channelConnectionDisplayName,
   notifyChannelConnected,
 } from "../../../lib/channel-connection-events";
-import {
-  completionMatchesFlow,
-  openAuthPopup,
-  subscribeProductAuthOAuthCompletion,
-} from "../../../lib/product-auth-oauth-events";
-import {
-  fetchExtensionSetup,
-  fetchOauthFlowStatus,
-  installExtension,
-  startExtensionOauth,
-} from "../../extensions/lib/extensions-api";
 
 const CONNECT_LINK_QUERY_PARAM = "connect";
-// Watcher bounds, mirroring the in-chat onboarding watcher so an abandoned
-// popup cannot leave the card polling forever.
-const CONNECT_OAUTH_TIMEOUT_MS = 10 * 60 * 1000;
-const CONNECT_OAUTH_POLL_MS = 2000;
-const CONNECT_OAUTH_STATUS_ERROR_KEYS = Object.freeze({
-  failed: "extensions.oauthFailed",
-  canceled: "extensions.oauthCanceled",
-  expired: "extensions.oauthExpired",
-});
+
+// The resolver, the install/oauth-start sequence, and the flow watcher all live
+// in `../lib/connect-link-flow`, loaded through this dynamic `import()` only
+// when a `connect` param is actually on the URL. Almost nobody lands on /chat
+// with one, and the eager chat chunk has a gzip budget
+// (`scripts/check-bundle-budgets.ts`), so that machinery — plus the extensions
+// API client and surface schema it pulls in — stays out of the initial route.
+function loadConnectLinkFlow() {
+  return import("../lib/connect-link-flow");
+}
 
 // #7681: an OAuth-strategy channel's "connect your account" chat notice can
 // carry a one-click link — `/chat?connect=<extension>`. `/chat` is an
@@ -36,9 +26,9 @@ const CONNECT_OAUTH_STATUS_ERROR_KEYS = Object.freeze({
 // round-trip (`RequireAuth` → `redirect_after` → `login_ticket`) unchanged:
 // a logged-out click lands through `/login` first, a logged-in one lands here
 // directly. This hook owns the landing half only — detect the param, strip it
-// so a reload cannot replay it, and drive the same
-// setup → oauth-start → popup sequence the Extensions page's Connect button
-// uses. No new backend route.
+// so a reload cannot replay it, resolve it against the server's own extension
+// inventory, and drive the same setup → oauth-start → popup sequence the
+// Extensions page's Connect button uses. No new backend route.
 export function useConnectLinkLanding() {
   const t = useT();
   const location = useLocation();
@@ -51,31 +41,34 @@ export function useConnectLinkLanding() {
   // re-running on later location changes would find nothing to consume.
   React.useEffect(() => {
     const params = new URLSearchParams(location.search);
-    const extensionName = params.get(CONNECT_LINK_QUERY_PARAM);
-    if (!extensionName) return;
+    const requested = params.get(CONNECT_LINK_QUERY_PARAM);
+    if (!requested) return undefined;
     params.delete(CONNECT_LINK_QUERY_PARAM);
     const search = params.toString();
     navigate(
       { pathname: location.pathname, search: search ? `?${search}` : "" },
       { replace: true },
     );
-    setConnectLanding({
-      extensionName,
-      strategy: "oauth",
-      submitLabel: t("pairing.continueConnect", {
-        name: channelConnectionDisplayName(extensionName),
-      }),
-    });
+    let cancelled = false;
+    loadConnectLinkFlow()
+      .then(({ resolveOauthConnectTarget }) => resolveOauthConnectTarget(requested))
+      .then((target) => {
+        if (cancelled || !target) return;
+        setConnectLanding({
+          extensionName: target.extensionName,
+          strategy: "oauth",
+          submitLabel: t("pairing.continueConnect", {
+            name: channelConnectionDisplayName(target.extensionName, target.displayName),
+          }),
+        });
+      })
+      .catch(() => null);
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Clear the card on real backend evidence, never optimistically on click.
-  //
-  // Two signals, because neither alone is sufficient. The broadcast is the
-  // fast path but is same-origin only: when the OAuth callback lands on a
-  // different origin than the opener (a tunnelled callback against a
-  // 127.0.0.1 app, or split app/callback domains), it never arrives and the
-  // card would spin forever. Polling the durable flow status closes that gap
-  // and is also what recovers the card after a reload mid-flow.
   React.useEffect(() => {
     if (!pendingFlow) return undefined;
 
@@ -101,78 +94,54 @@ export function useConnectLinkLanding() {
       );
     };
 
-    const unsubscribe = subscribeProductAuthOAuthCompletion(window, (payload) => {
-      if (completionMatchesFlow(payload, flowIdRef.current)) void settle();
-    });
-    const timer = window.setInterval(async () => {
-      if (Date.now() - pendingFlow.startedAt > CONNECT_OAUTH_TIMEOUT_MS) {
-        fail("extensions.oauthTimedOut");
-        return;
-      }
-      const result = await fetchOauthFlowStatus(pendingFlow.flowId, pendingFlow.invocationId);
-      if (result?.status === "completed") {
-        void settle();
-        return;
-      }
-      const errorKey = CONNECT_OAUTH_STATUS_ERROR_KEYS[result?.status];
-      if (errorKey) fail(errorKey);
-    }, CONNECT_OAUTH_POLL_MS);
+    let stopWatching = null;
+    let cancelled = false;
+    // Already resolved by the time a flow exists — the click that started the
+    // flow loaded this module — so the watcher attaches on the next microtask.
+    loadConnectLinkFlow()
+      .then(({ watchConnectLinkFlow }) => {
+        if (cancelled) return;
+        stopWatching = watchConnectLinkFlow({
+          flow: pendingFlow,
+          browserWindow: window,
+          isCurrent: () => flowIdRef.current === pendingFlow.flowId,
+          onCompleted: () => void settle(),
+          onFailed: fail,
+        });
+      })
+      .catch(() => null);
 
     return () => {
-      window.clearInterval(timer);
-      unsubscribe();
+      cancelled = true;
+      stopWatching?.();
     };
   }, [pendingFlow, t]);
 
   const startConnectLinkOAuth = React.useCallback(async () => {
     if (!connectLanding) throw new Error("connection is no longer pending");
-    const packageRef = { kind: "extension", id: connectLanding.extensionName };
-    // Open the placeholder popup BEFORE any await: a slow setup fetch would
-    // otherwise burn the click's user activation and get the real popup
-    // blocked (same reasoning as `useChannelOnboarding.startOnboardingOAuth`).
+    // A retry after a failed attempt clears the stale card error first. The card
+    // only leaves its spinner when the `oauthError` VALUE changes, so without
+    // this a second identical failure would produce no prop change and the card
+    // would spin forever.
+    setConnectLanding((current) =>
+      current?.oauthError ? { ...current, oauthError: null } : current,
+    );
+    // Open the placeholder popup BEFORE any await: a slow module load or setup
+    // fetch would otherwise burn the click's user activation and get the real
+    // popup blocked (same reasoning as
+    // `useChannelOnboarding.startOnboardingOAuth`).
     const popup = window.open("about:blank", "_blank", "width=600,height=600");
     if (!popup) throw new Error(t("authGate.popupBlocked"));
     popup.opener = null;
     try {
-      // Install first. Someone arriving from a channel nudge has, by
-      // definition, not connected this extension — and usually has not
-      // installed it either, which makes `setup/oauth/start` fail closed
-      // (`require_installed_extension` -> 409). Install is idempotent, so an
-      // already-installed extension costs one no-op call rather than a
-      // pre-flight inventory read.
-      await installExtension(packageRef);
-      const setup = await fetchExtensionSetup(packageRef);
-      const secret = (setup?.secrets || []).find(
-        (item) => (item?.setup?.kind || "manual_token") === "oauth",
-      );
-      if (!secret) throw new Error(t("extensions.oauthSetupFailed"));
-      const response = await startExtensionOauth(packageRef, secret);
-      if (response?.success === false) {
-        throw new Error(response.message || t("extensions.oauthSetupFailed"));
-      }
-      if (!response?.authorization_url || !response?.flow_id) {
-        throw new Error(t("extensions.oauthSetupFailed"));
-      }
-      const opened = openAuthPopup(response.authorization_url, popup);
-      if (!opened.ok) {
-        throw new Error(
-          opened.reason === "popup_blocked"
-            ? t("authGate.popupBlocked")
-            : t("extensions.oauthInvalidAuthorizationUrl"),
-        );
-      }
-      flowIdRef.current = response.flow_id;
-      setPendingFlow({
-        flowId: response.flow_id,
-        // The caller-scoped backend needs this to locate its own flow when
-        // reconciling status; absent on responses that mint no callback scope.
-        invocationId:
-          response?.callback_scope?.invocation_id ||
-          response?.callbackScope?.invocationId ||
-          null,
-        channel: connectLanding.extensionName,
-        startedAt: Date.now(),
+      const { startConnectLinkOauth } = await loadConnectLinkFlow();
+      const { response, flow } = await startConnectLinkOauth({
+        extensionName: connectLanding.extensionName,
+        popup,
+        t,
       });
+      flowIdRef.current = flow.flowId;
+      setPendingFlow(flow);
       return response;
     } catch (error) {
       if (!popup.closed) popup.close();
