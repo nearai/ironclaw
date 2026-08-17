@@ -1,3 +1,9 @@
+---
+type: "Reference"
+title: "Architecture Overview"
+description: "High-level system design of IronClaw: four-layer kernel-userland model, crate organization, dual stack (v1 and Reborn), and layer responsibilities."
+---
+
 # Architecture Overview
 
 This page explains IronClaw's system design, the four-layer model, dependency structure, and where to build new features.
@@ -388,7 +394,9 @@ MemoryStore (Native | Bedrock | Pinecone | ...)
 ## See Also
 
 - **[Crate Reference](crates.md)** — Detailed breakdown of all 68+ crates
+<!-- openwiki: broken internal link [data-model.md] file "data-model.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **[Data Model](data-model.md)** — Events, threads, turns, capabilities
+<!-- openwiki: broken internal link [security.md] file "security.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **[Security & Safety](security.md)** — Kernel boundary, threat model, approval gates
 - **[AGENTS.md](/AGENTS.md)** — Quick rules and code discovery
 - **[CLAUDE.md](/CLAUDE.md)** — Subsystem deep-dives by crate/module

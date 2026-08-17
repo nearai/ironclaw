@@ -1,3 +1,9 @@
+---
+type: "Reference"
+title: "Testing Guide"
+description: "Testing strategy for IronClaw: test tiers (unit, integration, E2E), patterns, writing tests, CI/CD pipeline, and test-through-caller discipline."
+---
+
 # Testing Guide
 
 This guide covers IronClaw's testing strategy, test tiers, patterns, and how to write tests for different parts of the system.
@@ -589,7 +595,9 @@ Find the cause:
 ## See Also
 
 - **[Setup Guide](setup.md)** — How to set up your environment
+<!-- openwiki: broken internal link [workflows.md#code-review] heading anchor "code-review" does not exist in "workflows.md". Fix the href or restore the target, then delete this comment. -->
 - **[Workflows: Code Review](workflows.md#code-review)** — How to review tests in PRs
+<!-- openwiki: broken internal link [/AGENTS.md#test-discipline] heading anchor "test-discipline" does not exist in "/AGENTS.md". Fix the href or restore the target, then delete this comment. -->
 - **[AGENTS.md: Testing](/AGENTS.md#test-discipline)** — Testing discipline rules
 - **[COVERAGE_PLAN.md](/COVERAGE_PLAN.md)** — Coverage goals and strategy
 - **[tests/e2e/CLAUDE.md](/tests/e2e/CLAUDE.md)** — E2E test documentation

@@ -1,3 +1,9 @@
+---
+type: "Reference"
+title: "Development Workflows"
+description: "Common development tasks in IronClaw: fixing bugs (test-first discipline), adding features, code review checklist, and deployment."
+---
+
 # Development Workflows
 
 This page covers common development tasks: fixing bugs, adding features, code review, and deployment.
@@ -310,6 +316,7 @@ fn test_issue_is_fixed() {
 
 The safety layer is high-risk. Follow this process:
 
+<!-- openwiki: broken internal link [/crates/ironclaw_safety/CLAUDE.md] file "/crates/ironclaw_safety/CLAUDE.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 1. **Understand current behavior:** Read [crates/ironclaw_safety/CLAUDE.md](/crates/ironclaw_safety/CLAUDE.md)
 
 2. **Write tests first:**
