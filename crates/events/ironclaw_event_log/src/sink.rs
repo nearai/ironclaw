@@ -9,32 +9,31 @@ use crate::runtime_event::RuntimeEvent;
 
 /// Async event sink used by runtime/composition services.
 ///
-/// [`EventSink::emit`] is **best-effort observability**. A failure from that
-/// method must not change runtime outcomes. The trait returns `Result` so
-/// implementations can surface diagnostics to a separate observer/log, never
-/// so best-effort callers can short-circuit the surrounding workflow.
-///
-/// Durable lifecycle producers use [`EventSink::emit_lossless`] instead. That
-/// method may wait for bounded write-behind capacity and may propagate an
-/// enqueue failure. Lifecycle shutdown must then call [`EventSink::flush`] to
-/// wait for accepted events to reach durable storage.
+/// [`EventSink::emit`] and [`EventSink::try_emit`] are **best-effort
+/// observability**. A failure from either method must not change runtime
+/// outcomes. The trait returns `Result` so implementations can surface
+/// diagnostics to a separate observer/log, never so best-effort callers can
+/// short-circuit the surrounding workflow.
 ///
 /// Best-effort callers (dispatcher, process manager, host runtime) must:
 ///
-/// 1. invoke `emit(...).await`;
+/// 1. invoke `try_emit(...)` on runtime-critical paths or `emit(...).await`
+///    where awaiting the sink cannot delay runtime work;
 /// 2. record any returned error to a diagnostics channel of their choice;
 /// 3. continue with their original success/failure result.
 #[async_trait]
 pub trait EventSink: Send + Sync {
-    async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError>;
-
-    /// Enqueue an event without treating a full bounded write-behind channel
-    /// as success. Synchronous and non-dropping sinks can inherit this default.
-    /// Any sink whose [`EventSink::emit`] may report success after dropping an
-    /// event must override this method.
-    async fn emit_lossless(&self, event: RuntimeEvent) -> Result<(), EventError> {
-        self.emit(event).await
+    /// Attempt to emit without waiting for queue capacity or durable I/O.
+    /// Runtime-critical callers use this method so observability backpressure
+    /// cannot stall execution. Sinks without a non-blocking path inherit an
+    /// immediate error that callers must treat as diagnostic-only.
+    fn try_emit(&self, _event: RuntimeEvent) -> Result<(), EventError> {
+        Err(EventError::Sink {
+            reason: "event sink does not support non-blocking emission".to_string(),
+        })
     }
+
+    async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError>;
 
     /// Flush any buffered events to durable storage. Synchronous sinks are
     /// already durable on `emit` return, so the default is a no-op. Write-behind

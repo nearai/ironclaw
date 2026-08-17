@@ -27,9 +27,13 @@ impl InMemoryEventSink {
 
 #[async_trait]
 impl EventSink for InMemoryEventSink {
-    async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
+    fn try_emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
         lock_or_recover(&self.events).push(event);
         Ok(())
+    }
+
+    async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
+        self.try_emit(event)
     }
 }
 

@@ -27,8 +27,8 @@
 //! - The [`EventSink::flush`] override drains everything queued before the
 //!   call, for graceful shutdown and deterministic tests.
 //! - The internal channel is bounded by [`EventBatchConfig::channel_capacity`].
-//!   [`EventSink::emit`] drops best-effort events while the channel is full;
-//!   [`EventSink::emit_lossless`] waits for capacity for durable lifecycle events.
+//!   [`EventSink::emit`] and [`EventSink::try_emit`] drop best-effort events
+//!   while the channel is full; neither applies backpressure to producers.
 //!
 //! ## Loss semantics — best-effort by design, NOT at-least-once
 //!
@@ -39,10 +39,8 @@
 //! Ordering & durability above), all bounded and observable:
 //!
 //! 1. **Overload drop** — sustained back-pressure fills the bounded channel;
-//!    best-effort `emit` drops (it must never block the caller per that method's
-//!    contract) and increments `dropped_count`. Durable lifecycle producers use
-//!    `emit_lossless`, which waits for bounded capacity and is completed by the
-//!    lifecycle owner's graceful `flush`.
+//!    best-effort emission drops (it must never block the caller) and increments
+//!    `dropped_count`.
 //! 2. **Per-event reject** — a backend `append_batch` rejects some rows. The
 //!    successful rows are still durably committed (`append_batch` preserves the
 //!    successful prefix and returns per-event results); only the rejected rows
@@ -54,9 +52,8 @@
 //!    whole window for that flush is lost and `error!`-logged. Retrying a
 //!    panicking append is a panic loop, so the next window simply proceeds.
 //!
-//! This sink does not retry backend rejects or survive process crashes. Producers
-//! that require lossless overload handling may use `emit_lossless` plus graceful
-//! `flush`; at-least-once durability still requires a different substrate.
+//! This sink does not retry backend rejects or survive process crashes.
+//! At-least-once durability requires a different substrate.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -143,28 +140,15 @@ impl CoalescingEventSink {
     pub fn dropped_count(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
-}
 
-fn sink_closed() -> EventError {
-    EventError::Sink {
-        reason: "coalescing event sink drain task is no longer running".to_string(),
-    }
-}
-
-#[async_trait]
-impl EventSink for CoalescingEventSink {
-    async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
-        // Best-effort: buffer and return immediately. The channel is bounded;
-        // if it is full (drain stalled) we drop the event rather than block
-        // the caller. Durable lifecycle producers use `emit_lossless` below.
+    fn try_emit_event(&self, event: RuntimeEvent) -> Result<(), EventError> {
         match self.tx.try_send(DrainMessage::Event(Box::new(event))) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => {
                 // Rate-limited: log on the first drop (0→1 transition) and
                 // every 1000th drop thereafter. The `dropped` counter is the
                 // real signal; logging every single drop would amplify a
-                // backend outage with unbounded I/O and corrupt the REPL/TUI
-                // (CLAUDE.md: background tasks must use `debug!`, not `warn!`).
+                // backend outage with unbounded I/O and corrupt the REPL/TUI.
                 let new_dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
                 if new_dropped == 1 || new_dropped.is_multiple_of(1000) {
                     tracing::debug!(
@@ -179,12 +163,25 @@ impl EventSink for CoalescingEventSink {
             Err(mpsc::error::TrySendError::Closed(_)) => Err(sink_closed()),
         }
     }
+}
 
-    async fn emit_lossless(&self, event: RuntimeEvent) -> Result<(), EventError> {
-        self.tx
-            .send(DrainMessage::Event(Box::new(event)))
-            .await
-            .map_err(|_| sink_closed())
+fn sink_closed() -> EventError {
+    EventError::Sink {
+        reason: "coalescing event sink drain task is no longer running".to_string(),
+    }
+}
+
+#[async_trait]
+impl EventSink for CoalescingEventSink {
+    fn try_emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
+        self.try_emit_event(event)
+    }
+
+    async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
+        // Best-effort: buffer and return immediately. The channel is bounded;
+        // if it is full (drain stalled) we drop the event rather than block
+        // the caller.
+        self.try_emit_event(event)
     }
 
     /// Flush every event queued before this call, awaiting durable write. Used

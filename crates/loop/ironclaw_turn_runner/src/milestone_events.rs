@@ -5,9 +5,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_event_log::{
-    EventError, EventSink, MAX_RUNTIME_EVENT_DURATION_MS, RuntimeEvent, RuntimeEventId,
-};
+use ironclaw_event_log::{EventSink, MAX_RUNTIME_EVENT_DURATION_MS, RuntimeEvent, RuntimeEventId};
 use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId},
     resource::ResourceScope,
@@ -228,10 +226,13 @@ impl LoopHostMilestoneSink for DurableLoopHostMilestoneSink {
         let Some(event) = self.runtime_event_for_milestone(&milestone)? else {
             return Ok(());
         };
-        self.event_sink
-            .emit_lossless(event)
-            .await
-            .map_err(durable_event_error)
+        if let Err(error) = self.event_sink.try_emit(event) {
+            tracing::debug!(
+                error = %error,
+                "loop milestone runtime event was not emitted"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -437,22 +438,12 @@ fn capability_id(value: &'static str) -> Result<CapabilityId, AgentLoopHostError
     })
 }
 
-fn durable_event_error(error: EventError) -> AgentLoopHostError {
-    ironclaw_loop_host::raw_agent_loop_host_error(
-        "loop_milestone_events",
-        "append_event",
-        AgentLoopHostErrorKind::Unavailable,
-        "loop milestone event log is unavailable",
-        error,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ironclaw_event_log::{
-        DurableEventLog, EventCursor, EventLogEntry, EventReplay, EventSink, EventStreamKey,
-        InMemoryDurableEventLog, InMemoryEventSink, ReadScope, RuntimeEventKind,
+        DurableEventLog, EventCursor, EventError, EventLogEntry, EventReplay, EventSink,
+        EventStreamKey, InMemoryDurableEventLog, InMemoryEventSink, ReadScope, RuntimeEventKind,
     };
     use ironclaw_event_store::{CoalescingEventSink, EventBatchConfig};
     use ironclaw_host_api::{
@@ -935,7 +926,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn durable_milestone_waits_for_full_coalescing_channel_without_loss() {
+    async fn milestone_does_not_wait_for_full_coalescing_channel() {
         let (started, thread_id, run_id) = fixture_milestone(LoopHostMilestoneKind::ModelStarted {
             requested_model_profile_id: None,
         });
@@ -983,38 +974,36 @@ mod tests {
             .await
             .expect("second best-effort event fills the bounded channel");
 
-        let terminal_publish = sink.publish_loop_milestone(terminal);
-        tokio::pin!(terminal_publish);
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(20),
-                terminal_publish.as_mut()
-            )
-            .await
-            .is_err(),
-            "durable milestone enqueue must wait instead of reporting success while the channel is full"
+        tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            sink.publish_loop_milestone(terminal),
+        )
+        .await
+        .expect("runtime event overload must not block the agent loop")
+        .expect("runtime event overload must not change the loop outcome");
+        assert_eq!(
+            coalescing.dropped_count(),
+            1,
+            "the saturated observability queue must record the dropped milestone"
         );
 
         log.release_appends(4);
-        terminal_publish
-            .await
-            .expect("durable milestone enqueues after capacity becomes available");
         coalescing
             .flush()
             .await
-            .expect("graceful flush persists the accepted durable milestone");
+            .expect("graceful flush persists events accepted before overload");
 
         let replay = log
             .read_after_cursor(&stream, &ReadScope::default(), None, 10)
             .await
             .expect("replay persisted events");
-        assert_eq!(replay.entries.len(), 3);
+        assert_eq!(replay.entries.len(), 2);
         assert!(
             replay
                 .entries
                 .iter()
-                .any(|entry| entry.record.kind == RuntimeEventKind::ModelCompleted),
-            "the durable terminal milestone must survive bounded-channel overload"
+                .all(|entry| entry.record.kind == RuntimeEventKind::LoopCancelled),
+            "the dropped terminal milestone must not appear in durable replay"
         );
     }
 }

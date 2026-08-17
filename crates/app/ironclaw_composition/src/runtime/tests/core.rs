@@ -22,23 +22,23 @@ use ironclaw_event_log::{EventError, EventSink, RuntimeEvent, RuntimeEventKind};
 
 #[derive(Default)]
 struct OverloadedEventSink {
-    best_effort_attempts: AtomicUsize,
-    durable_events: StdMutex<Vec<RuntimeEvent>>,
+    attempted_events: StdMutex<Vec<RuntimeEvent>>,
 }
 
 #[async_trait]
 impl EventSink for OverloadedEventSink {
-    async fn emit(&self, _event: RuntimeEvent) -> Result<(), EventError> {
-        self.best_effort_attempts.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+    fn try_emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
+        self.attempted_events
+            .lock()
+            .expect("attempted event recording mutex is not poisoned")
+            .push(event);
+        Err(EventError::Sink {
+            reason: "injected saturated observability queue".to_string(),
+        })
     }
 
-    async fn emit_lossless(&self, event: RuntimeEvent) -> Result<(), EventError> {
-        self.durable_events
-            .lock()
-            .expect("durable event recording mutex is not poisoned")
-            .push(event);
-        Ok(())
+    async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
+        self.try_emit(event)
     }
 }
 
@@ -4219,7 +4219,7 @@ async fn hosted_mcp_activation_stays_pending_until_preparation_completes() {
 }
 
 #[tokio::test]
-async fn cancel_run_propagates_to_children_without_loss_under_sink_overload() {
+async fn cancel_run_propagates_to_children_when_event_sink_is_unavailable() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway {
         reply: "unused".to_string(),
@@ -4390,28 +4390,21 @@ async fn cancel_run_propagates_to_children_without_loss_under_sink_overload() {
         .expect("child state");
     assert_eq!(child_state.status, TurnStatus::Cancelled);
 
-    assert_eq!(
-        overloaded_event_sink
-            .best_effort_attempts
-            .load(Ordering::SeqCst),
-        0,
-        "cancellation must not use the best-effort path that drops on overload"
-    );
     {
         let cancellation_events = overloaded_event_sink
-            .durable_events
+            .attempted_events
             .lock()
-            .expect("durable event recording mutex is not poisoned");
+            .expect("attempted event recording mutex is not poisoned");
         assert_eq!(
             cancellation_events.len(),
             2,
-            "parent and child cancellation events must both use lossless enqueue"
+            "parent and child cancellation events must both be attempted"
         );
         assert!(
             cancellation_events
                 .iter()
                 .all(|event| event.kind == RuntimeEventKind::LoopCancelled),
-            "the lossless cancellation path must retain only the expected cancellation records"
+            "the best-effort cancellation path must emit only the expected cancellation records"
         );
     }
 

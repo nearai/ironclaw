@@ -2822,7 +2822,7 @@ impl RebornRuntime {
             TurnStatus::CancelRequested | TurnStatus::Cancelled
         );
         if cancellation_accepted {
-            self.append_webui_loop_cancelled(scope, run_id).await?;
+            self.append_webui_loop_cancelled(scope, run_id);
         }
         self.turn_scheduler.notify(TurnRunWake {
             scope: scope.clone(),
@@ -2917,8 +2917,7 @@ impl RebornRuntime {
                 response.status,
                 TurnStatus::CancelRequested | TurnStatus::Cancelled
             ) {
-                self.append_webui_loop_cancelled(&child.scope, child_run_id)
-                    .await?;
+                self.append_webui_loop_cancelled(&child.scope, child_run_id);
             }
             self.turn_scheduler.notify(TurnRunWake {
                 scope: child_scope,
@@ -2930,18 +2929,17 @@ impl RebornRuntime {
         Ok(())
     }
 
-    async fn append_webui_loop_cancelled(
-        &self,
-        scope: &TurnScope,
-        run_id: TurnRunId,
-    ) -> Result<(), RebornRuntimeError> {
-        let capability_id = CapabilityId::new(LOOP_RUN_CAPABILITY_ID).map_err(|reason| {
-            RebornRuntimeError::InvalidArgument {
-                reason: format!("loop-run capability id: {reason}"),
+    fn append_webui_loop_cancelled(&self, scope: &TurnScope, run_id: TurnRunId) {
+        let capability_id = match CapabilityId::new(LOOP_RUN_CAPABILITY_ID) {
+            Ok(capability_id) => capability_id,
+            Err(error) => {
+                tracing::debug!(error = %error, "loop cancellation runtime event was not built");
+                return;
             }
-        })?;
-        self.runtime_event_sink
-            .emit_lossless(RuntimeEvent::loop_cancelled(
+        };
+        if let Err(error) = self
+            .runtime_event_sink
+            .try_emit(RuntimeEvent::loop_cancelled(
                 ResourceScope {
                     tenant_id: scope.tenant_id.clone(),
                     user_id: self.actor_user_id.clone(),
@@ -2953,8 +2951,9 @@ impl RebornRuntime {
                 },
                 capability_id,
             ))
-            .await
-            .map_err(|error| RebornRuntimeError::TurnCoordinator(error.to_string()))
+        {
+            tracing::debug!(error = %error, "loop cancellation runtime event was not emitted");
+        }
     }
 
     async fn read_latest_assistant_text(

@@ -216,12 +216,13 @@ cargo test -p ironclaw_composition --lib projection::tests::nested_dispatch_stre
 
 Runtime dispatcher event emission is best-effort observability. If the configured `EventSink` fails, the dispatcher ignores that sink error and still returns the original dispatch success or original dispatch failure.
 
-Durable loop milestones and accepted loop-cancellation events use
-`EventSink::emit_lossless`: a full bounded coalescing channel applies backpressure
-instead of reporting success after a drop. `RebornRuntime::shutdown` flushes the
-same composition-owned sink, waiting for accepted events to drain and returning
-an error if a durable append failed. Other runtime telemetry keeps the
-best-effort `emit` overload contract.
+Loop milestones and accepted loop-cancellation events use
+`EventSink::try_emit`: a full bounded coalescing channel records a dropped event
+without applying backpressure or changing the agent-loop outcome.
+`RebornRuntime::shutdown` still flushes the same composition-owned sink, waiting
+for accepted events to drain and returning an error if a durable append failed.
+The process journal, turn state, and checkpoints remain the authoritative
+lifecycle records; runtime events are best-effort projections.
 
 ---
 
