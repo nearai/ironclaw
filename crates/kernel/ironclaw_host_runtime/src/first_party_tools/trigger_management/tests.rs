@@ -1,4 +1,6 @@
 use chrono::{Datelike, TimeZone};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId};
+use ironclaw_turns::TurnRunId;
 
 use super::*;
 
@@ -757,6 +759,29 @@ struct FixedManualFireRunner {
     outcome: TriggerManualFireOutcome,
 }
 
+#[derive(Debug, Default)]
+struct RecordingManualFireRunner {
+    calls: std::sync::Mutex<Vec<(TenantId, TriggerId)>>,
+}
+
+#[async_trait]
+impl TriggerManualFireRunner for RecordingManualFireRunner {
+    async fn run_manual_fire(
+        &self,
+        tenant_id: TenantId,
+        trigger_id: TriggerId,
+        _now: DateTime<Utc>,
+    ) -> Result<TriggerManualFireOutcome, TriggerError> {
+        self.calls
+            .lock()
+            .expect("manual fire calls lock")
+            .push((tenant_id, trigger_id));
+        Ok(TriggerManualFireOutcome::Submitted {
+            run_id: TurnRunId::new(),
+        })
+    }
+}
+
 #[async_trait]
 impl TriggerManualFireRunner for FixedManualFireRunner {
     async fn run_manual_fire(
@@ -909,6 +934,46 @@ async fn trigger_run_maps_submitted_outcome_to_bounded_success() {
     assert_eq!(output["trigger_id"], trigger_id.to_string());
     assert_eq!(output["status"], "submitted");
     assert_eq!(output["run_id"], run_id.to_string());
+}
+
+#[tokio::test]
+async fn trigger_run_rejects_a_target_outside_the_full_caller_scope() {
+    let (repository, scope, trigger_id) = caller_scoped_trigger_fixture().await;
+    let mut record = repository
+        .get_trigger(scope.tenant_id.clone(), trigger_id)
+        .await
+        .expect("load trigger")
+        .expect("trigger exists");
+    record.creator_user_id = UserId::new("different-user").expect("valid user");
+    record.agent_id = Some(AgentId::new("different-agent").expect("valid agent"));
+    record.project_id = Some(ProjectId::new("different-project").expect("valid project"));
+    repository
+        .upsert_trigger(record)
+        .await
+        .expect("replace trigger scope");
+    let runner = RecordingManualFireRunner::default();
+
+    let error = run_trigger(
+        &*repository,
+        &runner,
+        &scope,
+        json!({"trigger_id": trigger_id.to_string()}),
+        Utc::now(),
+    )
+    .await
+    .expect_err("a trigger outside the caller scope must be hidden");
+    let FirstPartyCapabilityError::Dispatch { kind, .. } = error else {
+        panic!("expected dispatch failure");
+    };
+    assert_eq!(kind, RuntimeDispatchErrorKind::InputEncode);
+    assert!(
+        runner
+            .calls
+            .lock()
+            .expect("manual fire calls lock")
+            .is_empty(),
+        "scope rejection must happen before manual-fire dispatch"
+    );
 }
 
 /// #7474 review: `limit: 0` would return an empty `triggers` array while

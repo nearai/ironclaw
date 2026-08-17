@@ -108,6 +108,7 @@ pub(super) struct CapabilityPortWiring {
     pub(super) display_previews: Arc<CapabilityDisplayPreviewStore>,
 }
 
+// arch-exempt: too_many_args, composition threads independently owned runtime services into one capability-port assembly seam, plan #7193
 #[allow(clippy::too_many_arguments)]
 pub(super) fn capability_wiring(
     services: &RebornRuntimeStores,

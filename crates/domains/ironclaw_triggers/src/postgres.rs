@@ -821,8 +821,13 @@ impl TriggerRepository for PostgresTriggerRepository {
         // single-active-fire invariant keeps the active claim row reachable.
         let source = tx
             .query_opt(
-                &format!("SELECT source FROM {TRIGGER_RUN_TABLE} WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3"),
-                &[&request.tenant_id.as_str(), &trigger_id, &fire_slot],
+                &format!("SELECT source FROM {TRIGGER_RUN_TABLE} WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3 AND status = $4"),
+                &[
+                    &request.tenant_id.as_str(),
+                    &trigger_id,
+                    &fire_slot,
+                    &trigger_run_history_status_text(TriggerRunHistoryStatus::Running),
+                ],
             )
             .await
             .map_err(|error| backend_error("read retryable trigger fire source", error))?
@@ -1052,8 +1057,13 @@ impl TriggerRepository for PostgresTriggerRepository {
         // single-active-fire invariant keeps the active claim row reachable.
         let source = tx
             .query_opt(
-                &format!("SELECT source FROM {TRIGGER_RUN_TABLE} WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3"),
-                &[&request.tenant_id.as_str(), &trigger_id, &fire_slot],
+                &format!("SELECT source FROM {TRIGGER_RUN_TABLE} WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3 AND status = $4"),
+                &[
+                    &request.tenant_id.as_str(),
+                    &trigger_id,
+                    &fire_slot,
+                    &trigger_run_history_status_text(TriggerRunHistoryStatus::Running),
+                ],
             )
             .await
             .map_err(|error| backend_error("read clearing trigger fire source", error))?
@@ -1276,9 +1286,15 @@ async fn mark_successful_fire_result(
         .query_opt(
             &format!(
                 "SELECT source FROM {TRIGGER_RUN_TABLE}
-                 WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3"
+                 WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3
+                   AND status = $4"
             ),
-            &[&update.tenant_id, &update.trigger_id, &fire_slot_text],
+            &[
+                &update.tenant_id,
+                &update.trigger_id,
+                &fire_slot_text,
+                &trigger_run_history_status_text(TriggerRunHistoryStatus::Running),
+            ],
         )
         .await
         .map_err(|error| backend_error("read claimed trigger fire source", error))?
@@ -1368,7 +1384,7 @@ async fn upsert_run_history(
                 "INSERT INTO {TRIGGER_RUN_TABLE} (
                     tenant_id, trigger_id, fire_slot, source, run_id, thread_id, status, submitted_at, completed_at
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                ON CONFLICT (tenant_id, trigger_id, fire_slot) DO UPDATE SET
+                ON CONFLICT (tenant_id, trigger_id, fire_slot, source) DO UPDATE SET
                     run_id = EXCLUDED.run_id,
                     thread_id = COALESCE(EXCLUDED.thread_id, {TRIGGER_RUN_TABLE}.thread_id),
                     status = EXCLUDED.status,
@@ -1420,7 +1436,7 @@ async fn complete_run_history(
                 "INSERT INTO {TRIGGER_RUN_TABLE} (
                     tenant_id, trigger_id, fire_slot, source, run_id, thread_id, status, submitted_at, completed_at
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                ON CONFLICT (tenant_id, trigger_id, fire_slot) DO UPDATE SET
+                ON CONFLICT (tenant_id, trigger_id, fire_slot, source) DO UPDATE SET
                     run_id = COALESCE(trigger_run_history.run_id, EXCLUDED.run_id),
                     status = EXCLUDED.status,
                     completed_at = EXCLUDED.completed_at"
@@ -1457,11 +1473,11 @@ async fn prune_run_history(
                 "DELETE FROM {TRIGGER_RUN_TABLE}
                  WHERE tenant_id = $1
                    AND trigger_id = $2
-                   AND fire_slot NOT IN (
-                       SELECT fire_slot
+                   AND (fire_slot, source) NOT IN (
+                       SELECT fire_slot, source
                        FROM {TRIGGER_RUN_TABLE}
                        WHERE tenant_id = $1 AND trigger_id = $2
-                       ORDER BY fire_slot DESC
+                       ORDER BY fire_slot DESC, source
                        LIMIT $3
                    )"
             ),
@@ -1702,10 +1718,31 @@ CREATE TABLE IF NOT EXISTS trigger_run_history (
     status TEXT NOT NULL,
     submitted_at TEXT NOT NULL,
     completed_at TEXT,
-    PRIMARY KEY (tenant_id, trigger_id, fire_slot)
+    PRIMARY KEY (tenant_id, trigger_id, fire_slot, source)
 );
 
 ALTER TABLE trigger_run_history ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'schedule';
+
+DO $migration$
+DECLARE
+    legacy_primary_key_name TEXT;
+BEGIN
+    SELECT constraint_row.conname
+      INTO legacy_primary_key_name
+      FROM pg_constraint constraint_row
+     WHERE constraint_row.conrelid = 'trigger_run_history'::regclass
+       AND constraint_row.contype = 'p'
+       AND pg_get_constraintdef(constraint_row.oid) NOT LIKE '%source%';
+    IF legacy_primary_key_name IS NOT NULL THEN
+        EXECUTE format(
+            'ALTER TABLE trigger_run_history DROP CONSTRAINT %I',
+            legacy_primary_key_name
+        );
+        ALTER TABLE trigger_run_history
+            ADD PRIMARY KEY (tenant_id, trigger_id, fire_slot, source);
+    END IF;
+END
+$migration$;
 
 CREATE INDEX IF NOT EXISTS trigger_run_history_trigger_fire_slot_idx
     ON trigger_run_history (tenant_id, trigger_id, fire_slot DESC);

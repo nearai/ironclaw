@@ -262,6 +262,13 @@ input ordering remain frozen for replay compatibility. Two manual claims in
 the same timestamp resolution cannot both mint an identity because the atomic
 active-fire claim rejects the second call.
 
+Run-history persistence includes the fire source in its identity:
+`(tenant_id, trigger_id, fire_slot, source)`. A manual fire and a scheduled fire
+may legitimately use the same timestamp after the manual run settles; both
+rows must remain independently observable, and accepting the scheduled row
+must still advance its cadence. Legacy three-column run-history primary keys
+are migrated in place with existing rows classified by their stored source.
+
 ---
 
 ## 5. Polling and concurrency

@@ -174,11 +174,11 @@ impl LibSqlTriggerRepository {
                         fire_slot TEXT NOT NULL,
                         source TEXT NOT NULL DEFAULT 'schedule',
                         run_id TEXT,
-                        thread_id TEXT NOT NULL,
+                        thread_id TEXT,
                         status TEXT NOT NULL,
                         submitted_at TEXT NOT NULL,
                         completed_at TEXT,
-                        PRIMARY KEY (tenant_id, trigger_id, fire_slot)
+                        PRIMARY KEY (tenant_id, trigger_id, fire_slot, source)
                     )"
                 ),
                 (),
@@ -313,10 +313,10 @@ impl LibSqlTriggerRepository {
                     return Err(backend_error("drop legacy completion_policy column", error));
                 }
             }
-            // Make thread_id nullable in trigger_run_history if it was created NOT NULL.
-            // SQLite does not support ALTER COLUMN, so we rebuild the table when the
-            // notnull constraint is still set on that column.
-            let needs_thread_id_migration = {
+            // SQLite cannot alter nullability or a primary key, so rebuild old
+            // run-history tables once to make thread_id nullable and include
+            // the fire source in the durable identity.
+            let needs_run_history_rebuild = {
                 let mut rows = conn
                     .query(
                         &format!("PRAGMA table_info({TRIGGER_RUN_TABLE})"),
@@ -325,8 +325,10 @@ impl LibSqlTriggerRepository {
                     .await
                     .map_err(|error| backend_error("pragma trigger_run_history table_info", error))?;
                 // PRAGMA table_info returns columns: cid, name, type, notnull, dflt_value, pk.
-                // notnull=1 means the column has NOT NULL. We iterate until we find thread_id.
-                let mut found_not_null = false;
+                // notnull=1 means the column has NOT NULL; pk>0 means the
+                // column participates in the composite primary key.
+                let mut thread_id_not_null = false;
+                let mut source_in_primary_key = false;
                 while let Some(row) = rows
                     .next()
                     .await
@@ -339,14 +341,18 @@ impl LibSqlTriggerRepository {
                         let not_null: i64 = row.get(3).map_err(|error| {
                             backend_error("read pragma notnull flag", error)
                         })?;
-                        found_not_null = not_null != 0;
-                        break;
+                        thread_id_not_null = not_null != 0;
+                    }
+                    if col_name == "source" {
+                        let primary_key_position: i64 = row.get(5).map_err(|error| {
+                            backend_error("read pragma primary-key flag", error)
+                        })?;
+                        source_in_primary_key = primary_key_position != 0;
                     }
                 }
-                found_not_null
+                thread_id_not_null || !source_in_primary_key
             };
-            if needs_thread_id_migration {
-                // Rebuild trigger_run_history with thread_id nullable.
+            if needs_run_history_rebuild {
                 conn.execute_batch(&format!(
                     "CREATE TABLE {TRIGGER_RUN_TABLE}_new (
                         tenant_id TEXT NOT NULL,
@@ -358,7 +364,7 @@ impl LibSqlTriggerRepository {
                         status TEXT NOT NULL,
                         submitted_at TEXT NOT NULL,
                         completed_at TEXT,
-                        PRIMARY KEY (tenant_id, trigger_id, fire_slot)
+                        PRIMARY KEY (tenant_id, trigger_id, fire_slot, source)
                     );
                     INSERT INTO {TRIGGER_RUN_TABLE}_new
                         SELECT tenant_id, trigger_id, fire_slot, source, run_id, thread_id, status, submitted_at, completed_at
@@ -371,7 +377,7 @@ impl LibSqlTriggerRepository {
                         ON {TRIGGER_RUN_TABLE} (tenant_id, thread_id);"
                 ))
                 .await
-                .map_err(|error| backend_error("make trigger_run_history thread_id nullable", error))?;
+                .map_err(|error| backend_error("rebuild source-aware trigger_run_history", error))?;
             }
             Ok::<(), TriggerError>(())
         }
@@ -1939,12 +1945,14 @@ async fn fetch_run_source(
         .query(
             &format!(
                 "SELECT source FROM {TRIGGER_RUN_TABLE}
-                 WHERE tenant_id = ?1 AND trigger_id = ?2 AND fire_slot = ?3"
+                 WHERE tenant_id = ?1 AND trigger_id = ?2 AND fire_slot = ?3
+                   AND status = ?4"
             ),
             params![
                 tenant_id.as_str(),
                 trigger_id.to_string(),
-                fmt_ts(&fire_slot)
+                fmt_ts(&fire_slot),
+                trigger_run_history_status_text(TriggerRunHistoryStatus::Running),
             ],
         )
         .await
@@ -1967,7 +1975,7 @@ async fn upsert_run_history(
             "INSERT INTO {TRIGGER_RUN_TABLE} (
                 tenant_id, trigger_id, fire_slot, source, run_id, thread_id, status, submitted_at, completed_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-            ON CONFLICT (tenant_id, trigger_id, fire_slot) DO UPDATE SET
+            ON CONFLICT (tenant_id, trigger_id, fire_slot, source) DO UPDATE SET
                 run_id = excluded.run_id,
                 thread_id = COALESCE(excluded.thread_id, {TRIGGER_RUN_TABLE}.thread_id),
                 status = excluded.status,
@@ -2026,7 +2034,7 @@ async fn complete_run_history(
             "INSERT INTO {TRIGGER_RUN_TABLE} (
                 tenant_id, trigger_id, fire_slot, source, run_id, thread_id, status, submitted_at, completed_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8)
-            ON CONFLICT (tenant_id, trigger_id, fire_slot) DO UPDATE SET
+            ON CONFLICT (tenant_id, trigger_id, fire_slot, source) DO UPDATE SET
                 run_id = COALESCE(trigger_run_history.run_id, excluded.run_id),
                 status = excluded.status,
                 completed_at = excluded.completed_at"
@@ -2059,11 +2067,11 @@ async fn prune_run_history(
             "DELETE FROM {TRIGGER_RUN_TABLE}
              WHERE tenant_id = ?1
                AND trigger_id = ?2
-               AND fire_slot NOT IN (
-                   SELECT fire_slot
+               AND (fire_slot, source) NOT IN (
+                   SELECT fire_slot, source
                    FROM {TRIGGER_RUN_TABLE}
                    WHERE tenant_id = ?1 AND trigger_id = ?2
-                   ORDER BY fire_slot DESC
+                   ORDER BY fire_slot DESC, source
                    LIMIT ?3
                )"
         ),

@@ -213,8 +213,9 @@ impl AutomationProductService for RebornAutomationProductService {
             return Err(scheduler_disabled());
         }
         let trigger_id = parse_trigger_id(&automation_id)?;
-        let target = tokio::time::timeout(
-            self.backend_timeout,
+        let deadline = tokio::time::Instant::now() + self.backend_timeout;
+        let target = tokio::time::timeout_at(
+            deadline,
             self.trigger_repository
                 .get_trigger(caller.tenant_id.clone(), trigger_id),
         )
@@ -232,8 +233,8 @@ impl AutomationProductService for RebornAutomationProductService {
             });
         }
 
-        let run_result = match tokio::time::timeout(
-            self.backend_timeout,
+        let run_result = match tokio::time::timeout_at(
+            deadline,
             self.manual_fire_runner.run_manual_fire(
                 caller.tenant_id.clone(),
                 trigger_id,
@@ -272,8 +273,8 @@ impl AutomationProductService for RebornAutomationProductService {
             }
         };
 
-        let record = tokio::time::timeout(
-            self.backend_timeout,
+        let record = tokio::time::timeout_at(
+            deadline,
             self.trigger_repository
                 .get_trigger(caller.tenant_id, trigger_id),
         )

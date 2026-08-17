@@ -12,7 +12,10 @@ use ironclaw_triggers::{
     TriggerRepository, TriggerState,
 };
 
-use super::{caller, make_record, now, service_over};
+use super::{
+    ScriptedOutcome, ScriptedRepository, caller, make_record, missing_lookup, now, service_over,
+    service_with_backend_timeout,
+};
 
 struct RecordingManualFireRunner {
     outcome: TriggerManualFireOutcome,
@@ -184,6 +187,45 @@ async fn run_automation_authorizes_target_among_many_records() {
 
     assert!(response.updated);
     assert_eq!(runner.call_count(), 1);
+}
+
+#[tokio::test]
+async fn run_automation_uses_one_timeout_budget_across_backend_calls() {
+    let c = caller();
+    let trigger_id = TriggerId::new();
+    let record = make_record(
+        trigger_id,
+        &c,
+        TriggerState::Scheduled,
+        "Deadline target",
+        "0 11 * * *",
+    );
+    let repository = Arc::new(ScriptedRepository {
+        get: Some((record, std::time::Duration::from_millis(30))),
+        scoped: ScriptedOutcome::FailBackend,
+        batch: ScriptedOutcome::FailBackend,
+        thread_lookup: None,
+        limits: None,
+    });
+    let runner = Arc::new(RecordingManualFireRunner::new(
+        TriggerManualFireOutcome::Submitted {
+            run_id: ironclaw_turns::TurnRunId::new(),
+        },
+    ));
+    let service = service_with_backend_timeout(
+        repository,
+        missing_lookup(),
+        std::time::Duration::from_millis(50),
+    )
+    .with_manual_fire_runner(runner);
+
+    let error = service
+        .run_automation(c, trigger_id.to_string())
+        .await
+        .expect_err("the final read must share the first read's timeout budget");
+    assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
+    assert_eq!(error.status_code, 503);
+    assert!(error.retryable);
 }
 
 #[tokio::test]

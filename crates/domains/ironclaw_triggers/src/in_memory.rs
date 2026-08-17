@@ -26,14 +26,21 @@ struct TriggerRunRepositoryKey {
     tenant_id: TenantId,
     trigger_id: TriggerId,
     fire_slot: Timestamp,
+    source: TriggerSourceKind,
 }
 
 impl TriggerRunRepositoryKey {
-    fn new(tenant_id: &TenantId, trigger_id: TriggerId, fire_slot: Timestamp) -> Self {
+    fn new(
+        tenant_id: &TenantId,
+        trigger_id: TriggerId,
+        fire_slot: Timestamp,
+        source: TriggerSourceKind,
+    ) -> Self {
         Self {
             tenant_id: tenant_id.clone(),
             trigger_id,
             fire_slot,
+            source,
         }
     }
 }
@@ -331,7 +338,12 @@ impl TriggerRepository for InMemoryTriggerRepository {
         record.active_run_ref = None;
         let record = record.clone();
         state.runs.insert(
-            TriggerRunRepositoryKey::new(&request.tenant_id, request.trigger_id, request.fire_slot),
+            TriggerRunRepositoryKey::new(
+                &request.tenant_id,
+                request.trigger_id,
+                request.fire_slot,
+                TriggerSourceKind::Schedule,
+            ),
             TriggerRunRecord::running(
                 request.tenant_id,
                 request.trigger_id,
@@ -378,7 +390,12 @@ impl TriggerRepository for InMemoryTriggerRepository {
         record.active_run_ref = None;
         let record = record.clone();
         state.runs.insert(
-            TriggerRunRepositoryKey::new(&request.tenant_id, request.trigger_id, request.now),
+            TriggerRunRepositoryKey::new(
+                &request.tenant_id,
+                request.trigger_id,
+                request.now,
+                TriggerSourceKind::Manual,
+            ),
             TriggerRunRecord::running(
                 request.tenant_id,
                 request.trigger_id,
@@ -589,15 +606,22 @@ impl TriggerRepository for InMemoryTriggerRepository {
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         let mut state = self.lock_state()?;
         let key = TriggerRepositoryKey::new(&request.tenant_id, request.trigger_id);
-        let run_key =
-            TriggerRunRepositoryKey::new(&request.tenant_id, request.trigger_id, request.fire_slot);
         // silent-ok: the run-history read can miss only on recovery; the
         // single-active-fire invariant keeps the active claim row newest and
         // therefore reachable during normal retention pruning.
-        let source = state
-            .runs
-            .get(&run_key)
-            .map_or(TriggerSourceKind::Schedule, |run| run.source);
+        let source = active_run_source(
+            &state,
+            &request.tenant_id,
+            request.trigger_id,
+            request.fire_slot,
+        )
+        .unwrap_or(TriggerSourceKind::Schedule);
+        let run_key = TriggerRunRepositoryKey::new(
+            &request.tenant_id,
+            request.trigger_id,
+            request.fire_slot,
+            source,
+        );
         let Some(record) = state.records.get_mut(&key) else {
             return Ok(None);
         };
@@ -747,12 +771,8 @@ impl InMemoryTriggerRepository {
         // silent-ok: the run-history read can miss only on recovery; the
         // single-active-fire invariant keeps the active claim row newest and
         // therefore reachable during normal retention pruning.
-        let run_source = state
-            .runs
-            .get(&TriggerRunRepositoryKey::new(
-                tenant_id, trigger_id, fire_slot,
-            ))
-            .map_or(TriggerSourceKind::Schedule, |run| run.source);
+        let run_source = active_run_source(&state, tenant_id, trigger_id, fire_slot)
+            .unwrap_or(TriggerSourceKind::Schedule);
         let Some(record) = state.records.get_mut(&key) else {
             return Ok(None);
         };
@@ -773,7 +793,9 @@ impl InMemoryTriggerRepository {
         submitted_at: Timestamp,
     ) -> Result<(), TriggerError> {
         let mut state = self.lock_state()?;
-        let key = TriggerRunRepositoryKey::new(tenant_id, trigger_id, fire_slot);
+        let source = active_run_source(&state, tenant_id, trigger_id, fire_slot)
+            .unwrap_or(TriggerSourceKind::Schedule);
+        let key = TriggerRunRepositoryKey::new(tenant_id, trigger_id, fire_slot, source);
         let existing = state.runs.get(&key);
         if existing.is_some_and(|run| run.completed_at.is_some()) {
             return Ok(());
@@ -786,7 +808,7 @@ impl InMemoryTriggerRepository {
             tenant_id.clone(),
             trigger_id,
             fire_slot,
-            existing.map_or(TriggerSourceKind::Schedule, |run| run.source),
+            source,
             Some(run_id),
             submitted_at,
         );
@@ -814,7 +836,7 @@ impl InMemoryTriggerRepository {
         state
             .runs
             .entry(TriggerRunRepositoryKey::new(
-                tenant_id, trigger_id, fire_slot,
+                tenant_id, trigger_id, fire_slot, source,
             ))
             .and_modify(|run| {
                 if run.run_id.is_none() {
@@ -841,6 +863,25 @@ impl InMemoryTriggerRepository {
         prune_run_history_locked(&mut state, tenant_id, trigger_id);
         Ok(())
     }
+}
+
+fn active_run_source(
+    state: &InMemoryTriggerRepositoryState,
+    tenant_id: &TenantId,
+    trigger_id: TriggerId,
+    fire_slot: Timestamp,
+) -> Option<TriggerSourceKind> {
+    state
+        .runs
+        .values()
+        .find(|run| {
+            run.tenant_id == *tenant_id
+                && run.trigger_id == trigger_id
+                && run.fire_slot == fire_slot
+                && run.status == TriggerRunHistoryStatus::Running
+                && run.completed_at.is_none()
+        })
+        .map(|run| run.source)
 }
 
 fn prune_run_history_locked(

@@ -57,17 +57,18 @@ use ironclaw_assistant::{
     RebornAdminUserRequest, RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
     RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationSource,
-    RebornAutomationState, RebornCancelRunResponse, RebornCreateProjectRequest,
-    RebornCreateThreadResponse, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
-    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
-    RebornGetProjectRequest, RebornGetRunStateResponse, RebornGlobalAutoApproveRequest,
-    RebornGlobalAutoApproveResponse, RebornListAutomationsResponse, RebornListMembersResponse,
-    RebornListProjectsResponse, RebornListThreadsResponse, RebornNotificationChannel,
-    RebornNotificationChannelsResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunMutationResult,
+    RebornAutomationRunMutationStatus, RebornAutomationSource, RebornAutomationState,
+    RebornCancelRunResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
+    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
+    RebornGetRunStateResponse, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
+    RebornListAutomationsResponse, RebornListMembersResponse, RebornListProjectsResponse,
+    RebornListThreadsResponse, RebornNotificationChannel, RebornNotificationChannelsResponse,
+    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
@@ -1852,7 +1853,10 @@ impl StubServices {
                         "Running status",
                         "*/5 * * * *",
                     )),
-                    run_result: None,
+                    run_result: Some(RebornAutomationRunMutationResult {
+                        status: RebornAutomationRunMutationStatus::Submitted,
+                        run_id: TurnRunId::new(),
+                    }),
                 })
             }
             ProductSurfaceCallId::AutomationPause => {
@@ -3321,6 +3325,8 @@ async fn run_pause_and_resume_automation_dispatch_path_id_to_service() {
     let run_body = read_json(run_response).await;
     assert_eq!(run_body["updated"], true);
     assert_eq!(run_body["automation"]["automation_id"], "automation-alpha");
+    assert_eq!(run_body["run_result"]["status"], "submitted");
+    assert!(run_body["run_result"]["run_id"].is_string());
 
     let pause_response = router
         .clone()
