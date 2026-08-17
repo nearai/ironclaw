@@ -27,15 +27,6 @@ pub(crate) fn take_last_error_message() -> Option<String> {
     LAST_ERROR_MESSAGE.with(|cell| cell.borrow_mut().take())
 }
 
-/// Bound a free-text message to a sane length before it rides in a
-/// `guest-failure`; the host re-bounds and scrubs downstream, but the guest
-/// should never hand over an unbounded string in the first place.
-#[cfg(not(test))]
-fn bounded_message(message: &str) -> String {
-    const MAX_MESSAGE_CHARS: usize = 512;
-    message.chars().take(MAX_MESSAGE_CHARS).collect()
-}
-
 #[cfg(not(test))]
 fn set_last_error_message(body: &[u8]) {
     let message = serde_json::from_slice::<serde_json::Value>(body)
@@ -82,10 +73,6 @@ pub(crate) fn github_request(
         return Ok(body);
     }
 
-    if response.status == 401 {
-        return Err(unauthorized_error_payload(&response.body));
-    }
-
     if response.status == 422 && is_github_validation_error_body(&response.body) {
         return Err("github_api_error_status_422_validation".to_string());
     }
@@ -101,23 +88,6 @@ pub(crate) fn github_request(
 /// guest error envelope -- keeps the payload small independent of the
 /// host's own `MAX_WASM_GUEST_MESSAGE_BYTES` backstop.
 const MAX_PROVIDER_MESSAGE_CHARS: usize = 512;
-
-/// Build the structured guest error envelope for a 401 response, carrying the
-/// provider's rejection `message` (when the body has one) alongside the
-/// stable `code`/`kind` pair. This is a pre-built envelope -- unlike other
-/// error codes in this module, which are plain stable strings wrapped later
-/// by `guest_error_payload` -- so `guest_error_payload` recognizes and passes
-/// it through unchanged instead of re-wrapping it.
-pub(crate) fn unauthorized_error_payload(body: &[u8]) -> String {
-    let mut payload = serde_json::json!({
-        "code": "github_api_error_status_401",
-        "kind": "auth_required",
-    });
-    if let Some(message) = provider_error_message(body) {
-        payload["message"] = serde_json::Value::String(message);
-    }
-    payload.to_string()
-}
 
 fn provider_error_message(body: &[u8]) -> Option<String> {
     let parsed: serde_json::Value = serde_json::from_slice(body).ok()?;
@@ -232,50 +202,38 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_github_validation_error_body, unauthorized_error_payload};
+    use super::{is_github_validation_error_body, provider_error_message};
 
     #[test]
-    fn unauthorized_error_payload_carries_the_provider_message() {
-        let payload = unauthorized_error_payload(br#"{"message":"Bad credentials"}"#);
-        let value: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
+    fn provider_error_message_carries_the_rejection_text() {
+        let message = provider_error_message(br#"{"message":"Bad credentials"}"#);
 
-        assert_eq!(value["code"], "github_api_error_status_401");
-        assert_eq!(value["kind"], "auth_required");
-        assert_eq!(value["message"], "Bad credentials");
+        assert_eq!(message.as_deref(), Some("Bad credentials"));
     }
 
     #[test]
-    fn unauthorized_error_payload_degrades_gracefully_without_a_message() {
+    fn provider_error_message_degrades_gracefully_without_usable_text() {
         for body in [
             &b"{}"[..],
             b"not json",
             br#"{"message":""}"#,
+            br#"{"message":"   "}"#,
             br#"{"message":123}"#,
         ] {
-            let payload = unauthorized_error_payload(body);
-            let value: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
-
-            assert_eq!(value["code"], "github_api_error_status_401");
-            assert_eq!(value["kind"], "auth_required");
             assert!(
-                value.get("message").is_none(),
-                "no message field expected for body {body:?}, got {value:?}"
+                provider_error_message(body).is_none(),
+                "no message expected for body {body:?}"
             );
         }
     }
 
     #[test]
-    fn unauthorized_error_payload_bounds_the_message_to_512_chars() {
-        let long_message = "a".repeat(1000);
-        let body = serde_json::json!({ "message": long_message }).to_string();
+    fn provider_error_message_bounds_the_message_to_512_chars() {
+        let body = serde_json::json!({ "message": "a".repeat(1000) }).to_string();
 
-        let payload = unauthorized_error_payload(body.as_bytes());
-        let value: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
+        let message = provider_error_message(body.as_bytes()).expect("message present");
 
-        assert_eq!(
-            value["message"].as_str().expect("message string").len(),
-            512
-        );
+        assert_eq!(message.chars().count(), 512);
     }
 
     #[test]

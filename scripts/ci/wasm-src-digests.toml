@@ -11,7 +11,7 @@
 # gate, which is the exact failure it exists to catch.
 
 [packages]
-github = "9cc1d31277aa2cb22b5c16784173ddb84606df1d7e133f0fdecc48a3cd5c6630"
+github = "82d37c88ecec742459d1628ec79e7b2880e770aec004227ca12c477f6f27307e"
 google-docs = "89aa65cd33f36a925c8e51a46218a1f299ff46a76811255a07a35639cf3d23e7"
 google-drive = "b6c922f53bf2c0fbaebe04d18d59d72108d1bc943234fac775092008f8a9ceb9"
 google-sheets = "ae2750e971c8c1401708b8ec3a6ec9af6d21de56e4ee23f43228dd252b99cfa6"
