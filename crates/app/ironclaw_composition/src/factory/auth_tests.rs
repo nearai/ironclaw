@@ -11,9 +11,8 @@ use ironclaw_auth::{
 };
 use ironclaw_event_log::{InMemorySecurityAuditSink, SecurityBoundary, SecurityDecision};
 use ironclaw_host_api::turn::{
-    AcceptedMessageRef, EventCursor, IdempotencyKey, ReplyTargetBindingRef, RunProfileId,
-    RunProfileRequest, RunProfileVersion, SourceBindingRef, TurnActor, TurnGateRef, TurnId,
-    TurnRunId, TurnScope, TurnStatus,
+    AcceptedMessageRef, EventCursor, IdempotencyKey, RunProfileId, RunProfileRequest,
+    RunProfileVersion, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
     http::{
@@ -88,8 +87,6 @@ fn auth_error_mapping_run_state(request: &GetRunStateRequest) -> TurnRunState {
         run_id: request.run_id,
         status: TurnStatus::BlockedAuth,
         accepted_message_ref: AcceptedMessageRef::new("message-auth-error").unwrap(), // safety: fixed test binding literal is valid.
-        source_binding_ref: SourceBindingRef::new("source-auth-error").unwrap(), // safety: fixed test binding literal is valid.
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-auth-error").unwrap(), // safety: fixed test binding literal is valid.
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         allow_steering: true,
@@ -197,8 +194,6 @@ async fn standalone_oauth_turn_gate_callback_resumes_default_turn_coordinator() 
             scope: scope.clone(),
             actor: actor.clone(),
             accepted_message_ref: AcceptedMessageRef::new("message-auth-callback").unwrap(),
-            source_binding_ref: SourceBindingRef::new("source-auth-callback").unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-auth-callback").unwrap(),
             requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
             idempotency_key: IdempotencyKey::new("submit-auth-callback").unwrap(),
             received_at: Utc::now(),
@@ -279,9 +274,6 @@ async fn standalone_oauth_turn_gate_callback_resumes_default_turn_coordinator() 
         .expect("run state");
     assert_eq!(state.status, TurnStatus::Queued);
     assert_eq!(state.gate_ref, None);
-    assert_eq!(state.source_binding_ref.as_str(), "source-auth-callback"); // safety: verifies fixed test binding literal is preserved.
-    let reply_binding_ref = state.reply_target_binding_ref.as_str();
-    assert_eq!(reply_binding_ref, "reply-auth-callback"); // safety: verifies fixed test binding literal is preserved.
 }
 
 #[tokio::test]
@@ -834,9 +826,6 @@ async fn submit_and_block_provider_auth_run(
             actor,
             accepted_message_ref: AcceptedMessageRef::new(format!("message-fanout-{suffix}"))
                 .unwrap(),
-            source_binding_ref: SourceBindingRef::new(format!("source-fanout-{suffix}")).unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new(format!("reply-fanout-{suffix}"))
-                .unwrap(),
             requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
             idempotency_key: IdempotencyKey::new(format!("submit-fanout-{suffix}")).unwrap(),
             received_at: Utc::now(),
@@ -979,8 +968,6 @@ async fn submit_and_block_auth_run(
             scope: scope.clone(),
             actor,
             accepted_message_ref: AcceptedMessageRef::new("message-auth-callback-2").unwrap(),
-            source_binding_ref: SourceBindingRef::new("source-auth-callback-2").unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-auth-callback-2").unwrap(),
             requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
             idempotency_key: IdempotencyKey::new("submit-auth-callback-2").unwrap(),
             received_at: Utc::now(),

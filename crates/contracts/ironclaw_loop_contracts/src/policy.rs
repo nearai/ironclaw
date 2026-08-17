@@ -70,6 +70,11 @@ pub struct ResourceBudgetPolicy {
     pub tier: ResourceBudgetTier,
     pub max_model_calls: u32,
     pub max_capability_invocations: u32,
+    /// Per-run wall-clock ceiling in seconds. `None` means no time limit.
+    /// Enforced by the loop executor's budget stage as a hard stop after a
+    /// final checkpoint; declared `TurnLimits` narrow it per run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_wall_clock_seconds: Option<u32>,
 }
 
 impl ResourceBudgetPolicy {
@@ -80,11 +85,22 @@ impl ResourceBudgetPolicy {
 
     /// The interactive-coding tier resource budget, shared by the interactive
     /// profile and its legacy-persisted reconstruction.
+    ///
+    /// These ceilings are runaway insurance BEHIND the loop's iteration
+    /// backstop (1,024 iterations with a model-visible warning turn), not
+    /// the primary bound — so they must sit above it or the backstop's
+    /// warning path is unreachable and legitimate long tool runs (window
+    /// compaction mid-run drives 100+ model calls per turn) hard-fail with
+    /// `model_call_limit`. Model calls get 2x the backstop (per-iteration
+    /// recovery retries), capability invocations 4x (the parallel dispatch
+    /// width). The original 32/64 values predate enforcement — they were
+    /// written while the caps were inert and never bound a real run.
     pub(crate) fn interactive() -> Self {
         Self {
             tier: ResourceBudgetTier::from_trusted_static("interactive_standard"),
-            max_model_calls: 32,
-            max_capability_invocations: 64,
+            max_model_calls: 2_048,
+            max_capability_invocations: 4_096,
+            max_wall_clock_seconds: None,
         }
     }
 }

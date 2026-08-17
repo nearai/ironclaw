@@ -35,8 +35,7 @@ use ironclaw_host_api::{
     safe_summary::SafeSummary,
 };
 use ironclaw_loop_contracts::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, ConcurrencyHint,
-    resolution,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, resolution,
 };
 
 use super::outbound_delivery::{
@@ -471,7 +470,6 @@ pub(super) fn notification_channels_set_capability(
             OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID,
             OUTBOUND_NOTIFICATION_CHANNELS_SET_PROVIDER_TOOL_NAME,
             OUTBOUND_NOTIFICATION_CHANNELS_SET_DESCRIPTION,
-            ConcurrencyHint::Exclusive,
             notification_channels_set_input_schema(),
         )?,
         Arc::new(handler),

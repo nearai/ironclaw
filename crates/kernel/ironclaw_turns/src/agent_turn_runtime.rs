@@ -7,11 +7,10 @@ use ironclaw_host_api::decision::RuntimeCredentialAuthRequirement;
 
 use crate::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, CapabilityActivityId, EventCursor,
-    GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
-    RetryTurnRequest, RetryTurnResponse, SourceBindingRef, SubmitChildRunRequest,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActiveRunRefState, TurnAdmissionPolicy,
-    TurnCheckpointId, TurnError, TurnGateRef, TurnId, TurnLeaseToken, TurnRunId, TurnRunProfile,
-    TurnRunState, TurnRunnerId, TurnScope, TurnStatus, TurnTimestamp,
+    GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse,
+    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActiveRunRefState,
+    TurnAdmissionPolicy, TurnCheckpointId, TurnError, TurnGateRef, TurnId, TurnLeaseToken,
+    TurnRunId, TurnRunProfile, TurnRunState, TurnRunnerId, TurnScope, TurnStatus, TurnTimestamp,
 };
 use ironclaw_loop_contracts::{LoopModelRouteSnapshot, RunProfileResolver};
 
@@ -148,8 +147,6 @@ pub struct TurnRunRecord {
     pub turn_id: TurnId,
     pub scope: TurnScope,
     pub accepted_message_ref: AcceptedMessageRef,
-    pub source_binding_ref: SourceBindingRef,
-    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub status: TurnStatus,
     pub profile: TurnRunProfile,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -206,8 +203,8 @@ pub struct SpawnTreeReservation {
 #[cfg(test)]
 mod tests {
     use crate::{
-        AcceptedMessageRef, EventCursor, GateResumeDisposition, ReplyTargetBindingRef,
-        SourceBindingRef, TurnRunId, TurnRunRecord, TurnScope, TurnStatus,
+        AcceptedMessageRef, EventCursor, GateResumeDisposition, TurnRunId, TurnRunRecord,
+        TurnScope, TurnStatus,
     };
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
 
@@ -234,8 +231,6 @@ mod tests {
             turn_id: crate::TurnId::new(),
             scope,
             accepted_message_ref: AcceptedMessageRef::new("accepted-store-test").unwrap(),
-            source_binding_ref: SourceBindingRef::new("source-store-test").unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-store-test").unwrap(),
             status: TurnStatus::Completed,
             profile,
             resolved_model_route: None,

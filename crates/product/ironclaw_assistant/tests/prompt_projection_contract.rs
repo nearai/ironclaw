@@ -57,6 +57,7 @@ impl AuthChallengeProvider for OAuthChallenge {
             ),
             expires_at: None,
             pairing: None,
+            device_link: None,
         }))
     }
 }

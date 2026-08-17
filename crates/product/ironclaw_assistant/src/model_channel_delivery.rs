@@ -8,9 +8,9 @@
 //! - `crate::run_delivery::observer`'s FinalReply delivery
 //!   construction (`OutboundPolicyService::new` plus a per-call reply-target
 //!   authority, `CoordinatedDeliveryRequest` shape).
-//! - the same-origin run lookup pattern composition used for trigger-create
-//!   delivery inheritance before that routing was deleted (`TurnScope` built
-//!   from `ResourceScope` + `TurnStateStore::get_run_state`).
+//! - the same-origin check asks the durable conversation-binding store which
+//!   thread a reply-target ref is bound to (`resolve_stored_reply_target`) —
+//!   runs themselves carry no reply route.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -23,6 +23,10 @@ use crate::{
 };
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_conversations::{
+    ConversationBindingService, InboundTurnError, ResolveStoredReplyTargetRequest,
+    StoredReplyTargetAccess,
+};
 use ironclaw_extension_contracts::channel_adapter::OutboundPart;
 use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec;
 use ironclaw_host_api::ids::{AgentId, RunId};
@@ -39,7 +43,6 @@ use ironclaw_outbound::{
     ThreadProjectionAccessPolicy, ThreadProjectionAccessRequest, ValidatedReplyTargetBinding,
 };
 use ironclaw_threads::ThreadScope;
-use ironclaw_turns::{AgentTurnRuntimePort, GetRunStateRequest};
 
 /// Tracing target shared by every log line in this module.
 const TRACE_TARGET: &str = "ironclaw::reborn::model_channel_delivery";
@@ -72,11 +75,11 @@ pub struct ModelChannelDeliveryDeps {
     pub coordinator: Arc<DeliveryCoordinator>,
     pub outbound_store: Arc<dyn OutboundStateStorePort>,
     pub target_resolver: Arc<dyn ProductOutboundTargetResolver>,
-    /// Run-state source for the same-origin check. The narrower
-    /// [`TurnStateStore`] port rather than `TurnCoordinator`: only
-    /// `get_run_state` is needed, and composition serves it from the same
-    /// late-bindable source-turn-state slot `builtin.trigger_create` reads.
-    pub run_state: Arc<dyn AgentTurnRuntimePort>,
+    /// Durable conversation-binding authority for the same-origin check:
+    /// resolves which thread a sealed reply-target ref is bound to, so a
+    /// target bound to the calling run's own thread is rejected as the
+    /// origin conversation.
+    pub binding_service: Arc<dyn ConversationBindingService>,
     /// Canonical project-scoped reader the coordinator materializes
     /// `/workspace/...` references through. Model deliveries carry no
     /// attachments, so this is contract plumbing, not a data path.
@@ -200,16 +203,18 @@ impl ModelChannelDelivery for CoordinatedModelChannelDelivery {
         };
         let target_binding_ref = entry.destination.clone();
 
-        // 3. Same-origin check: build the TurnScope from the caller's
-        // `ResourceScope`, then compare the run's own reply-target binding
-        // against the resolved target. A run-state read failure (including the
-        // structural inability to even build the lookup scope) fails
+        // 3. Same-origin check: runs carry no reply route, so the durable
+        // conversation-binding store is the authority on which thread a
+        // reply-target ref is bound to. `resolve_stored_reply_target`
+        // succeeds only when the ref is bound to the probed thread — an `Ok`
+        // against the run's own thread IS the origin conversation. A failure
+        // that cannot rule the target out (backend unavailability) fails
         // closed as `Unavailable`.
         let Some(thread_id) = request.scope.thread_id.clone() else {
             tracing::debug!(
                 target: TRACE_TARGET,
                 run_id = %request.run_id,
-                "model channel delivery unavailable: invocation scope has no thread id for the same-origin run lookup"
+                "model channel delivery unavailable: invocation scope has no thread id for the same-origin lookup"
             );
             return Err(ModelChannelDeliveryError::Unavailable);
         };
@@ -217,29 +222,46 @@ impl ModelChannelDelivery for CoordinatedModelChannelDelivery {
             request.scope.tenant_id.clone(),
             request.scope.agent_id.clone(),
             request.scope.project_id.clone(),
-            thread_id,
+            thread_id.clone(),
             Some(request.scope.user_id.clone()),
         );
         let turn_run_id = TurnRunId::from_uuid(request.run_id.as_uuid());
-        let run_state = self
+        match self
             .deps
-            .run_state
-            .get_run_state(GetRunStateRequest {
-                scope: turn_scope.clone(),
-                run_id: turn_run_id,
+            .binding_service
+            .resolve_stored_reply_target(ResolveStoredReplyTargetRequest {
+                tenant_id: request.scope.tenant_id.clone(),
+                actor_user_id: request.authenticated_actor_user_id.clone(),
+                current_thread_id: thread_id.clone(),
+                reply_target_binding_ref: target_binding_ref.clone(),
+                access: StoredReplyTargetAccess::OrdinaryReply,
             })
             .await
-            .map_err(|error| {
+        {
+            Ok(_) => return Err(ModelChannelDeliveryError::OriginConversationTarget),
+            // Bound to this thread but the actor's route authority failed:
+            // still the origin conversation — reject rather than letting an
+            // authority edge case re-open the origin lane.
+            Err(InboundTurnError::AccessDenied {
+                thread_id: denied, ..
+            }) if denied == thread_id.as_str() => {
+                return Err(ModelChannelDeliveryError::OriginConversationTarget);
+            }
+            // Definitive non-origin reads: the ref is not a stored
+            // conversation route at all, or it is bound to a different
+            // thread.
+            Err(
+                InboundTurnError::ThreadNotFound { .. } | InboundTurnError::AccessDenied { .. },
+            ) => {}
+            Err(error) => {
                 tracing::debug!(
                     target: TRACE_TARGET,
                     run_id = %request.run_id,
                     %error,
-                    "model channel delivery same-origin run-state lookup failed"
+                    "model channel delivery same-origin binding probe failed"
                 );
-                ModelChannelDeliveryError::Unavailable
-            })?;
-        if run_state.reply_target_binding_ref == target_binding_ref {
-            return Err(ModelChannelDeliveryError::OriginConversationTarget);
+                return Err(ModelChannelDeliveryError::Unavailable);
+            }
         }
 
         // 4. Per-run cap. Only reserved after every check above passed.

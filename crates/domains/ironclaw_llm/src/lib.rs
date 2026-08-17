@@ -10,6 +10,7 @@
 //! - **AWS Bedrock**: Native Converse API via aws-sdk-bedrockruntime
 #![warn(unreachable_pub)]
 
+pub mod agent_message;
 mod anthropic_oauth;
 mod anthropic_thinking;
 pub mod auth;

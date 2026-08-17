@@ -50,6 +50,16 @@ export function isWebGeneratedCodeConnection(connection) {
   return connection?.strategy === "web_generated_code";
 }
 
+// The setup secret whose `RebornExtensionCredentialSetup` is `device_link`
+// (`crates/contracts/ironclaw_product_contracts/src/product_wire.rs`). There is
+// no secret for the user to paste on this path — the vendor issues the payload
+// and the host takes custody of the resulting session — so the connect
+// affordance must route to the device-link panel and never fall back to the
+// manual-token form, which would ask for a value that does not exist.
+export function deviceLinkSetupSecret(secrets) {
+  return (secrets || []).find((secret) => secret?.setup?.kind === "device_link") || null;
+}
+
 // Caller-visible lifecycle has only two listed states. Absence from the
 // installed list is `uninstalled`; internal install/discovery/publication
 // checkpoints never become extra card states.
@@ -82,6 +92,16 @@ export function primaryAuthAccount(item) {
 // expiry/failure notice. There is no `revoking` state on the wire: disconnect
 // and removal delete the account synchronously (overview §6.3), so no
 // in-progress revoking window is ever produced or observed here.
+// #7660: a connected account whose grant predates a recipe widening. The
+// connection WORKS — every already-granted capability keeps running — so this
+// must never render as setup_needed or a broken connection. The card offers a
+// re-consent ("Update access") affordance instead.
+export function authAccountNeedsScopeUpdate(item) {
+  const account = primaryAuthAccount(item);
+  if (!account || account.state !== "connected") return false;
+  return (account.missing_recipe_scopes || []).length > 0;
+}
+
 export function authAccountNeedsReconnect(item) {
   const account = primaryAuthAccount(item);
   if (!account) return false;

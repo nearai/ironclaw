@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection;
+use ironclaw_extension_contracts::{hosted_mcp::HostedMcpAuthSelection, recipe::HttpsEndpoint};
 use ironclaw_extension_registry::{
     ExtensionManifestRecord, ExtensionPackage, ManifestSource, PackageDefinitionRetention,
     PackageRootBinding,
@@ -140,6 +140,24 @@ pub(crate) fn oauth_admission_error(
     }
 }
 
+fn oauth_resource_validation_error(
+    error: ironclaw_host_api::error::HostApiError,
+) -> ProductOperationFailure {
+    let (error_kind, error_reason) = match error {
+        ironclaw_host_api::error::HostApiError::InvalidId { kind, reason, .. } => (kind, reason),
+        _ => (
+            "host_api_validation",
+            "unexpected host API validation error".to_string(),
+        ),
+    };
+    tracing::debug!(
+        error_kind,
+        error_reason,
+        "hosted MCP OAuth resource was invalid"
+    );
+    oauth_admission_error(ironclaw_auth::AuthProductError::MalformedConfig)
+}
+
 pub(crate) fn metadata_network_policy(url: &str) -> Result<NetworkPolicy, ProductOperationFailure> {
     let parsed = url::Url::parse(url)
         .map_err(|_| oauth_admission_error(ironclaw_auth::AuthProductError::MalformedConfig))?;
@@ -169,7 +187,18 @@ pub(crate) fn manifest_with_admitted_oauth(
     endpoint: &hosted_mcp_admission::CanonicalHostedMcpEndpoint,
     admitted: ironclaw_auth::ResolvedVendorAuthRecipe,
 ) -> Result<ExtensionManifestRecord, ProductOperationFailure> {
-    if admitted.token_exchange_resource.as_deref() != Some(endpoint.as_str()) {
+    let endpoint_resource =
+        HttpsEndpoint::new(endpoint.as_str()).map_err(oauth_resource_validation_error)?;
+    let oauth_resource = admitted
+        .token_exchange_resource
+        .as_deref()
+        .ok_or_else(|| oauth_admission_error(ironclaw_auth::AuthProductError::MalformedConfig))?;
+    let oauth_resource =
+        HttpsEndpoint::new(oauth_resource).map_err(oauth_resource_validation_error)?;
+    if !ironclaw_auth::oauth_resource_matches_hosted_mcp_endpoint(
+        &endpoint_resource,
+        &oauth_resource,
+    ) {
         return Err(oauth_admission_error(
             ironclaw_auth::AuthProductError::MalformedConfig,
         ));
@@ -210,6 +239,7 @@ pub(crate) fn manifest_with_admitted_oauth(
         vendor,
         setup,
         recipe: Some(admitted.recipe),
+        oauth_resource: Some(oauth_resource),
         protected_resource_metadata_url: admitted.protected_resource_metadata_url,
     }];
     let mcp = resolved

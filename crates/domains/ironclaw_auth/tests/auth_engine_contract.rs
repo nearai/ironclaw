@@ -1365,7 +1365,7 @@ async fn dcr_requires_advertised_protected_resource_metadata() {
 #[tokio::test]
 async fn dcr_uses_the_admitted_non_well_known_protected_resource_metadata_url() {
     let mut recipe = manifest_recipe("notion-mcp", "notion");
-    recipe.token_exchange_resource = Some("https://mcp.example.test/mcp".to_string());
+    recipe.token_exchange_resource = Some("https://mcp.example.test".to_string());
     recipe.protected_resource_metadata_url = Some(
         HttpsEndpoint::new("https://mcp.example.test/admitted-metadata".to_string())
             .expect("admitted metadata URL"),
@@ -1375,7 +1375,7 @@ async fn dcr_uses_the_admitted_non_well_known_protected_resource_metadata_url() 
         "https://mcp.example.test/admitted-metadata",
         200,
         serde_json::json!({
-            "resource": "https://mcp.example.test/mcp",
+            "resource": "https://mcp.example.test",
             "authorization_servers": ["https://auth.example.test"]
         }),
     );
@@ -1395,12 +1395,13 @@ async fn dcr_uses_the_admitted_non_well_known_protected_resource_metadata_url() 
         serde_json::json!({ "client_id": "admitted-metadata-dcr-client" }),
     );
 
+    let scope = test_scope();
     harness
         .engine
         .prepare_oauth_flow(PrepareOAuthFlowRequest {
             vendor: "notion".to_string(),
             requester_extension: None,
-            scope: test_scope(),
+            scope: scope.clone(),
             flow_id: AuthFlowId::new(),
             account_label: CredentialAccountLabel::new("account").expect("account label"),
             requested_scopes: Vec::new(),
@@ -1422,6 +1423,65 @@ async fn dcr_uses_the_admitted_non_well_known_protected_resource_metadata_url() 
             .requests_for("https://mcp.example.test/.well-known/oauth-protected-resource/mcp")
             .is_empty(),
         "DCR must not reconstruct a different metadata URL from the resource"
+    );
+
+    harness.server.script(
+        "https://auth.example.test/token",
+        200,
+        serde_json::json!({
+            "access_token": "origin-resource-access",
+            "refresh_token": "origin-resource-refresh",
+            "expires_in": 3600
+        }),
+    );
+    let exchange = harness
+        .engine
+        .exchange_callback(
+            exchange_context(&scope),
+            callback_request("notion", Vec::new()),
+        )
+        .await
+        .expect("the admitted origin resource survives through token exchange");
+    let token_requests = harness
+        .server
+        .requests_for("https://auth.example.test/token");
+    let token_request = &token_requests[0];
+    assert_eq!(
+        token_request.form().get("resource").map(String::as_str),
+        Some("https://mcp.example.test"),
+        "token exchange uses the admitted origin resource, not the transport path"
+    );
+
+    harness.server.script(
+        "https://auth.example.test/token",
+        200,
+        serde_json::json!({
+            "access_token": "refreshed-origin-resource-access",
+            "refresh_token": "refreshed-origin-resource-refresh",
+            "expires_in": 3600
+        }),
+    );
+    harness
+        .engine
+        .refresh_token(OAuthProviderRefreshRequest {
+            provider: AuthProviderId::new("notion").expect("provider id"),
+            scope,
+            account_id: exchange.account_id.unwrap_or_else(CredentialAccountId::new),
+            refresh_secret: exchange
+                .refresh_secret
+                .expect("token exchange stores the refresh token"),
+            scopes: exchange.scopes,
+        })
+        .await
+        .expect("refresh preserves the admitted origin resource");
+    let token_requests = harness
+        .server
+        .requests_for("https://auth.example.test/token");
+    assert_eq!(token_requests.len(), 2);
+    assert_eq!(
+        token_requests[1].form().get("resource").map(String::as_str),
+        Some("https://mcp.example.test"),
+        "refresh uses the admitted origin resource, not the transport path"
     );
 }
 

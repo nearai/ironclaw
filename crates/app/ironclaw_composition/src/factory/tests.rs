@@ -20,10 +20,16 @@ use ironclaw_host_api::{
     },
     mount::{MountGrant, MountPermissions},
     path::{MountAlias, ScopedPath, VirtualPath},
+    product_adapter::AdapterInstallationId as ChannelAdapterInstallationId,
     resource::{ResourceEstimate, ResourceScope, ResourceUsage},
     result_meta::FailureKind,
     runtime::{RuntimeKind, TrustClass},
     scope::{ExecutionContext, Principal},
+    user_identity::{
+        RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
+        RebornUserIdentityBindingStore, RebornUserIdentityLookup,
+        installation_scoped_provider_user_id,
+    },
 };
 use ironclaw_host_api::{
     capability::{RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource},
@@ -1857,10 +1863,6 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
         actor: ironclaw_turns::TurnActor::new(owner),
         accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("configured-message-ref")
             .expect("message ref"),
-        source_binding_ref: ironclaw_turns::SourceBindingRef::new("source-web")
-            .expect("source binding"),
-        reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new("reply-web")
-            .expect("reply binding"),
         requested_run_profile: Some(
             ironclaw_turns::RunProfileRequest::new("default").expect("run profile"),
         ),
@@ -1949,10 +1951,6 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
         actor: ironclaw_turns::TurnActor::new(owner),
         accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("default-message-ref")
             .expect("message ref"),
-        source_binding_ref: ironclaw_turns::SourceBindingRef::new("source-web")
-            .expect("source binding"),
-        reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new("reply-web")
-            .expect("reply binding"),
         requested_run_profile: Some(
             ironclaw_turns::RunProfileRequest::new("default").expect("run profile"),
         ),
@@ -3531,6 +3529,30 @@ fn pairing_account_setup_descriptor(extension_id: &str) -> ExtensionAccountSetup
     }
 }
 
+#[test]
+fn device_link_channel_manifest_declares_product_account_setup_without_pairing_metadata() {
+    let descriptors = super::manifest_channel_account_setup_descriptors(&[Arc::new(
+        ironclaw_extension_host::test_support::device_link_channel_manifest(),
+    )]);
+
+    assert_eq!(
+        descriptors.len(),
+        1,
+        "the device-link channel needs one setup descriptor"
+    );
+    let descriptor = &descriptors[0];
+    assert_eq!(
+        descriptor.auth_requirement.setup,
+        RuntimeCredentialAccountSetup::DeviceLink,
+    );
+    assert_eq!(
+        descriptor.connection_requirement.strategy,
+        ironclaw_assistant::RebornChannelConnectStrategy::DeviceLink,
+    );
+    assert_eq!(descriptor.pairing_deep_link_template, None);
+    assert!(descriptor.inbound_code_prefixes.is_empty());
+}
+
 /// Live-repro regression (demo-stack defect): removing an installed channel
 /// extension through the lifecycle port with an authenticated actor must
 /// actually delete the caller's durable membership — and must be POSSIBLE in
@@ -3558,6 +3580,57 @@ async fn telegram_remove_with_authenticated_actor_deletes_the_membership() {
         .install(telegram_ref.clone(), &caller)
         .await
         .expect("install telegram");
+    let activation_requirements = extension_management
+        .activation_credential_requirements(&telegram_ref, &caller)
+        .await
+        .expect("read Telegram activation requirements");
+    assert!(
+        activation_requirements.is_empty(),
+        "Telegram's channel device link gates admission and personal tools, not adapter activation: {activation_requirements:?}"
+    );
+
+    let installation = extension_management
+        .installation_store_for_test()
+        .list_installations()
+        .await
+        .expect("list installations")
+        .into_iter()
+        .find(|installation| installation.extension_id().as_str() == "telegram")
+        .expect("Telegram installation");
+    let installation_id =
+        ChannelAdapterInstallationId::new(installation.installation_id().as_str())
+            .expect("adapter installation id");
+    let external_actor = "U-REMOVE";
+    let provider_user_id = installation_scoped_provider_user_id(&installation_id, external_actor);
+    services
+        .channel_identity_store
+        .bind_user_identity(RebornUserIdentityBinding {
+            provider: RebornIdentityProviderId::new("telegram").expect("provider"),
+            provider_user_id: RebornIdentityProviderUserId::new(&provider_user_id)
+                .expect("provider user"),
+            user_id: caller.clone(),
+        })
+        .await
+        .expect("seed linked channel identity");
+    services
+        .channel_dm_target_store
+        .upsert(
+            "telegram",
+            &caller,
+            external_actor.to_string(),
+            serde_json::json!({"chat_id": "qa-only"}),
+        )
+        .await
+        .expect("seed DM target");
+
+    assert!(
+        services
+            .channel_pairing
+            .as_ref()
+            .and_then(|registry| registry.get("telegram"))
+            .is_none(),
+        "a device-link channel must not receive a generated-code pairing service"
+    );
 
     let removal_scope =
         default_runtime_owner_scope(caller.clone()).expect("telegram removal scope");
@@ -3591,5 +3664,23 @@ async fn telegram_remove_with_authenticated_actor_deletes_the_membership() {
             .first()
             .is_some_and(|extension| extension.install_scope.is_none()),
         "removed telegram must have no visible membership for its former member: {extensions:?}",
+    );
+    assert_eq!(
+        services
+            .channel_identity_store
+            .resolve_user_identity("telegram", &provider_user_id)
+            .await
+            .expect("resolve after removal"),
+        None,
+        "removal must delete the linked Telegram channel identity"
+    );
+    assert!(
+        services
+            .channel_dm_target_store
+            .load("telegram", &caller)
+            .await
+            .expect("load target after removal")
+            .is_none(),
+        "removal must delete the caller's Telegram DM delivery target"
     );
 }

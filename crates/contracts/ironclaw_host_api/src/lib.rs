@@ -62,6 +62,7 @@ pub mod messaging;
 pub mod mount;
 pub mod outbound;
 pub mod path;
+pub mod prepared_context;
 pub mod resolution;
 pub mod resource;
 pub mod result_meta;

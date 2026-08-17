@@ -1,5 +1,6 @@
-//! Durable-backend fixtures for the deployed turn/run-state migration layouts.
+//! Durable-backend conformance fixtures for process-journal persistence.
 
+use chrono::Utc;
 use std::sync::Arc;
 
 use ironclaw_filesystem::{
@@ -7,12 +8,188 @@ use ironclaw_filesystem::{
     ScopedFilesystem,
 };
 use ironclaw_host_api::{
+    ids::{AgentId, InvocationId, ProcessId, ProjectId, TenantId, ThreadId, UserId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, ScopedPath, VirtualPath},
     resource::ResourceScope,
 };
-use ironclaw_processes::{ProcessJournalSource, ProcessJournalStore};
+use ironclaw_processes::{
+    ClaimProcessesRequest, GetProcessSnapshotRequest, ProcessJournalCursor, ProcessJournalKind,
+    ProcessJournalSource, ProcessJournalStore, ProcessKind, ProcessLeaseRequest,
+    ProcessSubmissionPort, ProcessTransitionPort, ProcessWorkerId, SubmitProcessRequest,
+};
 use serde_json::json;
+
+#[tokio::test]
+async fn heartbeat_persistence_is_durable_on_libsql() {
+    let storage = tempfile::tempdir().expect("temporary heartbeat database");
+    let database = Arc::new(
+        libsql::Builder::new_local(storage.path().join("heartbeat.db"))
+            .build()
+            .await
+            .expect("build libsql database"),
+    );
+    let backend = Arc::new(LibSqlRootFilesystem::new(database).expect("libSQL filesystem runtime"));
+    backend
+        .run_migrations()
+        .await
+        .expect("migrate libsql filesystem");
+    assert_durable_heartbeat(backend, format!("libsql-{}", uuid::Uuid::new_v4())).await;
+}
+
+#[tokio::test]
+async fn heartbeat_persistence_is_durable_on_postgres() {
+    let Some(backend) = postgres_backend().await else {
+        eprintln!(
+            "skipping process heartbeat Postgres contract: \
+             IRONCLAW_FILESYSTEM_POSTGRES_URL / DATABASE_URL unavailable"
+        );
+        return;
+    };
+    assert_durable_heartbeat(
+        Arc::new(backend),
+        format!("postgres-{}", uuid::Uuid::new_v4()),
+    )
+    .await;
+}
+
+async fn assert_durable_heartbeat<F>(backend: Arc<F>, fixture: String)
+where
+    F: RootFilesystem + Send + Sync + 'static,
+{
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        backend,
+        MountView::new(vec![mount(
+            "/processes",
+            &format!("/engine/process-heartbeat/{fixture}/processes"),
+        )])
+        .expect("heartbeat mount view"),
+    ));
+    let store = ProcessJournalStore::new(Arc::clone(&filesystem));
+    let scope = heartbeat_scope();
+    let process_id = ProcessId::new();
+    store
+        .submit_process(SubmitProcessRequest {
+            process_id,
+            process_kind: ProcessKind::AgentTurn,
+            scope: scope.clone(),
+            exclusive_within_scope: false,
+            operation_id: None,
+            owner_user_id: Some(scope.user_id.clone()),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("submit durable heartbeat process");
+    let claim = store
+        .claim_next_processes(ClaimProcessesRequest {
+            worker_id: ProcessWorkerId::from_trusted(ProcessId::new().as_uuid().to_string()),
+            scope_filter: Some(scope.clone()),
+            process_id_filter: Some(process_id),
+            process_kind_filter: Some(ProcessKind::AgentTurn),
+            max_processes: 1,
+        })
+        .await
+        .expect("claim durable heartbeat process")
+        .pop()
+        .expect("one durable heartbeat claim");
+    let claimed_lease = claim.state.lease.clone().expect("claimed lease");
+    let lease = ProcessLeaseRequest {
+        process_id,
+        worker_id: claim.worker_id,
+        lease_token: claim.lease_token,
+    };
+
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let first_cursor = store
+        .heartbeat_process(lease.clone())
+        .await
+        .expect("first durable heartbeat");
+    let first_snapshot = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: scope.clone(),
+            process_id,
+        })
+        .await
+        .expect("snapshot after first durable heartbeat");
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let second_cursor = store
+        .heartbeat_process(lease)
+        .await
+        .expect("second durable heartbeat");
+    assert_eq!(first_cursor, claim.state.journal_cursor);
+    assert_eq!(second_cursor, claim.state.journal_cursor);
+
+    drop(store);
+    let reloaded = ProcessJournalStore::new(filesystem);
+    let reloaded_snapshot = reloaded
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: scope.clone(),
+            process_id,
+        })
+        .await
+        .expect("reload durable heartbeat process");
+    let first_lease = first_snapshot
+        .lease
+        .as_ref()
+        .expect("first heartbeat lease");
+    let reloaded_lease = reloaded_snapshot
+        .lease
+        .as_ref()
+        .expect("reloaded heartbeat lease");
+    assert!(
+        first_lease.last_heartbeat_at > claimed_lease.last_heartbeat_at,
+        "first heartbeat must refresh last_heartbeat_at"
+    );
+    assert!(
+        reloaded_lease.last_heartbeat_at > first_lease.last_heartbeat_at,
+        "repeated heartbeat must durably refresh last_heartbeat_at"
+    );
+    assert!(
+        reloaded_lease.lease_expires_at > first_lease.lease_expires_at,
+        "repeated heartbeat must durably refresh lease_expires_at"
+    );
+    assert_eq!(reloaded_snapshot.journal_cursor, claim.state.journal_cursor);
+
+    let page = reloaded
+        .read_process_journal_after(&scope, None, Some(ProcessJournalCursor(0)), 10)
+        .await
+        .expect("read durable heartbeat journal after reload");
+    assert_eq!(page.entries.len(), 2);
+    assert!(
+        page.entries
+            .iter()
+            .all(|entry| entry.kind != ProcessJournalKind::Heartbeat),
+        "durable heartbeats must not append journal rows"
+    );
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|entry| entry.cursor)
+            .collect::<Vec<_>>(),
+        vec![ProcessJournalCursor(1), ProcessJournalCursor(2)],
+        "durable heartbeats must not reserve journal cursors"
+    );
+}
+
+fn heartbeat_scope() -> ResourceScope {
+    ResourceScope {
+        tenant_id: TenantId::new("tenant-heartbeat").expect("tenant"),
+        user_id: UserId::new("user-heartbeat").expect("user"),
+        agent_id: Some(AgentId::new("agent-heartbeat").expect("agent")),
+        project_id: Some(ProjectId::new("project-heartbeat").expect("project")),
+        mission_id: None,
+        thread_id: Some(ThreadId::new("thread-heartbeat").expect("thread")),
+        invocation_id: InvocationId::new(),
+    }
+}
 
 #[tokio::test]
 async fn deployed_legacy_layouts_import_on_libsql() {

@@ -212,10 +212,23 @@ observed_date = "2026-08-08"
 # eviction + #7373 re-equalization) into the unified-channel branch: main
 # evicted the memory-save guidance while this branch added the channel
 # registration/capability assembly; the merged tree is measured, not summed.
-# Union re-measured at 41973 on 2026-08-13 after merging that channel assembly
-# and current main into #7532's structured-trigger assembly. The deltas are
+# Union re-measured at 42299 on 2026-08-14 after merging main (#7532/#7548
+# structured-trigger assembly) into the unbound-turns surfaces branch. The
+# surfaces side keeps the prepared-lane behavior in
+# `ironclaw_assistant::UnboundPreparedTurnService`; composition holds only
+# the wire-DTO mapping, port adapter, and mount wiring. The deltas are
 # disjoint and the ceiling is the gate's exact merged-tree measurement.
-loc_ceiling = 41973
+#
+# Re-measured 42299 -> 41991 on 2026-08-14 (post-merge re-measure, same day):
+# this changelog's 42299, the prior loc_ceiling/loc_observed of 42086, and a
+# fresh `--print` run on the current tree had drifted out of agreement — three
+# numbers for the same metric. `bash scripts/ci/check-composition-budget.sh
+# --print` is the single authoritative re-capture and reports "composition
+# absolute: 41991 LOC (production src)"; loc_ceiling, loc_observed, and the
+# mirrored `COMPOSITION_ABSOLUTE_SRC_LOC` constant in
+# crates/app/ironclaw_architecture_tests/tests/reborn_restructure_baselines.rs
+# all move to this figure together, per this file's own re-capture instruction.
+loc_ceiling = 41991
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -226,8 +239,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 41973
-loc_observed_date = "2026-08-13"
+loc_observed = 41991
+loc_observed_date = "2026-08-14"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the

@@ -360,16 +360,6 @@ where
             parent_run_context,
             tree_root_run_id: metadata.tree_root_run_id,
             gate_ref,
-            source_binding_ref: ironclaw_host_api::turn::SourceBindingRef::new(format!(
-                "subagent-source:{parent_run_id}:{}",
-                event.run_id
-            ))
-            .map_err(|reason| TurnError::InvalidRequest { reason })?,
-            reply_target_binding_ref: ironclaw_host_api::turn::ReplyTargetBindingRef::new(format!(
-                "subagent-reply:{parent_run_id}:{}",
-                event.run_id
-            ))
-            .map_err(|reason| TurnError::InvalidRequest { reason })?,
             subagent_kind: metadata.subagent_kind,
             spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).map_err(
                 |reason| TurnError::InvalidRequest {
@@ -529,8 +519,6 @@ where
                 actor,
                 run_id: parent_run_id,
                 gate_resolution_ref: edge.gate_ref.clone(),
-                source_binding_ref: edge.source_binding_ref.clone(),
-                reply_target_binding_ref: edge.reply_target_binding_ref.clone(),
                 idempotency_key: IdempotencyKey::new(format!(
                     "subagent-resume:{parent_run_id}:{child_run_id}"
                 ))
@@ -939,12 +927,6 @@ mod tests {
             ),
             accepted_message_ref: ironclaw_host_api::turn::AcceptedMessageRef::new("msg:child")
                 .unwrap(),
-            source_binding_ref: ironclaw_host_api::turn::SourceBindingRef::new("source:child")
-                .unwrap(),
-            reply_target_binding_ref: ironclaw_host_api::turn::ReplyTargetBindingRef::new(
-                "reply:child",
-            )
-            .unwrap(),
             status: TurnStatus::Completed,
             profile: ironclaw_turns::TurnRunProfile::from_resolved(resolved_run_profile),
             resolved_model_route: None,
@@ -1626,14 +1608,6 @@ mod tests {
                 child_scope: child_scope.clone(),
                 child_run_id,
                 child_thread_id: child_thread_id.clone(),
-                source_binding_ref: ironclaw_host_api::turn::SourceBindingRef::new(format!(
-                    "source:drain-{label}"
-                ))
-                .expect("source"),
-                reply_target_binding_ref: ironclaw_host_api::turn::ReplyTargetBindingRef::new(
-                    format!("reply:drain-{label}"),
-                )
-                .expect("reply"),
                 subagent_kind: SubagentKindId::new("general").expect("kind"),
                 spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
                     .expect("capability"),

@@ -12,6 +12,7 @@ import {
   hasChannelSurface,
   primaryAuthAccount,
   authAccountNeedsReconnect,
+  authAccountNeedsScopeUpdate,
   authAccountReasonLabelKey,
 } from "../lib/extensions-schema";
 import { extensionLifecycleState, primaryExtensionAction } from "../lib/extension-actions";
@@ -111,6 +112,7 @@ function makeContext() {
     hasChannelSurface,
     primaryAuthAccount,
     authAccountNeedsReconnect,
+  authAccountNeedsScopeUpdate,
     authAccountReasonLabelKey,
     RUNTIME_LABELS,
     STATE_TONES,

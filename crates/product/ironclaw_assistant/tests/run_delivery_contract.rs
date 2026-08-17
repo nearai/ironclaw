@@ -204,9 +204,6 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
             run_id: request.run_id,
             status: scripted.status,
             accepted_message_ref: AcceptedMessageRef::new("msg:scripted").expect("ref"),
-            source_binding_ref: SourceBindingRef::new("src:scripted").expect("ref"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:test:scripted")
-                .expect("ref"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             allow_steering: true,
@@ -559,6 +556,7 @@ impl BlockedAuthPromptSource for OAuthPromptSource {
             expires_at: None,
             connection: None,
             pairing: None,
+            device_link: None,
         })
     }
 }

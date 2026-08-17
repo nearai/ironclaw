@@ -220,7 +220,13 @@ The loop must not call `RuntimeDispatcher` directly. `RuntimeDispatcher` only re
 
 ## 7. Batch execution
 
-The loop may execute a batch sequentially or in parallel.
+Multiple calls emitted in one model response are scheduled in parallel by
+default. The sequential policy spelling remains in the internal execution and
+observability vocabulary, but the canonical executor does not select it for new
+model-emitted batches. A host port may still require ordered batch entry for an
+operational hazard in the concrete invocation set. Ordered entry sets
+`stop_on_first_suspension`, so outer decorators must preserve caller-order
+dispatch and must not fan the batch back out.
 
 Rules:
 

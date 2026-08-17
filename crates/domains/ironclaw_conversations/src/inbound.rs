@@ -258,8 +258,6 @@ where
                 scope: resolution.turn_scope.clone(),
                 actor: accepted_message.actor.clone(),
                 accepted_message_ref: accepted_message.message_ref.clone(),
-                source_binding_ref: accepted_message.source_binding_ref.clone(),
-                reply_target_binding_ref: accepted_message.reply_target_binding_ref.clone(),
                 requested_run_profile: accepted_message.requested_run_profile.clone(),
                 idempotency_key,
                 received_at: accepted_message.received_at,
@@ -1094,7 +1092,6 @@ mod tests {
                 resolved_run_profile_version: RunProfileVersion::new(1),
                 event_cursor: ironclaw_host_api::turn::EventCursor(0),
                 accepted_message_ref,
-                reply_target_binding_ref,
             }),
             replayed_turn_submission,
         }
@@ -1387,8 +1384,6 @@ mod tests {
             scope: submission.scope,
             actor: submission.actor,
             accepted_message_ref: submission.accepted_message_ref,
-            source_binding_ref: submission.source_binding_ref,
-            reply_target_binding_ref: submission.reply_target_binding_ref,
             requested_run_profile: submission.requested_run_profile,
             idempotency_key: submission.idempotency_key,
             received_at: submission.received_at,
@@ -1425,7 +1420,6 @@ mod tests {
             resolved_run_profile_version: ironclaw_host_api::turn::RunProfileVersion::new(1),
             event_cursor: ironclaw_host_api::turn::EventCursor(0),
             accepted_message_ref: request.accepted_message_ref.clone(),
-            reply_target_binding_ref: request.reply_target_binding_ref.clone(),
         }
     }
 

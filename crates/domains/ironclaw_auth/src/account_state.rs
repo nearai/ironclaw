@@ -68,6 +68,13 @@ pub fn project_auth_account_state(
         Some(
             AuthFlowStatus::Pending
                 | AuthFlowStatus::AwaitingUser
+                // A device link that has shown its payload and is polling the
+                // vendor is mid-authentication, exactly like an OAuth flow
+                // waiting on a redirect. This arm is EXPLICIT because the
+                // fallthrough below would answer `Disconnected`: the card
+                // would tell a user with a live QR code on screen that nothing
+                // is happening, and a poller keyed on the state would stop.
+                | AuthFlowStatus::AwaitingVendor
                 | AuthFlowStatus::CallbackReceived
                 | AuthFlowStatus::Completing
         )
@@ -171,5 +178,25 @@ mod tests {
                 Some(AuthAccountLastError::VendorDenied)
             )
         );
+    }
+
+    /// A device link waiting on the vendor is `authenticating`, and must be so
+    /// with **no** account row — which is the only state a first link is ever
+    /// in, since no credential account exists until custody is durable. The
+    /// unconfigured/`None` fallthrough answers `Disconnected`, so an implicit
+    /// arm here would blank a live card mid-scan.
+    #[test]
+    fn awaiting_vendor_projects_as_authenticating_not_disconnected() {
+        for account_status in [
+            None,
+            Some(CredentialAccountStatus::PendingSetup),
+            Some(CredentialAccountStatus::Revoked),
+        ] {
+            assert_eq!(
+                project_auth_account_state(account_status, Some(AuthFlowStatus::AwaitingVendor)),
+                (AuthAccountState::Authenticating, None),
+                "a live device-link flow outranks account status {account_status:?}"
+            );
+        }
     }
 }

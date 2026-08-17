@@ -491,7 +491,6 @@ impl ProcessJournalMaterializedState {
         now: ironclaw_host_api::Timestamp,
         lease_duration: Duration,
     ) -> Result<StoredCommandOutcome, ProcessJournalStoreError> {
-        let cursor = self.next_cursor();
         let snapshot = self.process_mut(request.process_id)?;
         ensure_transition(snapshot, ProcessLifecycleStatus::Running)?;
         ensure_lease(snapshot, &request.worker_id, &request.lease_token)?;
@@ -501,14 +500,7 @@ impl ProcessJournalMaterializedState {
                 .ok()
                 .map(|duration| now + duration);
         }
-        snapshot.journal_cursor = cursor;
-        let snapshot = snapshot.clone();
-        self.push_entry(ProcessJournalEntry::from_snapshot(
-            &snapshot,
-            cursor,
-            ProcessJournalKind::Heartbeat,
-        ));
-        Ok(StoredCommandOutcome::Heartbeat(snapshot))
+        Ok(StoredCommandOutcome::Heartbeat(snapshot.clone()))
     }
 
     fn apply_recover_expired(

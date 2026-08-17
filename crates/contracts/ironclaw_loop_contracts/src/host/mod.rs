@@ -20,7 +20,7 @@ pub use capability::{
     AuthResumeApprovalIdentity, CapabilityApprovalResume, CapabilityAuthResume,
     CapabilityDeniedReasonKind, CapabilityDeniedReasonKindValue, CapabilityDescriptionTrust,
     CapabilityDescriptorView, CapabilityFailure, CapabilityProgress, CapabilityResultMessage,
-    ConcurrencyHint, LoopCapabilityPort, LoopRequest, LoopRequestBatch, ProviderToolCall,
+    LoopCapabilityPort, LoopRequest, LoopRequestBatch, ProviderToolCall,
     ProviderToolCallCapabilityIds, ProviderToolCallReference, ProviderToolCallReplay,
     ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
     VisibleCapabilitySurface,
@@ -42,9 +42,9 @@ pub use input::{
 pub use model::{
     AssistantReply, CapabilityCallCandidate, LoopInlineMessage, LoopInlineMessageRole,
     LoopModelCapabilityView, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
-    LoopModelUsage, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleGrant,
-    LoopPromptBundleRequest, LoopPromptDiagnosticMetadata, LoopPromptPort, ModelStreamChunk,
-    ParentLoopOutput, PromptMode,
+    LoopModelToolChoice, LoopModelUsage, LoopPromptBundle, LoopPromptBundleAuthority,
+    LoopPromptBundleGrant, LoopPromptBundleRequest, LoopPromptDiagnosticMetadata, LoopPromptPort,
+    ModelStreamChunk, ParentLoopOutput, PromptMode,
 };
 pub use progress::{
     AgentLoopDriverHost, BatchPolicyKind, LoopCancellationPort, LoopCancellationSignal,

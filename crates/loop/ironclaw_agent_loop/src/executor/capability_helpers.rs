@@ -20,7 +20,7 @@ use crate::{
         CapabilityCallSignature, LoopExecutionState, PendingApprovalResume, PendingAuthResume,
         PendingExternalToolResume,
     },
-    strategies::{CapabilityCallSummary, CapabilityErrorSummary, CapabilityFilter, GateKind},
+    strategies::{CapabilityErrorSummary, CapabilityFilter, GateKind},
 };
 
 use super::{AgentLoopExecutorError, capability_host_error};
@@ -188,21 +188,6 @@ impl<'a> CapabilitySurfaceIndex<'a> {
             descriptors,
             callable,
         }
-    }
-}
-
-pub(super) fn capability_summary(
-    surface: &CapabilitySurfaceIndex<'_>,
-    call: &CapabilityCallCandidate,
-) -> CapabilityCallSummary {
-    let concurrency_hint = surface
-        .descriptors
-        .get(&call.capability_id)
-        .map(|descriptor| descriptor.concurrency_hint)
-        .unwrap_or(ironclaw_loop_contracts::ConcurrencyHint::Exclusive);
-    CapabilityCallSummary {
-        name: call.capability_id.clone(),
-        concurrency_hint,
     }
 }
 
@@ -850,7 +835,7 @@ mod tests {
     fn capability_is_visible_authorizes_disclosed_but_unadvertised_callable_tool() {
         use ironclaw_host_api::runtime::RuntimeKind;
         use ironclaw_loop_contracts::{
-            CapabilityDescriptorView, CapabilityInputRef, ConcurrencyHint, VisibleCapabilitySurface,
+            CapabilityDescriptorView, CapabilityInputRef, VisibleCapabilitySurface,
         };
 
         let version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
@@ -864,7 +849,6 @@ mod tests {
             safe_name: "tool_search".to_string(),
             safe_description: "search".to_string(),
             description_trust: Default::default(),
-            concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: serde_json::json!({"type": "object"}),
         };
         let candidate = |cap: &CapabilityId| CapabilityCallCandidate {

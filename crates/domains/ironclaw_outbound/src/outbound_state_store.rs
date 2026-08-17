@@ -69,20 +69,20 @@ use sha2::{Digest, Sha256};
 
 use crate::reply_attachment_intents::validate_reply_attachment_intents;
 use crate::validation::{
-    validate_advance_request, validate_communication_preference, validate_delivery_attempt,
-    validate_delivery_identity, validate_delivery_status_request, validate_policy,
-    validate_subscription_identity, validate_subscription_record, validate_subscription_request,
+    validate_communication_preference, validate_delivery_attempt, validate_delivery_identity,
+    validate_delivery_status_request, validate_policy, validate_subscription_identity,
+    validate_subscription_record, validate_subscription_request,
 };
 use crate::{
-    AdvanceSubscriptionCursorRequest, CommunicationPreferenceKey, CommunicationPreferenceRecord,
-    CommunicationPreferenceRepository, CommunicationPreferenceVersion, DeliveredGateRouteRecord,
-    DeliveredGateRouteStore, DeliveryDefaultScope, LoadSubscriptionCursorRequest,
-    MAX_RUN_DELIVERY_CLEANUP_RECORDS, OutboundDeliveryAttempt, OutboundDeliveryId,
-    OutboundDeliveryStatus, OutboundError, OutboundStateStorePort, ProjectionSubscriptionId,
-    ProjectionSubscriptionRecord, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
-    RunDeliveryCleanupRecord, RunDeliveryCleanupRequest, ThreadNotificationPolicy,
-    TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore, UpdateDeliveryStatusRequest,
-    VersionedCommunicationPreferenceRecord, WriteCommunicationPreferenceRequest,
+    CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
+    CommunicationPreferenceVersion, DeliveredGateRouteRecord, DeliveredGateRouteStore,
+    DeliveryDefaultScope, LoadSubscriptionCursorRequest, MAX_RUN_DELIVERY_CLEANUP_RECORDS,
+    OutboundDeliveryAttempt, OutboundDeliveryId, OutboundDeliveryStatus, OutboundError,
+    OutboundStateStorePort, ProjectionSubscriptionId, ProjectionSubscriptionRecord,
+    ReplyAttachmentIntent, ReplyAttachmentIntentPort, RunDeliveryCleanupRecord,
+    RunDeliveryCleanupRequest, ThreadNotificationPolicy, TriggeredRunDeliveryRecord,
+    TriggeredRunDeliveryStore, UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
+    WriteCommunicationPreferenceRequest,
 };
 
 /// Maximum number of compare-and-swap retries on a read-then-write path
@@ -878,46 +878,6 @@ where
         };
         validate_subscription_request(&record, &request)?;
         Ok(record.cursor)
-    }
-
-    async fn advance_subscription_cursor(
-        &self,
-        request: AdvanceSubscriptionCursorRequest,
-    ) -> Result<(), OutboundError> {
-        let path = subscription_path(
-            &request.subscription_id,
-            &request.actor,
-            &request.cursor.scope,
-            &request.thread_id,
-        )?;
-        let resource_scope = ResourceScope::system();
-        self.ensure_tenant_id_index(&resource_scope, &subscriptions_root()?)
-            .await?;
-        for _ in 0..MAX_CAS_RETRIES {
-            let Some((mut record, versioned)) = self
-                .get_versioned_json::<ProjectionSubscriptionRecord>(&resource_scope, &path)
-                .await?
-            else {
-                return Err(OutboundError::SubscriptionScopeMismatch);
-            };
-            validate_advance_request(&record, &request)?;
-            record.cursor = Some(request.cursor.clone());
-            match self
-                .put_json(
-                    &resource_scope,
-                    &path,
-                    &record,
-                    &record.scope.stream.tenant_id,
-                    CasExpectation::Version(versioned.version),
-                )
-                .await
-            {
-                Ok(()) => return Ok(()),
-                Err(OutboundError::CasConflict) => continue,
-                Err(error) => return Err(error),
-            }
-        }
-        Err(OutboundError::Backend)
     }
 
     async fn record_delivery_attempt(

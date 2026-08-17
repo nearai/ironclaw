@@ -600,13 +600,6 @@ pub struct RebornRuntime {
     >,
     /// Sibling rebindable slot for the trigger delivery-target service; the
     /// test-support repoint seam swaps both slots together.
-    #[cfg(any(test, feature = "test-support"))]
-    #[allow(
-        dead_code,
-        reason = "held for test-support rebinding after runtime construction"
-    )]
-    pub(crate) trigger_source_turn_state:
-        Arc<std::sync::RwLock<Arc<dyn ironclaw_turns::AgentTurnRuntimePort>>>,
     pub(crate) broadcast_budget_event_sink: Arc<ironclaw_resources::BroadcastBudgetEventSink>,
     pub(crate) external_tool_catalog: Arc<dyn ExternalToolCatalog>,
     pub(crate) persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
@@ -2328,8 +2321,6 @@ impl RebornRuntime {
                 scope: scope.clone(),
                 actor: TurnActor::new(self.actor_user_id.clone()),
                 accepted_message_ref: accepted_message_ref.clone(),
-                source_binding_ref: self.source_binding_ref.clone(),
-                reply_target_binding_ref: self.reply_target_binding_ref.clone(),
                 requested_run_profile: None,
                 idempotency_key,
                 received_at: Utc::now(),
@@ -3137,6 +3128,12 @@ pub(crate) async fn build_runtime_with_resource_governor(
             limit.get(),
         );
     }
+    if let Some(limit) = runner.max_concurrent_unbound_runs {
+        max_running_by_class.insert(
+            ProcessConcurrencyClass::from_trusted("unbound"),
+            limit.get(),
+        );
+    }
     services_input = services_input.with_process_concurrency_limits(ProcessConcurrencyLimits {
         max_running_per_owner: runner
             .max_concurrent_runs_per_user
@@ -3870,7 +3867,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
             text_only_driver: Default::default(),
             host: Default::default(),
             tool_disclosure: resolved_tool_disclosure,
-            parallel_tool_batch: default_runtime_config.parallel_tool_batch,
             tool_disclosure_profile_pins: default_runtime_config.tool_disclosure_profile_pins,
             planned_default_iteration_limit: optional_nonzero_u32_env(
                 "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",
@@ -4505,8 +4501,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
         trigger_repository: trigger_repository.clone(),
         #[cfg(any(test, feature = "test-support"))]
         trigger_process_lifecycle_source: Arc::clone(&services.trigger_process_lifecycle_source),
-        #[cfg(any(test, feature = "test-support"))]
-        trigger_source_turn_state: Arc::clone(&services.trigger_source_turn_state),
         broadcast_budget_event_sink,
         external_tool_catalog: services.external_tool_catalog.clone(),
         persistent_approval_policies: Arc::clone(&services.persistent_approval_policies),

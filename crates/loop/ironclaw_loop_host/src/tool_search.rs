@@ -202,7 +202,10 @@ impl IndexedDocument {
             capability_id.to_lowercase(),
             definition.name.as_str().to_lowercase(),
         ]);
-        exact_identifiers.insert(capability_id.replace('.', "__").to_lowercase());
+        exact_identifiers.insert(
+            ironclaw_host_api::ids::ProviderToolName::encode_capability_str(capability_id)
+                .to_lowercase(),
+        );
         let length = builder.term_weights.len().max(1) as f64;
         Self {
             name: definition.name.to_string(),

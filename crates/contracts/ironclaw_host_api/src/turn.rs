@@ -316,6 +316,25 @@ impl RunProfileId {
         Self::from_trusted_static("scheduled_trigger")
     }
 
+    /// Runs over a prepared unbound thread with an ordinary
+    /// assistant-message output contract.
+    pub fn unbound_default() -> Self {
+        Self::from_trusted_static("unbound_default")
+    }
+
+    /// Runs over a prepared unbound thread whose journaled output contract
+    /// is a JSON schema; the loop family enforces strict schema validation on
+    /// the terminal output.
+    pub fn unbound_structured() -> Self {
+        Self::from_trusted_static("unbound_structured")
+    }
+
+    /// True for both unbound profile ids. Admission uses this to derive the
+    /// concurrency class; readers must keep treating unknown ids as opaque.
+    pub fn is_unbound(&self) -> bool {
+        self == &Self::unbound_default() || self == &Self::unbound_structured()
+    }
+
     pub fn is_interactive_default(&self) -> bool {
         self == &Self::interactive_default()
     }
@@ -1147,7 +1166,6 @@ pub enum SubmitTurnResponse {
         resolved_run_profile_version: RunProfileVersion,
         event_cursor: EventCursor,
         accepted_message_ref: AcceptedMessageRef,
-        reply_target_binding_ref: ReplyTargetBindingRef,
     },
 }
 

@@ -71,8 +71,12 @@ pub enum WebChatV2Event {
     Gate {
         prompt: GatePromptView,
     },
+    /// Boxed for the same reason as `ProductOutboundPayload::AuthPrompt`: the
+    /// auth card is the widest event here, and every SSE frame — `KeepAlive`
+    /// included — would otherwise be sized to it. `Box` is transparent to
+    /// serde, so the emitted JSON is byte-identical.
     AuthRequired {
-        prompt: AuthPromptView,
+        prompt: Box<AuthPromptView>,
     },
     FinalReply {
         reply: FinalReplyView,

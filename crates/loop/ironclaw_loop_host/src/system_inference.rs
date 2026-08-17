@@ -155,6 +155,7 @@ where
             resolved_model_route: self.run_context.resolved_model_route.clone(),
             run_id: self.run_context.run_id,
             turn_id: self.run_context.turn_id,
+            tool_choice: None,
         };
         let requested_fallback_index = model_request.fallback_index;
 

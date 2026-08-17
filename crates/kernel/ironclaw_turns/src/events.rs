@@ -554,9 +554,8 @@ mod tests {
     };
 
     use crate::{
-        AcceptedMessageRef, CapabilityActivityId, ReplyTargetBindingRef, RunProfileId,
-        RunProfileVersion, SourceBindingRef, TurnActor, TurnError, TurnGateRef, TurnId, TurnRunId,
-        TurnRunState, TurnScope, TurnStatus,
+        AcceptedMessageRef, CapabilityActivityId, RunProfileId, RunProfileVersion, TurnActor,
+        TurnError, TurnGateRef, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
         events::{
             EventCursor, TurnBlockedGateKind, TurnBlockedGateMetadata, TurnEventKind,
             TurnEventPage, TurnEventProjectionService, TurnEventProjectionSource,
@@ -708,8 +707,6 @@ mod tests {
             run_id: TurnRunId::new(),
             status: TurnStatus::BlockedAuth,
             accepted_message_ref: AcceptedMessageRef::new("accepted-a").expect("accepted ref"),
-            source_binding_ref: SourceBindingRef::new("source-a").expect("source ref"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-a").expect("reply ref"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             allow_steering: true,
@@ -749,8 +746,6 @@ mod tests {
             run_id: TurnRunId::new(),
             status: TurnStatus::Failed,
             accepted_message_ref: AcceptedMessageRef::new("accepted-a").expect("accepted ref"),
-            source_binding_ref: SourceBindingRef::new("source-a").expect("source ref"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-a").expect("reply ref"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             allow_steering: true,

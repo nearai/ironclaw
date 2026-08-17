@@ -1340,9 +1340,18 @@ pub enum ProductOutboundPayload {
     CapabilityActivity(CapabilityActivityView),
     CapabilityDisplayPreview(CapabilityDisplayPreviewView),
     GatePrompt(GatePromptView),
-    AuthPrompt(AuthPromptView),
-    ProjectionSnapshot { state: ProductProjectionState },
-    ProjectionUpdate { state: ProductProjectionState },
+    /// Boxed because `AuthPromptView` is by some margin the widest payload
+    /// here — it carries the pairing frame *and* the device-link frame, either
+    /// of which may be absent — and an unboxed variant would size every
+    /// projection event, `KeepAlive` included, to the largest auth card. `Box`
+    /// is transparent to serde, so the wire shape is unchanged.
+    AuthPrompt(Box<AuthPromptView>),
+    ProjectionSnapshot {
+        state: ProductProjectionState,
+    },
+    ProjectionUpdate {
+        state: ProductProjectionState,
+    },
     KeepAlive,
 }
 
