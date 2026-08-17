@@ -17,8 +17,8 @@ use ironclaw_approvals::{
     ApprovalRecord, ApprovalRequestStorePort, ApprovalResolver, ApprovalStoreError, LeaseApproval,
 };
 use ironclaw_authorization::{
-    GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer,
-    in_memory_backed_capability_lease_store,
+    CapabilityLeaseStatus, CapabilityLeaseStorePort, GrantAuthorizer,
+    TrustAwareCapabilityDispatchAuthorizer, in_memory_backed_capability_lease_store,
 };
 use ironclaw_extension_registry::{
     ExtensionManifest, ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry,
@@ -649,7 +649,7 @@ async fn default_runtime_approval_resume_completes_and_consumes_grant() {
         other => panic!("expected ApprovalRequired outcome, got {:?}", other),
     };
 
-    ApprovalResolver::new(approval_requests.as_ref(), leases.as_ref())
+    let lease = ApprovalResolver::new(approval_requests.as_ref(), leases.as_ref())
         .approve_dispatch(
             &scope,
             gate.approval_request_id,
@@ -687,6 +687,16 @@ async fn default_runtime_approval_resume_completes_and_consumes_grant() {
         other => panic!("expected Completed resume outcome, got {:?}", other),
     }
     assert_eq!(dispatcher.call_count(), 1);
+
+    // The name promises the grant is consumed by the resumed dispatch, not
+    // just that the outcome is `Completed` — assert the lease itself flips
+    // to `Consumed` so a regression that leaves the grant re-usable (or
+    // reverts to re-authorizing from a stale `Active` lease) fails here.
+    let consumed_lease = leases
+        .get(&scope, lease.grant.id)
+        .await
+        .expect("lease still present after resume");
+    assert_eq!(consumed_lease.status, CapabilityLeaseStatus::Consumed);
 }
 
 #[tokio::test]
