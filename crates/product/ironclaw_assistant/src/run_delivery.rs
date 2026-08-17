@@ -417,8 +417,7 @@ impl RunDeliveryServices {
     }
 
     /// [`Self::post_notice`] with an explicit visibility request.
-    // arch-exempt: too_many_args, needs a notice-request bundle, which would
-    // duplicate NoticeDeliveryRequest one layer up, issue #7681
+    // arch-exempt: too_many_args, needs a notice-request bundle, which would duplicate NoticeDeliveryRequest one layer up, plan #7681
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn post_notice_with_visibility(
         &self,
