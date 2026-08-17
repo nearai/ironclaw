@@ -152,13 +152,11 @@ fn dispatch_error_for_tool_error(
             kind,
             diagnostic,
             detail,
-            attempt,
         } => DispatchError::Rejected {
             runtime,
             kind,
             diagnostic,
             detail,
-            attempt,
         },
         ToolError::Failed {
             kind,

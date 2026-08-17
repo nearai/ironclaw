@@ -227,13 +227,11 @@ pub(super) fn tool_error_from_dispatch(error: DispatchError) -> ToolError {
             kind,
             diagnostic,
             detail,
-            attempt,
         } => ToolError::Rejected {
             runtime,
             kind,
             diagnostic,
             detail,
-            attempt,
         },
         other => ToolError::Failed {
             kind: ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::Client,

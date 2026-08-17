@@ -476,12 +476,6 @@ where
                     ),
                     diagnostic: Some(rejection.diagnostic),
                     detail: None,
-                    attempt: Some(Box::new(
-                        ironclaw_host_api::dispatch::DispatchAttemptAccounting {
-                            usage: rejection.usage,
-                            receipt: rejection.receipt,
-                        },
-                    )),
                 },
                 error => DispatchError::Mcp {
                     kind: mcp_error_kind(&error),

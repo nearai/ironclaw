@@ -68,14 +68,6 @@ pub struct ProviderDiagnostic {
     pub retry_after: Option<Duration>,
 }
 
-/// Evidence that a provider-facing dispatch attempt consumed its prepared
-/// resource reservation, even though the provider rejected the operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DispatchAttemptAccounting {
-    pub usage: ResourceUsage,
-    pub receipt: ResourceReceipt,
-}
-
 impl fmt::Debug for ProviderDiagnostic {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ProviderDiagnostic(<redacted>)")
@@ -555,9 +547,6 @@ pub enum DispatchError {
         kind: DispatchFailureKind,
         diagnostic: Option<ProviderDiagnostic>,
         detail: Option<DispatchFailureDetail>,
-        /// `Some` proves transport completed and the reservation was settled;
-        /// `None` is reserved for pre-transport rejection.
-        attempt: Option<Box<DispatchAttemptAccounting>>,
     },
     /// MCP dispatch failure. `model_visible_cause` carries the raw backend cause —
     /// it is NOT yet display/model-safe: secret VALUES are scrubbed downstream
@@ -670,14 +659,12 @@ impl fmt::Debug for DispatchError {
                 runtime,
                 kind,
                 detail,
-                attempt,
                 ..
             } => f
                 .debug_struct("Rejected")
                 .field("runtime", runtime)
                 .field("kind", kind)
                 .field("detail", detail)
-                .field("attempt", attempt)
                 .field("diagnostic", &"<redacted>")
                 .finish(),
             Self::Mcp { kind, .. } => f.debug_struct("Mcp").field("kind", kind).finish(),

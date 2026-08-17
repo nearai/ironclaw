@@ -188,13 +188,11 @@ fn tool_error_to_dispatch_error(
             kind,
             diagnostic,
             detail,
-            attempt,
         } => DispatchError::Rejected {
             runtime,
             kind,
             diagnostic,
             detail,
-            attempt,
         },
         ToolError::Failed {
             kind,
@@ -434,7 +432,6 @@ mod tests {
                     retry_after: None,
                 }),
                 detail: None,
-                attempt: None,
             })
         }
     }
