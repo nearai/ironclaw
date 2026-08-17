@@ -439,6 +439,7 @@ pub fn unbound_structured_planned_profile_definition()
         max_checkpoint_bytes: 64 * 1024,
         require_final_checkpoint: false,
         allow_no_reply_completion: true,
+        before_model_checkpoint_interval: 1,
     };
     Ok(base
         .with_steering_policy(unbound_steering_policy())
