@@ -346,6 +346,67 @@ async fn default_runtime_propagates_unavailable_when_run_state_lookup_fails_duri
 }
 
 #[tokio::test]
+async fn default_runtime_fresh_approval_without_persisted_request_fails_authorization() {
+    // Regression: the response processor's Fresh-mode `AuthorizationRequiresApproval`
+    // arm reads the approval request id back through `lookup_approval_request_id`
+    // rather than trusting the capability kernel's in-band signal alone. If that
+    // read-back finds no persisted record — even though the capability host's own
+    // write succeeded — the invocation must fail as a model-visible authorization
+    // failure instead of fabricating an `ApprovalRequired` gate the caller could
+    // never resolve.
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(ApprovalAuthorizer);
+    let inner_run_state =
+        Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let run_state: Arc<dyn ProcessInvocationStatePort> = Arc::new(InvisibleApprovalRunStateStore {
+        inner: inner_run_state.clone(),
+    });
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
+    let leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort> =
+        Arc::new(in_memory_backed_capability_lease_store());
+
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_invocation_state(run_state)
+    .with_approval_requests(approval_requests)
+    .with_capability_leases(leases);
+
+    let context = execution_context_with_dispatch_grant();
+    let request = (
+        context,
+        capability_id(),
+        ResourceEstimate::default(),
+        json!({"message": "hello"}),
+    );
+
+    let outcome = runtime
+        .invoke_capability(request)
+        .await
+        .expect("missing persisted approval must surface as a Failed outcome, not a host error");
+
+    match outcome {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.kind, FailureKind::Authorization);
+            let message = failure.message.as_deref().unwrap_or_default();
+            assert!(
+                message.contains("no approval request was persisted"),
+                "unexpected message: {message}"
+            );
+        }
+        other => panic!(
+            "expected Failed outcome with no approval gate, got {:?}",
+            other
+        ),
+    }
+}
+
+#[tokio::test]
 async fn default_runtime_returns_failed_for_unknown_capability() {
     let registry = Arc::new(ExtensionRegistry::new());
     let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
@@ -1803,6 +1864,82 @@ impl ProcessInvocationStatePort for FailingGetRunStateStore {
         Err(ProcessInvocationError::Backend(
             "simulated read failure: /tmp/runstate.db connection refused".to_string(),
         ))
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ProcessInvocationRecord>, ProcessInvocationError> {
+        self.inner.records_for_scope(scope).await
+    }
+}
+
+/// Wraps an [`ironclaw_processes::ProcessInvocationStateStore<ironclaw_filesystem::InMemoryBackend>`]
+/// but always answers `get` with `Ok(None)`, even after `start`/`block_approval`
+/// writes have succeeded against the inner store. Simulates a read-your-write
+/// gap between the capability host's approval-block write and the host
+/// runtime's own approval-lookup read, so the response processor's
+/// `AuthorizationRequiresApproval` arm sees no persisted record despite the
+/// kernel having required approval.
+struct InvisibleApprovalRunStateStore {
+    inner:
+        Arc<ironclaw_processes::ProcessInvocationStateStore<ironclaw_filesystem::InMemoryBackend>>,
+}
+
+#[async_trait]
+impl ProcessInvocationStatePort for InvisibleApprovalRunStateStore {
+    async fn start(
+        &self,
+        start: ProcessInvocationStart,
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
+        self.inner.start(start).await
+    }
+
+    async fn block_approval(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        approval: ApprovalRequest,
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
+        self.inner
+            .block_approval(scope, invocation_id, approval)
+            .await
+    }
+
+    async fn block_auth(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
+        self.inner
+            .block_auth(scope, invocation_id, error_kind)
+            .await
+    }
+
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
+        self.inner.complete(scope, invocation_id).await
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
+        self.inner.fail(scope, invocation_id, error_kind).await
+    }
+
+    async fn get(
+        &self,
+        _scope: &ResourceScope,
+        _invocation_id: InvocationId,
+    ) -> Result<Option<ProcessInvocationRecord>, ProcessInvocationError> {
+        Ok(None)
     }
 
     async fn records_for_scope(
