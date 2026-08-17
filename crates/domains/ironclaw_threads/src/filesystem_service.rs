@@ -192,6 +192,7 @@ where
     thread_index_declaration_lock: tokio::sync::Mutex<()>,
     thread_index_touch_state: Arc<thread_index::ThreadIndexTouchState>,
     thread_index_touch_flush_interval: Duration,
+    thread_index_projection_repair_state: Arc<thread_index::ThreadIndexProjectionRepairState>,
     one_shot_context_windows: Mutex<HashMap<String, ContextWindow>>,
 }
 
@@ -211,7 +212,7 @@ pub(super) enum IndexDeclarationPolicy {
 
 impl<F> FilesystemSessionThreadService<F>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + 'static,
 {
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
@@ -222,6 +223,9 @@ where
             thread_index_declaration_lock: tokio::sync::Mutex::new(()),
             thread_index_touch_state: Arc::new(thread_index::ThreadIndexTouchState::default()),
             thread_index_touch_flush_interval: DEFAULT_THREAD_INDEX_TOUCH_FLUSH_INTERVAL,
+            thread_index_projection_repair_state: Arc::new(
+                thread_index::ThreadIndexProjectionRepairState::default(),
+            ),
             one_shot_context_windows: Mutex::new(HashMap::new()),
         }
     }
@@ -1453,7 +1457,7 @@ where
 
 impl<F> FilesystemSessionThreadService<F>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + 'static,
 {
     /// One-time, per-scope backfill: stamp the `prepared_context` marker onto
     /// pre-marker subagent threads (their legacy metadata is
