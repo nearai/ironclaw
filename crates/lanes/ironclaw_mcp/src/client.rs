@@ -471,6 +471,11 @@ where
         let output = call.response.result.ok_or_else(|| {
             McpClientError::client(response_error(McpResponseErrorCause::MissingResult))
         })?;
+        if let Some(message) = call_tool_rejection_message(&output) {
+            return Err(McpClientError::client(response_error(
+                McpResponseErrorCause::ToolRejected(message),
+            )));
+        }
         let output_bytes = serde_json::to_vec(&output)
             .map(|bytes| bytes.len() as u64)
             .map_err(|err| {
@@ -602,6 +607,28 @@ where
             tools: discovered,
             usage,
         })
+    }
+}
+
+fn call_tool_rejection_message(result: &Value) -> Option<String> {
+    if result.get("isError").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+
+    let text = result
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+    if text.is_empty() {
+        Some("MCP server rejected the tool call".to_string())
+    } else {
+        Some(text)
     }
 }
 

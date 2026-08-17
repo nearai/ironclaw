@@ -88,6 +88,8 @@ pub(crate) enum McpResponseErrorCause {
     InvalidProtocolVersion,
     /// JSON-RPC response `id` did not match the request id.
     IdMismatch,
+    /// A valid `tools/call` result explicitly reported `isError: true`.
+    ToolRejected(String),
     /// Response did not contain a usable JSON-RPC payload (e.g. SSE with no
     /// matching data frame).
     NoPayload,
@@ -152,6 +154,9 @@ impl McpResponseErrorCause {
             Self::InvalidSessionId => "mcp_invalid_session_id".to_string(),
             Self::InvalidProtocolVersion => "mcp_invalid_protocol_version".to_string(),
             Self::IdMismatch => "mcp_jsonrpc_id_mismatch".to_string(),
+            Self::ToolRejected(message) => {
+                format!("mcp_tool_rejected: {}", bound_mcp_reason_detail(&message))
+            }
             Self::NoPayload => "mcp_no_payload".to_string(),
             Self::InvalidToolList(cause) => {
                 format!("mcp_invalid_tool_list: {}", cause.stable_token())

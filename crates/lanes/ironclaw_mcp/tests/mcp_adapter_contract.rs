@@ -307,6 +307,34 @@ async fn concrete_mcp_http_client_routes_json_rpc_through_shared_egress() {
 }
 
 #[tokio::test]
+async fn concrete_mcp_http_client_surfaces_call_tool_error_content() {
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(RecordingRuntimeEgress::tool_error())),
+        RecordingEgressPlanner::new(host_http_plan()),
+    );
+
+    let error = client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({"query": "ironclaw"}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .expect_err("CallToolResult.isError must not be treated as success");
+
+    assert_eq!(
+        error.stable_reason(),
+        "mcp_tool_rejected: Bad credentials; token lacks repo scope"
+    );
+}
+
+#[tokio::test]
 async fn concrete_mcp_http_auth_probe_stops_after_the_initialization_handshake() {
     let egress = RecordingRuntimeEgress::json_rpc();
     let planner = RecordingEgressPlanner::new(host_http_plan());
@@ -1742,6 +1770,7 @@ impl McpClient for RecordingMcpClient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecordedResponseMode {
     Json,
+    ToolError,
     AuthRequired,
     JsonMissingProtocolVersion,
     DeepOpenApiSchema,
@@ -1774,6 +1803,14 @@ impl RecordingRuntimeEgress {
     fn auth_required() -> Self {
         Self {
             mode: RecordedResponseMode::AuthRequired,
+            protocol_version: "2025-06-18",
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn tool_error() -> Self {
+        Self {
+            mode: RecordedResponseMode::ToolError,
             protocol_version: "2025-06-18",
             requests: Arc::new(Mutex::new(Vec::new())),
         }
@@ -1896,6 +1933,17 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                         id,
                         json!({"content":[{"type":"text","text":"ok from sse"}],"isError":false}),
                     )),
+                    RecordedResponseMode::ToolError => Ok(runtime_json_response(
+                        id,
+                        json!({
+                            "content": [
+                                {"type": "text", "text": "Bad credentials"},
+                                {"type": "text", "text": "token lacks repo scope"}
+                            ],
+                            "isError": true
+                        }),
+                        vec![],
+                    )),
                     RecordedResponseMode::AuthRequired => {
                         unreachable!("auth-required mode returns before JSON-RPC method dispatch")
                     }
@@ -2006,7 +2054,8 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                     | RecordedResponseMode::DeepOpenApiSchema
                     | RecordedResponseMode::InvalidToolCatalog
                     | RecordedResponseMode::MixedShapeInvalidCatalog
-                    | RecordedResponseMode::LongToolDescription => {
+                    | RecordedResponseMode::LongToolDescription
+                    | RecordedResponseMode::ToolError => {
                         Ok(runtime_json_response(id, result, vec![]))
                     }
                     RecordedResponseMode::Sse => Ok(runtime_sse_response(id, result)),
