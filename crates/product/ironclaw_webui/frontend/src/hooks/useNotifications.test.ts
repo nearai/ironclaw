@@ -1,7 +1,4 @@
 // @ts-nocheck
-// Run with:
-//   pnpm test -- hooks/useNotifications.test.ts
-
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
@@ -22,14 +19,18 @@ function sourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { useNotifications };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { useNotifications };`
+    .replaceAll(
+      'import("../lib/notification-approval-compat")',
+      "loadApprovalNotificationCompat()",
+    );
 }
 
 function depsEqual(left, right) {
-  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
-    return false;
-  }
-  return left.every((item, index) => Object.is(item, right[index]));
+  return Array.isArray(left) &&
+    Array.isArray(right) &&
+    left.length === right.length &&
+    left.every((item, index) => Object.is(item, right[index]));
 }
 
 function createReactStub() {
@@ -37,26 +38,26 @@ function createReactStub() {
   let cursor = 0;
   let pendingRender = false;
   return {
-    beginRender: () => {
+    beginRender() {
       cursor = 0;
       pendingRender = false;
     },
     didScheduleUpdate: () => pendingRender,
-    useCallback: (fn, deps) => {
+    useCallback(fn, deps) {
       const index = cursor++;
       const slot = slots[index];
       if (slot && depsEqual(slot.deps, deps)) return slot.value;
       slots[index] = { deps, value: fn };
       return fn;
     },
-    useEffect: (fn, deps) => {
+    useEffect(fn, deps) {
       const index = cursor++;
       const slot = slots[index];
       if (slot && depsEqual(slot.deps, deps)) return;
       slots[index] = { deps };
       fn();
     },
-    useMemo: (fn, deps) => {
+    useMemo(fn, deps) {
       const index = cursor++;
       const slot = slots[index];
       if (slot && depsEqual(slot.deps, deps)) return slot.value;
@@ -64,80 +65,101 @@ function createReactStub() {
       slots[index] = { deps, value };
       return value;
     },
-    useState: (initial) => {
+    useState(initial) {
       const index = cursor++;
       if (!slots[index]) {
-        slots[index] = {
-          value: typeof initial === "function" ? initial() : initial,
-        };
+        slots[index] = { value: typeof initial === "function" ? initial() : initial };
       }
-      return [
-        slots[index].value,
-        (next) => {
-          const value =
-            typeof next === "function" ? next(slots[index].value) : next;
-          if (!Object.is(value, slots[index].value)) {
-            slots[index].value = value;
-            pendingRender = true;
-          }
-        },
-      ];
+      return [slots[index].value, (next) => {
+        const value = typeof next === "function" ? next(slots[index].value) : next;
+        if (!Object.is(value, slots[index].value)) {
+          slots[index].value = value;
+          pendingRender = true;
+        }
+      }];
     },
   };
 }
 
-function instantiate(queryState, options = {}) {
-  const getStateScopes = [];
-  const markSeenCalls = [];
-  const listThreadCalls = [];
-  const subscribeCalls = [];
-  const notificationInputs = [];
-  let queryOptions = null;
+function instantiate({
+  data,
+  profile = { tenant_id: "tenant", user_id: "user" },
+  activeThreadId = null,
+  inboxError = null,
+  approvalError = null,
+} = {}) {
+  let queryOptions;
+  const readCalls = [];
+  const allReadCalls = [];
+  const inboxCalls = [];
+  const threadCalls = [];
+  const seenCalls = [];
+  let storedState = { initialized: true, seenIds: new Set() };
   const react = createReactStub();
-  const translate = (key) => key;
-  let storedState = options.initialState || { initialized: true, seenIds: new Set() };
-  const states = options.threadStates || new Map();
+  const queryClient = {
+    cancelQueries: async () => {},
+    getQueryData: () => data,
+    setQueryData: () => {},
+    invalidateQueries: () => {},
+  };
+  let mutationIndex = 0;
   const context = {
     React: react,
-    useI18n: () => ({ t: translate, lang: "en" }),
+    Promise,
+    useI18n: () => ({ t: (key) => key }),
+    useQueryClient: () => queryClient,
+    useThreadStates: () => new Map(),
+    THREAD_STATE: { NEEDS_ATTENTION: "needs_attention" },
     useQuery: (options) => {
       queryOptions = options;
-      return queryState;
+      return { data, isLoading: false, error: null, refetch: () => {} };
+    },
+    useMutation: ({ mutationFn }) => {
+      mutationIndex += 1;
+      return {
+        mutate: (value) => mutationFn(value),
+        isPending: false,
+        error: null,
+        mutationIndex,
+      };
+    },
+    listNotifications: async (request) => {
+      inboxCalls.push(request);
+      if (inboxError) throw inboxError;
+      return data?.inbox || { notifications: [], unread_count: 0 };
     },
     listThreads: async (request) => {
-      listThreadCalls.push(request);
-      return {};
+      threadCalls.push(request);
+      if (approvalError) throw approvalError;
+      return data?.approvalThreads || { threads: [] };
     },
-    THREAD_STATE: { NEEDS_ATTENTION: "needs_attention" },
-    useThreadStates: () => states,
-    approvalThreadNotifications: (threads, threadStates, t) => {
-      notificationInputs.push({ threads, threadStates, t });
-      return typeof options.approvalThreadNotifications === "function"
-        ? options.approvalThreadNotifications(threads, threadStates, t)
-        : threads.map((thread) => {
-            const threadId = thread.id || thread.thread_id;
-            return {
-              id: `approval:${threadId}`,
-              href: `/chat/${threadId}`,
-            };
-          });
-    },
-    getNotificationState: (scope) => {
-      getStateScopes.push(scope);
-      return storedState;
-    },
-    markNotificationIdsSeen: (ids, scope) => {
-      markSeenCalls.push({ ids, scope });
-      storedState = {
-        initialized: true,
-        seenIds: new Set([...storedState.seenIds, ...ids]),
-      };
-      return storedState;
-    },
-    subscribeNotifications: (listener) => {
-      subscribeCalls.push(listener);
-      return () => {};
-    },
+    markNotificationRead: async (id) => readCalls.push(id),
+    markAllNotificationsRead: async () => allReadCalls.push(true),
+    notificationMessages: (notifications) => (notifications || []).map((notification) => ({
+      id: notification.id,
+      type: notification.kind,
+      href: `/chat/${notification.action.thread_id}`,
+      timestamp: notification.timestamp || 2,
+      read: Boolean(notification.read_at),
+    })),
+    loadApprovalNotificationCompat: async () => ({
+      approvalThreadNotifications: (threads) => threads.map((thread) => ({
+        id: `approval:${thread.id}`,
+        type: "approval",
+        href: `/chat/${thread.id}`,
+        timestamp: 1,
+        read: false,
+      })),
+      getNotificationState: () => storedState,
+      markNotificationIdsSeen: (ids, scope) => {
+        seenCalls.push({ ids, scope });
+        storedState = {
+          initialized: true,
+          seenIds: new Set([...storedState.seenIds, ...ids]),
+        };
+        return storedState;
+      },
+    }),
     globalThis: {},
   };
   vm.runInNewContext(sourceForTest(), context);
@@ -145,220 +167,131 @@ function instantiate(queryState, options = {}) {
     let hook;
     for (let attempt = 0; attempt < 5; attempt += 1) {
       react.beginRender();
-      hook = context.globalThis.__testExports.useNotifications({
-        profile:
-          options.profile === undefined
-            ? { tenant_id: "tenant", user_id: "user" }
-            : options.profile,
-        activeThreadId: options.activeThreadId || null,
-      });
+      mutationIndex = 0;
+      hook = context.globalThis.__testExports.useNotifications({ profile, activeThreadId });
       if (!react.didScheduleUpdate()) break;
     }
     return hook;
   };
-  const hook = render();
   return {
-    hook,
+    hook: render(),
     render,
-    get queryOptions() {
-      return queryOptions;
-    },
-    getStateScopes,
-    markSeenCalls,
-    listThreadCalls,
-    notificationInputs,
-    subscribeCalls,
+    get queryOptions() { return queryOptions; },
+    readCalls,
+    allReadCalls,
+    inboxCalls,
+    threadCalls,
+    seenCalls,
   };
 }
 
-function plainCalls(calls) {
-  return calls.map((call) => ({ ids: [...call.ids], scope: call.scope }));
+function notification(id = "notification-1", threadId = "thread-1", readAt = null) {
+  return {
+    id,
+    kind: "approval_required",
+    action: { kind: "open_thread", thread_id: threadId },
+    read_at: readAt,
+  };
 }
 
-function plainThreadRequests(calls) {
-  return calls.map((call) => ({
-    limit: call.limit,
-    needsApproval: call.needsApproval,
-    candidateThreadId: call.candidateThreadId,
-  }));
+function flushAsyncWork() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-test("does not baseline approval notifications on first load", () => {
-  const harness = instantiate({
-    data: undefined,
-    isLoading: true,
-    isSuccess: false,
-    error: null,
-    refetch: () => {},
-  });
-
-  assert.deepEqual(harness.markSeenCalls, []);
-  assert.equal(harness.hook.unreadCount, 0);
-  assert.deepEqual(harness.listThreadCalls, []);
-});
-
-test("queries only threads that need approval", async () => {
-  const harness = instantiate({
-    data: { threads: [] },
-    isLoading: false,
-    isSuccess: true,
-    error: null,
-    refetch: () => {},
-  });
-
+test("queries the durable inbox and compatibility approval fallback after profile hydration", async () => {
+  const harness = instantiate({ data: { inbox: {}, approvalThreads: {} } });
+  assert.equal(harness.queryOptions.enabled, true);
   await harness.queryOptions.queryFn();
-  assert.deepEqual(plainThreadRequests(harness.listThreadCalls), [
-    { limit: 20, needsApproval: true, candidateThreadId: undefined },
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.inboxCalls)), [{ limit: 30 }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.threadCalls)), [
+    { limit: 20, needsApproval: true },
   ]);
+
+  const pending = instantiate({ data: {}, profile: null });
+  assert.equal(pending.queryOptions.enabled, false);
 });
 
-test("does not use active thread as an approval query candidate", async () => {
-  const harness = instantiate(
-    {
-      data: { threads: [] },
-      isLoading: false,
-      isSuccess: true,
-      error: null,
-      refetch: () => {},
-    },
-    { activeThreadId: "thread-active" },
-  );
-
-  await harness.queryOptions.queryFn();
-  assert.deepEqual(plainThreadRequests(harness.listThreadCalls), [
-    { limit: 20, needsApproval: true, candidateThreadId: undefined },
-  ]);
+test("keeps the compatibility fallback available when the inbox request fails", async () => {
+  const harness = instantiate({
+    data: { approvalThreads: { threads: [{ id: "thread-fallback" }] } },
+    inboxError: new Error("inbox unavailable"),
+  });
+  const result = await harness.queryOptions.queryFn();
+  assert.deepEqual(JSON.parse(JSON.stringify(result.inbox)), {
+    notifications: [],
+    unread_count: 0,
+  });
+  assert.equal(result.compatibility[0].id, "approval:thread-fallback");
 });
 
-test("does not poll or persist notification state before profile scope hydrates", () => {
-  const harness = instantiate(
-    {
-      data: { threads: [{ id: "thread-1", state: "needs_attention" }] },
-      isLoading: false,
-      isSuccess: true,
-      error: null,
-      refetch: () => {},
+test("deduplicates fallback approvals when the durable inbox has the same thread", () => {
+  const harness = instantiate({
+    data: {
+      inbox: { notifications: [notification()], unread_count: 1 },
+      compatibility: [{
+        id: "approval:thread-1",
+        type: "approval",
+        href: "/chat/thread-1",
+        timestamp: 1,
+        read: false,
+      }],
     },
-    { activeThreadId: "thread-1", profile: null },
-  );
-
-  assert.equal(harness.queryOptions.enabled, false);
-  assert.deepEqual(harness.getStateScopes, []);
-  assert.deepEqual(harness.markSeenCalls, []);
-  assert.equal(harness.hook.unreadCount, 0);
-});
-
-test("does not include locally known non-automation approval threads", () => {
-  const harness = instantiate(
-    {
-      data: { threads: [] },
-      isLoading: false,
-      isSuccess: true,
-      error: null,
-      refetch: () => {},
-    },
-    {
-      threadStates: new Map([["thread-local", "needs_attention"]]),
-      approvalThreadNotifications: (threads) =>
-        threads.map((thread) => ({
-          id: `approval:${thread.id}`,
-          href: `/chat/${thread.id}`,
-        })),
-    },
-  );
-
+  });
   assert.deepEqual(
-    JSON.parse(JSON.stringify(
-      harness.notificationInputs.at(-1).threads.map((thread) => ({
-        id: thread.id,
-        state: thread.state,
-        title: thread.title,
-      })),
-    )),
-    [],
+    JSON.parse(JSON.stringify(harness.hook.messages.map((message) => message.id))),
+    ["notification-1"],
   );
-  assert.equal(harness.hook.messages.length, 0);
-});
-
-test("passes local thread state to approval notification presenter for backend records", () => {
-  const threadStates = new Map([["thread-1", "needs_attention"]]);
-  const harness = instantiate(
-    {
-      data: { threads: [{ id: "thread-1", state: "idle" }] },
-      isLoading: false,
-      isSuccess: true,
-      error: null,
-      refetch: () => {},
-    },
-    {
-      threadStates,
-      approvalThreadNotifications: (threads, states) =>
-        threads
-          .filter((thread) => states.get(thread.id) === "needs_attention")
-          .map((thread) => ({
-            id: `approval:${thread.id}`,
-            href: `/chat/${thread.id}`,
-          })),
-    },
-  );
-
-  assert.equal(harness.notificationInputs.at(-1).threadStates, threadStates);
   assert.equal(harness.hook.unreadCount, 1);
 });
 
-test("keeps pending approval messages after they are marked seen", () => {
-  const { hook, markSeenCalls, render } = instantiate({
-    data: { threads: [{ id: "thread-1", state: "needs_attention" }] },
-    isLoading: false,
-    isSuccess: true,
-    error: null,
-    refetch: () => {},
-  });
-
-  assert.equal(hook.unreadCount, 1);
-  hook.dismissMessage("approval:thread-1");
-  assert.deepEqual(plainCalls(markSeenCalls), [
-    { ids: ["approval:thread-1"], scope: "tenant:user" },
-  ]);
-  const nextHook = render();
-  assert.equal(nextHook.messages.length, 1);
-  assert.equal(nextHook.unreadCount, 0);
-  assert.equal(nextHook.unreadIds.has("approval:thread-1"), false);
-});
-
-test("uses the profile scope for notification dismissal", () => {
-  const { getStateScopes, hook, markSeenCalls } = instantiate({
-    data: { threads: [{ id: "thread-1", state: "needs_attention" }] },
-    isLoading: false,
-    isSuccess: true,
-    error: null,
-    refetch: () => {},
-  });
-
-  assert(getStateScopes.includes("tenant:user"));
-
-  hook.dismissMessage("approval:thread-1");
-  assert.deepEqual(plainCalls(markSeenCalls), [
-    { ids: ["approval:thread-1"], scope: "tenant:user" },
-  ]);
-});
-
-test("marks an approval notification seen after the thread has been opened", () => {
-  const { hook, markSeenCalls } = instantiate(
-    {
-      data: { threads: [{ id: "thread-1", state: "needs_attention" }] },
-      isLoading: false,
-      isSuccess: true,
-      error: null,
-      refetch: () => {},
+test("marks durable and compatibility notifications through their owning state", async () => {
+  const durable = instantiate({
+    data: {
+      inbox: { notifications: [notification()], unread_count: 1 },
+      approvalThreads: { threads: [] },
     },
-    { activeThreadId: "thread-1" },
-  );
+  });
+  durable.hook.dismissMessage("notification-1");
+  assert.deepEqual(durable.readCalls, ["notification-1"]);
 
-  assert.deepEqual(plainCalls(markSeenCalls), [
-    { ids: ["approval:thread-1"], scope: "tenant:user" },
+  const fallback = instantiate({
+    data: {
+      inbox: { notifications: [], unread_count: 0 },
+      compatibility: [{
+        id: "approval:thread-fallback",
+        type: "approval",
+        href: "/chat/thread-fallback",
+        timestamp: 1,
+        read: false,
+      }],
+    },
+  });
+  fallback.hook.dismissMessage("approval:thread-fallback");
+  await flushAsyncWork();
+  assert.deepEqual(JSON.parse(JSON.stringify(fallback.seenCalls)), [
+    { ids: ["approval:thread-fallback"], scope: "tenant:user" },
   ]);
-  assert.equal(hook.messages.length, 1);
-  assert.equal(hook.unreadCount, 0);
-  assert.equal(hook.unreadIds.has("approval:thread-1"), false);
+});
+
+test("marks the active notification and supports mark all across both stores", async () => {
+  const harness = instantiate({
+    data: {
+      inbox: { notifications: [notification()], unread_count: 1 },
+      compatibility: [{
+        id: "approval:thread-fallback",
+        type: "approval",
+        href: "/chat/thread-fallback",
+        timestamp: 1,
+        read: false,
+      }],
+    },
+    activeThreadId: "thread-1",
+  });
+  assert.deepEqual(harness.readCalls, ["notification-1"]);
+  harness.hook.markAllRead();
+  await flushAsyncWork();
+  assert.deepEqual(harness.allReadCalls, [true]);
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.seenCalls)), [
+    { ids: ["approval:thread-fallback"], scope: "tenant:user" },
+  ]);
 });

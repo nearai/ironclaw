@@ -1,34 +1,25 @@
 // @ts-nocheck
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React from "react";
-import { listThreads } from "../lib/api";
-import { useI18n } from "../lib/i18n";
-import { THREAD_STATE, useThreadStates } from "../lib/thread-state";
 import {
-  approvalThreadNotifications,
-  getNotificationState,
-  markNotificationIdsSeen,
-  subscribeNotifications,
-} from "../lib/notifications";
+  listThreads,
+  listNotifications,
+  markAllNotificationsRead,
+  markNotificationRead,
+} from "../lib/api";
+import { useI18n } from "../lib/i18n";
+import { useThreadStates } from "../lib/thread-state";
+import { notificationMessages } from "../lib/notifications";
 
+const NOTIFICATION_LIMIT = 30;
 const NOTIFICATION_THREAD_LIMIT = 20;
 const NOTIFICATION_REFETCH_MS = 10_000;
-
-function emptyNotificationState() {
-  return { initialized: false, seenIds: new Set() };
-}
-
-function profileScope(profile) {
-  return profile?.tenant_id && profile?.user_id
-    ? `${profile.tenant_id}:${profile.user_id}`
-    : null;
-}
 
 function normalizeThread(record) {
   return {
     ...record,
     id: record?.id || record?.thread_id,
-    state: record?.state || null,
+    state: record?.state || "needs_attention",
     updated_at: record?.updated_at || null,
     created_at: record?.created_at || null,
   };
@@ -40,83 +31,175 @@ export function useNotifications({
   activeThreadId = null,
 } = {}) {
   const { t } = useI18n();
+  const queryClient = useQueryClient();
   const threadStates = useThreadStates();
-  const scope = profileScope(profile);
-  const [notificationState, setNotificationState] = React.useState(() =>
-    scope ? getNotificationState(scope) : emptyNotificationState(),
-  );
-
-  React.useEffect(() => {
-    if (!scope) {
-      setNotificationState(emptyNotificationState());
-      return undefined;
-    }
-    setNotificationState(getNotificationState(scope));
-    return subscribeNotifications((nextState, changedScope) => {
-      if (changedScope === scope) setNotificationState(nextState);
-    });
-  }, [scope]);
+  const tenantId = profile?.tenant_id || null;
+  const userId = profile?.user_id || null;
+  const scope = tenantId && userId ? `${tenantId}:${userId}` : null;
+  const queryKey = ["notifications", "inbox", tenantId, userId];
 
   const query = useQuery({
-    queryKey: ["notifications", "approval-threads", scope || "pending-profile"],
-    queryFn: () =>
-      listThreads({
-        limit: NOTIFICATION_THREAD_LIMIT,
-        needsApproval: true,
-      }),
-    enabled: enabled && Boolean(scope),
+    queryKey,
+    queryFn: async () => {
+      const [inbox, approvalThreads] = await Promise.allSettled([
+        listNotifications({ limit: NOTIFICATION_LIMIT }),
+        listThreads({ limit: NOTIFICATION_THREAD_LIMIT, needsApproval: true }),
+      ]);
+      if (inbox.status === "rejected" && approvalThreads.status === "rejected") {
+        throw inbox.reason || approvalThreads.reason;
+      }
+      let compatibility = [];
+      if (approvalThreads.status === "fulfilled" && scope) {
+        try {
+          const presenter = await import("../lib/notification-approval-compat");
+          const seenIds = presenter.getNotificationState(scope).seenIds;
+          const records = Array.isArray(approvalThreads.value?.threads)
+            ? approvalThreads.value.threads
+            : [];
+          compatibility = presenter
+            .approvalThreadNotifications(records.map(normalizeThread), threadStates, t)
+            .map((message) => ({
+              ...message,
+              durable: false,
+              read: seenIds.has(message.id),
+            }));
+        } catch (_) {
+          // A compatibility chunk failure must not hide the durable inbox.
+        }
+      }
+      return {
+        inbox:
+          inbox.status === "fulfilled"
+            ? inbox.value
+            : { notifications: [], unread_count: 0 },
+        compatibility,
+      };
+    },
+    enabled: enabled && Boolean(tenantId && userId),
     refetchInterval: NOTIFICATION_REFETCH_MS,
     refetchIntervalInBackground: false,
   });
 
   const messages = React.useMemo(() => {
-    if (!scope) return [];
-    const records = Array.isArray(query.data?.threads) ? query.data.threads : [];
-    const approvalThreads = records.map((record) => ({
-      ...normalizeThread(record),
-      state: record?.state || THREAD_STATE.NEEDS_ATTENTION,
-    }));
-    return approvalThreadNotifications(approvalThreads, threadStates, t);
-  }, [query.data, scope, t, threadStates]);
-
-  React.useEffect(() => {
-    if (!activeThreadId || !scope) return;
-    const activeMessageIds = messages
-      .filter(
-        (message) =>
-          message.href === `/chat/${encodeURIComponent(activeThreadId)}` &&
-          !notificationState.seenIds.has(message.id),
-      )
-      .map((message) => message.id);
-    if (activeMessageIds.length === 0) return;
-    const next = markNotificationIdsSeen(activeMessageIds, scope);
-    setNotificationState(next);
-  }, [activeThreadId, messages, notificationState, scope]);
-
+    const durable = notificationMessages(query.data?.inbox?.notifications, t).map(
+      (message) => ({ ...message, durable: true }),
+    );
+    const durableThreadHrefs = new Set(
+      durable
+        .filter((message) => message.type === "approval_required" && message.href)
+        .map((message) => message.href),
+    );
+    const compatibility = (query.data?.compatibility || [])
+      .filter((message) => !durableThreadHrefs.has(message.href))
+      .map((message) => ({ ...message, durable: false }));
+    return [...durable, ...compatibility].sort(
+      (left, right) => right.timestamp - left.timestamp,
+    );
+  }, [query.data, t]);
   const unreadIds = React.useMemo(
-    () =>
-      new Set(
-        messages
-          .filter((message) => !notificationState.seenIds.has(message.id))
-          .map((message) => message.id),
-      ),
-    [messages, notificationState],
+    () => new Set(messages.filter((message) => !message.read).map((message) => message.id)),
+    [messages],
   );
 
-  const dismissMessage = React.useCallback((messageId) => {
-    if (!scope) return;
-    const next = markNotificationIdsSeen([messageId], scope);
-    setNotificationState(next);
-  }, [scope]);
+  const markRead = useMutation({
+    mutationFn: markNotificationRead,
+    onMutate: async (notificationId) => {
+      await queryClient.cancelQueries({ queryKey });
+      const previous = queryClient.getQueryData(queryKey);
+      queryClient.setQueryData(queryKey, (current) => ({
+        ...current,
+        inbox: {
+          ...current?.inbox,
+          unread_count: Math.max(0, Number(current?.inbox?.unread_count || 0) - 1),
+          notifications: (current?.inbox?.notifications || []).map((notification) =>
+            notification.id === notificationId && !notification.read_at
+              ? { ...notification, read_at: new Date().toISOString() }
+              : notification,
+          ),
+        },
+      }));
+      return { previous };
+    },
+    onError: (_error, _notificationId, context) => {
+      if (context?.previous) queryClient.setQueryData(queryKey, context.previous);
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey }),
+  });
+
+  const markAllReadMutation = useMutation({
+    mutationFn: markAllNotificationsRead,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey }),
+  });
+
+  const markCompatibilitySeen = React.useCallback(
+    async (ids) => {
+      if (!scope || ids.length === 0) return;
+      const compatibility = await import("../lib/notification-approval-compat");
+      compatibility.markNotificationIdsSeen(ids, scope);
+      await queryClient.invalidateQueries({ queryKey });
+    },
+    [queryClient, queryKey, scope],
+  );
+
+  React.useEffect(() => {
+    if (!activeThreadId) return;
+    for (const message of messages) {
+      if (
+        !message.read &&
+        message.href === `/chat/${encodeURIComponent(activeThreadId)}` &&
+        !markRead.isPending
+      ) {
+        if (message.durable) {
+          markRead.mutate(message.id);
+        } else if (scope) {
+          void markCompatibilitySeen([message.id]);
+        }
+        break;
+      }
+    }
+  }, [activeThreadId, markCompatibilitySeen, markRead, messages, scope]);
+
+  const dismissMessage = React.useCallback(
+    (messageId) => {
+      if (!unreadIds.has(messageId)) return;
+      const message = messages.find((candidate) => candidate.id === messageId);
+      if (message?.durable) {
+        markRead.mutate(messageId);
+      } else if (scope) {
+        void markCompatibilitySeen([messageId]);
+      }
+    },
+    [markCompatibilitySeen, markRead, messages, scope, unreadIds],
+  );
+
+  const markAllRead = React.useCallback(() => {
+    if (scope) {
+      const compatibilityIds = messages
+        .filter((message) => !message.durable && !message.read)
+        .map((message) => message.id);
+      if (compatibilityIds.length > 0) {
+        void markCompatibilitySeen(compatibilityIds);
+      }
+    }
+    markAllReadMutation.mutate();
+  }, [markAllReadMutation, markCompatibilitySeen, messages, scope]);
+
+  const serverUnreadCount = Number(query.data?.inbox?.unread_count || 0);
+  const compatibilityUnreadCount = messages.filter(
+    (message) => !message.durable && !message.read,
+  ).length;
+  const unreadCount = serverUnreadCount + compatibilityUnreadCount;
 
   return {
     messages,
     unreadIds,
-    unreadCount: unreadIds.size,
-    hasUnread: unreadIds.size > 0,
+    unreadCount,
+    hasUnread: unreadCount > 0,
     isLoading: query.isLoading,
-    error: query.error || null,
+    error: query.error || markRead.error || markAllReadMutation.error || null,
     refetch: query.refetch,
     dismissMessage,
+    markAllRead,
+    isMarkingAllRead: markAllReadMutation.isPending,
   };
 }

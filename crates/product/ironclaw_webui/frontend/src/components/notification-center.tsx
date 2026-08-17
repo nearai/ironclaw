@@ -64,6 +64,11 @@ export function NotificationCenter({ state }) {
   const hasUnread = state?.hasUnread || false;
   const unreadCount = state?.unreadCount || 0;
   const dismissMessage = state?.dismissMessage;
+  const markAllRead = state?.markAllRead;
+  const isMarkingAllRead = state?.isMarkingAllRead || false;
+  const isLoading = state?.isLoading || false;
+  const error = state?.error || null;
+  const refetch = state?.refetch;
 
   const close = React.useCallback(() => {
     setOpen(false);
@@ -136,20 +141,61 @@ export function NotificationCenter({ state }) {
                     : t("notifications.allCaughtUp")}
                 </p>
               </div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                onClick={close}
-                aria-label={t("notifications.close")}
-                title={t("notifications.close")}
-              >
-                <Icon name="close" className="h-4 w-4" />
-              </Button>
+              <div className="flex items-center gap-1">
+                {unreadCount > 0 && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={markAllRead}
+                    disabled={isMarkingAllRead}
+                  >
+                    {t("notifications.markAllRead")}
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={close}
+                  aria-label={t("notifications.close")}
+                  title={t("notifications.close")}
+                >
+                  <Icon name="close" className="h-4 w-4" />
+                </Button>
+              </div>
             </div>
 
             <div className="max-h-[calc(78dvh-4.5rem)] overflow-y-auto lg:max-h-[calc(min(70vh,32rem)-4.5rem)]">
-              {messages.length === 0
+              {isLoading && messages.length === 0
+                ? (
+                    <div className="px-4 py-8 text-center" role="status">
+                      <div className="text-sm font-semibold text-[var(--v2-text-strong)]">
+                        {t("notifications.loadingTitle")}
+                      </div>
+                    </div>
+                  )
+                : error && messages.length === 0
+                  ? (
+                      <div className="px-4 py-8 text-center" role="alert">
+                        <div className="text-sm font-semibold text-[var(--v2-text-strong)]">
+                          {t("notifications.errorTitle")}
+                        </div>
+                        <div className="mt-1 text-sm text-[var(--v2-text-muted)]">
+                          {t("notifications.errorDescription")}
+                        </div>
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          className="mt-3"
+                          onClick={() => refetch?.()}
+                        >
+                          {t("notifications.retry")}
+                        </Button>
+                      </div>
+                    )
+                  : messages.length === 0
                 ? (
                     <div className="px-4 py-8 text-center">
                       <div className="text-sm font-semibold text-[var(--v2-text-strong)]">

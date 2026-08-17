@@ -222,6 +222,35 @@ export function deleteThread({ threadId } = {}) {
   });
 }
 
+// --- Notification inbox ---
+
+export function listNotifications({ limit, cursor, signal } = {}) {
+  const url = new URL(`${V2_BASE}/notifications`, window.location.origin);
+  if (limit != null) url.searchParams.set("limit", String(limit));
+  if (cursor) url.searchParams.set("cursor", cursor);
+  return apiFetch(url.pathname + url.search, { signal });
+}
+
+export function markNotificationRead(notificationId) {
+  if (!notificationId) return Promise.reject(new Error("notificationId is required"));
+  return apiFetch(
+    `${V2_BASE}/notifications/${encodeURIComponent(notificationId)}/read`,
+    { method: "POST" },
+  );
+}
+
+export function markAllNotificationsRead() {
+  return apiFetch(`${V2_BASE}/notifications/read-all`, { method: "POST" });
+}
+
+export function archiveNotification(notificationId) {
+  if (!notificationId) return Promise.reject(new Error("notificationId is required"));
+  return apiFetch(
+    `${V2_BASE}/notifications/${encodeURIComponent(notificationId)}/archive`,
+    { method: "POST" },
+  );
+}
+
 // --- Project filesystem (download / navigation) ---
 
 function projectFilesBase(threadId) {
