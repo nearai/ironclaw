@@ -320,17 +320,34 @@ async fn build_local_storage_production_shaped(
     )
     .await?;
     let secret_credentials = SecretCredentialStores::new(scoped_filesystem, crypto);
-    let resource_governor = filesystem_resource_governor(&filesystem);
+    // On libSQL the whole process shares one write connection, so the
+    // latency-sensitive journals get a lane of their own (#7714). On Postgres
+    // the data plane is already a multi-connection pool that does not serialize
+    // writers, so only the process journal takes the dedicated pool (#7471) and
+    // the governor stays on the data plane, unchanged.
+    let libsql_journal_lane = match &filesystem_bundle.durable_backend {
+        DurableBackend::LibSql { runtime, .. } => Some(
+            crate::filesystem_assembly::libsql_journal_lane_filesystem(runtime, |backend| {
+                crate::filesystem_assembly::process_journal_root_filesystem(backend)
+            })?,
+        ),
+        DurableBackend::Postgres(_) => None,
+    };
+    let resource_governor =
+        filesystem_resource_governor(libsql_journal_lane.as_ref().unwrap_or(&filesystem));
     if let Some(singleton) = postgres_resource_governor_singleton {
         ensure_postgres_resource_governor_authority_for_build(singleton)?;
     }
-    let process_journal_filesystem = process_journal_pool
-        .map(|pool| {
-            crate::filesystem_assembly::process_journal_root_filesystem(Arc::new(
-                ironclaw_filesystem::PostgresRootFilesystem::new(pool),
-            ))
-        })
-        .transpose()?;
+    let process_journal_filesystem = match libsql_journal_lane {
+        Some(lane) => Some(lane),
+        None => process_journal_pool
+            .map(|pool| {
+                crate::filesystem_assembly::process_journal_root_filesystem(Arc::new(
+                    ironclaw_filesystem::PostgresRootFilesystem::new(pool),
+                ))
+            })
+            .transpose()?,
+    };
     let stores = ProductionStoreBundle::with_secret_credentials(
         filesystem,
         resource_governor,

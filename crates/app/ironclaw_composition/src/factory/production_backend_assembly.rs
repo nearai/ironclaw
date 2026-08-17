@@ -1517,16 +1517,35 @@ impl ironclaw_auth::DeliveryRegistrationPaths for DeploymentRegistrationPaths {
     }
 }
 
+/// Dedicated write lanes for the latency-sensitive journals, when the backend
+/// has them. A `None` field keeps that journal on the data-plane filesystem.
+///
+/// Postgres populates only `process_journal` (its data plane is already a
+/// multi-connection pool, so the governor has no starvation to escape, #7471).
+/// libSQL populates both: one write connection serves the whole process there,
+/// so both journals otherwise queue behind bulk event and message writes and
+/// time out on a healthy database (#7714).
+#[derive(Default)]
+pub(super) struct DurableJournalLanes {
+    process_journal: Option<Arc<CompositeRootFilesystem>>,
+    resource_governor: Option<Arc<CompositeRootFilesystem>>,
+}
+
 async fn finish_production_backend(
     context: RebornProductionBuildContext,
     filesystem: Arc<CompositeRootFilesystem>,
-    process_journal_filesystem: Option<Arc<CompositeRootFilesystem>>,
+    journal_lanes: DurableJournalLanes,
     trigger_repository: Arc<dyn TriggerRepository>,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     event_store_config: ironclaw_event_store::RebornEventStoreConfig,
     leader_lock: ironclaw_auth::CredentialRefreshLeaderLock,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
-    let resource_governor = filesystem_resource_governor(&filesystem);
+    let DurableJournalLanes {
+        process_journal: process_journal_filesystem,
+        resource_governor: resource_governor_filesystem,
+    } = journal_lanes;
+    let resource_governor =
+        filesystem_resource_governor(resource_governor_filesystem.as_ref().unwrap_or(&filesystem));
     let stores = ProductionStoreBundle::new(
         filesystem,
         resource_governor,
@@ -1551,6 +1570,7 @@ pub(super) async fn build_libsql_production(
     ensure_libsql_resource_governor_authority_for_build(process_local_resource_governor_singleton)?;
     let database_filesystem = Arc::new(LibSqlRootFilesystem::from_runtime(Arc::clone(&runtime)));
     database_filesystem.run_migrations().await?;
+    let lane_runtime = Arc::clone(&runtime);
     let trigger_repository = Arc::new(ironclaw_triggers::LibSqlTriggerRepository::from_runtime(
         runtime,
     ));
@@ -1568,11 +1588,23 @@ pub(super) async fn build_libsql_production(
         filesystem: database_filesystem,
         path_or_url,
     };
+    // libSQL admits one writer process-wide, so the governor's delta journal and
+    // the process journal queue behind every event and message write and time
+    // out on a healthy database (#7714). They get a second write lane over the
+    // same rows; see `libsql_journal_lane_filesystem`.
+    let journal_lane = crate::filesystem_assembly::libsql_journal_lane_filesystem(
+        lane_runtime.as_ref(),
+        |backend| {
+            production_database_root_filesystem(backend, "production-libsql-journal-lane-state")
+        },
+    )?;
     finish_production_backend(
         context,
         filesystem,
-        // libSQL is single-writer by design; a second handle buys nothing.
-        None,
+        DurableJournalLanes {
+            process_journal: Some(Arc::clone(&journal_lane)),
+            resource_governor: Some(journal_lane),
+        },
         trigger_repository,
         secret_master_key,
         event_store_config,
@@ -1631,7 +1663,12 @@ pub(super) async fn build_postgres_production(
     finish_production_backend(
         context,
         filesystem,
-        process_journal_filesystem,
+        DurableJournalLanes {
+            process_journal: process_journal_filesystem,
+            // Postgres writers do not share one connection, so the governor has
+            // no starvation to escape and stays on the data plane.
+            resource_governor: None,
+        },
         trigger_repository,
         secret_master_key,
         ironclaw_event_store::RebornEventStoreConfig::PostgresPool {

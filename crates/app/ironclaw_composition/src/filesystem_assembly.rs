@@ -221,6 +221,34 @@ where
     Ok(Arc::new(root))
 }
 
+/// The libSQL counterpart of the Postgres journal pool split (#7471): a
+/// filesystem handle over a second libSQL write lane, addressing the same
+/// database rows.
+///
+/// libSQL admits one writer process-wide, and callers queue for it FIFO with a
+/// multi-second checkout timeout. Bulk per-turn traffic therefore starved the
+/// resource-governor delta journal for ~40s at a time, which the governor read
+/// as a failed authority and answered with journal replacement, failed
+/// reservation releases, and lost process leases (nearai/ironclaw#7714). The
+/// latency-sensitive journals get their own lane so they never queue behind
+/// event and message writes; see
+/// [`ironclaw_libsql_runtime::LibSqlRuntime::split_journal_lane`] for why a
+/// second connection to one SQLite file actually buys parallelism.
+///
+/// `mount_roots` builds the same mount set as the data-plane handle it is
+/// splitting off, so the lane resolves the same virtual paths to the same rows.
+pub(crate) fn libsql_journal_lane_filesystem(
+    runtime: &ironclaw_libsql_runtime::LibSqlRuntime,
+    mount_roots: impl FnOnce(
+        Arc<LibSqlRootFilesystem>,
+    ) -> Result<Arc<CompositeRootFilesystem>, RebornBuildError>,
+) -> Result<Arc<CompositeRootFilesystem>, RebornBuildError> {
+    let lane_runtime = Arc::new(runtime.split_journal_lane()?);
+    // No migrations here: the lane addresses a database the data-plane handle
+    // has already migrated.
+    mount_roots(Arc::new(LibSqlRootFilesystem::from_runtime(lane_runtime)))
+}
+
 pub(crate) fn mount_database_roots<F>(
     root: &mut CompositeRootFilesystem,
     database: Arc<F>,

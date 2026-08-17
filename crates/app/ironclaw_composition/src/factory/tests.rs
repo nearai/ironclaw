@@ -1599,6 +1599,93 @@ async fn process_journal_filesystem_is_a_separate_handle_over_the_same_tenant_ro
     }
 }
 
+/// The libSQL leg of the same split (nearai/ironclaw#7714). libSQL admits one
+/// writer process-wide, so the governor's delta journal and the process journal
+/// used to queue behind every event and message write and time out on a healthy
+/// database. Their lane must therefore (a) resolve the same virtual roots to the
+/// same rows as the data plane, and (b) be admitted while the data-plane writer
+/// slot is held — the timing-free way to state "not the same write lane".
+#[tokio::test]
+async fn libsql_journal_lane_is_a_separate_write_lane_over_the_same_rows() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = Arc::new(
+        libsql::Builder::new_local(directory.path().join("journal-lane.db"))
+            .build()
+            .await
+            .expect("database"),
+    );
+    let runtime = Arc::new(
+        ironclaw_libsql_runtime::LibSqlRuntime::new(Arc::clone(&database)).expect("runtime"),
+    );
+    let data_plane_backend = Arc::new(ironclaw_filesystem::LibSqlRootFilesystem::from_runtime(
+        Arc::clone(&runtime),
+    ));
+    data_plane_backend
+        .run_migrations()
+        .await
+        .expect("libsql migrations");
+    let data_plane = crate::filesystem_assembly::process_journal_root_filesystem(Arc::clone(
+        &data_plane_backend,
+    ))
+    .expect("data-plane composite");
+    let journal_lane = crate::filesystem_assembly::libsql_journal_lane_filesystem(
+        runtime.as_ref(),
+        crate::filesystem_assembly::process_journal_root_filesystem,
+    )
+    .expect("journal lane composite");
+
+    let mount_roots = |filesystem: &Arc<ironclaw_filesystem::CompositeRootFilesystem>| {
+        let filesystem = Arc::clone(filesystem);
+        async move {
+            filesystem
+                .mounts()
+                .await
+                .expect("mounts")
+                .into_iter()
+                .map(|descriptor| descriptor.virtual_root.as_str().to_owned())
+                .collect::<Vec<_>>()
+        }
+    };
+    let lane_roots = mount_roots(&journal_lane).await;
+    assert_eq!(
+        lane_roots,
+        mount_roots(&data_plane).await,
+        "the journal lane must resolve the same virtual roots, or its rows move"
+    );
+    assert!(
+        lane_roots.iter().any(|root| root == "/tenants"),
+        "governor and process rows live under /tenants; got {lane_roots:?}"
+    );
+
+    // Bulk data-plane traffic occupies the sole data-plane writer for the whole
+    // journal write, the way a per-turn write burst does in production.
+    let data_plane_writer = runtime.write().await.expect("data-plane writer");
+    let path = VirtualPath::new("/tenants/probe/users/probe/resources").expect("probe path");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        journal_lane.put(
+            &path,
+            ironclaw_filesystem::Entry::bytes(b"delta".to_vec()),
+            ironclaw_filesystem::CasExpectation::Any,
+        ),
+    )
+    .await
+    .expect("journal lane must not queue behind the data-plane writer")
+    .expect("journal write");
+    drop(data_plane_writer);
+
+    let entry = data_plane
+        .get(&path)
+        .await
+        .expect("data-plane read")
+        .expect("journal row must be visible to the data plane");
+    assert_eq!(
+        entry.entry.body.as_slice(),
+        b"delta".as_slice(),
+        "the lane must address the same rows the data plane reads"
+    );
+}
+
 /// The caller-level Postgres leg of the pool split (Docker/testcontainers;
 /// skipped when unavailable, like the other Postgres composition tests). The
 /// two InMemory-backend handles above cannot prove that two pool-backed
