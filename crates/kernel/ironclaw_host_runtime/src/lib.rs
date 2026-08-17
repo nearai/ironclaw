@@ -529,6 +529,18 @@ impl RuntimeCapabilityOutcome {
     }
 }
 
+// `RuntimeCapabilityOutcome` is an in-process host-runtime return value, never
+// a wire type: it carries capability output `serde_json::Value`s alongside
+// internal gate/failure state, and nothing downstream is entitled to
+// serialize or deserialize it directly (projections and transports build
+// their own typed wire shapes from it). Pin that with a compile-time check so
+// an incidental `#[derive(Serialize)]`/`#[derive(Deserialize)]` added later
+// fails the build instead of silently opening a serialization surface.
+static_assertions::assert_not_impl_any!(
+    RuntimeCapabilityOutcome: serde::Serialize,
+    serde::de::DeserializeOwned
+);
+
 /// Stable reasons for capability suspension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeBlockedReason {

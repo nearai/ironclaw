@@ -13,7 +13,9 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_approvals::{ApprovalRecord, ApprovalRequestStorePort, ApprovalStoreError};
+use ironclaw_approvals::{
+    ApprovalRecord, ApprovalRequestStorePort, ApprovalResolver, ApprovalStoreError, LeaseApproval,
+};
 use ironclaw_authorization::{
     GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer,
     in_memory_backed_capability_lease_store,
@@ -35,7 +37,7 @@ use ironclaw_host_api::{
         CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
     },
     decision::{Decision, DenyReason, Obligations},
-    dispatch::CapabilityDispatchResult,
+    dispatch::{CapabilityDispatchResult, DispatchError},
     host_port::HostPortCatalog,
     ids::{
         ApprovalRequestId, CapabilityGrantId, CapabilityId, ExtensionId, InvocationId, PackageId,
@@ -56,7 +58,8 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_processes::{
     ProcessCancellationRegistry, ProcessInvocationError, ProcessInvocationRecord,
-    ProcessInvocationStart, ProcessInvocationStatePort, ProcessInvocationStore,
+    ProcessInvocationStart, ProcessInvocationStatePort, ProcessInvocationStatus,
+    ProcessInvocationStore,
     ProcessJournalStore, ProcessResultStore, ProcessResultStorePort, ProcessServices, ProcessStart,
     ProcessStatus, capability_process_record, submit_capability_process,
 };
@@ -425,6 +428,499 @@ async fn default_runtime_surfaces_authorization_failure_when_authorizer_denies()
     }
     // Deny must short-circuit before dispatch runs.
     assert_eq!(dispatcher.call_count(), 0);
+}
+
+// The four tests below extend caller-level coverage of
+// `crate::capability_response_processor::process_capability_response` — the
+// centralized mapping fresh invoke, approval resume, and auth resume all cross
+// (plan: docs/internal/reborn/extension-runtime/capability-response-normalization-plan.md
+// §11 PR 1 step 1). They drive `DefaultHostRuntime`'s public entry points, not
+// the processor directly.
+
+#[tokio::test]
+async fn default_runtime_fresh_dispatch_error_becomes_failed_and_fails_run_state() {
+    // Fresh-invocation pin for the processor's `CapabilityInvocationError::Dispatch`
+    // arm: a dispatcher failure distinct from AuthRequired/RequireApproval must
+    // surface as `Failed`, and the processor's `fail_dispatch_run` side effect
+    // must transition the already-started run-state record to `Failed`.
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(TestDispatcher::responding(|_, _| {
+        Err(DispatchError::UnknownProvider {
+            capability: capability_id(),
+            provider: extension_id(),
+        })
+    }));
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher.clone(),
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_invocation_state(run_state.clone());
+
+    let context = execution_context_with_dispatch_grant();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let request = (
+        context,
+        capability_id(),
+        ResourceEstimate::default(),
+        json!({"message": "hello"}),
+    );
+
+    let outcome = runtime.invoke_capability(request).await.unwrap();
+
+    match outcome {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.capability_id, capability_id());
+            assert_eq!(failure.kind, FailureKind::UnknownProvider);
+        }
+        other => panic!("expected Failed outcome, got {:?}", other),
+    }
+    assert_eq!(dispatcher.call_count(), 1);
+    let record = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .expect("run record persisted before dispatch");
+    assert_eq!(
+        record.status,
+        ProcessInvocationStatus::Failed,
+        "a Dispatch error on fresh invocation must fail the started run-state record"
+    );
+}
+
+#[tokio::test]
+async fn default_runtime_fresh_auth_required_gate_is_stable_across_calls() {
+    // Fresh-invocation pin for the processor's `AuthorizationRequiresAuth` arm:
+    // two independent fresh invocations that hit the same auth requirement must
+    // resolve to the same stable `RuntimeGateId`, since the gate id is derived
+    // deterministically from capability + secrets + credential requirements
+    // (production.rs::stable_auth_gate_id), not from invocation identity.
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(TestDispatcher::auth_required());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher.clone(),
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()));
+
+    let first = runtime
+        .invoke_capability((
+            execution_context_with_dispatch_grant(),
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"n": 1}),
+        ))
+        .await
+        .unwrap();
+    let second = runtime
+        .invoke_capability((
+            execution_context_with_dispatch_grant(),
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"n": 2}),
+        ))
+        .await
+        .unwrap();
+
+    let ironclaw_host_runtime::RuntimeCapabilityOutcome::AuthRequired(first_gate) = first else {
+        panic!("expected AuthRequired outcome, got {:?}", first);
+    };
+    let ironclaw_host_runtime::RuntimeCapabilityOutcome::AuthRequired(second_gate) = second else {
+        panic!("expected AuthRequired outcome, got {:?}", second);
+    };
+    assert_eq!(first_gate.capability_id, capability_id());
+    assert_eq!(first_gate.gate_id, second_gate.gate_id);
+    assert_eq!(dispatcher.call_count(), 2);
+}
+
+#[tokio::test]
+async fn default_runtime_approval_resume_completes_and_consumes_grant() {
+    // Approval-resume success: an approved gate resumed through
+    // `resume_capability` re-authorizes with the injected lease grant and
+    // completes, driving the processor's `Ok(dispatch)` arm under
+    // `InlineInvocationMode::ApprovalResume`.
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ApprovalThenGrantAuthorizer);
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
+    let leases = Arc::new(in_memory_backed_capability_lease_store());
+
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher.clone(),
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_invocation_state(run_state.clone())
+    .with_approval_requests(approval_requests.clone())
+    .with_capability_leases(leases.clone());
+
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "hello"});
+
+    let gate = match runtime
+        .invoke_capability((
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        ))
+        .await
+        .unwrap()
+    {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::ApprovalRequired(gate) => gate,
+        other => panic!("expected ApprovalRequired outcome, got {:?}", other),
+    };
+
+    ApprovalResolver::new(approval_requests.as_ref(), leases.as_ref())
+        .approve_dispatch(
+            &scope,
+            gate.approval_request_id,
+            LeaseApproval {
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
+            },
+        )
+        .await
+        .expect("approve dispatch");
+
+    let outcome = runtime
+        .resume_capability((
+            context,
+            gate.approval_request_id,
+            capability_id(),
+            estimate,
+            input,
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id());
+        }
+        other => panic!("expected Completed resume outcome, got {:?}", other),
+    }
+    assert_eq!(dispatcher.call_count(), 1);
+}
+
+#[tokio::test]
+async fn default_runtime_approval_resume_repeated_approval_requirement_fails_without_reopening_gate()
+ {
+    // Pins the processor's `ApprovalResume` arm for `AuthorizationRequiresApproval`:
+    // when the resumed authorization decision requires approval again (rather
+    // than completing), the processor must surface a `Failed` outcome instead of
+    // opening a second approval loop (see the "resume must never start a second
+    // approval loop" comment in capability_response_processor.rs).
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(AlwaysRequireApprovalAuthorizer);
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
+    let leases = Arc::new(in_memory_backed_capability_lease_store());
+
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher.clone(),
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_invocation_state(run_state.clone())
+    .with_approval_requests(approval_requests.clone())
+    .with_capability_leases(leases.clone());
+
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "hello"});
+
+    let gate = match runtime
+        .invoke_capability((
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        ))
+        .await
+        .unwrap()
+    {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::ApprovalRequired(gate) => gate,
+        other => panic!("expected ApprovalRequired outcome, got {:?}", other),
+    };
+
+    ApprovalResolver::new(approval_requests.as_ref(), leases.as_ref())
+        .approve_dispatch(
+            &scope,
+            gate.approval_request_id,
+            LeaseApproval {
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
+            },
+        )
+        .await
+        .expect("approve dispatch");
+
+    let outcome = runtime
+        .resume_capability((
+            context,
+            gate.approval_request_id,
+            capability_id(),
+            estimate,
+            input,
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.capability_id, capability_id());
+            assert_eq!(failure.kind, FailureKind::Authorization);
+        }
+        other => panic!(
+            "expected Failed outcome (no second approval loop), got {:?}",
+            other
+        ),
+    }
+    // The authorizer requiring approval again must never re-dispatch.
+    assert_eq!(dispatcher.call_count(), 0);
+}
+
+#[tokio::test]
+async fn default_runtime_auth_resume_completes_blocked_auth_run() {
+    // Auth-resume success (approval_request_id = None): a run parked in
+    // `BlockedAuth` that resumes with an authorized grant completes, driving the
+    // processor's `Ok(dispatch)` arm under `InlineInvocationMode::AuthResume`.
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher.clone(),
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_invocation_state(run_state.clone());
+
+    let context = execution_context_with_dispatch_grant();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    run_state
+        .start(ProcessInvocationStart {
+            invocation_id,
+            capability_id: capability_id(),
+            scope: scope.clone(),
+            authenticated_actor_user_id: None,
+        })
+        .await
+        .expect("seed running invocation");
+    run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .expect("park invocation in BlockedAuth");
+
+    let outcome = runtime
+        .auth_resume_capability((
+            context,
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "hello"}),
+            None,
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id());
+        }
+        other => panic!("expected Completed auth-resume outcome, got {:?}", other),
+    }
+    assert_eq!(dispatcher.call_count(), 1);
+    let record = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(record.status, ProcessInvocationStatus::Completed);
+}
+
+#[tokio::test]
+async fn default_runtime_auth_resume_repeated_auth_requirement_reuses_stable_gate_id() {
+    // Pins the processor's `AuthorizationRequiresAuth` arm on auth-resume: a
+    // BlockedAuth run resumed against a dispatcher that still needs the same
+    // credential surfaces `AuthRequired` again with the *same* stable gate id a
+    // fresh invocation for the identical capability/requirements would have
+    // produced — the gate id is a deterministic function of capability +
+    // secrets + credential requirements, not invocation or mode identity.
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(TestDispatcher::auth_required());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher.clone(),
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_invocation_state(run_state.clone());
+
+    // A fresh invocation against the same always-auth-required dispatcher
+    // establishes the baseline gate id.
+    let fresh_gate = match runtime
+        .invoke_capability((
+            execution_context_with_dispatch_grant(),
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"n": 1}),
+        ))
+        .await
+        .unwrap()
+    {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::AuthRequired(gate) => gate,
+        other => panic!("expected AuthRequired outcome, got {:?}", other),
+    };
+
+    let context = execution_context_with_dispatch_grant();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    run_state
+        .start(ProcessInvocationStart {
+            invocation_id,
+            capability_id: capability_id(),
+            scope: scope.clone(),
+            authenticated_actor_user_id: None,
+        })
+        .await
+        .expect("seed running invocation");
+    run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .expect("park invocation in BlockedAuth");
+
+    let outcome = runtime
+        .auth_resume_capability((
+            context,
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"n": 1}),
+            None,
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::AuthRequired(resumed_gate) => {
+            assert_eq!(resumed_gate.capability_id, capability_id());
+            assert_eq!(resumed_gate.gate_id, fresh_gate.gate_id);
+        }
+        other => panic!(
+            "expected AuthRequired outcome (no second approval loop), got {:?}",
+            other
+        ),
+    }
+}
+
+struct ApprovalThenGrantAuthorizer;
+
+#[async_trait]
+impl TrustAwareCapabilityDispatchAuthorizer for ApprovalThenGrantAuthorizer {
+    async fn authorize_dispatch_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) -> Decision {
+        if context.grants.grants.is_empty() {
+            Decision::RequireApproval {
+                request: ApprovalRequest {
+                    id: ApprovalRequestId::new(),
+                    correlation_id: context.correlation_id,
+                    requested_by: Principal::Extension(context.extension_id.clone()),
+                    action: Box::new(Action::Dispatch {
+                        capability: descriptor.id.clone(),
+                        estimated_resources: estimate.clone(),
+                    }),
+                    invocation_fingerprint: None,
+                    reason: "approval required".to_string(),
+                    reusable_scope: None,
+                },
+            }
+        } else {
+            GrantAuthorizer
+                .authorize_dispatch_with_trust(context, descriptor, estimate, trust_decision)
+                .await
+        }
+    }
+}
+
+/// Always requires approval, ignoring any grant injected by the resume
+/// preamble — pins that a resume decision landing back on
+/// `AuthorizationRequiresApproval` fails the resume instead of reopening a
+/// second approval loop.
+struct AlwaysRequireApprovalAuthorizer;
+
+#[async_trait]
+impl TrustAwareCapabilityDispatchAuthorizer for AlwaysRequireApprovalAuthorizer {
+    async fn authorize_dispatch_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        _trust_decision: &TrustDecision,
+    ) -> Decision {
+        Decision::RequireApproval {
+            request: ApprovalRequest {
+                id: ApprovalRequestId::new(),
+                correlation_id: context.correlation_id,
+                requested_by: Principal::Extension(context.extension_id.clone()),
+                action: Box::new(Action::Dispatch {
+                    capability: descriptor.id.clone(),
+                    estimated_resources: estimate.clone(),
+                }),
+                invocation_fingerprint: None,
+                reason: "approval required".to_string(),
+                reusable_scope: None,
+            },
+        }
+    }
 }
 
 #[tokio::test]
@@ -1711,6 +2207,24 @@ fn execution_context_with_dispatch_grant() -> ExecutionContext {
         RuntimeKind::Wasm,
         TrustClass::UserTrusted,
         grants,
+        MountView::default(),
+    )
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
+}
+
+/// A context with no pre-existing dispatch grant — the approval/auth resume
+/// tests use this so the initial dispatch requires approval instead of
+/// bypassing it, mirroring `execution_context_without_grants` in
+/// `host_runtime_persistent_approvals_contract.rs`.
+fn execution_context_without_grants() -> ExecutionContext {
+    let mut context = ExecutionContext::local_default(
+        UserId::new("user").unwrap(),
+        ExtensionId::new("caller").unwrap(),
+        RuntimeKind::Wasm,
+        TrustClass::UserTrusted,
+        CapabilitySet::default(),
         MountView::default(),
     )
     .unwrap();

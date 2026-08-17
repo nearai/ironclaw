@@ -439,7 +439,7 @@ impl HostRuntime for DefaultHostRuntime {
                 );
                 tracing::debug!(
                     capability_id = %capability_id,
-                    error_kind = failure_kind_from(&error).as_str(),
+                    error_kind = failure_kind_from(error).as_str(),
                     "capability invocation failed"
                 );
             }
@@ -576,7 +576,7 @@ impl HostRuntime for DefaultHostRuntime {
         if let Err(error) = &response {
             tracing::debug!(
                 capability_id = %capability_id,
-                error_kind = failure_kind_from(&error).as_str(),
+                error_kind = failure_kind_from(error).as_str(),
                 "capability resume failed"
             );
         }
@@ -630,7 +630,7 @@ impl HostRuntime for DefaultHostRuntime {
         if let Err(error) = &response {
             tracing::debug!(
                 capability_id = %capability_id,
-                error_kind = failure_kind_from(&error).as_str(),
+                error_kind = failure_kind_from(error).as_str(),
                 "capability auth-resume failed"
             );
         }
