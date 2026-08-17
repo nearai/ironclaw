@@ -37,6 +37,11 @@ function oauthChannelEntry(id, displayName) {
 
 vi.mock("../../extensions/lib/extensions-api", () => api);
 
+// The hook loads `lib/connect-link-flow` through a dynamic `import()` so the
+// machinery stays out of the eager /chat bundle. Importing it statically here
+// puts it in the module registry, so that `import()` resolves on a microtask
+// and the flush helper below stays deterministic.
+import "../lib/connect-link-flow";
 import { useConnectLinkLanding } from "./useConnectLinkLanding";
 
 function fakePopup() {
