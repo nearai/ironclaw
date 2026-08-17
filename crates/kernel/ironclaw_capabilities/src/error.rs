@@ -238,18 +238,19 @@ impl fmt::Debug for CapabilityInvocationError {
             Self::Process(source) => f.debug_tuple("Process").field(source).finish(),
             // `safe_summary` carries the same untrusted provider text as
             // `provider_diagnostic` (see `From<DispatchError>`), so it is
-            // redacted here too — never log or render it directly.
+            // redacted here too — never log or render it directly. `detail`
+            // may carry `DispatchFailureDetail::Diagnostic { text }`, an
+            // untrusted raw provider/backend cause, so it is redacted too.
             Self::Dispatch {
                 kind,
                 provider_diagnostic,
-                detail,
                 ..
             } => f
                 .debug_struct("Dispatch")
                 .field("kind", kind)
                 .field("provider_diagnostic", provider_diagnostic)
                 .field("safe_summary", &"<redacted>")
-                .field("detail", detail)
+                .field("detail", &"<redacted>")
                 .finish(),
         }
     }
@@ -569,16 +570,48 @@ mod tests {
         });
 
         match err {
-            CapabilityInvocationError::Dispatch { detail, .. } => {
+            CapabilityInvocationError::Dispatch {
+                detail,
+                safe_summary,
+                ..
+            } => {
                 assert_eq!(
                     detail,
                     Some(DispatchFailureDetail::InvalidInput {
                         issues: vec![issue]
                     })
                 );
+                // `code: None` rides the bare-message branch unprefixed —
+                // no "provider error code:"/"provider message:" label.
+                assert_eq!(
+                    safe_summary.as_deref(),
+                    Some("trigger_create input failed validation")
+                );
             }
             other => panic!("expected Dispatch variant, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn capability_invocation_error_dispatch_debug_redacts_diagnostic_detail_text() {
+        // `DispatchFailureDetail::Diagnostic { text }` carries an untrusted
+        // raw provider/backend cause (never-log content); the folded
+        // `Dispatch` variant's Debug must not print it, mirroring
+        // `DispatchError::Rejected`'s Debug redaction.
+        let err = CapabilityInvocationError::from(DispatchError::Rejected {
+            runtime: Some(RuntimeKind::FirstParty),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            diagnostic: None,
+            detail: Some(DispatchFailureDetail::Diagnostic {
+                text: "leak-me-not: /secret/path token=abc123".to_string(),
+            }),
+            attempt: None,
+        });
+
+        let debug_output = format!("{err:?}");
+        assert!(!debug_output.contains("leak-me-not"));
+        assert!(!debug_output.contains("/secret/path"));
+        assert!(!debug_output.contains("abc123"));
     }
 
     #[test]

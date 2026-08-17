@@ -621,16 +621,14 @@ impl fmt::Debug for DispatchError {
                     ),
                 )
                 .finish(),
-            Self::Rejected {
-                runtime,
-                kind,
-                detail,
-                ..
-            } => f
+            // `detail` may carry `DispatchFailureDetail::Diagnostic { text }`,
+            // an untrusted raw provider/backend cause — redact it here too,
+            // the same as `diagnostic`, so Debug output never leaks it.
+            Self::Rejected { runtime, kind, .. } => f
                 .debug_struct("Rejected")
                 .field("runtime", runtime)
                 .field("kind", kind)
-                .field("detail", detail)
+                .field("detail", &"<redacted>")
                 .field("diagnostic", &"<redacted>")
                 .finish(),
         }
@@ -688,6 +686,43 @@ impl DispatchError {
                 _ => "provider_rejected",
             },
         }
+    }
+
+    /// Builds a provider-rejection [`Self::Rejected`] from an optional cause
+    /// string. `cause` rides the typed diagnostic channel (#5965):
+    /// raw-or-better cause text, scrubbed downstream at the model-visible
+    /// Diagnostic seam. `detail` is `None`; chain
+    /// [`Self::with_detail`] when a caller has a structured
+    /// [`DispatchFailureDetail`] to carry through.
+    ///
+    /// This is the single construction site for cause-only provider
+    /// rejections; runtime-lane callers wrap it with a thin constant-runtime
+    /// helper rather than repeating the struct literal.
+    pub fn provider_rejected(
+        runtime: Option<RuntimeKind>,
+        kind: DispatchFailureKind,
+        cause: Option<String>,
+    ) -> Self {
+        Self::Rejected {
+            runtime,
+            kind,
+            diagnostic: cause.map(|text| ProviderDiagnostic {
+                code: None,
+                message: Some(UntrustedProviderMessage::new(text)),
+                retry_after: None,
+            }),
+            detail: None,
+        }
+    }
+
+    /// Attaches a structured [`DispatchFailureDetail`] to a
+    /// [`Self::Rejected`] built via [`Self::provider_rejected`]; a no-op on
+    /// other variants.
+    pub fn with_detail(mut self, detail: DispatchFailureDetail) -> Self {
+        if let Self::Rejected { detail: slot, .. } = &mut self {
+            *slot = Some(detail);
+        }
+        self
     }
 }
 
@@ -762,5 +797,26 @@ mod tests {
         assert!(message.as_str().len() <= crate::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES);
         assert!(message.as_str().is_char_boundary(message.as_str().len()));
         assert!(!format!("{diagnostic:?}").contains('é'));
+    }
+
+    #[test]
+    fn dispatch_error_rejected_debug_redacts_diagnostic_detail_text() {
+        // `DispatchFailureDetail::Diagnostic { text }` carries an untrusted
+        // raw provider/backend cause (never-log content); the folded
+        // `Rejected` variant's Debug must not print it, matching the retired
+        // `FirstParty` variant's omission of the same content.
+        let error = DispatchError::Rejected {
+            runtime: Some(RuntimeKind::FirstParty),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            diagnostic: None,
+            detail: Some(DispatchFailureDetail::Diagnostic {
+                text: "leak-me-not: /secret/path token=abc123".to_string(),
+            }),
+        };
+
+        let debug_output = format!("{error:?}");
+        assert!(!debug_output.contains("leak-me-not"));
+        assert!(!debug_output.contains("/secret/path"));
+        assert!(!debug_output.contains("abc123"));
     }
 }

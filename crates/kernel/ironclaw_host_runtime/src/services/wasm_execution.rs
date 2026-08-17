@@ -37,16 +37,11 @@ const MAX_WASM_GUEST_MESSAGE_BYTES: usize = 2048;
 /// rides the typed diagnostic channel (#5965): raw-or-better cause text,
 /// scrubbed downstream at the model-visible Diagnostic seam.
 fn wasm_dispatch_error(kind: RuntimeDispatchErrorKind, cause: Option<String>) -> DispatchError {
-    DispatchError::Rejected {
-        runtime: Some(RuntimeKind::Wasm),
-        kind: DispatchFailureKind::Runtime(kind),
-        diagnostic: cause.map(|text| ProviderDiagnostic {
-            code: None,
-            message: Some(UntrustedProviderMessage::new(text)),
-            retry_after: None,
-        }),
-        detail: None,
-    }
+    DispatchError::provider_rejected(
+        Some(RuntimeKind::Wasm),
+        DispatchFailureKind::Runtime(kind),
+        cause,
+    )
 }
 
 /// RAII guard over an in-flight `ResourceGovernor` reservation.

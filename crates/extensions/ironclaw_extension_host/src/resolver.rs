@@ -27,10 +27,7 @@ use ironclaw_extension_contracts::tool_adapter::{
     ToolCall, ToolCallResources, ToolError, ToolPorts,
 };
 use ironclaw_host_api::{
-    dispatch::{
-        DispatchError, DispatchFailureKind, ProviderDiagnostic, RuntimeDispatchErrorKind,
-        UntrustedProviderMessage,
-    },
+    dispatch::{DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind},
     ids::{CapabilityId, ExtensionId},
     resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
     runtime::RuntimeKind,
@@ -181,16 +178,7 @@ fn dispatch_error_for_kind(
     // is trivially cause-safe, so it rides the same channel rather than being
     // dropped.
     let cause = model_visible_cause.or(safe_summary);
-    DispatchError::Rejected {
-        runtime: Some(runtime),
-        kind: DispatchFailureKind::Runtime(kind),
-        diagnostic: cause.map(|text| ProviderDiagnostic {
-            code: None,
-            message: Some(UntrustedProviderMessage::new(text)),
-            retry_after: None,
-        }),
-        detail: None,
-    }
+    DispatchError::provider_rejected(Some(runtime), DispatchFailureKind::Runtime(kind), cause)
 }
 
 #[cfg(test)]

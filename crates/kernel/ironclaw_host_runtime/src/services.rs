@@ -33,8 +33,7 @@ use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     dispatch::{
-        CapabilityDispatcher, DispatchError, DispatchFailureKind, ProviderDiagnostic,
-        RuntimeDispatchErrorKind, UntrustedProviderMessage,
+        CapabilityDispatcher, DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind,
     },
     http::RuntimeHttpEgress,
     ids::{CapabilityId, ResourceReservationId, SecretHandle},

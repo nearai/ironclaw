@@ -26,10 +26,10 @@ use super::{
     CapabilityId, DenyWasmHostHttp, DispatchError, DispatchFailureKind, ExtensionRuntime,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, InvocationServicesResolutionRequest,
     InvocationServicesResolver, McpError, McpExecutionRequest, McpExecutor, McpInvocation,
-    NetworkObligationPolicyStore, PlannerError, PreparedWitTool, ProviderDiagnostic,
-    ResourceGovernor, ResourceReservationId, ResourceScope, RootFilesystem, RuntimeAdapterResult,
+    NetworkObligationPolicyStore, PlannerError, PreparedWitTool, ResourceGovernor,
+    ResourceReservationId, ResourceScope, RootFilesystem, RuntimeAdapterResult,
     RuntimeDispatchErrorKind, RuntimeKind, RuntimeLane, ScriptError, ScriptExecutionRequest,
-    ScriptExecutor, ScriptInvocation, SharedRuntimeHttpEgress, UntrustedProviderMessage, WasmError,
+    ScriptExecutor, ScriptInvocation, SharedRuntimeHttpEgress, WasmError,
     WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost,
     WitToolRuntime, WitToolRuntimeConfig, plan_capability, runtime_http_egress,
 };
@@ -53,15 +53,14 @@ fn first_party_dispatch_error(
     safe_summary: Option<String>,
     detail: Option<ironclaw_host_api::dispatch::DispatchFailureDetail>,
 ) -> DispatchError {
-    DispatchError::Rejected {
-        runtime: Some(RuntimeKind::FirstParty),
-        kind: DispatchFailureKind::Runtime(kind),
-        diagnostic: safe_summary.map(|text| ProviderDiagnostic {
-            code: None,
-            message: Some(UntrustedProviderMessage::new(text)),
-            retry_after: None,
-        }),
-        detail,
+    let error = DispatchError::provider_rejected(
+        Some(RuntimeKind::FirstParty),
+        DispatchFailureKind::Runtime(kind),
+        safe_summary,
+    );
+    match detail {
+        Some(detail) => error.with_detail(detail),
+        None => error,
     }
 }
 
@@ -1228,16 +1227,7 @@ fn dispatch_error_for_runtime(
     kind: RuntimeDispatchErrorKind,
     cause: Option<String>,
 ) -> DispatchError {
-    DispatchError::Rejected {
-        runtime: Some(runtime),
-        kind: DispatchFailureKind::Runtime(kind),
-        diagnostic: cause.map(|text| ProviderDiagnostic {
-            code: None,
-            message: Some(UntrustedProviderMessage::new(text)),
-            retry_after: None,
-        }),
-        detail: None,
-    }
+    DispatchError::provider_rejected(Some(runtime), DispatchFailureKind::Runtime(kind), cause)
 }
 
 fn planner_error_kind(error: &PlannerError) -> RuntimeDispatchErrorKind {

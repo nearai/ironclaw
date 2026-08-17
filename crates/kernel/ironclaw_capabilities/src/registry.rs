@@ -15,8 +15,7 @@ use ironclaw_extension_contracts::tool_adapter::{
 use ironclaw_host_api::{
     capability::CapabilityDescriptor,
     dispatch::{
-        CapabilityDispatchRequest, DispatchError, DispatchFailureKind, ProviderDiagnostic,
-        RuntimeDispatchErrorKind, UntrustedProviderMessage,
+        CapabilityDispatchRequest, DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind,
     },
     ids::{CapabilityId, ExtensionId},
     resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
@@ -210,16 +209,7 @@ fn runtime_dispatch_error(
     model_visible_cause: Option<String>,
 ) -> DispatchError {
     let cause = model_visible_cause.or(safe_summary);
-    DispatchError::Rejected {
-        runtime: Some(runtime),
-        kind: DispatchFailureKind::Runtime(kind),
-        diagnostic: cause.map(|text| ProviderDiagnostic {
-            code: None,
-            message: Some(UntrustedProviderMessage::new(text)),
-            retry_after: None,
-        }),
-        detail: None,
-    }
+    DispatchError::provider_rejected(Some(runtime), DispatchFailureKind::Runtime(kind), cause)
 }
 
 impl ToolResolver for CapabilityDispatchRegistry {

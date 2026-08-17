@@ -14,13 +14,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_event_log::{EventSink, RuntimeEvent};
-use ironclaw_host_api::dispatch::{
-    CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
-    CapabilityDisplayOutputPreview, DispatchError, DispatchFailureKind, ProviderDiagnostic,
-    RuntimeDispatchErrorKind, UntrustedProviderMessage,
-};
 use ironclaw_host_api::{
     authorized::Authorized,
+    dispatch::{
+        CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
+        CapabilityDisplayOutputPreview, DispatchError, DispatchFailureKind,
+        RuntimeDispatchErrorKind,
+    },
     ids::{CapabilityId, ExtensionId, InvocationId},
     invocation::{Actor, InvocationOrigin},
     lane::RuntimeLane,
@@ -419,16 +419,11 @@ fn dispatch_resource_error(
     if runtime == RuntimeKind::System {
         return DispatchError::MissingRuntimeBackend { runtime };
     }
-    DispatchError::Rejected {
-        runtime: Some(runtime),
-        kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
-        diagnostic: Some(ProviderDiagnostic {
-            code: None,
-            message: Some(UntrustedProviderMessage::new(cause)),
-            retry_after: None,
-        }),
-        detail: None,
-    }
+    DispatchError::provider_rejected(
+        Some(runtime),
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+        Some(cause),
+    )
 }
 
 #[async_trait]
