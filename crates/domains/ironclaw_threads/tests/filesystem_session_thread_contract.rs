@@ -4238,6 +4238,94 @@ async fn filesystem_list_threads_degrades_to_projected_rows_when_reconcile_fails
     assert!(repaired_ids.contains(&"projected-before-failure-b"));
 }
 
+/// A corrupt row or permanently unavailable backend path must not trigger a
+/// full-scope repair scan on every later sidebar request. The process gives
+/// transient failures a bounded retry budget, then stops admitting the scope
+/// without ever writing the durable completion marker for partial work.
+#[tokio::test]
+async fn filesystem_list_threads_bounds_persistent_projection_repair_failures() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(
+        Arc::clone(&backend),
+        "tenant-index-reconcile-persistent-failure",
+        "alice",
+    );
+    let scope = scope("index-reconcile-persistent-failure");
+    let seeding_service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    seeding_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("persistent-failure-thread").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("persistent failure thread".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    seeding_service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .expect("seed listing writes the completed v1 migration marker");
+
+    backend.add_fault(
+        Fault::on(FilesystemOperation::ListDir)
+            .path("/thread_index")
+            .backend("projection repair remains unavailable"),
+    );
+    let baseline = backend.count(FilesystemOperation::ListDir);
+    let restarted = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+
+    for expected_attempts in 1..=3 {
+        restarted
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope: scope.clone(),
+                limit: None,
+                cursor: None,
+            })
+            .await
+            .expect("listing remains available while background repair fails");
+        timeout(Duration::from_secs(5), async {
+            while backend.count(FilesystemOperation::ListDir) < baseline + expected_attempts {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the admitted background repair attempt must finish");
+    }
+
+    for _ in 0..5 {
+        restarted
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope: scope.clone(),
+                limit: None,
+                cursor: None,
+            })
+            .await
+            .expect("listing remains available after the retry budget is exhausted");
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        backend.count(FilesystemOperation::ListDir),
+        baseline + 3,
+        "persistent failure must stop scheduling a full-scope scan on every listing"
+    );
+    assert!(
+        scoped
+            .get(
+                &scope.to_resource_scope(),
+                &thread_index_projection_repair_marker_path_for_test(&scope),
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "a scope that exhausted its retry budget must remain durably incomplete"
+    );
+}
+
 /// A current-version record can still be invisible when its entry sidecar
 /// loses the ordered keys. Repair must use the shared CAS retry loop rather
 /// than a one-shot conditional put, because a benign concurrent rewrite can
@@ -4323,8 +4411,8 @@ async fn filesystem_list_threads_retries_reconcile_projection_repair_after_cas_r
 /// the background and writes completion only after the entire scope succeeds.
 #[tokio::test]
 async fn filesystem_list_threads_repairs_oversized_scope_in_background() {
-    let backend = Arc::new(InMemoryBackend::new());
-    let scoped = scoped_threads_fs_at(backend, "tenant-index-oversized", "alice");
+    let backend = Arc::new(QueryCountingBackend::new());
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-index-oversized", "alice");
     let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
     let scope = scope("index-oversized");
     let damaged_id = ThreadId::new("thread-oversized-hidden").unwrap();
@@ -4415,6 +4503,18 @@ async fn filesystem_list_threads_repairs_oversized_scope_in_background() {
         listed_ids.contains(&damaged_id),
         "the background repair must restore a damaged row beyond one backend page"
     );
+    let page_calls = backend.directory_page_calls().await;
+    assert_eq!(
+        page_calls.len(),
+        2,
+        "1,025 durable rows must be enumerated as two bounded keyset pages"
+    );
+    assert_eq!(page_calls[0], (None, Page::MAX_LIMIT as usize));
+    assert!(
+        page_calls[1].0.is_some(),
+        "the second page must continue after the prior page's stable final name"
+    );
+    assert_eq!(page_calls[1].1, Page::MAX_LIMIT as usize);
 }
 
 #[tokio::test]
@@ -5682,6 +5782,7 @@ struct QueryCountingBackend {
     query_count: AtomicUsize,
     get_count: AtomicUsize,
     thread_index_put_count: AtomicUsize,
+    directory_page_calls: Mutex<Vec<(Option<String>, usize)>>,
 }
 
 /// Holds the first reconcile directory scan for one scope so the caller test
@@ -5728,6 +5829,7 @@ impl QueryCountingBackend {
             query_count: AtomicUsize::new(0),
             get_count: AtomicUsize::new(0),
             thread_index_put_count: AtomicUsize::new(0),
+            directory_page_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -5741,6 +5843,10 @@ impl QueryCountingBackend {
 
     fn thread_index_put_count(&self) -> usize {
         self.thread_index_put_count.load(Ordering::SeqCst)
+    }
+
+    async fn directory_page_calls(&self) -> Vec<(Option<String>, usize)> {
+        self.directory_page_calls.lock().await.clone()
     }
 
     fn reset_thread_index_put_count(&self) {
@@ -5914,6 +6020,19 @@ impl RootFilesystem for QueryCountingBackend {
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
         self.inner.list_dir(path).await
+    }
+
+    async fn list_dir_page(
+        &self,
+        path: &VirtualPath,
+        after: Option<&str>,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.directory_page_calls
+            .lock()
+            .await
+            .push((after.map(str::to_owned), max_entries));
+        self.inner.list_dir_page(path, after, max_entries).await
     }
 
     async fn query(

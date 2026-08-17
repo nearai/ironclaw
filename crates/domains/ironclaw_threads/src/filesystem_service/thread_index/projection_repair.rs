@@ -6,7 +6,7 @@
 //! after every row succeeds; failures remain retryable on a later listing.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
@@ -28,10 +28,12 @@ use crate::filesystem_service::{
 
 const MAX_CONCURRENT_PROJECTION_REPAIRS: usize = 2;
 const MAX_PENDING_PROJECTION_REPAIRS: usize = 128;
+const MAX_PROJECTION_REPAIR_FAILURES_PER_SCOPE: u32 = 3;
 
 pub(crate) struct ThreadIndexProjectionRepairState {
     active_scopes: Mutex<HashSet<String>>,
     completed_scopes: Mutex<HashSet<String>>,
+    failed_scope_attempts: Mutex<HashMap<String, u32>>,
     permits: Arc<tokio::sync::Semaphore>,
 }
 
@@ -40,6 +42,7 @@ impl Default for ThreadIndexProjectionRepairState {
         Self {
             active_scopes: Mutex::new(HashSet::new()),
             completed_scopes: Mutex::new(HashSet::new()),
+            failed_scope_attempts: Mutex::new(HashMap::new()),
             permits: Arc::new(tokio::sync::Semaphore::new(
                 MAX_CONCURRENT_PROJECTION_REPAIRS,
             )),
@@ -61,6 +64,17 @@ where
             .completed_scopes
             .lock()
             .is_ok_and(|completed| completed.contains(&scope_key))
+        {
+            return;
+        }
+        if self
+            .thread_index_projection_repair_state
+            .failed_scope_attempts
+            .lock()
+            .is_ok_and(|failed| {
+                failed.get(&scope_key).copied().unwrap_or_default()
+                    >= MAX_PROJECTION_REPAIR_FAILURES_PER_SCOPE
+            })
         {
             return;
         }
@@ -89,24 +103,49 @@ where
                 return;
             };
             let result = repair_thread_index_projection(Arc::clone(&filesystem), &scope).await;
-            if result.is_ok()
-                && let Ok(mut completed) = state.completed_scopes.lock()
-            {
-                completed.insert(scope_key.clone());
-                evict_entry_over_limit(
-                    &mut completed,
-                    THREAD_INDEX_SCOPE_CACHE_MAX_ENTRIES,
-                    &scope_key,
-                );
+            let failed_attempts = if result.is_ok() {
+                if let Ok(mut failed) = state.failed_scope_attempts.lock() {
+                    failed.remove(&scope_key);
+                }
+                if let Ok(mut completed) = state.completed_scopes.lock() {
+                    completed.insert(scope_key.clone());
+                    evict_entry_over_limit(
+                        &mut completed,
+                        THREAD_INDEX_SCOPE_CACHE_MAX_ENTRIES,
+                        &scope_key,
+                    );
+                }
+                0
+            } else if let Ok(mut failed) = state.failed_scope_attempts.lock() {
+                if failed.len() >= THREAD_INDEX_SCOPE_CACHE_MAX_ENTRIES
+                    && !failed.contains_key(&scope_key)
+                    && let Some(victim) = failed.keys().next().cloned()
+                {
+                    failed.remove(&victim);
+                }
+                let attempts = failed.entry(scope_key.clone()).or_default();
+                *attempts = attempts.saturating_add(1);
+                *attempts
+            } else {
+                0
+            };
+            if let Err(error) = &result {
+                if failed_attempts >= MAX_PROJECTION_REPAIR_FAILURES_PER_SCOPE {
+                    tracing::warn!(
+                        error = %error,
+                        attempts = failed_attempts,
+                        "thread-index projection repair exhausted its per-process retry budget"
+                    );
+                } else {
+                    tracing::debug!(
+                        error = %error,
+                        attempts = failed_attempts,
+                        "background thread-index projection repair failed; a later listing will retry"
+                    );
+                }
             }
             if let Ok(mut active) = state.active_scopes.lock() {
                 active.remove(&scope_key);
-            }
-            if let Err(error) = result {
-                tracing::debug!(
-                    error = %error,
-                    "background thread-index projection repair failed; a later listing will retry"
-                );
             }
             drop(permit);
         });
@@ -130,28 +169,41 @@ where
     }
 
     let root = thread_index_root(scope)?;
-    let durable = match filesystem.list_dir(&scope.to_resource_scope(), &root).await {
-        Ok(entries) => entries,
-        Err(error) if is_not_found(&error) => Vec::new(),
-        Err(error) => return Err(error.into()),
-    };
-    let index_rows: Vec<ThreadId> = durable
-        .into_iter()
-        .filter(|entry| entry.file_type == FileType::File)
-        .filter_map(|entry| {
-            entry
-                .name
-                .strip_suffix(THREAD_INDEX_SUFFIX)
-                .map(str::to_owned)
-        })
-        .map(|raw_id| ThreadId::new(raw_id).map_err(invalid_path))
-        .collect::<Result<_, _>>()?;
-
-    for page in index_rows.chunks(Page::MAX_LIMIT as usize) {
-        for thread_id in page {
-            restore_thread_index_projection(filesystem.as_ref(), scope, thread_id).await?;
+    let page_limit = Page::MAX_LIMIT as usize;
+    let mut after = None;
+    loop {
+        let page = match filesystem
+            .list_dir_page(
+                &scope.to_resource_scope(),
+                &root,
+                after.as_deref(),
+                page_limit,
+            )
+            .await
+        {
+            Ok(entries) => entries,
+            Err(error) if is_not_found(&error) => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        if page.is_empty() {
+            break;
         }
+        let page_len = page.len();
+        for entry in &page {
+            if entry.file_type != FileType::File {
+                continue;
+            }
+            let Some(raw_id) = entry.name.strip_suffix(THREAD_INDEX_SUFFIX) else {
+                continue;
+            };
+            let thread_id = ThreadId::new(raw_id.to_string()).map_err(invalid_path)?;
+            restore_thread_index_projection(filesystem.as_ref(), scope, &thread_id).await?;
+        }
+        after = page.last().map(|entry| entry.name.clone());
         tokio::task::yield_now().await;
+        if page_len < page_limit {
+            break;
+        }
     }
 
     filesystem

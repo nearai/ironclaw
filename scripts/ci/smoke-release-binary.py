@@ -42,7 +42,7 @@ class SmokeFailure(RuntimeError):
 
 
 Runner = Callable[
-    [Path, tuple[str, ...], dict[str, str]], subprocess.CompletedProcess[str]
+    [Path, tuple[str, ...], dict[str, str], Path], subprocess.CompletedProcess[str]
 ]
 
 
@@ -50,6 +50,7 @@ def _run_command(
     binary: Path,
     args: tuple[str, ...],
     environment: dict[str, str],
+    working_directory: Path,
 ) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
@@ -58,6 +59,7 @@ def _run_command(
             capture_output=True,
             text=True,
             env=environment,
+            cwd=working_directory,
             timeout=120,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
@@ -70,9 +72,10 @@ def _checked_output(
     binary: Path,
     args: tuple[str, ...],
     environment: dict[str, str],
+    working_directory: Path,
     runner: Runner,
 ) -> str:
-    result = runner(binary, args, environment)
+    result = runner(binary, args, environment, working_directory)
     if result.returncode != 0:
         stdout = result.stdout[-4000:]
         stderr = result.stderr[-4000:]
@@ -183,26 +186,39 @@ def smoke_release_binary(binary: Path, runner: Runner = _run_command) -> set[str
     with tempfile.TemporaryDirectory(prefix="ironclaw-release-smoke-") as temp:
         root = Path(temp)
         environment = _isolated_environment(root)
+        workspace = Path(environment["IRONCLAW_REBORN_WORKSPACE_ROOT"])
 
-        version = _checked_output(binary, ("--version",), environment, runner)
+        version = _checked_output(
+            binary, ("--version",), environment, workspace, runner
+        )
         if "ironclaw" not in version.lower():
             raise SmokeFailure("--version did not identify IronClaw")
         evidence.add("version")
 
-        help_output = _checked_output(binary, ("--help",), environment, runner)
+        help_output = _checked_output(
+            binary, ("--help",), environment, workspace, runner
+        )
         for command in ("serve", "run", "extension", "profile"):
             if command not in help_output:
                 raise SmokeFailure(f"--help is missing the {command!r} command")
         evidence.add("help")
 
         profiles = _checked_output(
-            binary, ("profile", "list", "--json"), environment, runner
+            binary,
+            ("profile", "list", "--json"),
+            environment,
+            workspace,
+            runner,
         )
         _validate_profiles(profiles)
         evidence.add("profiles")
 
         extensions = _checked_output(
-            binary, ("extension", "search", "--json"), environment, runner
+            binary,
+            ("extension", "search", "--json"),
+            environment,
+            workspace,
+            runner,
         )
         _validate_bundled_extensions(extensions)
         evidence.add("bundled_extensions")
@@ -217,7 +233,11 @@ def smoke_release_binary(binary: Path, runner: Runner = _run_command) -> set[str
         migration_environment = dict(environment)
         migration_environment["IRONCLAW_REBORN_PROFILE"] = "migration-dry-run"
         migration = _checked_output(
-            binary, ("run", "--dry-run"), migration_environment, runner
+            binary,
+            ("run", "--dry-run"),
+            migration_environment,
+            workspace,
+            runner,
         )
         if "profile: migration-dry-run" not in migration:
             raise SmokeFailure(

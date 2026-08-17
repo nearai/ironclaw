@@ -546,6 +546,52 @@ impl RootFilesystem for DiskFilesystem {
         Ok(entries)
     }
 
+    async fn list_dir_page(
+        &self,
+        path: &VirtualPath,
+        after: Option<&str>,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        if max_entries == 0 {
+            return Ok(Vec::new());
+        }
+        let resolved = self
+            .resolve_existing(path, FilesystemOperation::ListDir)
+            .await?;
+        let mut read_dir = tokio::fs::read_dir(resolved)
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::ListDir, error))?;
+        let mut page = std::collections::BTreeMap::<String, DirEntry>::new();
+        while let Some(entry) = read_dir
+            .next_entry()
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::ListDir, error))?
+        {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if after.is_some_and(|cursor| name.as_str() <= cursor) {
+                continue;
+            }
+            let entry_path =
+                VirtualPath::new(format!("{}/{}", path.as_str().trim_end_matches('/'), name))?;
+            let metadata = entry
+                .metadata()
+                .await
+                .map_err(|error| io_error(entry_path.clone(), FilesystemOperation::Stat, error))?;
+            page.insert(
+                name.clone(),
+                DirEntry {
+                    name,
+                    path: entry_path,
+                    file_type: file_type_from_metadata(&metadata),
+                },
+            );
+            if page.len() > max_entries {
+                page.pop_last();
+            }
+        }
+        Ok(page.into_values().collect())
+    }
+
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         let resolved = self
             .resolve_existing(path, FilesystemOperation::Stat)
@@ -727,16 +773,7 @@ async fn publish_absent_temp(
                     "best-effort cleanup of write temp file failed after rename error"
                 );
             }
-            let target_exists = tokio::fs::try_exists(target)
-                .await
-                .map_err(|inspect_error| {
-                    io_error(
-                        virtual_path.clone(),
-                        FilesystemOperation::WriteFile,
-                        inspect_error,
-                    )
-                })?;
-            if target_exists {
+            if windows_target_exists_error(&error) {
                 Err(FilesystemError::VersionMismatch {
                     path: virtual_path.clone(),
                     expected: None,
@@ -751,6 +788,15 @@ async fn publish_absent_temp(
             }
         }
     }
+}
+
+#[cfg(windows)]
+fn windows_target_exists_error(error: &std::io::Error) -> bool {
+    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS};
+
+    error
+        .raw_os_error()
+        .is_some_and(|code| code == ERROR_ALREADY_EXISTS as i32 || code == ERROR_FILE_EXISTS as i32)
 }
 
 #[cfg(windows)]
@@ -1108,6 +1154,20 @@ fn io_reason(error: std::io::Error) -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_existing_target_errors_are_classified_without_a_follow_up_probe() {
+        use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS};
+
+        for code in [ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS] {
+            let error = std::io::Error::from_raw_os_error(code as i32);
+            assert!(windows_target_exists_error(&error));
+        }
+        assert!(!windows_target_exists_error(
+            &std::io::Error::from_raw_os_error(5)
+        ));
+    }
 
     #[tokio::test]
     #[tracing_test::traced_test]

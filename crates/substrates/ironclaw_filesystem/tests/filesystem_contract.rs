@@ -922,6 +922,38 @@ async fn local_list_dir_bounded_returns_at_most_max_entries() {
 }
 
 #[tokio::test]
+async fn local_list_dir_page_continues_after_stable_name_cursor() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+    for name in ["c.txt", "a.txt", "b.txt"] {
+        std::fs::write(storage.path().join("project1").join(name), b"entry").unwrap();
+    }
+    let root = local_root_with_projects_mount(storage.path());
+    let path = VirtualPath::new("/projects/project1").unwrap();
+
+    let first = root.list_dir_page(&path, None, 2).await.unwrap();
+    let second = root
+        .list_dir_page(&path, first.last().map(|entry| entry.name.as_str()), 2)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        first
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a.txt", "b.txt"]
+    );
+    assert_eq!(
+        second
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["c.txt"]
+    );
+}
+
+#[tokio::test]
 async fn local_list_dir_bounded_propagates_read_dir_errors() {
     let storage = tempdir().unwrap();
     std::fs::create_dir_all(storage.path().join("project1")).unwrap();

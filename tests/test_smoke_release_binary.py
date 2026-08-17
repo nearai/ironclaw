@@ -27,7 +27,7 @@ def completed(
 
 class FakeRunner:
     def __init__(self) -> None:
-        self.calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
+        self.calls: list[tuple[tuple[str, ...], dict[str, str], Path]] = []
         self.workspace_roots_were_directories: list[bool] = []
         self.responses = {
             ("--version",): completed("ironclaw 1.0.0\n"),
@@ -72,9 +72,13 @@ class FakeRunner:
         }
 
     def __call__(
-        self, _binary: Path, args: tuple[str, ...], environment: dict[str, str]
+        self,
+        _binary: Path,
+        args: tuple[str, ...],
+        environment: dict[str, str],
+        working_directory: Path,
     ) -> subprocess.CompletedProcess[str]:
-        self.calls.append((args, environment))
+        self.calls.append((args, environment, working_directory))
         workspace_root = environment.get("IRONCLAW_REBORN_WORKSPACE_ROOT")
         self.workspace_roots_were_directories.append(
             workspace_root is not None and Path(workspace_root).is_dir()
@@ -105,7 +109,7 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
 
         self.assertEqual(evidence, SMOKE.REQUIRED_EVIDENCE)
         self.assertEqual(
-            [args for args, _ in self.runner.calls],
+            [args for args, _, _ in self.runner.calls],
             [
                 ("--version",),
                 ("--help",),
@@ -114,7 +118,11 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
                 ("run", "--dry-run"),
             ],
         )
-        environments = [environment for _, environment in self.runner.calls]
+        environments = [environment for _, environment, _ in self.runner.calls]
+        working_directories = {
+            working_directory.resolve()
+            for _, _, working_directory in self.runner.calls
+        }
         self.assertEqual(
             environments[-1]["IRONCLAW_REBORN_PROFILE"], "migration-dry-run"
         )
@@ -130,6 +138,7 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
         self.assertIsNotNone(workspace_root)
         self.assertTrue(all(self.runner.workspace_roots_were_directories))
         workspace_path = Path(workspace_root).resolve()
+        self.assertEqual(working_directories, {workspace_path})
         repository_path = ROOT.resolve()
         self.assertFalse(
             workspace_path == repository_path
@@ -187,7 +196,10 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
 
     def test_successful_catalog_without_local_libsql_state_fails(self) -> None:
         def runner_without_database(
-            _binary: Path, args: tuple[str, ...], _environment: dict[str, str]
+            _binary: Path,
+            args: tuple[str, ...],
+            _environment: dict[str, str],
+            _working_directory: Path,
         ) -> subprocess.CompletedProcess[str]:
             return self.runner.responses[args]
 
