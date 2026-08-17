@@ -350,3 +350,42 @@ mod tests {
         assert!(!scrubbed_error.unwrap().contains(GITHUB_TOKEN_SHAPE));
     }
 }
+
+#[cfg(test)]
+mod classify_instantiation_error_tests {
+    use super::*;
+
+    #[test]
+    fn version_mismatch_message_gains_the_unsupported_contract_hint() {
+        let error = classify_instantiation_error(
+            "component imports instance `near:agent/host@0.3.0`, but a matching implementation \
+             was not found in the linker"
+                .to_string(),
+        );
+        let WasmError::InstantiationFailed(message) = error else {
+            panic!("expected InstantiationFailed");
+        };
+        assert!(message.contains("near:agent/host@0.3.0"));
+        assert!(message.contains("unsupported WIT contract version"));
+        assert!(message.contains(WIT_TOOL_VERSION));
+    }
+
+    #[test]
+    fn generic_import_error_gains_the_unsupported_contract_hint() {
+        let error =
+            classify_instantiation_error("missing import `some-other-interface`".to_string());
+        let WasmError::InstantiationFailed(message) = error else {
+            panic!("expected InstantiationFailed");
+        };
+        assert!(message.contains("unsupported WIT contract version"));
+    }
+
+    #[test]
+    fn unrelated_instantiation_failure_passes_through_unmodified() {
+        let error = classify_instantiation_error("trap: out of bounds memory access".to_string());
+        let WasmError::InstantiationFailed(message) = error else {
+            panic!("expected InstantiationFailed");
+        };
+        assert_eq!(message, "trap: out of bounds memory access");
+    }
+}
