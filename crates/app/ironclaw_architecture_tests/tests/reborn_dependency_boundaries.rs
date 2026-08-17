@@ -795,7 +795,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // obligations that were previously prose in a design doc no
         // implementor reads. Enforcement of all of it stays where it was.
         // Count read from this test's own failure message.
-        ("ironclaw_extension_contracts", 10_512),
+        // 10_512 -> 10_681 (2026-08-14, capability response normalization):
+        // ToolAdapter auth errors carry the neutral bounded provider diagnostic
+        // through the extension ABI. Parsing and model-safety behavior remain
+        // in runtime lanes and loop_host.
+        ("ironclaw_extension_contracts", 10_681),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -851,19 +855,19 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // forever, and `RuntimeCredentialAccountSetup::DeviceLink`.
         // 19_483 -> 19_718 (#7532): the provider-neutral turn execution
         // policy and validated required-skill identity shared by trusted
-        // trigger ingress and the runner.
+        // trigger ingress and the runner. Resolution, activation, and
+        // capability enforcement remain in their owning implementation crates.
         // + (2026-08-13, unbound turns): the `prepared_context` module —
         // `PreparedTurnDeclarations`, `OutputContract`, `TurnLimits`, the
         // `PreparedContextSource` admission-probe trait, and the
         // structured-result capability id constants. Neutral authority
         // vocabulary only.
-        // Union re-measured on the merged tree (2026-08-14); count read from
-        // this test's own failure message.
-        // Reviewed growth: immutable, provider-neutral output-contract DTOs
-        // belong beside the turn contract consumed across loop families.
-        // 20_156 -> 20_334 (2026-08-19, #7686 restack): capability dispatch-result
-        // declarations retained beside main's provider-neutral output contracts.
-        ("ironclaw_host_api", 20_334),
+        // 20_334 -> 20_481 (2026-08-14, capability response normalization):
+        // provider diagnostics and rejected-attempt accounting are neutral
+        // dispatch DTOs beside main's provider-neutral output contracts.
+        // Protocol decoding and settlement stay in their owning runtime crates;
+        // the count was re-measured on the merged tree.
+        ("ironclaw_host_api", 20_481),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

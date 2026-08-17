@@ -33,7 +33,7 @@ use ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID;
 use ironclaw_host_api::{
     approval::sha256_digest_token,
     decision::{DenyReason, RuntimeCredentialAuthRequirement},
-    dispatch::CapabilityDispatcher,
+    dispatch::{CapabilityDispatcher, provider_diagnostic_model_cause},
     ids::{ApprovalRequestId, CapabilityId, InvocationId, SecretHandle},
     resource::ResourceScope,
     result_meta::FailureKind,
@@ -749,10 +749,12 @@ impl HostRuntime for DefaultHostRuntime {
                         capability,
                         required_secrets,
                         credential_requirements,
+                        model_visible_cause,
                     } => Ok(auth_required_outcome(
                         capability,
                         required_secrets,
                         credential_requirements,
+                        model_visible_cause,
                     )),
                     other => {
                         let is_standard_write =
@@ -1374,14 +1376,18 @@ pub(super) fn auth_required_outcome(
     capability_id: CapabilityId,
     required_secrets: Vec<SecretHandle>,
     credential_requirements: Vec<ironclaw_host_api::decision::RuntimeCredentialAuthRequirement>,
+    model_visible_cause: Option<Box<ironclaw_host_api::dispatch::ProviderDiagnostic>>,
 ) -> RuntimeCapabilityOutcome {
-    RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate {
-        gate_id: stable_auth_gate_id(&capability_id, &required_secrets, &credential_requirements),
-        capability_id,
-        reason: RuntimeBlockedReason::AuthRequired,
-        required_secrets,
-        credential_requirements,
-    })
+    RuntimeCapabilityOutcome::AuthRequired(
+        RuntimeAuthGate::new(
+            stable_auth_gate_id(&capability_id, &required_secrets, &credential_requirements),
+            capability_id,
+            RuntimeBlockedReason::AuthRequired,
+            required_secrets,
+            credential_requirements,
+        )
+        .with_provider_diagnostic(model_visible_cause.map(|diagnostic| *diagnostic)),
+    )
 }
 
 fn stable_auth_gate_id(
@@ -1656,6 +1662,10 @@ fn bounded_diagnostic_text(value: &str) -> String {
 fn raw_failure_cause(error: &CapabilityInvocationError) -> Option<String> {
     use CapabilityInvocationError::Dispatch;
     match error {
+        Dispatch {
+            provider_diagnostic: Some(diagnostic),
+            ..
+        } => provider_diagnostic_model_cause(diagnostic),
         Dispatch { safe_summary, .. } => safe_summary.clone(),
         _ => None,
     }
@@ -1830,9 +1840,30 @@ mod tests {
         let secrets = vec![SecretHandle::new("notion-token").unwrap()];
         let requirements = vec![auth_requirement(&["read", "write"])];
 
-        let first =
-            auth_required_outcome(capability_id.clone(), secrets.clone(), requirements.clone());
-        let second = auth_required_outcome(capability_id, secrets, requirements);
+        let first = auth_required_outcome(
+            capability_id.clone(),
+            secrets.clone(),
+            requirements.clone(),
+            Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
+                code: None,
+                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                    "Bad credentials",
+                )),
+                retry_after: None,
+            })),
+        );
+        let second = auth_required_outcome(
+            capability_id,
+            secrets,
+            requirements,
+            Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
+                code: None,
+                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                    "different provider wording",
+                )),
+                retry_after: None,
+            })),
+        );
 
         let RuntimeCapabilityOutcome::AuthRequired(first_gate) = first else {
             panic!("expected auth gate");
@@ -1841,6 +1872,15 @@ mod tests {
             panic!("expected auth gate");
         };
         assert_eq!(first_gate.gate_id, second_gate.gate_id);
+        assert_eq!(first_gate, second_gate);
+        assert_eq!(
+            first_gate
+                .provider_diagnostic()
+                .and_then(|diagnostic| diagnostic.message.as_ref())
+                .map(|message| message.as_str()),
+            Some("Bad credentials")
+        );
+        assert!(!format!("{first_gate:?}").contains("Bad credentials"));
         assert!(
             first_gate.gate_id.as_str().starts_with("auth-"),
             "gate id should be stable and auth-specific: {}",
@@ -1850,8 +1890,10 @@ mod tests {
 
     #[test]
     fn auth_required_outcome_changes_gate_when_requirements_change() {
-        let first = auth_required_outcome(cap(), Vec::new(), vec![auth_requirement(&["read"])]);
-        let second = auth_required_outcome(cap(), Vec::new(), vec![auth_requirement(&["write"])]);
+        let first =
+            auth_required_outcome(cap(), Vec::new(), vec![auth_requirement(&["read"])], None);
+        let second =
+            auth_required_outcome(cap(), Vec::new(), vec![auth_requirement(&["write"])], None);
 
         let RuntimeCapabilityOutcome::AuthRequired(first_gate) = first else {
             panic!("expected auth gate");
@@ -1881,7 +1923,7 @@ mod tests {
         };
         let gate_id = |setup: Setup| {
             let RuntimeCapabilityOutcome::AuthRequired(gate) =
-                auth_required_outcome(cap(), Vec::new(), vec![requirement_with(setup)])
+                auth_required_outcome(cap(), Vec::new(), vec![requirement_with(setup)], None)
             else {
                 panic!("expected auth gate");
             };
@@ -1936,7 +1978,7 @@ mod tests {
                 provider_scopes: scopes,
             };
             let RuntimeCapabilityOutcome::AuthRequired(gate) =
-                auth_required_outcome(cap(), Vec::new(), vec![requirement])
+                auth_required_outcome(cap(), Vec::new(), vec![requirement], None)
             else {
                 panic!("expected auth gate");
             };

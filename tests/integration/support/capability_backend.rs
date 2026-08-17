@@ -102,7 +102,7 @@ pub(super) enum ShellMode {
 pub(super) struct CapabilityScriptingInputs {
     pub(super) keyed_http_responses: Vec<ScriptedHttpResponse>,
     pub(super) web_access_response_bodies: Vec<Vec<u8>>,
-    pub(super) github_network_statuses: Vec<u16>,
+    pub(super) github_network_responses: Vec<(u16, Option<Vec<u8>>)>,
     pub(super) real_egress_response_bodies: Vec<Vec<u8>>,
 }
 
@@ -134,7 +134,7 @@ impl RebornCapabilityBackend {
         let CapabilityScriptingInputs {
             keyed_http_responses,
             web_access_response_bodies,
-            github_network_statuses,
+            github_network_responses,
             real_egress_response_bodies,
         } = scripting;
         Ok(match self {
@@ -212,8 +212,12 @@ impl RebornCapabilityBackend {
                 // port — see `reborn_integration_secret_injection.rs`'s module
                 // doc), so a runtime-401-after-injection scenario scripts the
                 // status here instead. A no-op (empty vec) for existing callers.
-                for status in github_network_statuses {
-                    host_runtime.install_network_status_script(status)?;
+                for (status, body) in github_network_responses {
+                    if let Some(body) = body {
+                        host_runtime.install_network_response_script(status, body)?;
+                    } else {
+                        host_runtime.install_network_status_script(status)?;
+                    }
                 }
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }

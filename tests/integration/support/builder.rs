@@ -141,9 +141,10 @@ pub struct RebornIntegrationHarnessBuilder {
     capability: RebornCapabilityBackend,
     keyed_http_responses: Vec<ScriptedHttpResponse>,
     web_access_response_bodies: Vec<Vec<u8>>,
-    /// W4-AUTHGATE-WIRE: FIFO scripted statuses for the `GithubIssueTools`
-    /// backend's **network**-egress lane (see `with_github_network_status`).
-    github_network_statuses: Vec<u16>,
+    /// W4-AUTHGATE-WIRE: FIFO scripted responses for the `GithubIssueTools`
+    /// backend's **network**-egress lane. `None` preserves the existing
+    /// status-only default body; `Some` scripts the exact provider body.
+    github_network_responses: Vec<(u16, Option<Vec<u8>>)>,
     /// S1 seam: FIFO scripted response bodies for the real-egress-pipeline
     /// backend's wire-level transport recorder (see
     /// `with_real_egress_response_bodies`).
@@ -646,7 +647,18 @@ impl RebornIntegrationHarnessBuilder {
     /// path) must be scripted here. Implies [`with_github_issue_tools`](Self::with_github_issue_tools).
     pub fn with_github_network_status(mut self, status: u16) -> Self {
         self.capability = RebornCapabilityBackend::GithubIssueTools;
-        self.github_network_statuses.push(status);
+        self.github_network_responses.push((status, None));
+        self
+    }
+
+    /// Script one exact GitHub WASM provider response on the network lane.
+    /// Use this instead of [`with_github_network_status`](Self::with_github_network_status)
+    /// when the regression depends on the provider's response body as well as
+    /// its status.
+    pub fn with_github_network_response(mut self, status: u16, body: impl Into<Vec<u8>>) -> Self {
+        self.capability = RebornCapabilityBackend::GithubIssueTools;
+        self.github_network_responses
+            .push((status, Some(body.into())));
         self
     }
 
@@ -736,7 +748,7 @@ impl RebornIntegrationHarnessBuilder {
                 CapabilityScriptingInputs {
                     keyed_http_responses: self.keyed_http_responses,
                     web_access_response_bodies: self.web_access_response_bodies,
-                    github_network_statuses: self.github_network_statuses,
+                    github_network_responses: self.github_network_responses,
                     real_egress_response_bodies: self.real_egress_response_bodies,
                 },
                 self.park_tool_gate,
@@ -894,7 +906,7 @@ impl RebornIntegrationHarness {
             capability: RebornCapabilityBackend::Echo,
             keyed_http_responses: Vec::new(),
             web_access_response_bodies: Vec::new(),
-            github_network_statuses: Vec::new(),
+            github_network_responses: Vec::new(),
             real_egress_response_bodies: Vec::new(),
             storage: StorageMode::default(),
             safety_context: None,

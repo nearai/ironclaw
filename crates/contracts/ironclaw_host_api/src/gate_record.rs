@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     decision::{DenyReason, RuntimeCredentialAuthRequirement},
     ids::ResultRef,
+    result_meta::ModelDiagnostic,
     safe_summary::SafeSummary,
 };
 
@@ -79,6 +80,11 @@ pub enum GateRecord {
     Auth {
         summary: SafeSummary,
         credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+        /// The bounded, scrubbed provider explanation that caused this auth
+        /// gate, when the runtime supplied one. This is model-visible content,
+        /// not a credential value or an account-level auth projection.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<ModelDiagnostic>,
     },
     /// Awaiting resource budget currently unavailable.
     Resource { summary: SafeSummary },
@@ -155,6 +161,7 @@ mod tests {
                 GateRecord::Auth {
                     summary: summary(),
                     credential_requirements: vec![credential_requirement()],
+                    diagnostic: None,
                 },
                 "auth",
             ),
@@ -194,6 +201,12 @@ mod tests {
         let record = GateRecord::Auth {
             summary: summary(),
             credential_requirements: vec![credential_requirement()],
+            diagnostic: Some(
+                ModelDiagnostic::new(
+                    "provider error code: github_api_error_status_401; provider message: Bad credentials",
+                )
+                .unwrap(),
+            ),
         };
         // The host-owned requirement is rendered FROM the record, never
         // reconstructed from model-visible data.
@@ -202,10 +215,17 @@ mod tests {
         match back {
             GateRecord::Auth {
                 credential_requirements,
+                diagnostic,
                 ..
             } => {
                 assert_eq!(credential_requirements.len(), 1);
                 assert_eq!(credential_requirements[0], credential_requirement());
+                assert_eq!(
+                    diagnostic.as_ref().map(ModelDiagnostic::as_str),
+                    Some(
+                        "provider error code: github_api_error_status_401; provider message: Bad credentials"
+                    )
+                );
             }
             other => panic!("expected Auth, got {other:?}"),
         }

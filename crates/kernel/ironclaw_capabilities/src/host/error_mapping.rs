@@ -212,6 +212,7 @@ pub(super) fn prepare_obligation_error_to_invocation(
             capability: capability_id.clone(),
             required_secrets: Vec::new(),
             credential_requirements,
+            model_visible_cause: None,
         },
         CapabilityObligationError::Failed { kind } => CapabilityInvocationError::ObligationFailed {
             capability: capability_id.clone(),
@@ -281,6 +282,7 @@ pub(super) fn enrich_dispatch_error_credential_requirements(
             capability,
             required_secrets,
             credential_requirements,
+            model_visible_cause,
         } if required_secrets.is_empty() && credential_requirements.is_empty() => {
             let derived: Vec<_> = obligations
                 .iter()
@@ -291,12 +293,37 @@ pub(super) fn enrich_dispatch_error_credential_requirements(
                     capability,
                     required_secrets,
                     credential_requirements: vec![requirement.clone()],
+                    model_visible_cause,
                 },
-                // zero or >1 credential obligations: do not guess
-                _ => DispatchError::AuthRequired {
-                    capability,
-                    required_secrets,
-                    credential_requirements,
+                [] => DispatchError::Rejected {
+                    runtime: None,
+                    kind: ironclaw_host_api::dispatch::DispatchFailureKind::Runtime(
+                        ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::SecretDenied,
+                    ),
+                    diagnostic: model_visible_cause.map(|diagnostic| *diagnostic),
+                    detail: Some(
+                        ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic {
+                            text: format!(
+                                "capability {capability} reported authentication failure without a declared credential binding"
+                            ),
+                        },
+                    ),
+                    attempt: None,
+                },
+                _ => DispatchError::Rejected {
+                    runtime: None,
+                    kind: ironclaw_host_api::dispatch::DispatchFailureKind::Runtime(
+                        ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::SecretDenied,
+                    ),
+                    diagnostic: model_visible_cause.map(|diagnostic| *diagnostic),
+                    detail: Some(
+                        ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic {
+                            text: format!(
+                                "capability {capability} authentication failure could not be attributed to one credential binding"
+                            ),
+                        },
+                    ),
+                    attempt: None,
                 },
             }
         }

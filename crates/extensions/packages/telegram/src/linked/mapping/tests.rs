@@ -303,6 +303,7 @@ fn credential_failures_leave_the_messaging_vocabulary() {
         let ToolError::AuthRequired {
             required_secrets,
             credential_requirements,
+            ..
         } = mapped
         else {
             panic!("{name} must park the run on the re-auth gate, not answer messaging.*");

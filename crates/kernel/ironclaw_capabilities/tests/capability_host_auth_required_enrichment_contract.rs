@@ -170,6 +170,7 @@ async fn invoke_json_preserves_non_empty_credential_requirements_from_dispatcher
                 requester_extension: ExtensionId::new("mcp_ext").unwrap(),
                 provider_scopes: Vec::new(),
             }],
+            model_visible_cause: None,
         })
     });
     let handler = PassthroughObligationHandler;
@@ -315,7 +316,7 @@ async fn auth_resume_json_enriches_auth_required_credential_requirements_from_ob
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn invoke_json_does_not_enrich_when_multiple_credential_obligations_declared() {
+async fn invoke_json_fails_without_auth_gate_when_credential_attribution_is_ambiguous() {
     struct MultiObligationAuthorizer;
 
     #[async_trait]
@@ -369,20 +370,15 @@ async fn invoke_json_does_not_enrich_when_multiple_credential_obligations_declar
         .await
         .unwrap_err();
 
-    let CapabilityInvocationError::AuthorizationRequiresAuth {
-        credential_requirements,
-        ..
-    } = err
-    else {
-        panic!("expected AuthorizationRequiresAuth, got {err:?}");
-    };
-
-    assert!(
-        credential_requirements.is_empty(),
-        "must NOT enrich when two InjectCredentialAccountOnce obligations are declared — \
-         failed credential cannot be attributed to one provider; gate is left unmodified \
-         rather than mis-pointed at the wrong provider"
-    );
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::Dispatch {
+            kind: ironclaw_host_api::dispatch::DispatchFailureKind::Runtime(
+                ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::SecretDenied
+            ),
+            ..
+        }
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -419,6 +415,7 @@ async fn invoke_json_preserves_required_secrets_from_dispatcher() {
             capability: request.invocation.capability.clone(),
             required_secrets: vec![SecretHandle::new("raw_secret_handle").unwrap()],
             credential_requirements: Vec::new(),
+            model_visible_cause: None,
         })
     });
     let handler = PassthroughObligationHandler;

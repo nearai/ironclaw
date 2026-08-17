@@ -18,10 +18,14 @@ use ironclaw_host_api::{
     Timestamp,
     action::NetworkMethod,
     decision::RuntimeCredentialAuthRequirement,
-    dispatch::{CapabilityDisplayOutputPreview, RuntimeDispatchErrorKind},
+    dispatch::{
+        CapabilityDisplayOutputPreview, DispatchAttemptAccounting, DispatchFailureDetail,
+        DispatchFailureKind, ProviderDiagnostic, RuntimeDispatchErrorKind,
+    },
     ids::{CapabilityId, SecretHandle},
     mount::MountView,
     resource::{ResourceEstimate, ResourceReservation, ResourceScope},
+    runtime::RuntimeKind,
 };
 
 /// One invocation of one declared capability.
@@ -64,12 +68,28 @@ pub struct ToolResult {
 /// Typed invocation failures. The host maps these onto the dispatch port's
 /// redacted failure categories; `AuthRequired` maps to the generic re-auth
 /// gate and resumes through the standard blocked-turn flow.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ToolError {
     #[error("tool invocation requires authorization")]
     AuthRequired {
         required_secrets: Vec<SecretHandle>,
         credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+        /// Raw provider rejection retained for the host's downstream
+        /// model-diagnostic scrub/fence seam. Its `Debug` representation is
+        /// redacted; never log or render it directly.
+        model_visible_cause: Option<ProviderDiagnostic>,
+    },
+    #[error("tool provider rejected invocation ({kind})")]
+    Rejected {
+        runtime: Option<RuntimeKind>,
+        kind: DispatchFailureKind,
+        /// Provider-authored metadata remains typed so its `Debug` output is
+        /// redacted until the host's model-diagnostic scrub/fence seam.
+        diagnostic: Option<ProviderDiagnostic>,
+        detail: Option<DispatchFailureDetail>,
+        /// `Some` means transport began and the runtime already reconciled the
+        /// reservation. `None` is valid only for pre-transport rejection.
+        attempt: Option<Box<DispatchAttemptAccounting>>,
     },
     #[error("tool invocation failed ({kind:?})")]
     Failed {
@@ -83,6 +103,66 @@ pub enum ToolError {
         model_visible_cause: Option<String>,
     },
 }
+
+impl PartialEq for ToolError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::AuthRequired {
+                    required_secrets: left_secrets,
+                    credential_requirements: left_requirements,
+                    ..
+                },
+                Self::AuthRequired {
+                    required_secrets: right_secrets,
+                    credential_requirements: right_requirements,
+                    ..
+                },
+            ) => left_secrets == right_secrets && left_requirements == right_requirements,
+            (
+                Self::Failed {
+                    kind: left_kind,
+                    safe_summary: left_summary,
+                    model_visible_cause: left_cause,
+                },
+                Self::Failed {
+                    kind: right_kind,
+                    safe_summary: right_summary,
+                    model_visible_cause: right_cause,
+                },
+            ) => {
+                left_kind == right_kind
+                    && left_summary == right_summary
+                    && left_cause == right_cause
+            }
+            (
+                Self::Rejected {
+                    runtime: left_runtime,
+                    kind: left_kind,
+                    diagnostic: left_diagnostic,
+                    detail: left_detail,
+                    attempt: left_attempt,
+                },
+                Self::Rejected {
+                    runtime: right_runtime,
+                    kind: right_kind,
+                    diagnostic: right_diagnostic,
+                    detail: right_detail,
+                    attempt: right_attempt,
+                },
+            ) => {
+                left_runtime == right_runtime
+                    && left_kind == right_kind
+                    && left_diagnostic == right_diagnostic
+                    && left_detail == right_detail
+                    && left_attempt == right_attempt
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ToolError {}
 
 /// Host ports available to an adapter during one invocation — derived from
 /// the resolved contract, nothing wider. A port is `None` exactly when the

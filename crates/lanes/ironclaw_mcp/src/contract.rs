@@ -12,6 +12,7 @@ use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_host_api::{
     capability::CapabilityDescriptor,
     decision::RuntimeCredentialAuthRequirement,
+    dispatch::ProviderDiagnostic,
     ids::{CapabilityId, ExtensionId, SecretHandle},
     resource::{
         CapabilityHostResult, ResourceEstimate, ResourceReceipt, ResourceReservation,
@@ -108,6 +109,9 @@ pub struct McpClientOutput {
     pub output: Value,
     pub usage: ResourceUsage,
     pub output_bytes: Option<u64>,
+    /// Protocol-level rejection returned after transport completed. Transport
+    /// failures still use `McpClientError`.
+    pub provider_rejection: Option<ProviderDiagnostic>,
 }
 
 impl McpClientOutput {
@@ -116,6 +120,7 @@ impl McpClientOutput {
             output: value,
             usage: ResourceUsage::default(),
             output_bytes: None,
+            provider_rejection: None,
         }
     }
 }
@@ -173,11 +178,18 @@ pub enum McpClientError {
     InvalidToolCatalog {
         reason: String,
     },
-    AuthRequired,
+    AuthRequired {
+        usage: ResourceUsage,
+    },
     /// A hosted server returned 401/403. The challenge is header-derived and
     /// deliberately redacted; it contains no remote response body or tokens.
     AuthChallenge {
         challenge: McpAuthChallenge,
+        usage: ResourceUsage,
+    },
+    ProviderRejected {
+        diagnostic: Box<ProviderDiagnostic>,
+        usage: ResourceUsage,
     },
 }
 
@@ -197,7 +209,11 @@ impl McpClientError {
     pub fn stable_reason(&self) -> &str {
         match self {
             Self::Client { reason } | Self::InvalidToolCatalog { reason } => reason,
-            Self::AuthRequired | Self::AuthChallenge { .. } => "auth_required",
+            Self::AuthRequired { .. } | Self::AuthChallenge { .. } => "auth_required",
+            Self::ProviderRejected { diagnostic, .. } => diagnostic
+                .code
+                .as_ref()
+                .map_or("provider_rejected", |code| code.as_str()),
         }
     }
 }
@@ -209,6 +225,24 @@ pub struct McpExecutionResult {
     pub receipt: ResourceReceipt,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct McpProviderRejection {
+    pub diagnostic: ProviderDiagnostic,
+    pub receipt: ResourceReceipt,
+    pub usage: ResourceUsage,
+}
+
+impl std::fmt::Debug for McpProviderRejection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpProviderRejection")
+            .field("diagnostic", &"<redacted>")
+            .field("receipt", &self.receipt)
+            .field("usage", &self.usage)
+            .finish()
+    }
+}
+
 /// MCP runtime failures.
 #[derive(Debug, Error)]
 pub enum McpError {
@@ -216,6 +250,8 @@ pub enum McpError {
     Resource(RuntimeResourceError),
     #[error("MCP client error: {reason}")]
     Client { reason: String },
+    #[error("MCP provider rejected the tool call")]
+    ProviderRejected(Box<McpProviderRejection>),
     #[error("MCP server advertised an invalid tool catalog: {reason}")]
     InvalidToolCatalog { reason: String },
     #[error("MCP capability requires authentication")]
