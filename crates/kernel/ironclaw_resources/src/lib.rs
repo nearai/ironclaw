@@ -1659,6 +1659,13 @@ pub(crate) struct ReservationRecord {
     pub(crate) tally: ResourceTally,
     pub(crate) status: ReservationStatus,
     pub(crate) actual: Option<ResourceUsage>,
+    /// When the hold was taken. The only age basis a stale-`Active` sweeper
+    /// has: a reservation whose owner died before releasing leaves an
+    /// `Active` record that replays forever. `None` for records written
+    /// before this field existed — those are never swept, because an
+    /// unknown age cannot be proven stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reserved_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Deserialize)]
@@ -1734,6 +1741,8 @@ struct ReservationRecordSerde {
         deserialize_with = "deserialize_optional_strict_resource_usage"
     )]
     actual: Option<ResourceUsage>,
+    #[serde(default)]
+    reserved_at: Option<DateTime<Utc>>,
 }
 
 impl<'de> Deserialize<'de> for ReservationRecord {
@@ -1748,6 +1757,7 @@ impl<'de> Deserialize<'de> for ReservationRecord {
             tally: value.tally,
             status: value.status,
             actual: value.actual,
+            reserved_at: value.reserved_at,
         })
     }
 }
@@ -2165,6 +2175,7 @@ pub(crate) fn reserve_with_outcome_in_state(
             tally: requested,
             status: ReservationStatus::Active,
             actual: None,
+            reserved_at: Some(now),
         },
     );
 

@@ -23,6 +23,18 @@ use super::{fs_error, storage_error};
 
 const DELTA_LOG_PATH: &str = "/resources/deltas/log";
 const DELTA_JOURNAL_MAX_BATCH: usize = 256;
+/// How long the flusher keeps collecting deltas after the first one arrives.
+///
+/// Every caller blocks on its own ack, so the channel is empty the instant
+/// the flusher drains it: a greedy `try_recv` loop therefore always saw
+/// `batch_size=1`, and the 256-delta group commit this journal was built for
+/// never engaged (issue #7714, `batch_size=1` on every contention line of a
+/// 147-task bench). Waiting a bounded window lets concurrent callers coalesce
+/// into one backend append. The window is small relative to a durable append
+/// (single-digit milliseconds against ~10s of writer-checkout contention on
+/// libSQL), so an uncontended single delta pays at most this much latency
+/// while a contended burst collapses up to 256 writes into one.
+const DELTA_JOURNAL_COLLECTION_WINDOW: Duration = Duration::from_millis(2);
 // The window must cover at least one FULL backend append attempt, or a single
 // transient `BackendBusy` exhausts it with zero retries. A local libSQL
 // backend attempt can block for the writer-pool checkout timeout (10s) plus
@@ -125,6 +137,7 @@ where
     filesystem: Arc<ScopedFilesystem<F>>,
     sender: Mutex<mpsc::Sender<DeltaJournalRequest>>,
     retry_policy: BusyRetryPolicy,
+    collection_window: Duration,
     #[cfg(test)]
     restart_hook: Option<JournalRestartHook>,
 }
@@ -133,12 +146,40 @@ where
 pub(super) type JournalRestartHook = Arc<dyn Fn() + Send + Sync>;
 
 pub(super) struct PendingResourceDelta {
-    ack: mpsc::Receiver<Result<SeqNo, ResourceError>>,
+    ack: mpsc::Receiver<Result<SeqNo, DeltaJournalFailure>>,
 }
 
 struct DeltaJournalRequest {
     delta: ResourceGovernorDelta,
-    ack: mpsc::Sender<Result<SeqNo, ResourceError>>,
+    ack: mpsc::Sender<Result<SeqNo, DeltaJournalFailure>>,
+}
+
+/// A durable-append failure plus whether it is worth retrying.
+///
+/// `transient` is true only for a backend that reported itself busy for the
+/// whole retry window — congestion, never corruption. The governor uses it to
+/// choose between discarding the diverged in-memory authority (cheap, and the
+/// journal keeps running) and full authority invalidation.
+#[derive(Debug, Clone)]
+pub(super) struct DeltaJournalFailure {
+    pub(super) error: ResourceError,
+    pub(super) transient: bool,
+}
+
+impl DeltaJournalFailure {
+    pub(super) fn fatal(error: ResourceError) -> Self {
+        Self {
+            error,
+            transient: false,
+        }
+    }
+
+    fn transient(error: ResourceError) -> Self {
+        Self {
+            error,
+            transient: true,
+        }
+    }
 }
 
 impl<F> ResourceDeltaJournal<F>
@@ -146,14 +187,23 @@ where
     F: RootFilesystem + 'static,
 {
     pub(super) fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
-        Self::with_retry_policy(filesystem, DEFAULT_BUSY_RETRY_POLICY)
+        Self::with_retry_policy(
+            filesystem,
+            DEFAULT_BUSY_RETRY_POLICY,
+            DELTA_JOURNAL_COLLECTION_WINDOW,
+        )
     }
 
     fn with_retry_policy(
         filesystem: Arc<ScopedFilesystem<F>>,
         retry_policy: BusyRetryPolicy,
+        collection_window: Duration,
     ) -> Self {
-        let sender = match spawn_delta_journal_flusher(Arc::clone(&filesystem), retry_policy) {
+        let sender = match spawn_delta_journal_flusher(
+            Arc::clone(&filesystem),
+            retry_policy,
+            collection_window,
+        ) {
             Ok(sender) => sender,
             Err(_) => {
                 warn!(
@@ -169,6 +219,7 @@ where
             filesystem,
             sender: Mutex::new(sender),
             retry_policy,
+            collection_window,
             #[cfg(test)]
             restart_hook: None,
         }
@@ -179,7 +230,7 @@ where
         filesystem: Arc<ScopedFilesystem<F>>,
         retry_policy: BusyRetryPolicy,
     ) -> Self {
-        Self::with_retry_policy(filesystem, retry_policy)
+        Self::with_retry_policy(filesystem, retry_policy, DELTA_JOURNAL_COLLECTION_WINDOW)
     }
 
     pub(super) fn restart(&self) -> Result<(), ResourceError> {
@@ -187,8 +238,11 @@ where
         if let Some(hook) = &self.restart_hook {
             hook();
         }
-        let replacement =
-            spawn_delta_journal_flusher(Arc::clone(&self.filesystem), self.retry_policy)?;
+        let replacement = spawn_delta_journal_flusher(
+            Arc::clone(&self.filesystem),
+            self.retry_policy,
+            self.collection_window,
+        )?;
         *self
             .sender
             .lock()
@@ -225,9 +279,45 @@ where
     }
 }
 
+/// Construction seams that exist only for this crate's tests.
+///
+/// The whole block is `#[cfg(test)]` rather than each method, so these never
+/// read as test-support members grafted onto the production type
+/// (`reborn_struct_test_support_ratchet`).
+#[cfg(test)]
+impl<F> ResourceDeltaJournal<F>
+where
+    F: RootFilesystem + 'static,
+{
+    /// Journal whose busy-retry window is short enough for a unit test to
+    /// drive to exhaustion. Governor tests need the exhaustion path, and the
+    /// production window is 60s.
+    pub(super) fn new_fast_busy_for_tests(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
+        Self::with_retry_policy(
+            filesystem,
+            BusyRetryPolicy {
+                max_retries: 1,
+                max_elapsed: Duration::from_millis(40),
+                backoff_base: Duration::from_millis(1),
+                backoff_max: Duration::from_millis(1),
+                jitter: false,
+            },
+            DELTA_JOURNAL_COLLECTION_WINDOW,
+        )
+    }
+
+    fn new_with_collection_window(
+        filesystem: Arc<ScopedFilesystem<F>>,
+        collection_window: Duration,
+    ) -> Self {
+        Self::with_retry_policy(filesystem, DEFAULT_BUSY_RETRY_POLICY, collection_window)
+    }
+}
+
 fn spawn_delta_journal_flusher<F>(
     filesystem: Arc<ScopedFilesystem<F>>,
     retry_policy: BusyRetryPolicy,
+    collection_window: Duration,
 ) -> Result<mpsc::Sender<DeltaJournalRequest>, ResourceError>
 where
     F: RootFilesystem + 'static,
@@ -235,7 +325,9 @@ where
     let (sender, receiver) = mpsc::channel();
     std::thread::Builder::new()
         .name("resource-governor-delta-journal".to_string())
-        .spawn(move || run_delta_journal_flusher(filesystem, receiver, retry_policy))
+        .spawn(move || {
+            run_delta_journal_flusher(filesystem, receiver, retry_policy, collection_window)
+        })
         .map_err(|error| {
             storage_error(format!("resource governor delta journal thread: {error}"))
         })?;
@@ -243,7 +335,7 @@ where
 }
 
 impl PendingResourceDelta {
-    pub(super) fn wait(self) -> Result<SeqNo, ResourceError> {
+    pub(super) fn wait(self) -> Result<SeqNo, DeltaJournalFailure> {
         if let Ok(handle) = Handle::try_current()
             && handle.runtime_flavor() == RuntimeFlavor::MultiThread
         {
@@ -252,10 +344,13 @@ impl PendingResourceDelta {
         self.recv_ack()
     }
 
-    fn recv_ack(self) -> Result<SeqNo, ResourceError> {
-        self.ack
-            .recv()
-            .map_err(|_| storage_error("resource governor delta journal stopped"))?
+    fn recv_ack(self) -> Result<SeqNo, DeltaJournalFailure> {
+        match self.ack.recv() {
+            Ok(result) => result,
+            Err(_) => Err(DeltaJournalFailure::fatal(storage_error(
+                "resource governor delta journal stopped",
+            ))),
+        }
     }
 }
 
@@ -263,6 +358,7 @@ fn run_delta_journal_flusher<F>(
     filesystem: Arc<ScopedFilesystem<F>>,
     receiver: mpsc::Receiver<DeltaJournalRequest>,
     retry_policy: BusyRetryPolicy,
+    collection_window: Duration,
 ) where
     F: RootFilesystem + 'static,
 {
@@ -273,9 +369,11 @@ fn run_delta_journal_flusher<F>(
         Ok(runtime) => runtime,
         Err(error) => {
             while let Ok(request) = receiver.recv() {
-                let _ = request.ack.send(Err(storage_error(format!(
-                    "resource governor delta journal runtime failed: {error}"
-                ))));
+                let _ = request
+                    .ack
+                    .send(Err(DeltaJournalFailure::fatal(storage_error(format!(
+                        "resource governor delta journal runtime failed: {error}"
+                    )))));
             }
             return;
         }
@@ -283,11 +381,17 @@ fn run_delta_journal_flusher<F>(
     while let Ok(first) = receiver.recv() {
         let mut requests = Vec::with_capacity(DELTA_JOURNAL_MAX_BATCH);
         requests.push(first);
-        std::thread::yield_now();
+        let collect_until = Instant::now() + collection_window;
         while requests.len() < DELTA_JOURNAL_MAX_BATCH {
-            match receiver.try_recv() {
+            let remaining = collect_until.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match receiver.recv_timeout(remaining) {
                 Ok(request) => requests.push(request),
-                Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => {
+                    break;
+                }
             }
         }
         let result = runtime.block_on(persist_delta_journal_batch(
@@ -301,9 +405,18 @@ fn run_delta_journal_flusher<F>(
                     let _ = request.ack.send(Ok(seq));
                 }
             }
-            Err(error) => {
+            Err(failure) => {
+                let transient = failure.transient;
                 for request in requests {
-                    let _ = request.ack.send(Err(error.clone()));
+                    let _ = request.ack.send(Err(failure.clone()));
+                }
+                if transient {
+                    // A busy backend is congestion, not a broken writer.
+                    // Killing the thread here forced every later enqueue to
+                    // fail and made the governor replace the journal, which
+                    // is what turned one contended append into the
+                    // invalidate/replace/reload cascade in issue #7714.
+                    continue;
                 }
                 break;
             }
@@ -315,14 +428,17 @@ async fn persist_delta_journal_batch<F>(
     filesystem: &ScopedFilesystem<F>,
     requests: &[DeltaJournalRequest],
     retry_policy: BusyRetryPolicy,
-) -> Result<Vec<SeqNo>, ResourceError>
+) -> Result<Vec<SeqNo>, DeltaJournalFailure>
 where
     F: RootFilesystem,
 {
-    let path = delta_log_path()?;
+    let path = delta_log_path().map_err(DeltaJournalFailure::fatal)?;
     let payloads = requests
         .iter()
-        .map(|request| serde_json::to_vec(&request.delta).map_err(storage_error))
+        .map(|request| {
+            serde_json::to_vec(&request.delta)
+                .map_err(|error| DeltaJournalFailure::fatal(storage_error(error)))
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let started = Instant::now();
     let mut retry = 0;
@@ -352,7 +468,7 @@ where
                         batch_size = requests.len(),
                         "resource governor delta journal filesystem contention exhausted"
                     );
-                    return Err(fs_error(error));
+                    return Err(DeltaJournalFailure::transient(fs_error(error)));
                 }
                 retry += 1;
                 let delay = busy_retry_delay(retry, retry_policy)
@@ -368,13 +484,13 @@ where
                 );
                 tokio::time::sleep(delay).await;
             }
-            Err(error) => return Err(fs_error(error)),
+            Err(error) => return Err(DeltaJournalFailure::fatal(fs_error(error))),
         }
     };
     if seqs.len() != requests.len() {
-        return Err(storage_error(
+        return Err(DeltaJournalFailure::fatal(storage_error(
             "resource governor delta batch append returned an unexpected ack count",
-        ));
+        )));
     }
     Ok(seqs)
 }
@@ -873,6 +989,120 @@ mod tests {
         Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
     }
 
+    /// Records the size of every durable append the flusher performs.
+    struct BatchRecordingFilesystem {
+        batches: Mutex<Vec<usize>>,
+    }
+
+    impl BatchRecordingFilesystem {
+        fn new() -> Self {
+            Self {
+                batches: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn record(&self, size: usize) {
+            self.batches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(size);
+        }
+
+        fn batches(&self) -> Vec<usize> {
+            self.batches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl RootFilesystem for BatchRecordingFilesystem {
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities::sql_typical().with(Capability::Events)
+        }
+
+        async fn append(
+            &self,
+            _path: &VirtualPath,
+            _payload: Vec<u8>,
+        ) -> Result<SeqNo, FilesystemError> {
+            self.record(1);
+            Ok(SeqNo::from_backend(1))
+        }
+
+        async fn append_batch(
+            &self,
+            _path: &VirtualPath,
+            payloads: Vec<Vec<u8>>,
+        ) -> Result<Vec<SeqNo>, FilesystemError> {
+            self.record(payloads.len());
+            Ok((1..=payloads.len() as u64)
+                .map(SeqNo::from_backend)
+                .collect())
+        }
+
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            Err(unsupported(path, FilesystemOperation::ListDir))
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            Err(unsupported(path, FilesystemOperation::Stat))
+        }
+    }
+
+    fn scoped_batch_recording_filesystem(
+        backend: Arc<BatchRecordingFilesystem>,
+    ) -> Arc<ScopedFilesystem<BatchRecordingFilesystem>> {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/resources").expect("alias"),
+            VirtualPath::new("/resources").expect("target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view");
+        Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
+    }
+
+    fn snapshot_delta(tenant: &str) -> ResourceGovernorDelta {
+        ResourceGovernorDelta::AccountSnapshot {
+            account: ResourceAccount::tenant(TenantId::new(tenant).expect("tenant id")),
+            at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn deltas_arriving_during_the_collection_window_coalesce_into_one_batch() {
+        // Regression for issue #7714: every caller blocks on its own ack, so
+        // the greedy `try_recv` drain always found an empty channel and wrote
+        // `batch_size=1` under exactly the load the 256-delta group commit was
+        // built for. The window here is 500ms and the follow-on deltas are
+        // enqueued ~20ms in, a 25x margin, so the assertion is about the
+        // window existing at all rather than about precise timing.
+        let backend = Arc::new(BatchRecordingFilesystem::new());
+        let journal = ResourceDeltaJournal::new_with_collection_window(
+            scoped_batch_recording_filesystem(Arc::clone(&backend)),
+            Duration::from_millis(500),
+        );
+
+        let first = journal.enqueue(snapshot_delta("tenant1")).expect("enqueue");
+        // Let the flusher pick the first delta up and open its window.
+        std::thread::sleep(Duration::from_millis(20));
+        let rest: Vec<_> = (0..7)
+            .map(|_| journal.enqueue(snapshot_delta("tenant1")).expect("enqueue"))
+            .collect();
+
+        first.wait().expect("first delta ack");
+        for pending in rest {
+            pending.wait().expect("coalesced delta ack");
+        }
+
+        assert_eq!(
+            backend.batches(),
+            vec![8],
+            "concurrent deltas must coalesce into a single durable append"
+        );
+    }
+
     #[test]
     fn transient_busy_single_append_is_retried_without_using_batch() {
         let backend = Arc::new(BusyOnceAppendFilesystem::new());
@@ -943,14 +1173,31 @@ mod tests {
             })
             .expect("enqueue delta");
 
+        let failure = pending
+            .wait()
+            .expect_err("busy retry window must fail closed");
         assert!(
-            pending.wait().is_err(),
-            "busy retry window must fail closed"
+            failure.transient,
+            "a busy backend is congestion, not a broken journal"
         );
         assert_eq!(
             backend.append_attempts.load(Ordering::SeqCst),
             2,
             "the journal must not start a third database attempt after the retry window is exhausted"
+        );
+
+        // The writer thread must survive congestion: killing it is what made
+        // the governor replace the journal and reload durable state (#7714).
+        let next = journal
+            .enqueue(snapshot_delta("tenant1"))
+            .expect("the flusher must still accept work after busy exhaustion");
+        assert!(
+            next.wait().is_err(),
+            "the still-busy backend fails the next delta too, but through a live journal"
+        );
+        assert!(
+            backend.append_attempts.load(Ordering::SeqCst) > 2,
+            "a live flusher must have attempted the follow-up delta"
         );
     }
 
@@ -1066,7 +1313,7 @@ mod tests {
         assert_eq!(seq, SeqNo::from_backend(1));
     }
 
-    async fn pending_delta_wait_with_gated_append() -> Result<SeqNo, ResourceError> {
+    async fn pending_delta_wait_with_gated_append() -> Result<SeqNo, DeltaJournalFailure> {
         let (release_tx, release_rx) = oneshot::channel();
         let journal = ResourceDeltaJournal::new(scoped_gated_filesystem(release_rx));
         let pending = journal
