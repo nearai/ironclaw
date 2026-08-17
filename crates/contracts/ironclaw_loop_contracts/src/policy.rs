@@ -93,7 +93,7 @@ impl CheckpointPolicy {
     /// Iteration 0 always flushes, so every run has a durable pre-model
     /// resume point from its first model call onward.
     pub fn flushes_before_model_at(&self, iteration: u32) -> bool {
-        iteration % self.before_model_flush_interval() == 0
+        iteration.is_multiple_of(self.before_model_flush_interval())
     }
 
     /// The interactive-coding tier checkpoint policy, shared by the interactive

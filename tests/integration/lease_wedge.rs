@@ -215,6 +215,13 @@ async fn run_parked_before_a_model_call_is_resumed_after_lease_expiry_not_failed
 /// - Only the model call is redone.
 #[tokio::test]
 async fn run_interrupted_after_a_side_effect_still_auto_recovers_without_repeating_it() {
+    // This scenario drives two tool calls plus a resumed run, so its future is
+    // large enough to overflow libtest's default 2 MiB thread stack in debug
+    // builds. Box it onto the heap; CI sets no `RUST_MIN_STACK`.
+    Box::pin(run_interrupted_after_a_side_effect_body()).await;
+}
+
+async fn run_interrupted_after_a_side_effect_body() {
     const FIRST_URL: &str = "https://api.example.test/v1/batched/first";
     const SECOND_URL: &str = "https://api.example.test/v1/batched/second";
 
