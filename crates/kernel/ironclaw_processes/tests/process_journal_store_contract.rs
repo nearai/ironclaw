@@ -4,7 +4,7 @@ use chrono::Utc;
 use ironclaw_filesystem::{
     CasExpectation, DiskFilesystem, Entry, Fault, FaultInjecting, FaultKind, FilesystemError,
     FilesystemOperation, Filter, InMemoryBackend, IndexKey, LibSqlRootFilesystem, Page,
-    ScopedFilesystem,
+    PostgresRootFilesystem, RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
     ids::{AgentId, InvocationId, ProcessId, ProjectId, TenantId, ThreadId, UserId},
@@ -30,11 +30,11 @@ use ironclaw_processes::{
     ProcessLifecycleLookupBatchRequest, ProcessLifecycleLookupRequest,
     ProcessLifecycleLookupResult, ProcessLifecycleLookupSource, ProcessLifecycleStatus,
     ProcessOperationId, ProcessSnapshotSource, ProcessStateTransitionRequest,
-    ProcessSubmissionPort, ProcessSuspension, ProcessSuspensionKind, ProcessTerminalEvidence,
-    ProcessTransitionPort, ProcessTreePort, ProcessWorkerId, PruneReleasedProcessRequest,
-    RecordProcessCheckpointRequest, ReleaseProcessTreeRequest, ReserveProcessTreeRequest,
-    ResumeProcessRequest, SettleProcessDependencyRequest, StopProcessRequest, SubmitProcessRequest,
-    SuspendProcessRequest,
+    ProcessSubmissionEdge, ProcessSubmissionPort, ProcessSuspension, ProcessSuspensionKind,
+    ProcessTerminalEvidence, ProcessTransitionPort, ProcessTreePort, ProcessWorkerId,
+    PruneReleasedProcessRequest, RecordProcessCheckpointRequest, ReleaseProcessTreeRequest,
+    ReserveProcessTreeRequest, ResumeProcessRequest, SettleProcessDependencyRequest,
+    StopProcessRequest, SubmitProcessAtEdgeRequest, SubmitProcessRequest, SuspendProcessRequest,
 };
 use serde_json::json;
 use std::{
@@ -521,6 +521,144 @@ async fn each_process_lifecycle_event_is_an_individual_libsql_row() {
         .expect("count row exists");
     let count: i64 = row.get(0).expect("read count");
     assert_eq!(count, 32);
+}
+
+#[tokio::test]
+async fn edge_submission_survives_libsql_restart() {
+    let storage = tempfile::tempdir().expect("temporary process journal database");
+    let database = Arc::new(
+        libsql::Builder::new_local(storage.path().join("edge-submission.db"))
+            .build()
+            .await
+            .expect("build libsql database"),
+    );
+    let backend =
+        Arc::new(LibSqlRootFilesystem::new(database).expect("create libSQL filesystem runtime"));
+    backend
+        .run_migrations()
+        .await
+        .expect("migrate libSQL filesystem");
+    assert_edge_submission_survives_restart(
+        backend,
+        format!("libsql-edge-{}", uuid::Uuid::new_v4()),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn edge_submission_survives_postgres_restart() {
+    let Some(backend) = postgres_backend().await else {
+        eprintln!(
+            "skipping process edge-submission Postgres contract: \
+             IRONCLAW_FILESYSTEM_POSTGRES_URL / DATABASE_URL unavailable"
+        );
+        return;
+    };
+    assert_edge_submission_survives_restart(
+        Arc::new(backend),
+        format!("postgres-edge-{}", uuid::Uuid::new_v4()),
+    )
+    .await;
+}
+
+async fn assert_edge_submission_survives_restart<F>(backend: Arc<F>, fixture: String)
+where
+    F: RootFilesystem + 'static,
+{
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        backend,
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/processes").expect("mount alias"),
+            VirtualPath::new(format!("/engine/process-edge/{fixture}")).expect("virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view"),
+    ));
+    let request_scope = scope();
+    let process_id = ProcessId::new();
+    let request = SubmitProcessAtEdgeRequest {
+        submission: SubmitProcessRequest {
+            process_id,
+            process_kind: ProcessKind::CapabilityInvocationState,
+            scope: request_scope.clone(),
+            exclusive_within_scope: false,
+            operation_id: Some(ProcessOperationId::from_trusted("durable-edge")),
+            owner_user_id: Some(request_scope.user_id.clone()),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at: Utc::now(),
+            metadata: json!({"record_type": "capability_run"}),
+        },
+        edge: ProcessSubmissionEdge::Completed,
+    };
+    ProcessJournalStore::new(Arc::clone(&filesystem))
+        .submit_process_at_edge(request.clone())
+        .await
+        .expect("submit terminal edge");
+
+    let restarted = ProcessJournalStore::new(filesystem);
+    let loaded = restarted
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: request_scope.clone(),
+            process_id,
+        })
+        .await
+        .expect("load edge after restart");
+    assert_eq!(loaded.status, ProcessLifecycleStatus::Completed);
+    assert_eq!(loaded.metadata, request.submission.metadata);
+    restarted
+        .submit_process_at_edge(request)
+        .await
+        .expect("replay edge after restart");
+    let page = restarted
+        .read_process_journal_after(&request_scope, None, None, 16)
+        .await
+        .expect("read edge journal after restart");
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].kind, ProcessJournalKind::Completed);
+}
+
+fn postgres_test_url() -> Option<String> {
+    let primary = std::env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL");
+    match primary {
+        Ok(url) => Some(url),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("IRONCLAW_FILESYSTEM_POSTGRES_URL is configured but not valid UTF-8")
+        }
+        Err(std::env::VarError::NotPresent) => match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(url),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                panic!("DATABASE_URL is configured but not valid UTF-8")
+            }
+            Err(std::env::VarError::NotPresent) => None,
+        },
+    }
+}
+
+async fn postgres_backend() -> Option<PostgresRootFilesystem> {
+    if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
+        return None;
+    }
+    let url = postgres_test_url()?;
+    let config = url
+        .parse::<tokio_postgres::Config>()
+        .expect("parse configured PostgreSQL test URL");
+    let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+    let pool = deadpool_postgres::Pool::builder(manager)
+        .max_size(4)
+        .build()
+        .expect("build PostgreSQL test pool");
+    let backend = PostgresRootFilesystem::new(pool);
+    backend
+        .run_migrations()
+        .await
+        .expect("migrate configured PostgreSQL filesystem");
+    Some(backend)
 }
 
 #[tokio::test]
@@ -3013,10 +3151,40 @@ async fn process_journal_store_owns_lifecycle_and_gate_projection() {
         worker_id: claim.worker_id.clone(),
         lease_token: claim.lease_token.clone(),
     };
-    store
+    let first_heartbeat_cursor = store
         .heartbeat_process(lease.clone())
         .await
-        .expect("heartbeat process");
+        .expect("first heartbeat process");
+    let second_heartbeat_cursor = store
+        .heartbeat_process(lease.clone())
+        .await
+        .expect("second heartbeat process");
+    assert_eq!(
+        first_heartbeat_cursor, claim.state.journal_cursor,
+        "heartbeats must update lease health without advancing the journal cursor"
+    );
+    assert_eq!(
+        second_heartbeat_cursor, claim.state.journal_cursor,
+        "repeated heartbeats must not reserve journal cursors"
+    );
+
+    let heartbeat_snapshot = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: scope.clone(),
+            process_id,
+        })
+        .await
+        .expect("heartbeat-updated process snapshot");
+    let claimed_lease = claim.state.lease.as_ref().expect("claimed lease");
+    let heartbeat_lease = heartbeat_snapshot.lease.as_ref().expect("heartbeat lease");
+    assert!(
+        heartbeat_lease.last_heartbeat_at >= claimed_lease.last_heartbeat_at,
+        "heartbeat must refresh last_heartbeat_at"
+    );
+    assert!(
+        heartbeat_lease.lease_expires_at >= claimed_lease.lease_expires_at,
+        "heartbeat must refresh lease_expires_at"
+    );
 
     let gate_ref = TurnGateRef::new("gate:journal-contract").expect("gate ref");
     store
@@ -3129,9 +3297,27 @@ async fn process_journal_store_owns_lifecycle_and_gate_projection() {
         .read_process_journal_after(&scope, None, Some(ProcessJournalCursor(0)), 10)
         .await
         .expect("journal page");
-    assert_eq!(page.entries.len(), 4);
+    assert_eq!(page.entries.len(), 3);
     assert_eq!(page.entries[0].status, ProcessLifecycleStatus::Queued);
-    assert_eq!(page.entries[3].status, ProcessLifecycleStatus::Suspended);
+    assert_eq!(page.entries[2].status, ProcessLifecycleStatus::Suspended);
+    assert!(
+        page.entries
+            .iter()
+            .all(|entry| entry.kind != ProcessJournalKind::Heartbeat),
+        "lease-only heartbeats must not append journal entries"
+    );
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|entry| entry.cursor)
+            .collect::<Vec<_>>(),
+        vec![
+            ProcessJournalCursor(1),
+            ProcessJournalCursor(2),
+            ProcessJournalCursor(3)
+        ],
+        "heartbeats must not leave cursor-reservation gaps"
+    );
 }
 
 #[tokio::test]

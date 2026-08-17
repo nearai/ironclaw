@@ -19,6 +19,7 @@ use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, InvocationId, ProjectId, TenantId, UserId},
     resource::ResourceScope,
 };
+use tokio::sync::Semaphore;
 
 fn capability_id() -> CapabilityId {
     CapabilityId::new("demo.echo").expect("capability id")
@@ -64,6 +65,7 @@ struct CountingEventLog {
     /// When `true`, `append_batch` injects an error on every event after the
     /// first, simulating a partial backend rejection.
     inject_partial_failure: std::sync::atomic::AtomicBool,
+    append_batch_completed: Semaphore,
 }
 
 impl CountingEventLog {
@@ -75,7 +77,16 @@ impl CountingEventLog {
             batched_events: AtomicUsize::new(0),
             batch_sizes: std::sync::Mutex::new(Vec::new()),
             inject_partial_failure: std::sync::atomic::AtomicBool::new(false),
+            append_batch_completed: Semaphore::new(0),
         }
+    }
+
+    async fn wait_for_append_batch(&self) {
+        self.append_batch_completed
+            .acquire()
+            .await
+            .expect("append-batch completion semaphore stays open")
+            .forget();
     }
 }
 
@@ -97,7 +108,7 @@ impl DurableEventLog for CountingEventLog {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(events.len());
-        if self
+        let results = if self
             .inject_partial_failure
             .load(std::sync::atomic::Ordering::SeqCst)
         {
@@ -110,14 +121,16 @@ impl DurableEventLog for CountingEventLog {
                 results.push(self.inner.append(first).await);
             }
             for _ in iter {
-                results.push(Err(EventError::Sink {
+                results.push(Err(EventError::DurableLog {
                     reason: "injected test failure".to_string(),
                 }));
             }
             results
         } else {
             self.inner.append_batch(events).await
-        }
+        };
+        self.append_batch_completed.add_permits(1);
+        results
     }
 
     async fn read_after_cursor(
@@ -149,6 +162,7 @@ async fn emits_coalesce_into_a_single_batched_append_preserving_order() {
         EventBatchConfig {
             max_batch: 256,
             flush_interval: Duration::from_millis(50),
+            ..EventBatchConfig::default()
         },
     );
 
@@ -205,6 +219,7 @@ async fn crash_before_flush_loses_only_the_unflushed_tail() {
         EventBatchConfig {
             max_batch: 1000,
             flush_interval: Duration::from_secs(10),
+            ..EventBatchConfig::default()
         },
     );
 
@@ -281,6 +296,7 @@ async fn coalescing_sink_flush_splits_burst_at_max_batch() {
             // Large interval so the drain loop never fires on the timer;
             // the final batch is released only when flush() sends its ack.
             flush_interval: Duration::from_secs(10),
+            ..EventBatchConfig::default()
         },
     );
 
@@ -355,11 +371,10 @@ async fn coalescing_sink_flush_splits_burst_at_max_batch() {
 }
 
 #[tokio::test]
-async fn flush_propagates_partial_append_batch_failure() {
-    // Verify that a per-event rejection inside `append_batch` propagates all
-    // the way through `flush()` as an `Err`. The sink's `flush()` contract
-    // guarantees `Ok(())` only when every queued event landed durably; callers
-    // rely on that guarantee for graceful-shutdown sequencing.
+async fn flush_propagates_partial_append_failure_from_prior_drain_window() {
+    // A per-event rejection must remain pending until the lifecycle owner
+    // flushes, even when the failed batch drained before the Flush message
+    // reached the channel.
     let log = Arc::new(CountingEventLog::new());
     log.inject_partial_failure
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -367,7 +382,8 @@ async fn flush_propagates_partial_append_batch_failure() {
         Arc::clone(&log) as Arc<dyn DurableEventLog>,
         EventBatchConfig {
             max_batch: 256,
-            flush_interval: Duration::from_millis(50),
+            flush_interval: Duration::from_millis(10),
+            ..EventBatchConfig::default()
         },
     );
 
@@ -382,10 +398,11 @@ async fn flush_propagates_partial_append_batch_failure() {
         .await
         .expect("emit must buffer without blocking");
     }
+    log.wait_for_append_batch().await;
 
     let result = sink.flush().await;
     assert!(
-        result.is_err(),
-        "flush must return Err when append_batch reports a per-event rejection"
+        matches!(result, Err(EventError::DurableLog { .. })),
+        "flush must preserve the durable-log error from a prior drain window"
     );
 }

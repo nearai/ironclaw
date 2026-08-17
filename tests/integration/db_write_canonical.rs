@@ -109,9 +109,7 @@ async fn run_canonical_agent_turn(
     harness
         .assert_capability_result_count("builtin.http", TOOL_CALLS)
         .await?;
-    harness
-        .assert_process_heartbeat_count(run_id, MINIMUM_HEARTBEATS)
-        .await?;
+    harness.assert_no_process_heartbeat_entries(run_id).await?;
     harness.assert_durable_event_count_at_least(1).await?;
 
     measurement.assert_minimum_duration(HEARTBEAT_INTERVAL * MINIMUM_HEARTBEATS as u32)?;

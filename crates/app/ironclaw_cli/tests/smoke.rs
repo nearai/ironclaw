@@ -679,6 +679,29 @@ fn docker_reborn_config_defaults_to_standalone() {
 }
 
 #[test]
+fn shipped_reborn_configs_use_conservative_runner_heartbeat() {
+    for name in [
+        "config.toml",
+        "config.production.toml",
+        "config.hosted-single-tenant.toml",
+        "config.hosted-single-tenant-volume.toml",
+    ] {
+        let path = workspace_root().join("docker/reborn").join(name);
+        let config = std::fs::read_to_string(&path).expect("docker reborn config");
+        let parsed =
+            ironclaw_config::RebornConfigFile::parse_text(&config, &path).expect("config parses");
+        assert_eq!(
+            parsed
+                .runner
+                .as_ref()
+                .and_then(|runner| runner.heartbeat_interval_secs),
+            Some(15),
+            "{name} must ship the conservative 15-second runner heartbeat"
+        );
+    }
+}
+
+#[test]
 fn docker_reborn_production_config_uses_postgres_storage() {
     let config =
         std::fs::read_to_string(workspace_root().join("docker/reborn/config.production.toml"))

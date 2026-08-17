@@ -240,10 +240,9 @@ impl RebornIntegrationHarness {
         }
     }
 
-    pub async fn assert_process_heartbeat_count(
+    pub async fn assert_no_process_heartbeat_entries(
         &self,
         run_id: TurnRunId,
-        minimum: usize,
     ) -> HarnessResult<()> {
         let page = self
             ._shared
@@ -265,9 +264,9 @@ impl RebornIntegrationHarness {
                 entry.process_id == process_id && entry.kind == ProcessJournalKind::Heartbeat
             })
             .count();
-        if actual < minimum {
+        if actual != 0 {
             return Err(format!(
-                "expected at least {minimum} process heartbeats for run {run_id}, found {actual}"
+                "expected no heartbeat journal entries for run {run_id}, found {actual}"
             )
             .into());
         }
@@ -275,6 +274,13 @@ impl RebornIntegrationHarness {
     }
 
     pub async fn assert_durable_event_count_at_least(&self, minimum: usize) -> HarnessResult<()> {
+        self._shared
+            .durable_event_sink
+            .as_ref()
+            .ok_or("durable milestone event sink is not wired")?
+            .flush()
+            .await
+            .map_err(|error| format!("flush durable milestone events: {error}"))?;
         let event_log = self
             ._shared
             .durable_event_log

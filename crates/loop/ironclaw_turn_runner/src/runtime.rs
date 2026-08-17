@@ -142,7 +142,7 @@ pub struct DefaultPlannedRuntimeConfig {
 impl Default for DefaultPlannedRuntimeConfig {
     fn default() -> Self {
         Self {
-            heartbeat_interval: std::time::Duration::from_secs(10),
+            heartbeat_interval: std::time::Duration::from_secs(15),
             poll_interval: std::time::Duration::from_secs(5),
             lease_recovery_interval: std::time::Duration::from_secs(10),
             worker_count: Some(DEFAULT_TURN_RUNNER_WORKER_COUNT),
@@ -264,6 +264,14 @@ fn scheduler_permit_count(worker_count: Option<std::num::NonZeroUsize>) -> usize
         // oversized operator config loudly before it ever reaches here.
         .unwrap_or(tokio::sync::Semaphore::MAX_PERMITS)
         .min(tokio::sync::Semaphore::MAX_PERMITS)
+}
+
+fn turn_run_scheduler_config(config: &DefaultPlannedRuntimeConfig) -> TurnRunSchedulerConfig {
+    TurnRunSchedulerConfig::default()
+        .with_max_concurrent_runs(scheduler_permit_count(config.worker_count))
+        .with_runner_heartbeat_interval(config.heartbeat_interval)
+        .with_poll_interval(config.poll_interval)
+        .with_lease_recovery_interval(config.lease_recovery_interval)
 }
 
 fn default_disabled_capability_ids() -> Vec<CapabilityId> {
@@ -796,6 +804,7 @@ where
     // spawn decoration and before disclosure. Override `disabled_capability_ids`
     // to re-enable it in targeted regression harnesses.
     let global_denied = parts.config.disabled_capability_ids.clone();
+    let scheduler_config = turn_run_scheduler_config(&parts.config);
     // Issue #5505: a scheduled-trigger fire must not be able to create,
     // remove, pause, or resume triggers (read-only trigger_list stays
     // available). These ids are folded into that run's one resolved policy only
@@ -919,11 +928,6 @@ where
         executor = executor.with_after_turn_memory_recorder(recorder);
     }
     let executor = Arc::new(executor);
-    let scheduler_config = TurnRunSchedulerConfig::default()
-        .with_max_concurrent_runs(scheduler_permit_count(parts.config.worker_count))
-        .with_runner_heartbeat_interval(parts.config.heartbeat_interval)
-        .with_poll_interval(parts.config.poll_interval)
-        .with_lease_recovery_interval(parts.config.lease_recovery_interval);
     let scheduler = TurnRunScheduler::new_with_process_runtime(
         process_system.runtime(),
         executor,
@@ -1144,7 +1148,7 @@ mod tests {
         DefaultPlannedRuntimeConfig, REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV,
         RuntimeProfiledCapabilityPortFactory, SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS,
         ToolDisclosureCapabilityDecorator, ToolDisclosureMode, parse_tool_disclosure_profile_pins,
-        scheduler_permit_count,
+        scheduler_permit_count, turn_run_scheduler_config,
     };
     use async_trait::async_trait;
     use ironclaw_host_api::{
@@ -1173,6 +1177,16 @@ mod tests {
         DecoratingLoopCapabilityPortFactory, LoopCapabilityPortDecorator,
         LoopCapabilityPortFactory,
     };
+
+    #[test]
+    fn planned_runtime_wires_fifteen_second_heartbeat_and_three_failure_budget() {
+        let scheduler_config = turn_run_scheduler_config(&DefaultPlannedRuntimeConfig::default());
+        assert_eq!(
+            scheduler_config.runner_heartbeat_interval(),
+            std::time::Duration::from_secs(15)
+        );
+        assert_eq!(scheduler_config.max_consecutive_heartbeat_failures(), 3);
+    }
 
     #[test]
     fn scheduler_permit_count_unlimited_uses_max_permits() {

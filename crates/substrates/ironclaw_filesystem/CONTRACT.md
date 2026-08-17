@@ -136,8 +136,9 @@ boundary. The current rule is codified in
      without native sequence reservation; `reserve_sequence` itself is now
      row-native), `apply_message_update`, `append_capability_display_preview`,
      `create_summary_artifact`, and the
-     message-row and lookup-projection writers through a local `put_with_cas`
-     retry loop (only `ensure_thread` was migrated onto `cas_update`). These
+     message-row writer through a local `put_with_cas` retry loop (lookup keys
+     are indexed projections on that same row; only `ensure_thread` was
+     migrated onto `cas_update`). These
      loops are already lock-free (no per-path mutex),
      so they are not the convoy hazard `cas_update` was introduced to fix;
      migration to `cas_update`'s fail-closed semantics is a deferred

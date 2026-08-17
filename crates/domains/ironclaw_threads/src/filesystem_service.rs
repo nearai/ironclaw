@@ -40,6 +40,7 @@ mod transcript_migration;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -110,6 +111,10 @@ const TITLE_DERIVATION_READ_CONCURRENCY: usize = 8;
 /// One-shot first-turn context windows are a hot-path handoff from inbound
 /// accept to prompt construction; keep the cache bounded if a turn never runs.
 const ONE_SHOT_CONTEXT_WINDOW_CACHE_MAX_ENTRIES: usize = 4096;
+/// Activity projection writes are advisory and bursty. Keep the default short
+/// enough for sidebar freshness while collapsing the message/draft/finalize
+/// writes produced by a typical turn.
+const DEFAULT_THREAD_INDEX_TOUCH_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 
 struct MaterializedMessageRange {
     thread: StoredThreadRecord,
@@ -178,13 +183,15 @@ where
     F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
-    known_thread_index_rows: Mutex<HashSet<String>>,
+    known_thread_index_rows: Arc<Mutex<HashSet<String>>>,
     ready_thread_index_scopes: Mutex<HashSet<String>>,
     /// Mounts whose `/threads`-root index specs are already declared, keyed by
     /// `tenant:user` — the pair the alias resolves through. Keeps thread create
     /// off the index-DDL path after a mount's first thread.
     ready_index_mounts: Mutex<HashSet<(TenantId, UserId)>>,
     thread_index_declaration_lock: tokio::sync::Mutex<()>,
+    thread_index_touch_state: Arc<thread_index::ThreadIndexTouchState>,
+    thread_index_touch_flush_interval: Duration,
     one_shot_context_windows: Mutex<HashMap<String, ContextWindow>>,
 }
 
@@ -209,12 +216,23 @@ where
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
             filesystem,
-            known_thread_index_rows: Mutex::new(HashSet::new()),
+            known_thread_index_rows: Arc::new(Mutex::new(HashSet::new())),
             ready_thread_index_scopes: Mutex::new(HashSet::new()),
             ready_index_mounts: Mutex::new(HashSet::new()),
             thread_index_declaration_lock: tokio::sync::Mutex::new(()),
+            thread_index_touch_state: Arc::new(thread_index::ThreadIndexTouchState::default()),
+            thread_index_touch_flush_interval: DEFAULT_THREAD_INDEX_TOUCH_FLUSH_INTERVAL,
             one_shot_context_windows: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Configure how frequently one service instance may rewrite a thread's
+    /// activity projection. Production uses the short default; tests and
+    /// specialized compositions may tune the trade-off between write volume
+    /// and sidebar freshness.
+    pub fn with_thread_index_touch_flush_interval(mut self, interval: Duration) -> Self {
+        self.thread_index_touch_flush_interval = interval;
+        self
     }
 
     pub fn clear_thread_index_cache_for_scope(&self, _scope: &ThreadScope) {}
@@ -280,7 +298,7 @@ where
         })?;
         let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
         entry.kind = Some(kind);
-        Ok(entry
+        let entry = entry
             .with_indexed(
                 fs_index_key("thread_id")?,
                 IndexValue::Text(record.thread_id.to_string()),
@@ -304,7 +322,8 @@ where
             .with_indexed(
                 fs_index_key("message_status")?,
                 IndexValue::Text(serde_enum_index_value(&record.status)?),
-            ))
+            );
+        message_lookup_index::with_message_lookup_projections(entry, record)
     }
 
     fn summary_entry(record: &SummaryArtifact) -> Result<Entry, SessionThreadError> {
@@ -486,44 +505,6 @@ where
         Ok(Some((record, versioned.version)))
     }
 
-    async fn write_message_lookup_indexes(
-        &self,
-        scope: &ThreadScope,
-        thread_id: &ThreadId,
-        message: &ThreadMessageRecord,
-    ) -> Result<(), SessionThreadError> {
-        MessageLookupIndexStore::new(self.filesystem.as_ref())
-            .write_for_message(scope, thread_id, message)
-            .await
-    }
-
-    async fn write_message_lookup_indexes_best_effort(
-        &self,
-        scope: &ThreadScope,
-        thread_id: &ThreadId,
-        message: &ThreadMessageRecord,
-        context: &'static str,
-    ) {
-        if let Err(error) = self
-            .write_message_lookup_indexes(scope, thread_id, message)
-            .await
-        {
-            // The source message is already durable. Lookup projection failure
-            // is observable as a missing exact lookup; requests never repair it
-            // by scanning the transcript.
-            tracing::debug!(
-                ?error,
-                ?scope,
-                thread_id = %thread_id.as_str(),
-                message_id = %message.message_id,
-                kind = ?message.kind,
-                status = ?message.status,
-                context = context,
-                "message lookup projection write failed; exact lookup remains unavailable",
-            );
-        }
-    }
-
     async fn write_new_message(
         &self,
         scope: &ThreadScope,
@@ -545,20 +526,6 @@ where
                 {
                     txn.rollback().await;
                     return Err(absent_put_error(error, description, &path));
-                }
-                for (lookup_path, lookup_entry, expectation) in
-                    MessageLookupIndexStore::<F>::entries_for_message(scope, thread_id, message)?
-                {
-                    let virtual_path = self.filesystem.resolve(&resource_scope, &lookup_path)?;
-                    if matches!(expectation, CasExpectation::Absent)
-                        && txn.get(&virtual_path).await?.is_some()
-                    {
-                        continue;
-                    }
-                    if let Err(error) = txn.put(&virtual_path, lookup_entry, expectation).await {
-                        txn.rollback().await;
-                        return Err(absent_put_error(error, "message lookup", &lookup_path));
-                    }
                 }
                 txn.commit().await?;
                 self.invalidate_one_shot_context_window(scope, thread_id);
@@ -582,15 +549,6 @@ where
         let thread_virtual_path = self.filesystem.resolve(&resource_scope, &thread_path)?;
         let message_path = message_record_path(scope, thread_id, message.message_id)?;
         let message_virtual_path = self.filesystem.resolve(&resource_scope, &message_path)?;
-        let lookup_entries =
-            MessageLookupIndexStore::<F>::entries_for_message(scope, thread_id, message)?
-                .into_iter()
-                .map(|(path, entry, expectation)| {
-                    self.filesystem
-                        .resolve(&resource_scope, &path)
-                        .map(|virtual_path| (path, virtual_path, entry, expectation))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
         let idempotency_record = idempotency_record
             .map(|(path, entry)| {
                 self.filesystem
@@ -688,18 +646,6 @@ where
                 txn.rollback().await;
                 return Err(absent_put_error(error, "message", &message_path));
             }
-            for (lookup_path, virtual_path, entry, expectation) in &lookup_entries {
-                if matches!(expectation, CasExpectation::Absent)
-                    && txn.get(virtual_path).await?.is_some()
-                {
-                    continue;
-                }
-                if let Err(error) = txn.put(virtual_path, entry.clone(), *expectation).await {
-                    txn.rollback().await;
-                    return Err(absent_put_error(error, "message lookup", lookup_path));
-                }
-            }
-
             match txn.commit().await {
                 Ok(()) => return Ok(TransactionalMessageWrite::Written),
                 // Optimistic-concurrency conflict on the thread record: another
@@ -1381,7 +1327,10 @@ where
         scope: &ThreadScope,
         thread_id: &ThreadId,
         updated_at: DateTime<Utc>,
-    ) -> Result<(), SessionThreadError> {
+    ) -> Result<(), SessionThreadError>
+    where
+        F: 'static,
+    {
         self.touch_thread_index_updated_at(scope, thread_id, updated_at)
             .await
     }
@@ -1398,7 +1347,9 @@ where
         scope: &ThreadScope,
         thread_id: &ThreadId,
         updated_at: DateTime<Utc>,
-    ) {
+    ) where
+        F: 'static,
+    {
         if let Err(error) = self
             .touch_thread_updated_at(scope, thread_id, updated_at)
             .await
@@ -1463,13 +1414,6 @@ where
             .await
             {
                 Ok(()) => {
-                    self.write_message_lookup_indexes_best_effort(
-                        scope,
-                        thread_id,
-                        &message,
-                        "message update",
-                    )
-                    .await;
                     self.invalidate_one_shot_context_window(scope, thread_id);
                     return Ok(message);
                 }
@@ -1615,7 +1559,7 @@ where
 #[async_trait]
 impl<F> SessionThreadService for FilesystemSessionThreadService<F>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + 'static,
 {
     async fn ensure_thread(
         &self,
@@ -2023,15 +1967,7 @@ where
                 .put(&resource_scope, &path, entry, CasExpectation::Absent)
                 .await
             {
-                Ok(_) => {
-                    self.write_message_lookup_indexes_best_effort(
-                        &request.scope,
-                        &thread_id,
-                        row,
-                        "prepared context seed",
-                    )
-                    .await;
-                }
+                Ok(_) => {}
                 // A crashed prior attempt already landed this row; its stored
                 // sequence stays authoritative (the reservation above only
                 // burned a counter slot, which is harmless).
@@ -2686,16 +2622,7 @@ where
         )
         .await
         {
-            Ok(()) => {
-                self.write_message_lookup_indexes_best_effort(
-                    &request.scope,
-                    &request.thread_id,
-                    &message,
-                    "capability display preview",
-                )
-                .await;
-                Ok(message)
-            }
+            Ok(()) => Ok(message),
             Err(PutError::VersionMismatch) => self
                 .read_message_versioned(&request.scope, &request.thread_id, message_id)
                 .await?
@@ -3706,13 +3633,15 @@ fn fs_index_name(raw: &str) -> Result<IndexName, SessionThreadError> {
 /// Every ordered-index spec this crate queries, all declared together at the
 /// `/threads` alias root. Each leads with its partition key, so one
 /// declaration above the per-thread paths serves every thread on the mount.
-fn root_index_specs() -> Result<[IndexSpec; 4], SessionThreadError> {
-    Ok([
+fn root_index_specs() -> Result<Vec<IndexSpec>, SessionThreadError> {
+    let mut indexes = vec![
         message_sequence_index_spec()?,
         message_kind_status_index_spec()?,
         summary_index_spec()?,
         thread_index::thread_activity_index_spec()?,
-    ])
+    ];
+    indexes.extend(message_lookup_index::lookup_index_specs()?);
+    Ok(indexes)
 }
 
 fn summary_index_spec() -> Result<IndexSpec, SessionThreadError> {

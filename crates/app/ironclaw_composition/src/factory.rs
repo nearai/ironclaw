@@ -79,7 +79,8 @@ use ironclaw_capabilities::{
 };
 use ironclaw_conversations::RebornFilesystemConversationServices;
 use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ConversationActorPairingService};
-use ironclaw_event_log::{DurableAuditLog, DurableEventLog};
+use ironclaw_event_log::{DurableAuditLog, DurableEventLog, EventSink, NonBlockingEventSink};
+use ironclaw_event_store::{CoalescingEventSink, EventBatchConfig};
 use ironclaw_extension_contracts::external::ExternalActorRef;
 use ironclaw_extension_contracts::recipe::RecipeClientCredentials;
 use ironclaw_extension_host::channel_pairing::ChannelPairingRegistry;
@@ -354,6 +355,9 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) budget_gate_store: Arc<dyn BudgetGateStorePort>,
     pub(crate) broadcast_budget_event_sink: Arc<BroadcastBudgetEventSink>,
     pub(crate) event_log: Arc<dyn DurableEventLog>,
+    /// One composition-owned write-behind sink shared by every runtime-event
+    /// producer over `event_log`.
+    pub(crate) runtime_event_sink: Arc<dyn NonBlockingEventSink>,
     pub(crate) audit_log: Arc<dyn DurableAuditLog>,
     pub(crate) admin_secret_provisioner: Arc<dyn ironclaw_assistant::AdminSecretProvisioner>,
     pub(crate) project_service: Arc<dyn ProjectService>,

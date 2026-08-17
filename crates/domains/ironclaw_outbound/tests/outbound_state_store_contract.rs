@@ -387,7 +387,7 @@ async fn outbound_state_store_satisfies_outbound_contract_on_in_memory_backend()
     durable_policy_subscription_delivery_flow(&store).await;
     subscription_cursor_rejects_mismatched_scope(&store).await;
     subscription_ids_are_scoped_not_global(&store).await;
-    subscription_cursor_rejects_backward_advancement(&store).await;
+    subscription_upsert_rejects_backward_cursor(&store).await;
     delivery_status_rejects_inconsistent_failure_kind(&store).await;
     coordinator_delivery_lifecycle_round_trips(&store).await;
     recovery_transition_never_clobbers_delivered(&store).await;
@@ -1470,16 +1470,7 @@ async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateSto
     );
 
     seed_subscription(store).await;
-    let cursor = ProjectionCursor::for_scope(projection_scope(), EventCursor::new(42));
-    store
-        .advance_subscription_cursor(AdvanceSubscriptionCursorRequest {
-            subscription_id: subscription_id(),
-            actor: actor(),
-            thread_id: thread_id(),
-            cursor: cursor.clone(),
-        })
-        .await
-        .unwrap();
+    let initial_cursor = ProjectionCursor::origin_for_scope(projection_scope());
     let loaded = store
         .load_subscription_cursor(LoadSubscriptionCursorRequest {
             subscription_id: subscription_id(),
@@ -1490,7 +1481,10 @@ async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateSto
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(loaded, cursor);
+    assert_eq!(
+        loaded, initial_cursor,
+        "subscription creation must retain the caller's initial after_cursor"
+    );
 
     let delivery_id = OutboundDeliveryId::new();
     let initial_attempt = OutboundDeliveryAttempt {
@@ -1605,21 +1599,6 @@ async fn subscription_cursor_rejects_mismatched_scope(store: &impl OutboundState
     // from absence.
     assert!(matches!(result, Ok(None)));
 
-    let mut wrong_scope = projection_scope();
-    wrong_scope.read_scope.thread_id = Some(ThreadId::new("thread-other").unwrap());
-    let result = store
-        .advance_subscription_cursor(AdvanceSubscriptionCursorRequest {
-            subscription_id: subscription_id(),
-            actor: actor(),
-            thread_id: thread_id(),
-            cursor: ProjectionCursor::for_scope(wrong_scope, EventCursor::new(7)),
-        })
-        .await;
-    assert!(matches!(
-        result,
-        Err(OutboundError::SubscriptionScopeMismatch)
-    ));
-
     let rebind = store
         .upsert_subscription(ProjectionSubscriptionRecord {
             subscription_id: subscription_id(),
@@ -1707,7 +1686,7 @@ async fn subscription_ids_are_scoped_not_global(store: &impl OutboundStateStoreP
     assert!(matches!(unrelated_lookup, Ok(None)));
 }
 
-async fn subscription_cursor_rejects_backward_advancement(store: &impl OutboundStateStorePort) {
+async fn subscription_upsert_rejects_backward_cursor(store: &impl OutboundStateStorePort) {
     let subscription_id =
         ProjectionSubscriptionId::new(format!("webui-subscription-backward-{}", TurnRunId::new()))
             .unwrap();
@@ -1724,19 +1703,6 @@ async fn subscription_cursor_rejects_backward_advancement(store: &impl OutboundS
         })
         .await
         .unwrap();
-
-    let regression = store
-        .advance_subscription_cursor(AdvanceSubscriptionCursorRequest {
-            subscription_id: subscription_id.clone(),
-            actor: actor(),
-            thread_id: thread_id(),
-            cursor: ProjectionCursor::for_scope(projection_scope(), EventCursor::new(7)),
-        })
-        .await;
-    assert!(matches!(
-        regression,
-        Err(OutboundError::InvalidRequest { .. })
-    ));
 
     let stale_upsert = store
         .upsert_subscription(ProjectionSubscriptionRecord {
@@ -2569,116 +2535,6 @@ impl RootFilesystem for UnsupportedCriticalCasBackend {
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.inner.delete(path).await
     }
-}
-
-/// Audit finding F4: prove the CAS retry loop on
-/// `advance_subscription_cursor` converges when a racing writer bumps the
-/// version exactly once between the store's read and put. Before F1 this
-/// would silently lose the forward progression because the put used
-/// `CasExpectation::Any`; before F5 the retry loop couldn't distinguish a
-/// transient race from a permanent backend error.
-#[tokio::test]
-async fn advance_subscription_cursor_retries_through_cas_conflict() {
-    let inner = Arc::new(InMemoryBackend::new());
-    let racing = Arc::new(VersionRacingBackend::new(Arc::clone(&inner)));
-    let store = OutboundStateStore::new(build_scoped_fs(
-        Arc::clone(&racing),
-        "/engine/tenants/test/users/test/outbound",
-    ));
-    seed_subscription(&store).await;
-
-    // Arm one injected conflict on the next put to any subscription path.
-    // The store's read returns version v1; we inject `VersionMismatch` on
-    // the first put, forcing the retry loop to re-read, re-validate
-    // progression, and put again with the new version — which succeeds.
-    // The injected prefix matches the resolved VirtualPath the
-    // ScopedFilesystem produces for the `/outbound/subscriptions/...` alias.
-    racing
-        .arm("/engine/tenants/test/users/test/outbound/subscriptions/", 1)
-        .await;
-
-    let cursor = ProjectionCursor::for_scope(projection_scope(), EventCursor::new(101));
-    store
-        .advance_subscription_cursor(AdvanceSubscriptionCursorRequest {
-            subscription_id: subscription_id(),
-            actor: actor(),
-            thread_id: thread_id(),
-            cursor: cursor.clone(),
-        })
-        .await
-        .expect("retry loop must converge after one transient CAS conflict");
-
-    assert_eq!(
-        racing.injected_count().await,
-        1,
-        "exactly one CAS conflict should have been injected and recovered from",
-    );
-
-    let loaded = store
-        .load_subscription_cursor(LoadSubscriptionCursorRequest {
-            subscription_id: subscription_id(),
-            actor: actor(),
-            scope: projection_scope(),
-            thread_id: thread_id(),
-        })
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(loaded, cursor);
-}
-
-/// Audit finding F4: with two racing advancers, the loser must NOT silently
-/// overwrite the winner's higher cursor. F1's retry loop re-reads and
-/// re-validates progression on every attempt, so the loser's request is
-/// rejected with `InvalidRequest` because its target cursor is now
-/// regressing against the winner's persisted state.
-#[tokio::test]
-async fn concurrent_backwards_race_rejected_after_winner_advances() {
-    let backend = Arc::new(InMemoryBackend::new());
-    let store = build_outbound_store_for_backend(Arc::clone(&backend));
-    seed_subscription(&store).await;
-
-    // Winner advances first to cursor=100.
-    let winner_cursor = ProjectionCursor::for_scope(projection_scope(), EventCursor::new(100));
-    store
-        .advance_subscription_cursor(AdvanceSubscriptionCursorRequest {
-            subscription_id: subscription_id(),
-            actor: actor(),
-            thread_id: thread_id(),
-            cursor: winner_cursor.clone(),
-        })
-        .await
-        .unwrap();
-
-    // Loser tries to advance to a strictly lower cursor=50. Even without a
-    // racing CAS conflict, the progression re-check inside the retry loop
-    // catches the regression on the first iteration.
-    let loser_cursor = ProjectionCursor::for_scope(projection_scope(), EventCursor::new(50));
-    let regression = store
-        .advance_subscription_cursor(AdvanceSubscriptionCursorRequest {
-            subscription_id: subscription_id(),
-            actor: actor(),
-            thread_id: thread_id(),
-            cursor: loser_cursor,
-        })
-        .await;
-    assert!(
-        matches!(regression, Err(OutboundError::InvalidRequest { .. })),
-        "regressing cursor must be rejected, got {regression:?}",
-    );
-
-    // And the winner's progress is preserved.
-    let loaded = store
-        .load_subscription_cursor(LoadSubscriptionCursorRequest {
-            subscription_id: subscription_id(),
-            actor: actor(),
-            scope: projection_scope(),
-            thread_id: thread_id(),
-        })
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(loaded, winner_cursor);
 }
 
 /// Audit finding F4 + F3: write more than `Page::MAX_LIMIT` (1024) delivery
