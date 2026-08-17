@@ -795,6 +795,10 @@ impl InMemoryTriggerRepository {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "repository parity helper mirrors the durable run-history row fields"
+    )]
     pub(crate) fn complete_run_history(
         &self,
         tenant_id: &TenantId,

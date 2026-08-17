@@ -2003,6 +2003,11 @@ fn trigger_ids_json_array(trigger_ids: &[TriggerId]) -> String {
     value.push(']');
     value
 }
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "repository parity helper mirrors the durable run-history row fields"
+)]
 async fn complete_run_history(
     conn: &libsql::Connection,
     tenant_id: &TenantId,

@@ -1392,6 +1392,10 @@ async fn upsert_run_history(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "repository parity helper mirrors the durable run-history row fields"
+)]
 async fn complete_run_history(
     client: &impl GenericClient,
     tenant_id: &TenantId,
