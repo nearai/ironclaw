@@ -80,6 +80,13 @@ pub(crate) const TOOL_SEARCH_NAME: &str = "tool_search";
 pub(crate) const TOOL_DESCRIBE_NAME: &str = "tool_describe";
 pub(crate) const TOOL_CALL_NAME: &str = "tool_call";
 
+/// Stable capability identities for the model-facing discovery bridges.
+/// Prepared contexts may allow search and schema inspection while excluding
+/// `TOOL_CALL_CAPABILITY_ID`, which would grant dispatch rather than discovery.
+pub const TOOL_SEARCH_CAPABILITY_ID: &str = "ironclaw.tool_search";
+pub const TOOL_DESCRIBE_CAPABILITY_ID: &str = "ironclaw.tool_describe";
+pub const TOOL_CALL_CAPABILITY_ID: &str = "ironclaw.tool_call";
+
 const MEMORY_CORE_TOOL_ALIASES: &[(&str, &str)] = &[
     (
         ironclaw_host_runtime::MEMORY_SEARCH_CAPABILITY_ID,
@@ -1040,7 +1047,12 @@ fn bridge_tool_definition(
 }
 
 fn bridge_capability_id(name: &'static str) -> CapabilityId {
-    let raw = format!("{BRIDGE_CAPABILITY_PREFIX}.{name}");
+    let raw = match name {
+        TOOL_SEARCH_NAME => TOOL_SEARCH_CAPABILITY_ID.to_string(),
+        TOOL_DESCRIBE_NAME => TOOL_DESCRIBE_CAPABILITY_ID.to_string(),
+        TOOL_CALL_NAME => TOOL_CALL_CAPABILITY_ID.to_string(),
+        _ => format!("{BRIDGE_CAPABILITY_PREFIX}.{name}"),
+    };
     match CapabilityId::new(raw) {
         Ok(capability_id) => capability_id,
         Err(error) => {

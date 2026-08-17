@@ -37,7 +37,7 @@ use ironclaw_assistant::{
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
     DefaultApprovalInteractionService, DefaultAuthInteractionService,
     OutboundPreferencesProductService, PersistentApprovalGranteeResolver,
-    RunStateApprovalInteractionReadModel,
+    RunStateApprovalInteractionReadModel, SuggestionsProcessCommitObserver,
 };
 use ironclaw_event_log::{
     DurableAuditLog, DurableEventLog, EventError, NonBlockingEventSink, RuntimeEvent,
@@ -584,6 +584,7 @@ pub struct RebornRuntime {
     pub(crate) extension_lifecycle_surface_context: LifecycleProductSurfaceContext,
     pub(crate) secret_store: Arc<dyn SecretStorePort>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
+    pub(crate) suggestions_store: Arc<dyn ironclaw_assistant::SuggestionsStore>,
     pub(crate) llm_config_service: Option<Arc<ironclaw_operator::RebornLlmConfigService>>,
     pub(crate) admin_secret_provisioner: Arc<dyn ironclaw_assistant::AdminSecretProvisioner>,
     pub(crate) project_service:
@@ -1691,6 +1692,14 @@ impl RebornRuntime {
 
     pub(crate) fn product_thread_service(&self) -> Arc<dyn SessionThreadService> {
         self.thread_service.clone()
+    }
+
+    pub(crate) fn suggestions_store(&self) -> Arc<dyn ironclaw_assistant::SuggestionsStore> {
+        Arc::clone(&self.suggestions_store)
+    }
+
+    pub(crate) fn product_default_thread_scope(&self) -> &ThreadScope {
+        &self.thread_scope
     }
 
     /// Test-only accessor for the session thread service shared by the trigger
@@ -3212,6 +3221,20 @@ pub(crate) async fn build_runtime_with_resource_governor(
     let process_journal_source = processes.journal();
     let process_lifecycle_lookup_source = processes.lifecycle();
     let process_gate_query_source = processes.gates();
+    // Suggestion generation is an ordinary durable AgentTurn.  Register its
+    // materializer before the planned runtime starts so replay covers both
+    // prior terminal commits and runs submitted immediately after startup.
+    let suggestions_store: Arc<dyn ironclaw_assistant::SuggestionsStore> = Arc::new(
+        ironclaw_assistant::FilesystemSuggestionsStore::new(Arc::clone(&scoped_filesystem)),
+    );
+    processes
+        .subscribe_process_observer(Arc::new(SuggestionsProcessCommitObserver::new(
+            Arc::clone(&suggestions_store),
+            Arc::clone(&thread_service),
+        )))
+        .map_err(|error| RebornRuntimeError::MalformedConfig {
+            reason: format!("suggestion generation observer wiring failed: {error}"),
+        })?;
     let filesystem_skill_context_runtime = filesystem_skill_context_runtime(&services);
     let (skill_context_source, skill_activation_source, skill_execution_adapter) = match (
         configured_skill_context_source,
@@ -4497,6 +4520,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         extension_lifecycle_surface_context: services.extension_lifecycle_surface_context.clone(),
         secret_store: Arc::clone(&services.secret_store),
         scoped_filesystem,
+        suggestions_store,
         llm_config_service,
         admin_secret_provisioner,
         project_service,

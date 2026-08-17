@@ -57,12 +57,12 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Tools & tool dispatch | — | 11 | ✓ | ✓ |
 | Turn lifecycle (cancel/steer/retry/restart) | — | 8 | ✓ | ✓ |
 | WebUI surfaces & APIs | 2 | 2 | — | ✓ (largest) |
-| Durability & restart | 4 | 5 | ✓ | ✓ |
+| Durability & restart | 4 | 6 | ✓ | ✓ |
 | Security & redaction | — | 3 | ✓ | ✓ |
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **59** group scenarios · **59** flat integration bins (52 in
+Totals: **59** group scenarios · **60** flat integration bins (53 in
 `tests/integration/`, 7 in `tests/integration/auth/`) · **39** top-level Rust bins ·
 **102** Python scenario files (**869** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
@@ -181,7 +181,7 @@ ones speak MTProto over a raw socket with no injectable seam.
 
 ---
 
-## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (59)
+## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (60)
 
 One thread, whole real turn. Grouped by what the user experiences.
 
@@ -256,6 +256,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Secrets survive a genuine on-disk reopen | `secrets.rs` |
 | Outbound preferences survive a process-level reopen | `outbound_store_durability.rs` |
 | Restart sequences over a gated run recover correctly | `generated_restart_sequences.rs` |
+| A suggestions generation survives a backend restart: GET/list alone shows it generating and then ready after durable recovery | `suggestions.rs::generation_in_progress_survives_runtime_restart_and_recovers_via_list_view` |
 | Odd gate sequences (double-resolve, cancel-after-finish, approve-a-done-run) behave | `generated_gate_sequences.rs` |
 
 **Platform / wiring**
