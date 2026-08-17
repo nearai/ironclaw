@@ -18,7 +18,9 @@ use crate::test_support::{TEST_SESSION_EXTENSION_ID, with_test_authenticated_ses
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
-use ironclaw_event_log::{EventError, EventSink, RuntimeEvent, RuntimeEventKind};
+use ironclaw_event_log::{
+    EventError, EventSink, NonBlockingEventSink, RuntimeEvent, RuntimeEventKind,
+};
 
 #[derive(Default)]
 struct OverloadedEventSink {
@@ -27,6 +29,12 @@ struct OverloadedEventSink {
 
 #[async_trait]
 impl EventSink for OverloadedEventSink {
+    async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
+        NonBlockingEventSink::try_emit(self, event)
+    }
+}
+
+impl NonBlockingEventSink for OverloadedEventSink {
     fn try_emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
         self.attempted_events
             .lock()
@@ -35,10 +43,6 @@ impl EventSink for OverloadedEventSink {
         Err(EventError::Sink {
             reason: "injected saturated observability queue".to_string(),
         })
-    }
-
-    async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
-        self.try_emit(event)
     }
 }
 
@@ -4243,7 +4247,7 @@ async fn cancel_run_propagates_to_children_when_event_sink_is_unavailable() {
 
     let mut runtime = build_reborn_runtime(input).await.expect("runtime builds");
     let overloaded_event_sink = Arc::new(OverloadedEventSink::default());
-    let event_sink: Arc<dyn EventSink> = overloaded_event_sink.clone();
+    let event_sink: Arc<dyn NonBlockingEventSink> = overloaded_event_sink.clone();
     runtime.runtime_event_sink = event_sink;
     stop_turn_runner_worker_for_manual_state_test(&runtime).await;
     let conversation = runtime.new_conversation().await.expect("conversation");

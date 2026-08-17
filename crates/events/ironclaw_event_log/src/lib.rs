@@ -12,8 +12,11 @@
 //! - [`RuntimeEvent`] / [`RuntimeEventKind`] are redacted event shapes.
 //!   Constructors collapse unsafe error categories into `Unclassified` and
 //!   keep only bounded, sanitized display summaries.
-//! - [`EventSink`] / [`AuditSink`] are best-effort delivery traits. Failures
-//!   are recorded but must not alter runtime or control-plane outcomes.
+//! - [`EventSink`] / [`AuditSink`] are best-effort delivery traits. Runtime-
+//!   critical producers require [`NonBlockingEventSink`] explicitly so an
+//!   async-only sink cannot be wired into a path that must never wait.
+//!   Failures are recorded but must not alter runtime or control-plane
+//!   outcomes.
 //! - [`DurableEventLog`] / [`DurableAuditLog`] are explicit-error append-log
 //!   traits with a monotonic per-stream [`EventCursor`] and replay-after
 //!   semantics. Append failures are propagated; replay against a cursor older
@@ -60,4 +63,5 @@ pub use security_audit::{
 };
 pub use sink::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
+    NonBlockingEventSink,
 };

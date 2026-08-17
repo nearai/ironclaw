@@ -5,7 +5,9 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_event_log::{EventSink, MAX_RUNTIME_EVENT_DURATION_MS, RuntimeEvent, RuntimeEventId};
+use ironclaw_event_log::{
+    MAX_RUNTIME_EVENT_DURATION_MS, NonBlockingEventSink, RuntimeEvent, RuntimeEventId,
+};
 use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId},
     resource::ResourceScope,
@@ -156,13 +158,16 @@ impl DurableLoopHostMilestoneScope {
 /// their owning stores and never enter runtime events.
 #[derive(Clone)]
 pub struct DurableLoopHostMilestoneSink {
-    event_sink: Arc<dyn EventSink>,
+    event_sink: Arc<dyn NonBlockingEventSink>,
     scope: DurableLoopHostMilestoneScope,
     model_started_at: Arc<Mutex<HashMap<TurnRunId, Instant>>>,
 }
 
 impl DurableLoopHostMilestoneSink {
-    pub fn new(event_sink: Arc<dyn EventSink>, scope: DurableLoopHostMilestoneScope) -> Self {
+    pub fn new(
+        event_sink: Arc<dyn NonBlockingEventSink>,
+        scope: DurableLoopHostMilestoneScope,
+    ) -> Self {
         Self {
             event_sink,
             scope,
@@ -170,7 +175,7 @@ impl DurableLoopHostMilestoneSink {
         }
     }
 
-    pub fn event_sink(&self) -> Arc<dyn EventSink> {
+    pub fn event_sink(&self) -> Arc<dyn NonBlockingEventSink> {
         Arc::clone(&self.event_sink)
     }
 
@@ -596,7 +601,7 @@ mod tests {
         run_id: TurnRunId,
     ) -> (DurableLoopHostMilestoneSink, Arc<InMemoryEventSink>) {
         let recorded = Arc::new(InMemoryEventSink::new());
-        let event_sink: Arc<dyn EventSink> = recorded.clone();
+        let event_sink: Arc<dyn NonBlockingEventSink> = recorded.clone();
         let milestone_scope = DurableLoopHostMilestoneScope::from_thread_scope_for_run(
             &fixture_thread_scope(),
             thread_id,
@@ -912,7 +917,7 @@ mod tests {
             let mut terminal = started.clone();
             terminal.kind = terminal_kind;
             let recorded = Arc::new(InMemoryEventSink::new());
-            let event_sink: Arc<dyn EventSink> = recorded.clone();
+            let event_sink: Arc<dyn NonBlockingEventSink> = recorded.clone();
             let milestone_scope = DurableLoopHostMilestoneScope::from_thread_scope_for_run(
                 &fixture_thread_scope(),
                 thread_id,
@@ -1063,7 +1068,7 @@ mod tests {
                 channel_capacity: 1,
             },
         ));
-        let event_sink: Arc<dyn EventSink> = coalescing.clone();
+        let event_sink: Arc<dyn NonBlockingEventSink> = coalescing.clone();
         let sink = DurableLoopHostMilestoneSink::new(event_sink, milestone_scope);
 
         sink.publish_loop_milestone(started)

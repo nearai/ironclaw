@@ -9,30 +9,19 @@ use crate::runtime_event::RuntimeEvent;
 
 /// Async event sink used by runtime/composition services.
 ///
-/// [`EventSink::emit`] and [`EventSink::try_emit`] are **best-effort
-/// observability**. A failure from either method must not change runtime
-/// outcomes. The trait returns `Result` so implementations can surface
-/// diagnostics to a separate observer/log, never so best-effort callers can
-/// short-circuit the surrounding workflow.
+/// [`EventSink::emit`] is **best-effort observability**. A failure must not
+/// change runtime outcomes. The trait returns `Result` so implementations can
+/// surface diagnostics to a separate observer/log, never so best-effort
+/// callers can short-circuit the surrounding workflow.
 ///
 /// Best-effort callers (dispatcher, process manager, host runtime) must:
 ///
-/// 1. invoke `try_emit(...)` on runtime-critical paths or `emit(...).await`
-///    where awaiting the sink cannot delay runtime work;
+/// 1. invoke `emit(...).await` only where awaiting the sink cannot delay
+///    runtime work;
 /// 2. record any returned error to a diagnostics channel of their choice;
 /// 3. continue with their original success/failure result.
 #[async_trait]
 pub trait EventSink: Send + Sync {
-    /// Attempt to emit without waiting for queue capacity or durable I/O.
-    /// Runtime-critical callers use this method so observability backpressure
-    /// cannot stall execution. Sinks without a non-blocking path inherit an
-    /// immediate error that callers must treat as diagnostic-only.
-    fn try_emit(&self, _event: RuntimeEvent) -> Result<(), EventError> {
-        Err(EventError::Sink {
-            reason: "event sink does not support non-blocking emission".to_string(),
-        })
-    }
-
     async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError>;
 
     /// Flush any buffered events to durable storage. Synchronous sinks are
@@ -41,6 +30,17 @@ pub trait EventSink: Send + Sync {
     async fn flush(&self) -> Result<(), EventError> {
         Ok(())
     }
+}
+
+/// Event sink with an explicitly non-blocking emission path.
+///
+/// Runtime-critical callers require this stronger contract so an ordinary
+/// [`EventSink`] cannot be wired accidentally and silently discard every
+/// event. Implementations must return without waiting for queue capacity or
+/// durable I/O; bounded implementations may drop best-effort events under
+/// overload as documented by their own contract.
+pub trait NonBlockingEventSink: EventSink {
+    fn try_emit(&self, event: RuntimeEvent) -> Result<(), EventError>;
 }
 
 /// Async audit sink used by control-plane services.

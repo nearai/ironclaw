@@ -27,8 +27,9 @@
 //! - The [`EventSink::flush`] override drains everything queued before the
 //!   call, for graceful shutdown and deterministic tests.
 //! - The internal channel is bounded by [`EventBatchConfig::channel_capacity`].
-//!   [`EventSink::emit`] and [`EventSink::try_emit`] drop best-effort events
-//!   while the channel is full; neither applies backpressure to producers.
+//!   [`EventSink::emit`] and [`NonBlockingEventSink::try_emit`] drop best-effort
+//!   events while the channel is full; neither applies backpressure to
+//!   producers.
 //!
 //! ## Loss semantics — best-effort by design, NOT at-least-once
 //!
@@ -60,7 +61,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_event_log::{DurableEventLog, EventError, EventSink, RuntimeEvent};
+use ironclaw_event_log::{
+    DurableEventLog, EventError, EventSink, NonBlockingEventSink, RuntimeEvent,
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, timeout_at};
 
@@ -173,10 +176,6 @@ fn sink_closed() -> EventError {
 
 #[async_trait]
 impl EventSink for CoalescingEventSink {
-    fn try_emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
-        self.try_emit_event(event)
-    }
-
     async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
         // Best-effort: buffer and return immediately. The channel is bounded;
         // if it is full (drain stalled) we drop the event rather than block
@@ -200,6 +199,12 @@ impl EventSink for CoalescingEventSink {
             .map_err(|_| sink_closed())?;
         // The ack now carries a Result; flatten Result<Result<…>, RecvError>.
         ack_rx.await.map_err(|_| sink_closed())?
+    }
+}
+
+impl NonBlockingEventSink for CoalescingEventSink {
+    fn try_emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
+        self.try_emit_event(event)
     }
 }
 

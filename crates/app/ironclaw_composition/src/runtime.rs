@@ -39,7 +39,9 @@ use ironclaw_assistant::{
     OutboundPreferencesProductService, PersistentApprovalGranteeResolver,
     RunStateApprovalInteractionReadModel,
 };
-use ironclaw_event_log::{DurableAuditLog, DurableEventLog, EventError, EventSink, RuntimeEvent};
+use ironclaw_event_log::{
+    DurableAuditLog, DurableEventLog, EventError, NonBlockingEventSink, RuntimeEvent,
+};
 use ironclaw_extension_registry::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::{CompositeRootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::turn::{
@@ -220,7 +222,7 @@ struct RuntimeStoreParts {
     loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
     thread_service: Arc<dyn SessionThreadService>,
     event_log: Arc<dyn DurableEventLog>,
-    runtime_event_sink: Arc<dyn EventSink>,
+    runtime_event_sink: Arc<dyn NonBlockingEventSink>,
     audit_log: Arc<dyn DurableAuditLog>,
     resource_governor: Arc<dyn ironclaw_resources::ResourceGovernor>,
     budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStorePort>,
@@ -709,7 +711,7 @@ pub struct RebornRuntime {
     auth_interaction_service: Arc<dyn AuthInteractionService>,
     #[cfg(any(test, feature = "test-support"))]
     interaction_service_test_parts: Option<InteractionServiceTestParts>,
-    runtime_event_sink: Arc<dyn EventSink>,
+    runtime_event_sink: Arc<dyn NonBlockingEventSink>,
     default_run_profile_id: String,
     send_locks: Mutex<HashMap<ConversationId, Arc<Mutex<()>>>>,
     #[cfg(feature = "test-support")]
