@@ -435,9 +435,12 @@ fn dispatch_errors_preserve_typed_failure_kind() {
         DispatchFailureKind::UnsupportedRuntime
     );
     assert_eq!(
-        DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Guest,
-            model_visible_cause: None,
+        DispatchError::Rejected {
+            runtime: Some(RuntimeKind::Wasm),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest),
+            diagnostic: None,
+            detail: None,
+            attempt: None,
         }
         .failure_kind(),
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)

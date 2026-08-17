@@ -18,9 +18,10 @@ use super::{
     WitToolRuntime,
 };
 use ironclaw_host_api::dispatch::{
-    ProviderDiagnostic, ProviderErrorCode, UntrustedProviderMessage,
+    DispatchFailureKind, ProviderDiagnostic, ProviderErrorCode, UntrustedProviderMessage,
 };
 use ironclaw_host_api::resource::ResourceReceipt;
+use ironclaw_host_api::runtime::RuntimeKind;
 
 /// Bound for a guest-supplied provider message before it rides
 /// `model_visible_cause`/`ProviderDiagnostic.message`. Well under the
@@ -32,6 +33,23 @@ use ironclaw_host_api::resource::ResourceReceipt;
 /// real provider explanation now has room to survive intact instead of being
 /// clipped to a near-useless 256 bytes.
 const MAX_WASM_GUEST_MESSAGE_BYTES: usize = 2048;
+
+/// Builds a provider-rejection `DispatchError` for the WASM lane. `cause`
+/// rides the typed diagnostic channel (#5965): raw-or-better cause text,
+/// scrubbed downstream at the model-visible Diagnostic seam.
+fn wasm_dispatch_error(kind: RuntimeDispatchErrorKind, cause: Option<String>) -> DispatchError {
+    DispatchError::Rejected {
+        runtime: Some(RuntimeKind::Wasm),
+        kind: DispatchFailureKind::Runtime(kind),
+        diagnostic: cause.map(|text| ProviderDiagnostic {
+            code: None,
+            message: Some(UntrustedProviderMessage::new(text)),
+            retry_after: None,
+        }),
+        detail: None,
+        attempt: None,
+    }
+}
 
 /// RAII guard over an in-flight `ResourceGovernor` reservation.
 ///
@@ -185,9 +203,8 @@ where
         None => request
             .governor
             .reserve(request.scope.clone(), request.estimate.clone())
-            .map_err(|error| DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Resource,
-                model_visible_cause: Some(error.to_string()),
+            .map_err(|error| {
+                wasm_dispatch_error(RuntimeDispatchErrorKind::Resource, Some(error.to_string()))
             })?,
     };
     // Hold the reservation in an RAII guard from here on. The guard is carried
@@ -196,18 +213,15 @@ where
     // releases the reservation instead of leaking it permanently. Every early
     // `return` below drops the still-armed guard, which releases.
     let guard = ReservationGuard::new(request.governor, reservation.id);
-    let wasm_resource_error = || DispatchError::Wasm {
-        kind: RuntimeDispatchErrorKind::Resource,
-        model_visible_cause: None,
-    };
+    let wasm_resource_error = || wasm_dispatch_error(RuntimeDispatchErrorKind::Resource, None);
     let input_json = match serde_json::to_string(&request.input) {
         Ok(json) => json,
         Err(error) => {
             // Dropping `guard` releases the reservation.
-            return Err(DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::InputEncode,
-                model_visible_cause: Some(error.to_string()),
-            });
+            return Err(wasm_dispatch_error(
+                RuntimeDispatchErrorKind::InputEncode,
+                Some(error.to_string()),
+            ));
         }
     };
     let context_json = wasm_invocation_context(request.capability_id);
@@ -237,10 +251,10 @@ where
                 preserved_wasm_error_usage(error.source()).as_ref(),
                 wasm_resource_error,
             )?;
-            return Err(DispatchError::Wasm {
-                kind: error.kind(),
-                model_visible_cause: Some(error.source().to_string()),
-            });
+            return Err(wasm_dispatch_error(
+                error.kind(),
+                Some(error.source().to_string()),
+            ));
         }
     };
     let output_json = match execution.outcome {
@@ -266,20 +280,20 @@ where
         // Legacy 0.3.0 binding fallback — removed in PR 4.
         WitToolOutcome::LegacyMissingOutput => {
             guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
-            return Err(DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::InvalidResult,
-                model_visible_cause: Some("WASM execution returned no output".to_string()),
-            });
+            return Err(wasm_dispatch_error(
+                RuntimeDispatchErrorKind::InvalidResult,
+                Some("WASM execution returned no output".to_string()),
+            ));
         }
     };
     let output = match serde_json::from_str(&output_json) {
         Ok(output) => output,
         Err(error) => {
             guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
-            return Err(DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::OutputDecode,
-                model_visible_cause: Some(error.to_string()),
-            });
+            return Err(wasm_dispatch_error(
+                RuntimeDispatchErrorKind::OutputDecode,
+                Some(error.to_string()),
+            ));
         }
     };
     let receipt = guard.reconcile(execution.usage.clone(), wasm_resource_error)?;
@@ -327,9 +341,18 @@ fn wasm_guest_dispatch_error(error: &str, capability: &CapabilityId) -> Dispatch
             credential_requirements: Vec::new(),
             model_visible_cause: wasm_guest_provider_diagnostic(error).map(Box::new),
         },
-        WasmGuestErrorKind::Runtime(kind) => DispatchError::Wasm {
-            kind,
-            model_visible_cause: wasm_guest_error_cause(error).or_else(|| Some(error.to_string())),
+        WasmGuestErrorKind::Runtime(kind) => DispatchError::Rejected {
+            runtime: Some(RuntimeKind::Wasm),
+            kind: DispatchFailureKind::Runtime(kind),
+            diagnostic: wasm_guest_provider_diagnostic(error).or_else(|| {
+                Some(ProviderDiagnostic {
+                    code: None,
+                    message: Some(UntrustedProviderMessage::new(error.to_string())),
+                    retry_after: None,
+                })
+            }),
+            detail: None,
+            attempt: None,
         },
     }
 }
@@ -355,9 +378,12 @@ fn typed_wasm_guest_dispatch_error(
             model_visible_cause: typed_wasm_guest_provider_diagnostic(&failure).map(Box::new),
         };
     }
-    DispatchError::Wasm {
-        kind: typed_wasm_guest_runtime_kind(failure.kind),
-        model_visible_cause: typed_wasm_guest_cause(&failure),
+    DispatchError::Rejected {
+        runtime: Some(RuntimeKind::Wasm),
+        kind: DispatchFailureKind::Runtime(typed_wasm_guest_runtime_kind(failure.kind)),
+        diagnostic: typed_wasm_guest_provider_diagnostic(&failure),
+        detail: None,
+        attempt: None,
     }
 }
 
@@ -388,10 +414,6 @@ fn sanitized_wasm_guest_code(code: Option<&str>) -> Option<String> {
     (!sanitized.is_empty()).then_some(sanitized)
 }
 
-fn typed_wasm_guest_cause(failure: &WitGuestFailure) -> Option<String> {
-    provider_error_cause(failure.code.as_deref(), failure.message.as_deref())
-}
-
 fn typed_wasm_guest_provider_diagnostic(failure: &WitGuestFailure) -> Option<ProviderDiagnostic> {
     let retry_after = failure.retry_after_ms.map(std::time::Duration::from_millis);
     provider_error_diagnostic(
@@ -401,33 +423,11 @@ fn typed_wasm_guest_provider_diagnostic(failure: &WitGuestFailure) -> Option<Pro
     )
 }
 
-/// Shared decode over a guest error's `(code, message, retry_after)` trio,
-/// used by both the typed (`WitGuestFailure`) and legacy
-/// (`StructuredWasmGuestError`) guest-error paths so the two stay in lockstep
-/// instead of drifting apart as separate copies.
-///
-/// Combines the sanitized stable `code` with the bounded free-text `message`
-/// into a single model-visible cause string: `code` alone, `code; message`
-/// when both are present, or `message` alone when there is no usable code.
-/// Returns `None` when neither is present.
-fn provider_error_cause(code: Option<&str>, message: Option<&str>) -> Option<String> {
-    let message = bounded_wasm_guest_message(message.unwrap_or_default().trim());
-    match sanitized_wasm_guest_code(code) {
-        Some(code) => {
-            let stable_cause = format!("provider error code: {code}");
-            if message.is_empty() {
-                Some(stable_cause)
-            } else {
-                Some(format!("{stable_cause}; provider message: {message}"))
-            }
-        }
-        None => (!message.is_empty()).then_some(message),
-    }
-}
-
 /// Shared decode over a guest error's `(code, message, retry_after)` trio
-/// into a [`ProviderDiagnostic`]; see [`provider_error_cause`] for why this is
-/// one chokepoint shared by the typed and legacy guest-error paths.
+/// into a [`ProviderDiagnostic`], one chokepoint shared by the typed
+/// (`WitGuestFailure`) and legacy (`StructuredWasmGuestError`) guest-error
+/// paths so the two stay in lockstep instead of drifting apart as separate
+/// copies.
 fn provider_error_diagnostic(
     code: Option<&str>,
     message: Option<&str>,
@@ -462,17 +462,6 @@ fn wasm_guest_error_code(error: &str) -> Option<String> {
 
 fn wasm_guest_error_code_from(payload: &StructuredWasmGuestError) -> Option<String> {
     sanitized_wasm_guest_code(Some(&payload.code))
-}
-
-/// Legacy plain-string guest error cause, matching `wasm_guest_error_code`'s
-/// stricter "no code, no cause" contract: unlike `provider_error_cause`
-/// (the typed path's permissive message-only fallback), this returns `None`
-/// outright when the code does not sanitize to anything, rather than falling
-/// back to a message-only cause.
-fn wasm_guest_error_cause(error: &str) -> Option<String> {
-    let payload = structured_wasm_guest_error(error)?;
-    wasm_guest_error_code_from(&payload)?;
-    provider_error_cause(Some(&payload.code), payload.message.as_deref())
 }
 
 fn wasm_guest_provider_diagnostic(error: &str) -> Option<ProviderDiagnostic> {
@@ -739,9 +728,8 @@ mod tests {
         let id = ResourceReservationId::new();
         let guard = ReservationGuard::new(&governor, id);
         let receipt = guard
-            .reconcile(accountable_usage(), || DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Resource,
-                model_visible_cause: None,
+            .reconcile(accountable_usage(), || {
+                wasm_dispatch_error(RuntimeDispatchErrorKind::Resource, None)
             })
             .expect("reconcile must succeed");
         assert_eq!(receipt.status, ReservationStatus::Reconciled);
@@ -760,9 +748,8 @@ mod tests {
         let id = ResourceReservationId::new();
         let guard = ReservationGuard::new(&governor, id);
         guard
-            .account_failed(Some(&accountable_usage()), || DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Resource,
-                model_visible_cause: None,
+            .account_failed(Some(&accountable_usage()), || {
+                wasm_dispatch_error(RuntimeDispatchErrorKind::Resource, None)
             })
             .expect("account_failed with accountable usage must reconcile");
         assert_eq!(governor.reconcile_calls(), 1);
@@ -780,9 +767,8 @@ mod tests {
         let guard = ReservationGuard::new(&governor, id);
         // No usage → release path; guard consumed, so Drop does not fire again.
         guard
-            .account_failed(None, || DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Resource,
-                model_visible_cause: None,
+            .account_failed(None, || {
+                wasm_dispatch_error(RuntimeDispatchErrorKind::Resource, None)
             })
             .expect("account_failed with no usage releases and returns Ok");
         assert_eq!(
@@ -1558,17 +1544,21 @@ mod tests {
             r#"{"code":"channel_not_found","kind":"input"}"#,
             &capability,
         ) {
-            DispatchError::Wasm {
-                kind,
-                model_visible_cause,
+            DispatchError::Rejected {
+                kind, diagnostic, ..
             } => {
-                assert_eq!(kind, RuntimeDispatchErrorKind::InputEncode);
                 assert_eq!(
-                    model_visible_cause.as_deref(),
+                    kind,
+                    DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode)
+                );
+                let diagnostic = diagnostic.expect("structured code must produce a diagnostic");
+                assert_eq!(
+                    ironclaw_host_api::dispatch::provider_diagnostic_model_cause(&diagnostic)
+                        .as_deref(),
                     Some("provider error code: channel_not_found")
                 );
             }
-            other => panic!("expected Wasm dispatch error, got {other:?}"),
+            other => panic!("expected Rejected dispatch error, got {other:?}"),
         }
 
         // Hostile codes are reduced to identifier characters, never free text.
@@ -1583,18 +1573,18 @@ mod tests {
         // generic sentence.
         assert_eq!(wasm_guest_error_code("invalid_parameters"), None);
         match wasm_guest_dispatch_error("invalid_parameters", &capability) {
-            DispatchError::Wasm {
-                model_visible_cause,
-                ..
-            } => {
+            DispatchError::Rejected { diagnostic, .. } => {
+                let cause = diagnostic
+                    .and_then(|diagnostic| diagnostic.message)
+                    .map(|message| message.as_str().to_string());
                 assert!(
-                    model_visible_cause
+                    cause
                         .as_deref()
                         .is_some_and(|summary| summary.contains("invalid_parameters")),
-                    "legacy guest error text must survive as the raw cause: {model_visible_cause:?}"
+                    "legacy guest error text must survive as the raw cause: {cause:?}"
                 );
             }
-            other => panic!("expected Wasm dispatch error, got {other:?}"),
+            other => panic!("expected Rejected dispatch error, got {other:?}"),
         }
     }
 

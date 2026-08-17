@@ -112,11 +112,11 @@ async fn mcp_adapter_preserves_executor_failure_cause() {
         .await;
 
     match result {
-        Err(DispatchError::Mcp {
-            model_visible_cause,
-            ..
-        }) => {
-            let summary = model_visible_cause.expect("MCP cause should be retained");
+        Err(DispatchError::Rejected { diagnostic, .. }) => {
+            let summary = diagnostic
+                .and_then(|diagnostic| diagnostic.message)
+                .map(|message| message.as_str().to_string())
+                .expect("MCP cause should be retained");
             assert!(summary.contains(raw), "unexpected cause: {summary}");
         }
         other => panic!("expected MCP dispatch failure, got {other:?}"),

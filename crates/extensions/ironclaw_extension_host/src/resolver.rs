@@ -27,10 +27,13 @@ use ironclaw_extension_contracts::tool_adapter::{
     ToolCall, ToolCallResources, ToolError, ToolPorts,
 };
 use ironclaw_host_api::{
-    dispatch::{DispatchError, DispatchFailureDetail, RuntimeDispatchErrorKind},
+    dispatch::{
+        DispatchError, DispatchFailureKind, ProviderDiagnostic, RuntimeDispatchErrorKind,
+        UntrustedProviderMessage,
+    },
     ids::{CapabilityId, ExtensionId},
     resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
-    runtime::{DispatchErrorLane, RuntimeKind},
+    runtime::RuntimeKind,
 };
 
 use crate::active::ResolvedToolBinding;
@@ -172,34 +175,22 @@ fn dispatch_error_for_kind(
     safe_summary: Option<String>,
     model_visible_cause: Option<String>,
 ) -> DispatchError {
-    match runtime.dispatch_error_lane() {
-        // The lane variants carry the cause on `model_visible_cause` (#5965):
-        // raw-or-better cause text, scrubbed downstream at the model-visible
-        // Diagnostic seam. When an adapter supplied only a fixed host-authored
-        // summary, that text is trivially cause-safe, so it rides the same
-        // channel rather than being dropped.
-        DispatchErrorLane::Wasm => DispatchError::Wasm {
-            kind,
-            model_visible_cause: model_visible_cause.or(safe_summary),
-        },
-        DispatchErrorLane::Mcp => DispatchError::Mcp {
-            kind,
-            model_visible_cause: model_visible_cause.or(safe_summary),
-        },
-        DispatchErrorLane::Script => DispatchError::Script {
-            kind,
-            model_visible_cause: model_visible_cause.or(safe_summary),
-        },
-        // FirstParty/System carry the raw cause on the Diagnostic detail
-        // channel (untrusted-provenance text, scrubbed downstream) rather than
-        // dropping it — the lane arms' `model_visible_cause` equivalent for the
-        // detail-shaped variant. A fixed host-authored summary, if that is all
-        // the adapter gave, still travels on `safe_summary`.
-        DispatchErrorLane::FirstParty => DispatchError::FirstParty {
-            kind,
-            safe_summary,
-            detail: model_visible_cause.map(|text| DispatchFailureDetail::Diagnostic { text }),
-        },
+    // The cause rides the typed diagnostic channel (#5965): raw-or-better
+    // cause text, scrubbed downstream at the model-visible Diagnostic seam.
+    // When an adapter supplied only a fixed host-authored summary, that text
+    // is trivially cause-safe, so it rides the same channel rather than being
+    // dropped.
+    let cause = model_visible_cause.or(safe_summary);
+    DispatchError::Rejected {
+        runtime: Some(runtime),
+        kind: DispatchFailureKind::Runtime(kind),
+        diagnostic: cause.map(|text| ProviderDiagnostic {
+            code: None,
+            message: Some(UntrustedProviderMessage::new(text)),
+            retry_after: None,
+        }),
+        detail: None,
+        attempt: None,
     }
 }
 
@@ -209,22 +200,10 @@ mod tests {
 
     fn cause_of(error: &DispatchError) -> Option<&str> {
         match error {
-            DispatchError::Wasm {
-                model_visible_cause,
+            DispatchError::Rejected {
+                diagnostic: Some(diagnostic),
                 ..
-            }
-            | DispatchError::Mcp {
-                model_visible_cause,
-                ..
-            }
-            | DispatchError::Script {
-                model_visible_cause,
-                ..
-            } => model_visible_cause.as_deref(),
-            DispatchError::FirstParty {
-                detail: Some(DispatchFailureDetail::Diagnostic { text }),
-                ..
-            } => Some(text.as_str()),
+            } => diagnostic.message.as_ref().map(|message| message.as_str()),
             _ => None,
         }
     }

@@ -14,16 +14,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_event_log::{EventSink, RuntimeEvent};
-use ironclaw_host_api::{
-    authorized::Authorized,
-    dispatch::{
-        CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
-        CapabilityDisplayOutputPreview, DispatchError, DispatchFailureDetail,
-        RuntimeDispatchErrorKind,
-    },
-    runtime::DispatchErrorLane,
+use ironclaw_host_api::dispatch::{
+    CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
+    CapabilityDisplayOutputPreview, DispatchError, DispatchFailureKind, ProviderDiagnostic,
+    RuntimeDispatchErrorKind, UntrustedProviderMessage,
 };
 use ironclaw_host_api::{
+    authorized::Authorized,
     ids::{CapabilityId, ExtensionId, InvocationId},
     invocation::{Actor, InvocationOrigin},
     lane::RuntimeLane,
@@ -418,29 +415,20 @@ fn dispatch_resource_error(
     let cause = error.to_string();
     // System has no runtime backend to attribute a resource-reservation
     // failure to, so it classifies as MissingRuntimeBackend here rather than
-    // joining FirstParty's lane (unlike the other three RuntimeKind ->
-    // DispatchError sites, which route System into FirstParty uniformly).
+    // as a generic provider rejection.
     if runtime == RuntimeKind::System {
         return DispatchError::MissingRuntimeBackend { runtime };
     }
-    match runtime.dispatch_error_lane() {
-        DispatchErrorLane::Wasm => DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Resource,
-            model_visible_cause: Some(cause),
-        },
-        DispatchErrorLane::Script => DispatchError::Script {
-            kind: RuntimeDispatchErrorKind::Resource,
-            model_visible_cause: Some(cause),
-        },
-        DispatchErrorLane::Mcp => DispatchError::Mcp {
-            kind: RuntimeDispatchErrorKind::Resource,
-            model_visible_cause: Some(cause),
-        },
-        DispatchErrorLane::FirstParty => DispatchError::FirstParty {
-            kind: RuntimeDispatchErrorKind::Resource,
-            safe_summary: None,
-            detail: Some(DispatchFailureDetail::Diagnostic { text: cause }),
-        },
+    DispatchError::Rejected {
+        runtime: Some(runtime),
+        kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+        diagnostic: Some(ProviderDiagnostic {
+            code: None,
+            message: Some(UntrustedProviderMessage::new(cause)),
+            retry_after: None,
+        }),
+        detail: None,
+        attempt: None,
     }
 }
 

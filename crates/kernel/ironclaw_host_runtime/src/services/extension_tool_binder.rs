@@ -199,29 +199,6 @@ pub(super) fn tool_error_from_dispatch(error: DispatchError) -> ToolError {
             credential_requirements,
             model_visible_cause: model_visible_cause.map(|diagnostic| *diagnostic),
         },
-        DispatchError::Wasm {
-            kind,
-            model_visible_cause,
-        }
-        | DispatchError::Mcp {
-            kind,
-            model_visible_cause,
-        }
-        | DispatchError::Script {
-            kind,
-            model_visible_cause,
-        } => ToolError::Failed {
-            kind,
-            safe_summary: None,
-            model_visible_cause,
-        },
-        DispatchError::FirstParty {
-            kind, safe_summary, ..
-        } => ToolError::Failed {
-            kind,
-            safe_summary,
-            model_visible_cause: None,
-        },
         DispatchError::Rejected {
             runtime,
             kind,

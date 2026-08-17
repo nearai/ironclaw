@@ -1,3 +1,5 @@
+use std::fmt;
+
 use ironclaw_authorization::CapabilityLeaseError;
 use ironclaw_host_api::{
     decision::{DenyReason, Obligation, RuntimeCredentialAuthRequirement},
@@ -22,7 +24,7 @@ pub enum ResumeContextMismatchKind {
 }
 
 /// Capability invocation failures before or during dispatch.
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum CapabilityInvocationError {
     #[error("unknown capability {capability}")]
     UnknownCapability { capability: CapabilityId },
@@ -117,9 +119,140 @@ pub enum CapabilityInvocationError {
         /// Provider-authored metadata remains typed and Debug-redacted until
         /// the runtime's model-diagnostic scrub/fence seam.
         provider_diagnostic: Option<Box<ProviderDiagnostic>>,
+        /// Candidate public label carrying the same untrusted provider text as
+        /// `provider_diagnostic` — Debug-redacted here too (see
+        /// `provider_diagnostic`'s doc) even though it is a plain `String`, so
+        /// Debug output never depends on which downstream seam scrubs first.
         safe_summary: Option<String>,
         detail: Option<DispatchFailureDetail>,
     },
+}
+
+impl fmt::Debug for CapabilityInvocationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownCapability { capability } => f
+                .debug_struct("UnknownCapability")
+                .field("capability", capability)
+                .finish(),
+            Self::AuthorizationDenied {
+                capability,
+                reason,
+                detail,
+            } => f
+                .debug_struct("AuthorizationDenied")
+                .field("capability", capability)
+                .field("reason", reason)
+                .field("detail", detail)
+                .finish(),
+            Self::UnsupportedObligations {
+                capability,
+                obligations,
+            } => f
+                .debug_struct("UnsupportedObligations")
+                .field("capability", capability)
+                .field("obligations", obligations)
+                .finish(),
+            Self::ObligationFailed { capability, kind } => f
+                .debug_struct("ObligationFailed")
+                .field("capability", capability)
+                .field("kind", kind)
+                .finish(),
+            Self::AuthorizationRequiresApproval { capability } => f
+                .debug_struct("AuthorizationRequiresApproval")
+                .field("capability", capability)
+                .finish(),
+            Self::AuthorizationRequiresAuth {
+                capability,
+                required_secrets,
+                credential_requirements,
+                model_visible_cause,
+            } => f
+                .debug_struct("AuthorizationRequiresAuth")
+                .field("capability", capability)
+                .field(
+                    "required_secrets",
+                    &format!("[{} handle(s) redacted]", required_secrets.len()),
+                )
+                .field(
+                    "credential_requirements",
+                    &format!(
+                        "[{} requirement(s) redacted]",
+                        credential_requirements.len()
+                    ),
+                )
+                .field("model_visible_cause", model_visible_cause)
+                .finish(),
+            Self::InvocationFingerprint { capability, source } => f
+                .debug_struct("InvocationFingerprint")
+                .field("capability", capability)
+                .field("source", source)
+                .finish(),
+            Self::ApprovalRequestMismatch { capability, field } => f
+                .debug_struct("ApprovalRequestMismatch")
+                .field("capability", capability)
+                .field("field", field)
+                .finish(),
+            Self::ApprovalFingerprintMismatch { capability } => f
+                .debug_struct("ApprovalFingerprintMismatch")
+                .field("capability", capability)
+                .finish(),
+            Self::ApprovalNotApproved { capability, status } => f
+                .debug_struct("ApprovalNotApproved")
+                .field("capability", capability)
+                .field("status", status)
+                .finish(),
+            Self::ApprovalStoreMissing { capability, store } => f
+                .debug_struct("ApprovalStoreMissing")
+                .field("capability", capability)
+                .field("store", store)
+                .finish(),
+            Self::ApprovalLeaseMissing { capability } => f
+                .debug_struct("ApprovalLeaseMissing")
+                .field("capability", capability)
+                .finish(),
+            Self::ResumeStoreMissing { capability, store } => f
+                .debug_struct("ResumeStoreMissing")
+                .field("capability", capability)
+                .field("store", store)
+                .finish(),
+            Self::ProcessManagerMissing { capability } => f
+                .debug_struct("ProcessManagerMissing")
+                .field("capability", capability)
+                .finish(),
+            Self::ResumeNotBlocked { capability, status } => f
+                .debug_struct("ResumeNotBlocked")
+                .field("capability", capability)
+                .field("status", status)
+                .finish(),
+            Self::ResumeContextMismatch { capability, kind } => f
+                .debug_struct("ResumeContextMismatch")
+                .field("capability", capability)
+                .field("kind", kind)
+                .finish(),
+            Self::Lease(source) => f.debug_tuple("Lease").field(source).finish(),
+            Self::ApprovalStore(source) => f.debug_tuple("ApprovalStore").field(source).finish(),
+            Self::InvocationState(source) => {
+                f.debug_tuple("InvocationState").field(source).finish()
+            }
+            Self::Process(source) => f.debug_tuple("Process").field(source).finish(),
+            // `safe_summary` carries the same untrusted provider text as
+            // `provider_diagnostic` (see `From<DispatchError>`), so it is
+            // redacted here too — never log or render it directly.
+            Self::Dispatch {
+                kind,
+                provider_diagnostic,
+                detail,
+                ..
+            } => f
+                .debug_struct("Dispatch")
+                .field("kind", kind)
+                .field("provider_diagnostic", provider_diagnostic)
+                .field("safe_summary", &"<redacted>")
+                .field("detail", detail)
+                .finish(),
+        }
+    }
 }
 
 impl From<ApprovalStoreError> for CapabilityInvocationError {
@@ -159,12 +292,41 @@ impl From<DispatchError> for CapabilityInvocationError {
                 diagnostic,
                 detail,
                 ..
-            } => Self::Dispatch {
-                kind,
-                provider_diagnostic: diagnostic.map(Box::new),
-                safe_summary: None,
-                detail,
-            },
+            } => {
+                // The cause rides both channels: `provider_diagnostic` stays
+                // typed and Debug-redacted for the raw model-visible
+                // Diagnostic seam, while the same text is the candidate
+                // public `safe_summary` label — fails closed downstream
+                // through the strict `LoopSafeSummary` gate
+                // (`dispatch_failure_message`), which degrades anything
+                // unsafe to the kind's fixed sentence. This mirrors the
+                // retired lane variants' `model_visible_cause`, which rode
+                // the identical two channels before the fold.
+                //
+                // A structured `code` (e.g. a WASM guest's stable taxonomy
+                // code) uses the formatted `code`/`message` combination so
+                // the code always surfaces; a bare `message` with no `code`
+                // (a plain already-final cause string, e.g. a lane's
+                // `error.to_string()` or a first-party handler's fixed
+                // summary) rides through unprefixed, matching the retired
+                // variants' raw text exactly.
+                let safe_summary = diagnostic.as_ref().and_then(|diagnostic| {
+                    if diagnostic.code.is_some() {
+                        provider_diagnostic_model_cause(diagnostic)
+                    } else {
+                        diagnostic
+                            .message
+                            .as_ref()
+                            .map(|message| message.as_str().to_string())
+                    }
+                });
+                Self::Dispatch {
+                    kind,
+                    provider_diagnostic: diagnostic.map(Box::new),
+                    safe_summary,
+                    detail,
+                }
+            }
             other @ (DispatchError::UnknownCapability { .. }
             | DispatchError::UnknownProvider { .. }
             | DispatchError::RuntimeMismatch { .. }
@@ -172,15 +334,11 @@ impl From<DispatchError> for CapabilityInvocationError {
             | DispatchError::UnsupportedRuntime { .. }
             | DispatchError::MissingAuthorization { .. }
             | DispatchError::AuthorizationExpired { .. }
-            | DispatchError::MissingProcessAuthorization { .. }
-            | DispatchError::Mcp { .. }
-            | DispatchError::Script { .. }
-            | DispatchError::Wasm { .. }
-            | DispatchError::FirstParty { .. }) => Self::Dispatch {
+            | DispatchError::MissingProcessAuthorization { .. }) => Self::Dispatch {
                 kind: dispatch_error_kind(&other),
                 provider_diagnostic: None,
                 safe_summary: dispatch_error_model_visible_cause(&other),
-                detail: dispatch_error_detail(&other),
+                detail: None,
             },
         }
     }
@@ -190,30 +348,14 @@ fn dispatch_error_kind(error: &DispatchError) -> DispatchFailureKind {
     error.failure_kind()
 }
 
+/// These variants carry no free-form runtime string; their `Display` is a
+/// stable capability-id + category description that is itself the real
+/// cause. Carry it so the model-visible detail channel keeps it (scrubbing
+/// of any secret VALUE happens downstream at the Diagnostic-building layer,
+/// which lives in a crate that may depend on `ironclaw_turns` — this crate
+/// must not).
 fn dispatch_error_model_visible_cause(error: &DispatchError) -> Option<String> {
     match error {
-        DispatchError::Rejected { diagnostic, .. } => diagnostic
-            .as_ref()
-            .and_then(provider_diagnostic_model_cause),
-        DispatchError::Mcp {
-            model_visible_cause,
-            ..
-        }
-        | DispatchError::Script {
-            model_visible_cause,
-            ..
-        }
-        | DispatchError::Wasm {
-            model_visible_cause,
-            ..
-        } => model_visible_cause.clone(),
-        DispatchError::FirstParty { safe_summary, .. } => safe_summary.clone(),
-        // These variants carry no free-form runtime string; their `Display`
-        // is a stable capability-id + category description that is itself the
-        // real cause. Carry it so the model-visible detail channel keeps it
-        // (scrubbing of any secret VALUE happens downstream at the
-        // Diagnostic-building layer, which lives in a crate that may depend on
-        // `ironclaw_turns` — this crate must not).
         DispatchError::UnknownCapability { .. }
         | DispatchError::UnknownProvider { .. }
         | DispatchError::RuntimeMismatch { .. }
@@ -223,16 +365,9 @@ fn dispatch_error_model_visible_cause(error: &DispatchError) -> Option<String> {
         | DispatchError::AuthorizationExpired { .. }
         | DispatchError::MissingProcessAuthorization { .. } => Some(error.to_string()),
         // Auth-required carries redacted secret handles; keep it summary-free.
-        DispatchError::AuthRequired { .. } => None,
-    }
-}
-
-fn dispatch_error_detail(error: &DispatchError) -> Option<DispatchFailureDetail> {
-    match error {
-        DispatchError::FirstParty { detail, .. } | DispatchError::Rejected { detail, .. } => {
-            detail.clone()
-        }
-        _ => None,
+        // Rejected's cause rides the typed `provider_diagnostic` channel
+        // instead of this raw-string one (see the `Rejected` arm above).
+        DispatchError::AuthRequired { .. } | DispatchError::Rejected { .. } => None,
     }
 }
 
@@ -300,20 +435,36 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_error_kind_forwards_mcp_runtime_kind_as_str() {
-        // Regression (Phase 1): an MCP dispatch error's raw cause must be
-        // carried on the model-visible-cause channel — including path/JSON delimiters
+    fn dispatch_error_kind_forwards_runtime_kind_via_rejected() {
+        // Regression (Phase 1): a runtime dispatch error's raw cause must be
+        // carried on the typed diagnostic channel — including path/JSON delimiters
         // that the strict summary validator rejects — so it reaches the
         // model-visible Diagnostic/detail downstream instead of being dropped.
-        let error = DispatchError::Mcp {
-            kind: RuntimeDispatchErrorKind::Backend,
-            model_visible_cause: Some("MCP request failed at /tmp/{socket}".to_string()),
+        let error = DispatchError::Rejected {
+            runtime: Some(RuntimeKind::Mcp),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            diagnostic: Some(ProviderDiagnostic {
+                code: None,
+                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                    "MCP request failed at /tmp/{socket}",
+                )),
+                retry_after: None,
+            }),
+            detail: None,
+            attempt: None,
         };
         let kind = dispatch_error_kind(&error);
         assert_eq!(kind.as_str(), "Backend");
+        let DispatchError::Rejected {
+            diagnostic: Some(diagnostic),
+            ..
+        } = &error
+        else {
+            panic!("expected Rejected variant");
+        };
         assert_eq!(
-            dispatch_error_model_visible_cause(&error).as_deref(),
-            Some("MCP request failed at /tmp/{socket}")
+            provider_diagnostic_model_cause(diagnostic).as_deref(),
+            Some("provider message: MCP request failed at /tmp/{socket}")
         );
     }
 
@@ -348,41 +499,23 @@ mod tests {
             kind,
             DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client)
         );
-        assert!(safe_summary.is_none());
+        // The formatted cause is the candidate public label too — it still
+        // fails closed downstream through the strict `LoopSafeSummary` gate
+        // (`dispatch_failure_message` in `ironclaw_host_runtime`), which
+        // degrades anything unsafe to the kind's fixed sentence; this layer
+        // only carries the candidate text forward.
+        assert_eq!(
+            safe_summary.as_deref(),
+            Some(
+                "provider error code: mcp_tool_rejected; provider message: token lacks repo scope"
+            )
+        );
         assert_eq!(
             provider_diagnostic_model_cause(&diagnostic).as_deref(),
             Some(
                 "provider error code: mcp_tool_rejected; provider message: token lacks repo scope"
             )
         );
-    }
-
-    #[test]
-    fn dispatch_error_kind_forwards_script_runtime_kind_as_str() {
-        let kind = dispatch_error_kind(&DispatchError::Script {
-            kind: RuntimeDispatchErrorKind::OutputTooLarge,
-            model_visible_cause: None,
-        });
-        assert_eq!(kind.as_str(), "OutputTooLarge");
-    }
-
-    #[test]
-    fn dispatch_error_kind_forwards_wasm_runtime_kind_as_str() {
-        let kind = dispatch_error_kind(&DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Memory,
-            model_visible_cause: None,
-        });
-        assert_eq!(kind.as_str(), "Memory");
-    }
-
-    #[test]
-    fn dispatch_error_kind_forwards_first_party_runtime_kind_as_str() {
-        let kind = dispatch_error_kind(&DispatchError::FirstParty {
-            kind: RuntimeDispatchErrorKind::UndeclaredCapability,
-            safe_summary: None,
-            detail: None,
-        });
-        assert_eq!(kind.as_str(), "UndeclaredCapability");
     }
 
     #[test]
@@ -399,9 +532,12 @@ mod tests {
 
     #[test]
     fn from_dispatch_error_preserves_redacted_runtime_kind() {
-        let err = CapabilityInvocationError::from(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Guest,
-            model_visible_cause: None,
+        let err = CapabilityInvocationError::from(DispatchError::Rejected {
+            runtime: Some(RuntimeKind::Wasm),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest),
+            diagnostic: None,
+            detail: None,
+            attempt: None,
         });
         match err {
             CapabilityInvocationError::Dispatch { kind, .. } => {
@@ -419,12 +555,20 @@ mod tests {
         let issue =
             DispatchInputIssue::new("schedule.kind", DispatchInputIssueCode::MissingRequired)
                 .expected("cron or once");
-        let err = CapabilityInvocationError::from(DispatchError::FirstParty {
-            kind: RuntimeDispatchErrorKind::InputEncode,
-            safe_summary: Some("trigger_create input failed validation".to_string()),
+        let err = CapabilityInvocationError::from(DispatchError::Rejected {
+            runtime: Some(RuntimeKind::FirstParty),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
+            diagnostic: Some(ProviderDiagnostic {
+                code: None,
+                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                    "trigger_create input failed validation",
+                )),
+                retry_after: None,
+            }),
             detail: Some(DispatchFailureDetail::InvalidInput {
                 issues: vec![issue.clone()],
             }),
+            attempt: None,
         });
 
         match err {

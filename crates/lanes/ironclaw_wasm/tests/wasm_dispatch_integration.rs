@@ -23,7 +23,9 @@ use ironclaw_host_api::{
     Timestamp,
     action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     authorized::Authorized,
-    dispatch::{CapabilityDispatchRequest, DispatchError, RuntimeDispatchErrorKind},
+    dispatch::{
+        CapabilityDispatchRequest, DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind,
+    },
     host_port::HostPortCatalog,
     http::{
         RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
@@ -123,8 +125,8 @@ async fn wasm_lane_guest_trap_releases_reservation_and_preserves_dispatch_failur
 
     assert!(matches!(
         err,
-        DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Guest,
+        DispatchError::Rejected {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest),
             ..
         }
     ));
@@ -189,8 +191,8 @@ async fn wasm_lane_execution_failure_reconciles_preserved_usage_from_runtime() {
 
     assert!(matches!(
         err,
-        DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Guest,
+        DispatchError::Rejected {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest),
             ..
         }
     ));
@@ -242,8 +244,8 @@ async fn wasm_lane_missing_module_file_returns_sanitized_filesystem_error() {
 
     assert!(matches!(
         err,
-        DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::FilesystemDenied,
+        DispatchError::Rejected {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::FilesystemDenied),
             ..
         }
     ));
@@ -288,8 +290,8 @@ async fn wasm_lane_malformed_module_returns_sanitized_manifest_error() {
 
     assert!(matches!(
         err,
-        DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Manifest,
+        DispatchError::Rejected {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Manifest),
             ..
         }
     ));
@@ -347,8 +349,8 @@ async fn wasm_lane_invalid_output_json_returns_sanitized_output_error() {
 
     assert!(matches!(
         err,
-        DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::OutputDecode,
+        DispatchError::Rejected {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputDecode),
             ..
         }
     ));
@@ -395,10 +397,12 @@ async fn wasm_lane_rejects_unsupported_import_through_dispatcher_without_reserva
 
     assert!(matches!(
         err,
-        DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Manifest
-                | RuntimeDispatchErrorKind::MethodMissing
-                | RuntimeDispatchErrorKind::Executor,
+        DispatchError::Rejected {
+            kind: DispatchFailureKind::Runtime(
+                RuntimeDispatchErrorKind::Manifest
+                    | RuntimeDispatchErrorKind::MethodMissing
+                    | RuntimeDispatchErrorKind::Executor
+            ),
             ..
         }
     ));
@@ -456,8 +460,10 @@ async fn wasm_lane_enforces_memory_growth_budget_through_dispatcher() {
     assert!(
         matches!(
             err,
-            DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Guest | RuntimeDispatchErrorKind::Memory,
+            DispatchError::Rejected {
+                kind: DispatchFailureKind::Runtime(
+                    RuntimeDispatchErrorKind::Guest | RuntimeDispatchErrorKind::Memory
+                ),
                 ..
             }
         ),
@@ -531,8 +537,8 @@ async fn wasm_lane_caps_overdue_host_import_at_dispatch_execution_deadline() {
 
     assert!(matches!(
         err,
-        DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Guest,
+        DispatchError::Rejected {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest),
             ..
         }
     ));
@@ -658,23 +664,32 @@ impl WasmRuntimeAdapter {
                 request
                     .package
                     .materialized_root()
-                    .map_err(|_| DispatchError::Wasm {
-                        kind: RuntimeDispatchErrorKind::Manifest,
-                        model_visible_cause: None,
+                    .map_err(|_| DispatchError::Rejected {
+                        runtime: Some(RuntimeKind::Wasm),
+                        kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Manifest),
+                        diagnostic: None,
+                        detail: None,
+                        attempt: None,
                     })?,
             )
-            .map_err(|_| DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Manifest,
-                model_visible_cause: None,
+            .map_err(|_| DispatchError::Rejected {
+                runtime: Some(RuntimeKind::Wasm),
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Manifest),
+                diagnostic: None,
+                detail: None,
+                attempt: None,
             })?,
             other => {
-                return Err(DispatchError::Wasm {
-                    kind: if other.kind() == RuntimeKind::Wasm {
+                return Err(DispatchError::Rejected {
+                    runtime: Some(RuntimeKind::Wasm),
+                    kind: DispatchFailureKind::Runtime(if other.kind() == RuntimeKind::Wasm {
                         RuntimeDispatchErrorKind::Manifest
                     } else {
                         RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
-                    },
-                    model_visible_cause: None,
+                    }),
+                    diagnostic: None,
+                    detail: None,
+                    attempt: None,
                 });
             }
         };
@@ -691,16 +706,22 @@ impl WasmRuntimeAdapter {
             .filesystem
             .read_file(&module_path)
             .await
-            .map_err(|_| DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::FilesystemDenied,
-                model_visible_cause: None,
+            .map_err(|_| DispatchError::Rejected {
+                runtime: Some(RuntimeKind::Wasm),
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::FilesystemDenied),
+                diagnostic: None,
+                detail: None,
+                attempt: None,
             })?;
         let prepared = Arc::new(
             self.runtime
                 .prepare(request.capability_id.as_str(), &wasm_bytes)
-                .map_err(|error| DispatchError::Wasm {
-                    kind: wasm_error_kind(&error),
-                    model_visible_cause: None,
+                .map_err(|error| DispatchError::Rejected {
+                    runtime: Some(RuntimeKind::Wasm),
+                    kind: DispatchFailureKind::Runtime(wasm_error_kind(&error)),
+                    diagnostic: None,
+                    detail: None,
+                    attempt: None,
                 })?,
         );
         let prepared = {
@@ -807,18 +828,25 @@ fn execute_prepared_wasm(
     host: WitToolHost,
     request: LocalLaneRequest<'_>,
 ) -> Result<RuntimeAdapterResult, DispatchError> {
-    let input_json = serde_json::to_string(&request.input).map_err(|_| DispatchError::Wasm {
-        kind: RuntimeDispatchErrorKind::InputEncode,
-        model_visible_cause: None,
-    })?;
+    let input_json =
+        serde_json::to_string(&request.input).map_err(|_| DispatchError::Rejected {
+            runtime: Some(RuntimeKind::Wasm),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
+            diagnostic: None,
+            detail: None,
+            attempt: None,
+        })?;
     let reservation = match request.resource_reservation {
         Some(reservation) => reservation,
         None => request
             .governor
             .reserve(request.scope, request.estimate)
-            .map_err(|_| DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Resource,
-                model_visible_cause: None,
+            .map_err(|_| DispatchError::Rejected {
+                runtime: Some(RuntimeKind::Wasm),
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+                diagnostic: None,
+                detail: None,
+                attempt: None,
             })?,
     };
     let execution = match runtime.execute(prepared, host, WitToolRequest::new(input_json)) {
@@ -827,17 +855,23 @@ fn execute_prepared_wasm(
             if let Some(usage) = preserved_wasm_error_usage(&error) {
                 if request.governor.reconcile(reservation.id, usage).is_err() {
                     release_wasm_reservation(request.governor, reservation.id);
-                    return Err(DispatchError::Wasm {
-                        kind: RuntimeDispatchErrorKind::Resource,
-                        model_visible_cause: None,
+                    return Err(DispatchError::Rejected {
+                        runtime: Some(RuntimeKind::Wasm),
+                        kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+                        diagnostic: None,
+                        detail: None,
+                        attempt: None,
                     });
                 }
             } else {
                 release_wasm_reservation(request.governor, reservation.id);
             }
-            return Err(DispatchError::Wasm {
-                kind: wasm_error_kind(&error),
-                model_visible_cause: None,
+            return Err(DispatchError::Rejected {
+                runtime: Some(RuntimeKind::Wasm),
+                kind: DispatchFailureKind::Runtime(wasm_error_kind(&error)),
+                diagnostic: None,
+                detail: None,
+                attempt: None,
             });
         }
     };
@@ -845,16 +879,22 @@ fn execute_prepared_wasm(
         WitToolOutcome::Success(output_json) => output_json,
         WitToolOutcome::Failure(_) | WitToolOutcome::LegacyFailure(_) => {
             release_wasm_reservation(request.governor, reservation.id);
-            return Err(DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Guest,
-                model_visible_cause: None,
+            return Err(DispatchError::Rejected {
+                runtime: Some(RuntimeKind::Wasm),
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest),
+                diagnostic: None,
+                detail: None,
+                attempt: None,
             });
         }
         WitToolOutcome::LegacyMissingOutput => {
             release_wasm_reservation(request.governor, reservation.id);
-            return Err(DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::InvalidResult,
-                model_visible_cause: None,
+            return Err(DispatchError::Rejected {
+                runtime: Some(RuntimeKind::Wasm),
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InvalidResult),
+                diagnostic: None,
+                detail: None,
+                attempt: None,
             });
         }
     };
@@ -862,9 +902,12 @@ fn execute_prepared_wasm(
         Ok(output) => output,
         Err(_) => {
             release_wasm_reservation(request.governor, reservation.id);
-            return Err(DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::OutputDecode,
-                model_visible_cause: None,
+            return Err(DispatchError::Rejected {
+                runtime: Some(RuntimeKind::Wasm),
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputDecode),
+                diagnostic: None,
+                detail: None,
+                attempt: None,
             });
         }
     };
@@ -875,9 +918,12 @@ fn execute_prepared_wasm(
         Ok(receipt) => receipt,
         Err(_) => {
             release_wasm_reservation(request.governor, reservation.id);
-            return Err(DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Resource,
-                model_visible_cause: None,
+            return Err(DispatchError::Rejected {
+                runtime: Some(RuntimeKind::Wasm),
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+                diagnostic: None,
+                detail: None,
+                attempt: None,
             });
         }
     };
