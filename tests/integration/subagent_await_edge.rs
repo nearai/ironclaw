@@ -2,9 +2,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-use ironclaw_host_api::turn::{
-    LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnGateRef, TurnRunId, TurnScope,
-};
+use ironclaw_host_api::turn::{LoopResultRef, TurnGateRef, TurnRunId, TurnScope};
 use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, InvocationId, ProcessId, ProjectId, TenantId, ThreadId, UserId},
     mount::{MountGrant, MountPermissions, MountView},
@@ -49,8 +47,6 @@ async fn runner_await_edge_is_a_projection_over_process_dependencies() {
         child_scope: child_scope.clone(),
         child_run_id,
         child_thread_id: child_scope.thread_id.clone(),
-        source_binding_ref: SourceBindingRef::new("source:child").expect("source"),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply:child").expect("reply target"),
         subagent_kind: SubagentKindId::new("general").expect("subagent kind"),
         spawn_capability_id: CapabilityId::new("builtin.subagent.spawn").expect("capability"),
         spawn_provider_call_id: None,

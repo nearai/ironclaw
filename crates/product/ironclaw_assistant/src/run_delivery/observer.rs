@@ -78,6 +78,11 @@ struct RunNotificationDeliveryContext<'a> {
     scope: &'a TurnScope,
     thread_scope: &'a ThreadScope,
     actor: &'a TurnActor,
+    /// The reply route, owned by the CONVERSATION binding the envelope
+    /// resolved to — runs themselves carry no reply-target binding, so the
+    /// observer routes every notification from the product-side binding it
+    /// already holds.
+    reply_target_binding_ref: &'a ReplyTargetBindingRef,
 }
 
 /// The live working indicator for one run: the currently posted message (if
@@ -641,9 +646,9 @@ impl RunDeliveryObserver {
                         scope: &scope,
                         thread_scope: &thread_scope,
                         actor: &actor,
+                        reply_target_binding_ref: &binding.reply_target_binding_ref,
                     },
                     run_id,
-                    &actionable_state,
                     notification,
                 )
                 .await?;
@@ -974,6 +979,17 @@ impl RunDeliveryObserver {
                                 Some(AuthPromptChallengeKind::OAuthUrl) | None => {
                                     prompts::OAUTH_PRIVATE_SETUP_MESSAGE.to_string()
                                 }
+                                // Unreachable in practice — `DeviceLink` is
+                                // never serviceable, so it exits through the
+                                // cancel-and-redirect arm below rather than
+                                // reaching this private-target narrowing. The
+                                // arm still carries its own copy so that the
+                                // day a device-link frame becomes deliverable,
+                                // the fallback names the real next step
+                                // instead of the generic dead end.
+                                Some(AuthPromptChallengeKind::DeviceLink) => {
+                                    prompts::DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE.to_string()
+                                }
                                 Some(
                                     AuthPromptChallengeKind::ManualToken
                                     | AuthPromptChallengeKind::Other,
@@ -1021,7 +1037,6 @@ impl RunDeliveryObserver {
         &self,
         context: RunNotificationDeliveryContext<'_>,
         run_id: TurnRunId,
-        state: &TurnRunState,
         notification: ActionableNotification,
     ) -> Result<Vec<DeliveredChannelMessage>, RunDeliveryError> {
         let RunNotificationDeliveryContext {
@@ -1029,8 +1044,9 @@ impl RunDeliveryObserver {
             scope,
             thread_scope,
             actor,
+            reply_target_binding_ref,
         } = context;
-        let reply_target = state.reply_target_binding_ref.clone();
+        let reply_target = reply_target_binding_ref.clone();
         let target_authority = ObservedReplyTargetAuthority {
             scope: scope.clone(),
             actor: actor.clone(),

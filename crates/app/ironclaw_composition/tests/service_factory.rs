@@ -1588,10 +1588,6 @@ async fn production_postgres_process_journal_pool_writes_rows_the_data_plane_rea
             actor: ironclaw_turns::TurnActor::new(owner),
             accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("journal-pool-message")
                 .expect("message ref"),
-            source_binding_ref: ironclaw_turns::SourceBindingRef::new("source-web")
-                .expect("source binding"),
-            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new("reply-web")
-                .expect("reply binding"),
             requested_run_profile: Some(
                 ironclaw_turns::RunProfileRequest::new("default").expect("run profile"),
             ),

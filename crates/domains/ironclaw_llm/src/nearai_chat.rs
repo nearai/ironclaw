@@ -1119,8 +1119,12 @@ struct ChatCompletionRequest {
     stop: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<ChatCompletionTool>>,
+    /// `"auto"`/`"required"`/`"none"` serialize as bare strings; a named
+    /// tool serializes as the OpenAI object form
+    /// `{"type":"function","function":{"name":…}}` — a bare tool-name string
+    /// is rejected by OpenAI-compatible chat servers.
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_choice: Option<String>,
+    tool_choice: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "is_false")]
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1442,6 +1446,17 @@ fn build_chat_completion_request(
 ) -> ChatCompletionRequest {
     let tools: Vec<ChatCompletionTool> = tools.into_iter().map(convert_tool_definition).collect();
     let has_tools = !tools.is_empty();
+    let tool_choice = if has_tools {
+        tool_choice.map(|tc| match tc.as_str() {
+            "auto" | "required" | "none" => serde_json::Value::String(tc),
+            specific => serde_json::json!({
+                "type": "function",
+                "function": {"name": specific}
+            }),
+        })
+    } else {
+        None
+    };
 
     ChatCompletionRequest {
         model,
@@ -1450,7 +1465,7 @@ fn build_chat_completion_request(
         max_tokens,
         stop,
         tools: if has_tools { Some(tools) } else { None },
-        tool_choice: if has_tools { tool_choice } else { None },
+        tool_choice,
         stream: false,
         stream_options: None,
     }
@@ -3971,7 +3986,7 @@ data: [DONE]
                     })),
                 },
             }]),
-            tool_choice: Some("auto".to_string()),
+            tool_choice: Some(serde_json::Value::String("auto".to_string())),
             stream: false,
             stream_options: None,
         };
@@ -4006,6 +4021,51 @@ data: [DONE]
         assert!(
             json.get("tool_choice").is_none(),
             "tool_choice is invalid without tools on OpenAI-compatible chat APIs"
+        );
+    }
+
+    #[test]
+    fn test_request_encodes_named_tool_choice_as_the_openai_object_form() {
+        let request = build_chat_completion_request(
+            "gpt-4o".to_string(),
+            vec![ChatMessage::user("finish").into()],
+            vec![crate::provider::ToolDefinition {
+                name: "builtin__structured_result".to_string(),
+                description: "record the result".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+            None,
+            None,
+            None,
+            Some("builtin__structured_result".to_string()),
+        );
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            json["tool_choice"],
+            serde_json::json!({
+                "type": "function",
+                "function": {"name": "builtin__structured_result"}
+            }),
+            "a bare tool-name string is rejected by OpenAI-compatible chat servers"
+        );
+        assert_eq!(
+            serde_json::to_value(build_chat_completion_request(
+                "gpt-4o".to_string(),
+                vec![ChatMessage::user("finish").into()],
+                vec![crate::provider::ToolDefinition {
+                    name: "lookup".to_string(),
+                    description: "lookup".to_string(),
+                    parameters: serde_json::json!({"type": "object"}),
+                }],
+                None,
+                None,
+                None,
+                Some("required".to_string()),
+            ))
+            .unwrap()["tool_choice"],
+            serde_json::json!("required"),
+            "mode strings stay bare strings"
         );
     }
 

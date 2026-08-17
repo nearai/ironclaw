@@ -487,6 +487,17 @@ DOCKER_RUNTIME_CONFIG_OWNERS = {
     "docker/reborn/config.hosted-single-tenant.toml": "tests/dockerfile_runtime_home.rs",
     "docker/reborn/config.hosted-single-tenant-volume.toml": "tests/dockerfile_runtime_home.rs",
 }
+# Repository configuration that a Reborn crate test reads as an asserted input.
+# These paths are not static CI control: changing one must schedule the test that
+# defines its product/security contract. The linked-device supply-chain test
+# parses Dependabot's Cargo ignore rules so the exact grammers pin cannot be
+# silently reopened by an automated dependency update.
+REPO_CONFIG_TEST_OWNERS = {
+    ".github/dependabot.yml": (
+        "crates/app/ironclaw_architecture_tests/tests/"
+        "reborn_linked_device_supply_chain_pin.rs"
+    ),
+}
 # `.githooks/` is developer-local git hook plumbing: no Reborn lane executes a
 # hook, while Code Style both triggers on the tree and lints its contents
 # (`scripts/ci/test-ci-comm-locale-pin.sh` follows the symlinks and scans them).
@@ -822,6 +833,24 @@ def build_plan(
             # nextest configuration. Keep other `.github/actions/**` paths
             # fail-closed until their consumers are mapped deliberately.
             shared_reborn_action_changed = True
+            continue
+        if path in REPO_CONFIG_TEST_OWNERS:
+            owner = REPO_CONFIG_TEST_OWNERS[path]
+            package = next(
+                (
+                    name
+                    for directory, name in package_directories.items()
+                    if owner.startswith(f"{directory}/")
+                ),
+                None,
+            )
+            if package is None:
+                raise ValueError(
+                    f"repository config owner is in no workspace package: {owner}"
+                )
+            direct_test_packages.add(package)
+            exact_test_targets[package].add(("test", Path(owner).stem))
+            reasons.append(f"repository config parsed by {owner}: {path}")
             continue
         if path in PR_STATIC_CONTROL_PATHS or path.startswith(
             PR_STATIC_CONTROL_PREFIXES

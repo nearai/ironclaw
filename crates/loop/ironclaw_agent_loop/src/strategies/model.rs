@@ -1,6 +1,8 @@
 use async_trait::async_trait;
+use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_loop_contracts::LoopModelToolChoice;
 
-use crate::state::LoopExecutionState;
+use crate::state::{LoopExecutionState, ReplyAdmissionRejectionReason};
 
 /// Decides which model preference to pass on the next `stream_model` call.
 ///
@@ -14,6 +16,12 @@ use crate::state::LoopExecutionState;
 #[async_trait]
 pub(crate) trait ModelStrategy: Send + Sync {
     async fn preference(&self, state: &LoopExecutionState) -> ModelPreference;
+
+    /// Provider tool-choice constraint for the next model call. `None` (the
+    /// default) leaves the provider on its own "auto" behavior.
+    async fn tool_choice(&self, _state: &LoopExecutionState) -> Option<LoopModelToolChoice> {
+        None
+    }
 }
 
 #[allow(dead_code)]
@@ -33,6 +41,42 @@ impl ModelStrategy for DefaultModelStrategy {
         match state.model_state.fallback_index {
             0 => ModelPreference::Primary,
             index => ModelPreference::Fallback { index },
+        }
+    }
+}
+
+/// `ModelStrategy` for structured-output runs (unbound-turn design §4.5):
+/// route selection is the default fallback-chain behavior, but a model call
+/// issued while a structured-output rejection is pending — a repair retry
+/// after the model produced a plain-text final — forces the provider's
+/// tool choice onto the synthetic result capability. First attempts stay on
+/// provider "auto" so the model can use ordinary tools before finishing.
+#[derive(Debug, Clone)]
+pub struct StructuredResultModelStrategy {
+    result_capability: CapabilityId,
+}
+
+impl StructuredResultModelStrategy {
+    pub fn new(result_capability: CapabilityId) -> Self {
+        Self { result_capability }
+    }
+}
+
+#[async_trait]
+impl ModelStrategy for StructuredResultModelStrategy {
+    async fn preference(&self, state: &LoopExecutionState) -> ModelPreference {
+        DefaultModelStrategy.preference(state).await
+    }
+
+    async fn tool_choice(&self, state: &LoopExecutionState) -> Option<LoopModelToolChoice> {
+        let pending = state.reply_admission_state.pending_rejection.as_ref()?;
+        match pending.reason_code {
+            ReplyAdmissionRejectionReason::StructuredOutputRequired => {
+                Some(LoopModelToolChoice::ForcedCapability {
+                    capability_id: self.result_capability.clone(),
+                })
+            }
+            ReplyAdmissionRejectionReason::StopConditionNotMet => None,
         }
     }
 }
@@ -126,6 +170,7 @@ mod tests {
                 tier: ResourceBudgetTier::new("default_model_test_tier").expect("valid"),
                 max_model_calls: 32,
                 max_capability_invocations: 64,
+                max_wall_clock_seconds: None,
             },
             personal_context_policy: ironclaw_loop_contracts::PersonalContextPolicy::Excluded,
             runtime_constraints: RuntimeProfileConstraints {
@@ -164,6 +209,43 @@ mod tests {
         let mut state = LoopExecutionState::initial_for_run(&test_run_context());
         state.model_state.fallback_index = 2;
 
+        assert_eq!(
+            strategy.preference(&state).await,
+            ModelPreference::Fallback { index: 2 }
+        );
+    }
+
+    #[tokio::test]
+    async fn structured_result_strategy_forces_the_result_tool_only_on_repair_retries() {
+        use super::StructuredResultModelStrategy;
+        use crate::state::ReplyAdmissionRejection;
+        use ironclaw_loop_contracts::LoopModelToolChoice;
+
+        let capability =
+            ironclaw_host_api::ids::CapabilityId::new("builtin.structured_result").expect("valid");
+        let strategy = StructuredResultModelStrategy::new(capability.clone());
+        let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+
+        // First attempt: no pending rejection, provider stays on "auto".
+        assert_eq!(strategy.tool_choice(&state).await, None);
+
+        // Repair retry after a rejected plain-text final: force the tool.
+        state.reply_admission_state.pending_rejection =
+            Some(ReplyAdmissionRejection::structured_output_required());
+        assert_eq!(
+            strategy.tool_choice(&state).await,
+            Some(LoopModelToolChoice::ForcedCapability {
+                capability_id: capability
+            })
+        );
+
+        // A stop-condition rejection is not a structured repair.
+        state.reply_admission_state.pending_rejection =
+            Some(ReplyAdmissionRejection::stop_condition_not_met());
+        assert_eq!(strategy.tool_choice(&state).await, None);
+
+        // Route preference stays the default fallback-chain behavior.
+        state.model_state.fallback_index = 2;
         assert_eq!(
             strategy.preference(&state).await,
             ModelPreference::Fallback { index: 2 }

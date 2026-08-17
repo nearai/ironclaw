@@ -3416,6 +3416,7 @@ async fn production_loop_model_gateway_rejects_forged_context_summary_before_pro
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -3467,6 +3468,7 @@ async fn production_loop_model_gateway_rejects_unvalidated_surface_before_provid
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -4492,6 +4494,7 @@ async fn production_loop_request_with_safety_and_inline_messages(
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     }
 }
 
@@ -4618,6 +4621,7 @@ fn model_request(model_profile_id: ModelProfileId) -> HostManagedModelRequest {
         resolved_model_route: None,
         run_id: TurnRunId::new(),
         turn_id: TurnId::new(),
+        tool_choice: None,
     }
 }
 

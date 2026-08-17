@@ -720,8 +720,8 @@ use ironclaw_assistant::{
 use ironclaw_extension_contracts::state::{InstallationState, LifecyclePublicState};
 use ironclaw_host_api::ids::ProjectId;
 use ironclaw_host_api::turn::{
-    AcceptedMessageRef, IdempotencyKey, LoopResultRef, ReplyTargetBindingRef,
-    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnId, TurnRunId, TurnScope, TurnStatus,
+    AcceptedMessageRef, IdempotencyKey, LoopResultRef, SanitizedCancelReason, TurnActor, TurnId,
+    TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
     ids::{
@@ -1990,6 +1990,7 @@ fn nearai_gateway_test_request() -> HostManagedModelRequest {
         fallback_index: 0,
         run_id: TurnRunId::new(),
         turn_id: TurnId::new(),
+        tool_choice: None,
     }
 }
 
@@ -4229,8 +4230,6 @@ async fn cancel_run_propagates_to_subagent_children() {
             scope: parent_scope.clone(),
             actor: actor.clone(),
             accepted_message_ref: AcceptedMessageRef::new("msg:cancel-parent").unwrap(),
-            source_binding_ref: SourceBindingRef::new("source:cancel-parent").unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:cancel-parent").unwrap(),
             requested_run_profile: None,
             idempotency_key: IdempotencyKey::new("cancel-parent").unwrap(),
             received_at: Utc::now(),
@@ -4262,8 +4261,6 @@ async fn cancel_run_propagates_to_subagent_children() {
                 child_scope: child_scope.clone(),
                 actor,
                 accepted_message_ref: AcceptedMessageRef::new("msg:cancel-child").unwrap(),
-                source_binding_ref: SourceBindingRef::new("source:cancel-child").unwrap(),
-                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:cancel-child").unwrap(),
                 requested_run_profile: None,
                 idempotency_key: IdempotencyKey::new("cancel-child").unwrap(),
                 received_at: Utc::now(),
@@ -5424,6 +5421,11 @@ async fn standalone_runtime_rejects_workspace_overlapping_default_skill_roots() 
 
 #[tokio::test]
 async fn standalone_runtime_skips_invalid_filesystem_skill_before_model_call() {
+    // This exercises a complete filesystem-backed runtime bootstrap. Under the
+    // crate's parallel test load that can exceed the short poll budget used by
+    // smaller scenarios, even though the model path itself completes promptly.
+    const INVALID_SKILL_TEST_TIMEOUT: Duration = Duration::from_secs(15);
+
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("standalone");
     seed_user_skill(
@@ -5455,7 +5457,7 @@ async fn standalone_runtime_skips_invalid_filesystem_skill_before_model_call() {
     })
     .with_poll_settings(PollSettings {
         interval: Duration::from_millis(10),
-        max_total: Duration::from_secs(3),
+        max_total: INVALID_SKILL_TEST_TIMEOUT,
     })
     .with_model_gateway_override(gateway);
 
@@ -6860,6 +6862,13 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
     };
     use std::sync::OnceLock;
 
+    // This scenario performs a complete libSQL-backed runtime bootstrap and an
+    // extension lifecycle transition while the crate's other runtime tests run
+    // in parallel. Keep the timeout large enough to measure the behavior under
+    // test rather than host scheduling contention; the generic 10-second poll
+    // budget is intentionally tighter for smaller runtime scenarios.
+    const SURFACE_CHANGE_TEST_TIMEOUT: Duration = Duration::from_secs(30);
+
     // Gateway state seeded after runtime build.
     struct LifecycleServiceHandle {
         service: ironclaw_extension_manager::ExtensionHostLifecycleProductService,
@@ -7021,7 +7030,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
     })
     .with_poll_settings(PollSettings {
         interval: Duration::from_millis(10),
-        max_total: RUNTIME_POLL_TIMEOUT,
+        max_total: SURFACE_CHANGE_TEST_TIMEOUT,
     })
     .with_model_gateway_override(gateway_for_runtime);
 
@@ -7043,7 +7052,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
         .enable_global_auto_approve_for_test(&conversation)
         .await;
     let reply = tokio::time::timeout(
-        RUNTIME_SEND_TIMEOUT,
+        SURFACE_CHANGE_TEST_TIMEOUT,
         runtime.send_user_message(&conversation, "use echo tool twice"),
     )
     .await
@@ -7138,8 +7147,6 @@ async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
             scope: scope.clone(),
             actor: actor.clone(),
             accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy-a").unwrap(),
-            source_binding_ref: SourceBindingRef::new("source:rejected-busy-a").unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:rejected-busy-a").unwrap(),
             requested_run_profile: None,
             idempotency_key: IdempotencyKey::new("rejected-busy-a").unwrap(),
             received_at: Utc::now(),
@@ -7342,6 +7349,7 @@ impl ironclaw_auth::RuntimeCredentialAccountSelectionService for MultiToolConfig
             refresh_secret: None,
             scopes: Vec::new(),
             provider_identity: None,
+            link_revision: 0,
             created_at: now,
             updated_at: now,
         })

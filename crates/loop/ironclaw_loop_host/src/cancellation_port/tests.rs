@@ -11,10 +11,9 @@ use ironclaw_loop_contracts::{AgentLoopHostError, RunProfileResolver};
 use ironclaw_loop_contracts::{LoopCancelReasonKind, LoopCancellationPort};
 use ironclaw_turns::{
     AcceptedMessageRef, AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, EventCursor,
-    GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnAdmissionPolicy, TurnError, TurnId, TurnRunId, TurnRunState, TurnRunWake,
-    TurnRunWakeNotifier, TurnScope, TurnStatus,
+    GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy, TurnError, TurnId,
+    TurnRunId, TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnScope, TurnStatus,
 };
 
 use super::{
@@ -160,8 +159,6 @@ fn test_run_state(status: TurnStatus) -> TurnRunState {
         run_id: TurnRunId::new(),
         status,
         accepted_message_ref: AcceptedMessageRef::new("accepted-cancel-factory").unwrap(),
-        source_binding_ref: SourceBindingRef::new("source-cancel-factory").unwrap(),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-cancel-factory").unwrap(),
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         allow_steering: true,

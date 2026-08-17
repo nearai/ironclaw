@@ -104,10 +104,6 @@ use crate::{
     UnsupportedLifecycleProductService,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
-    binding_ref::{
-        DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_reply_target_binding_ref,
-        bounded_source_binding_ref,
-    },
     declared_command_help_text, is_approval_gate_ref, is_auth_gate_ref,
     policy::{BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest},
     product_command_descriptors, required_audience, thread_metadata_is_automation_trigger,
@@ -4953,21 +4949,12 @@ where
         // (the failed run is terminal) and then deletes the thread while
         // `retry_turn` enqueues a replacement run against it.
         let _thread_operation_guard = self.lock_thread_operation(&access.scope).await;
-        let binding_id = webui_retry_binding_id(&access.scope, run_id, &client_action_id);
         let response = self
             .turn_coordinator
             .retry_turn(RetryTurnRequest {
                 scope: access.scope,
                 actor: access.run_actor,
                 run_id,
-                source_binding_ref: webui_source_binding_ref_from_raw(
-                    "webui-retry-src",
-                    &binding_id,
-                )?,
-                reply_target_binding_ref: webui_reply_target_binding_ref_from_raw(
-                    "webui-retry-reply",
-                    &binding_id,
-                )?,
                 idempotency_key: client_action_id,
             })
             .await
@@ -6415,7 +6402,6 @@ where
                 if always {
                     return Err(persistent_approval_unavailable());
                 }
-                let binding_id = webui_gate_binding_id(&scope, &gate_ref_string(&gate_ref));
                 let response = self
                     .turn_coordinator
                     .resume_turn(ResumeTurnRequest {
@@ -6424,14 +6410,6 @@ where
                         run_id,
                         gate_resolution_ref: gate_ref,
                         precondition: ResumeTurnPrecondition::AnyBlockedGate,
-                        source_binding_ref: webui_source_binding_ref_from_raw(
-                            "webui-gate-src",
-                            &binding_id,
-                        )?,
-                        reply_target_binding_ref: webui_reply_target_binding_ref_from_raw(
-                            "webui-gate-reply",
-                            &binding_id,
-                        )?,
                         idempotency_key: client_action_id,
                         resume_disposition: None,
                     })
@@ -6714,24 +6692,6 @@ fn parse_run_id_field(
 
 fn parse_persisted_turn_run_id(value: &str) -> Result<TurnRunId, ProductSurfaceError> {
     TurnRunId::parse(value).map_err(ProductSurfaceError::internal_from)
-}
-
-fn webui_source_binding_ref_from_raw(
-    prefix: &str,
-    raw: &str,
-) -> Result<ironclaw_host_api::turn::SourceBindingRef, ProductSurfaceError> {
-    bounded_source_binding_ref(prefix, raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(|_| {
-        ProductSurfaceError::from_status(ProductSurfaceErrorCode::Internal, 500, false)
-    })
-}
-
-fn webui_reply_target_binding_ref_from_raw(
-    prefix: &str,
-    raw: &str,
-) -> Result<ironclaw_host_api::turn::ReplyTargetBindingRef, ProductSurfaceError> {
-    bounded_reply_target_binding_ref(prefix, raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(|_| {
-        ProductSurfaceError::from_status(ProductSurfaceErrorCode::Internal, 500, false)
-    })
 }
 
 /// Transport identity stamped on session-lane submissions that did not name
@@ -7028,35 +6988,6 @@ fn cap_summary_artifacts(
     artifacts
 }
 
-fn webui_gate_binding_id(scope: &TurnScope, gate_ref: &str) -> String {
-    format!(
-        "{}{}{}{}",
-        segment("surface", "webui"),
-        segment("tenant", scope.tenant_id.as_str()),
-        segment("thread", scope.thread_id.as_str()),
-        segment("gate", gate_ref)
-    )
-}
-
-fn webui_retry_binding_id(
-    scope: &TurnScope,
-    run_id: TurnRunId,
-    client_action_id: &IdempotencyKey,
-) -> String {
-    format!(
-        "{}{}{}{}{}",
-        segment("surface", "webui"),
-        segment("tenant", scope.tenant_id.as_str()),
-        segment("thread", scope.thread_id.as_str()),
-        segment("failed_run", run_id.as_uuid().to_string().as_str()),
-        segment("action", client_action_id.as_str())
-    )
-}
-
-fn gate_ref_string(gate_ref: &ironclaw_host_api::turn::TurnGateRef) -> String {
-    gate_ref.as_str().to_string()
-}
-
 fn persistent_approval_unavailable() -> ProductSurfaceError {
     ProductSurfaceError::from_status_kind(
         ProductSurfaceErrorCode::Unavailable,
@@ -7129,12 +7060,16 @@ fn map_thread_error(error: SessionThreadError) -> ProductSurfaceError {
         | SessionThreadError::OverlappingSummaryRange { .. } => {
             ProductSurfaceError::from_status(ProductSurfaceErrorCode::Conflict, 409, false)
         }
-        SessionThreadError::InvalidAttachment(_) => ProductSurfaceError::from_status_kind(
-            ProductSurfaceErrorCode::InvalidRequest,
-            ProductSurfaceErrorKind::Validation,
-            400,
-            false,
-        ),
+        SessionThreadError::InvalidAttachment(_)
+        | SessionThreadError::InvalidPreparedContext { .. }
+        | SessionThreadError::PreparedContextKeyMismatch { .. } => {
+            ProductSurfaceError::from_status_kind(
+                ProductSurfaceErrorCode::InvalidRequest,
+                ProductSurfaceErrorKind::Validation,
+                400,
+                false,
+            )
+        }
         SessionThreadError::GeneratedThreadId(_)
         | SessionThreadError::Serialization(_)
         | SessionThreadError::Deserialization(_)

@@ -14,9 +14,9 @@ use aws_sdk_bedrockruntime::Client;
 use aws_sdk_bedrockruntime::operation::converse::ConverseError;
 use aws_sdk_bedrockruntime::types::{
     AnyToolChoice, AutoToolChoice, ContentBlock, ConversationRole, ImageBlock, ImageFormat,
-    ImageSource, InferenceConfiguration, Message, StopReason, SystemContentBlock, Tool, ToolChoice,
-    ToolConfiguration, ToolInputSchema, ToolResultBlock, ToolResultContentBlock, ToolResultStatus,
-    ToolSpecification, ToolUseBlock,
+    ImageSource, InferenceConfiguration, Message, SpecificToolChoice, StopReason,
+    SystemContentBlock, Tool, ToolChoice, ToolConfiguration, ToolInputSchema, ToolResultBlock,
+    ToolResultContentBlock, ToolResultStatus, ToolSpecification, ToolUseBlock,
 };
 use aws_smithy_types::{Blob, Document};
 use rust_decimal::Decimal;
@@ -598,8 +598,17 @@ fn build_tool_config(
             return Ok(None);
         }
         Some("required") => Some(ToolChoice::Any(AnyToolChoice::builder().build())),
-        // "auto" or anything else
-        _ => Some(ToolChoice::Auto(AutoToolChoice::builder().build())),
+        Some("auto") | None => Some(ToolChoice::Auto(AutoToolChoice::builder().build())),
+        // A named tool: Converse supports forcing one specific tool.
+        Some(specific) => Some(ToolChoice::Tool(
+            SpecificToolChoice::builder()
+                .name(specific)
+                .build()
+                .map_err(|e| LlmError::RequestFailed {
+                    provider: "bedrock".to_string(),
+                    reason: format!("Failed to build SpecificToolChoice: {}", e),
+                })?,
+        )),
     };
 
     let mut builder = ToolConfiguration::builder().set_tools(Some(bedrock_tools));

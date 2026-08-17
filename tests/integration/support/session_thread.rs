@@ -45,7 +45,7 @@ where
     root_prefix: String,
 }
 
-impl<F: RootFilesystem> RebornThreadHarness<F> {
+impl<F: RootFilesystem + 'static> RebornThreadHarness<F> {
     pub fn reopened(&self) -> Result<Self, RebornThreadHarnessError> {
         let scoped = scoped_threads_fs_at(&self.root_prefix, Arc::clone(&self.backend))?;
         let service = Arc::new(FilesystemSessionThreadService::new(scoped));

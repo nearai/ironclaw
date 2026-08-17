@@ -118,10 +118,6 @@ const CROSS_SLACK_ACK: &str = "Sent it to your Telegram DM.";
 const TELEGRAM_VENDOR_MESSAGE_ID: &str = "4242";
 
 // ── Same-origin denial journey ─────────────────────────────────────────────
-const ORIGIN_TARGET_ID: &str = "origin:this-conversation";
-const ORIGIN_DENIED_CONTENT: &str = "please send this update to my own conversation";
-const ORIGIN_DENIED_ACK: &str = "Your reply already lands here, so there's nothing more to send.";
-const ORIGIN_DENIED_SUMMARY: &str = "target is this conversation - your reply already lands here";
 
 // ── Partial-failure journey ────────────────────────────────────────────────
 const PARTIAL_OK_DM_CHANNEL: &str = "D-JOURNEY-OK";
@@ -1091,83 +1087,6 @@ async fn slack_origin_delivers_to_telegram_and_acks_in_slack() {
     // Attempt ledger: per-surface attribution — the explicit ModelDelivery
     // to Telegram and the automatic FinalReply to Slack.
     assert_delivered_attempts_by_kind(services, &vendor_scope, 1, 1).await;
-}
-
-/// Spec §13.3 — delivering to the origin conversation is a soft, safe
-/// denial, not a silent no-op and not a crash.
-///
-/// A `builtin.outbound_deliver` call naming the SAME conversation the run is
-/// replying in must be denied BEFORE any coordinator dispatch
-/// (`ModelChannelDeliveryError::OriginConversationTarget`, surfaced as a
-/// policy-denied tool error with the fixed "already lands here" summary) —
-/// never delivered twice, never silently dropped. The run still finishes
-/// with its own normal final reply.
-#[tokio::test(flavor = "multi_thread")]
-async fn deliver_to_origin_conversation_is_denied_and_model_replies() {
-    let group = RebornIntegrationGroup::extension_delivery()
-        .await
-        .expect("delivery group builds");
-    let services = reborn_services(&group);
-    let harness = group
-        .thread("conv-origin-denied")
-        .script([RebornScriptedReply::text("priming reply")])
-        .build()
-        .await
-        .expect("origin-denied thread builds");
-
-    // Learn this thread's own reply-target binding by completing a priming
-    // turn, then reading it straight back off the run's persisted state —
-    // the EXACT value the same-origin check compares against, with no risk
-    // of a parallel (and possibly divergent) reconstruction formula. A plain
-    // WebUI-shaped thread's own final reply never touches the delivery
-    // ledger (unlike a channel-origin run's lane-1 echo), so this priming
-    // turn adds no attempt row for the later zero-attempts assertion to
-    // trip over.
-    let priming_run_id = harness
-        .submit_turn("hello")
-        .await
-        .expect("priming turn completes");
-    let priming_state = harness
-        .turn_coordinator_for_test()
-        .get_run_state(GetRunStateRequest {
-            scope: harness.turn_scope.clone(),
-            run_id: priming_run_id,
-        })
-        .await
-        .expect("priming run state readable");
-    group
-        .register_source_delivery_target_for_test(
-            "origin",
-            ORIGIN_TARGET_ID,
-            priming_state.reply_target_binding_ref.clone(),
-        )
-        .expect("origin target registers on the caller-owned registry");
-
-    let baseline = harness
-        .history_len()
-        .await
-        .expect("history length baseline");
-    harness.push_script([
-        RebornScriptedReply::tool_call(
-            OUTBOUND_DELIVER,
-            json!({"target_id": ORIGIN_TARGET_ID, "content": ORIGIN_DENIED_CONTENT}),
-        ),
-        RebornScriptedReply::text(ORIGIN_DENIED_ACK),
-    ]);
-    harness
-        .submit_turn(ORIGIN_DENIED_CONTENT)
-        .await
-        .expect("origin-denied turn completes");
-
-    harness
-        .assert_tool_error_since(baseline, ToolErrorClass::Denied, ORIGIN_DENIED_SUMMARY)
-        .await
-        .expect("same-origin delivery must be denied with the fixed 'already lands here' summary");
-    assert_no_delivery_attempts(services, &harness.turn_scope).await;
-    harness
-        .assert_reply_contains(ORIGIN_DENIED_ACK)
-        .await
-        .expect("the run's own final reply still lands after the denial");
 }
 
 /// Spec §13.4 — a partial failure across two deliver calls is reported

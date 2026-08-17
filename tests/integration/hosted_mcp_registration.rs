@@ -18,13 +18,13 @@ use ironclaw_assistant::{
 };
 use ironclaw_auth::{
     AdmissionClientProfile, AuthContinuationRef, AuthProductError, AuthProductScope,
-    AuthProviderClient, AuthProviderId, AuthSurface, AuthorizationCodeHash, CredentialAccountLabel,
-    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthClientProfileRegistry,
-    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
-    OAuthProviderRefresh, OAuthProviderRefreshRequest, OpaqueStateHash, PkceVerifierHash,
-    PkceVerifierSecret, ProviderScope, RebornManualTokenSetupRequest,
-    RebornManualTokenSubmitRequest, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
-    RebornOAuthStartFlowRequest,
+    AuthProviderClient, AuthProviderId, AuthRecipeResolver, AuthSurface, AuthorizationCodeHash,
+    CredentialAccountLabel, OAuthAuthorizationCode, OAuthAuthorizationUrl,
+    OAuthClientProfileRegistry, OAuthProviderCallbackRequest, OAuthProviderExchange,
+    OAuthProviderExchangeContext, OAuthProviderRefresh, OAuthProviderRefreshRequest,
+    OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, ProviderScope,
+    RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornOAuthCallbackOutcome,
+    RebornOAuthCallbackRequest, RebornOAuthStartFlowRequest,
 };
 use ironclaw_extension_contracts::hosted_mcp::{
     HostedMcpAuthSelection, HostedMcpEndpoint, RegisterHostedMcpRequest,
@@ -33,6 +33,7 @@ use ironclaw_extension_contracts::lifecycle_id::LifecyclePackageId;
 use ironclaw_extension_contracts::recipe::{
     HttpsEndpoint, RecipeClientCredentials, VendorAuthRecipe,
 };
+use ironclaw_extension_host::InstalledManifestAuthRecipeResolver;
 use ironclaw_extension_manager::lifecycle_test_support::{
     build_lifecycle_test_services, build_lifecycle_test_services_with_auth_provider,
     build_lifecycle_test_services_with_oauth_client_profiles, invoke_with_standalone_approval,
@@ -2262,6 +2263,161 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
     assert!(server.requests().iter().any(|request| {
         request.rpc_method.as_deref() == Some("tools/call") && request.authorization_matches
     }));
+}
+
+#[tokio::test]
+async fn oauth_registration_accepts_origin_scoped_resource_and_hands_off_to_auth_setup() {
+    let server = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::OAuth {
+            access_token: "oauth-token".to_string(),
+        },
+        vec![HostedMcpTool::read_only("search", json!("ok"))],
+    )
+    .await;
+    server.script_protected_resource_response(ScriptedMetadataResponse::new(
+        axum::http::StatusCode::OK,
+        serde_json::to_vec(&json!({
+            "resource": "https://mcp.example.test",
+            "authorization_servers": ["https://auth.example.test"],
+            "bearer_methods_supported": ["header"]
+        }))
+        .expect("origin-scoped protected-resource metadata serializes"),
+    ));
+    let services = build_lifecycle_test_services(
+        "hosted-mcp-oauth-origin-resource",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+    )
+    .await;
+    let scope = webui_gate_resource_scope_for_owner("hosted-mcp-oauth-origin-resource");
+
+    let registration = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: registration_request(HostedMcpAuthSelection::OAuth {
+                    client_profile_id: None,
+                }),
+            },
+        )
+        .await
+        .expect("origin-scoped OAuth metadata admits the hosted MCP definition");
+    assert_eq!(
+        registration.phase,
+        ironclaw_extension_contracts::state::InstallationState::Installed
+    );
+    assert!(registration.blockers.is_empty());
+
+    let setup_needed = install_fixture(&services, scope.clone()).await;
+    let provider = credential_provider_from_response(&setup_needed);
+    assert!(setup_needed.blockers.iter().any(|blocker| matches!(
+        blocker,
+        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
+    )));
+    assert!(
+        services
+            .extension_management
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capability projection")
+            .is_empty(),
+        "origin-scoped OAuth publishes no tools before browser authorization"
+    );
+
+    let restored = rebuild_lifecycle_test_services_with_auth_provider(
+        &services,
+        "hosted-mcp-oauth-origin-resource",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+        Arc::new(ironclaw_auth::UnavailableAuthProviderClient),
+    )
+    .await;
+    let resolver = InstalledManifestAuthRecipeResolver::new(
+        restored.extension_management.installation_store_for_test(),
+    );
+    let extension_id = ExtensionId::new("mcp-fixture").expect("test extension id");
+    let resolved = resolver
+        .resolve(Some(&extension_id), Some(&scope.user_id), provider.as_str())
+        .await
+        .expect("installed hosted MCP retains its admitted OAuth recipe");
+    assert_eq!(
+        resolved.token_exchange_resource.as_deref(),
+        Some("https://mcp.example.test"),
+        "the installed manifest must retain the admitted origin resource for browser OAuth"
+    );
+}
+
+#[tokio::test]
+async fn oauth_registration_rejects_origin_scope_near_misses_without_persistence() {
+    let cases = [
+        ("query-root", "https://mcp.example.test?tenant=one"),
+        ("sibling-path", "https://mcp.example.test/team"),
+        ("cross-origin", "https://other.example.test"),
+        ("changed-port", "https://mcp.example.test:8443"),
+        ("dot-segment", "https://mcp.example.test/tenant/.."),
+        ("encoded-dot-segment", "https://mcp.example.test/%2e"),
+    ];
+
+    for (case, resource) in cases {
+        let server = HostedMcpRegistrationServer::start(
+            HostedMcpAuthPolicy::OAuth {
+                access_token: "oauth-token".to_string(),
+            },
+            vec![HostedMcpTool::read_only("search", json!("ok"))],
+        )
+        .await;
+        server.script_protected_resource_response(ScriptedMetadataResponse::new(
+            axum::http::StatusCode::OK,
+            serde_json::to_vec(&json!({
+                "resource": resource,
+                "authorization_servers": ["https://auth.example.test"]
+            }))
+            .expect("near-miss protected-resource metadata serializes"),
+        ));
+        let user_id = format!("hosted-mcp-oauth-origin-near-miss-{case}");
+        let services = build_lifecycle_test_services(
+            &user_id,
+            Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+                &server,
+            ))),
+            false,
+        )
+        .await;
+        let error = services
+            .lifecycle_service
+            .execute(
+                lifecycle_product_context(webui_gate_resource_scope_for_owner(&user_id)),
+                LifecycleProductAction::ExtensionRegisterHostedMcp {
+                    request: registration_request(HostedMcpAuthSelection::OAuth {
+                        client_profile_id: None,
+                    }),
+                },
+            )
+            .await
+            .expect_err("an origin-scope near miss must fail registration");
+        assert_eq!(
+            error.kind,
+            ProductSurfaceErrorKind::Validation,
+            "case={case}"
+        );
+        assert!(
+            services
+                .extension_management
+                .installation_store_for_test()
+                .get_registered_package_definition(
+                    &ExtensionId::new("mcp-fixture").expect("extension id")
+                )
+                .await
+                .expect("registered definition readback")
+                .is_none(),
+            "case={case} must not persist a hosted MCP definition"
+        );
+    }
 }
 
 #[tokio::test]

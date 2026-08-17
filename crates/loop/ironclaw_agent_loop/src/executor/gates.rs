@@ -230,13 +230,31 @@ impl ExecutorStage<GateInput> for GateStage {
                     failure_kind,
                     Some(checked.checkpoint_id),
                     FailedExitDetails {
-                        safe_summary: None,
+                        // The gate KIND rides the sanitized failure detail
+                        // (loop-exit contract): callers see WHICH unsupported
+                        // gate ended the run, not a bare category.
+                        safe_summary: gate_abort_safe_summary(kind, failure_kind),
                         explanation_message_ref,
                     },
                 )?))
             }
         }
     }
+}
+
+/// Sanitized summary for a gate-abort exit. Only the `gate_not_supported`
+/// contract promises the gate kind on the failure detail; other abort
+/// classifications keep their pinned bare-category shape.
+fn gate_abort_safe_summary(
+    kind: GateKind,
+    failure_kind: ironclaw_loop_contracts::LoopFailureKind,
+) -> Option<ironclaw_host_api::turn::SanitizedFailure> {
+    if failure_kind != ironclaw_loop_contracts::LoopFailureKind::GateNotSupported {
+        return None;
+    }
+    ironclaw_host_api::turn::SanitizedFailure::new(failure_kind.as_str())
+        .ok()
+        .map(|summary| summary.with_detail(gate_tool_result_summary(kind, "aborted")))
 }
 
 #[async_trait]
@@ -322,7 +340,13 @@ impl ExecutorStage<AwaitDependentRunGateInput> for AwaitDependentRunGateStage {
                     failure_kind,
                     Some(checked.checkpoint_id),
                     FailedExitDetails {
-                        safe_summary: None,
+                        // The gate KIND rides the sanitized failure detail
+                        // (loop-exit contract): callers see WHICH unsupported
+                        // gate ended the run, not a bare category.
+                        safe_summary: gate_abort_safe_summary(
+                            GateKind::AwaitDependentRun,
+                            failure_kind,
+                        ),
                         explanation_message_ref,
                     },
                 )?))

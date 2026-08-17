@@ -1639,6 +1639,7 @@ fn capability_profile_schema_refs_are_relative_repository_paths() {
         // constructor, including otherwise valid canonical refs.
         "standard:messaging/send_message.input.v1",
         "standard:messaging/edit_message.output.v1",
+        "standard:messaging/send_message.output.v2",
         "evil:messaging/x.json",
         "standard:",
         "standard:messaging/../../x",
@@ -1665,6 +1666,47 @@ fn capability_profile_schema_refs_are_relative_repository_paths() {
         )
         .is_err(),
         "reserved operations have no constructible canonical schema ref"
+    );
+
+    // A minted output ref carries the op's CURRENT schema version, not a
+    // hardcoded `.v1`: `send_message` graduated to `.v2` (the `sent_unverified`
+    // evidence branch), every other op is still on `.v1`.
+    for (op, expected) in [
+        (
+            ironclaw_host_api::messaging::StandardMessagingOp::SendMessage,
+            "standard:messaging/send_message.output.v2",
+        ),
+        (
+            ironclaw_host_api::messaging::StandardMessagingOp::EditMessage,
+            "standard:messaging/edit_message.output.v1",
+        ),
+    ] {
+        assert_eq!(
+            CapabilityProfileSchemaRef::standard_messaging_output(op)
+                .expect("typed standard output ref")
+                .as_str(),
+            expected
+        );
+    }
+
+    // Resolved extension records persisted before the graduation still pin
+    // `.v1`, and that ref must keep deserializing forever — a published schema
+    // version is served for as long as any binding names it.
+    for persisted in [
+        "standard:messaging/send_message.output.v1",
+        "standard:messaging/send_message.output.v2",
+    ] {
+        let parsed: CapabilityProfileSchemaRef =
+            serde_json::from_value(serde_json::json!(persisted))
+                .unwrap_or_else(|error| panic!("{persisted} must stay loadable: {error}"));
+        assert_eq!(parsed.as_str(), persisted);
+    }
+    assert!(
+        serde_json::from_value::<CapabilityProfileSchemaRef>(serde_json::json!(
+            "standard:messaging/edit_message.output.v2"
+        ))
+        .is_err(),
+        "a version an op never published must not deserialize"
     );
 }
 

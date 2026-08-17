@@ -169,14 +169,6 @@ pub struct LoadSubscriptionCursorRequest {
     pub thread_id: ThreadId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AdvanceSubscriptionCursorRequest {
-    pub subscription_id: ProjectionSubscriptionId,
-    pub actor: TurnActor,
-    pub thread_id: ThreadId,
-    pub cursor: ProjectionCursor,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutboundDeliveryStatus {

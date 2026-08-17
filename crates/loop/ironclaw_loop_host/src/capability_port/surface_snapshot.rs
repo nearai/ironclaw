@@ -8,7 +8,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptionTrust,
-    CapabilityDescriptorView, ConcurrencyHint, ProviderToolCall, ProviderToolDefinition,
+    CapabilityDescriptorView, ProviderToolCall, ProviderToolDefinition,
 };
 
 use crate::capability_info::{self, CapabilityInfoEntry};
@@ -256,7 +256,6 @@ impl SyntheticSurfaceCapabilitySnapshot {
                     safe_name: self.provider_tool_name.as_str().to_string(),
                     safe_description: self.safe_description.clone(),
                     description_trust: Default::default(),
-                    concurrency_hint: ConcurrencyHint::SafeForParallel,
                     parameters_schema: self.parameters_schema.clone(),
                 })
             }

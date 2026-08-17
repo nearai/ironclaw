@@ -7,9 +7,9 @@
 
 use crate::family::{ComponentIdentity, LoopFamilyId};
 use crate::strategies::{
-    BatchPolicyStrategy, BudgetStrategy, CapabilityStrategy, CompactionStrategy, ContextStrategy,
-    GateHandlingStrategy, InputDrainStrategy, ModelStrategy, RecoveryStrategy,
-    ReplyAdmissionStrategy, StopConditionStrategy,
+    BudgetStrategy, CapabilityStrategy, CompactionStrategy, ContextStrategy, GateHandlingStrategy,
+    InputDrainStrategy, ModelStrategy, RecoveryStrategy, ReplyAdmissionStrategy,
+    StopConditionStrategy,
 };
 
 mod sealed {
@@ -38,7 +38,6 @@ pub(crate) trait AgentLoopPlannerInternal: AgentLoopPlanner {
     fn capability(&self) -> &dyn CapabilityStrategy;
     fn model(&self) -> &dyn ModelStrategy;
     fn compaction(&self) -> &dyn CompactionStrategy;
-    fn batch(&self) -> &dyn BatchPolicyStrategy;
     fn gate(&self) -> &dyn GateHandlingStrategy;
     fn recovery(&self) -> &dyn RecoveryStrategy;
     fn reply_admission(&self) -> &dyn ReplyAdmissionStrategy;

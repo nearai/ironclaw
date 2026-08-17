@@ -692,11 +692,16 @@ fn convert_tools(tools: &[IronToolDefinition]) -> Vec<RigToolDefinition> {
 
 /// Convert IronClaw tool_choice string to rig-core ToolChoice.
 fn convert_tool_choice(choice: Option<&str>) -> Option<RigToolChoice> {
-    match choice.map(|s| s.to_lowercase()).as_deref() {
-        Some("auto") => Some(RigToolChoice::Auto),
-        Some("required") => Some(RigToolChoice::Required),
-        Some("none") => Some(RigToolChoice::None),
-        _ => None,
+    let choice = choice?;
+    match choice.to_lowercase().as_str() {
+        "auto" => Some(RigToolChoice::Auto),
+        "required" => Some(RigToolChoice::Required),
+        "none" => Some(RigToolChoice::None),
+        // A named tool: rig providers without specific-tool support reject
+        // this loudly, which beats silently downgrading a forced call.
+        _ => Some(RigToolChoice::Specific {
+            function_names: vec![choice.to_string()],
+        }),
     }
 }
 
@@ -3490,7 +3495,15 @@ mod tests {
             Some(RigToolChoice::Auto)
         ));
         assert!(convert_tool_choice(None).is_none());
-        assert!(convert_tool_choice(Some("unknown")).is_none());
+        match convert_tool_choice(Some("builtin__structured_result")) {
+            Some(RigToolChoice::Specific { function_names }) => {
+                assert_eq!(
+                    function_names,
+                    vec!["builtin__structured_result".to_string()]
+                );
+            }
+            other => panic!("named tool choice must map to Specific, got {other:?}"),
+        }
     }
 
     #[test]

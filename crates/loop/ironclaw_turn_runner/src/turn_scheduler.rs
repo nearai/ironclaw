@@ -16,13 +16,11 @@ use ironclaw_turns::{
 /// Consecutive heartbeat failures a turn run absorbs before the supervisor gives
 /// up on it.
 ///
-/// The generic [`ProcessSupervisorConfig`] default is 3. At the hosted
-/// heartbeat interval of 5 seconds — which the supervisor also uses as each
-/// heartbeat's timeout — 3 failures is roughly 30 seconds of tolerance, less
-/// than a single Postgres connection-checkout timeout. One slow checkout was
-/// therefore enough to abandon a healthy run. 8 keeps a run alive across a
-/// checkout stall while still giving up inside the lease TTL (see
-/// [`heartbeat_failure_budget_within_lease`]).
+/// The generic [`ProcessSupervisorConfig`] default is 3. The turn-run maximum
+/// remains 8 for callers using shorter intervals, while
+/// [`heartbeat_failure_budget_within_lease`] reduces it to the largest budget
+/// the configured interval can fit inside the lease TTL. At the shipped
+/// 15-second interval, that budget is 3.
 ///
 /// This is a turn-run figure only. The generic default stays at 3 because the
 /// capability path heartbeats every 30 seconds, where 8 failures would run far

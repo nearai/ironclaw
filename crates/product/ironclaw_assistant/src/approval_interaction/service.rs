@@ -16,7 +16,6 @@ use ironclaw_turns::{
     TurnErrorCategory,
 };
 
-use super::gate_ref::{approval_reply_binding_ref, approval_source_binding_ref};
 use super::{
     ApprovalGateRecord, ApprovalInteractionDecision, ApprovalInteractionReadModel,
     ApprovalInteractionRejectionKind, ApprovalInteractionScope, ApprovalLeaseTermsProvider,
@@ -243,8 +242,6 @@ impl DefaultApprovalInteractionService {
                 run_id,
                 gate_resolution_ref: request.gate_ref.clone(),
                 precondition: ResumeTurnPrecondition::BlockedApprovalGate,
-                source_binding_ref: approval_source_binding_ref(&request.gate_ref)?,
-                reply_target_binding_ref: approval_reply_binding_ref(&request.gate_ref)?,
                 idempotency_key: request.idempotency_key,
                 resume_disposition: None,
             })
@@ -383,8 +380,6 @@ impl DefaultApprovalInteractionService {
                 run_id,
                 gate_resolution_ref: request.gate_ref.clone(),
                 precondition: ResumeTurnPrecondition::BlockedApprovalGate,
-                source_binding_ref: approval_source_binding_ref(&request.gate_ref)?,
-                reply_target_binding_ref: approval_reply_binding_ref(&request.gate_ref)?,
                 idempotency_key: request.idempotency_key,
                 resume_disposition: Some(GateResumeDisposition::Denied),
             })
@@ -406,8 +401,6 @@ impl DefaultApprovalInteractionService {
                 run_id,
                 gate_resolution_ref: request.gate_ref.clone(),
                 precondition: ResumeTurnPrecondition::BlockedApprovalGate,
-                source_binding_ref: approval_source_binding_ref(&request.gate_ref)?,
-                reply_target_binding_ref: approval_reply_binding_ref(&request.gate_ref)?,
                 idempotency_key: request.idempotency_key,
                 resume_disposition: None,
             })

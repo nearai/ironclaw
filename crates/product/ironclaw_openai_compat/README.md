@@ -15,9 +15,9 @@ wire-stability promise rides on its own contract tests.
 - **Don't use this when:** changing what a command *does* →
   `ironclaw_assistant` behind `ironclaw_product_contracts`; binding a
   listener or authenticating callers → `ironclaw_webui`; building the port
-  *implementations* the mount consumes (they name `ironclaw_threads`/
-  `ironclaw_turns`/`ironclaw_event_streams`, all on this crate's forbidden
-  list) → `ironclaw_composition`.
+  *implementations* the mount consumes (they name `ironclaw_turns`/
+  `ironclaw_event_streams`, on this crate's forbidden list) →
+  `ironclaw_composition`.
 
 ## Public surface
 
@@ -35,10 +35,12 @@ wire-stability promise rides on its own contract tests.
 
 ## Depends on / consumed by
 
-- **Normal workspace deps (7):** `ironclaw_product_contracts` (the membrane
+- **Normal workspace deps (8):** `ironclaw_product_contracts` (the membrane
   and everything it speaks), `ironclaw_extension_contracts` (one enum,
   `ProductTriggerReason`), `ironclaw_host_api`, `ironclaw_host_ingress` (its
-  carrier), `ironclaw_filesystem` (the ref ledger), `ironclaw_common` — and
+  carrier), `ironclaw_filesystem` (the ref ledger), `ironclaw_common`,
+  `ironclaw_threads` (the accept door's seed vocabulary + its
+  `validate_prepared_seed_content`, never thread services) — and
   `ironclaw_assistant`, whose residue is exactly **three** frozen command
   constants (`SUBMIT_TURN_COMMAND`, `CREATE_THREAD_COMMAND`,
   `CANCEL_RUN_COMMAND`), pinned exact-match and shrink-only; §12.11 D-B names
@@ -54,10 +56,13 @@ wire-stability promise rides on its own contract tests.
   `reborn_transport_product_boundary.rs`.
 - **No socket, ever** — no `TcpListener::bind`/`axum::serve` here:
   `reborn_dependency_boundaries.rs::reborn_product_api_crates_do_not_bind_http_ingress`.
-- **BoundaryRule** forbids `ironclaw_threads`, `ironclaw_turns`,
-  `ironclaw_event_streams`, runtime/lane crates
-  (`reborn_crate_dependency_boundaries_hold`) — which is why the projection
-  adapters live in composition and arrive as ports.
+- **BoundaryRule** forbids `ironclaw_turns`, `ironclaw_event_streams`, and
+  runtime/lane crates (`reborn_crate_dependency_boundaries_hold`) — which is
+  why the projection adapters live in composition and arrive as ports.
+  `ironclaw_threads` is the one domain carve-in: the prepared lane speaks the
+  accept door's seed vocabulary and runs the door's own
+  `validate_prepared_seed_content` pre-reservation (one validator); thread
+  services still arrive as ports.
 - Client-supplied `tools`/`tool_choice` are model hints only, never executed
   as capabilities from this crate; auth evidence is minted by host middleware,
   never here; unauthorized and nonexistent refs stay indistinguishable.

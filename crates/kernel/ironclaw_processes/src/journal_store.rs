@@ -1380,16 +1380,6 @@ where
                         scope: snapshot.scope.clone(),
                         owner_user_id: snapshot.owner_user_id.clone(),
                         suspension: snapshot.suspension.clone()?,
-                        resume_source_ref: snapshot
-                            .metadata
-                            .pointer("/agent_turn/source_binding_ref")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
-                        reply_target_ref: snapshot
-                            .metadata
-                            .pointer("/agent_turn/reply_target_binding_ref")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
                         historical: false,
                     })
                 })

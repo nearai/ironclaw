@@ -66,6 +66,7 @@ mod reborn_services;
 mod run_delivery;
 mod scoped_fs;
 mod steering;
+mod unbound_turn;
 mod workflow;
 
 pub use project_create_capability::{PROJECT_CREATE_CAPABILITY_ID, project_create_capability};
@@ -384,6 +385,9 @@ pub use reborn_services::{
     outbound_delivery_synthetic_provider, outbound_delivery_targets_list_input_schema,
     parse_notification_channels_set_input, parse_outbound_delivery_targets_list_input,
     set_notification_channels_for_model,
+};
+pub use unbound_turn::{
+    UnboundTurnError, UnboundTurnOutcome, UnboundTurnService, UnboundTurnSubmission,
 };
 
 pub use product_surface_inbound::{

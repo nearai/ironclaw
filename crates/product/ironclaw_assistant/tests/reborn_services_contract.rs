@@ -127,8 +127,7 @@ use ironclaw_host_api::product_adapter::{
 };
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
-    SanitizedFailure, SourceBindingRef, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope,
-    TurnStatus,
+    SanitizedFailure, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
@@ -591,14 +590,6 @@ impl FakeTurnCoordinator {
         self.run_state_requests.lock().expect("lock").len()
     }
 
-    fn last_resumption_source_binding_ref(&self) -> Option<String> {
-        self.resumptions
-            .lock()
-            .expect("lock")
-            .last()
-            .map(|request| request.source_binding_ref.as_str().to_string())
-    }
-
     fn last_resumption_precondition(&self) -> Option<ResumeTurnPrecondition> {
         self.resumptions
             .lock()
@@ -689,7 +680,6 @@ impl TurnCoordinator for FakeTurnCoordinator {
             resolved_run_profile_version: RunProfileVersion::new(1),
             event_cursor: EventCursor(7),
             accepted_message_ref: request.accepted_message_ref,
-            reply_target_binding_ref: request.reply_target_binding_ref,
         })
     }
 
@@ -759,9 +749,6 @@ impl TurnCoordinator for FakeTurnCoordinator {
             run_id,
             status,
             accepted_message_ref: AcceptedMessageRef::new("msg:replayed").expect("valid ref"),
-            source_binding_ref: SourceBindingRef::new("webui-src:replayed").expect("valid ref"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("webui-reply:replayed")
-                .expect("valid ref"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             allow_steering: true,
@@ -834,7 +821,6 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
             resolved_run_profile_version: RunProfileVersion::new(1),
             event_cursor: EventCursor(23),
             accepted_message_ref: request.accepted_message_ref,
-            reply_target_binding_ref: request.reply_target_binding_ref,
         })
     }
 
@@ -864,10 +850,6 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
             run_id: request.run_id,
             status: TurnStatus::Queued,
             accepted_message_ref: AcceptedMessageRef::new("msg:blocked-submit").expect("valid ref"),
-            source_binding_ref: SourceBindingRef::new("webui-src:blocked-submit")
-                .expect("valid ref"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("webui-reply:blocked-submit")
-                .expect("valid ref"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             allow_steering: true,
@@ -5510,18 +5492,6 @@ async fn retry_run_uses_turn_service_and_stable_response() {
         retry.scope,
         caller().turn_scope(ThreadId::new("thread-alpha").expect("thread"))
     );
-    assert!(
-        retry
-            .source_binding_ref
-            .as_str()
-            .contains("webui-retry-src")
-    );
-    assert!(
-        retry
-            .reply_target_binding_ref
-            .as_str()
-            .contains("webui-retry-reply")
-    );
     assert_eq!(retry.idempotency_key.as_str(), "retry-1");
 }
 
@@ -5663,12 +5633,6 @@ async fn approved_gate_resolution_resumes_turn() {
     assert_eq!(
         coordinator.last_resumption_precondition(),
         Some(ResumeTurnPrecondition::AnyBlockedGate)
-    );
-    assert!(
-        coordinator
-            .last_resumption_source_binding_ref()
-            .expect("resume source binding")
-            .contains("gate-alpha")
     );
 }
 

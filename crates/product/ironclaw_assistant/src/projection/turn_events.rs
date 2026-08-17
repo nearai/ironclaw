@@ -495,7 +495,7 @@ async fn blocked_prompt_payload(
             },
             auth_challenges)
             .await?;
-            Ok(Some(ProductOutboundPayload::AuthPrompt(view)))
+            Ok(Some(ProductOutboundPayload::AuthPrompt(Box::new(view))))
         }
         TurnStatus::BlockedApproval => Ok(Some(
             approval_gate_prompt(

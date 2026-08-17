@@ -947,7 +947,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                         "goal": {
                             "type": "string",
                             "minLength": 1,
-                            "description": "The complete task for a future run with no memory of this conversation. Include explicit external-delivery steps using builtin__outbound_deliver and target ids selected now from builtin__outbound_delivery_targets_list. A bare send-me request from the web app needs no external-delivery step; the final reply is recorded in the run thread."
+                            "description": "The complete task for a future run with no memory of this conversation. A scheduled fire runs as the routine's owning user and may use the linked integration capabilities available to the owning user, subject to the user's current connection and permission settings; write requested integration reads or user-authorized actions into this goal explicitly. Include explicit external-delivery steps using builtin__outbound_deliver and target ids selected now from builtin__outbound_delivery_targets_list. A bare send-me request from the web app needs no external-delivery step; the final reply is recorded in the run thread."
                         },
                         "success_criteria": {
                             "type": "array", "minItems": 1, "maxItems": 32,
@@ -1222,6 +1222,16 @@ mod tests {
         assert_eq!(
             schema["required"],
             serde_json::json!(["name", "execution_contract", "schedule"])
+        );
+        let goal_description =
+            schema["properties"]["execution_contract"]["properties"]["goal"]["description"]
+                .as_str()
+                .expect("execution-contract goal description is a string");
+        assert!(
+            goal_description.contains(
+                "may use the linked integration capabilities available to the owning user"
+            ) && !goal_description.contains("unavailable to scheduled automations"),
+            "the execution-contract schema must allow future scheduled loop-runs to use the owning user's linked integrations: {goal_description}"
         );
     }
 
