@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use serde::Deserialize;
 #[cfg(test)]
 use tokio::sync::Semaphore;
 
@@ -47,7 +46,6 @@ fn wasm_dispatch_error(kind: RuntimeDispatchErrorKind, cause: Option<String>) ->
             retry_after: None,
         }),
         detail: None,
-        attempt: None,
     }
 }
 
@@ -271,20 +269,6 @@ where
                 request.capability_id,
             ));
         }
-        // Legacy 0.3.0 binding fallback — removed in PR 4.
-        WitToolOutcome::LegacyFailure(error) => {
-            log_wasm_guest_error(request.capability_id, &execution.logs, &error);
-            guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
-            return Err(wasm_guest_dispatch_error(&error, request.capability_id));
-        }
-        // Legacy 0.3.0 binding fallback — removed in PR 4.
-        WitToolOutcome::LegacyMissingOutput => {
-            guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
-            return Err(wasm_dispatch_error(
-                RuntimeDispatchErrorKind::InvalidResult,
-                Some("WASM execution returned no output".to_string()),
-            ));
-        }
     };
     let output = match serde_json::from_str(&output_json) {
         Ok(output) => output,
@@ -333,36 +317,9 @@ fn has_accountable_effects(usage: &ResourceUsage) -> bool {
         || usage.process_count > 0
 }
 
-fn wasm_guest_dispatch_error(error: &str, capability: &CapabilityId) -> DispatchError {
-    match wasm_guest_error_kind(error) {
-        WasmGuestErrorKind::AuthRequired => DispatchError::AuthRequired {
-            capability: capability.clone(),
-            required_secrets: Vec::new(),
-            credential_requirements: Vec::new(),
-            model_visible_cause: wasm_guest_provider_diagnostic(error).map(Box::new),
-        },
-        WasmGuestErrorKind::Runtime(kind) => DispatchError::Rejected {
-            runtime: Some(RuntimeKind::Wasm),
-            kind: DispatchFailureKind::Runtime(kind),
-            diagnostic: wasm_guest_provider_diagnostic(error).or_else(|| {
-                Some(ProviderDiagnostic {
-                    code: None,
-                    message: Some(UntrustedProviderMessage::new(error.to_string())),
-                    retry_after: None,
-                })
-            }),
-            detail: None,
-            attempt: None,
-        },
-    }
-}
-
 /// Maps a typed WIT `guest-failure` (near:agent@0.4.0) directly to a
-/// `DispatchError` — the closed `error-kind` vocabulary already carries what
-/// the legacy string-decode path (`wasm_guest_dispatch_error` above) had to
-/// recover by parsing a JSON-encoded convention on the plain error string.
-/// Reuses the exact same table `wasm_guest_dispatch_error` uses: `kind ==
-/// auth-required` maps to `DispatchError::AuthRequired` with empty
+/// `DispatchError`. `kind == auth-required` maps to
+/// `DispatchError::AuthRequired` with empty
 /// `required_secrets`/`credential_requirements` (the capability host
 /// enriches these), everything else maps through
 /// `RuntimeDispatchErrorKind`.
@@ -383,7 +340,6 @@ fn typed_wasm_guest_dispatch_error(
         kind: DispatchFailureKind::Runtime(typed_wasm_guest_runtime_kind(failure.kind)),
         diagnostic: typed_wasm_guest_provider_diagnostic(&failure),
         detail: None,
-        attempt: None,
     }
 }
 
@@ -400,9 +356,8 @@ fn typed_wasm_guest_runtime_kind(kind: WitErrorKind) -> RuntimeDispatchErrorKind
     }
 }
 
-/// Sanitize a typed guest failure's `code` the same way the legacy
-/// string-decode path does (`wasm_guest_error_code_from`): reduced to
-/// `[A-Za-z0-9_.-]` identifier characters, bounded to 64, `None` if empty.
+/// Sanitize a typed guest failure's `code`: reduced to `[A-Za-z0-9_.-]`
+/// identifier characters, bounded to 64, `None` if empty.
 fn sanitized_wasm_guest_code(code: Option<&str>) -> Option<String> {
     let sanitized: String = code?
         .chars()
@@ -424,10 +379,7 @@ fn typed_wasm_guest_provider_diagnostic(failure: &WitGuestFailure) -> Option<Pro
 }
 
 /// Shared decode over a guest error's `(code, message, retry_after)` trio
-/// into a [`ProviderDiagnostic`], one chokepoint shared by the typed
-/// (`WitGuestFailure`) and legacy (`StructuredWasmGuestError`) guest-error
-/// paths so the two stay in lockstep instead of drifting apart as separate
-/// copies.
+/// into a [`ProviderDiagnostic`].
 fn provider_error_diagnostic(
     code: Option<&str>,
     message: Option<&str>,
@@ -446,35 +398,6 @@ fn provider_error_diagnostic(
     )
 }
 
-/// Extract the stable error `code` from a structured guest error payload so
-/// the model-visible failure keeps its actionable cause (e.g. a Slack
-/// `channel_not_found`) instead of collapsing to the kind's generic sentence.
-///
-/// Guests are sandboxed but not trusted with free text on this channel: the
-/// code is reduced to a short `[A-Za-z0-9_.-]` identifier, and the composed
-/// summary is still re-validated downstream (`LoopSafeSummary`) before it
-/// reaches the model. Returns `None` for legacy plain-string guest errors.
-#[cfg(test)]
-fn wasm_guest_error_code(error: &str) -> Option<String> {
-    let payload = structured_wasm_guest_error(error)?;
-    wasm_guest_error_code_from(&payload)
-}
-
-fn wasm_guest_error_code_from(payload: &StructuredWasmGuestError) -> Option<String> {
-    sanitized_wasm_guest_code(Some(&payload.code))
-}
-
-fn wasm_guest_provider_diagnostic(error: &str) -> Option<ProviderDiagnostic> {
-    let payload = structured_wasm_guest_error(error)?;
-    provider_error_diagnostic(Some(&payload.code), payload.message.as_deref(), None)
-}
-
-fn structured_wasm_guest_error(error: &str) -> Option<StructuredWasmGuestError> {
-    // silent-ok: structured diagnostics are optional; legacy plain-string
-    // guest errors continue through the existing stable-kind fallback.
-    serde_json::from_str(error).ok()
-}
-
 fn bounded_wasm_guest_message(message: &str) -> String {
     let mut bounded = String::new();
     for character in message.chars() {
@@ -484,94 +407,6 @@ fn bounded_wasm_guest_message(message: &str) -> String {
         bounded.push(character);
     }
     bounded
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WasmGuestErrorKind {
-    AuthRequired,
-    Runtime(RuntimeDispatchErrorKind),
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum StructuredWasmGuestErrorKind {
-    AuthRequired,
-    Input,
-    OutputTooLarge,
-    Executor,
-    NetworkDenied,
-    Client,
-    OperationFailed,
-}
-
-#[derive(Debug, Deserialize)]
-struct StructuredWasmGuestError {
-    code: String,
-    kind: StructuredWasmGuestErrorKind,
-    #[serde(default)]
-    message: Option<String>,
-}
-
-fn wasm_guest_error_kind(error: &str) -> WasmGuestErrorKind {
-    if let Ok(payload) = serde_json::from_str::<StructuredWasmGuestError>(error) {
-        return match payload.kind {
-            StructuredWasmGuestErrorKind::AuthRequired => WasmGuestErrorKind::AuthRequired,
-            StructuredWasmGuestErrorKind::Input => {
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode)
-            }
-            StructuredWasmGuestErrorKind::OutputTooLarge => {
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge)
-            }
-            StructuredWasmGuestErrorKind::Executor => {
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Executor)
-            }
-            StructuredWasmGuestErrorKind::NetworkDenied => {
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied)
-            }
-            StructuredWasmGuestErrorKind::Client => {
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client)
-            }
-            StructuredWasmGuestErrorKind::OperationFailed => {
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed)
-            }
-        };
-    }
-
-    match error {
-        "AuthRequired" => WasmGuestErrorKind::AuthRequired,
-        "missing_invocation_context"
-        | "invalid_invocation_context"
-        | "unsupported_capability"
-        | "invalid_parameters"
-        | "invalid_repository"
-        | "invalid_query_empty"
-        | "invalid_query_too_large"
-        | "invalid_author"
-        | "invalid_assignee"
-        | "invalid_involves"
-        | "invalid_state"
-        | "invalid_type"
-        | "invalid_sort"
-        | "invalid_order"
-        | "invalid_page"
-        | "invalid_limit"
-        | "invalid_issue_number"
-        | "invalid_body_empty"
-        | "invalid_body_too_large" => {
-            WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode)
-        }
-        "host_http_body_limit" => {
-            WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge)
-        }
-        "host_http_timeout" => WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Executor),
-        "host_http_network_denied" => {
-            WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied)
-        }
-        "host_http_forbidden" | "host_http_rate_limited" => {
-            WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client)
-        }
-        _ => WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
-    }
 }
 
 #[cfg(test)]
@@ -1444,104 +1279,20 @@ mod tests {
         drop(b);
     }
 
-    #[test]
-    fn wasm_guest_error_kind_maps_structured_payloads() {
-        let cases = [
-            (
-                r#"{"code":"AuthRequired","kind":"auth_required"}"#,
-                WasmGuestErrorKind::AuthRequired,
-            ),
-            (
-                r#"{"code":"invalid_repository","kind":"input"}"#,
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
-            ),
-            (
-                r#"{"code":"host_http_body_limit","kind":"output_too_large"}"#,
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge),
-            ),
-            (
-                r#"{"code":"host_http_timeout","kind":"executor"}"#,
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Executor),
-            ),
-            (
-                r#"{"code":"host_http_network_denied","kind":"network_denied"}"#,
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied),
-            ),
-            (
-                r#"{"code":"host_http_forbidden","kind":"client"}"#,
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client),
-            ),
-            (
-                r#"{"code":"host_http_request_failed","kind":"operation_failed"}"#,
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
-            ),
-        ];
-
-        for (error, expected) in cases {
-            assert_eq!(wasm_guest_error_kind(error), expected);
-        }
-    }
-
-    #[test]
-    fn wasm_guest_error_kind_preserves_legacy_error_mapping_without_prefix_catch_all() {
-        let cases = [
-            ("AuthRequired", WasmGuestErrorKind::AuthRequired),
-            (
-                "invalid_repository",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
-            ),
-            (
-                "missing_invocation_context",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
-            ),
-            (
-                "unsupported_capability",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
-            ),
-            (
-                "host_http_body_limit",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge),
-            ),
-            (
-                "host_http_timeout",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Executor),
-            ),
-            (
-                "host_http_network_denied",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied),
-            ),
-            (
-                "host_http_forbidden",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client),
-            ),
-            (
-                "host_http_rate_limited",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client),
-            ),
-            (
-                "invalid_internal_state",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
-            ),
-            (
-                "unknown_error",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
-            ),
-        ];
-
-        for (error, expected) in cases {
-            assert_eq!(wasm_guest_error_kind(error), expected);
-        }
-    }
-
-    /// A structured guest error's `code` must ride the dispatch error as a
+    /// A typed guest failure's `code` must ride the dispatch error as a
     /// sanitized safe summary so the model sees the actionable cause (e.g.
     /// `channel_not_found`), while hostile codes are reduced to identifier
-    /// characters and legacy plain-string errors stay summary-less.
+    /// characters.
     #[test]
-    fn wasm_guest_dispatch_error_carries_sanitized_structured_code() {
+    fn typed_wasm_guest_dispatch_error_carries_sanitized_code() {
         let capability = CapabilityId::new("slack.get_conversation_history").unwrap();
-        match wasm_guest_dispatch_error(
-            r#"{"code":"channel_not_found","kind":"input"}"#,
+        match typed_wasm_guest_dispatch_error(
+            WitGuestFailure {
+                kind: WitErrorKind::Input,
+                code: Some("channel_not_found".to_string()),
+                message: None,
+                retry_after_ms: None,
+            },
             &capability,
         ) {
             DispatchError::Rejected {
@@ -1551,7 +1302,7 @@ mod tests {
                     kind,
                     DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode)
                 );
-                let diagnostic = diagnostic.expect("structured code must produce a diagnostic");
+                let diagnostic = diagnostic.expect("a structured code must produce a diagnostic");
                 assert_eq!(
                     ironclaw_host_api::dispatch::provider_diagnostic_model_cause(&diagnostic)
                         .as_deref(),
@@ -1563,29 +1314,9 @@ mod tests {
 
         // Hostile codes are reduced to identifier characters, never free text.
         assert_eq!(
-            wasm_guest_error_code(r#"{"code":"bad {} `code` <script>","kind":"input"}"#).as_deref(),
+            sanitized_wasm_guest_code(Some("bad {} `code` <script>")).as_deref(),
             Some("badcodescript")
         );
-        // Legacy plain-string guest errors carry no structured code, but the
-        // raw text still rides `model_visible_cause` as the best available cause so
-        // the model can recover (secret VALUES are scrubbed downstream at the
-        // model-visible Diagnostic seam) instead of collapsing to the kind's
-        // generic sentence.
-        assert_eq!(wasm_guest_error_code("invalid_parameters"), None);
-        match wasm_guest_dispatch_error("invalid_parameters", &capability) {
-            DispatchError::Rejected { diagnostic, .. } => {
-                let cause = diagnostic
-                    .and_then(|diagnostic| diagnostic.message)
-                    .map(|message| message.as_str().to_string());
-                assert!(
-                    cause
-                        .as_deref()
-                        .is_some_and(|summary| summary.contains("invalid_parameters")),
-                    "legacy guest error text must survive as the raw cause: {cause:?}"
-                );
-            }
-            other => panic!("expected Rejected dispatch error, got {other:?}"),
-        }
     }
 
     #[test]

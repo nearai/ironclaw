@@ -661,7 +661,6 @@ fn dispatch_error_for_runtime(
                 kind: DispatchFailureKind::Runtime(kind),
                 diagnostic: None,
                 detail: None,
-                attempt: None,
             }
         }
         RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::UnsupportedRuntime {

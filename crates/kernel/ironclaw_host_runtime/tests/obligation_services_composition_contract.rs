@@ -298,7 +298,6 @@ impl CapabilityDispatcher for ObligationAwareDispatcher {
                 kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied),
                 diagnostic: None,
                 detail: None,
-                attempt: None,
             })?;
         assert_eq!(egress_response.status, 200);
 

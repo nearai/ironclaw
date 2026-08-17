@@ -14,7 +14,7 @@ mod store;
 mod types;
 pub mod wasm_sandbox_core;
 
-pub use config::{LEGACY_TOOL_WIT, TOOL_WIT, WIT_TOOL_VERSION, WitToolRuntimeConfig};
+pub use config::{TOOL_WIT, WIT_TOOL_VERSION, WitToolRuntimeConfig};
 pub use error::{WasmError, WasmHostError};
 pub use host::{
     DenyWasmHostHttp, DenyWasmHostSecrets, DenyWasmHostTools, DenyWasmHostWorkspace,

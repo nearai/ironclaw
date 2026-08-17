@@ -108,7 +108,6 @@ async fn dispatcher_redacts_binding_failure_details() {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExitFailure),
             diagnostic: None,
             detail: None,
-            attempt: None,
         },
         Arc::clone(&governor),
     );
@@ -512,7 +511,6 @@ impl BoundCapabilityAdapter for RecordingBinding {
                     kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
                     diagnostic: None,
                     detail: None,
-                    attempt: None,
                 })?,
         };
         let receipt = self
@@ -523,7 +521,6 @@ impl BoundCapabilityAdapter for RecordingBinding {
                 kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
                 diagnostic: None,
                 detail: None,
-                attempt: None,
             })?;
         Ok(RuntimeAdapterResult {
             output: self.output.clone(),

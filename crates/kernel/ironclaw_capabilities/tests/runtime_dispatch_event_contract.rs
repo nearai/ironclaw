@@ -198,7 +198,6 @@ async fn dispatcher_marks_loop_dispatch_failure_events_with_parent_run() {
                     kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExitFailure),
                     diagnostic: None,
                     detail: None,
-                    attempt: None,
                 },
             }),
         },
@@ -339,7 +338,6 @@ async fn dispatcher_emits_redacted_runtime_error_kind_for_binding_failure() {
                     kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExitFailure),
                     diagnostic: None,
                     detail: None,
-                    attempt: None,
                 },
             }),
         },
@@ -497,7 +495,6 @@ impl BoundCapabilityAdapter for EchoBinding {
                     kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
                     diagnostic: None,
                     detail: None,
-                    attempt: None,
                 })?,
         };
         let receipt = self
@@ -508,7 +505,6 @@ impl BoundCapabilityAdapter for EchoBinding {
                 kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
                 diagnostic: None,
                 detail: None,
-                attempt: None,
             })?;
         Ok(RuntimeAdapterResult {
             output,

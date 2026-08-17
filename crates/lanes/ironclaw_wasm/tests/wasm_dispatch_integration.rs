@@ -669,7 +669,6 @@ impl WasmRuntimeAdapter {
                         kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Manifest),
                         diagnostic: None,
                         detail: None,
-                        attempt: None,
                     })?,
             )
             .map_err(|_| DispatchError::Rejected {
@@ -677,7 +676,6 @@ impl WasmRuntimeAdapter {
                 kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Manifest),
                 diagnostic: None,
                 detail: None,
-                attempt: None,
             })?,
             other => {
                 return Err(DispatchError::Rejected {
@@ -689,7 +687,6 @@ impl WasmRuntimeAdapter {
                     }),
                     diagnostic: None,
                     detail: None,
-                    attempt: None,
                 });
             }
         };
@@ -711,7 +708,6 @@ impl WasmRuntimeAdapter {
                 kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::FilesystemDenied),
                 diagnostic: None,
                 detail: None,
-                attempt: None,
             })?;
         let prepared = Arc::new(
             self.runtime
@@ -721,7 +717,6 @@ impl WasmRuntimeAdapter {
                     kind: DispatchFailureKind::Runtime(wasm_error_kind(&error)),
                     diagnostic: None,
                     detail: None,
-                    attempt: None,
                 })?,
         );
         let prepared = {
@@ -834,7 +829,6 @@ fn execute_prepared_wasm(
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
             diagnostic: None,
             detail: None,
-            attempt: None,
         })?;
     let reservation = match request.resource_reservation {
         Some(reservation) => reservation,
@@ -846,7 +840,6 @@ fn execute_prepared_wasm(
                 kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
                 diagnostic: None,
                 detail: None,
-                attempt: None,
             })?,
     };
     let execution = match runtime.execute(prepared, host, WitToolRequest::new(input_json)) {
@@ -860,7 +853,6 @@ fn execute_prepared_wasm(
                         kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
                         diagnostic: None,
                         detail: None,
-                        attempt: None,
                     });
                 }
             } else {
@@ -871,30 +863,18 @@ fn execute_prepared_wasm(
                 kind: DispatchFailureKind::Runtime(wasm_error_kind(&error)),
                 diagnostic: None,
                 detail: None,
-                attempt: None,
             });
         }
     };
     let output_json = match execution.outcome {
         WitToolOutcome::Success(output_json) => output_json,
-        WitToolOutcome::Failure(_) | WitToolOutcome::LegacyFailure(_) => {
+        WitToolOutcome::Failure(_) => {
             release_wasm_reservation(request.governor, reservation.id);
             return Err(DispatchError::Rejected {
                 runtime: Some(RuntimeKind::Wasm),
                 kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest),
                 diagnostic: None,
                 detail: None,
-                attempt: None,
-            });
-        }
-        WitToolOutcome::LegacyMissingOutput => {
-            release_wasm_reservation(request.governor, reservation.id);
-            return Err(DispatchError::Rejected {
-                runtime: Some(RuntimeKind::Wasm),
-                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InvalidResult),
-                diagnostic: None,
-                detail: None,
-                attempt: None,
             });
         }
     };
@@ -907,7 +887,6 @@ fn execute_prepared_wasm(
                 kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputDecode),
                 diagnostic: None,
                 detail: None,
-                attempt: None,
             });
         }
     };
@@ -923,7 +902,6 @@ fn execute_prepared_wasm(
                 kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
                 diagnostic: None,
                 detail: None,
-                attempt: None,
             });
         }
     };

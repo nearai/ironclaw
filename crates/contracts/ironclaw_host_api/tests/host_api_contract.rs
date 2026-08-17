@@ -440,7 +440,6 @@ fn dispatch_errors_preserve_typed_failure_kind() {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest),
             diagnostic: None,
             detail: None,
-            attempt: None,
         }
         .failure_kind(),
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)

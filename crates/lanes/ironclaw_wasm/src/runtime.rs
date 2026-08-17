@@ -11,8 +11,8 @@ use crate::error::WasmError;
 use crate::host::WitToolHost;
 use crate::store::StoreData;
 use crate::types::{
-    PreparedWitTool, WitBindingVersion, WitErrorKind, WitGuestFailure, WitToolExecution,
-    WitToolOutcome, WitToolRequest,
+    PreparedWitTool, WitErrorKind, WitGuestFailure, WitToolExecution, WitToolOutcome,
+    WitToolRequest,
 };
 use crate::wasm_sandbox_core::SandboxLimits;
 
@@ -25,10 +25,8 @@ use crate::wasm_sandbox_core::SandboxLimits;
 /// response body that repeats the credential the caller sent) can carry live
 /// credential material. This is the single chokepoint every WIT tool's guest
 /// error crosses on the way out of the sandbox, so redacting here defends
-/// all WASM tools, not just one. For the typed (current) response, this
-/// applies to `guest-failure`'s `code`/`message` fields — the only free-text
-/// carriers on that path; for the legacy response, it applies to the whole
-/// error string, as before.
+/// all WASM tools, not just one. This applies to `guest-failure`'s
+/// `code`/`message` fields — the only free-text carriers on that path.
 static GUEST_ERROR_LEAK_DETECTOR: LazyLock<LeakDetector> = LazyLock::new(LeakDetector::new);
 
 /// Redact secret-shaped values from a guest-authored string before it becomes
@@ -87,7 +85,7 @@ impl WitToolRuntime {
         let component = wasmtime::component::Component::new(&self.engine, wasm_bytes)
             .map_err(|error| WasmError::CompilationFailed(error.to_string()))?;
         let limits = self.config.default_limits.clone();
-        let (description, schema, binding_version) = self.extract_metadata(&component, &limits)?;
+        let (description, schema) = self.extract_metadata(&component, &limits)?;
 
         Ok(PreparedWitTool {
             name: name.to_string(),
@@ -95,7 +93,6 @@ impl WitToolRuntime {
             schema,
             component,
             limits,
-            binding_version,
         })
     }
 
@@ -105,11 +102,7 @@ impl WitToolRuntime {
         host: WitToolHost,
         request: WitToolRequest,
     ) -> Result<WitToolExecution, WasmError> {
-        match prepared.binding_version {
-            WitBindingVersion::Current => self.execute_current(prepared, host, request),
-            // Legacy fallback — removed in PR 4.
-            WitBindingVersion::Legacy => self.execute_legacy(prepared, host, request),
-        }
+        self.execute_current(prepared, host, request)
     }
 
     fn execute_current(
@@ -177,107 +170,22 @@ impl WitToolRuntime {
         })
     }
 
-    /// Legacy 0.3.0 binding fallback — removed in PR 4.
-    fn execute_legacy(
-        &self,
-        prepared: &PreparedWitTool,
-        host: WitToolHost,
-        request: WitToolRequest,
-    ) -> Result<WitToolExecution, WasmError> {
-        let started = Instant::now();
-        let (mut store, instance) =
-            self.instantiate_legacy(&prepared.component, host, &prepared.limits)?;
-        let tool = instance.near_agent_tool();
-        let wit_request = bindings::legacy::exports::near::agent::tool::Request {
-            params: request.params_json,
-            context: request.context_json,
-        };
-        let response = match tool.call_execute(&mut store, &wit_request) {
-            Ok(response) => response,
-            Err(error) => {
-                let message = if store.data().deadline_exceeded() {
-                    "WASM execution deadline exceeded".to_string()
-                } else {
-                    error.to_string()
-                };
-                return Err(execution_failed_with_usage(message, &store, started));
-            }
-        };
-        if store.data().deadline_exceeded() {
-            return Err(execution_failed_with_usage(
-                "WASM execution deadline exceeded".to_string(),
-                &store,
-                started,
-            ));
-        }
-
-        let mut usage = store.data().usage.clone();
-        usage.wall_clock_ms = elapsed_millis(started);
-        usage.output_bytes = response
-            .output
-            .as_deref()
-            .map(|output| output.len().min(u64::MAX as usize) as u64)
-            .unwrap_or(0);
-        let logs = store.data().logs.clone();
-
-        let outcome = match (response.output, response.error) {
-            (_, Some(error)) => WitToolOutcome::LegacyFailure(scrub_guest_error(error)),
-            (Some(output), None) => WitToolOutcome::Success(output),
-            (None, None) => WitToolOutcome::LegacyMissingOutput,
-        };
-
-        Ok(WitToolExecution {
-            outcome,
-            usage,
-            logs,
-        })
-    }
-
     fn extract_metadata(
         &self,
         component: &wasmtime::component::Component,
         limits: &SandboxLimits,
-    ) -> Result<(String, serde_json::Value, WitBindingVersion), WasmError> {
-        match self.instantiate_current(component, WitToolHost::deny_all(), limits) {
-            Ok((mut store, instance)) => {
-                let tool = instance.near_agent_tool();
-                let description = tool
-                    .call_description(&mut store)
-                    .map_err(|error| WasmError::execution_failed(error.to_string()))?;
-                let schema_json = tool
-                    .call_schema(&mut store)
-                    .map_err(|error| WasmError::execution_failed(error.to_string()))?;
-                let schema = parse_schema(&schema_json)?;
-                Ok((description, schema, WitBindingVersion::Current))
-            }
-            // Legacy fallback — removed in PR 4. A component compiled against
-            // the frozen 0.3.0 world fails the current-world instantiation on
-            // an import/version mismatch (wasmtime's instantiation error
-            // names the missing import, e.g. `near:agent/host`); only that
-            // signature is worth retrying against the legacy world. Any
-            // other current-world failure (a real bug in the component, a
-            // resource limit, ...) is not a version issue and re-running it
-            // against a different world would just mask the real error.
-            Err(current_error) if is_version_mismatch_error(&current_error) => {
-                match self.instantiate_legacy(component, WitToolHost::deny_all(), limits) {
-                    Ok((mut store, instance)) => {
-                        let tool = instance.near_agent_tool();
-                        let description = tool
-                            .call_description(&mut store)
-                            .map_err(|error| WasmError::execution_failed(error.to_string()))?;
-                        let schema_json = tool
-                            .call_schema(&mut store)
-                            .map_err(|error| WasmError::execution_failed(error.to_string()))?;
-                        let schema = parse_schema(&schema_json)?;
-                        Ok((description, schema, WitBindingVersion::Legacy))
-                    }
-                    Err(legacy_error) => Err(WasmError::InstantiationFailed(format!(
-                        "current-world instantiation failed: {current_error}; legacy-world fallback also failed: {legacy_error}"
-                    ))),
-                }
-            }
-            Err(current_error) => Err(current_error),
-        }
+    ) -> Result<(String, serde_json::Value), WasmError> {
+        let (mut store, instance) =
+            self.instantiate_current(component, WitToolHost::deny_all(), limits)?;
+        let tool = instance.near_agent_tool();
+        let description = tool
+            .call_description(&mut store)
+            .map_err(|error| WasmError::execution_failed(error.to_string()))?;
+        let schema_json = tool
+            .call_schema(&mut store)
+            .map_err(|error| WasmError::execution_failed(error.to_string()))?;
+        let schema = parse_schema(&schema_json)?;
+        Ok((description, schema))
     }
 
     fn instantiate_current(
@@ -293,24 +201,6 @@ impl WitToolRuntime {
         configure_store(&mut store, limits)?;
         let linker = create_linker_current(&self.engine)?;
         let instance = bindings::SandboxedTool::instantiate(&mut store, component, &linker)
-            .map_err(|error| classify_instantiation_error(error.to_string()))?;
-        Ok((store, instance))
-    }
-
-    /// Legacy 0.3.0 binding fallback — removed in PR 4.
-    fn instantiate_legacy(
-        &self,
-        component: &wasmtime::component::Component,
-        host: WitToolHost,
-        limits: &SandboxLimits,
-    ) -> Result<(Store<StoreData>, bindings::legacy::SandboxedTool), WasmError> {
-        let mut store = Store::new(
-            &self.engine,
-            StoreData::new(host, limits.memory_bytes, limits.timeout),
-        );
-        configure_store(&mut store, limits)?;
-        let linker = create_linker_legacy(&self.engine)?;
-        let instance = bindings::legacy::SandboxedTool::instantiate(&mut store, component, &linker)
             .map_err(|error| classify_instantiation_error(error.to_string()))?;
         Ok((store, instance))
     }
@@ -402,33 +292,17 @@ fn create_linker_current(engine: &Engine) -> Result<Linker<StoreData>, WasmError
     Ok(linker)
 }
 
-/// Legacy 0.3.0 binding fallback — removed in PR 4.
-fn create_linker_legacy(engine: &Engine) -> Result<Linker<StoreData>, WasmError> {
-    let mut linker = Linker::new(engine);
-    wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
-        .map_err(|error| WasmError::LinkerConfiguration(error.to_string()))?;
-    bindings::legacy::SandboxedTool::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
-        &mut linker,
-        |state: &mut StoreData| state,
-    )
-    .map_err(|error| WasmError::LinkerConfiguration(error.to_string()))?;
-    Ok(linker)
-}
-
-/// Whether `error` looks like a current-world instantiation failure caused by
-/// a version/import mismatch rather than a real component bug. Wasmtime
-/// names the missing import in its instantiation error text (e.g.
-/// `near:agent/host@0.4.0`), so a plain substring check on `near:agent` is
-/// enough to distinguish "this component targets a different WIT version"
-/// from "this component is broken" without a new abstraction.
-fn is_version_mismatch_error(error: &WasmError) -> bool {
-    matches!(error, WasmError::InstantiationFailed(message) if message.contains("near:agent"))
-}
-
+/// Wraps a raw wasmtime instantiation error with a decent, actionable
+/// message when it looks like a version/import mismatch rather than a real
+/// component bug. Wasmtime names the missing import in its instantiation
+/// error text (e.g. `near:agent/host@0.4.0`), so a plain substring check on
+/// `near:agent`/`import` is enough to distinguish "this component targets an
+/// unsupported WIT contract version" from "this component is broken" and
+/// name the one contract version the host actually supports.
 fn classify_instantiation_error(message: String) -> WasmError {
     if message.contains("near:agent") || message.contains("import") {
         WasmError::InstantiationFailed(format!(
-            "{message}. This usually means the component was compiled against a different WIT version than the host supports (host: {WIT_TOOL_VERSION})."
+            "{message}. This component targets an unsupported WIT contract version — the host only supports near:agent@{WIT_TOOL_VERSION}."
         ))
     } else {
         WasmError::InstantiationFailed(message)
@@ -474,41 +348,5 @@ mod tests {
         let scrubbed_error: Option<String> = guest_error.map(scrub_guest_error);
 
         assert!(!scrubbed_error.unwrap().contains(GITHUB_TOKEN_SHAPE));
-    }
-}
-
-#[cfg(test)]
-mod legacy_retry_gate_tests {
-    use super::*;
-
-    /// A current-world instantiation failure that names the missing
-    /// `near:agent` import is the version-mismatch signature `extract_metadata`
-    /// gates its legacy-world retry on.
-    #[test]
-    fn version_mismatch_signature_is_detected_from_instantiation_error() {
-        let error = classify_instantiation_error(
-            "unknown import: `near:agent/host@0.4.0::log` has not been defined".to_string(),
-        );
-        assert!(is_version_mismatch_error(&error));
-    }
-
-    /// A current-world instantiation failure that does NOT name a
-    /// `near:agent` import (a real component bug, not a version mismatch)
-    /// must not be treated as retry-worthy — retrying it against the legacy
-    /// world would mask the real error instead of surfacing it.
-    #[test]
-    fn non_version_instantiation_error_is_not_a_retry_signature() {
-        let error = classify_instantiation_error("trap: out of bounds memory access".to_string());
-        assert!(!is_version_mismatch_error(&error));
-    }
-
-    /// Non-instantiation `WasmError` variants (store/linker configuration
-    /// failures preceding instantiation) are never retry-worthy either —
-    /// the gate only matches `InstantiationFailed`.
-    #[test]
-    fn non_instantiation_error_variant_is_not_a_retry_signature() {
-        let error =
-            WasmError::StoreConfiguration("near:agent memory limit misconfigured".to_string());
-        assert!(!is_version_mismatch_error(&error));
     }
 }

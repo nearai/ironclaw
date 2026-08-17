@@ -907,7 +907,6 @@ async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume(
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
             diagnostic: None,
             detail: None,
-            attempt: None,
         })
     });
     let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();

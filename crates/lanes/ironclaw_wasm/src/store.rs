@@ -77,11 +77,8 @@ impl WasiView for StoreData {
     }
 }
 
-/// Core (binding-agnostic) implementations of the WIT `host` import surface,
-/// shared by the current (near:agent@0.4.0) and legacy (near:agent@0.3.0,
-/// removed in PR 4) `Host` trait impls below — the `host` interface itself
-/// is unchanged between the two package versions, only `tool.response`
-/// differs.
+/// Core implementation of the WIT `host` import surface, shared by the
+/// generated `Host` trait impl below.
 impl StoreData {
     fn log_core(&mut self, level: WasmLogLevel, message: String) {
         if self.logs.len() >= MAX_LOGS_PER_EXECUTION {
@@ -201,56 +198,6 @@ impl bindings::near::agent::host::Host for StoreData {
         self.http_request_core(method, url, headers_json, body, timeout_ms)
             .map(
                 |(status, headers_json, body)| bindings::near::agent::host::HttpResponse {
-                    status,
-                    headers_json,
-                    body,
-                },
-            )
-    }
-
-    fn tool_invoke(&mut self, alias: String, params_json: String) -> Result<String, String> {
-        self.tool_invoke_core(alias, params_json)
-    }
-
-    fn secret_exists(&mut self, name: String) -> bool {
-        self.secret_exists_core(name)
-    }
-}
-
-/// Legacy 0.3.0 binding fallback — removed in PR 4. Identical behavior to
-/// the current `Host` impl above; the `host` import surface did not change
-/// between package versions, only `tool.response` did.
-impl bindings::legacy::near::agent::host::Host for StoreData {
-    fn log(&mut self, level: bindings::legacy::near::agent::host::LogLevel, message: String) {
-        let level = match level {
-            bindings::legacy::near::agent::host::LogLevel::Trace => WasmLogLevel::Trace,
-            bindings::legacy::near::agent::host::LogLevel::Debug => WasmLogLevel::Debug,
-            bindings::legacy::near::agent::host::LogLevel::Info => WasmLogLevel::Info,
-            bindings::legacy::near::agent::host::LogLevel::Warn => WasmLogLevel::Warn,
-            bindings::legacy::near::agent::host::LogLevel::Error => WasmLogLevel::Error,
-        };
-        self.log_core(level, message);
-    }
-
-    fn now_millis(&mut self) -> u64 {
-        self.now_millis_core()
-    }
-
-    fn workspace_read(&mut self, path: String) -> Option<String> {
-        self.workspace_read_core(path)
-    }
-
-    fn http_request(
-        &mut self,
-        method: String,
-        url: String,
-        headers_json: String,
-        body: Option<Vec<u8>>,
-        timeout_ms: Option<u32>,
-    ) -> Result<bindings::legacy::near::agent::host::HttpResponse, String> {
-        self.http_request_core(method, url, headers_json, body, timeout_ms)
-            .map(
-                |(status, headers_json, body)| bindings::legacy::near::agent::host::HttpResponse {
                     status,
                     headers_json,
                     body,

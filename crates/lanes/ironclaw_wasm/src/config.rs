@@ -4,9 +4,9 @@ use crate::wasm_sandbox_core::SandboxLimits;
 
 /// WIT package version supported by the Reborn WASM tool runtime.
 ///
-/// The runtime also accepts components compiled against the frozen legacy
-/// world (`0.3.0`, `wit/legacy/tool_v0_3_0.wit`) through a binding-level
-/// fallback (`WitToolRuntime::prepare`), removed in PR 4.
+/// A component compiled against any other package version fails
+/// instantiation with an explicit unsupported-contract error (see
+/// `classify_instantiation_error` in `runtime.rs`).
 pub const WIT_TOOL_VERSION: &str = "0.4.0";
 
 /// Source text of the canonical tool ABI, `wit/tool.wit`, which this crate
@@ -21,10 +21,6 @@ pub const WIT_TOOL_VERSION: &str = "0.4.0";
 /// reach-ins, which is exactly what PROPOSAL §11.2.7 forbids. One `include_str!`
 /// at the owner plus a public const is the same bytes with none of that.
 pub const TOOL_WIT: &str = include_str!("../wit/tool.wit");
-
-/// Source text of the frozen legacy tool ABI, `wit/legacy/tool_v0_3_0.wit`.
-/// Removed in PR 4 alongside the binding-level fallback that uses it.
-pub const LEGACY_TOOL_WIT: &str = include_str!("../wit/legacy/tool_v0_3_0.wit");
 
 pub(crate) const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(500);
 pub(crate) const DEFAULT_HTTP_TIMEOUT_MS: u32 = 30_000;

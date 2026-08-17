@@ -2008,9 +2008,8 @@ fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected_kind: Failu
 
 /// The bundled `github.wasm`/`google-drive.wasm` fixtures are compiled
 /// against the typed near:agent@0.4.0 world, so every execution in this file
-/// lands in `WitToolOutcome::Success`/`Failure` — the legacy
-/// `LegacyFailure`/`LegacyMissingOutput` fallback cases (removed in PR 4)
-/// only exist for still-unmigrated 0.3.0 guests.
+/// lands in `WitToolOutcome::Success`/`Failure` — the only two variants
+/// `WitToolOutcome` has.
 fn wasm_output_json(execution: &WitToolExecution) -> Option<String> {
     match &execution.outcome {
         WitToolOutcome::Success(output) => Some(output.clone()),

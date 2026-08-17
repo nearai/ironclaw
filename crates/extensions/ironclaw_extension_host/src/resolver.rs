@@ -190,7 +190,6 @@ fn dispatch_error_for_kind(
             retry_after: None,
         }),
         detail: None,
-        attempt: None,
     }
 }
 

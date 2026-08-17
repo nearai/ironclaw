@@ -219,7 +219,6 @@ fn runtime_dispatch_error(
             retry_after: None,
         }),
         detail: None,
-        attempt: None,
     }
 }
 

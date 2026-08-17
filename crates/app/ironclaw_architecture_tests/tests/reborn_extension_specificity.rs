@@ -1291,10 +1291,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_host_runtime/src/first_party_tools/schemas.rs",
         "slack",
     ),
-    (
-        "crates/ironclaw_host_runtime/src/services/wasm_execution.rs",
-        "slack",
-    ),
     ("crates/ironclaw_loop_host/src/tool_disclosure.rs", "google"),
     (
         "crates/ironclaw_loop_host/src/tool_disclosure.rs",
@@ -1697,7 +1693,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
 // `ironclaw_host_api/src/dispatch.rs`/"slack" carve-out named a doc-comment
 // example on the retired `DispatchError::Wasm` variant; deleting the variant
 // deleted the example, so the now-stale allowlist entry was deleted too.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 111;
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 110;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///

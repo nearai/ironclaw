@@ -241,7 +241,6 @@ impl BoundCapabilityAdapter for RecordingRuntimeAdapter {
                     kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
                     diagnostic: None,
                     detail: None,
-                    attempt: None,
                 })?,
         };
         let output_bytes = usage.output_bytes;
@@ -253,7 +252,6 @@ impl BoundCapabilityAdapter for RecordingRuntimeAdapter {
                 kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
                 diagnostic: None,
                 detail: None,
-                attempt: None,
             })?;
         Ok(RuntimeAdapterResult {
             output,

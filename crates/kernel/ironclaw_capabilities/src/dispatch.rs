@@ -428,7 +428,6 @@ fn dispatch_resource_error(
             retry_after: None,
         }),
         detail: None,
-        attempt: None,
     }
 }
 

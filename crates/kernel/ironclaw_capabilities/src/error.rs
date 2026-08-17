@@ -451,7 +451,6 @@ mod tests {
                 retry_after: None,
             }),
             detail: None,
-            attempt: None,
         };
         let kind = dispatch_error_kind(&error);
         assert_eq!(kind.as_str(), "Backend");
@@ -537,7 +536,6 @@ mod tests {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest),
             diagnostic: None,
             detail: None,
-            attempt: None,
         });
         match err {
             CapabilityInvocationError::Dispatch { kind, .. } => {
@@ -568,7 +566,6 @@ mod tests {
             detail: Some(DispatchFailureDetail::InvalidInput {
                 issues: vec![issue.clone()],
             }),
-            attempt: None,
         });
 
         match err {

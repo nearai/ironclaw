@@ -62,7 +62,6 @@ fn first_party_dispatch_error(
             retry_after: None,
         }),
         detail,
-        attempt: None,
     }
 }
 
@@ -1238,7 +1237,6 @@ fn dispatch_error_for_runtime(
             retry_after: None,
         }),
         detail: None,
-        attempt: None,
     }
 }
 

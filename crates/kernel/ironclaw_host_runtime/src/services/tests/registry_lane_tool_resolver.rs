@@ -83,7 +83,6 @@ impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for EchoLane {
                     kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
                     diagnostic: None,
                     detail: None,
-                    attempt: None,
                 })?,
         };
         let receipt = self
@@ -94,7 +93,6 @@ impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for EchoLane {
                 kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
                 diagnostic: None,
                 detail: None,
-                attempt: None,
             })?;
         Ok(RuntimeAdapterResult {
             output,

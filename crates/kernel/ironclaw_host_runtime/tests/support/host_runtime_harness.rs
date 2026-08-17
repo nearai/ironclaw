@@ -2093,48 +2093,6 @@ pub(crate) async fn wasm_runtime_for_component(
     }
 }
 
-/// Sibling of [`wasm_runtime_for_component`] that encodes `wat` against the
-/// frozen near:agent@0.3.0 world via [`legacy_tool_component`] instead of the
-/// current one, exercising `WitToolRuntime::instantiate_legacy`. Removed in
-/// PR 4 alongside the legacy fallback.
-pub(crate) async fn wasm_runtime_for_legacy_component(
-    manifest: &str,
-    capability: &str,
-    module_path: &str,
-    wat: &str,
-) -> WasmRuntimeFixture {
-    let parsed_manifest = parse_manifest(manifest);
-    let component = legacy_tool_component(wat);
-    let filesystem = Arc::new(
-        filesystem_with_wasm_component(parsed_manifest.id.as_str(), module_path, &component).await,
-    );
-    let governor = Arc::new(governor_with_default_limit(sample_account()));
-    let policy = wasm_http_policy();
-    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
-        Arc::new(ObligatingAuthorizer::new(vec![
-            Obligation::ApplyNetworkPolicy { policy },
-        ]));
-    let http = Arc::new(RecordingRuntimeHttpEgress::new());
-    let services = HostRuntimeServices::new(
-        Arc::new(registry_with_manifest(manifest)),
-        filesystem,
-        Arc::clone(&governor),
-        authorizer,
-        ironclaw_processes::in_memory_backed_process_services(),
-        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    )
-    .with_runtime_http_egress(Arc::clone(&http))
-    .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
-    .unwrap();
-
-    WasmRuntimeFixture {
-        runtime: services.host_runtime_for_local_testing(),
-        governor,
-        http,
-        capability_id: CapabilityId::new(capability).unwrap(),
-    }
-}
-
 pub(crate) async fn wasm_runtime_for_component_with_slow_zero_body_http(
     manifest: &str,
     capability: &str,
@@ -2257,30 +2215,6 @@ pub(crate) fn tool_component(wat_src: &str) -> Vec<u8> {
     let mut resolve = Resolve::default();
     let package = resolve
         .push_str("tool.wit", ironclaw_wasm::TOOL_WIT)
-        .unwrap();
-    let world = resolve
-        .select_world(&[package], Some("sandboxed-tool"))
-        .unwrap();
-
-    embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8).unwrap();
-
-    let mut encoder = ComponentEncoder::default()
-        .module(&module)
-        .unwrap()
-        .validate(true);
-    encoder.encode().unwrap()
-}
-
-/// Sibling of [`tool_component`] that embeds metadata against the frozen
-/// near:agent@0.3.0 world (`ironclaw_wasm::LEGACY_TOOL_WIT`) instead of the
-/// current one, so [`LEGACY_V0_3_HTTP_TOOL_WAT`] encodes to a component whose
-/// declared imports/exports actually match its 0.3.0 names. Removed in PR 4
-/// alongside the legacy fallback it exercises.
-pub(crate) fn legacy_tool_component(wat_src: &str) -> Vec<u8> {
-    let mut module = wat::parse_str(wat_src).unwrap();
-    let mut resolve = Resolve::default();
-    let package = resolve
-        .push_str("legacy_tool.wit", ironclaw_wasm::LEGACY_TOOL_WIT)
         .unwrap();
     let world = resolve
         .select_world(&[package], Some("sandboxed-tool"))
@@ -2752,76 +2686,6 @@ pub(crate) const SECRET_EXISTS_TOOL_WAT: &str = r#"
   (export "cabi_post_near:agent/tool@0.4.0#schema" (func $post))
   (export "near:agent/tool@0.4.0#description" (func $description))
   (export "cabi_post_near:agent/tool@0.4.0#description" (func $post))
-  (export "cabi_realloc" (func $realloc))
-  (export "_initialize" (func $_initialize))
-)
-"#;
-
-/// A tool compiled against the frozen near:agent@0.3.0 world (untyped
-/// `record response { output: option<string>, error: option<string> }`),
-/// deliberately kept at the old import/export version so
-/// `WitToolRuntime::instantiate_legacy` (`instantiate_current` fails on the
-/// version mismatch, then falls back) stays pinned through this harness.
-/// Removed alongside the legacy fallback in PR 4 — search "legacy_v0_3" for
-/// every reference before deleting.
-pub(crate) const LEGACY_V0_3_HTTP_TOOL_WAT: &str = r#"
-(module
-  (type (;0;) (func (param i32 i32 i32)))
-  (type (;1;) (func (param i32 i32) (result i32)))
-  (import "near:agent/host@0.3.0" "log" (func $log (type 0)))
-  (import "near:agent/host@0.3.0" "secret-exists" (func $secret_exists (type 1)))
-  (memory (export "memory") 1)
-  (global $heap (mut i32) (i32.const 4096))
-  (data (i32.const 1024) "{\"type\":\"object\"}")
-  (data (i32.const 2048) "legacy fixture")
-  (data (i32.const 3072) "1")
-  (func $schema (result i32)
-    i32.const 16
-    i32.const 1024
-    i32.store
-    i32.const 20
-    i32.const 17
-    i32.store
-    i32.const 16)
-  (func $description (result i32)
-    i32.const 32
-    i32.const 2048
-    i32.store
-    i32.const 36
-    i32.const 14
-    i32.store
-    i32.const 32)
-  (func $execute (param i32 i32 i32 i32 i32) (result i32)
-    i32.const 48
-    i32.const 1
-    i32.store
-    i32.const 52
-    i32.const 3072
-    i32.store
-    i32.const 56
-    i32.const 1
-    i32.store
-    i32.const 60
-    i32.const 0
-    i32.store
-    i32.const 48)
-  (func $post (param i32))
-  (func $realloc (param $old i32) (param $old_align i32) (param $new_size i32) (param $new_align i32) (result i32)
-    (local $ret i32)
-    global.get $heap
-    local.set $ret
-    global.get $heap
-    local.get $new_size
-    i32.add
-    global.set $heap
-    local.get $ret)
-  (func $_initialize)
-  (export "near:agent/tool@0.3.0#execute" (func $execute))
-  (export "cabi_post_near:agent/tool@0.3.0#execute" (func $post))
-  (export "near:agent/tool@0.3.0#schema" (func $schema))
-  (export "cabi_post_near:agent/tool@0.3.0#schema" (func $post))
-  (export "near:agent/tool@0.3.0#description" (func $description))
-  (export "cabi_post_near:agent/tool@0.3.0#description" (func $post))
   (export "cabi_realloc" (func $realloc))
   (export "_initialize" (func $_initialize))
 )

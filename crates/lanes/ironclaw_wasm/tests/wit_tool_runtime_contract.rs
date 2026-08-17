@@ -318,38 +318,6 @@ fn prepares_metadata_from_wit_tool_component() {
     assert_eq!(prepared.schema(), &json!({ "type": "object" }));
 }
 
-// Regression: `extract_metadata` retries a version-mismatch current-world
-// instantiation failure against the legacy 0.3.0 world (see
-// `is_version_mismatch_error`); when that legacy retry ALSO fails, both
-// error messages must be preserved in the combined `InstantiationFailed`
-// rather than only the last one. A component built against a THIRD WIT
-// version (0.9.9 — matching neither the current 0.4.0 world nor the frozen
-// legacy 0.3.0 world) triggers exactly that double-failure branch: the
-// current-world instantiation fails citing the missing `near:agent` import
-// (the version-mismatch signature that gates the legacy retry), and the
-// legacy-world retry then also fails for the same reason.
-#[test]
-fn double_failure_preserves_both_current_and_legacy_errors() {
-    let mismatched_wit = ironclaw_wasm::TOOL_WIT.replace("0.4.0", "0.9.9");
-    let mismatched_wat = COUNTER_TOOL_WAT.replace("0.4.0", "0.9.9");
-    let component = tool_component_with_wit(&mismatched_wat, &mismatched_wit);
-
-    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
-    let error = runtime.prepare("mismatched", &component).unwrap_err();
-
-    let WasmError::InstantiationFailed(message) = error else {
-        panic!("expected InstantiationFailed, got: {error:?}");
-    };
-    assert!(
-        message.contains("current-world instantiation failed"),
-        "missing current-world error: {message}"
-    );
-    assert!(
-        message.contains("legacy-world fallback also failed"),
-        "missing legacy-world error: {message}"
-    );
-}
-
 #[test]
 fn malformed_component_bytes_are_rejected_as_compilation_failure() {
     let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();

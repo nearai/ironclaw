@@ -1551,7 +1551,6 @@ impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingRunti
                     kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
                     diagnostic: None,
                     detail: None,
-                    attempt: None,
                 })?,
         };
         let receipt: ResourceReceipt = request
@@ -1562,7 +1561,6 @@ impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingRunti
                 kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
                 diagnostic: None,
                 detail: None,
-                attempt: None,
             })?;
         Ok(RuntimeAdapterResult {
             output: Value::Null,
