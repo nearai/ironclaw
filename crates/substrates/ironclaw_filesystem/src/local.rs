@@ -664,9 +664,15 @@ async fn publish_absent_temp(
     target: &Path,
 ) -> Result<(), FilesystemError> {
     match tokio::fs::hard_link(temp, target).await {
-        Ok(()) => tokio::fs::remove_file(&temp)
-            .await
-            .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error)),
+        Ok(()) => {
+            if let Err(cleanup_error) = tokio::fs::remove_file(temp).await {
+                tracing::debug!(
+                    error = ?cleanup_error,
+                    "best-effort cleanup of write temp file failed after publication"
+                );
+            }
+            Ok(())
+        }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             if let Err(cleanup_error) = tokio::fs::remove_file(&temp).await {
                 tracing::debug!(
@@ -702,15 +708,25 @@ async fn publish_absent_temp(
     temp: &Path,
     target: &Path,
 ) -> Result<(), FilesystemError> {
-    // Windows rename is an atomic create-only publication: unlike Unix rename,
-    // it refuses to replace an existing destination. Use that native behavior
-    // instead of `CreateHardLinkW`, which can return `PermissionDenied` on
-    // hosted Windows runners even when both paths are writable and share a
-    // volume. The existence read is only error classification after rename
-    // has already failed; it never decides whether publication may proceed.
-    match tokio::fs::rename(temp, target).await {
+    let temp_path = temp.to_path_buf();
+    let target_path = target.to_path_buf();
+    let publish =
+        tokio::task::spawn_blocking(move || move_file_absent_windows(&temp_path, &target_path))
+            .await
+            .map_err(|error| FilesystemError::Backend {
+                path: virtual_path.clone(),
+                operation: FilesystemOperation::WriteFile,
+                reason: format!("Windows create-only publication task failed: {error}"),
+            })?;
+    match publish {
         Ok(()) => Ok(()),
         Err(error) => {
+            if let Err(cleanup_error) = tokio::fs::remove_file(temp).await {
+                tracing::debug!(
+                    error = ?cleanup_error,
+                    "best-effort cleanup of write temp file failed after rename error"
+                );
+            }
             let target_exists = tokio::fs::try_exists(target)
                 .await
                 .map_err(|inspect_error| {
@@ -720,12 +736,6 @@ async fn publish_absent_temp(
                         inspect_error,
                     )
                 })?;
-            if let Err(cleanup_error) = tokio::fs::remove_file(temp).await {
-                tracing::debug!(
-                    error = ?cleanup_error,
-                    "best-effort cleanup of write temp file failed after rename error"
-                );
-            }
             if target_exists {
                 Err(FilesystemError::VersionMismatch {
                     path: virtual_path.clone(),
@@ -741,6 +751,82 @@ async fn publish_absent_temp(
             }
         }
     }
+}
+
+#[cfg(windows)]
+fn move_file_absent_windows(temp: &Path, target: &Path) -> std::io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+
+    let temp = path_to_nul_terminated_wide(temp)?;
+    let target = path_to_nul_terminated_wide(target)?;
+    // SAFETY: Both pointers reference live, NUL-terminated UTF-16 buffers.
+    // Omitting MOVEFILE_REPLACE_EXISTING makes an existing target a failure,
+    // preserving CasExpectation::Absent atomically on the same volume.
+    let moved = unsafe { MoveFileExW(temp.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+    if moved == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn path_to_nul_terminated_wide(path: &Path) -> std::io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let absolute = std::path::absolute(path)?;
+    let mut wide: Vec<u16> = absolute.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path contains an interior NUL byte",
+        ));
+    }
+
+    normalize_windows_path_separators(&mut wide);
+    if !has_windows_namespace_prefix(&wide) {
+        wide = verbatim_windows_path(wide);
+    }
+    wide.push(0);
+    Ok(wide)
+}
+
+#[cfg(windows)]
+fn has_windows_namespace_prefix(wide: &[u16]) -> bool {
+    wide.len() >= 4
+        && is_windows_path_separator(wide[0])
+        && is_windows_path_separator(wide[1])
+        && (wide[2] == b'?' as u16 || wide[2] == b'.' as u16)
+        && is_windows_path_separator(wide[3])
+}
+
+#[cfg(windows)]
+fn normalize_windows_path_separators(wide: &mut [u16]) {
+    for code_unit in wide {
+        if *code_unit == b'/' as u16 {
+            *code_unit = b'\\' as u16;
+        }
+    }
+}
+
+#[cfg(windows)]
+fn verbatim_windows_path(wide: Vec<u16>) -> Vec<u16> {
+    if wide.len() >= 2 && is_windows_path_separator(wide[0]) && is_windows_path_separator(wide[1]) {
+        let mut prefixed: Vec<u16> = r"\\?\UNC\".encode_utf16().collect();
+        prefixed.extend_from_slice(&wide[2..]);
+        prefixed
+    } else if wide.len() >= 3 && wide[1] == b':' as u16 && is_windows_path_separator(wide[2]) {
+        let mut prefixed: Vec<u16> = r"\\?\".encode_utf16().collect();
+        prefixed.extend_from_slice(&wide);
+        prefixed
+    } else {
+        wide
+    }
+}
+
+#[cfg(windows)]
+fn is_windows_path_separator(code_unit: u16) -> bool {
+    code_unit == b'\\' as u16 || code_unit == b'/' as u16
 }
 
 fn unique_temp_path(

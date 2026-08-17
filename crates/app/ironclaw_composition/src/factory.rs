@@ -1044,11 +1044,20 @@ fn write_standalone_secret_master_key(path: &Path, key: &str) -> Result<(), Rebo
             })?;
         if !output.status.success() {
             let _ = std::fs::remove_file(path);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
             return Err(RebornBuildError::InvalidConfig {
-                reason: format!(
-                    "standalone secrets master key permissions could not be set: icacls exited with {}",
-                    output.status
-                ),
+                reason: if stderr.is_empty() {
+                    format!(
+                        "standalone secrets master key permissions could not be set: icacls exited with {}",
+                        output.status
+                    )
+                } else {
+                    format!(
+                        "standalone secrets master key permissions could not be set: icacls exited with {}: {stderr}",
+                        output.status
+                    )
+                },
             });
         }
         file.write_all(key.as_bytes())

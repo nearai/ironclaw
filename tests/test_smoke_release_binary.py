@@ -129,7 +129,12 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
         workspace_root = workspace_roots.pop()
         self.assertIsNotNone(workspace_root)
         self.assertTrue(all(self.runner.workspace_roots_were_directories))
-        self.assertNotEqual(Path(workspace_root), ROOT)
+        workspace_path = Path(workspace_root).resolve()
+        repository_path = ROOT.resolve()
+        self.assertFalse(
+            workspace_path == repository_path
+            or repository_path in workspace_path.parents
+        )
         self.assertTrue(
             all("DATABASE_URL" not in environment for environment in environments)
         )
