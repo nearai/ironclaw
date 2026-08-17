@@ -24,9 +24,10 @@ tool code runs and calls http-request with an UNAUTHENTICATED request
     ↓
 host egress boundary
   ├─ reject tool-supplied Authorization / Cookie / x-api-key headers
-  ├─ match scheme + host against the tool's network_targets
   ├─ leak-scan URL, headers, body
-  └─ inject the staged credential
+  ├─ inject the staged credential
+  └─ match scheme + host against the tool's network_targets and
+     credential audiences before any connection opens
     ↓
 external service
     ↓
@@ -48,7 +49,7 @@ Every execution is bounded by three limits applied at instantiation:
 | Limit | Default | Behavior on breach |
 |-------|---------|--------------------|
 | Fuel | 500,000,000 instructions | The module is terminated the moment it runs out. Prevents infinite loops and runaway computation. |
-| Memory | 10 MB linear memory | An allocation beyond the cap traps and terminates the module. |
+| Memory | 10 MB linear memory | Growth beyond the cap is refused; the guest's `memory.grow` fails and the module cannot obtain more memory. |
 | Wall clock | 60 seconds | Execution is interrupted via wasmtime's epoch deadline. |
 
 These are host-side defaults, not environment-tunable knobs — there is no `WASM_FUEL_LIMIT`-style variable. A deployment that needs different bounds configures them where the runtime is composed.
@@ -97,9 +98,11 @@ audience = { scheme = "https", host = "api.github.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 ```
 
+The example is condensed from the shipped `github` package. The real `github.create_repo` entry declares no `network_targets` at all: its credential `audience` alone puts `api.github.com` on the allowlist (see below).
+
 ### `[runtime]`
 
-`kind` is `wasm`, `mcp`, or `first_party` — implementation detail, not taxonomy. For `wasm`, `module` is the path to the compiled component within the package.
+`kind` is `wasm` or `first_party` — implementation detail, not taxonomy. For `wasm`, `module` is the path to the compiled component within the package; for `first_party`, `service` names the host-side implementation. Extensions backed by an MCP server declare no `[runtime]` table; they use a top-level `[mcp]` table instead.
 
 ### `[[tools]]`
 
@@ -110,9 +113,13 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
 | `default_permission` | `allow`, `ask`, or `deny`. `ask` pauses the call for user approval. |
 | `visibility` | Whether the tool is offered to the model at all. |
 | `origin_gate_matrix` | Per-origin reachability — `loop_run` (an agent turn), `product` (a direct product action), `automation` (an unattended trigger). A tool can be reachable from a supervised turn and `forbidden` from a scheduled run. |
-| `network_targets` | Allowed outbound destinations by `scheme` and `host_pattern`. Unlisted destinations are refused before the connection opens. |
+| `network_targets` | Allowed outbound destinations by `scheme` and `host_pattern` (optionally `port`). Together with every credential `audience` below, this is the tool's allowlist; unlisted destinations are refused before the connection opens, and private-IP ranges are refused whenever a tool has any egress targets. |
 | `max_egress_bytes` | Per-call ceiling on outbound bytes. |
-| `input_schema_ref` / `prompt_doc_ref` | Paths to the JSON Schema for parameters and the model-facing prompt doc. |
+| `input_schema_ref` / `output_schema_ref` / `prompt_doc_ref` | Paths to the JSON Schema for parameters (required for a bespoke tool), the optional result schema, and the model-facing prompt doc. |
+| `standard_op` | Binds the tool to a host-owned canonical operation instead of a bespoke schema. Mutually exclusive with `input_schema_ref`. |
+| `resource_profile` | Optional resource ceilings for the call. |
+
+`id`, `description`, and `default_permission` are required. `effects` defaults to empty, `visibility` to `model`, and an absent `origin_gate_matrix` makes every origin `forbidden`.
 
 ### `[[tools.credentials]]`
 
@@ -122,7 +129,8 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
 | `vendor` | The credential authority namespace (`google`, `github`, …), which may be shared across extensions. |
 | `audience` | The `scheme` + `host` this credential may be attached to. A credential declared for one host is never sent to another. |
 | `scopes` | For OAuth credentials, the scopes required by this specific tool. |
-| `injection` | How the host attaches it: `header` (with optional `prefix`), `query_param`, `path_placeholder`, or `body_json_pointer`. |
+| `injection` | How the host attaches it: `header` (with optional `prefix`), `query_param`, `path_placeholder`, `body_json_pointer`, `basic` (HTTP Basic with a `username`), or `vapid_authorization`. |
+| `required` | Whether the tool can run without this credential. Defaults to `true`. |
 
 There is no manifest field that lets a tool *read* a secret. Credential material is only ever attached by the host to a request the host has already validated.
 
@@ -130,7 +138,7 @@ There is no manifest field that lets a tool *read* a secret. Credential material
 
 ## Host Functions
 
-The WIT interface (`near:agent@0.3.0`) declares six host functions. The production host starts deny-all and grants three:
+The WIT interface (`near:agent@0.3.0`) declares six host functions. The production host starts deny-all and grants four — three unconditionally, plus `http-request` when the call has a staged network policy:
 
 | Function | Available in production | Notes |
 |----------|------------------------|-------|
@@ -138,7 +146,7 @@ The WIT interface (`near:agent@0.3.0`) declares six host functions. The producti
 | `now-millis()` | Yes | Milliseconds since the Unix epoch. |
 | `http-request(method, url, headers-json, body, timeout-ms)` | Yes, when a network policy is staged | The entry point for the credential-injection flow. Denied outright when the call has no staged policy. |
 | `workspace-read(path)` | No | Denied by the production host. |
-| `secret-exists(name)` | No | Denied by the production host. Returns a boolean, never a value, even where granted. |
+| `secret-exists(name)` | Yes | Answers from the credentials staged for this one invocation: `true` only if material was staged for that handle. Returns a boolean, never a value. |
 | `tool-invoke(alias, params-json)` | No | Declared for future chained tool calls; denied today. |
 
 That is the entire surface. A WASM tool cannot call arbitrary OS functions, spawn processes, open files, or reach the network except through `http-request`.
@@ -201,7 +209,7 @@ Read the manifest before installing an extension from an untrusted source — sp
   </Accordion>
 
   <Accordion title="No process spawning" icon="shield">
-    Modules cannot spawn child processes, execute shell commands, or load dynamic libraries. The interface exposed to a module is the six functions above and nothing else.
+    Modules cannot spawn child processes, execute shell commands, or load dynamic libraries. The interface exposed to a module is the six functions above plus a capability-less WASI Preview 2 context — no preopened directories, no environment, no inherited stdio, no sockets.
   </Accordion>
 
   <Accordion title="Fuel prevents denial-of-service" icon="zap">

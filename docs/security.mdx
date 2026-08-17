@@ -37,7 +37,7 @@ Everything below exists to make that hold up in practice.
 
 IronClaw takes a **defense in depth** approach — independent layers that a request passes through on its way out, and that a response passes through on its way back.
 
-The critical detail is where the credential enters. It is **not** in the tool. A sandboxed tool builds an unauthenticated request; the host attaches the credential after the request has already cleared the allowlist and the leak scan, on its way out the door:
+The critical detail is where the credential enters. It is **not** in the tool. A sandboxed tool builds an unauthenticated request; the host attaches the credential only after the request has passed the leak scan, and the allowlist is enforced before any connection opens — so a destination the tool did not declare never receives the credential:
 
 ```
 model picks a tool
@@ -50,9 +50,10 @@ tool code runs in the sandbox — builds an UNAUTHENTICATED request
 host egress boundary
   ├─ reject model/tool-supplied Authorization, Cookie, x-api-key headers
   ├─ reject user:pass@ credentials embedded in the URL
-  ├─ check host + method against the tool's declared network targets
   ├─ leak-scan the URL (raw and percent-decoded), headers, and body
-  └─ inject the staged credential  ← the ONLY point a plaintext secret exists
+  ├─ inject the staged credential  ← the ONLY point a plaintext secret exists
+  └─ match scheme + host (+ port) against the tool's declared network
+     targets and credential audiences; refuse private-IP ranges
     ↓
 external service
     ↓
@@ -72,7 +73,7 @@ See [Secrets & Sandboxing](/security/secrets-and-sandboxing) for the step-by-ste
 
 ## Tool Capability Declarations
 
-When you install an extension, you are approving its **manifest** (`manifest.toml`, schema `reborn.extension_manifest.v3`). The manifest declares, per tool, exactly what that tool may reach. The host enforces those declarations at runtime — a tool cannot call a host it didn't declare, use a credential it didn't declare, or produce more output than its ceiling allows.
+When you install an extension, you are approving its **manifest** (`manifest.toml`, schema `reborn.extension_manifest.v3`). The manifest declares, per tool, exactly what that tool may reach. The host enforces those declarations at runtime — a tool cannot call a host it didn't declare, use a credential it didn't declare, or send more than its egress ceiling allows.
 
 ```toml
 [[tools]]
@@ -81,11 +82,14 @@ description = "Send a Gmail message as the user."
 effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
+input_schema_ref = "schemas/gmail/send_message.input.v1.json"
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 
 network_targets = [
+  { scheme = "https", host_pattern = "www.googleapis.com" },
   { scheme = "https", host_pattern = "gmail.googleapis.com" },
   { scheme = "https", host_pattern = "oauth2.googleapis.com" },
+  { scheme = "https", host_pattern = "accounts.google.com" },
 ]
 max_egress_bytes = 10485760
 
@@ -104,9 +108,9 @@ What each field controls:
 | `effects` | The effect classes this tool claims — `network`, `use_secret`, `external_write`, `write_filesystem`, `spawn_process`, `financial`, and similar. Authorization plans obligations from these. |
 | `default_permission` | `allow`, `ask`, or `deny`. `ask` means the call pauses for your approval before it runs. |
 | `origin_gate_matrix` | Which invocation origins may reach this tool at all — an agent loop run, a direct product action, or an unattended automation. A tool can be reachable from a supervised turn and `forbidden` from a scheduled trigger. |
-| `network_targets` | Every outbound destination, by scheme and host pattern. Anything not listed is refused before the connection opens. |
-| `credentials` | The credential to attach for a matching `audience`, and how (`header` with an optional prefix, query parameter, path placeholder, or JSON body pointer). The tool never receives the value. |
-| `max_egress_bytes` | Per-call ceiling on how much this tool may send. |
+| `network_targets` | Outbound destinations, by scheme and host pattern (optionally port). Together with every credential `audience`, this is the allowlist; anything not on it is refused before the connection opens. HTTP method is not part of the match. |
+| `[[tools.credentials]]` | The credential to attach for a matching `audience`, and how (`header` with an optional prefix, query parameter, path placeholder, JSON body pointer, HTTP Basic, or VAPID authorization). The tool never receives the value. |
+| `max_egress_bytes` | Per-call ceiling on how many bytes this tool may send. Response size is bounded separately by the host. |
 
 Note what is *absent*: there is no field a tool can set to read a secret. Credential material is only ever attached by the host, to a request the host has already validated.
 
@@ -148,7 +152,7 @@ A prompt injection is any external string that tries to redirect the model again
 
 IronClaw's honest position on this is that **structural containment, not pattern matching, is what carries the weight.** Injection-detection heuristics are a real layer, but they are the weakest one; a determined injection will get past regexes. What holds is the boundary underneath:
 
-1. **Untrusted content is fenced.** Error text and diagnostics from tools and providers are wrapped in explicit `EXTERNAL, UNTRUSTED` delimiters before they reach the model, with an instruction to treat them as data. Any attempt to forge a closing delimiter inside that content is escaped on the way in.
+1. **Untrusted content is fenced.** Error text and diagnostics from tools and providers are scanned for injection patterns before they reach the model; when any survive, the text is wrapped in explicit `EXTERNAL, UNTRUSTED` delimiters with an instruction to treat it as data, and any attempt to forge a closing delimiter inside that content is escaped on the way in.
 2. **Secret values are scrubbed from that same text** using the full leak-detector registry, so a hijacked tool call can't turn an error message into an exfiltration channel.
 3. **Capabilities are gated by origin.** `origin_gate_matrix` means a tool the model can reach during a supervised turn can be `forbidden` to an unattended scheduled run — the origin where a successful injection would be least likely to be noticed.
 4. **Effects need approval.** A tool whose `default_permission` is `ask` stops and waits for you. An injection that convinces the model to send an email still has to convince *you* to approve it.
@@ -205,7 +209,7 @@ A separate check catches the techniques used to hide a dangerous command from a 
 
 ### Sensitive-path check
 
-Beyond substring matching, the command is split into shell segments (quote- and escape-aware) and the arguments of file-reading commands — `cat`, `grep`, `cp`, `tar`, `base64`, `strings`, editors, and roughly forty others — are checked against a sensitive-path list, as are `<` and `>` redirection targets. A sensitive path is caught as an *argument*, not only as a literal substring of a blocked pattern.
+Beyond substring matching, the command is split into shell segments (quote- and escape-aware) and the arguments of file-reading commands — `cat`, `grep`, `cp`, `tar`, `base64`, `strings`, editors, and around thirty others — are checked against a sensitive-path list, as are `<` and `>` redirection targets. A sensitive path is caught as an *argument*, not only as a literal substring of a blocked pattern.
 
 ### Output scanning
 
