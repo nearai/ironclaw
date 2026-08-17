@@ -1,6 +1,6 @@
 // @ts-nocheck
-// Temporary compatibility path. Issue #7690 removes this module once all
-// approval producers publish to the durable notification inbox.
+// Temporary compatibility path for rolling deployments whose backend does not
+// expose the durable notification inbox API yet.
 
 import { authScope } from "./auth-scope";
 

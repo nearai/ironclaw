@@ -15,6 +15,11 @@ const NOTIFICATION_LIMIT = 30;
 const NOTIFICATION_THREAD_LIMIT = 20;
 const NOTIFICATION_REFETCH_MS = 10_000;
 
+function isNotificationInboxUnsupported(error) {
+  const status = Number(error?.status);
+  return status === 404 || status === 405 || status === 501;
+}
+
 function normalizeThread(record) {
   return {
     ...record,
@@ -41,37 +46,32 @@ export function useNotifications({
   const query = useQuery({
     queryKey,
     queryFn: async () => {
-      const [inbox, approvalThreads] = await Promise.allSettled([
-        listNotifications({ limit: NOTIFICATION_LIMIT }),
-        listThreads({ limit: NOTIFICATION_THREAD_LIMIT, needsApproval: true }),
-      ]);
-      if (inbox.status === "rejected" && approvalThreads.status === "rejected") {
-        throw inbox.reason || approvalThreads.reason;
+      try {
+        const inbox = await listNotifications({ limit: NOTIFICATION_LIMIT });
+        return { inbox, inboxSupported: true, compatibility: [] };
+      } catch (error) {
+        if (!isNotificationInboxUnsupported(error)) throw error;
       }
-      let compatibility = [];
-      if (approvalThreads.status === "fulfilled" && scope) {
-        try {
-          const presenter = await import("../lib/notification-approval-compat");
-          const seenIds = presenter.getNotificationState(scope).seenIds;
-          const records = Array.isArray(approvalThreads.value?.threads)
-            ? approvalThreads.value.threads
-            : [];
-          compatibility = presenter
-            .approvalThreadNotifications(records.map(normalizeThread), threadStates, t)
-            .map((message) => ({
-              ...message,
-              durable: false,
-              read: seenIds.has(message.id),
-            }));
-        } catch (_) {
-          // A compatibility chunk failure must not hide the durable inbox.
-        }
-      }
+
+      const approvalThreads = await listThreads({
+        limit: NOTIFICATION_THREAD_LIMIT,
+        needsApproval: true,
+      });
+      const presenter = await import("../lib/notification-approval-compat");
+      const seenIds = presenter.getNotificationState(scope).seenIds;
+      const records = Array.isArray(approvalThreads?.threads)
+        ? approvalThreads.threads
+        : [];
+      const compatibility = presenter
+        .approvalThreadNotifications(records.map(normalizeThread), threadStates, t)
+        .map((message) => ({
+          ...message,
+          durable: false,
+          read: seenIds.has(message.id),
+        }));
       return {
-        inbox:
-          inbox.status === "fulfilled"
-            ? inbox.value
-            : { notifications: [], unread_count: 0 },
+        inbox: { notifications: [], unread_count: 0 },
+        inboxSupported: false,
         compatibility,
       };
     },
@@ -100,6 +100,7 @@ export function useNotifications({
     () => new Set(messages.filter((message) => !message.read).map((message) => message.id)),
     [messages],
   );
+  const inboxSupported = query.data?.inboxSupported !== false;
 
   const markRead = useMutation({
     mutationFn: markNotificationRead,
@@ -181,8 +182,10 @@ export function useNotifications({
         void markCompatibilitySeen(compatibilityIds);
       }
     }
-    markAllReadMutation.mutate();
-  }, [markAllReadMutation, markCompatibilitySeen, messages, scope]);
+    if (inboxSupported) {
+      markAllReadMutation.mutate();
+    }
+  }, [inboxSupported, markAllReadMutation, markCompatibilitySeen, messages, scope]);
 
   const serverUnreadCount = Number(query.data?.inbox?.unread_count || 0);
   const compatibilityUnreadCount = messages.filter(

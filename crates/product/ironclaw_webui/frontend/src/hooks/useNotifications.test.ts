@@ -198,23 +198,21 @@ function flushAsyncWork() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-test("queries the durable inbox and compatibility approval fallback after profile hydration", async () => {
+test("queries only the durable inbox after profile hydration", async () => {
   const harness = instantiate({ data: { inbox: {}, approvalThreads: {} } });
   assert.equal(harness.queryOptions.enabled, true);
   await harness.queryOptions.queryFn();
   assert.deepEqual(JSON.parse(JSON.stringify(harness.inboxCalls)), [{ limit: 30 }]);
-  assert.deepEqual(JSON.parse(JSON.stringify(harness.threadCalls)), [
-    { limit: 20, needsApproval: true },
-  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.threadCalls)), []);
 
   const pending = instantiate({ data: {}, profile: null });
   assert.equal(pending.queryOptions.enabled, false);
 });
 
-test("keeps the compatibility fallback available when the inbox request fails", async () => {
+test("uses the compatibility fallback when the server does not support the inbox", async () => {
   const harness = instantiate({
     data: { approvalThreads: { threads: [{ id: "thread-fallback" }] } },
-    inboxError: new Error("inbox unavailable"),
+    inboxError: Object.assign(new Error("inbox unavailable"), { status: 404 }),
   });
   const result = await harness.queryOptions.queryFn();
   assert.deepEqual(JSON.parse(JSON.stringify(result.inbox)), {
@@ -222,6 +220,20 @@ test("keeps the compatibility fallback available when the inbox request fails", 
     unread_count: 0,
   });
   assert.equal(result.compatibility[0].id, "approval:thread-fallback");
+  assert.equal(result.inboxSupported, false);
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.threadCalls)), [
+    { limit: 20, needsApproval: true },
+  ]);
+});
+
+test("surfaces transient inbox failures without activating the compatibility path", async () => {
+  const inboxError = Object.assign(new Error("inbox unavailable"), { status: 503 });
+  const harness = instantiate({
+    data: { approvalThreads: { threads: [{ id: "thread-fallback" }] } },
+    inboxError,
+  });
+  await assert.rejects(harness.queryOptions.queryFn(), inboxError);
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.threadCalls)), []);
 });
 
 test("deduplicates fallback approvals when the durable inbox has the same thread", () => {
@@ -291,6 +303,28 @@ test("marks the active notification and supports mark all across both stores", a
   harness.hook.markAllRead();
   await flushAsyncWork();
   assert.deepEqual(harness.allReadCalls, [true]);
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.seenCalls)), [
+    { ids: ["approval:thread-fallback"], scope: "tenant:user" },
+  ]);
+});
+
+test("does not call durable mutations when the server lacks the inbox API", async () => {
+  const harness = instantiate({
+    data: {
+      inboxSupported: false,
+      inbox: { notifications: [], unread_count: 0 },
+      compatibility: [{
+        id: "approval:thread-fallback",
+        type: "approval",
+        href: "/chat/thread-fallback",
+        timestamp: 1,
+        read: false,
+      }],
+    },
+  });
+  harness.hook.markAllRead();
+  await flushAsyncWork();
+  assert.deepEqual(harness.allReadCalls, []);
   assert.deepEqual(JSON.parse(JSON.stringify(harness.seenCalls)), [
     { ids: ["approval:thread-fallback"], scope: "tenant:user" },
   ]);
