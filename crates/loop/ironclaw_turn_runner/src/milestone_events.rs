@@ -185,18 +185,27 @@ impl DurableLoopHostMilestoneSink {
         }
     }
 
-    fn take_model_duration_ms(&self, run_id: TurnRunId) -> u64 {
+    fn take_model_duration_ms(&self, run_id: TurnRunId) -> Option<u64> {
         let started = match self.model_started_at.lock() {
             Ok(mut started) => started.remove(&run_id),
             Err(poisoned) => poisoned.into_inner().remove(&run_id),
         };
-        started
-            .map(|started| {
-                u64::try_from(started.elapsed().as_millis())
-                    .unwrap_or(u64::MAX)
-                    .min(MAX_RUNTIME_EVENT_DURATION_MS)
-            })
-            .unwrap_or(0)
+        started.map(|started| {
+            u64::try_from(started.elapsed().as_millis())
+                .unwrap_or(u64::MAX)
+                .min(MAX_RUNTIME_EVENT_DURATION_MS)
+        })
+    }
+
+    fn forget_model_started(&self, run_id: TurnRunId) {
+        match self.model_started_at.lock() {
+            Ok(mut started) => {
+                started.remove(&run_id);
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().remove(&run_id);
+            }
+        }
     }
 
     fn resource_scope(
@@ -248,19 +257,27 @@ impl DurableLoopHostMilestoneSink {
                 return Ok(None);
             }
             LoopHostMilestoneKind::ModelCompleted { .. } => {
-                RuntimeEvent::model_completed_with_duration(
-                    scope,
-                    capability_id(MODEL_CAPABILITY_ID)?,
-                    self.take_model_duration_ms(milestone.run_id),
-                )
+                let capability_id = capability_id(MODEL_CAPABILITY_ID)?;
+                match self.take_model_duration_ms(milestone.run_id) {
+                    Some(duration_ms) => RuntimeEvent::model_completed_with_duration(
+                        scope,
+                        capability_id,
+                        duration_ms,
+                    ),
+                    None => RuntimeEvent::model_completed(scope, capability_id),
+                }
             }
             LoopHostMilestoneKind::ModelFailed { reason_kind } => {
-                RuntimeEvent::model_failed_with_duration(
-                    scope,
-                    capability_id(MODEL_CAPABILITY_ID)?,
-                    reason_kind.as_str(),
-                    self.take_model_duration_ms(milestone.run_id),
-                )
+                let capability_id = capability_id(MODEL_CAPABILITY_ID)?;
+                match self.take_model_duration_ms(milestone.run_id) {
+                    Some(duration_ms) => RuntimeEvent::model_failed_with_duration(
+                        scope,
+                        capability_id,
+                        reason_kind.as_str(),
+                        duration_ms,
+                    ),
+                    None => RuntimeEvent::model_failed(scope, capability_id, reason_kind.as_str()),
+                }
             }
             LoopHostMilestoneKind::CapabilityInvoked {
                 activity_id,
@@ -338,13 +355,21 @@ impl DurableLoopHostMilestoneSink {
                 )
             }
             LoopHostMilestoneKind::Completed { .. } => {
+                self.forget_model_started(milestone.run_id);
                 RuntimeEvent::loop_completed(scope, capability_id(LOOP_RUN_CAPABILITY_ID)?)
             }
-            LoopHostMilestoneKind::Failed { reason_kind, .. } => RuntimeEvent::loop_failed(
-                scope,
-                capability_id(LOOP_RUN_CAPABILITY_ID)?,
-                reason_kind.as_str(),
-            ),
+            LoopHostMilestoneKind::Failed { reason_kind, .. } => {
+                self.forget_model_started(milestone.run_id);
+                RuntimeEvent::loop_failed(
+                    scope,
+                    capability_id(LOOP_RUN_CAPABILITY_ID)?,
+                    reason_kind.as_str(),
+                )
+            }
+            LoopHostMilestoneKind::Blocked { .. } => {
+                self.forget_model_started(milestone.run_id);
+                return Ok(None);
+            }
             // Hook telemetry is projected into the durable event log so audit
             // consumers can replay the same hook dispatched/decision/failed
             // trail that SSE observers see live. Only closed-vocabulary labels
@@ -413,7 +438,6 @@ impl DurableLoopHostMilestoneSink {
             | LoopHostMilestoneKind::CompactionCompleted { .. }
             | LoopHostMilestoneKind::CompactionFailed { .. }
             | LoopHostMilestoneKind::CompactionLeakDetected { .. }
-            | LoopHostMilestoneKind::Blocked { .. }
             | LoopHostMilestoneKind::DriverNote { .. } => return Ok(None),
         };
         Ok(Some(event))
@@ -450,10 +474,11 @@ mod tests {
         ids::{AgentId, ExtensionId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
         result_meta::FailureKind,
         runtime::RuntimeKind,
+        turn::{LoopExitId, LoopGateRef, TurnCheckpointId},
     };
     use ironclaw_loop_contracts::{
-        HookDecisionSummary, LoopDriverId, LoopHostMilestone, LoopRecoveryClass,
-        LoopRecoveryDisposition, LoopRecoveryStage, LoopSafeSummary,
+        HookDecisionSummary, LoopCompletionKind, LoopDriverId, LoopFailureKind, LoopHostMilestone,
+        LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage, LoopSafeSummary,
     };
     use ironclaw_threads::ThreadScope;
     use ironclaw_turns::{CapabilityActivityId, TurnId, TurnScope};
@@ -921,6 +946,90 @@ mod tests {
                     |duration| duration > 0 && duration <= MAX_RUNTIME_EVENT_DURATION_MS
                 ),
                 "terminal model event must carry a positive bounded duration"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn model_terminal_without_start_preserves_unknown_duration() {
+        for (terminal_kind, expected_kind) in [
+            (
+                LoopHostMilestoneKind::ModelCompleted {
+                    effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new(
+                        "test-model",
+                    )
+                    .unwrap(),
+                },
+                RuntimeEventKind::ModelCompleted,
+            ),
+            (
+                LoopHostMilestoneKind::ModelFailed {
+                    reason_kind: AgentLoopHostErrorKind::Unavailable,
+                },
+                RuntimeEventKind::ModelFailed,
+            ),
+        ] {
+            let (terminal, thread_id, run_id) = fixture_milestone(terminal_kind);
+            let (sink, recorded) = projector_with_events(thread_id, run_id);
+
+            sink.publish_loop_milestone(terminal)
+                .await
+                .expect("terminal milestone is emitted without a matching start");
+
+            let events = recorded.events();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].kind, expected_kind);
+            assert_eq!(
+                events[0].duration_ms, None,
+                "a missing model start must remain distinguishable from a sub-millisecond call"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn loop_terminal_milestones_release_model_start_tracking() {
+        for terminal_kind in [
+            LoopHostMilestoneKind::Completed {
+                completion_kind: LoopCompletionKind::FinalReply,
+                exit_id: LoopExitId::new("exit:model-start-cleanup-completed").unwrap(),
+            },
+            LoopHostMilestoneKind::Failed {
+                reason_kind: LoopFailureKind::InterruptedUnexpectedly,
+                exit_id: LoopExitId::new("exit:model-start-cleanup-failed").unwrap(),
+            },
+            LoopHostMilestoneKind::Blocked {
+                gate_ref: LoopGateRef::new("gate:model-start-cleanup").unwrap(),
+                checkpoint_id: TurnCheckpointId::new(),
+            },
+        ] {
+            let (started, thread_id, run_id) =
+                fixture_milestone(LoopHostMilestoneKind::ModelStarted {
+                    requested_model_profile_id: None,
+                });
+            let mut terminal = started.clone();
+            terminal.kind = terminal_kind;
+            let sink = projector_for(thread_id, run_id);
+
+            sink.publish_loop_milestone(started)
+                .await
+                .expect("model start is tracked");
+            assert!(
+                sink.model_started_at
+                    .lock()
+                    .expect("model-start map is not poisoned")
+                    .contains_key(&run_id)
+            );
+
+            sink.publish_loop_milestone(terminal)
+                .await
+                .expect("loop terminal milestone is handled");
+            assert!(
+                !sink
+                    .model_started_at
+                    .lock()
+                    .expect("model-start map is not poisoned")
+                    .contains_key(&run_id),
+                "loop-terminal milestones must release abandoned model-start state"
             );
         }
     }

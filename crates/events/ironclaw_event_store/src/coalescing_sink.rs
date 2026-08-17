@@ -209,7 +209,7 @@ async fn drain_loop(
     mut rx: mpsc::Receiver<DrainMessage>,
 ) {
     let max_batch = config.max_batch.max(1);
-    let mut pending_flush_error: Option<String> = None;
+    let mut pending_flush_error: Option<EventError> = None;
     loop {
         // Block until a window opens (or exit once every sender is dropped).
         let first = match rx.recv().await {
@@ -249,20 +249,17 @@ async fn drain_loop(
 
         let flush_result = flush_batch(&log, std::mem::take(&mut batch)).await;
         if pending_flush_error.is_none() {
-            pending_flush_error = flush_result.err().map(|error| error.to_string());
+            pending_flush_error = flush_result.err();
         }
         if !acks.is_empty() {
-            // EventError is not Clone, so retain the first unreported failure
-            // as text and reconstruct one Err per ack. A graceful flush must
-            // surface failures from earlier drain windows, not only the window
-            // that happened to carry the Flush message.
-            let flush_err_msg = pending_flush_error.take();
+            // A graceful flush must surface the original typed failure from
+            // earlier drain windows, not only the window that happened to
+            // carry the Flush message.
+            let flush_error = pending_flush_error.take();
             for ack in acks {
-                let payload = match &flush_err_msg {
+                let payload = match &flush_error {
                     None => Ok(()),
-                    Some(reason) => Err(EventError::Sink {
-                        reason: reason.clone(),
-                    }),
+                    Some(error) => Err(error.clone()),
                 };
                 // Receiver may have given up; ignore.
                 let _ = ack.send(payload);
@@ -302,7 +299,7 @@ async fn flush_batch(
             // Collect the first error (if any) so callers can surface durable
             // failures. All per-event errors are logged; the first is returned
             // so `flush()` can fail loud on a stalled backend.
-            let mut first_err: Option<String> = None;
+            let mut first_error: Option<EventError> = None;
             for result in results {
                 if let Err(error) = result {
                     tracing::debug!(
@@ -310,13 +307,13 @@ async fn flush_batch(
                         %error,
                         "durable event append failed during coalescing flush"
                     );
-                    if first_err.is_none() {
-                        first_err = Some(error.to_string());
+                    if first_error.is_none() {
+                        first_error = Some(error);
                     }
                 }
             }
-            match first_err {
-                Some(reason) => Err(EventError::Sink { reason }),
+            match first_error {
+                Some(error) => Err(error),
                 None => Ok(()),
             }
         }
