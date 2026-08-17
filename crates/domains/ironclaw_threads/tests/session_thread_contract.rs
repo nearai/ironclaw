@@ -4597,7 +4597,8 @@ fn prepared_request(label: &str, key: &str) -> ironclaw_threads::PreparedContext
         }],
         declarations: ironclaw_host_api::prepared_context::PreparedTurnDeclarations {
             tools: Vec::new(),
-            output: ironclaw_host_api::prepared_context::OutputContract::JsonSchema {
+            output: ironclaw_host_api::output::OutputContract::JsonSchema {
+                name: "session_v1".to_string(),
                 schema: serde_json::json!({ "type": "object" }),
             },
             limits: ironclaw_host_api::prepared_context::TurnLimits {

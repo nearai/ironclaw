@@ -11,6 +11,7 @@ use ironclaw_extension_contracts::{
 use ironclaw_extension_registry::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
 };
+use ironclaw_host_api::capability::EXTENSION_SEARCH_CAPABILITY_ID;
 use ironclaw_host_api::{
     capability::{EffectKind, OriginGateMatrix, OriginGatePolicy, PermissionMode},
     capability_profile::CapabilityProfileSchemaRef,

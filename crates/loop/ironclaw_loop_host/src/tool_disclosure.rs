@@ -7,6 +7,7 @@ use std::{
 };
 
 use ironclaw_host_api::{
+    capability::{TOOL_CALL_CAPABILITY_ID, TOOL_DESCRIBE_CAPABILITY_ID, TOOL_SEARCH_CAPABILITY_ID},
     capability_surface::CapabilitySurfacePolicy,
     ids::{CapabilityId, ProviderToolName},
     runtime::RuntimeKind,

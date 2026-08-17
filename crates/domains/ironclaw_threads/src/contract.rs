@@ -436,6 +436,24 @@ pub struct AppendFinalizedAssistantMessageRequest {
     pub content: MessageContent,
 }
 
+/// Publish the already-durable structured-finalization output into the exact
+/// finalized assistant row produced by the run.
+///
+/// The service resolves the immutable finalization record by `turn_run_id`
+/// and verifies it against the current message before changing anything. The
+/// message id is deliberately carried by the caller: a run may have more
+/// than one assistant reply after steering, so selecting "the latest" row is
+/// not safe for terminal publication. `replacement` must be that record's
+/// raw JSON representation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishStructuredFinalizationMessageRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub message_id: ThreadMessageId,
+    pub turn_run_id: String,
+    pub replacement: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendToolResultReferenceRequest {
     pub scope: ThreadScope,

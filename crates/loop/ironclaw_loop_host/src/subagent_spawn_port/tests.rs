@@ -1125,6 +1125,7 @@ fn turn_record(run_context: &LoopRunContext, subagent_depth: u32) -> TurnRunReco
         accepted_message_ref: AcceptedMessageRef::new("msg:parent").unwrap(),
         status: TurnStatus::Queued,
         profile: TurnRunProfile::from_resolved(run_context.resolved_run_profile.clone()),
+        output_contract: run_context.output_contract.clone(),
         resolved_model_route: None,
         model_usage: None,
         execution_outcome: None,

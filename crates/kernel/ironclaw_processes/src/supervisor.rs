@@ -146,6 +146,7 @@ pub struct ProcessExecutorFailure {
     failure: Option<SanitizedFailure>,
     fallback_category: String,
     recovery: ProcessFailureRecovery,
+    metadata: Option<serde_json::Value>,
 }
 
 impl ProcessExecutorFailure {
@@ -156,6 +157,7 @@ impl ProcessExecutorFailure {
             failure,
             fallback_category,
             recovery: ProcessFailureRecovery::Terminal,
+            metadata: None,
         }
     }
 
@@ -165,12 +167,26 @@ impl ProcessExecutorFailure {
             failure: Some(failure),
             fallback_category,
             recovery: ProcessFailureRecovery::Terminal,
+            metadata: None,
         }
     }
 
     pub fn with_recovery(mut self, recovery: ProcessFailureRecovery) -> Self {
         self.recovery = recovery;
         self
+    }
+
+    /// Attach typed-at-the-caller process metadata to the terminal transition.
+    /// The generic supervisor carries it as JSON because process kinds own the
+    /// shape of their durable metadata; it is never flattened into an error
+    /// string.
+    pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
+    pub fn metadata(&self) -> Option<&serde_json::Value> {
+        self.metadata.as_ref()
     }
 
     pub fn failure(&self) -> Option<&SanitizedFailure> {
@@ -737,7 +753,7 @@ async fn record_failure(
                 failure: failure.clone(),
                 recovery: executor_failure.recovery(),
                 checkpoint_ref: None,
-                metadata: None,
+                metadata: executor_failure.metadata().cloned(),
             })
             .await
         {
@@ -1719,9 +1735,16 @@ mod tests {
 
         let sanitized =
             SanitizedFailure::new("explicit_failure").expect("valid sanitized failure category");
-        let failure = ProcessExecutorFailure::from_failure(sanitized);
+        let metadata = serde_json::json!({
+            "agent_turn": {
+                "model_usage": {"input_tokens": 13, "output_tokens": 5}
+            }
+        });
+        let failure =
+            ProcessExecutorFailure::from_failure(sanitized).with_metadata(metadata.clone());
         assert_eq!(failure.failure_category(), "explicit_failure");
         assert!(failure.failure().is_some());
+        assert_eq!(failure.metadata(), Some(&metadata));
         assert_eq!(
             failure.to_string(),
             "process executor failed: explicit_failure"

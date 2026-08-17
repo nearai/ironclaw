@@ -1,4 +1,4 @@
-use ironclaw_host_api::ids::ThreadId;
+use ironclaw_host_api::{ids::ThreadId, turn::TurnRunId};
 use thiserror::Error;
 
 use crate::{MessageStatus, ThreadMessageId};
@@ -67,6 +67,15 @@ pub enum SessionThreadError {
     InvalidPreparedContext { reason: String },
     #[error("prepared context replay key mismatch for thread {thread_id}")]
     PreparedContextKeyMismatch { thread_id: ThreadId },
+    #[error("structured finalization record conflicts for run {turn_run_id}")]
+    StructuredFinalizationConflict { turn_run_id: TurnRunId },
+    #[error("structured finalization record is invalid: {reason}")]
+    InvalidStructuredFinalization { reason: String },
+    #[error("structured finalization publish rejected for message {message_id}: {reason}")]
+    StructuredFinalizationPublishMismatch {
+        message_id: ThreadMessageId,
+        reason: &'static str,
+    },
     #[error("failed to create generated thread id: {0}")]
     GeneratedThreadId(String),
     #[error("serialization error: {0}")]
@@ -94,6 +103,11 @@ impl SessionThreadError {
             Self::InvalidMessageTimestamp { .. } => "invalid_message_timestamp",
             Self::InvalidPreparedContext { .. } => "invalid_prepared_context",
             Self::PreparedContextKeyMismatch { .. } => "prepared_context_key_mismatch",
+            Self::StructuredFinalizationConflict { .. } => "structured_finalization_conflict",
+            Self::InvalidStructuredFinalization { .. } => "invalid_structured_finalization",
+            Self::StructuredFinalizationPublishMismatch { .. } => {
+                "structured_finalization_publish_mismatch"
+            }
             Self::GeneratedThreadId(_) => "generated_thread_id",
             Self::Serialization(_) => "serialization",
             Self::Deserialization(_) => "deserialization",

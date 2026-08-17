@@ -1585,6 +1585,7 @@ async fn production_postgres_process_journal_pool_writes_rows_the_data_plane_rea
         services.turn_coordinator_for_test().as_ref(),
         ironclaw_turns::SubmitTurnRequest {
             requested_model: None,
+            output_contract: None,
             scope,
             actor: ironclaw_turns::TurnActor::new(owner),
             accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("journal-pool-message")

@@ -7054,6 +7054,8 @@ fn map_thread_error(error: SessionThreadError) -> ProductSurfaceError {
         }
         SessionThreadError::ThreadScopeMismatch { .. }
         | SessionThreadError::IdempotentReplayActorMismatch { .. }
+        | SessionThreadError::StructuredFinalizationConflict { .. }
+        | SessionThreadError::StructuredFinalizationPublishMismatch { .. }
         | SessionThreadError::InvalidMessageTransition { .. }
         | SessionThreadError::MessageNotDraft { .. }
         | SessionThreadError::InvalidSummaryRange { .. }
@@ -7073,6 +7075,7 @@ fn map_thread_error(error: SessionThreadError) -> ProductSurfaceError {
         SessionThreadError::GeneratedThreadId(_)
         | SessionThreadError::Serialization(_)
         | SessionThreadError::Deserialization(_)
+        | SessionThreadError::InvalidStructuredFinalization { .. }
         | SessionThreadError::InvalidMessageTimestamp { .. }
         | SessionThreadError::Backend(_) => ProductSurfaceError::service_unavailable(true),
     }
@@ -7502,5 +7505,22 @@ mod tests {
             !unavailable.retryable,
             "false-arg sentinel is non-retryable"
         );
+    }
+
+    #[test]
+    fn structured_finalization_errors_map_to_stable_product_statuses() {
+        let conflict = map_thread_error(SessionThreadError::StructuredFinalizationConflict {
+            turn_run_id: TurnRunId::new(),
+        });
+        assert_eq!(conflict.code, ProductSurfaceErrorCode::Conflict);
+        assert_eq!(conflict.status_code, 409);
+        assert!(!conflict.retryable);
+
+        let invalid = map_thread_error(SessionThreadError::InvalidStructuredFinalization {
+            reason: "malformed JSON".to_string(),
+        });
+        assert_eq!(invalid.code, ProductSurfaceErrorCode::Unavailable);
+        assert_eq!(invalid.status_code, 503);
+        assert!(invalid.retryable);
     }
 }

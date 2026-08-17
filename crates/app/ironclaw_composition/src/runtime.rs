@@ -2324,6 +2324,7 @@ impl RebornRuntime {
                 actor: TurnActor::new(self.actor_user_id.clone()),
                 accepted_message_ref: accepted_message_ref.clone(),
                 requested_run_profile: None,
+                output_contract: None,
                 idempotency_key,
                 received_at: Utc::now(),
                 requested_run_id: None,

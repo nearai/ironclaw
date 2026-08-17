@@ -49,7 +49,7 @@ use ironclaw_loop_host::{
     SkillBundleContextSource, SkillBundleDescriptor, SkillBundleId, SkillBundleSource,
     SkillBundleSourceError, SkillFilePath, SkillSourceKind, ThreadBackedLoopContextPort,
     ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort, ThreadContextWindowCache,
-    build_skill_run_snapshot, identity_message_ref,
+    build_skill_run_snapshot, identity_message_ref, load_canonical_system_inference_context,
 };
 use ironclaw_outbound::{
     OutboundError, OutboundStateStore, ReplyAttachmentHandle, ReplyAttachmentIntent,
@@ -3054,6 +3054,25 @@ async fn thread_ports_reject_thread_scope_mismatch_before_thread_access() {
         })
         .await
         .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::ScopeMismatch);
+}
+
+#[tokio::test]
+async fn structured_finalization_rejects_scope_mismatch_before_context_read() {
+    let fixture = ThreadFixture::new().await;
+    let mut wrong_scope = fixture.thread_scope.clone();
+    wrong_scope.tenant_id = TenantId::new("different-tenant").unwrap();
+
+    let error = load_canonical_system_inference_context(
+        fixture.thread_service.as_ref(),
+        &wrong_scope,
+        &fixture.run_context,
+        16,
+        PromptContextTokenBudget::default(),
+    )
+    .await
+    .unwrap_err();
 
     assert_eq!(error.kind, AgentLoopHostErrorKind::ScopeMismatch);
 }
