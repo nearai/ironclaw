@@ -22,6 +22,7 @@ import type { ReactNode } from "react";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
 import { useT } from "../../../lib/i18n";
+import { BrandIcon, resolveIconId } from "../lib/brand-icons";
 import type { Suggestion } from "../lib/suggestions-api";
 
 export function SuggestedTaskCard({
@@ -41,6 +42,7 @@ export function SuggestedTaskCard({
 }) {
   const t = useT();
   const started = Boolean(suggestion.thread_id);
+  const iconId = resolveIconId(suggestion);
 
   return (
     <div
@@ -48,8 +50,12 @@ export function SuggestedTaskCard({
       aria-label={suggestion.title}
       className="flex flex-col rounded-[13px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] p-3 text-left transition-colors hover:border-[color-mix(in_srgb,var(--v2-accent)_32%,var(--v2-panel-border))]"
     >
-      {/* Dismiss */}
+      {/* Brand icon + dismiss */}
       <div className="mb-1.5 flex items-center gap-1.5">
+        <BrandIcon
+          id={iconId}
+          className="grid h-5 w-5 shrink-0 place-items-center [&_svg]:h-full [&_svg]:w-full"
+        />
         <button
           type="button"
           onClick={() => onDismiss?.()}

@@ -85,7 +85,18 @@ because the suggestion→thread/run binding is durable and survives restart.
 
 ## 3. The conflict: the connect model has no backing
 
-The generated card carries **no tool or extension identity** and **no connect state**:
+> **⚠ Update (incoming schema change).** The #7694 author is adding **`icon`** (a
+> brand-icon enum) and **`source_ids`** (the extension ids a suggestion relates to) to the
+> card. That **reverses the premise of this section** — cards *will* carry tool identity.
+> The connect model **stays decoupled** (§3.1) and cards stay startable regardless of
+> connection, but `source_ids` now also drives the card's brand mark and a just-in-time
+> in-thread auth prompt, and per-card connect becomes viable again (open question §6.4).
+> Enum, schema block, and the frontend mapping: [SUGGESTION-ICONS.md](SUGGESTION-ICONS.md).
+> The rest of this section describes the contract **as it stands on the branch today**
+> (fields not yet present).
+
+The generated card as it stands on the branch carries **no tool or extension identity**
+and **no connect state**:
 
 ```
 { id, title, description, suggested_prompt, thread_id?, run_id? }
@@ -208,3 +219,8 @@ single-active lock is removed; and "+ Automation" is removed.)*
    durable home and typed gate wiring.
 3. **Replacement UX** — a new generation clears the previous set. What does the drawer do
    if the user is mid-read when a replacement lands?
+4. **Per-card connect, now that `source_ids` exists?** The incoming `icon`/`source_ids`
+   fields (§3, [SUGGESTION-ICONS.md](SUGGESTION-ICONS.md)) make a per-card "Connect
+   &lt;tool&gt;" CTA viable again. Current decision keeps connect decoupled (§3.1) and uses
+   `source_ids` only for the brand mark + just-in-time in-thread auth; revisit if the review
+   wants connect-first activation back on the card.
