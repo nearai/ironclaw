@@ -705,4 +705,51 @@ mod tests {
 
         assert_eq!(mcp_tool_name(&provider, &capability_id), "web_search");
     }
+
+    #[test]
+    fn call_tool_rejection_message_joins_non_empty_text_blocks() {
+        let result = serde_json::json!({
+            "isError": true,
+            "content": [
+                {"type": "text", "text": "  channel not found  "},
+                {"type": "text", "text": ""},
+                {"type": "text", "text": "retry with a valid channel"},
+            ],
+        });
+
+        assert_eq!(
+            call_tool_rejection_message(&result),
+            Some("channel not found; retry with a valid channel".to_string())
+        );
+    }
+
+    #[test]
+    fn call_tool_rejection_message_falls_back_when_content_is_empty() {
+        let result = serde_json::json!({
+            "isError": true,
+            "content": [],
+        });
+
+        assert_eq!(
+            call_tool_rejection_message(&result),
+            Some("MCP server rejected the tool call".to_string())
+        );
+    }
+
+    #[test]
+    fn call_tool_rejection_message_falls_back_when_content_missing() {
+        let result = serde_json::json!({"isError": true});
+
+        assert_eq!(
+            call_tool_rejection_message(&result),
+            Some("MCP server rejected the tool call".to_string())
+        );
+    }
+
+    #[test]
+    fn call_tool_rejection_message_returns_none_when_not_an_error() {
+        let result = serde_json::json!({"isError": false, "content": []});
+
+        assert_eq!(call_tool_rejection_message(&result), None);
+    }
 }

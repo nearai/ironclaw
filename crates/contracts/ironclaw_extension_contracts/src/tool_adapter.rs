@@ -289,4 +289,96 @@ mod tests {
         };
         assert!(error.to_string().contains("evil.example"));
     }
+
+    #[test]
+    fn auth_required_equality_ignores_model_visible_cause() {
+        let secrets = vec![SecretHandle::new("notion-token").unwrap()];
+        let left = ToolError::AuthRequired {
+            required_secrets: secrets.clone(),
+            credential_requirements: Vec::new(),
+            model_visible_cause: Some(ProviderDiagnostic {
+                code: None,
+                message: None,
+                retry_after: None,
+            }),
+        };
+        let right = ToolError::AuthRequired {
+            required_secrets: secrets,
+            credential_requirements: Vec::new(),
+            model_visible_cause: None,
+        };
+
+        assert_eq!(left, right);
+    }
+
+    #[test]
+    fn auth_required_equality_still_compares_required_secrets() {
+        let left = ToolError::AuthRequired {
+            required_secrets: vec![SecretHandle::new("notion-token").unwrap()],
+            credential_requirements: Vec::new(),
+            model_visible_cause: None,
+        };
+        let right = ToolError::AuthRequired {
+            required_secrets: vec![SecretHandle::new("slack-token").unwrap()],
+            credential_requirements: Vec::new(),
+            model_visible_cause: None,
+        };
+
+        assert_ne!(left, right);
+    }
+
+    fn rejected(kind: DispatchFailureKind, diagnostic: Option<ProviderDiagnostic>) -> ToolError {
+        ToolError::Rejected {
+            runtime: Some(RuntimeKind::FirstParty),
+            kind,
+            diagnostic,
+            detail: None,
+            attempt: None,
+        }
+    }
+
+    #[test]
+    fn rejected_equality_compares_kind_and_diagnostic() {
+        let denied = DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied);
+        let network_denied = DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied);
+
+        assert_eq!(
+            rejected(denied, None),
+            rejected(denied, None),
+            "identical Rejected values must be equal"
+        );
+        assert_ne!(
+            rejected(denied, None),
+            rejected(network_denied, None),
+            "differing kind must break equality"
+        );
+        assert_ne!(
+            rejected(
+                denied,
+                Some(ProviderDiagnostic {
+                    code: None,
+                    message: None,
+                    retry_after: None,
+                })
+            ),
+            rejected(denied, None),
+            "differing diagnostic presence must break equality"
+        );
+    }
+
+    #[test]
+    fn tool_error_of_different_variants_are_never_equal() {
+        let auth_required = ToolError::AuthRequired {
+            required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
+            model_visible_cause: None,
+        };
+        let failed = ToolError::Failed {
+            kind: RuntimeDispatchErrorKind::Backend,
+            safe_summary: None,
+            model_visible_cause: None,
+        };
+
+        assert_ne!(auth_required, failed);
+    }
 }

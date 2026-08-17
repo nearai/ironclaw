@@ -1659,16 +1659,24 @@ fn bounded_diagnostic_text(value: &str) -> String {
 
 /// The raw descriptive cause for the model-visible Diagnostic channel, before
 /// any public-surface gating.
+///
+/// A `Some(diagnostic)` with every field empty (`provider_diagnostic_model_cause`
+/// renders `None`) falls through to `safe_summary` rather than collapsing the
+/// whole cause to `None` — an empty diagnostic must not hide an available
+/// safe summary.
 fn raw_failure_cause(error: &CapabilityInvocationError) -> Option<String> {
-    use CapabilityInvocationError::Dispatch;
-    match error {
-        Dispatch {
-            provider_diagnostic: Some(diagnostic),
-            ..
-        } => provider_diagnostic_model_cause(diagnostic),
-        Dispatch { safe_summary, .. } => safe_summary.clone(),
-        _ => None,
-    }
+    let CapabilityInvocationError::Dispatch {
+        provider_diagnostic,
+        safe_summary,
+        ..
+    } = error
+    else {
+        return None;
+    };
+    provider_diagnostic
+        .as_deref()
+        .and_then(provider_diagnostic_model_cause)
+        .or_else(|| safe_summary.clone())
 }
 
 /// Returns a stable, redacted summary message for a capability invocation
@@ -1822,6 +1830,62 @@ mod tests {
             detail: None,
             provider_diagnostic: None,
         }
+    }
+
+    #[test]
+    fn raw_failure_cause_falls_back_to_safe_summary_when_diagnostic_renders_empty() {
+        // `provider_diagnostic` is `Some`, but every field is `None`, so
+        // `provider_diagnostic_model_cause` renders `None` for it — the empty
+        // diagnostic must not hide an available safe summary.
+        let error = CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            safe_summary: Some("operation failed".to_string()),
+            detail: None,
+            provider_diagnostic: Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
+                code: None,
+                message: None,
+                retry_after: None,
+            })),
+        };
+
+        assert_eq!(
+            raw_failure_cause(&error),
+            Some("operation failed".to_string())
+        );
+    }
+
+    #[test]
+    fn raw_failure_cause_prefers_non_empty_diagnostic_over_safe_summary() {
+        let error = CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            safe_summary: Some("operation failed".to_string()),
+            detail: None,
+            provider_diagnostic: Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
+                code: None,
+                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                    "provider says no",
+                )),
+                retry_after: None,
+            })),
+        };
+
+        assert_eq!(
+            raw_failure_cause(&error),
+            Some("provider message: provider says no".to_string())
+        );
+    }
+
+    #[test]
+    fn raw_failure_cause_falls_back_to_safe_summary_when_diagnostic_absent() {
+        let error = dispatch(DispatchFailureKind::Runtime(
+            RuntimeDispatchErrorKind::OperationFailed,
+        ));
+        let CapabilityInvocationError::Dispatch { safe_summary, .. } = &error else {
+            unreachable!("dispatch() always builds Dispatch");
+        };
+        assert!(safe_summary.is_none());
+
+        assert_eq!(raw_failure_cause(&error), None);
     }
 
     fn auth_requirement(scopes: &[&str]) -> RuntimeCredentialAuthRequirement {

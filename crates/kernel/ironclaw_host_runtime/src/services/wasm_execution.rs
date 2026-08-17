@@ -1473,4 +1473,35 @@ mod tests {
             other => panic!("expected Wasm dispatch error, got {other:?}"),
         }
     }
+
+    #[test]
+    fn bounded_wasm_guest_message_passes_through_short_text_unchanged() {
+        let message = bounded_wasm_guest_message("channel_not_found");
+        assert_eq!(message, "channel_not_found");
+    }
+
+    #[test]
+    fn bounded_wasm_guest_message_truncates_to_the_byte_limit() {
+        let message = bounded_wasm_guest_message(&"a".repeat(MAX_WASM_GUEST_MESSAGE_BYTES + 64));
+
+        assert_eq!(message.len(), MAX_WASM_GUEST_MESSAGE_BYTES);
+        assert_eq!(message, "a".repeat(MAX_WASM_GUEST_MESSAGE_BYTES));
+    }
+
+    #[test]
+    fn bounded_wasm_guest_message_never_splits_a_multi_byte_char_at_the_boundary() {
+        // A 3-byte UTF-8 character ('€', U+20AC) straddling the byte limit
+        // must be dropped whole rather than split into invalid UTF-8: pad
+        // with single-byte 'a's up to one byte short of the limit, then
+        // append the multi-byte char so it would overflow the cap by two
+        // bytes if included.
+        let padding = "a".repeat(MAX_WASM_GUEST_MESSAGE_BYTES - 1);
+        let input = format!("{padding}€");
+
+        let message = bounded_wasm_guest_message(&input);
+
+        assert!(message.is_char_boundary(message.len()));
+        assert_eq!(message, padding);
+        assert!(message.len() < MAX_WASM_GUEST_MESSAGE_BYTES);
+    }
 }
