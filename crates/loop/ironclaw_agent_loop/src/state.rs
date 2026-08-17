@@ -2,12 +2,15 @@
 //!
 
 mod bounded_ring;
+mod budget_ledger;
 mod model_recovery;
 mod signature;
 mod slots;
 mod terminal_warning;
 
 pub use bounded_ring::BoundedRing;
+pub use budget_ledger::BudgetLedger;
+pub(crate) use budget_ledger::{BudgetCharge, InvocationCharge};
 pub use ironclaw_loop_contracts::AuthResumeApprovalIdentity;
 pub use ironclaw_loop_contracts::LoopFailureKind;
 pub use model_recovery::{ModelErrorRecoveryObservation, PendingModelRetryDirective};
@@ -80,6 +83,14 @@ pub struct LoopExecutionState {
     /// usage (replay stubs and usage-less providers leave it `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cumulative_model_usage: Option<ironclaw_loop_contracts::LoopModelUsage>,
+
+    /// Per-run budget accounting chokepoint: wall-clock start plus the
+    /// model-call and capability-invocation counters. Flattened so the
+    /// checkpoint wire shape is unchanged (same top-level field names,
+    /// same defaults) from when these were three bare fields on this
+    /// struct — see `budget_ledger.rs` and the frozen-shape test below.
+    #[serde(flatten)]
+    pub budget_ledger: BudgetLedger,
 
     /// Count of tools-capable completion nudges issued this run (driver-specific
     /// nudge, gated by `SteeringPolicy.allow_driver_specific_nudges`). It
@@ -347,6 +358,7 @@ impl LoopExecutionState {
             recent_failure_kinds: BoundedRing::new(),
             recent_output_token_counts: BoundedRing::new(),
             cumulative_model_usage: None,
+            budget_ledger: BudgetLedger::fresh_for_run(),
             completion_nudges_used: 0,
             completion_nudge_pending: false,
             pending_model_error_observation: None,
@@ -424,6 +436,14 @@ impl LoopExecutionState {
         // belongs to that run and must not be re-reported under the new one.
         // (Same-run gate resumes return early above, preserving the total.)
         self.cumulative_model_usage = None;
+        // `budget_ledger` holds per-run budget accounting (see its doc
+        // comments and `ResourceBudgetPolicy` in the budget stage). It
+        // belongs to the source run, not the retry: carrying an exhausted
+        // counter or a stale wall-clock start across to a fresh `TurnRunId`
+        // would make the retry fail its budget stage immediately, before it
+        // does any work. Reset it here so the retry starts its own budget
+        // window. (Same-run gate resumes return early above, preserving it.)
+        self.budget_ledger = BudgetLedger::fresh_for_run();
         self
     }
 }
@@ -530,6 +550,7 @@ mod tests {
                 tier: ResourceBudgetTier::new("loop_state_test_tier").expect("valid"),
                 max_model_calls: 32,
                 max_capability_invocations: 64,
+                max_wall_clock_seconds: None,
             },
             personal_context_policy: ironclaw_loop_contracts::PersonalContextPolicy::Excluded,
             runtime_constraints: RuntimeProfileConstraints {
@@ -775,6 +796,107 @@ mod tests {
         );
     }
 
+    /// Frozen-shape pin for the `BudgetLedger` refactor: before this refactor
+    /// `run_started_at`, `model_calls_made`, and `capability_invocations_made`
+    /// were three bare top-level fields on `LoopExecutionState`. The refactor
+    /// moves them into `BudgetLedger` behind `#[serde(flatten)]`, which must
+    /// keep the exact same top-level keys (no nested `budget_ledger` object)
+    /// so checkpoints written before this refactor still decode, and
+    /// checkpoints written after it still decode under a rollback to the
+    /// pre-refactor binary.
+    #[test]
+    fn budget_ledger_wire_shape_is_frozen_to_the_pre_refactor_top_level_fields() {
+        let context = test_run_context();
+        let mut legacy_shaped = serde_json::to_value(LoopExecutionState::initial_for_run(&context))
+            .expect("encode baseline state");
+        let object = legacy_shaped
+            .as_object_mut()
+            .expect("state serializes as object");
+        // The pre-refactor wire shape carried these three fields directly on
+        // the top-level object. This is exactly the payload shape a
+        // checkpoint written before this refactor has.
+        object.insert("run_started_at".to_string(), json!("2026-01-01T00:00:00Z"));
+        object.insert("model_calls_made".to_string(), json!(7));
+        object.insert("capability_invocations_made".to_string(), json!(9));
+        assert!(
+            !object.contains_key("budget_ledger"),
+            "the flattened ledger must not require (or introduce) a nested \
+             `budget_ledger` wire key"
+        );
+
+        let payload = serde_json::to_vec(&legacy_shaped).expect("re-encode legacy-shaped payload");
+        let decoded =
+            LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeBlock)
+                .expect("decode legacy top-level budget fields");
+
+        assert_eq!(
+            decoded.budget_ledger.run_started_at(),
+            Some(
+                "2026-01-01T00:00:00Z"
+                    .parse::<chrono::DateTime<chrono::Utc>>()
+                    .expect("valid timestamp")
+            )
+        );
+        assert_eq!(decoded.budget_ledger.model_calls_made(), 7);
+        assert_eq!(decoded.budget_ledger.capability_invocations_made(), 9);
+
+        // Re-encoding must reproduce the same flat top-level keys, not a
+        // nested object — byte-compatible with checkpoints written before
+        // this refactor.
+        let re_encoded = serde_json::to_value(&decoded).expect("re-encode decoded state");
+        let re_encoded_object = re_encoded.as_object().expect("state serializes as object");
+        assert_eq!(
+            re_encoded_object.get("run_started_at"),
+            Some(&json!("2026-01-01T00:00:00Z"))
+        );
+        assert_eq!(re_encoded_object.get("model_calls_made"), Some(&json!(7)));
+        assert_eq!(
+            re_encoded_object.get("capability_invocations_made"),
+            Some(&json!(9))
+        );
+        assert!(!re_encoded_object.contains_key("budget_ledger"));
+    }
+
+    /// Companion to the frozen-shape pin above: `run_started_at` must stay
+    /// `skip_serializing_if = "Option::is_none"` and the two counters must
+    /// stay plain `#[serde(default)]` (always emitted, defaulting to `0` on
+    /// legacy decode) — exactly the pre-refactor per-field behavior, now
+    /// living on `BudgetLedger` instead of directly on `LoopExecutionState`.
+    #[test]
+    fn budget_ledger_field_defaults_match_pre_refactor_behavior() {
+        let context = test_run_context();
+        let state = LoopExecutionState::initial_for_run(&context);
+        assert!(state.budget_ledger.run_started_at().is_none());
+
+        let value = serde_json::to_value(&state).expect("encode state");
+        let object = value.as_object().expect("state serializes as object");
+        assert!(
+            !object.contains_key("run_started_at"),
+            "an unset run_started_at must still be omitted from the payload"
+        );
+        assert_eq!(object.get("model_calls_made"), Some(&json!(0)));
+        assert_eq!(object.get("capability_invocations_made"), Some(&json!(0)));
+
+        // A payload predating these fields entirely (no budget keys at all)
+        // must still decode, defaulting the ledger to zeroed/unarmed.
+        let mut without_budget_fields = value.clone();
+        without_budget_fields
+            .as_object_mut()
+            .expect("state serializes as object")
+            .remove("model_calls_made");
+        without_budget_fields
+            .as_object_mut()
+            .expect("state serializes as object")
+            .remove("capability_invocations_made");
+        let payload = serde_json::to_vec(&without_budget_fields).expect("re-encode");
+        let decoded =
+            LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeBlock)
+                .expect("decode payload missing budget counters entirely");
+        assert_eq!(decoded.budget_ledger.model_calls_made(), 0);
+        assert_eq!(decoded.budget_ledger.capability_invocations_made(), 0);
+        assert!(decoded.budget_ledger.run_started_at().is_none());
+    }
+
     #[test]
     fn compaction_prompt_snapshot_round_trips_through_checkpoints() {
         let context = test_run_context();
@@ -941,6 +1063,32 @@ mod tests {
     }
 
     #[test]
+    fn rebase_for_run_resets_per_run_budget_counters_for_a_different_run() {
+        // A retry rebases the failed run's checkpoint onto a fresh TurnRunId.
+        // run_started_at/model_calls_made/capability_invocations_made are
+        // per-run budget accounting (see their doc comments on
+        // LoopExecutionState); carrying an exhausted counter or a stale
+        // wall-clock start into the retry would make it fail the budget
+        // stage immediately, before it does any work.
+        let source_context = test_run_context();
+        let target_context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&source_context);
+        state
+            .budget_ledger
+            .set_run_started_at_for_test(Some(chrono::Utc::now() - chrono::Duration::seconds(120)));
+        state.budget_ledger.set_model_calls_made_for_test(32);
+        state
+            .budget_ledger
+            .set_capability_invocations_made_for_test(64);
+
+        let rebased = state.rebase_for_run(&target_context);
+
+        assert!(rebased.budget_ledger.run_started_at().is_none());
+        assert_eq!(rebased.budget_ledger.model_calls_made(), 0);
+        assert_eq!(rebased.budget_ledger.capability_invocations_made(), 0);
+    }
+
+    #[test]
     fn rebase_for_run_preserves_refs_for_same_run_gate_resume() {
         let context = test_run_context();
         let mut state = LoopExecutionState::initial_for_run(&context);
@@ -963,6 +1111,16 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         });
+        // A same-run gate resume must also preserve per-run budget
+        // accounting: the full-equality assertion below locks that in
+        // alongside the token total above.
+        state
+            .budget_ledger
+            .set_run_started_at_for_test(Some(chrono::Utc::now() - chrono::Duration::seconds(120)));
+        state.budget_ledger.set_model_calls_made_for_test(5);
+        state
+            .budget_ledger
+            .set_capability_invocations_made_for_test(7);
 
         let rebased = state.clone().rebase_for_run(&context);
 

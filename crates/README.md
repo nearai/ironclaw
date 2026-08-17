@@ -42,7 +42,7 @@ that owns that boundary — never thread it through a UI or runtime crate.
 
 ## The ten families
 
-Counts measured 2026-08-05 (`cargo metadata --no-deps`; the enforcing gate is
+Counts updated 2026-08-12 (`cargo metadata --no-deps`; the enforcing gate is
 `python3 scripts/ci/check-target-tree.py`). Every family has an `AGENTS.md`
 (its boundary and crate table) and an in-depth spec in
 [`docs/internal/reborn/target-architecture/families/`](../docs/internal/reborn/target-architecture/families/);
@@ -51,7 +51,7 @@ every crate has a `README.md`.
 | Directory | Crates | What lives there |
 | --- | --- | --- |
 | [`contracts/`](./contracts/AGENTS.md) | 6 | `host_api`, `common`, `prompt_envelope`, `loop_contracts`, `extension_contracts`, `product_contracts` |
-| [`substrates/`](./substrates/AGENTS.md) | 6 | `filesystem`, `libsql_runtime`, `secrets`, `network`, `safety`, `observability` |
+| [`substrates/`](./substrates/AGENTS.md) | 7 | `filesystem`, `documents`, `libsql_runtime`, `secrets`, `network`, `safety`, `observability` |
 | [`events/`](./events/AGENTS.md) | 4 | `event_log`, `event_store`, `event_projections`, `event_streams` |
 | [`domains/`](./domains/AGENTS.md) | 12 | `threads`, `conversations`, `triggers`, `memory`, `skills`, `auth`, `attachments`, `extractors`, `identity`, `llm`, `trace_commons`, `outbound` |
 | [`kernel/`](./kernel/AGENTS.md) | 9 | `trust`, `authorization`, `approvals`, `resources`, `runtime_policy`, `capabilities`, `processes`, `turns`, `host_runtime` |
@@ -79,7 +79,7 @@ directory has its own `README.md`, crate or not.
 
 ### The workspace beyond `crates/`
 
-62 of the workspace's **64 packages** live under `crates/`. The other two are
+65 of the workspace's **67 packages** live under `crates/`. The other two are
 the root package `ironclaw_integration_tests` (the in-process integration
 suite driving `tests/integration/`) and `tools/ironclaw_stress`. One package
 is deliberately excluded from the workspace: `tools/ironclaw_silk_decoder`,

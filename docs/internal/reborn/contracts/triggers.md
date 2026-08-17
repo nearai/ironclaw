@@ -43,6 +43,7 @@ The trigger system is owned by `ironclaw_triggers` in implementation terms, but 
 | `source` | Trigger source kind |
 | `schedule` | V1 schedule definition |
 | `prompt` | Materialized instruction content |
+| `execution_spec` | Optional versioned structured execution contract; absent for legacy prompts |
 | `state` | Lifecycle state for the trigger definition |
 | `next_run_at` | Next eligible fire time |
 | `last_run_at` | Last time a fire was submitted |
@@ -77,7 +78,34 @@ V1 schedule shape is cron-backed schedule intake only.
 
 The `TriggerSchedule::Cron` variant stores both `expression` and `timezone` as the canonical schedule definition. `TriggerRecord.schedule` carries the full cron shape, including the IANA timezone string.
 
-### 3.3 Trigger state
+### 3.3 Structured execution contracts
+
+New trigger creation requires a versioned `execution_contract`; the create
+surface does not accept or advertise the legacy raw `prompt` field. A
+structured contract stores canonical JSON in `execution_spec_json` and stores
+its rendered prompt alongside it.
+
+This is a new-write rule, not a destructive migration. Existing rows with a
+raw prompt retain `NULL` in `execution_spec_json`, remain readable, and continue
+to execute their frozen prompt without interpretation or backfill.
+
+The v1 contract contains a goal, one or more success criteria, output
+instructions, no-result text, an optional capability allowlist, and required
+skill names. The trigger domain validates and renders this contract before
+persistence. Production creation also resolves capability references against
+the current model-visible catalog and required skills through the normal skill
+selector before writing the trigger. The scheduler continues to submit the
+frozen prompt; only the neutral execution policy crosses the trusted-trigger
+turn boundary.
+
+Capability allowlists are intersections: absent preserves the scheduled
+surface, an empty list exposes no capabilities, and a non-empty list can only
+narrow the surface. Global and scheduled-trigger denials still win. Required
+skills resolve through the normal skill activation catalog before model context
+is built; missing, ambiguous, untrusted, unready, or over-budget requirements
+fail closed and never widen capabilities.
+
+### 3.4 Trigger state
 
 `TriggerRecord.state` is the trigger-definition state, not the turn-run state.
 It is the source of truth for fire eligibility.
@@ -99,7 +127,7 @@ It is the source of truth for fire eligibility.
   denormalized indexes derived from `state == Scheduled`, but those indexes must
   never become independent fire gates.
 
-### 3.4 Completion policy
+### 3.5 Completion policy
 
 `TriggerRecord.completion_policy` controls what happens after a successful fire:
 

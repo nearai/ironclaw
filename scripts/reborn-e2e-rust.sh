@@ -84,6 +84,13 @@ run_architecture_boundaries() {
   # Pins the retired-taxonomy Telegram identifiers and prevents v1 pairing
   # routes from re-entering the Reborn context.
   run_test ironclaw_architecture_tests telegram_extension_gates
+  # Supply-chain pin for the linked-device MTProto stack: exact versions +
+  # .crate checksums from Cargo.lock, frozen resolved feature sets under both
+  # the default and --all-features resolution, and the socks5 `proxy` feature
+  # off. That dependency runs in-process with full process authority, and a
+  # proxied dial bypasses the only seam its datacenter-address validation owns
+  # (docs/internal/design/telegram-linked-device/ADR-device-link-auth-hook.md).
+  run_test ironclaw_architecture_tests reborn_linked_device_supply_chain_pin
   # Pins docs/internal/reborn/contracts/host-api.md: every recoverable verdict carries
   # an inline model diagnostic, and legacy omissions upgrade explicitly.
   run_lib_test_exact ironclaw_host_api resolution::tests::recoverable_failure_carries_its_model_visible_diagnostic

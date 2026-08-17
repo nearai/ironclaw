@@ -41,11 +41,12 @@ use ironclaw_threads::{
     FilesystemSessionThreadService, FinalizedAssistantMessageByRunRequest,
     InboundMessageReplayMetadata, ListThreadsForScopeRequest, LoadContextMessagesRequest,
     LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
-    ProviderToolCallReferenceEnvelope, PutToolResultRecordRequest, ReadToolResultRecordRequest,
-    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadService, SummaryKind, SummaryModelContextPolicy, ThreadHistoryRequest,
-    ThreadMessageId, ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
-    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    PREPARED_CONTEXT_METADATA_MARKER_KEY, ProviderToolCallReferenceEnvelope,
+    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
+    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 use tokio::sync::{Barrier, Mutex, OwnedMutexGuard};
 
@@ -903,7 +904,7 @@ async fn filesystem_delete_thread_removes_inbound_idempotency_records() {
 #[tokio::test]
 async fn filesystem_finalized_assistant_lookup_by_run_uses_persisted_message() {
     let backend = Arc::new(InMemoryBackend::new());
-    let scoped = scoped_threads_fs_at(backend, "tenant-finalized-by-run", "alice");
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-finalized-by-run", "alice");
     let service = FilesystemSessionThreadService::new(scoped);
     let scope = scope("finalized-by-run");
     let thread = service
@@ -948,7 +949,7 @@ async fn filesystem_finalized_assistant_lookup_by_run_uses_persisted_message() {
 
     let finalized = service
         .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
-            scope,
+            scope: scope.clone(),
             thread_id: thread.thread_id,
             turn_run_id: "run-finalized-lookup".into(),
         })
@@ -958,6 +959,21 @@ async fn filesystem_finalized_assistant_lookup_by_run_uses_persisted_message() {
     assert_eq!(finalized.message_id, draft.message_id);
     assert_eq!(finalized.status, MessageStatus::Finalized);
     assert_eq!(finalized.content.as_deref(), Some("final"));
+
+    let stored_rows = backend
+        .query(
+            &VirtualPath::new("/tenants/tenant-finalized-by-run/users/alice/threads").unwrap(),
+            &Filter::All,
+            Page::new(0, Page::MAX_LIMIT),
+        )
+        .await
+        .unwrap();
+    assert!(
+        stored_rows
+            .iter()
+            .all(|row| !row.path.as_str().contains("/indexes/")),
+        "message lookup must not amplify one message row into sibling index entries"
+    );
 }
 
 #[tokio::test]
@@ -1437,8 +1453,8 @@ async fn filesystem_redacts_append_only_finalized_assistant_message() {
 }
 
 #[tokio::test]
-async fn filesystem_lookup_index_write_failure_rolls_back_source_message() {
-    let backend = Arc::new(lookup_index_write_failure_backend());
+async fn filesystem_message_row_write_failure_rejects_source_message() {
+    let backend = Arc::new(message_row_write_failure_backend());
     let scoped = scoped_threads_fs_at(backend, "tenant-lookup-index-failure", "alice");
     let service = FilesystemSessionThreadService::new(scoped);
     let scope = scope("lookup-index-failure");
@@ -1460,7 +1476,7 @@ async fn filesystem_lookup_index_write_failure_rolls_back_source_message() {
             content: MessageContent::text("draft"),
         })
         .await
-        .expect_err("required lookup projection failure must reject the atomic append");
+        .expect_err("message-row projection failure must reject the append");
 
     let history = service
         .list_thread_history(ThreadHistoryRequest {
@@ -2852,9 +2868,8 @@ async fn filesystem_thread_create_declares_indexes_once_per_mount() {
     create("ddl-000").await;
     let after_first = backend.count(FilesystemOperation::EnsureIndex);
     assert_eq!(
-        after_first, 4,
-        "a mount's first thread declares exactly the four root specs \
-         (message sequence, message kind/status, summary, thread activity)"
+        after_first, 9,
+        "a mount's first thread declares four transcript specs and five message lookup specs"
     );
 
     for index in 1..5 {
@@ -3195,7 +3210,7 @@ async fn filesystem_transcript_migration_retries_writer_admission_contention() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -3254,7 +3269,7 @@ async fn filesystem_transcript_migration_retries_a_lost_cas_race() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -3278,7 +3293,7 @@ async fn filesystem_transcript_migration_retries_a_lost_cas_race() {
     let marker_writes = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .filter(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .filter(|path| path.as_str().contains("transcript-index-v2.complete"))
         .count();
     assert_eq!(
         marker_writes, 2,
@@ -3317,7 +3332,7 @@ async fn filesystem_transcript_migration_conflict_retries_are_bounded() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -3851,7 +3866,8 @@ async fn filesystem_list_threads_orders_by_last_activity_not_creation() {
 
     let backend = Arc::new(InMemoryBackend::new());
     let scoped = scoped_threads_fs_at(backend, "tenant-activity-fs", "alice");
-    let service = FilesystemSessionThreadService::new(scoped);
+    let service = FilesystemSessionThreadService::new(scoped)
+        .with_thread_index_touch_flush_interval(std::time::Duration::from_millis(20));
     let scope_a = scope("activity");
 
     // Create "older" first, then "newer" — newer has the later
@@ -3979,14 +3995,27 @@ async fn filesystem_list_threads_orders_by_last_activity_not_creation() {
         .await
         .unwrap();
 
-    let final_list = service
-        .list_threads_for_scope(ListThreadsForScopeRequest {
-            scope: scope_a,
-            limit: None,
-            cursor: None,
-        })
-        .await
-        .unwrap();
+    // This touch follows earlier activity on the same thread inside the
+    // coalescing window. Poll until the detached trailing flush makes the
+    // expected cross-thread order observable.
+    let final_list = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let listed = service
+                .list_threads_for_scope(ListThreadsForScopeRequest {
+                    scope: scope_a.clone(),
+                    limit: None,
+                    cursor: None,
+                })
+                .await
+                .unwrap();
+            if listed.threads[0].thread_id.as_str() == "t-older" {
+                break listed;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the trailing touch reaches the sidebar after the flush interval");
     let final_ids: Vec<&str> = final_list
         .threads
         .iter()
@@ -3994,6 +4023,203 @@ async fn filesystem_list_threads_orders_by_last_activity_not_creation() {
         .collect();
     // Recency wins over transcript length.
     assert_eq!(final_ids, ["t-older", "t-newer"]);
+}
+
+/// Regression for #7596: the message/draft/finalize path used to rewrite the
+/// complete thread-index row once at every activity call site. A single turn
+/// should coalesce that burst while still making the finalized thread lead the
+/// activity-sorted sidebar.
+#[tokio::test]
+async fn filesystem_thread_activity_burst_coalesces_index_touches_and_orders_after_finalize() {
+    let backend = Arc::new(QueryCountingBackend::new());
+    let scoped = scoped_threads_fs_at(
+        Arc::clone(&backend),
+        "tenant-coalesced-index-touch",
+        "alice",
+    );
+    let service = FilesystemSessionThreadService::new(scoped)
+        .with_thread_index_touch_flush_interval(std::time::Duration::from_millis(500));
+    let request_scope = scope("coalesced-index-touch");
+
+    let older = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-coalesced-older").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("older".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: request_scope.clone(),
+            thread_id: older.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: Some("binding-coalesced-touch".into()),
+            reply_target_binding_id: None,
+            external_event_id: Some("event-coalesced-touch".into()),
+            content: MessageContent::text("start the turn"),
+        })
+        .await
+        .unwrap();
+    let draft = service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: request_scope.clone(),
+            thread_id: older.thread_id.clone(),
+            turn_run_id: "run-coalesced-touch".into(),
+            content: MessageContent::text("working"),
+        })
+        .await
+        .unwrap();
+    wait_until_after(draft.updated_at.expect("draft activity stamp")).await;
+    let newer = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-coalesced-newer").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("newer".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    wait_until_after(newer.updated_at.expect("newer creation stamp")).await;
+    backend.reset_thread_index_put_count();
+
+    service
+        .update_assistant_draft(UpdateAssistantDraftRequest {
+            scope: request_scope.clone(),
+            thread_id: older.thread_id.clone(),
+            message_id: draft.message_id,
+            content: MessageContent::text("still working"),
+        })
+        .await
+        .unwrap();
+    service
+        .finalize_assistant_message(
+            &request_scope,
+            &older.thread_id,
+            draft.message_id,
+            MessageContent::text("done"),
+        )
+        .await
+        .unwrap();
+
+    let listed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let listed = service
+                .list_threads_for_scope(ListThreadsForScopeRequest {
+                    scope: request_scope.clone(),
+                    limit: None,
+                    cursor: None,
+                })
+                .await
+                .unwrap();
+            if listed.threads[0].thread_id == older.thread_id {
+                break listed;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("finalized activity reaches the sidebar after the flush interval");
+    let burst_puts = backend.thread_index_put_count();
+    assert!(
+        burst_puts <= 1,
+        "one turn must write the thread-index touch at most once per flush interval; saw {burst_puts} writes"
+    );
+    assert_eq!(
+        listed.threads[0].thread_id, older.thread_id,
+        "the finalized thread must lead the activity-sorted sidebar"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_failed_deferred_thread_index_touch_is_retried() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-deferred-index-retry", "alice");
+    let service = FilesystemSessionThreadService::new(scoped)
+        .with_thread_index_touch_flush_interval(std::time::Duration::from_secs(1));
+    let request_scope = scope("deferred-index-retry");
+    let older = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-deferred-retry-older").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("older".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: request_scope.clone(),
+            thread_id: older.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: Some("binding-deferred-index-retry".into()),
+            reply_target_binding_id: None,
+            external_event_id: Some("event-deferred-index-retry".into()),
+            content: MessageContent::text("start activity tracking"),
+        })
+        .await
+        .unwrap();
+    let draft = service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: request_scope.clone(),
+            thread_id: older.thread_id.clone(),
+            turn_run_id: "run-deferred-index-retry".into(),
+            content: MessageContent::text("working"),
+        })
+        .await
+        .unwrap();
+    wait_until_after(draft.updated_at.expect("draft activity stamp")).await;
+    let newer = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-deferred-retry-newer").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("newer".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    wait_until_after(newer.updated_at.expect("newer creation stamp")).await;
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path("/thread_index/")
+            .nth(1)
+            .backend("deferred thread-index write fails once"),
+    );
+
+    service
+        .update_assistant_draft(UpdateAssistantDraftRequest {
+            scope: request_scope.clone(),
+            thread_id: older.thread_id.clone(),
+            message_id: draft.message_id,
+            content: MessageContent::text("newest activity"),
+        })
+        .await
+        .unwrap();
+
+    let listed = tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        loop {
+            let listed = service
+                .list_threads_for_scope(ListThreadsForScopeRequest {
+                    scope: request_scope.clone(),
+                    limit: None,
+                    cursor: None,
+                })
+                .await
+                .unwrap();
+            if listed.threads[0].thread_id == older.thread_id {
+                break listed;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the failed deferred touch is retried");
+    assert_eq!(listed.threads[0].thread_id, older.thread_id);
 }
 
 #[tokio::test]
@@ -4531,7 +4757,7 @@ fn thread_index_migration_marker_path_for_test(scope: &ThreadScope) -> ScopedPat
 
 fn transcript_index_migration_marker_path_for_test(scope: &ThreadScope) -> ScopedPath {
     ScopedPath::new(format!(
-        "/threads/agents/{}/projects/{}/owners/{}/index-migrations/transcript-index-v1.complete",
+        "/threads/agents/{}/projects/{}/owners/{}/index-migrations/transcript-index-v2.complete",
         scope.agent_id.as_str(),
         scope
             .project_id
@@ -4613,29 +4839,19 @@ where
     Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
 }
 
-/// Real thread store backend that fails every write to a message lookup-index
-/// row (`/indexes/assistant-runs/…`, `/indexes/tool-results/…`) so the store
-/// runs its genuine "lookup-index backfill is best-effort, fall back to a
-/// transcript scan" path. Folds the former hand-rolled
-/// `LookupIndexWriteFailureBackend` onto `FaultInjecting` — two path-scoped
-/// `WriteFile` faults, one per lookup-index family.
-fn lookup_index_write_failure_backend() -> FaultInjecting<InMemoryBackend> {
-    FaultInjecting::new(InMemoryBackend::new())
-        .with_fault(
-            Fault::on(FilesystemOperation::WriteFile)
-                .path("/indexes/assistant-runs/")
-                .backend("lookup index writes disabled by contract test"),
-        )
-        .with_fault(
-            Fault::on(FilesystemOperation::WriteFile)
-                .path("/indexes/tool-results/")
-                .backend("lookup index writes disabled by contract test"),
-        )
+/// Real thread store backend that fails message-row writes. Lookup projections
+/// share that row, so projection failure cannot leave a source message without
+/// its exact-lookup keys.
+fn message_row_write_failure_backend() -> FaultInjecting<InMemoryBackend> {
+    FaultInjecting::new(InMemoryBackend::new()).with_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path("/messages/")
+            .backend("message row writes disabled by contract test"),
+    )
 }
 
-/// As [`lookup_index_write_failure_backend`], but fails every lookup-index
-/// *read* so the store must fall back to a transcript scan. Folds the former
-/// hand-rolled `LookupIndexReadFailureBackend`.
+/// Fails every legacy lookup-index read so a missing message-row projection
+/// cannot silently degrade into a transcript scan.
 fn lookup_index_read_failure_backend() -> FaultInjecting<InMemoryBackend> {
     FaultInjecting::new(InMemoryBackend::new())
         .with_fault(
@@ -4654,6 +4870,7 @@ struct QueryCountingBackend {
     inner: InMemoryBackend,
     query_count: AtomicUsize,
     get_count: AtomicUsize,
+    thread_index_put_count: AtomicUsize,
 }
 
 struct MigrationRaceBackend {
@@ -4688,6 +4905,7 @@ impl QueryCountingBackend {
             inner: InMemoryBackend::new(),
             query_count: AtomicUsize::new(0),
             get_count: AtomicUsize::new(0),
+            thread_index_put_count: AtomicUsize::new(0),
         }
     }
 
@@ -4697,6 +4915,14 @@ impl QueryCountingBackend {
 
     fn get_count(&self) -> usize {
         self.get_count.load(Ordering::SeqCst)
+    }
+
+    fn thread_index_put_count(&self) -> usize {
+        self.thread_index_put_count.load(Ordering::SeqCst)
+    }
+
+    fn reset_thread_index_put_count(&self) {
+        self.thread_index_put_count.store(0, Ordering::SeqCst);
     }
 }
 
@@ -4829,6 +5055,9 @@ impl RootFilesystem for QueryCountingBackend {
         entry: Entry,
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
+        if path.as_str().contains("/thread_index/") {
+            self.thread_index_put_count.fetch_add(1, Ordering::SeqCst);
+        }
         self.inner.put(path, entry, cas).await
     }
 
@@ -6022,4 +6251,492 @@ async fn filesystem_mark_message_submitted_is_idempotent_for_same_run() {
         .unwrap();
     assert_eq!(history.messages[0].status, MessageStatus::Submitted);
     assert_eq!(history.messages[0].turn_run_id.as_deref(), Some("run-1"));
+}
+
+/// Taxonomy baseline for unbound turns (filesystem twin of the in-memory
+/// pin): a thread whose scope carries NO `owner_user_id` lands under scope
+/// axes without an `/owners/<user>` segment, so an owner-scoped listing —
+/// which reads the per-axes thread index — is structurally unable to surface
+/// it, and vice versa.
+#[tokio::test]
+async fn filesystem_list_threads_excludes_ownerless_threads_from_owner_scoped_listings() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+
+    let owned_scope = scope("taxonomy");
+    let ownerless_scope = ThreadScope {
+        owner_user_id: None,
+        ..owned_scope.clone()
+    };
+
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: owned_scope.clone(),
+            thread_id: Some(ThreadId::new("t-owned-001").unwrap()),
+            created_by_actor_id: "actor-taxonomy".into(),
+            title: Some("owned".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: ownerless_scope.clone(),
+            thread_id: Some(ThreadId::new("t-ownerless-001").unwrap()),
+            created_by_actor_id: "actor-taxonomy".into(),
+            title: Some("ownerless".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let owner_view = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: owned_scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let owner_ids: Vec<&str> = owner_view
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(
+        owner_ids,
+        ["t-owned-001"],
+        "an owner-scoped listing must never surface ownerless threads"
+    );
+
+    let ownerless_view = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: ownerless_scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ownerless_ids: Vec<&str> = ownerless_view
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(
+        ownerless_ids,
+        ["t-ownerless-001"],
+        "an ownerless-scope enumeration must never surface owner-scoped threads"
+    );
+}
+
+fn filesystem_prepared_request(label: &str, key: &str) -> ironclaw_threads::PreparedContextRequest {
+    ironclaw_threads::PreparedContextRequest {
+        scope: ThreadScope {
+            owner_user_id: None,
+            ..scope(label)
+        },
+        actor_id: format!("user-{label}"),
+        system_prompt: "You are a background task.".to_string(),
+        messages: vec![ironclaw_llm::agent_message::AgentMessage {
+            role: ironclaw_llm::agent_message::AgentMessageRole::User,
+            content: vec![ironclaw_llm::agent_message::ContentPart::text(
+                "do the thing",
+            )],
+        }],
+        declarations: ironclaw_host_api::prepared_context::PreparedTurnDeclarations {
+            tools: Vec::new(),
+            output: ironclaw_host_api::prepared_context::OutputContract::JsonSchema {
+                schema: serde_json::json!({ "type": "object" }),
+            },
+            limits: ironclaw_host_api::prepared_context::TurnLimits {
+                max_model_calls: Some(4),
+                max_capability_invocations: None,
+                max_wall_clock_seconds: None,
+            },
+        },
+        idempotency_key: key.to_string(),
+        thread_id: ThreadId::new(format!("unbound-{key}")).expect("thread id"),
+        title: None,
+        metadata_json: None,
+    }
+}
+
+/// One-time backfill: a legacy subagent thread (metadata
+/// `{"kind":"subagent",…}` with no marker) is stamped on the first listing
+/// and stays hidden from then on — the single-marker predicate needs no
+/// second spelling.
+#[tokio::test]
+async fn filesystem_listing_backfills_the_marker_onto_legacy_subagent_threads() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let listing_scope = scope("legacy-backfill");
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: listing_scope.clone(),
+            thread_id: Some(ThreadId::new("subagent-legacy-001").unwrap()),
+            created_by_actor_id: "actor-legacy".into(),
+            title: None,
+            metadata_json: Some(
+                serde_json::json!({"kind": "subagent", "parent_run_id": "run-1"}).to_string(),
+            ),
+        })
+        .await
+        .unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: listing_scope.clone(),
+            thread_id: Some(ThreadId::new("t-visible-legacy-001").unwrap()),
+            created_by_actor_id: "actor-legacy".into(),
+            title: Some("visible".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let view = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: listing_scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = view
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        ["t-visible-legacy-001"],
+        "the legacy subagent thread must be stamped and hidden on first listing"
+    );
+
+    // The stamp is durable — a second listing (marker predicate only, no
+    // legacy spelling consulted) still hides it.
+    let second = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: listing_scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(second.threads.len(), 1);
+
+    // The second listing hiding the thread is consistent with either the
+    // durable marker stamp OR the legacy `"kind":"subagent"` spelling still
+    // matching — prove it is actually the stamp by reading the thread record
+    // back and asserting the marker landed.
+    let stamped = service
+        .read_thread(ThreadHistoryRequest {
+            scope: listing_scope,
+            thread_id: ThreadId::new("subagent-legacy-001").unwrap(),
+        })
+        .await
+        .expect("legacy subagent thread record is readable after backfill");
+    let metadata: serde_json::Value = stamped
+        .metadata_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .expect("stamped thread carries JSON object metadata");
+    assert_eq!(
+        metadata.get(PREPARED_CONTEXT_METADATA_MARKER_KEY),
+        Some(&serde_json::Value::Bool(true)),
+        "the backfill must durably stamp the marker, not merely rely on the legacy \
+         \"kind\":\"subagent\" spelling still matching: {metadata:?}"
+    );
+}
+
+/// Two racing accepts for the SAME prepared request converge: deterministic
+/// ids make the seeds collide row-by-row (CAS Absent; losers skip), and the
+/// commit marker written last decides exactly one non-replay winner. Both
+/// callers get the same thread and pin, and the rows are not duplicated.
+#[tokio::test(flavor = "multi_thread")]
+async fn filesystem_concurrent_duplicate_prepared_accepts_converge() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = Arc::new(FilesystemSessionThreadService::new(scoped));
+    let request = filesystem_prepared_request("race-fs", "race-fs-key-1");
+
+    let left = {
+        let service = Arc::clone(&service);
+        let request = request.clone();
+        tokio::spawn(async move { service.accept_prepared_context(request).await })
+    };
+    let right = {
+        let service = Arc::clone(&service);
+        let request = request.clone();
+        tokio::spawn(async move { service.accept_prepared_context(request).await })
+    };
+    let (left, right) = tokio::join!(left, right);
+    let left = left.expect("join").expect("left accept");
+    let right = right.expect("join").expect("right accept");
+
+    assert_eq!(left.thread_id, right.thread_id);
+    assert_eq!(left.accepted_message_ref, right.accepted_message_ref);
+    assert_eq!(
+        [left.idempotent_replay, right.idempotent_replay]
+            .iter()
+            .filter(|replayed| !**replayed)
+            .count(),
+        1,
+        "exactly one racer is the non-replay winner (left={left:?} right={right:?})"
+    );
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: left.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(
+        history.messages.len(),
+        2,
+        "racing accepts must not duplicate the seeded rows: {:?}",
+        history.messages.iter().map(|m| m.kind).collect::<Vec<_>>()
+    );
+}
+
+/// A crash BEFORE the commit marker (rows seeded, record write fails) is
+/// retryable: the retry converges on the same thread, writes the marker, and
+/// reports the accept as fresh — never an orphaned half-seeded thread.
+#[tokio::test]
+async fn filesystem_prepared_accept_retries_after_a_crash_before_the_commit_marker() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request = filesystem_prepared_request("marker-crash-fs", "marker-crash-fs-key-1");
+
+    // The commit marker is the ONE write to `prepared_context.json`.
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path("prepared_context.json")
+            .nth(1)
+            .backend("crash before commit marker"),
+    );
+    let error = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect_err("the poisoned marker write must fail the accept");
+    assert!(
+        !matches!(
+            error,
+            SessionThreadError::InvalidPreparedContext { .. }
+                | SessionThreadError::PreparedContextKeyMismatch { .. }
+        ),
+        "the crash must surface as a backend failure, not a validation shape: {error:?}"
+    );
+
+    let retried = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("the retry succeeds once the fault clears");
+    assert!(
+        !retried.idempotent_replay,
+        "no commit marker landed, so the retry is the first completed accept"
+    );
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: retried.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(
+        history.messages.len(),
+        2,
+        "the crashed attempt's rows converge instead of duplicating: {:?}",
+        history.messages.iter().map(|m| m.kind).collect::<Vec<_>>()
+    );
+}
+
+/// Filesystem twin of the delete-then-re-accept pin: the journaled record
+/// lives under the thread root, so the delete removes it and the same
+/// accept re-run mints fresh.
+#[tokio::test]
+async fn filesystem_deleting_a_prepared_thread_deletes_its_replay_record() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request = filesystem_prepared_request("delete-replay-fs", "delete-replay-fs-key-1");
+    let first = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("first accept");
+    assert!(!first.idempotent_replay);
+    service
+        .delete_thread(&request.scope, &first.thread_id)
+        .await
+        .expect("delete");
+
+    let second = service
+        .accept_prepared_context(request)
+        .await
+        .expect("re-accept after delete");
+    assert!(
+        !second.idempotent_replay,
+        "a deleted prepared thread must re-mint, not replay its deleted record"
+    );
+}
+
+/// Filesystem twin of the in-memory listing-exclusion pin, plus the cursor
+/// invariant that only matters here: the page cursor advances over the
+/// FETCHED index rows, so a page consisting entirely of hidden
+/// prepared-context threads still makes progress instead of stalling.
+#[tokio::test]
+async fn filesystem_list_threads_excludes_prepared_context_threads_and_cursor_advances() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+
+    let mut listing_scope = None;
+    for index in 0..3 {
+        let request = filesystem_prepared_request("hidden-fs", &format!("hidden-fs-key-{index}"));
+        listing_scope.get_or_insert(request.scope.clone());
+        service
+            .accept_prepared_context(request)
+            .await
+            .expect("prepared-context accept succeeds");
+    }
+    let listing_scope = listing_scope.expect("at least one prepared request");
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: listing_scope.clone(),
+            thread_id: Some(ThreadId::new("t-visible-fs-001").unwrap()),
+            created_by_actor_id: "actor-hidden-fs".into(),
+            title: Some("visible".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // Walk the listing with a page size smaller than the hidden population:
+    // every page must either surface visible threads or advance the cursor.
+    let mut cursor = None;
+    let mut seen: Vec<String> = Vec::new();
+    for _ in 0..8 {
+        let view = service
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope: listing_scope.clone(),
+                limit: Some(2),
+                cursor: cursor.clone(),
+            })
+            .await
+            .unwrap();
+        seen.extend(
+            view.threads
+                .iter()
+                .map(|record| record.thread_id.as_str().to_string()),
+        );
+        match view.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(
+        seen,
+        ["t-visible-fs-001"],
+        "only the conversation thread may surface; hidden pages must advance"
+    );
+}
+
+/// Filesystem twin of the in-memory accept-door pins: mint + seed + journal
+/// land durably, the accepted ref pins the last seeded row, and the
+/// journaled declarations read back.
+#[tokio::test]
+async fn filesystem_accept_prepared_context_mints_seeds_and_journals() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request = filesystem_prepared_request("unbound-fs", "unbound-fs-key-1");
+
+    let accepted = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("prepared-context accept succeeds");
+    assert!(!accepted.idempotent_replay);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: accepted.thread_id.clone(),
+        })
+        .await
+        .expect("seeded thread history");
+    assert_eq!(history.thread.scope.owner_user_id, None);
+    assert_eq!(history.messages.len(), 2);
+    assert_eq!(history.messages[0].kind, MessageKind::System);
+    assert_eq!(history.messages[0].status, MessageStatus::Finalized);
+    assert_eq!(history.messages[1].kind, MessageKind::User);
+    assert_eq!(history.messages[1].status, MessageStatus::Accepted);
+    assert!(history.messages[0].sequence < history.messages[1].sequence);
+    assert_eq!(
+        accepted.accepted_message_ref.as_str(),
+        format!("msg:{}", history.messages[1].message_id)
+    );
+
+    let record = service
+        .read_prepared_context(&request.scope, &accepted.thread_id)
+        .await
+        .expect("declarations read-back")
+        .expect("record present");
+    assert_eq!(record.declarations, request.declarations);
+
+    let window = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: request.scope.clone(),
+            thread_id: accepted.thread_id.clone(),
+            max_messages: 16,
+        })
+        .await
+        .expect("context window over seeded thread");
+    assert_eq!(window.messages.len(), 2);
+}
+
+/// Replay discipline on the durable backend: same request → same thread and
+/// pin, no duplicate rows; cross-scope reads stay non-enumerating.
+#[tokio::test]
+async fn filesystem_accept_prepared_context_replays_without_orphans() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request = filesystem_prepared_request("unbound-fs-replay", "unbound-fs-key-replay");
+
+    let first = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("first accept");
+    let replay = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("replay accept");
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.thread_id, first.thread_id);
+    assert_eq!(replay.accepted_message_ref, first.accepted_message_ref);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: first.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages.len(), 2, "replay must not duplicate rows");
+
+    let foreign_scope = ThreadScope {
+        owner_user_id: None,
+        ..scope("unbound-fs-foreign")
+    };
+    let missing = service
+        .read_prepared_context(&foreign_scope, &first.thread_id)
+        .await;
+    assert!(
+        matches!(missing, Err(SessionThreadError::UnknownThread { .. })),
+        "cross-scope reads must stay non-enumerating, got {missing:?}"
+    );
 }

@@ -1,7 +1,8 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use ironclaw_event_log::{
-    EventCursor, EventError, EventStreamKey, ReadScope, RuntimeEvent, RuntimeEventKind,
+    DurableEventLog, EventCursor, EventError, EventStreamKey, ReadScope, RuntimeEvent,
+    RuntimeEventKind,
 };
 use ironclaw_event_store::{RebornEventStoreConfig, RebornProfile, build_reborn_event_stores};
 use ironclaw_filesystem::{
@@ -70,6 +71,35 @@ fn audit_record(scope: &ResourceScope, status: &str) -> AuditEnvelope {
             output_bytes: Some(12),
         }),
     }
+}
+
+async fn assert_model_duration_persistence(log: &Arc<dyn DurableEventLog>, scope: ResourceScope) {
+    let stream = EventStreamKey::from_scope(&scope);
+    log.append(RuntimeEvent::model_completed_with_duration(
+        scope.clone(),
+        capability_id(),
+        37,
+    ))
+    .await
+    .expect("append terminal model event with duration");
+    log.append(RuntimeEvent::model_completed(scope, capability_id()))
+        .await
+        .expect("append historical terminal model event without duration");
+
+    let replay = log
+        .read_after_cursor(&stream, &ReadScope::default(), None, 10)
+        .await
+        .expect("replay terminal model events");
+    assert_eq!(replay.entries.len(), 2);
+    assert_eq!(
+        replay.entries[0].record.duration_ms,
+        Some(37),
+        "new terminal model duration must survive durable serialization and replay"
+    );
+    assert_eq!(
+        replay.entries[1].record.duration_ms, None,
+        "historical terminal model rows without duration must remain readable"
+    );
 }
 #[tokio::test]
 async fn libsql_replay_advances_next_cursor_past_trailing_filtered_records() {
@@ -504,6 +534,26 @@ async fn libsql_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_sema
         Some("project-a".to_string())
     );
 }
+
+#[tokio::test]
+async fn libsql_model_duration_present_and_historical_absent_round_trip() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let stores = build_reborn_event_stores(
+        RebornProfile::Production,
+        RebornEventStoreConfig::Libsql {
+            path_or_url: temp.path().join("model-duration.db").display().to_string(),
+            auth_token: None,
+        },
+    )
+    .await
+    .expect("libsql stores");
+
+    assert_model_duration_persistence(
+        &stores.events,
+        scope_for("libsql-model-duration", "project-a"),
+    )
+    .await;
+}
 // ─── Postgres per-test isolation ──────────────────────────────────────────
 //
 // The two `postgres_*` tests below assert *absolute* cursor values
@@ -690,6 +740,30 @@ async fn postgres_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_se
             .status,
         Some("project-a".to_string())
     );
+    drop(stores);
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_model_duration_present_and_historical_absent_round_trip() {
+    let Some(db) = isolated_postgres_database().await else {
+        return;
+    };
+    let stores = build_reborn_event_stores(
+        RebornProfile::Production,
+        RebornEventStoreConfig::Postgres {
+            url: SecretString::new(db.url().to_owned().into_boxed_str()),
+            tls_options: Default::default(),
+        },
+    )
+    .await
+    .expect("postgres stores");
+
+    assert_model_duration_persistence(
+        &stores.events,
+        scope_for("postgres-model-duration", "project-a"),
+    )
+    .await;
     drop(stores);
     db.cleanup().await;
 }

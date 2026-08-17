@@ -99,6 +99,77 @@ pub struct SecretMetadata {
     pub expires_at: Option<Timestamp>,
 }
 
+/// Version of one stored secret, minted by the store on every committed
+/// write.
+///
+/// Exists for the compare-and-swap write path
+/// ([`SecretStorePort::put_versioned`]): custody flows whose material rotates
+/// (the motivating case is a linked-device session key) present the version
+/// they loaded, and the store refuses a write over anything newer. Opaque to
+/// every other caller — nothing outside a store implementation should
+/// construct one from thin air.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SecretVersion(u64);
+
+impl SecretVersion {
+    /// Wrap a backend-issued version counter.
+    pub fn from_backend(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// The backend counter, for rendering into a caller-side opaque token.
+    pub fn get(&self) -> u64 {
+        self.0
+    }
+}
+
+/// What state a compare-and-swap secret write expects to find.
+///
+/// Deliberately has no `Any` arm: unconditional overwrite is what
+/// [`SecretStorePort::put`] already does, and the whole point of the
+/// versioned path is that a caller cannot reach for it by accident.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretCasExpectation {
+    /// No secret may currently be stored under the handle.
+    Absent,
+    /// The stored secret must currently carry exactly this version.
+    Version(SecretVersion),
+}
+
+/// What a compare-and-swap secret write did.
+///
+/// A lost race is an **outcome**, not an error: the caller owns the
+/// reload-and-merge decision, and a store must never resolve it by silently
+/// retrying the write (that is the last-writer-wins behavior the method
+/// exists to prevent).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretCasWriteOutcome {
+    /// The write committed; `version` is the token to present on the next one.
+    Stored {
+        metadata: SecretMetadata,
+        version: SecretVersion,
+    },
+    /// The stored state did not match the expectation. `current` is the
+    /// version stored now — `None` when the secret was deleted concurrently.
+    Conflict { current: Option<SecretVersion> },
+}
+
+/// Secret material together with its compare-and-swap version.
+pub struct VersionedSecretMaterial {
+    pub material: SecretMaterial,
+    pub version: SecretVersion,
+}
+
+impl fmt::Debug for VersionedSecretMaterial {
+    /// Version only — material never reaches a diagnostic.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VersionedSecretMaterial")
+            .field("version", &self.version)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Lease lifecycle for one secret access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1116,6 +1187,39 @@ pub trait SecretStorePort: Send + Sync {
         material: SecretMaterial,
         expires_at: Option<Timestamp>,
     ) -> Result<SecretMetadata, SecretStoreError>;
+
+    /// Stores or replaces a secret only if the stored state matches `expected`.
+    ///
+    /// The compare-and-swap sibling of [`SecretStorePort::put`], for custody
+    /// flows whose material *rotates* — the motivating consumer is a
+    /// linked-device session key, where a concurrent last-writer-wins `put`
+    /// silently kills the credential. The loser of a race is told it lost,
+    /// with the current version, as an outcome rather than an error; the
+    /// caller owns reload-and-merge and must never blindly re-issue the write.
+    ///
+    /// Same trust posture as `put`: a low-level primitive for chartered
+    /// custody owners, not a runtime/plugin surface.
+    async fn put_versioned(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        material: SecretMaterial,
+        expires_at: Option<Timestamp>,
+        expected: SecretCasExpectation,
+    ) -> Result<SecretCasWriteOutcome, SecretStoreError>;
+
+    /// Returns secret material together with its compare-and-swap version.
+    ///
+    /// Exists for the same custody flows as
+    /// [`SecretStorePort::put_versioned`] — a CAS write needs a version to
+    /// expect, and the one-shot lease path deliberately does not expose one.
+    /// Runtime injection keeps using leases; this is for the custody owner
+    /// that manages the material's lifecycle.
+    async fn read_versioned(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<Option<VersionedSecretMaterial>, SecretStoreError>;
 
     /// Atomically store a secret only when the scoped handle is absent.
     /// Returns `true` for the sole writer that created it and `false` when a

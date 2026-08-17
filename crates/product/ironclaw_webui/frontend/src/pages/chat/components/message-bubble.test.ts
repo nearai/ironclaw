@@ -59,7 +59,11 @@ vi.mock("../../../design-system/icons", async () => {
 });
 
 vi.mock("../../../lib/toast", () => ({ toast: () => {} }));
-vi.mock("../../../lib/i18n", () => ({ useT: () => (key) => key }));
+vi.mock("../../../lib/i18n", () => ({
+  useT: () => (key) => key === "chat.busyRejectedResend"
+    ? "Translated busy retry message"
+    : key,
+}));
 
 vi.mock("./attachment-chip", async () => {
   const { createElement } = await import("react");
@@ -109,6 +113,24 @@ test("assistant bubbles expose final reply state for live QA", () => {
     /data-final-reply=\{finalReplyState\}/,
     "live QA should be able to distinguish streaming text from the final answer",
   );
+});
+
+test("user error bubbles translate durable error keys at render time", async () => {
+  const { MessageBubble } = await import("./message-bubble");
+  const html = renderToStaticMarkup(
+    React.createElement(MessageBubble, {
+      message: {
+        id: "busy-rejected",
+        role: CHAT_MESSAGE_ROLES.USER,
+        content: "try this",
+        status: "error",
+        errorKey: "chat.busyRejectedResend",
+      },
+    }),
+  );
+
+  assert.match(html, /Translated busy retry message/);
+  assert.doesNotMatch(html, /chat\.busyRejectedResend/);
 });
 
 test("assistant bubbles render only durable attachment references, not workspace paths in prose", async () => {

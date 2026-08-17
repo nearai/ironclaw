@@ -247,19 +247,22 @@ where
         ),
     )
     .with_turn_run_wake_notifier(turn_run_wake_notifier);
-    let services = match event_store {
+    let event_stores = match event_store {
         ProductionEventStoresInput::Config(config) => {
-            services
-                .with_reborn_event_store_config(
-                    ironclaw_event_store::RebornProfile::Production,
-                    config,
-                )
-                .await?
+            ironclaw_event_store::build_reborn_event_stores(
+                ironclaw_event_store::RebornProfile::Production,
+                config,
+            )
+            .await?
         }
-        ProductionEventStoresInput::Prebuilt(stores) => {
-            services.with_production_reborn_event_stores(stores)
-        }
+        ProductionEventStoresInput::Prebuilt(stores) => stores,
     };
+    let runtime_event_sink: Arc<dyn NonBlockingEventSink> = Arc::new(CoalescingEventSink::new(
+        Arc::clone(&event_stores.events),
+        EventBatchConfig::default(),
+    ));
+    let services =
+        services.with_production_reborn_event_stores_and_sink(event_stores, runtime_event_sink);
     let services = apply_production_runtime_process_binding(services, process_binding);
     let services = match PostEditCheckConfig::from_env() {
         Ok(Some(config)) => services.with_post_edit_check(config),
@@ -521,17 +524,10 @@ pub(super) async fn build_backend_production(
     let process_lifecycle_lookup_source = processes.lifecycle();
     let process_gate_query_source = processes.gates();
     let process_turn_state = Arc::new(processes.agent_turn_runtime());
-    // The run-state source every caller-initiated lookup of "the run this
-    // call belongs to" reads — today `builtin.outbound_deliver`'s same-origin
-    // check. One late-bindable handle so every such lookup agrees on which
-    // runs exist; production installs the runtime's own turn state and never
-    // repoints it, a `test-support` harness repoints it.
-    let trigger_source_turn_state: Arc<std::sync::RwLock<Arc<dyn AgentTurnRuntimePort>>> = Arc::new(
-        std::sync::RwLock::new(Arc::clone(&process_turn_state) as Arc<dyn AgentTurnRuntimePort>),
-    );
     let trigger_create_hook = Arc::new(TriggerCreatorPairingHook {
         scoped_filesystem: Arc::clone(&stores.scoped_filesystem),
         conversations: tokio::sync::OnceCell::new(),
+        execution_preflight: tokio::sync::OnceCell::new(),
     });
     let thread_service: Arc<dyn SessionThreadService> = Arc::new(
         FilesystemSessionThreadService::new(Arc::clone(&stores.scoped_filesystem)),
@@ -551,6 +547,10 @@ pub(super) async fn build_backend_production(
     .await?;
     let event_log = Arc::clone(&event_stores.events);
     let audit_log = Arc::clone(&event_stores.audit);
+    let runtime_event_sink: Arc<dyn NonBlockingEventSink> = Arc::new(CoalescingEventSink::new(
+        Arc::clone(&event_log),
+        EventBatchConfig::default(),
+    ));
     let admin_secret_provisioner: Arc<dyn ironclaw_assistant::AdminSecretProvisioner> =
         Arc::new(crate::admin_secrets::FilesystemAdminSecretProvisioner::new(
             Arc::clone(&stores.filesystem),
@@ -602,7 +602,7 @@ pub(super) async fn build_backend_production(
     );
     let mut first_party_registry = production_first_party_registry_with_trigger_create_hook(
         Arc::clone(&trigger_repository),
-        trigger_create_hook,
+        Arc::clone(&trigger_create_hook) as Arc<dyn TriggerCreateHook>,
         trigger_active_run_lookup,
         process_backend,
     )?;
@@ -617,6 +617,7 @@ pub(super) async fn build_backend_production(
         );
     }
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
+    let host_runtime_event_sink: Arc<dyn EventSink> = runtime_event_sink.clone();
     let services = with_shared_host_runtime_wiring!(
         HostRuntimeServices::new(
             Arc::clone(&extension_registry),
@@ -639,7 +640,7 @@ pub(super) async fn build_backend_production(
     )
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_resource_governor(Arc::clone(&resource_governor))
-    .with_production_reborn_event_stores(event_stores)
+    .with_production_reborn_event_stores_and_sink(event_stores, host_runtime_event_sink)
     .with_turn_run_wake_notifier_dyn(production_wiring.turn_run_wake_notifier);
     #[cfg(any(test, feature = "test-support"))]
     let network_http_egress = match network_http_egress_for_test {
@@ -712,8 +713,18 @@ pub(super) async fn build_backend_production(
     let services = apply_post_edit_check_from_env(services)?;
     let security_audit_sink = services.security_audit_sink();
 
-    let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
-        Arc::new(services.turn_coordinator_for_production()?);
+    // The prepared-context probe backs unbound-profile derivation at
+    // admission; it reads the SAME durable thread store the accept door
+    // journals into.
+    let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
+        services
+            .turn_coordinator_for_production()?
+            .with_prepared_context_source(Arc::new(
+                ironclaw_threads::ThreadServicePreparedContextSource::new(Arc::clone(
+                    &thread_service,
+                )),
+            )),
+    );
     let credential_refresh_candidate_source: Option<
         Arc<dyn ironclaw_auth::KeepaliveCandidateSource>,
     >;
@@ -1209,6 +1220,21 @@ pub(super) async fn build_backend_production(
             .collect();
         reserved_capability_ids.extend(ironclaw_loop_host::bridge_capability_ids());
         let generic_installation_store = extension_management.installation_store_handle();
+        // Linked-account custody rides the auth domain's credential service:
+        // the material store forwards encrypted bytes to it (never a second
+        // custody path), and the resolver factory selects through the same
+        // credential-account selection every runtime injection uses.
+        let linked_sessions = ironclaw_extension_host::LinkedSessionStore::new(Arc::new(
+            ironclaw_extension_host::CredentialServiceLinkedSessionMaterial::new(
+                product_auth_services.credential_account_service(),
+            ),
+        ));
+        let linked_accounts: Arc<dyn ironclaw_extension_host::LinkedAccountResolution> = Arc::new(
+            ironclaw_extension_host::CredentialLinkedAccountResolution::new(
+                product_auth_services.runtime_credential_account_selection_service(),
+                Arc::clone(&linked_sessions),
+            ),
+        );
         let backend_extension_host =
             build_backend_extension_host(BackendExtensionHostAssemblyInput {
                 binder: services.extension_lane_tool_binder(),
@@ -1226,10 +1252,40 @@ pub(super) async fn build_backend_production(
                 filesystem: Arc::clone(&stores.filesystem),
                 outbound_state: Arc::clone(&outbound_stores.outbound_state)
                     as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+                linked_sessions: Some(Arc::clone(&linked_sessions)),
+                linked_accounts: Some(linked_accounts),
             })
             .await?;
         let pairing_installation_store = Arc::clone(&backend_extension_host.installation_store);
         extension_management.attach_generic_host(Arc::clone(&backend_extension_host.generic_host));
+        // The device-link engine rides the generic host's published snapshot,
+        // so it can only exist now — fill the auth bundle's deferred slots:
+        // the flow driver the product-auth routes dispatch to, and the revoker
+        // lifecycle cleanup logs devices out through (ordered before unbind).
+        let device_link_engine = Arc::new(
+            ironclaw_extension_host::SnapshotDeviceLinkDriver::new(
+                backend_extension_host.generic_host.snapshot_watch(),
+                Arc::clone(&linked_sessions),
+                ironclaw_extension_host::DeviceLinkLimits::default(),
+                product_auth_services.credential_account_service(),
+                Arc::clone(&channel_identity_store),
+            )
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("device-link limits are invalid: {error}"),
+            })?,
+        );
+        let device_link_recipes = super::auth_engine_assembly::compose_recipe_resolver(
+            &first_party_bundles,
+            Arc::clone(&backend_extension_host.installation_store),
+        )?;
+        product_auth_services.attach_device_link(
+            Arc::new(ironclaw_auth::DeviceLinkFlowDriver::new(
+                Arc::clone(&device_link_engine) as Arc<dyn ironclaw_auth::DeviceLinkDriver>,
+                product_auth_services.flow_manager(),
+                device_link_recipes,
+            )),
+            device_link_engine as Arc<dyn ironclaw_auth::LinkedDeviceRevoker>,
+        );
         services.set_extension_tool_resolver(backend_extension_host.resolver);
         let channel_pairing_registry_built =
             build_backend_channel_pairing(BackendChannelPairingAssemblyInput {
@@ -1291,9 +1347,10 @@ pub(super) async fn build_backend_production(
                     target_resolver: Arc::new(ironclaw_assistant::CodecChannelTargetResolver::new(
                         target_codecs,
                     )),
-                    run_state: Arc::new(crate::factory::LateBoundAgentTurnRuntime::new(
-                        Arc::clone(&trigger_source_turn_state),
-                    )),
+                    // Same durable conversation-binding state the trigger
+                    // poller reads: the same-origin check resolves which
+                    // thread a sealed reply-target ref is bound to.
+                    binding_service: Arc::new(trigger_conversation_services.clone()),
                     // Model deliveries never carry attachments, so nothing
                     // materializes through this reader in practice; wired to
                     // the same caller-scoped workspace view the channel-host
@@ -1354,8 +1411,6 @@ pub(super) async fn build_backend_production(
         process_gate_query_source,
         #[cfg(any(test, feature = "test-support"))]
         trigger_process_lifecycle_source,
-        #[cfg(any(test, feature = "test-support"))]
-        trigger_source_turn_state,
         extension_management,
         admin_configuration,
         admin_configuration_uses: Arc::new(admin_configuration_uses),
@@ -1384,10 +1439,12 @@ pub(super) async fn build_backend_production(
         processes,
         thread_service,
         trigger_repository: Arc::clone(&trigger_repository),
+        trigger_create_hook,
         resource_governor: production_resource_governor,
         budget_gate_store,
         broadcast_budget_event_sink,
         event_log,
+        runtime_event_sink,
         audit_log,
         admin_secret_provisioner,
         project_service,

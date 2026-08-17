@@ -374,6 +374,11 @@ async fn build_lifecycle_test_services_over_backing(
                 std::time::Duration::from_secs(30),
             ),
             channel_egress_transport: None,
+            linked_sessions: ironclaw_extension_host::LinkedSessionStore::unavailable(),
+            linked_accounts: std::sync::Arc::new(
+                ironclaw_extension_host::UnavailableLinkedAccountResolution,
+            ),
+            admin_secrets: None,
         })
         .await;
     extension_management.attach_generic_host(Arc::clone(&generic.host));

@@ -38,6 +38,12 @@ pub const SUBAGENT_CAPABILITY_SURFACE_PROFILE_ID: &str = "subagent_tools";
 /// string to strip the trigger mutator capabilities from a fire's
 /// model-visible surface.
 pub const SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID: &str = "scheduled_trigger";
+pub const UNBOUND_PLANNED_DRIVER_ID: &str = "reborn:planned-unbound";
+pub const UNBOUND_STRUCTURED_PLANNED_DRIVER_ID: &str = "reborn:planned-unbound-structured";
+/// Capability-surface profile id for unbound runs. `runtime.rs` keys its
+/// per-profile deny-map on this string to strip subagent spawn (and lets
+/// the declared-tools allowlist narrow further per run).
+pub const UNBOUND_CAPABILITY_SURFACE_PROFILE_ID: &str = "unbound_tools";
 
 pub struct DefaultPlannedDriverBuild {
     pub driver: Arc<dyn AgentLoopDriver>,
@@ -132,6 +138,25 @@ pub fn subagent_planned_driver_descriptor() -> Result<AgentLoopDriverDescriptor,
         )
 }
 
+pub fn unbound_planned_driver_descriptor() -> Result<AgentLoopDriverDescriptor, String> {
+    AgentLoopDriverDescriptor::new(UNBOUND_PLANNED_DRIVER_ID, planned_driver_default_version())?
+        .with_checkpoint_schema(
+            PLANNED_DRIVER_CHECKPOINT_SCHEMA_ID,
+            planned_driver_checkpoint_schema_version(),
+        )
+}
+
+pub fn unbound_structured_planned_driver_descriptor() -> Result<AgentLoopDriverDescriptor, String> {
+    AgentLoopDriverDescriptor::new(
+        UNBOUND_STRUCTURED_PLANNED_DRIVER_ID,
+        planned_driver_default_version(),
+    )?
+    .with_checkpoint_schema(
+        PLANNED_DRIVER_CHECKPOINT_SCHEMA_ID,
+        planned_driver_checkpoint_schema_version(),
+    )
+}
+
 pub fn default_planned_driver(
     family_registry: Arc<LoopFamilyRegistry>,
 ) -> Result<DefaultPlannedDriverBuild, AgentLoopDriverError> {
@@ -159,6 +184,42 @@ pub fn subagent_planned_driver(
             reason: "subagent loop family is not registered".to_string(),
         })?;
     let descriptor = subagent_planned_driver_descriptor()
+        .map_err(|reason| AgentLoopDriverError::InvalidRequest { reason })?;
+    let executor = Arc::new(CanonicalAgentLoopExecutor);
+    let driver = PlannedDriver::from_family_with_descriptor(family, executor, descriptor.clone())?;
+    Ok(DefaultPlannedDriverBuild {
+        driver: Arc::new(driver),
+        descriptor,
+    })
+}
+
+pub fn unbound_planned_driver(
+    family_registry: Arc<LoopFamilyRegistry>,
+) -> Result<DefaultPlannedDriverBuild, AgentLoopDriverError> {
+    let family = family_registry
+        .get(&LoopFamilyId::UNBOUND_DEFAULT)
+        .ok_or_else(|| AgentLoopDriverError::InvalidRequest {
+            reason: "unbound-default loop family is not registered".to_string(),
+        })?;
+    let descriptor = unbound_planned_driver_descriptor()
+        .map_err(|reason| AgentLoopDriverError::InvalidRequest { reason })?;
+    let executor = Arc::new(CanonicalAgentLoopExecutor);
+    let driver = PlannedDriver::from_family_with_descriptor(family, executor, descriptor.clone())?;
+    Ok(DefaultPlannedDriverBuild {
+        driver: Arc::new(driver),
+        descriptor,
+    })
+}
+
+pub fn unbound_structured_planned_driver(
+    family_registry: Arc<LoopFamilyRegistry>,
+) -> Result<DefaultPlannedDriverBuild, AgentLoopDriverError> {
+    let family = family_registry
+        .get(&LoopFamilyId::UNBOUND_STRUCTURED)
+        .ok_or_else(|| AgentLoopDriverError::InvalidRequest {
+            reason: "unbound-structured loop family is not registered".to_string(),
+        })?;
+    let descriptor = unbound_structured_planned_driver_descriptor()
         .map_err(|reason| AgentLoopDriverError::InvalidRequest { reason })?;
     let executor = Arc::new(CanonicalAgentLoopExecutor);
     let driver = PlannedDriver::from_family_with_descriptor(family, executor, descriptor.clone())?;
@@ -199,6 +260,34 @@ pub fn register_subagent_planned_driver(
     family_registry: Arc<LoopFamilyRegistry>,
 ) -> Result<LoopDriverRegistryKey, DefaultPlannedDriverRegistrationError> {
     let build = subagent_planned_driver(family_registry)?;
+    registry
+        .register_driver(
+            build.driver,
+            planned_driver_requirements(),
+            DriverKind::Production,
+        )
+        .map_err(Into::into)
+}
+
+pub fn register_unbound_planned_driver(
+    registry: &mut DriverRegistry,
+    family_registry: Arc<LoopFamilyRegistry>,
+) -> Result<LoopDriverRegistryKey, DefaultPlannedDriverRegistrationError> {
+    let build = unbound_planned_driver(family_registry)?;
+    registry
+        .register_driver(
+            build.driver,
+            planned_driver_requirements(),
+            DriverKind::Production,
+        )
+        .map_err(Into::into)
+}
+
+pub fn register_unbound_structured_planned_driver(
+    registry: &mut DriverRegistry,
+    family_registry: Arc<LoopFamilyRegistry>,
+) -> Result<LoopDriverRegistryKey, DefaultPlannedDriverRegistrationError> {
+    let build = unbound_structured_planned_driver(family_registry)?;
     registry
         .register_driver(
             build.driver,
@@ -303,12 +392,73 @@ pub fn register_scheduled_trigger_planned_profile(
     registry.register(scheduled_trigger_planned_profile_definition()?)
 }
 
+/// Unbound-run steering posture: no conversation is attached, so there is no
+/// steering surface, no interrupt author, and no nudge audience.
+fn unbound_steering_policy() -> ironclaw_loop_contracts::SteeringPolicy {
+    ironclaw_loop_contracts::SteeringPolicy {
+        allow_steering: false,
+        allow_interrupt: false,
+        allow_driver_specific_nudges: false,
+    }
+}
+
+/// The unbound run profile (unbound-turn design §4): default planned loop
+/// composition with the unbound gate posture, no steering, and the shared
+/// `unbound_tools` capability surface the host deny-map keys on.
+pub fn unbound_planned_profile_definition() -> Result<RunProfileDefinition, RunProfileRegistryError>
+{
+    let descriptor = unbound_planned_driver_descriptor()
+        .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
+    Ok(planned_like_profile_definition(
+        RunProfileId::unbound_default(),
+        descriptor,
+        UNBOUND_CAPABILITY_SURFACE_PROFILE_ID,
+    )?
+    .with_steering_policy(unbound_steering_policy()))
+}
+
+/// The structured variant (design §4.5): same posture, but the run's
+/// terminal output is the validated structured-result row, not an assistant
+/// reply — `allow_no_reply_completion` reflects that contract.
+pub fn unbound_structured_planned_profile_definition()
+-> Result<RunProfileDefinition, RunProfileRegistryError> {
+    let descriptor = unbound_structured_planned_driver_descriptor()
+        .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
+    let base = planned_like_profile_definition(
+        RunProfileId::unbound_structured(),
+        descriptor,
+        UNBOUND_CAPABILITY_SURFACE_PROFILE_ID,
+    )?;
+    // The interactive checkpoint posture with one deliberate difference:
+    // a structured run's terminal output is the validated result row, so a
+    // no-reply completion is the SUCCESS shape, not a defect.
+    let checkpoint_policy = ironclaw_loop_contracts::CheckpointPolicy {
+        require_before_model: false,
+        require_before_side_effect: true,
+        require_before_block: true,
+        max_checkpoint_bytes: 64 * 1024,
+        require_final_checkpoint: false,
+        allow_no_reply_completion: true,
+    };
+    Ok(base
+        .with_steering_policy(unbound_steering_policy())
+        .with_checkpoint_policy(checkpoint_policy))
+}
+
+pub fn register_unbound_planned_profiles(
+    registry: &mut InMemoryRunProfileRegistry,
+) -> Result<(), RunProfileRegistryError> {
+    registry.register(unbound_planned_profile_definition()?)?;
+    registry.register(unbound_structured_planned_profile_definition()?)
+}
+
 pub fn default_planned_run_profile_resolver()
 -> Result<InMemoryRunProfileResolver, RunProfileRegistryError> {
     let mut registry = InMemoryRunProfileRegistry::with_builtin_profiles();
     register_default_planned_profile(&mut registry)?;
     register_subagent_planned_profile(&mut registry)?;
     register_scheduled_trigger_planned_profile(&mut registry)?;
+    register_unbound_planned_profiles(&mut registry)?;
     let implicit_default = planned_default_profile_id()
         .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
     Ok(InMemoryRunProfileResolver::new_with_implicit_default(

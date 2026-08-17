@@ -26,6 +26,52 @@ mod support;
 use support::*;
 
 #[tokio::test]
+async fn capability_host_fresh_invoke_persists_one_terminal_invocation_edge() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = recording_dispatcher();
+    let process_services = ProcessServices::in_memory();
+    let process_runtime = process_services.process_runtime();
+    let run_state = ProcessInvocationStore::new(Arc::clone(&process_runtime));
+    let authorizer = GrantAuthorizer::new();
+    let host =
+        capability_host(&registry, &dispatcher, &authorizer).with_invocation_state(&run_state);
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+
+    host.invoke_json(
+        context,
+        capability_id(),
+        ResourceEstimate::default(),
+        json!({"message":"one edge"}),
+    )
+    .await
+    .unwrap();
+
+    let entries = process_runtime
+        .read_process_journal_after(&scope, None, None, 16)
+        .await
+        .unwrap()
+        .entries
+        .into_iter()
+        .filter(|entry| entry.process_kind == ProcessKind::CapabilityInvocationState)
+        .collect::<Vec<_>>();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].kind, ProcessJournalKind::Completed);
+
+    let reloaded = ProcessInvocationStore::new(process_runtime)
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reloaded.status, ProcessInvocationStatus::Completed);
+    assert_eq!(reloaded.capability_id, capability_id());
+    assert_eq!(reloaded.scope, scope);
+}
+
+#[tokio::test]
 async fn capability_host_spawn_runs_background_process_through_process_host() {
     let registry = registry_with_echo_capability();
     let dispatcher = recording_dispatcher();

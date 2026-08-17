@@ -1,5 +1,12 @@
 use super::*;
+use crate::db_probe::{begin_measurement, finish_measurement};
 use crate::redaction::redact_postgres_url;
+use ironclaw_stress::db_probe::{
+    self as db_probe, DbProbeConfig, DbProbeDelta, DbProbeSnapshot, StatsScope,
+    aggregate_statement_calls, begin as begin_db_probe, capture as capture_db_probe,
+    finish as finish_db_probe, pg_stat_statements_unavailable, sanitize_postgres_error,
+    summarize_measurement, try_capture_libsql,
+};
 
 #[test]
 fn redacts_postgres_uri_credentials_but_keeps_host() {
@@ -359,6 +366,161 @@ fn large_context_preset_populates_workload_defaults() {
     assert_eq!(args.prefill_threads, 100);
     assert_eq!(args.prefill_turns_per_thread, 50);
     assert_eq!(args.context_max_messages, 100);
+}
+
+#[test]
+fn db_write_measurement_preset_is_one_deterministic_tool_heavy_turn() {
+    let default_args = parse_test_args([
+        "ironclaw_stress",
+        "--backend",
+        "postgres",
+        "--preset",
+        "db-write-measurement",
+    ]);
+    assert_eq!(default_args.db_write_idle_seconds, 300);
+
+    let args = parse_test_args([
+        "ironclaw_stress",
+        "--backend",
+        "postgres",
+        "--preset",
+        "db-write-measurement",
+        "--db-write-idle-seconds",
+        "12",
+    ]);
+
+    assert_eq!(args.scenario, Scenario::ToolSession);
+    assert_eq!(args.concurrency, 1);
+    assert_eq!(args.operations, 1);
+    assert_eq!(args.users, 1);
+    assert_eq!(args.active_thread_count, 1);
+    assert_eq!(args.tool_calls_per_turn, 10);
+    assert_eq!(args.db_write_idle_seconds, 12);
+    validate_args(&args).expect("measurement preset is valid");
+}
+
+#[test]
+fn db_write_measurement_preset_supports_libsql() {
+    let args = parse_test_args([
+        "ironclaw_stress",
+        "--backend",
+        "libsql",
+        "--preset",
+        "db-write-measurement",
+        "--db-write-idle-seconds",
+        "0",
+    ]);
+
+    validate_args(&args).expect("libSQL measurement preset is valid");
+    assert_eq!(args.scenario, Scenario::ToolSession);
+    assert_eq!(args.tool_calls_per_turn, 10);
+}
+
+#[test]
+fn db_write_measurement_rejects_unsupported_combinations() {
+    let cases = [
+        (
+            vec![
+                "ironclaw_stress",
+                "--backend",
+                "postgres",
+                "--db-write-reset-stats",
+            ],
+            "--db-write-reset-stats requires --preset db-write-measurement",
+        ),
+        (
+            vec![
+                "ironclaw_stress",
+                "--backend",
+                "postgres",
+                "--preset",
+                "db-write-measurement",
+                "--process-journal-backend",
+                "memory-journal",
+            ],
+            "do not override its workload shape",
+        ),
+        (
+            vec![
+                "ironclaw_stress",
+                "--backend",
+                "postgres",
+                "--preset",
+                "db-write-measurement",
+                "--tool-calls-per-turn",
+                "4",
+            ],
+            "do not override its workload shape",
+        ),
+        (
+            vec![
+                "ironclaw_stress",
+                "--backend",
+                "postgres",
+                "--preset",
+                "db-write-measurement",
+                "--repetitions",
+                "2",
+            ],
+            "cannot be combined with suite, ramp, sweep, or repeated runs",
+        ),
+        (
+            vec![
+                "ironclaw_stress",
+                "--backend",
+                "postgres",
+                "--preset",
+                "db-write-measurement",
+                "--gate-blocked-every",
+                "1",
+            ],
+            "do not override its workload shape",
+        ),
+        (
+            vec![
+                "ironclaw_stress",
+                "--backend",
+                "postgres",
+                "--db-write-idle-seconds",
+                "1",
+            ],
+            "--db-write-idle-seconds requires --preset db-write-measurement",
+        ),
+    ];
+
+    for (arguments, expected_error) in cases {
+        let matches = Args::command()
+            .try_get_matches_from(arguments)
+            .expect("parse unsupported measurement arguments");
+        let args = parse_args_from_matches(&matches).expect("build unsupported measurement args");
+        let error = validate_args(&args).expect_err("unsupported measurement args must fail");
+        assert!(
+            error.contains(expected_error),
+            "expected error containing {expected_error:?}, got {error:?}"
+        );
+    }
+}
+
+#[test]
+fn pg_stat_statements_reset_requires_version_1_7_or_newer() {
+    assert!(!db_probe::pg_stat_statements_reset_supported("1.6"));
+    assert!(db_probe::pg_stat_statements_reset_supported("1.7"));
+    assert!(db_probe::pg_stat_statements_reset_supported("1.11"));
+    assert!(!db_probe::pg_stat_statements_reset_supported("invalid"));
+}
+
+#[test]
+fn measurement_stats_scope_uses_stable_wire_values() {
+    assert_eq!(
+        serde_json::to_value(db_probe::StatsScope::ExplicitResetCurrentDatabase)
+            .expect("serialize explicit-reset scope"),
+        "explicit-reset-current-database"
+    );
+    assert_eq!(
+        serde_json::to_value(db_probe::StatsScope::SnapshotDeltaCurrentDatabase)
+            .expect("serialize snapshot-delta scope"),
+        "snapshot-delta-current-database"
+    );
 }
 
 #[test]
@@ -1142,13 +1304,16 @@ fn human_summary_places_db_probe_errors_in_matching_columns() {
     summary.db_probe = Some(db_probe::DbProbeSummary {
         before: db_probe::DbProbeSnapshot {
             error: Some("before_failed".to_string()),
-            ..db_probe::DbProbeSnapshot::default()
+            ..DbProbeSnapshot::default()
         },
         after: db_probe::DbProbeSnapshot {
             error: Some("after_failed".to_string()),
-            ..db_probe::DbProbeSnapshot::default()
+            ..DbProbeSnapshot::default()
         },
-        delta: db_probe::DbProbeDelta::default(),
+        delta: DbProbeDelta::default(),
+        idle_after: None,
+        idle_delta: None,
+        measurement: None,
     });
 
     let rendered = human::render_run_summary(&summary);
@@ -1176,10 +1341,462 @@ fn postgres_probe_error_redacts_resolved_url() {
     let url = "postgresql://postgres:secret@localhost:5432/app";
     let error = format!("connection failed for {url}");
 
-    let sanitized = db_probe::sanitize_postgres_error(url, error);
+    let sanitized = sanitize_postgres_error(url, error);
 
     assert!(sanitized.contains("postgresql://<redacted>@localhost:5432/app"));
     assert!(!sanitized.contains("secret"));
+}
+
+#[test]
+fn missing_pg_stat_statements_error_is_actionable_and_redacted() {
+    let message = pg_stat_statements_unavailable(
+        "postgresql://postgres:secret@localhost:5432/app",
+        "extension is not installed",
+    );
+
+    assert!(message.contains("CREATE EXTENSION pg_stat_statements"));
+    assert!(message.contains("shared_preload_libraries"));
+    assert!(message.contains("postgresql://<redacted>@localhost:5432/app"));
+    assert!(!message.contains("secret"));
+}
+
+#[test]
+fn postgres_write_delta_aggregates_tables_queries_and_totals() {
+    let before = db_probe::DbProbeSnapshot {
+        postgres_table_writes: vec![db_probe::PostgresTableWrites {
+            table: "root_filesystem_entries".to_string(),
+            inserts: 10,
+            updates: 4,
+            deletes: 1,
+        }],
+        postgres_statement_calls: vec![db_probe::PostgresStatementCalls {
+            query_id: "000000000000002a".to_string(),
+            operation: "insert".to_string(),
+            tables: vec!["root_filesystem_entries".to_string()],
+            calls: 5,
+        }],
+        ..DbProbeSnapshot::default()
+    };
+    let after = db_probe::DbProbeSnapshot {
+        postgres_table_writes: vec![db_probe::PostgresTableWrites {
+            table: "root_filesystem_entries".to_string(),
+            inserts: 13,
+            updates: 9,
+            deletes: 1,
+        }],
+        postgres_statement_calls: vec![db_probe::PostgresStatementCalls {
+            query_id: "000000000000002a".to_string(),
+            operation: "insert".to_string(),
+            tables: vec!["root_filesystem_entries".to_string()],
+            calls: 12,
+        }],
+        ..DbProbeSnapshot::default()
+    };
+
+    let summary = summarize_measurement(
+        before,
+        after,
+        None,
+        db_probe::DbWriteMeasurement {
+            workload: "single-tool-heavy-user-turn".to_string(),
+            tool_calls_per_turn: 10,
+            idle_observation_seconds: 0,
+            reset_stats: false,
+            stats_scope: StatsScope::SnapshotDeltaCurrentDatabase,
+        },
+    );
+
+    assert_eq!(summary.delta.postgres_table_writes[0].inserts, 3);
+    assert_eq!(summary.delta.postgres_table_writes[0].updates, 5);
+    assert_eq!(summary.delta.postgres_table_writes_total.total(), 8);
+    assert_eq!(summary.delta.postgres_statement_calls[0].calls, 7);
+    assert_eq!(summary.delta.postgres_statement_calls_total, 7);
+    assert_eq!(summary.delta.postgres_statement_calls_by_table[0].calls, 7);
+    let json = serde_json::to_value(&summary).expect("serialize measurement summary");
+    assert_eq!(
+        json["measurement"]["workload"],
+        "single-tool-heavy-user-turn"
+    );
+    assert_eq!(json["before"]["postgres_table_writes"][0]["inserts"], 10);
+    assert_eq!(json["after"]["postgres_statement_calls"][0]["calls"], 12);
+    assert_eq!(
+        json["delta"]["postgres_statement_calls_by_table"][0]["calls"],
+        7
+    );
+}
+
+#[test]
+fn libsql_write_delta_aggregates_instrumented_table_rows() {
+    let before = db_probe::DbProbeSnapshot {
+        libsql_table_writes: vec![db_probe::LibSqlTableWrites {
+            table: "root_filesystem_entries".to_string(),
+            inserts: 2,
+            updates: 1,
+            deletes: 0,
+        }],
+        ..DbProbeSnapshot::default()
+    };
+    let after = db_probe::DbProbeSnapshot {
+        libsql_table_writes: vec![db_probe::LibSqlTableWrites {
+            table: "root_filesystem_entries".to_string(),
+            inserts: 5,
+            updates: 5,
+            deletes: 1,
+        }],
+        ..DbProbeSnapshot::default()
+    };
+
+    let summary = summarize_measurement(
+        before,
+        after,
+        None,
+        db_probe::DbWriteMeasurement {
+            workload: "single-tool-heavy-user-turn".to_string(),
+            tool_calls_per_turn: 10,
+            idle_observation_seconds: 0,
+            reset_stats: false,
+            stats_scope: StatsScope::SnapshotDeltaCurrentDatabase,
+        },
+    );
+
+    assert_eq!(summary.delta.libsql_table_writes[0].inserts, 3);
+    assert_eq!(summary.delta.libsql_table_writes[0].updates, 4);
+    assert_eq!(summary.delta.libsql_table_writes[0].deletes, 1);
+    assert_eq!(summary.delta.libsql_table_writes_total.total(), 8);
+}
+
+async fn create_libsql_measurement_tables(connection: &libsql::Connection) {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS root_filesystem_entries (id INTEGER PRIMARY KEY);\
+             CREATE TABLE IF NOT EXISTS root_filesystem_events (id INTEGER PRIMARY KEY);\
+             CREATE TABLE IF NOT EXISTS root_filesystem_index_specs (id INTEGER PRIMARY KEY);\
+             CREATE TABLE IF NOT EXISTS root_filesystem_ordered_index_rows (id INTEGER PRIMARY KEY);\
+             CREATE TABLE IF NOT EXISTS root_filesystem_sequences (id INTEGER PRIMARY KEY);\
+             CREATE TABLE IF NOT EXISTS trigger_records (id INTEGER PRIMARY KEY);\
+             CREATE TABLE IF NOT EXISTS trigger_run_history (id INTEGER PRIMARY KEY);",
+        )
+        .await
+        .expect("create measurement tables");
+}
+
+#[tokio::test]
+async fn libsql_probe_counts_insert_update_and_delete_rows_by_table() {
+    let path = std::env::temp_dir().join(format!(
+        "ironclaw-stress-write-probe-{}.db",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let db = libsql::Builder::new_local(&path)
+        .build()
+        .await
+        .expect("build local libSQL");
+    let connection = db.connect().expect("connect local libSQL");
+    connection
+        .execute_batch(
+            "CREATE TABLE root_filesystem_entries (path TEXT PRIMARY KEY, contents BLOB);\
+             CREATE TABLE root_filesystem_events (id INTEGER PRIMARY KEY, payload BLOB);",
+        )
+        .await
+        .expect("create measured tables");
+    create_libsql_measurement_tables(&connection).await;
+    drop(connection);
+    drop(db);
+
+    let mut args = test_args();
+    args.backend = Backend::Libsql;
+    args.libsql_path = Some(path.clone());
+    begin_measurement(&args)
+        .await
+        .expect("begin write measurement");
+    let db = libsql::Builder::new_local(&path)
+        .build()
+        .await
+        .expect("reopen local libSQL");
+    let connection = db.connect().expect("reconnect local libSQL");
+    connection
+        .execute(
+            "INSERT INTO root_filesystem_entries(path, contents) VALUES (?1, ?2)",
+            libsql::params!["/one", vec![1_u8]],
+        )
+        .await
+        .expect("insert measured row");
+    connection
+        .execute(
+            "UPDATE root_filesystem_entries SET contents = ?1 WHERE path = ?2",
+            libsql::params![vec![2_u8], "/one"],
+        )
+        .await
+        .expect("update measured row");
+    connection
+        .execute(
+            "DELETE FROM root_filesystem_entries WHERE path = ?1",
+            ["/one"],
+        )
+        .await
+        .expect("delete measured row");
+    drop(connection);
+    drop(db);
+
+    let snapshot = try_capture_libsql(path.clone())
+        .await
+        .expect("capture libSQL counters");
+    let entries = snapshot
+        .libsql_table_writes
+        .iter()
+        .find(|table| table.table == "root_filesystem_entries")
+        .expect("entries counter");
+    assert_eq!(
+        (entries.inserts, entries.updates, entries.deletes),
+        (1, 1, 1)
+    );
+    finish_measurement(&args)
+        .await
+        .expect("remove write counters");
+    let db = libsql::Builder::new_local(&path)
+        .build()
+        .await
+        .expect("reopen cleaned libSQL");
+    let connection = db.connect().expect("connect cleaned libSQL");
+    let mut rows = connection
+        .query(
+            "SELECT COUNT(*) FROM sqlite_schema \
+             WHERE name LIKE 'ironclaw_stress_%'",
+            (),
+        )
+        .await
+        .expect("query instrumentation schema");
+    let row = rows
+        .next()
+        .await
+        .expect("read instrumentation count")
+        .expect("instrumentation count row");
+    let remaining: i64 = row.get(0).expect("instrumentation count");
+    assert_eq!(remaining, 0);
+    drop(rows);
+    drop(connection);
+    drop(db);
+    crate::cleanup_generated_libsql_path(&path).await;
+}
+
+#[tokio::test]
+async fn libsql_probe_rejects_negative_and_overflow_counters() {
+    for invalid_count in ["-1", "9223372036854775808"] {
+        let path = std::env::temp_dir().join(format!(
+            "ironclaw-stress-invalid-write-counter-{}.db",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let database = libsql::Builder::new_local(&path)
+            .build()
+            .await
+            .expect("build local libSQL");
+        let connection = database.connect().expect("connect local libSQL");
+        connection
+            .execute_batch("CREATE TABLE root_filesystem_entries (path TEXT PRIMARY KEY);")
+            .await
+            .expect("create measured table");
+        create_libsql_measurement_tables(&connection).await;
+        drop(connection);
+        drop(database);
+
+        let config = DbProbeConfig::libsql(&path, true);
+        begin_db_probe(&config)
+            .await
+            .expect("begin write measurement");
+        let database = libsql::Builder::new_local(&path)
+            .build()
+            .await
+            .expect("reopen local libSQL");
+        let connection = database.connect().expect("reconnect local libSQL");
+        connection
+            .execute_batch(&format!(
+                "INSERT INTO ironclaw_stress_write_counters(table_name, operation, row_count) \
+                 VALUES ('root_filesystem_entries', 'insert', {invalid_count});"
+            ))
+            .await
+            .expect("store invalid counter");
+        drop(connection);
+        drop(database);
+
+        let error = capture_db_probe(&config)
+            .await
+            .expect_err("invalid counter must fail capture");
+        assert!(error.to_string().contains("libsql probe failed"));
+        assert!(std::error::Error::source(&error).is_some());
+        assert_eq!(error.backend(), "libsql");
+        assert_eq!(error.operation_name(), "capture");
+
+        finish_db_probe(&config)
+            .await
+            .expect("remove write counters");
+        crate::cleanup_generated_libsql_path(&path).await;
+    }
+}
+
+#[tokio::test]
+async fn libsql_measurement_reports_missing_tables() {
+    let path = std::env::temp_dir().join(format!(
+        "ironclaw-stress-missing-measurement-table-{}.db",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let database = libsql::Builder::new_local(&path)
+        .build()
+        .await
+        .expect("build local libSQL");
+    let connection = database.connect().expect("connect local libSQL");
+    connection
+        .execute_batch("CREATE TABLE root_filesystem_entries (id INTEGER PRIMARY KEY);")
+        .await
+        .expect("create one measured table");
+    drop(connection);
+    drop(database);
+
+    let config = DbProbeConfig::libsql(&path, true);
+    let snapshot = begin_db_probe(&config)
+        .await
+        .expect("missing tables remain explicitly reportable");
+    assert_eq!(
+        snapshot.libsql_table_writes[0].table,
+        "root_filesystem_entries"
+    );
+    assert!(
+        snapshot
+            .uninstrumented_tables
+            .contains(&"root_filesystem_events".to_string())
+    );
+    finish_db_probe(&config)
+        .await
+        .expect("remove write counters");
+    crate::cleanup_generated_libsql_path(&path).await;
+}
+
+#[test]
+fn human_summary_renders_libsql_write_measurement() {
+    let mut summary = run_summary_with_bottlenecks();
+    summary.db_probe = Some(summarize_measurement(
+        db_probe::DbProbeSnapshot {
+            libsql_table_writes: vec![db_probe::LibSqlTableWrites {
+                table: "root_filesystem_entries".to_string(),
+                inserts: 1,
+                updates: 0,
+                deletes: 0,
+            }],
+            ..DbProbeSnapshot::default()
+        },
+        db_probe::DbProbeSnapshot {
+            libsql_table_writes: vec![db_probe::LibSqlTableWrites {
+                table: "root_filesystem_entries".to_string(),
+                inserts: 4,
+                updates: 2,
+                deletes: 0,
+            }],
+            ..DbProbeSnapshot::default()
+        },
+        None,
+        db_probe::DbWriteMeasurement {
+            workload: "single-tool-heavy-user-turn".to_string(),
+            tool_calls_per_turn: 10,
+            idle_observation_seconds: 0,
+            reset_stats: false,
+            stats_scope: StatsScope::SnapshotDeltaCurrentDatabase,
+        },
+    ));
+
+    let rendered = human::render_run_summary(&summary);
+
+    assert!(rendered.contains("libSQL instrumented table writes"));
+    assert!(rendered.contains("root_filesystem_entries.insert"));
+    assert!(rendered.contains("counter-trigger writes are excluded"));
+    assert!(!rendered.contains("Postgres table writes"));
+}
+
+#[test]
+fn postgres_statement_aggregation_groups_normalized_queries_without_sql_text() {
+    let statements = aggregate_statement_calls([
+        (
+            42,
+            "INSERT INTO root_filesystem_entries(path, contents) VALUES ($1, 'secret-value')",
+            3,
+        ),
+        (
+            42,
+            "INSERT INTO root_filesystem_entries(path, contents) VALUES ($1, 'other-secret')",
+            4,
+        ),
+        (
+            7,
+            "UPDATE trigger_records SET enabled = $1 WHERE trigger_id = $2",
+            2,
+        ),
+        (99, "SELECT * FROM unrelated_table", 100),
+    ]);
+
+    assert_eq!(statements.len(), 2);
+    assert_eq!(statements[0].calls + statements[1].calls, 9);
+    assert!(statements.iter().any(|statement| {
+        statement.tables == ["root_filesystem_entries"] && statement.calls == 7
+    }));
+    assert!(
+        statements
+            .iter()
+            .any(|statement| statement.tables == ["trigger_records"] && statement.calls == 2)
+    );
+    let serialized = serde_json::to_string(&statements).expect("serialize statement counters");
+    assert!(!serialized.contains("secret-value"));
+    assert!(!serialized.contains("other-secret"));
+    assert!(!serialized.contains("UPDATE trigger_records"));
+}
+
+#[test]
+fn human_summary_renders_postgres_write_and_idle_measurement() {
+    let mut summary = run_summary_with_bottlenecks();
+    let before = db_probe::DbProbeSnapshot {
+        postgres_table_writes: vec![db_probe::PostgresTableWrites {
+            table: "root_filesystem_events".to_string(),
+            inserts: 1,
+            updates: 0,
+            deletes: 0,
+        }],
+        ..DbProbeSnapshot::default()
+    };
+    let after = db_probe::DbProbeSnapshot {
+        postgres_table_writes: vec![db_probe::PostgresTableWrites {
+            table: "root_filesystem_events".to_string(),
+            inserts: 4,
+            updates: 0,
+            deletes: 0,
+        }],
+        ..DbProbeSnapshot::default()
+    };
+    let idle_after = db_probe::DbProbeSnapshot {
+        postgres_table_writes: vec![db_probe::PostgresTableWrites {
+            table: "root_filesystem_events".to_string(),
+            inserts: 5,
+            updates: 0,
+            deletes: 0,
+        }],
+        ..DbProbeSnapshot::default()
+    };
+    summary.db_probe = Some(summarize_measurement(
+        before,
+        after,
+        Some(idle_after),
+        db_probe::DbWriteMeasurement {
+            workload: "single-tool-heavy-user-turn".to_string(),
+            tool_calls_per_turn: 10,
+            idle_observation_seconds: 300,
+            reset_stats: false,
+            stats_scope: StatsScope::SnapshotDeltaCurrentDatabase,
+        },
+    ));
+
+    let rendered = human::render_run_summary(&summary);
+
+    assert!(rendered.contains("DB write measurement"));
+    assert!(rendered.contains("single-tool-heavy-user-turn"));
+    assert!(rendered.contains("Postgres table writes"));
+    assert!(rendered.contains("root_filesystem_events"));
+    assert!(rendered.contains("Postgres idle table writes"));
+    assert!(rendered.contains("300"));
 }
 
 #[test]
@@ -1507,6 +2124,8 @@ fn test_args() -> Args {
         libsql_path: None,
         postgres_url: None,
         postgres_pool_size: 4,
+        db_write_idle_seconds: 0,
+        db_write_reset_stats: false,
         api_base_url: None,
         api_users_jsonl: None,
         api_bearer_token: None,
@@ -1606,16 +2225,19 @@ fn db_probe_summary() -> db_probe::DbProbeSummary {
     db_probe::DbProbeSummary {
         before: db_probe::DbProbeSnapshot {
             libsql_file_bytes: Some(1024),
-            ..db_probe::DbProbeSnapshot::default()
+            ..DbProbeSnapshot::default()
         },
         after: db_probe::DbProbeSnapshot {
             libsql_file_bytes: Some(2048),
-            ..db_probe::DbProbeSnapshot::default()
+            ..DbProbeSnapshot::default()
         },
         delta: db_probe::DbProbeDelta {
             libsql_file_bytes: Some(1024),
-            ..db_probe::DbProbeDelta::default()
+            ..DbProbeDelta::default()
         },
+        idle_after: None,
+        idle_delta: None,
+        measurement: None,
     }
 }
 

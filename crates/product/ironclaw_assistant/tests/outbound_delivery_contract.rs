@@ -1959,12 +1959,6 @@ impl OutboundStateStorePort for TerminalDeliveredWriteFailingStore {
     ) -> Result<Option<ironclaw_event_projections::ProjectionCursor>, OutboundError> {
         self.inner.load_subscription_cursor(request).await
     }
-    async fn advance_subscription_cursor(
-        &self,
-        request: ironclaw_outbound::AdvanceSubscriptionCursorRequest,
-    ) -> Result<(), OutboundError> {
-        self.inner.advance_subscription_cursor(request).await
-    }
     async fn record_delivery_attempt(
         &self,
         attempt: OutboundDeliveryAttempt,

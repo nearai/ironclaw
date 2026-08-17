@@ -12,7 +12,7 @@ use super::super::harness::HostRuntimeCapabilityHarness;
 
 pub(crate) struct HostRuntimeHarnessCapabilityPortFactory {
     pub(crate) harness: Arc<HostRuntimeCapabilityHarness>,
-    pub(crate) milestone_sink: Arc<ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink>,
+    pub(crate) milestone_sink: Arc<dyn ironclaw_loop_contracts::LoopHostMilestoneSink>,
     pub(crate) trajectory_observer: Option<Arc<dyn ironclaw_composition::RebornTrajectoryObserver>>,
 }
 

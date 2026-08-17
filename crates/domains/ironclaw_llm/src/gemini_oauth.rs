@@ -1667,16 +1667,19 @@ impl GeminiOauthProvider {
         }
 
         if let Some(choice) = tool_choice {
-            let mode = match choice {
-                "auto" => "AUTO",
-                "required" | "any" => "ANY",
-                "none" => "NONE",
-                _ => "AUTO",
+            let (mode, allowed_function_names) = match choice {
+                "auto" => ("AUTO", None),
+                "required" | "any" => ("ANY", None),
+                "none" => ("NONE", None),
+                // A named tool: force function calling restricted to it.
+                specific => ("ANY", Some(vec![specific.to_string()])),
             };
+            let mut function_calling_config = serde_json::json!({"mode": mode});
+            if let Some(allowed) = allowed_function_names {
+                function_calling_config["allowedFunctionNames"] = serde_json::json!(allowed);
+            }
             req["toolConfig"] = serde_json::json!({
-                "functionCallingConfig": {
-                    "mode": mode
-                }
+                "functionCallingConfig": function_calling_config
             });
         }
 

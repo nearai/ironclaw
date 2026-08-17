@@ -10,8 +10,8 @@ use super::*;
 use crate::TurnEventProjectionFromProcessJournal;
 use crate::{
     AcceptedMessageRef, AllowAllTurnAdmissionPolicy, CapabilityActivityId, EventCursor,
-    IdempotencyKey, ReplyTargetBindingRef, RunProfileId, RunProfileVersion, SourceBindingRef,
-    TurnActor, TurnGateRef, TurnId, TurnRunProfile, TurnScope, events::TurnEventProjectionSource,
+    IdempotencyKey, RunProfileId, RunProfileVersion, TurnActor, TurnGateRef, TurnId,
+    TurnRunProfile, TurnScope, events::TurnEventProjectionSource,
 };
 use ironclaw_loop_contracts::InMemoryRunProfileResolver;
 
@@ -41,9 +41,6 @@ fn record_with_status(status: TurnStatus) -> TurnRunRecord {
         scope: scope(),
         accepted_message_ref: AcceptedMessageRef::new("accepted-process-journal")
             .expect("accepted"),
-        source_binding_ref: SourceBindingRef::new("source-process-journal").expect("source"),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-process-journal")
-            .expect("reply"),
         status,
         profile: profile(),
         resolved_model_route: None,
@@ -80,9 +77,6 @@ fn agent_turn_metadata(
         actor: Some(actor),
         accepted_message_ref: AcceptedMessageRef::new("accepted-runtime-test")
             .expect("accepted message"),
-        source_binding_ref: SourceBindingRef::new("source-runtime-test").expect("source binding"),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-runtime-test")
-            .expect("reply binding"),
         resolved_run_profile_id: run_profile.id,
         resolved_run_profile_version: run_profile.version,
         allow_steering: true,
@@ -93,6 +87,7 @@ fn agent_turn_metadata(
         spawn_tree_descendant_cap: None,
         product_context: None,
         resume_disposition: None,
+        ownerless_thread: false,
     }
 }
 
@@ -110,8 +105,6 @@ fn child_request(
         child_scope,
         actor,
         accepted_message_ref: AcceptedMessageRef::new("accepted-child").expect("accepted child"),
-        source_binding_ref: SourceBindingRef::new("source-child").expect("source child"),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-child").expect("reply child"),
         requested_run_profile: None,
         idempotency_key: IdempotencyKey::new(idempotency_key).expect("idempotency key"),
         received_at: Utc::now(),
@@ -258,9 +251,6 @@ async fn resume_rejects_a_running_claim_without_clearing_its_lease() {
             actor,
             run_id,
             gate_resolution_ref: TurnGateRef::new("gate:stale-resume").expect("gate"),
-            source_binding_ref: SourceBindingRef::new("source:stale-resume").expect("source"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:stale-resume")
-                .expect("reply"),
             idempotency_key: IdempotencyKey::new("stale-resume").expect("idempotency"),
             precondition: crate::ResumeTurnPrecondition::default(),
             resume_disposition: None,
@@ -362,8 +352,6 @@ async fn foreign_actor_cannot_resume_or_cancel_and_leaves_process_unchanged() {
             actor: intruder.clone(),
             run_id,
             gate_resolution_ref: gate_ref,
-            source_binding_ref: SourceBindingRef::new("foreign-source").expect("source"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("foreign-reply").expect("reply"),
             idempotency_key: IdempotencyKey::new("foreign-resume").expect("idempotency"),
             precondition: crate::ResumeTurnPrecondition::default(),
             resume_disposition: None,
@@ -582,8 +570,6 @@ async fn retry_rejects_wrong_actor_and_non_terminal_runs_without_creating_proces
         scope: turn_scope.clone(),
         actor: TurnActor::new(UserId::new("retry-intruder").expect("retry intruder")),
         run_id,
-        source_binding_ref: SourceBindingRef::new("retry-wrong-source").expect("source"),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("retry-wrong-reply").expect("reply"),
         idempotency_key: IdempotencyKey::new("retry-wrong-actor").expect("idempotency"),
     };
     assert!(matches!(
@@ -595,8 +581,6 @@ async fn retry_rejects_wrong_actor_and_non_terminal_runs_without_creating_proces
         scope: turn_scope.clone(),
         actor,
         run_id,
-        source_binding_ref: SourceBindingRef::new("retry-queued-source").expect("source"),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("retry-queued-reply").expect("reply"),
         idempotency_key: IdempotencyKey::new("retry-queued").expect("idempotency"),
     };
     assert!(matches!(
@@ -648,9 +632,6 @@ async fn retry_rejects_checkpoint_rejection_without_creating_a_process() {
             scope: turn_scope.clone(),
             actor,
             run_id,
-            source_binding_ref: SourceBindingRef::new("retry-checkpoint-source").expect("source"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("retry-checkpoint-reply")
-                .expect("reply"),
             idempotency_key: IdempotencyKey::new("retry-checkpoint").expect("idempotency"),
         })
         .await;
@@ -709,9 +690,6 @@ async fn retry_rejects_superseded_runs_and_missing_checkpoint_payloads() {
         scope: turn_scope.clone(),
         actor: actor.clone(),
         run_id: original_run_id,
-        source_binding_ref: SourceBindingRef::new("retry-superseded-source").expect("source"),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("retry-superseded-reply")
-            .expect("reply"),
         idempotency_key: IdempotencyKey::new("retry-superseded").expect("idempotency"),
     };
     assert!(matches!(
@@ -743,8 +721,6 @@ async fn retry_rejects_superseded_runs_and_missing_checkpoint_payloads() {
         scope: turn_scope.clone(),
         actor,
         run_id: missing_checkpoint_run_id,
-        source_binding_ref: SourceBindingRef::new("retry-missing-source").expect("source"),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("retry-missing-reply").expect("reply"),
         idempotency_key: IdempotencyKey::new("retry-missing-checkpoint").expect("idempotency"),
     };
     let error = runtime
@@ -818,9 +794,6 @@ async fn retry_rejects_final_checkpoint_without_creating_a_process() {
             scope: turn_scope.clone(),
             actor,
             run_id,
-            source_binding_ref: SourceBindingRef::new("retry-final-source").expect("source"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("retry-final-reply")
-                .expect("reply"),
             idempotency_key: IdempotencyKey::new("retry-final").expect("idempotency"),
         })
         .await;
@@ -867,8 +840,6 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
         turn_id: TurnId::new(),
         actor: Some(actor.clone()),
         accepted_message_ref: AcceptedMessageRef::new("accepted-retry").expect("accepted"),
-        source_binding_ref: SourceBindingRef::new("source-retry").expect("source"),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-retry").expect("reply"),
         resolved_run_profile_id: run_profile.id,
         resolved_run_profile_version: run_profile.version,
         allow_steering: true,
@@ -879,6 +850,7 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
         spawn_tree_descendant_cap: None,
         product_context: None,
         resume_disposition: None,
+        ownerless_thread: false,
     };
     store
         .submit_process(SubmitProcessRequest {
@@ -952,9 +924,6 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
             scope: turn_scope,
             actor,
             run_id: failed_run_id,
-            source_binding_ref: SourceBindingRef::new("retry-source").expect("retry source"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("retry-reply")
-                .expect("retry reply"),
             idempotency_key: crate::IdempotencyKey::new("retry-operation")
                 .expect("idempotency key"),
         })
@@ -1110,9 +1079,6 @@ fn lifecycle_event_projects_to_process_journal_entry() {
         status: TurnStatus::BlockedAuth,
         accepted_message_ref: AcceptedMessageRef::new("accepted-process-journal")
             .expect("accepted"),
-        source_binding_ref: SourceBindingRef::new("source-process-journal").expect("source"),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-process-journal")
-            .expect("reply"),
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         allow_steering: true,
@@ -1157,9 +1123,6 @@ fn claimed_turn_run_projects_to_process_claim() {
         status: TurnStatus::Running,
         accepted_message_ref: AcceptedMessageRef::new("accepted-process-journal")
             .expect("accepted"),
-        source_binding_ref: SourceBindingRef::new("source-process-journal").expect("source"),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-process-journal")
-            .expect("reply"),
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         allow_steering: true,
@@ -1215,9 +1178,6 @@ fn claimed_process_round_trips_to_turn_executor_view() {
         status: TurnStatus::Running,
         accepted_message_ref: AcceptedMessageRef::new("accepted-process-journal")
             .expect("accepted"),
-        source_binding_ref: SourceBindingRef::new("source-process-journal").expect("source"),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-process-journal")
-            .expect("reply"),
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         allow_steering: true,
@@ -1254,6 +1214,52 @@ fn claimed_process_round_trips_to_turn_executor_view() {
     );
     assert_eq!(round_trip.subagent_depth, 4);
     assert_eq!(round_trip.spawn_tree_descendant_cap, Some(23));
+}
+
+/// The `__system__` owner slot holds BOTH ownerless (unbound) runs and
+/// actor-fallback runs with no explicit owner; the journaled
+/// `ownerless_thread` disposition marker is what keeps the round trip
+/// faithful in each direction (the sibling test above pins actor-fallback).
+#[test]
+fn ownerless_scope_round_trips_through_the_process_claim() {
+    let mut ownerless_scope = scope();
+    ownerless_scope.thread_owner = ironclaw_host_api::turn::TurnThreadOwner::Ownerless;
+    let state = crate::TurnRunState {
+        scope: ownerless_scope.clone(),
+        actor: Some(TurnActor::new(UserId::new("user:process").expect("user"))),
+        turn_id: TurnId::new(),
+        run_id: TurnRunId::new(),
+        status: TurnStatus::Running,
+        accepted_message_ref: AcceptedMessageRef::new("accepted-process-journal")
+            .expect("accepted"),
+        resolved_run_profile_id: RunProfileId::default_profile(),
+        resolved_run_profile_version: RunProfileVersion::new(1),
+        allow_steering: true,
+        resolved_model_route: None,
+        model_usage: None,
+        received_at: Utc::now(),
+        checkpoint_id: None,
+        gate_ref: None,
+        blocked_activity_id: None,
+        credential_requirements: Vec::new(),
+        failure: None,
+        event_cursor: EventCursor(12),
+        product_context: None,
+        resume_disposition: None,
+    };
+    let claimed = ClaimedTurnRun {
+        state: state.clone(),
+        resolved_run_profile: profile().resolved,
+        subagent_depth: 0,
+        spawn_tree_descendant_cap: None,
+        runner_id: TurnRunnerId::new(),
+        lease_token: crate::TurnLeaseToken::new(),
+    };
+    let round_trip = claimed_turn_run_from_process_claim(ClaimedProcess::from(&claimed))
+        .expect("claimed turn view");
+
+    assert_eq!(round_trip.state.scope, ownerless_scope);
+    assert_eq!(round_trip.state, state);
 }
 
 #[tokio::test]

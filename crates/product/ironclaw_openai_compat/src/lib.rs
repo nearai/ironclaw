@@ -23,6 +23,7 @@ mod model_validation;
 mod models;
 mod models_catalog;
 mod mount;
+mod prepared_turn;
 mod projection_helpers;
 mod refs;
 // Durable filesystem-backed ref store, over the universal `RootFilesystem`
@@ -82,6 +83,7 @@ pub use mount::{
     OpenAiCompatRouteMountPorts, openai_compat_route_mount,
     product_surface_caller_from_openai_scope,
 };
+pub use prepared_turn::{OpenAiCompatPreparedTurnPort, OpenAiCompatPreparedTurnRequest};
 pub use refs::{
     OpenAiChatCompletionId, OpenAiCompatActorScope, OpenAiCompatBindInternalRefs,
     OpenAiCompatIdempotencyConflict, OpenAiCompatIdempotencyKey, OpenAiCompatInternalRefs,

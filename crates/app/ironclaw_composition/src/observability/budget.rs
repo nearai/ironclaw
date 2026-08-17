@@ -124,6 +124,7 @@ mod tests {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         };
         let _ = governor
             .reserve(
@@ -217,6 +218,7 @@ mod tests {
                 tier: ResourceBudgetTier::new("budget_helper_tier").unwrap(),
                 max_model_calls: 32,
                 max_capability_invocations: 64,
+                max_wall_clock_seconds: None,
             },
             personal_context_policy: PersonalContextPolicy::Excluded,
             runtime_constraints: RuntimeProfileConstraints {

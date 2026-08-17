@@ -372,7 +372,6 @@ def build_gateway_env(
         "AGENT_AUTO_APPROVE_TOOLS",
         "REBORN_TOOL_DISCLOSURE",
         "REBORN_COLLAPSE_REPEATED_FAILURES",
-        "REBORN_PARALLEL_TOOL_BATCH",
     ):
         value = os.environ.get(var)
         if value:

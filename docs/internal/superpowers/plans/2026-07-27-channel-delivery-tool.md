@@ -308,7 +308,7 @@ Legacy fields (`final_reply_target`, `progress_target`, `approval_prompt_target`
 - Test: `tests/integration/outbound_target.rs` (extend — this file already owns the set/list seam), crate tests beside the service
 
 **Interfaces:**
-- Produces: capability id `builtin.notification_channels_set`, `PermissionMode::Ask`, effects `[DispatchCapability, ExternalWrite]`, `ConcurrencyHint::Exclusive`, full approval-gate dance copied from the existing set handler. Input schema: `{target_ids: {type: array, maxItems: 8, items: {type: string, minLength: 1, maxLength: 512}}}`, `additionalProperties: false`, required `["target_ids"]`. Description (verbatim const):
+- Produces: capability id `builtin.notification_channels_set`, `PermissionMode::Ask`, effects `[DispatchCapability, ExternalWrite]`, full approval-gate dance copied from the existing set handler. Scheduling is not descriptor metadata: model-emitted calls are independent by default, while middleware may require ordered batch invocation for operational safety. Input schema: `{target_ids: {type: array, maxItems: 8, items: {type: string, minLength: 1, maxLength: 512}}}`, `additionalProperties: false`, required `["target_ids"]`. Description (verbatim const):
 
 ```text
 Set the channels where IronClaw notifies this user about background runs (approval gates, re-authorization, failures) — full replace of the current set. Pass target ids from builtin__outbound_delivery_targets_list; an empty list means notifications stay in the web app only. This does not route replies or routine results — deliver those explicitly with builtin__outbound_deliver.

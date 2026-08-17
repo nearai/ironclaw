@@ -3,6 +3,7 @@ use ironclaw_filesystem::{LibSqlRootFilesystem, RootFilesystem, SeqNo};
 use ironclaw_host_api::turn::TurnRunId;
 use ironclaw_host_api::{
     Timestamp,
+    execution_policy::{RequiredSkill, TurnExecutionPolicy},
     ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
     path::VirtualPath,
 };
@@ -11,8 +12,8 @@ use ironclaw_triggers::AutomationName;
 use ironclaw_triggers::PostgresTriggerRepository;
 use ironclaw_triggers::{
     ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository,
-    TriggerDeliveryTargetId, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
-    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    TriggerDeliveryTargetId, TriggerError, TriggerExecutionSpec, TriggerId, TriggerRecord,
+    TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use {
     ironclaw_triggers::LibSqlTriggerRepository,
@@ -55,6 +56,7 @@ fn sample_record(
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
         prompt: "summarize unread mail".to_string(),
+        execution_spec: None,
         delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at,
@@ -68,11 +70,24 @@ fn sample_record(
 }
 
 async fn assert_round_trip_and_scoped_isolation(repo: &impl TriggerRepository) {
-    let due = sample_record(
+    let mut due = sample_record(
         TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
         tenant("tenant-a"),
         ts(1_704_067_200),
     );
+    let spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Summarize unread mail".to_string(),
+        success_criteria: vec!["Include every unread message".to_string()],
+        output_instructions: "Return concise Markdown".to_string(),
+        no_result_text: "There is no unread mail.".to_string(),
+        policy: TurnExecutionPolicy {
+            allowed_capability_ids: None,
+            required_skills: vec![RequiredSkill::new("mail-summary").expect("skill")],
+        },
+    };
+    due.prompt = spec.render_prompt();
+    due.execution_spec = Some(spec);
     let later = sample_record(
         TriggerId::parse("01J00000000000000000000000").expect("ulid"),
         tenant("tenant-a"),
@@ -1721,6 +1736,7 @@ fn malformed_row_cases() -> Vec<(&'static str, &'static str, &'static str, ReadM
         ("schedule_kind", "quarterly", "schedule_kind", Get),
         ("prompt", "", "prompt", Get),
         ("prompt", "\t  ", "prompt", Get),
+        ("execution_spec_json", "{", "execution_spec_json", Get),
         ("next_run_at", "not-a-timestamp", "next_run_at", Get),
         ("last_run_at", "not-a-timestamp", "last_run_at", Get),
         ("last_fired_slot", "not-a-timestamp", "last_fired_slot", Get),
@@ -3759,41 +3775,192 @@ mod fire_claim_contract {
         repo.upsert_trigger(sample_record(trigger_id, tenant_id.clone(), base_fire_slot))
             .await
             .expect("insert retention record");
+        let other_trigger_id = TriggerId::parse("01J00000000000000000000036").expect("ulid");
+        repo.upsert_trigger(sample_record(
+            other_trigger_id,
+            tenant_id.clone(),
+            base_fire_slot,
+        ))
+        .await
+        .expect("insert unrelated trigger");
+        let other_trigger_claim = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id: other_trigger_id,
+                fire_slot: base_fire_slot,
+                now: base_fire_slot,
+            })
+            .await
+            .expect("claim unrelated trigger fire");
+        assert!(matches!(
+            other_trigger_claim,
+            ClaimDueFireOutcome::Claimed(_)
+        ));
+
+        let other_tenant_id = tenant("tenant-run-history-retention-other");
+        repo.upsert_trigger(sample_record(
+            trigger_id,
+            other_tenant_id.clone(),
+            base_fire_slot,
+        ))
+        .await
+        .expect("insert unrelated tenant trigger");
+        let other_tenant_claim = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: other_tenant_id.clone(),
+                trigger_id,
+                fire_slot: base_fire_slot,
+                now: base_fire_slot,
+            })
+            .await
+            .expect("claim unrelated tenant fire");
+        assert!(matches!(
+            other_tenant_claim,
+            ClaimDueFireOutcome::Claimed(_)
+        ));
+
+        let mut fire_slot = base_fire_slot;
+        let mut claimed_slots = Vec::with_capacity(501);
 
         for offset in 0..=500 {
-            let fire_slot = base_fire_slot + chrono::Duration::minutes(offset);
+            claimed_slots.push(fire_slot);
             let run_id = TurnRunId::new();
-            let mut active_record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
-            active_record.active_fire_slot = Some(fire_slot);
-            active_record.active_run_ref = Some(run_id);
-            repo.upsert_trigger(active_record)
+            let claimed = repo
+                .claim_due_fire(ClaimDueFireRequest {
+                    tenant_id: tenant_id.clone(),
+                    trigger_id,
+                    fire_slot,
+                    now: fire_slot,
+                })
                 .await
-                .expect("upsert active retention record");
-            repo.clear_active_fire(ClearActiveFireRequest {
+                .expect("claim retention fire");
+            assert!(matches!(claimed, ClaimDueFireOutcome::Claimed(_)));
+            if offset == 500 {
+                let retained_at_claim = repo
+                    .list_trigger_run_history(tenant_id.clone(), trigger_id, 501)
+                    .await
+                    .expect("list retained run history at claim");
+                assert_eq!(
+                    retained_at_claim.len(),
+                    500,
+                    "the 501st claim must prune before acceptance"
+                );
+                assert_eq!(
+                    retained_at_claim
+                        .first()
+                        .expect("newest retained at claim")
+                        .fire_slot,
+                    claimed_slots.last().cloned().expect("newest claimed slot")
+                );
+                assert_eq!(
+                    retained_at_claim
+                        .last()
+                        .expect("oldest retained at claim")
+                        .fire_slot,
+                    claimed_slots.get(1).cloned().expect("oldest retained slot")
+                );
+            }
+            repo.mark_fire_accepted(FireAcceptedRequest {
                 tenant_id: tenant_id.clone(),
                 trigger_id,
                 fire_slot,
                 run_id,
-                status: TriggerRunHistoryStatus::Ok,
+                thread_id: ThreadId::new(format!("thread-retention-{offset}"))
+                    .expect("valid thread id"),
+                submitted_at: fire_slot,
             })
             .await
-            .expect("clear retention fire")
-            .expect("active fire should clear");
+            .expect("accept retention fire")
+            .expect("accepted retention fire should persist");
+            let cleared = repo
+                .clear_active_fire(ClearActiveFireRequest {
+                    tenant_id: tenant_id.clone(),
+                    trigger_id,
+                    fire_slot,
+                    run_id,
+                    status: TriggerRunHistoryStatus::Ok,
+                })
+                .await
+                .expect("clear retention fire")
+                .expect("active fire should clear");
+            fire_slot = cleared.next_run_at;
         }
 
         let retained = repo
-            .list_trigger_run_history(tenant_id, trigger_id, 501)
+            .list_trigger_run_history(tenant_id.clone(), trigger_id, 501)
             .await
             .expect("list retained run history");
         assert_eq!(retained.len(), 500);
         assert_eq!(
             retained.first().expect("newest retained").fire_slot,
-            base_fire_slot + chrono::Duration::minutes(500)
+            claimed_slots.last().cloned().expect("newest claimed slot")
         );
         assert_eq!(
             retained.last().expect("oldest retained").fire_slot,
-            base_fire_slot + chrono::Duration::minutes(1)
+            claimed_slots.get(1).cloned().expect("oldest retained slot")
         );
+
+        let recovery_fire_slot = fire_slot;
+        let recovery_run_id =
+            TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f84").expect("valid run");
+        let mut recovery_record = sample_record(trigger_id, tenant_id.clone(), recovery_fire_slot);
+        recovery_record.active_fire_slot = Some(recovery_fire_slot);
+        recovery_record.active_run_ref = Some(recovery_run_id);
+        repo.upsert_trigger(recovery_record)
+            .await
+            .expect("insert active recovery record without running history");
+
+        repo.clear_active_fire(ClearActiveFireRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot: recovery_fire_slot,
+            run_id: recovery_run_id,
+            status: TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .expect("complete recovery fire without running history")
+        .expect("active recovery fire should clear");
+
+        let retained_after_recovery = repo
+            .list_trigger_run_history(tenant_id.clone(), trigger_id, 501)
+            .await
+            .expect("list retained run history after recovery completion");
+        assert_eq!(
+            retained_after_recovery.len(),
+            500,
+            "completion-time recovery must retain exactly 500 rows"
+        );
+        assert_eq!(
+            retained_after_recovery
+                .first()
+                .expect("newest retained after recovery")
+                .fire_slot,
+            recovery_fire_slot
+        );
+        assert_eq!(
+            retained_after_recovery
+                .last()
+                .expect("oldest retained after recovery")
+                .fire_slot,
+            claimed_slots
+                .get(2)
+                .cloned()
+                .expect("oldest retained after recovery")
+        );
+
+        let other_trigger_history = repo
+            .list_trigger_run_history(tenant_id, other_trigger_id, 501)
+            .await
+            .expect("list unrelated trigger history");
+        assert_eq!(other_trigger_history.len(), 1);
+        assert_eq!(other_trigger_history[0].fire_slot, base_fire_slot);
+
+        let other_tenant_history = repo
+            .list_trigger_run_history(other_tenant_id, trigger_id, 501)
+            .await
+            .expect("list unrelated tenant history");
+        assert_eq!(other_tenant_history.len(), 1);
+        assert_eq!(other_tenant_history[0].fire_slot, base_fire_slot);
     }
 
     async fn seed_persisted_run_history(repo: &impl TriggerRepository) -> (TenantId, TriggerId) {

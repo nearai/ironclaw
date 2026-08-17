@@ -645,17 +645,14 @@ CapabilityDescriptorView {
     safe_description:
         "Spawn a child agent loop with a fresh context and attenuated tools."
             .to_string(),
-    // SpawnProcess-class effect => Exclusive: spawn calls serialise within a
-    // batch so per-turn ordinals (and thus idempotency keys) are deterministic.
-    concurrency_hint: ConcurrencyHint::Exclusive,
 }
 ```
 
-`ConcurrencyHint::Exclusive` is load-bearing: the idempotency key is
-`(parent_run_id, parent_turn_id, spawn-call ordinal)` (README §6), and the
-ordinal is only deterministic if the batch processes spawn calls serially.
-`invoke_capability_batch` already iterates serially, so a model emitting N
-`spawn_subagent` calls in one turn gets ordinals `0..N` deterministically.
+The descriptor does not declare scheduling metadata. Multiple calls emitted by
+the model are independent by default; the spawn-capable host port requests
+ordered batch invocation because it assigns deterministic per-turn ordinals
+used by the idempotency key `(parent_run_id, parent_turn_id, spawn-call ordinal)`
+(README §6).
 
 ### 4.2 Capability input
 

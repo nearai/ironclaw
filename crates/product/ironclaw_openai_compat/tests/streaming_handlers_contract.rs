@@ -460,6 +460,47 @@ async fn stream_true_without_wired_streamer_returns_not_wired() {
 }
 
 #[tokio::test]
+async fn streaming_with_json_schema_is_rejected_loudly() {
+    // Drives the real streaming entry point (stream_chat_request, via the
+    // mounted /v1/chat/completions route with a wired streamer) so the
+    // streaming guard at chat_workflow.rs's stream_chat_request is the one
+    // under test, not the unrelated early `stream` check in
+    // complete_chat_request. The guard must fire before any idempotency
+    // reservation or submission to the ProductSurface / streamer.
+    let streamer = Arc::new(QueuedStreamer::new());
+    let workflow = fake_workflow();
+    let router = router_with_workflow(streamer.clone(), workflow.clone());
+
+    let response = router
+        .oneshot(post_json(
+            "/v1/chat/completions",
+            json!({
+                "model": "gpt-reborn",
+                "stream": true,
+                "messages": [{"role": "user", "content": "classify the release"}],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {"name": "verdict", "schema": {"type": "object"}}
+                }
+            }),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
+    assert_eq!(
+        workflow.accepted_count(),
+        0,
+        "must reject before the ProductSurface ever sees the request"
+    );
+    assert_eq!(
+        streamer.chat_calls(),
+        0,
+        "must reject before the streamer is invoked"
+    );
+}
+
+#[tokio::test]
 async fn chat_stream_idempotency_replay_uses_recorded_ack_without_resubmit() {
     let streamer = Arc::new(QueuedStreamer::new());
     streamer.push_chat(vec![run_status_envelope("first-done", "completed")]);
@@ -696,6 +737,7 @@ fn router_with_options(
         workflow.clone(),
         ref_store.clone(),
         Arc::new(StaticChatReader),
+        Arc::new(UnusedPreparedTurnPort),
     )
     .with_wait_timeout(wait_timeout);
     let mut responses =
@@ -710,6 +752,21 @@ fn router_with_options(
             .with_chat_completions_workflow(Arc::new(chat))
             .with_responses_workflow(Arc::new(responses)),
     )
+}
+
+/// All requests exercised in this file are either `stream: true` (rejected
+/// before the prepared lane is ever consulted) or driven at the streamer
+/// seam directly, so the prepared-turn port is wired but never invoked here.
+struct UnusedPreparedTurnPort;
+
+#[async_trait]
+impl ironclaw_openai_compat::OpenAiCompatPreparedTurnPort for UnusedPreparedTurnPort {
+    async fn accept_and_submit(
+        &self,
+        _request: ironclaw_openai_compat::OpenAiCompatPreparedTurnRequest,
+    ) -> Result<ProductInboundAck, OpenAiCompatHttpError> {
+        panic!("prepared-turn port unexpectedly invoked in streaming_handlers_contract tests");
+    }
 }
 
 fn fake_workflow() -> Arc<FakeProductSurface> {

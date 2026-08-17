@@ -203,8 +203,6 @@ impl ProductAuthTurnGateResumeDispatcher {
             .ok_or(ProductSurfaceFailure::AuthContinuationRejected {
                 kind: AuthContinuationRejectionKind::UnauthorizedBlockedGate,
             })?;
-        let source_binding_ref = state.source_binding_ref;
-        let reply_target_binding_ref = state.reply_target_binding_ref;
         let mut binding_id =
             auth_continuation_binding_id(event.flow_id, &run_id, gate_ref.as_str());
         if let Some(disposition) = &resume_disposition {
@@ -218,8 +216,6 @@ impl ProductAuthTurnGateResumeDispatcher {
                 actor,
                 run_id,
                 gate_resolution_ref,
-                source_binding_ref,
-                reply_target_binding_ref,
                 idempotency_key,
                 precondition: ResumeTurnPrecondition::BlockedAuthGate,
                 resume_disposition,
@@ -451,10 +447,10 @@ mod tests {
     use ironclaw_turns::test_support::in_memory_agent_turn_process_system;
     use ironclaw_turns::{
         AcceptedMessageRef, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator,
-        EventCursor, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnRequest,
-        ResumeTurnResponse, RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef,
-        SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnId,
-        TurnRunId, TurnRunState, TurnScope, TurnStatus,
+        EventCursor, GetRunStateRequest, IdempotencyKey, ResumeTurnRequest, ResumeTurnResponse,
+        RunProfileId, RunProfileRequest, RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse,
+        TurnActor, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
+        TurnStatus,
     };
 
     use super::*;
@@ -636,8 +632,6 @@ mod tests {
             run_id,
             status,
             accepted_message_ref: AcceptedMessageRef::new("message-auth").unwrap(),
-            source_binding_ref: SourceBindingRef::new("source-auth").unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-auth").unwrap(),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             allow_steering: true,
@@ -686,8 +680,6 @@ mod tests {
         );
         assert_eq!(resumes[0].actor.user_id.as_str(), "alice");
         assert_eq!(resumes[0].scope.thread_id.as_str(), "thread-auth");
-        assert_eq!(resumes[0].source_binding_ref.as_str(), "source-auth");
-        assert_eq!(resumes[0].reply_target_binding_ref.as_str(), "reply-auth");
         assert_eq!(
             resumes[0]
                 .scope
@@ -847,8 +839,6 @@ mod tests {
         let resumes = coordinator.resumes();
         assert_eq!(resumes.len(), 1);
         assert_eq!(resumes[0].actor.user_id.as_str(), "alice");
-        assert_eq!(resumes[0].source_binding_ref.as_str(), "source-auth");
-        assert_eq!(resumes[0].reply_target_binding_ref.as_str(), "reply-auth");
         assert_eq!(
             resumes[0]
                 .scope
@@ -932,8 +922,6 @@ mod tests {
                 requested_model: None,
                 actor: actor.clone(),
                 accepted_message_ref: AcceptedMessageRef::new("message-auth-real").unwrap(),
-                source_binding_ref: SourceBindingRef::new("source-auth-real").unwrap(),
-                reply_target_binding_ref: ReplyTargetBindingRef::new("reply-auth-real").unwrap(),
                 requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
                 idempotency_key: IdempotencyKey::new("idem-auth-real-submit").unwrap(),
                 received_at: Utc::now(),

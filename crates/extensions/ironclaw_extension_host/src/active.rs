@@ -9,13 +9,16 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ironclaw_extension_contracts::channel_adapter::ChannelSurfaces;
+use ironclaw_extension_contracts::device_link::DeviceLinkAdapter;
 use ironclaw_extension_contracts::extension::{
     Extension, ExtensionContract, ExtensionInstanceId, ExtensionRuntimeIdentity,
 };
 use ironclaw_extension_contracts::tool_adapter::ToolAdapter;
 use ironclaw_extension_registry::{ResolvedExtensionManifest, composed_capability_description};
 use ironclaw_host_api::{
-    capability::CapabilityDescriptor, ids::CapabilityId, runtime::TrustClass,
+    capability::CapabilityDescriptor,
+    ids::{CapabilityId, ExtensionId},
+    runtime::TrustClass,
     trust::RequestedTrustClass,
 };
 
@@ -27,6 +30,15 @@ pub struct ActiveExtension {
     pub extension: Arc<dyn Extension>,
     pub tools: Option<Arc<dyn ToolAdapter>>,
     pub channel: ChannelSurfaces,
+    /// The device-link adapter, present iff the contract declares that auth
+    /// surface. Deliberately not on the [`Extension`] contract: auth mechanics
+    /// are reached by the host's device-link driver, never by a capability
+    /// dispatch or a channel delivery.
+    pub device_link: Option<Arc<dyn DeviceLinkAdapter>>,
+    /// The extension's non-secret operator config, as bound. Carried on the
+    /// snapshot so a host-side driver can build an adapter context without a
+    /// store read on a live flow.
+    pub config: Arc<BTreeMap<String, String>>,
 }
 
 /// Default live-extension wrapper published by the active snapshot.
@@ -133,6 +145,15 @@ pub struct ResolvedToolBinding {
     pub generation: Generation,
 }
 
+/// One prebound device-link binding the host's device-link driver returns.
+pub struct ResolvedDeviceLinkBinding {
+    pub adapter: Arc<dyn DeviceLinkAdapter>,
+    pub declaration: Arc<ResolvedExtensionManifest>,
+    pub installation_id: String,
+    pub config: Arc<BTreeMap<String, String>>,
+    pub generation: Generation,
+}
+
 impl ActiveSnapshot {
     /// The empty generation-0 snapshot.
     pub fn empty() -> Arc<Self> {
@@ -205,6 +226,26 @@ impl ActiveSnapshot {
         Some(ResolvedToolBinding {
             adapter,
             declaration: Arc::clone(&extension.resolved),
+            generation: self.generation,
+        })
+    }
+
+    /// Resolve a prebound device-link adapter by extension id.
+    ///
+    /// Keyed on the extension rather than a capability id because a device-link
+    /// flow is not a capability: it is reached by the auth engine through the
+    /// host's driver, and an extension declares at most one such surface.
+    pub fn resolve_device_link(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Option<ResolvedDeviceLinkBinding> {
+        let extension = self.extensions.get(extension_id.as_str())?;
+        let adapter = extension.device_link.clone()?;
+        Some(ResolvedDeviceLinkBinding {
+            adapter,
+            declaration: Arc::clone(&extension.resolved),
+            installation_id: extension.installation_id.clone(),
+            config: Arc::clone(&extension.config),
             generation: self.generation,
         })
     }

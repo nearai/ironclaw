@@ -60,7 +60,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                 "builtin.trigger_create",
                 json!({
                     "name": INTERACTIVE_CONTROL_TRIGGER_NAME,
-                    "prompt": "remain scheduled",
+                    "execution_contract": super::support::trigger_execution_contract("remain scheduled"),
                     "schedule": {"kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC"},
                 }),
             ),
@@ -88,7 +88,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                     "builtin.trigger_create",
                     json!({
                         "name": SELF_CREATE_ATTEMPT_TRIGGER_NAME,
-                        "prompt": "remind me again",
+                        "execution_contract": super::support::trigger_execution_contract("remind me again"),
                         "schedule": {"kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC"},
                     }),
                 ),
@@ -151,10 +151,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let capability_harness = g
         .capability_harness()
         .ok_or("trigger group must expose its capability harness")?;
+    let milestone_sink: Arc<dyn ironclaw_loop_contracts::LoopHostMilestoneSink> =
+        Arc::new(InMemoryLoopHostMilestoneSink::default());
     let raw_port = capability_harness
         .create_recording_capability_port(
             &run_context,
-            &Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            &milestone_sink,
             None,
             ironclaw_host_api::capability_surface::CapabilitySurfacePolicy::allow_all(),
         )
@@ -164,7 +166,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         "builtin.trigger_create",
         json!({
             "name": SELF_CREATE_ATTEMPT_TRIGGER_NAME,
-            "prompt": "remind me again",
+            "execution_contract": super::support::trigger_execution_contract("remind me again"),
             "schedule": {"kind": "once", "at": "2999-01-02T00:00:00", "timezone": "UTC"},
         }),
     )

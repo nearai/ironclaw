@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AcceptedMessageRef, GateKind, GateResumeDisposition, IdempotencyKey, ProductTurnContext,
-    ReplyTargetBindingRef, RunProfileRequest, SanitizedCancelReason, SourceBindingRef, TurnActor,
-    TurnGateRef, TurnRunId, TurnScope, TurnStatus,
+    RunProfileRequest, SanitizedCancelReason, TurnActor, TurnGateRef, TurnRunId, TurnScope,
+    TurnStatus,
 };
 
 pub type TurnTimestamp = DateTime<Utc>;
@@ -51,8 +51,6 @@ pub struct SubmitTurnRequest {
     pub scope: TurnScope,
     pub actor: TurnActor,
     pub accepted_message_ref: AcceptedMessageRef,
-    pub source_binding_ref: SourceBindingRef,
-    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub requested_run_profile: Option<RunProfileRequest>,
     /// Caller-requested model for this turn. A hint the coordinator resolves to a
     /// concrete per-run model route when the operator has it configured; when it
@@ -86,8 +84,6 @@ pub struct SubmitChildRunRequest {
     pub child_scope: TurnScope,
     pub actor: TurnActor,
     pub accepted_message_ref: AcceptedMessageRef,
-    pub source_binding_ref: SourceBindingRef,
-    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub requested_run_profile: Option<RunProfileRequest>,
     pub idempotency_key: IdempotencyKey,
     pub received_at: TurnTimestamp,
@@ -106,8 +102,6 @@ pub struct ResumeTurnRequest {
     pub actor: TurnActor,
     pub run_id: TurnRunId,
     pub gate_resolution_ref: TurnGateRef,
-    pub source_binding_ref: SourceBindingRef,
-    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub idempotency_key: IdempotencyKey,
     #[serde(default, skip_serializing_if = "ResumeTurnPrecondition::is_default")]
     pub precondition: ResumeTurnPrecondition,
@@ -124,8 +118,6 @@ pub struct RetryTurnRequest {
     pub scope: TurnScope,
     pub actor: TurnActor,
     pub run_id: TurnRunId,
-    pub source_binding_ref: SourceBindingRef,
-    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub idempotency_key: IdempotencyKey,
 }
 
@@ -162,9 +154,6 @@ mod tests {
             actor: TurnActor::new(UserId::from_trusted("user:test".to_string())),
             run_id: TurnRunId::new(),
             gate_resolution_ref: TurnGateRef::new("gate:test-gate").expect("valid gate ref"),
-            source_binding_ref: SourceBindingRef::new("source-binding").expect("valid source ref"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-target")
-                .expect("valid reply target ref"),
             idempotency_key: IdempotencyKey::new("idempotency-key").expect("valid idempotency key"),
             precondition: ResumeTurnPrecondition::default(),
             resume_disposition: disposition,

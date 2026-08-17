@@ -112,7 +112,6 @@ impl TurnCoordinator for CapturingTurnCoordinator {
             resolved_run_profile_version: RunProfileVersion::new(1),
             event_cursor: EventCursor::default(),
             accepted_message_ref: request.accepted_message_ref.clone(),
-            reply_target_binding_ref: request.reply_target_binding_ref.clone(),
         };
         *self
             .last_submit
@@ -301,7 +300,6 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
                     resolved_run_profile_version: RunProfileVersion::new(1),
                     event_cursor: EventCursor::default(),
                     accepted_message_ref: request.accepted_message_ref.clone(),
-                    reply_target_binding_ref: request.reply_target_binding_ref.clone(),
                 })
             })
     }
@@ -335,8 +333,6 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
             run_id: request.run_id,
             status: TurnStatus::Running,
             accepted_message_ref: AcceptedMessageRef::new("msg:scripted").expect("valid"),
-            source_binding_ref: SourceBindingRef::new("src:scripted").expect("valid"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:scripted").expect("valid"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             allow_steering: true,
@@ -2103,10 +2099,6 @@ async fn reply_target_binding_ref_has_single_reply_prefix() {
         .expect("captured submit lock poisoned")
         .clone()
         .expect("submit request captured");
-    let reply_ref = request.reply_target_binding_ref.as_str();
-    assert!(reply_ref.starts_with("reply:"));
-    assert!(!reply_ref.starts_with("reply:reply:"));
-    assert_eq!(reply_ref.matches("reply:").count(), 1);
     assert_eq!(
         request.product_context.as_ref().map(|c| c.origin),
         Some(TurnOriginKind::Inbound),
@@ -2629,19 +2621,6 @@ mod session_lane {
             "action-1",
             "session submissions keep the raw client action id as the idempotency key"
         );
-        assert!(
-            request.source_binding_ref.as_str().starts_with("webui-src"),
-            "session source ref keeps the webui prefix, got {}",
-            request.source_binding_ref.as_str()
-        );
-        assert!(
-            request
-                .reply_target_binding_ref
-                .as_str()
-                .starts_with("webui-reply"),
-            "session reply ref keeps the webui prefix, got {}",
-            request.reply_target_binding_ref.as_str()
-        );
         let product_context = request.product_context.expect("product context");
         assert_eq!(
             product_context.origin,
@@ -3032,7 +3011,6 @@ mod session_lane {
                 resolved_run_profile_version: RunProfileVersion::new(1),
                 event_cursor: EventCursor::default(),
                 accepted_message_ref: request.accepted_message_ref.clone(),
-                reply_target_binding_ref: request.reply_target_binding_ref.clone(),
             })
         }
 

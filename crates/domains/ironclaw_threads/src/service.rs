@@ -59,6 +59,39 @@ pub trait SessionThreadService: Send + Sync {
         ))
     }
 
+    /// The ONE shared accept door for every non-channel caller (unbound
+    /// turns design §4.2), sibling of [`Self::accept_inbound_message`]:
+    /// mints an unbound thread, seeds the caller-authored context as
+    /// transcript rows, journals the per-run declarations beside them, and
+    /// replays idempotently by key — a crash-retry returns the SAME prepared
+    /// context instead of minting an orphan.
+    async fn accept_prepared_context(
+        &self,
+        request: crate::PreparedContextRequest,
+    ) -> Result<crate::AcceptedPreparedContext, SessionThreadError> {
+        let _ = request;
+        Err(SessionThreadError::Backend(
+            "accept_prepared_context is not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
+
+    /// Read the journaled unbound-context record for a thread, or `None`
+    /// when the thread exists but is not a prepared context.
+    /// Missing and cross-scope threads return the same non-enumerating
+    /// `UnknownThread` shape as every other read on this trait.
+    async fn read_prepared_context(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<crate::PreparedContextRecord>, SessionThreadError> {
+        let _ = (scope, thread_id);
+        Err(SessionThreadError::Backend(
+            "read_prepared_context is not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
+
     async fn replay_accepted_inbound_message(
         &self,
         request: ReplayAcceptedInboundMessageRequest,
@@ -426,6 +459,21 @@ where
         self.as_ref()
             .accept_inbound_message_with_replay_metadata(request, replay_metadata)
             .await
+    }
+
+    async fn accept_prepared_context(
+        &self,
+        request: crate::PreparedContextRequest,
+    ) -> Result<crate::AcceptedPreparedContext, SessionThreadError> {
+        self.as_ref().accept_prepared_context(request).await
+    }
+
+    async fn read_prepared_context(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<crate::PreparedContextRecord>, SessionThreadError> {
+        self.as_ref().read_prepared_context(scope, thread_id).await
     }
 
     async fn replay_accepted_inbound_message(

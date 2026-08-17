@@ -452,6 +452,7 @@ mod tests {
                 timezone: "UTC".to_string(),
             },
             prompt: "check mail".to_string(),
+            execution_spec: None,
             delivery_target: None,
             state: TriggerState::Scheduled,
             next_run_at: now,
