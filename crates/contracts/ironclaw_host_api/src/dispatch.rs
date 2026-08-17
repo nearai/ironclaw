@@ -82,13 +82,26 @@ impl fmt::Debug for ProviderDiagnostic {
     }
 }
 
+/// Truncate `text` to at most `max_bytes` bytes, stepping back to the
+/// nearest UTF-8 char boundary so a multi-byte character is never split.
+/// Returns the truncated prefix and whether truncation occurred.
+fn truncate_at_char_boundary(text: &str, max_bytes: usize) -> (&str, bool) {
+    if text.len() <= max_bytes {
+        return (text, false);
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&text[..end], true)
+}
+
 fn bound_provider_text(mut value: String) -> String {
-    if value.len() > crate::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES {
-        let mut end = crate::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES;
-        while !value.is_char_boundary(end) {
-            end -= 1;
-        }
-        value.truncate(end);
+    let (truncated, did_truncate) =
+        truncate_at_char_boundary(&value, crate::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES);
+    if did_truncate {
+        let new_len = truncated.len();
+        value.truncate(new_len);
     }
     value
 }
@@ -151,20 +164,10 @@ pub struct CapabilityDisplayText {
 }
 
 pub fn truncate_capability_display_text(text: &str, max_bytes: usize) -> CapabilityDisplayText {
-    if text.len() <= max_bytes {
-        return CapabilityDisplayText {
-            text: text.to_string(),
-            truncated: false,
-        };
-    }
-
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
+    let (truncated, did_truncate) = truncate_at_char_boundary(text, max_bytes);
     CapabilityDisplayText {
-        text: text[..end].to_string(),
-        truncated: true,
+        text: truncated.to_string(),
+        truncated: did_truncate,
     }
 }
 

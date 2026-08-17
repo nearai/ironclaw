@@ -451,12 +451,19 @@ impl RuntimeAuthGate {
 
 impl fmt::Debug for RuntimeAuthGate {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `required_secrets` handle names are omitted in full and reduced to a
+        // count, matching `DispatchError::AuthRequired`'s Debug convention
+        // (`ironclaw_host_api::dispatch`) so secret-handle identifiers never
+        // reach logs from this gate either.
         formatter
             .debug_struct("RuntimeAuthGate")
             .field("gate_id", &self.gate_id)
             .field("capability_id", &self.capability_id)
             .field("reason", &self.reason)
-            .field("required_secrets", &self.required_secrets)
+            .field(
+                "required_secrets",
+                &format!("[{} handle(s) redacted]", self.required_secrets.len()),
+            )
             .field("credential_requirements", &self.credential_requirements)
             .finish_non_exhaustive()
     }
@@ -473,6 +480,27 @@ impl PartialEq for RuntimeAuthGate {
 }
 
 impl Eq for RuntimeAuthGate {}
+
+#[cfg(test)]
+mod runtime_auth_gate_debug_tests {
+    use super::*;
+
+    #[test]
+    fn debug_redacts_required_secret_handle_names() {
+        let gate = RuntimeAuthGate::new(
+            RuntimeGateId::new(),
+            CapabilityId::new("notion.search").unwrap(),
+            RuntimeBlockedReason::AuthRequired,
+            vec![SecretHandle::new("notion-oauth-token").unwrap()],
+            Vec::new(),
+        );
+
+        let rendered = format!("{gate:?}");
+
+        assert!(!rendered.contains("notion-oauth-token"), "{rendered}");
+        assert!(rendered.contains("1 handle(s) redacted"), "{rendered}");
+    }
+}
 
 /// Resource suspension state.
 #[derive(Debug, Clone, PartialEq, Eq)]

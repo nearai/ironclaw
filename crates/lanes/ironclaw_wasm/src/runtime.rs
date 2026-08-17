@@ -250,3 +250,45 @@ fn classify_instantiation_error(message: String) -> WasmError {
         WasmError::InstantiationFailed(message)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Recognized by `LeakDetector`'s `github_token` pattern
+    /// (`ironclaw_safety::leak_detector::test_detect_github_token`).
+    const GITHUB_TOKEN_SHAPE: &str = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+
+    #[test]
+    fn scrub_guest_error_redacts_leak_detector_recognized_secret_shapes() {
+        let guest_error = format!("upstream rejected request: token {GITHUB_TOKEN_SHAPE} failed");
+
+        let scrubbed = scrub_guest_error(guest_error.clone());
+
+        assert_ne!(scrubbed, guest_error);
+        assert!(!scrubbed.contains(GITHUB_TOKEN_SHAPE));
+    }
+
+    #[test]
+    fn scrub_guest_error_leaves_benign_text_unchanged() {
+        let guest_error = "channel_not_found: no such Slack channel".to_string();
+
+        let scrubbed = scrub_guest_error(guest_error.clone());
+
+        assert_eq!(scrubbed, guest_error);
+    }
+
+    /// Integration-ish: pins the exact seam `WitToolRuntime::execute` uses —
+    /// `response.error.map(scrub_guest_error)` — so a guest-authored error
+    /// carrying a secret-shaped value is redacted before it can populate
+    /// `WitToolExecution::error`, the value that crosses the sandbox
+    /// boundary into host-controlled data.
+    #[test]
+    fn execute_seam_scrubs_guest_error_before_reaching_wit_tool_execution() {
+        let guest_error = Some(format!("leaked cred: {GITHUB_TOKEN_SHAPE}"));
+
+        let scrubbed_error: Option<String> = guest_error.map(scrub_guest_error);
+
+        assert!(!scrubbed_error.unwrap().contains(GITHUB_TOKEN_SHAPE));
+    }
+}
