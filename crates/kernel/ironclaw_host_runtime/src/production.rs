@@ -561,6 +561,13 @@ impl HostRuntime for DefaultHostRuntime {
         // which fails the blocked run on a trust rejection (replacing the former
         // host_runtime pre-authorization + `context.trust` stamp).
         let registry = self.registry.snapshot();
+        // `context` is moved into `resume_json` below, so `resource_scope` must be
+        // cloned out first. `process_capability_response` doesn't read
+        // `context.scope` on the `ApprovalResume` path this PR sends here —
+        // `fail_dispatch_run` is Fresh-gated — but a stacked PR un-gates
+        // `fail_dispatch_run` for resumes too, which reads it again. Left
+        // unconditional rather than threading an `Option`/mode-gated clone that a
+        // near-term rebase would just undo.
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
         let host = self.capability_host(&registry);
@@ -615,6 +622,12 @@ impl HostRuntime for DefaultHostRuntime {
         // replacing the former host_runtime pre-authorization + `context.trust`
         // stamp.
         let registry = self.registry.snapshot();
+        // Same clone-before-move as `resume_capability` above: `context` is
+        // consumed by `auth_resume_json`, and `process_capability_response`
+        // doesn't read `context.scope` on the `AuthResume` path this PR sends
+        // here (`fail_dispatch_run` is Fresh-gated) — a stacked PR un-gates it
+        // for resumes and reads it again, so this is left unconditional rather
+        // than churned twice.
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
         let host = self.capability_host(&registry);
@@ -1282,8 +1295,8 @@ fn runtime_kind_rank(runtime: RuntimeKind) -> u8 {
 
 /// Whether `capability_id` resolves (in `registry`) to a capability bound to
 /// a standard messaging WRITE op. Mirrors
-/// [`completed_or_output_violation_outcome`]'s own descriptor lookup just
-/// above (same registry, same `descriptor.standard_op` field) — the retry
+/// [`crate::capability_response_processor::completed_or_output_violation_outcome`]'s
+/// own descriptor lookup (same registry, same `descriptor.standard_op` field) — the retry
 /// carve-out policy (pre-merge amendment W1,
 /// [`crate::capability_failure_disposition`]) needs the same fact that choke
 /// point already resolves for output validation, at the failure-construction

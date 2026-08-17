@@ -81,6 +81,10 @@ pub(super) async fn process_capability_response(
                         ),
                     )),
                     Err(host_error) => {
+                        // Surface persistence outages as Unavailable rather than
+                        // pretending the approval was never persisted; otherwise a
+                        // transient run-state failure looks indistinguishable from
+                        // the (separately bug-prone) cap-host-skipped-persist path.
                         tracing::warn!(
                             capability_id = %capability,
                             error = %host_error,
@@ -123,6 +127,25 @@ fn failed_response(
     failure_from(error, capability_id).with_is_standard_write(is_standard_write)
 }
 
+/// Single choke point for every path that turns a successful capability
+/// dispatch into a `Completed` outcome. [`process_capability_response`] above
+/// has exactly three callers — `invoke_capability` (Fresh), `resume_capability`
+/// (ApprovalResume), and `auth_resume_capability` (AuthResume), the only
+/// resume paths that can complete a capability rather than suspend or fail it
+/// — and all three route their successful-dispatch case through this function
+/// instead of constructing `Completed` themselves, so the standard-op output
+/// check cannot be skipped on one entry path while covered on another (see
+/// `.claude/rules/review-discipline.md`).
+///
+/// A capability bound to a standard messaging op (`descriptor.standard_op`)
+/// has its dispatch output checked against that op's canonical output schema
+/// before `Completed` is allowed to stick. A violation becomes a
+/// model-visible `Failed` outcome instead, using the same
+/// [`FailureKind::InvalidResult`] kind wasm `InvalidResult` dispatch
+/// errors already produce, so the model can retry or report rather than the
+/// run completing with a shape no downstream consumer validated. Bespoke
+/// capabilities (`standard_op: None`) and an unknown capability id
+/// (descriptor lookup miss — already errors elsewhere) are returned untouched.
 fn completed_or_output_violation_outcome(
     dispatch: CapabilityDispatchResult,
     capability_id: CapabilityId,

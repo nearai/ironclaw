@@ -4142,9 +4142,8 @@ mod tests {
     use ironclaw_host_runtime::{
         CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceVersion,
         HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalResume, RuntimeCapabilityCompleted,
-        RuntimeCapabilityFailure, RuntimeInvocation,
-        RuntimeStatusRequest, SurfaceKind, VisibleCapability, VisibleCapabilityAccess,
-        VisibleCapabilitySurface,
+        RuntimeCapabilityFailure, RuntimeInvocation, RuntimeStatusRequest, SurfaceKind,
+        VisibleCapability, VisibleCapabilityAccess, VisibleCapabilitySurface,
     };
     use ironclaw_loop_contracts::{
         InMemoryRunProfileResolver, LoopDriverId, RunProfileResolutionRequest, RunProfileResolver,

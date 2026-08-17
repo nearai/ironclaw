@@ -59,9 +59,9 @@ use ironclaw_host_runtime::{
 use ironclaw_processes::{
     ProcessCancellationRegistry, ProcessInvocationError, ProcessInvocationRecord,
     ProcessInvocationStart, ProcessInvocationStatePort, ProcessInvocationStatus,
-    ProcessInvocationStore,
-    ProcessJournalStore, ProcessResultStore, ProcessResultStorePort, ProcessServices, ProcessStart,
-    ProcessStatus, capability_process_record, submit_capability_process,
+    ProcessInvocationStore, ProcessJournalStore, ProcessResultStore, ProcessResultStorePort,
+    ProcessServices, ProcessStart, ProcessStatus, capability_process_record,
+    submit_capability_process,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -493,10 +493,9 @@ async fn default_runtime_surfaces_authorization_failure_when_authorizer_denies()
 
 // The four tests below extend caller-level coverage of
 // `crate::capability_response_processor::process_capability_response` — the
-// centralized mapping fresh invoke, approval resume, and auth resume all cross
-// (plan: docs/internal/reborn/extension-runtime/capability-response-normalization-plan.md
-// §11 PR 1 step 1). They drive `DefaultHostRuntime`'s public entry points, not
-// the processor directly.
+// centralized mapping fresh invoke, approval resume, and auth resume all cross.
+// They drive `DefaultHostRuntime`'s public entry points, not the processor
+// directly, so a regression here pins the seam as callers actually exercise it.
 
 #[tokio::test]
 async fn default_runtime_fresh_dispatch_error_becomes_failed_and_fails_run_state() {
