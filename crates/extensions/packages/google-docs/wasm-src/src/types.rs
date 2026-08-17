@@ -220,6 +220,9 @@ pub struct AnchoredTextEdit {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TableExpectation {
+    /// Zero-based document-order table index. Defaults to the expectation's position.
+    #[serde(default)]
+    pub table_index: Option<usize>,
     /// Expected row-major cell text. Each row must be rectangular.
     pub table_data: Vec<Vec<String>>,
 }
@@ -320,6 +323,15 @@ pub struct ApplyTextEditsResult {
     pub verified: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CreateTableStage {
+    TableInserted,
+    TablePopulated,
+    HeaderStyled,
+    Verified,
+}
+
 #[derive(Debug, Serialize)]
 pub struct CreateTableWithDataResult {
     pub document_id: String,
@@ -328,6 +340,9 @@ pub struct CreateTableWithDataResult {
     pub columns: usize,
     pub populated_cells: usize,
     pub verified: bool,
+    pub stage: CreateTableStage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

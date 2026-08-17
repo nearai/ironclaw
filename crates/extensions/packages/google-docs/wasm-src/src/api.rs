@@ -104,8 +104,33 @@ fn extract_revision_id(parsed: &serde_json::Value) -> String {
 }
 
 fn fetch_document(document_id: &str) -> Result<serde_json::Value, String> {
-    let response = api_call("GET", &url_encode(document_id), None)?;
-    serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {e}"))
+    let path = format!("{}?includeTabsContent=true", url_encode(document_id));
+    let response = api_call("GET", &path, None)?;
+    let mut document: serde_json::Value =
+        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {e}"))?;
+    normalize_first_tab(&mut document);
+    Ok(document)
+}
+
+fn normalize_first_tab(document: &mut serde_json::Value) {
+    let Some(document_tab) = document["tabs"]
+        .as_array()
+        .and_then(|tabs| tabs.first())
+        .and_then(|tab| tab.get("documentTab"))
+        .cloned()
+    else {
+        return;
+    };
+    if let Some(body) = document_tab.get("body") {
+        document["body"] = body.clone();
+    }
+    if let Some(named_ranges) = document_tab.get("namedRanges") {
+        document["namedRanges"] = named_ranges.clone();
+    }
+}
+
+fn first_tab_id(document: &serde_json::Value) -> Option<&str> {
+    document["tabs"].as_array()?.first()?["tabProperties"]["tabId"].as_str()
 }
 
 /// Create a new document.
@@ -278,7 +303,8 @@ pub fn apply_text_edits(
 
     let before = fetch_document(document_id)?;
     let before_text = document_text(&before);
-    let (requests, expected_text) = build_anchored_edit_requests(&before_text, edits)?;
+    let (requests, expected_text) =
+        build_anchored_edit_requests(&before_text, first_tab_id(&before), edits)?;
     let updated =
         batch_update_raw_with_revision(document_id, requests, before["revisionId"].as_str())?;
     let occurrences_changed = updated["replies"]
@@ -313,6 +339,7 @@ pub fn apply_text_edits(
 
 fn build_anchored_edit_requests(
     text: &str,
+    tab_id: Option<&str>,
     edits: &[AnchoredTextEdit],
 ) -> Result<(Vec<serde_json::Value>, String), String> {
     let mut current = text.to_string();
@@ -338,7 +365,7 @@ fn build_anchored_edit_requests(
             ));
         }
 
-        requests.push(serde_json::json!({
+        let mut request = serde_json::json!({
             "replaceAllText": {
                 "containsText": {
                     "text": edit.find,
@@ -346,7 +373,13 @@ fn build_anchored_edit_requests(
                 },
                 "replaceText": edit.replace,
             }
-        }));
+        });
+        if let Some(tab_id) = tab_id {
+            request["replaceAllText"]["tabsCriteria"] = serde_json::json!({
+                "tabIds": [tab_id],
+            });
+        }
+        requests.push(request);
         current = replace_matches(&current, &edit.find, &edit.replace, edit.match_case);
     }
     Ok((requests, current))
@@ -371,11 +404,18 @@ fn replace_matches(text: &str, find: &str, replace: &str, match_case: bool) -> S
         let mut output = String::new();
         let mut cursor = 0;
         for (offset, _) in lower_text.match_indices(&lower_find) {
-            output.push_str(&text[cursor..offset]);
+            let end = offset + find.len();
+            let (Some(prefix), Some(_matched)) = (text.get(cursor..offset), text.get(offset..end))
+            else {
+                continue;
+            };
+            output.push_str(prefix);
             output.push_str(replace);
-            cursor = offset + find.len();
+            cursor = end;
         }
-        output.push_str(&text[cursor..]);
+        if let Some(suffix) = text.get(cursor..) {
+            output.push_str(suffix);
+        }
         output
     }
 }
@@ -716,6 +756,12 @@ pub fn create_table_with_data(
     }
     let columns = validate_table_data(table_data)?;
     let rows = table_data.len();
+    let table_index = inserted_table_index(index)?;
+    let populated_cells = table_data
+        .iter()
+        .flatten()
+        .filter(|cell| !cell.is_empty())
+        .count();
     let before = fetch_document(document_id)?;
     let insert_response = batch_update_raw_with_revision(
         document_id,
@@ -729,36 +775,140 @@ pub fn create_table_with_data(
         before["revisionId"].as_str(),
     )?;
 
-    let inserted = fetch_document(document_id)?;
-    let population_requests = build_table_population_requests(&inserted, index, table_data)?;
     let mut latest_revision = extract_revision_id(&insert_response);
+    let result_document_id = before["documentId"]
+        .as_str()
+        .unwrap_or(document_id)
+        .to_string();
+    let inserted = match fetch_document(document_id) {
+        Ok(document) => document,
+        Err(reason) => {
+            return Ok(partial_table_result(
+                &result_document_id,
+                &latest_revision,
+                rows,
+                columns,
+                0,
+                CreateTableStage::TableInserted,
+                reason,
+            ));
+        }
+    };
+    if let Some(revision_id) = inserted["revisionId"].as_str() {
+        latest_revision = revision_id.to_string();
+    }
+    let population_requests =
+        match build_table_population_requests(&inserted, table_index, table_data) {
+            Ok(requests) => requests,
+            Err(reason) => {
+                return Ok(partial_table_result(
+                    &result_document_id,
+                    &latest_revision,
+                    rows,
+                    columns,
+                    0,
+                    CreateTableStage::TableInserted,
+                    reason,
+                ));
+            }
+        };
     if !population_requests.is_empty() {
-        let populated = batch_update_raw_with_revision(
+        let populated = match batch_update_raw_with_revision(
             document_id,
             population_requests,
             inserted["revisionId"].as_str(),
-        )?;
+        ) {
+            Ok(response) => response,
+            Err(reason) => {
+                return Ok(partial_table_result(
+                    &result_document_id,
+                    &latest_revision,
+                    rows,
+                    columns,
+                    0,
+                    CreateTableStage::TableInserted,
+                    reason,
+                ));
+            }
+        };
         latest_revision = extract_revision_id(&populated);
     }
 
+    let mut completed_stage = CreateTableStage::TablePopulated;
     if bold_header {
-        let populated = fetch_document(document_id)?;
-        let header_requests = build_header_style_requests(&populated, index)?;
+        let populated = match fetch_document(document_id) {
+            Ok(document) => document,
+            Err(reason) => {
+                return Ok(partial_table_result(
+                    &result_document_id,
+                    &latest_revision,
+                    rows,
+                    columns,
+                    populated_cells,
+                    completed_stage,
+                    reason,
+                ));
+            }
+        };
+        if let Some(revision_id) = populated["revisionId"].as_str() {
+            latest_revision = revision_id.to_string();
+        }
+        let header_requests = match build_header_style_requests(&populated, table_index) {
+            Ok(requests) => requests,
+            Err(reason) => {
+                return Ok(partial_table_result(
+                    &result_document_id,
+                    &latest_revision,
+                    rows,
+                    columns,
+                    populated_cells,
+                    completed_stage,
+                    reason,
+                ));
+            }
+        };
         if !header_requests.is_empty() {
-            let styled = batch_update_raw_with_revision(
+            let styled = match batch_update_raw_with_revision(
                 document_id,
                 header_requests,
                 populated["revisionId"].as_str(),
-            )?;
+            ) {
+                Ok(response) => response,
+                Err(reason) => {
+                    return Ok(partial_table_result(
+                        &result_document_id,
+                        &latest_revision,
+                        rows,
+                        columns,
+                        populated_cells,
+                        completed_stage,
+                        reason,
+                    ));
+                }
+            };
             latest_revision = extract_revision_id(&styled);
         }
+        completed_stage = CreateTableStage::HeaderStyled;
     }
 
-    let verified_document = fetch_document(document_id)?;
+    let verified_document = match fetch_document(document_id) {
+        Ok(document) => document,
+        Err(reason) => {
+            return Ok(partial_table_result(
+                &result_document_id,
+                &latest_revision,
+                rows,
+                columns,
+                populated_cells,
+                completed_stage,
+                reason,
+            ));
+        }
+    };
     if let Some(revision_id) = verified_document["revisionId"].as_str() {
         latest_revision = revision_id.to_string();
     }
-    let verified = table_at_index(&verified_document, index)
+    let verified = table_at_index(&verified_document, table_index)
         .is_some_and(|table_element| table_element_matches(table_element, table_data));
 
     Ok(CreateTableWithDataResult {
@@ -769,13 +919,38 @@ pub fn create_table_with_data(
         revision_id: latest_revision,
         rows,
         columns,
-        populated_cells: table_data
-            .iter()
-            .flatten()
-            .filter(|cell| !cell.is_empty())
-            .count(),
+        populated_cells,
         verified,
+        stage: CreateTableStage::Verified,
+        failure: None,
     })
+}
+
+fn inserted_table_index(requested_index: i64) -> Result<i64, String> {
+    requested_index
+        .checked_add(1)
+        .ok_or_else(|| "table insertion index is too large".to_string())
+}
+
+fn partial_table_result(
+    document_id: &str,
+    revision_id: &str,
+    rows: usize,
+    columns: usize,
+    populated_cells: usize,
+    stage: CreateTableStage,
+    failure: String,
+) -> CreateTableWithDataResult {
+    CreateTableWithDataResult {
+        document_id: document_id.to_string(),
+        revision_id: revision_id.to_string(),
+        rows,
+        columns,
+        populated_cells,
+        verified: false,
+        stage,
+        failure: Some(failure),
+    }
 }
 
 fn validate_table_data(table_data: &[Vec<String>]) -> Result<usize, String> {
@@ -976,9 +1151,10 @@ fn verify_parsed_document(
     }
     for (index, expectation) in expected_tables.iter().enumerate() {
         validate_table_data(&expectation.table_data)?;
+        let table_index = expectation.table_index.unwrap_or(index);
         checks.push(VerificationCheck {
-            expectation: format!("table {index} matches expected data"),
-            passed: table_matches(document, index, &expectation.table_data),
+            expectation: format!("table {table_index} matches expected data"),
+            passed: table_matches(document, table_index, &expectation.table_data),
         });
     }
     let verified = checks.iter().all(|check| check.passed);
@@ -1147,9 +1323,45 @@ mod tests {
             match_case: true,
         }];
 
-        let err = build_anchored_edit_requests("owner and owner", &edits).unwrap_err();
+        let err = build_anchored_edit_requests("owner and owner", None, &edits).unwrap_err();
 
         assert!(err.contains("matched 2 times"), "{err}");
+    }
+
+    #[test]
+    fn anchored_edits_are_scoped_to_the_inspected_tab() {
+        let edits = vec![AnchoredTextEdit {
+            find: "owner".to_string(),
+            replace: "lead".to_string(),
+            replace_all: false,
+            match_case: true,
+        }];
+
+        let (requests, _) = build_anchored_edit_requests("owner", Some("tab-1"), &edits).unwrap();
+
+        assert_eq!(
+            requests[0]["replaceAllText"]["tabsCriteria"]["tabIds"],
+            serde_json::json!(["tab-1"])
+        );
+    }
+
+    #[test]
+    fn tabbed_documents_are_normalized_to_the_first_tab_for_semantic_reads() {
+        let mut document = serde_json::json!({
+            "tabs": [{
+                "tabProperties": { "tabId": "tab-1" },
+                "documentTab": { "body": { "content": [{
+                    "paragraph": { "elements": [{
+                        "textRun": { "content": "first tab" }
+                    }] }
+                }] } }
+            }]
+        });
+
+        normalize_first_tab(&mut document);
+
+        assert_eq!(first_tab_id(&document), Some("tab-1"));
+        assert_eq!(document_text(&document), "first tab");
     }
 
     #[test]
@@ -1178,6 +1390,12 @@ mod tests {
     }
 
     #[test]
+    fn inserted_table_uses_provider_index_after_leading_newline() {
+        assert_eq!(inserted_table_index(5).unwrap(), 6);
+        assert!(inserted_table_index(i64::MAX).is_err());
+    }
+
+    #[test]
     fn verification_reports_each_failed_expectation_without_erroring() {
         let document = serde_json::json!({
             "documentId": "doc-1",
@@ -1189,6 +1407,7 @@ mod tests {
             }] }
         });
         let tables = vec![TableExpectation {
+            table_index: None,
             table_data: vec![vec!["Owner".to_string()]],
         }];
 
@@ -1198,6 +1417,67 @@ mod tests {
         assert_eq!(result.checks.len(), 2);
         assert!(result.checks[0].passed);
         assert!(!result.checks[1].passed);
+    }
+
+    #[test]
+    fn verification_can_target_a_later_table_without_padding_expectations() {
+        let table = |start_index: i64, value: &str| {
+            serde_json::json!({
+                "startIndex": start_index,
+                "table": { "tableRows": [{ "tableCells": [{ "content": [{
+                    "paragraph": { "elements": [{ "textRun": { "content": value } }] }
+                }] }] }] }
+            })
+        };
+        let document = serde_json::json!({
+            "documentId": "doc-1",
+            "revisionId": "3",
+            "body": { "content": [table(2, "first\n"), table(8, "second\n")] }
+        });
+        let tables = vec![TableExpectation {
+            table_index: Some(1),
+            table_data: vec![vec!["second".to_string()]],
+        }];
+
+        let result = verify_parsed_document(&document, &[], &tables).unwrap();
+
+        assert!(result.verified);
+        assert_eq!(
+            result.checks[0].expectation,
+            "table 1 matches expected data"
+        );
+    }
+
+    #[test]
+    fn partial_table_result_reports_the_last_completed_stage() {
+        let result = partial_table_result(
+            "doc-1",
+            "revision-2",
+            2,
+            2,
+            0,
+            CreateTableStage::TableInserted,
+            "provider unavailable".to_string(),
+        );
+
+        assert!(!result.verified);
+        assert_eq!(result.stage, CreateTableStage::TableInserted);
+        assert_eq!(result.failure.as_deref(), Some("provider unavailable"));
+    }
+
+    #[test]
+    fn semantic_input_schemas_bound_document_ids() {
+        let schemas = [
+            include_str!("../../schemas/google-docs/inspect_document.input.v1.json"),
+            include_str!("../../schemas/google-docs/apply_text_edits.input.v1.json"),
+            include_str!("../../schemas/google-docs/create_table_with_data.input.v1.json"),
+            include_str!("../../schemas/google-docs/verify_document.input.v1.json"),
+        ];
+
+        for schema in schemas {
+            let parsed: serde_json::Value = serde_json::from_str(schema).unwrap();
+            assert_eq!(parsed["properties"]["document_id"]["maxLength"], 256);
+        }
     }
 
     #[test]

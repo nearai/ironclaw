@@ -5,7 +5,7 @@
   "type": "object",
   "required": ["document_id", "index", "table_data"],
   "properties": {
-    "document_id": { "type": "string", "minLength": 1, "description": "The document ID." },
+    "document_id": { "type": "string", "minLength": 1, "maxLength": 256, "description": "The document ID." },
     "index": { "type": "integer", "minimum": 1, "description": "Character index at which to insert the table." },
     "table_data": {
       "type": "array",

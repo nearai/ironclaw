@@ -58,6 +58,10 @@ If you already authenticated one Google service, you still need to authenticate 
 - `insert_table`: Insert a table with a specified number of rows and columns
 - `create_list`: Convert a range of paragraphs into a bulleted or numbered list
 - `batch_update`: Send multiple document update requests in a single API call
+- `inspect_document`: Inspect paragraphs and tables with stable document indexes
+- `apply_text_edits`: Apply validated, tab-scoped text replacements and verify the result
+- `create_table_with_data`: Insert, populate, style, and verify a table
+- `verify_document`: Check expected text and specific table contents against provider state
 
 ---
 

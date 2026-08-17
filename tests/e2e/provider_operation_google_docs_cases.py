@@ -103,6 +103,8 @@ async def _semantic_edit_outcome(emulate_url: str, preview: dict) -> None:
 async def _semantic_table_outcome(emulate_url: str, preview: dict) -> None:
     output = _output(preview)
     assert output["verified"] is True, output
+    assert output["stage"] == "verified", output
+    assert "failure" not in output, output
     assert output["populated_cells"] == 4, output
     document = await _document(emulate_url)
     assert TABLE_DATA in _document_tables(document), document

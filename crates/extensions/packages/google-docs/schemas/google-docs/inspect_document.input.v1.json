@@ -8,6 +8,7 @@
     "document_id": {
       "type": "string",
       "minLength": 1,
+      "maxLength": 256,
       "description": "The document ID."
     }
   },
