@@ -45,8 +45,8 @@ use ironclaw_host_api::{
 use ironclaw_resources::*;
 use ironclaw_wasm::wasm_sandbox_core::SandboxLimits;
 use ironclaw_wasm::{
-    PreparedWitTool, WasmRuntimeHttpAdapter, WitToolHost, WitToolRequest, WitToolRuntime,
-    WitToolRuntimeConfig,
+    PreparedWitTool, WasmRuntimeHttpAdapter, WitToolHost, WitToolOutcome, WitToolRequest,
+    WitToolRuntime, WitToolRuntimeConfig,
 };
 use serde_json::{Value, json};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
@@ -321,8 +321,8 @@ async fn wasm_lane_invalid_output_json_returns_sanitized_output_error() {
             r#"(data (i32.const 3072) "not-json")"#,
         )
         .replace(
-            "i32.const 56\n    i32.const 1\n    i32.store",
-            "i32.const 56\n    i32.const 8\n    i32.store",
+            "i32.const 60\n    i32.const 1\n    i32.store",
+            "i32.const 60\n    i32.const 8\n    i32.store",
         );
     assert_ne!(
         invalid_output_wat, COUNTER_TOOL_WAT,
@@ -841,19 +841,22 @@ fn execute_prepared_wasm(
             });
         }
     };
-    if execution.error.is_some() {
-        release_wasm_reservation(request.governor, reservation.id);
-        return Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Guest,
-            model_visible_cause: None,
-        });
-    }
-    let Some(output_json) = execution.output_json else {
-        release_wasm_reservation(request.governor, reservation.id);
-        return Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::InvalidResult,
-            model_visible_cause: None,
-        });
+    let output_json = match execution.outcome {
+        WitToolOutcome::Success(output_json) => output_json,
+        WitToolOutcome::Failure(_) | WitToolOutcome::LegacyFailure(_) => {
+            release_wasm_reservation(request.governor, reservation.id);
+            return Err(DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::Guest,
+                model_visible_cause: None,
+            });
+        }
+        WitToolOutcome::LegacyMissingOutput => {
+            release_wasm_reservation(request.governor, reservation.id);
+            return Err(DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::InvalidResult,
+                model_visible_cause: None,
+            });
+        }
     };
     let output = match serde_json::from_str::<Value>(&output_json) {
         Ok(output) => output,
@@ -1107,28 +1110,25 @@ const COUNTER_TOOL_WAT: &str = r#"
     i32.add
     global.set $count
     i32.const 48
-    i32.const 1
-    i32.store
-    i32.const 52
-    i32.const 3072
+    i32.const 0
     i32.store
     i32.const 56
-    i32.const 1
+    i32.const 3072
     i32.store
     i32.const 60
-    i32.const 0
+    i32.const 1
     i32.store
     i32.const 48)
   (func $post (param i32))
   (func $realloc (param $old i32) (param $old_align i32) (param $new_size i32) (param $new_align i32) (result i32)
     i32.const 4096)
   (func $_initialize)
-  (export "near:agent/tool@0.3.0#execute" (func $execute))
-  (export "cabi_post_near:agent/tool@0.3.0#execute" (func $post))
-  (export "near:agent/tool@0.3.0#schema" (func $schema))
-  (export "cabi_post_near:agent/tool@0.3.0#schema" (func $post))
-  (export "near:agent/tool@0.3.0#description" (func $description))
-  (export "cabi_post_near:agent/tool@0.3.0#description" (func $post))
+  (export "near:agent/tool@0.4.0#execute" (func $execute))
+  (export "cabi_post_near:agent/tool@0.4.0#execute" (func $post))
+  (export "near:agent/tool@0.4.0#schema" (func $schema))
+  (export "cabi_post_near:agent/tool@0.4.0#schema" (func $post))
+  (export "near:agent/tool@0.4.0#description" (func $description))
+  (export "cabi_post_near:agent/tool@0.4.0#description" (func $post))
   (export "cabi_realloc" (func $realloc))
   (export "_initialize" (func $_initialize))
 )
@@ -1141,12 +1141,12 @@ const HTTP_TOOL_WAT: &str = r#"
   (type (;2;) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
   (type (;3;) (func (param i32 i32 i32 i32 i32)))
   (type (;4;) (func (param i32 i32) (result i32)))
-  (import "near:agent/host@0.3.0" "log" (func $log (type 0)))
-  (import "near:agent/host@0.3.0" "now-millis" (func $now (type 1)))
-  (import "near:agent/host@0.3.0" "workspace-read" (func $workspace_read (type 0)))
-  (import "near:agent/host@0.3.0" "http-request" (func $http_request (type 2)))
-  (import "near:agent/host@0.3.0" "tool-invoke" (func $tool_invoke (type 3)))
-  (import "near:agent/host@0.3.0" "secret-exists" (func $secret_exists (type 4)))
+  (import "near:agent/host@0.4.0" "log" (func $log (type 0)))
+  (import "near:agent/host@0.4.0" "now-millis" (func $now (type 1)))
+  (import "near:agent/host@0.4.0" "workspace-read" (func $workspace_read (type 0)))
+  (import "near:agent/host@0.4.0" "http-request" (func $http_request (type 2)))
+  (import "near:agent/host@0.4.0" "tool-invoke" (func $tool_invoke (type 3)))
+  (import "near:agent/host@0.4.0" "secret-exists" (func $secret_exists (type 4)))
   (memory (export "memory") 1)
   (global $heap (mut i32) (i32.const 4096))
   (data (i32.const 128) "POST")
@@ -1188,16 +1188,13 @@ const HTTP_TOOL_WAT: &str = r#"
     call $http_request
 
     i32.const 48
-    i32.const 1
-    i32.store
-    i32.const 52
-    i32.const 3072
+    i32.const 0
     i32.store
     i32.const 56
-    i32.const 1
+    i32.const 3072
     i32.store
     i32.const 60
-    i32.const 0
+    i32.const 1
     i32.store
     i32.const 48)
   (func $post (param i32))
@@ -1211,12 +1208,12 @@ const HTTP_TOOL_WAT: &str = r#"
     global.set $heap
     local.get $ret)
   (func $_initialize)
-  (export "near:agent/tool@0.3.0#execute" (func $execute))
-  (export "cabi_post_near:agent/tool@0.3.0#execute" (func $post))
-  (export "near:agent/tool@0.3.0#schema" (func $schema))
-  (export "cabi_post_near:agent/tool@0.3.0#schema" (func $post))
-  (export "near:agent/tool@0.3.0#description" (func $description))
-  (export "cabi_post_near:agent/tool@0.3.0#description" (func $post))
+  (export "near:agent/tool@0.4.0#execute" (func $execute))
+  (export "cabi_post_near:agent/tool@0.4.0#execute" (func $post))
+  (export "near:agent/tool@0.4.0#schema" (func $schema))
+  (export "cabi_post_near:agent/tool@0.4.0#schema" (func $post))
+  (export "near:agent/tool@0.4.0#description" (func $description))
+  (export "cabi_post_near:agent/tool@0.4.0#description" (func $post))
   (export "cabi_realloc" (func $realloc))
   (export "_initialize" (func $_initialize))
 )
@@ -1224,8 +1221,8 @@ const HTTP_TOOL_WAT: &str = r#"
 
 fn trap_after_http_wat() -> String {
     HTTP_TOOL_WAT.replace(
-        "i32.const 48\n    i32.const 1\n    i32.store",
-        "unreachable\n\n    i32.const 48\n    i32.const 1\n    i32.store",
+        "i32.const 48\n    i32.const 0\n    i32.store",
+        "unreachable\n\n    i32.const 48\n    i32.const 0\n    i32.store",
     )
 }
 
@@ -1256,12 +1253,12 @@ const TRAP_TOOL_WAT: &str = r#"
   (func $realloc (param $old i32) (param $old_align i32) (param $new_size i32) (param $new_align i32) (result i32)
     i32.const 4096)
   (func $_initialize)
-  (export "near:agent/tool@0.3.0#execute" (func $execute))
-  (export "cabi_post_near:agent/tool@0.3.0#execute" (func $post))
-  (export "near:agent/tool@0.3.0#schema" (func $schema))
-  (export "cabi_post_near:agent/tool@0.3.0#schema" (func $post))
-  (export "near:agent/tool@0.3.0#description" (func $description))
-  (export "cabi_post_near:agent/tool@0.3.0#description" (func $post))
+  (export "near:agent/tool@0.4.0#execute" (func $execute))
+  (export "cabi_post_near:agent/tool@0.4.0#execute" (func $post))
+  (export "near:agent/tool@0.4.0#schema" (func $schema))
+  (export "cabi_post_near:agent/tool@0.4.0#schema" (func $post))
+  (export "near:agent/tool@0.4.0#description" (func $description))
+  (export "cabi_post_near:agent/tool@0.4.0#description" (func $post))
   (export "cabi_realloc" (func $realloc))
   (export "_initialize" (func $_initialize))
 )

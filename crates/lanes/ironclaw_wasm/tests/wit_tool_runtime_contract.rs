@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use ironclaw_wasm::{
     DenyWasmHostHttp, RecordingWasmHostHttp, WasmError, WasmHostHttp, WasmHttpRequest,
-    WasmHttpResponse, WitToolHost, WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
+    WasmHttpResponse, WitToolHost, WitToolOutcome, WitToolRequest, WitToolRuntime,
+    WitToolRuntimeConfig,
 };
 use serde_json::json;
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
@@ -15,12 +16,12 @@ const COUNTER_TOOL_WAT: &str = r#"
   (type (;2;) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
   (type (;3;) (func (param i32 i32 i32 i32 i32)))
   (type (;4;) (func (param i32 i32) (result i32)))
-  (import "near:agent/host@0.3.0" "log" (func $log (type 0)))
-  (import "near:agent/host@0.3.0" "now-millis" (func $now (type 1)))
-  (import "near:agent/host@0.3.0" "workspace-read" (func $workspace_read (type 0)))
-  (import "near:agent/host@0.3.0" "http-request" (func $http_request (type 2)))
-  (import "near:agent/host@0.3.0" "tool-invoke" (func $tool_invoke (type 3)))
-  (import "near:agent/host@0.3.0" "secret-exists" (func $secret_exists (type 4)))
+  (import "near:agent/host@0.4.0" "log" (func $log (type 0)))
+  (import "near:agent/host@0.4.0" "now-millis" (func $now (type 1)))
+  (import "near:agent/host@0.4.0" "workspace-read" (func $workspace_read (type 0)))
+  (import "near:agent/host@0.4.0" "http-request" (func $http_request (type 2)))
+  (import "near:agent/host@0.4.0" "tool-invoke" (func $tool_invoke (type 3)))
+  (import "near:agent/host@0.4.0" "secret-exists" (func $secret_exists (type 4)))
   (memory (export "memory") 1)
   (global $heap (mut i32) (i32.const 4096))
   (global $count (mut i32) (i32.const 0))
@@ -44,6 +45,8 @@ const COUNTER_TOOL_WAT: &str = r#"
     i32.const 19
     i32.store
     i32.const 32)
+  ;; Encode `response` as the `success(string)` case of the near:agent@0.4.0
+  ;; typed variant (see wasm_execution.rs SIMPLE_TOOL_WAT for the layout note).
   (func $execute (param i32 i32 i32 i32 i32) (result i32)
     global.get $count
     i32.const 1
@@ -51,9 +54,9 @@ const COUNTER_TOOL_WAT: &str = r#"
     global.set $count
 
     i32.const 48
-    i32.const 1
+    i32.const 0
     i32.store
-    i32.const 52
+    i32.const 56
     global.get $count
     i32.const 1
     i32.eq
@@ -63,11 +66,8 @@ const COUNTER_TOOL_WAT: &str = r#"
       i32.const 3073
     end
     i32.store
-    i32.const 56
-    i32.const 1
-    i32.store
     i32.const 60
-    i32.const 0
+    i32.const 1
     i32.store
     i32.const 48)
   (func $post (param i32))
@@ -81,12 +81,12 @@ const COUNTER_TOOL_WAT: &str = r#"
     global.set $heap
     local.get $ret)
   (func $_initialize)
-  (export "near:agent/tool@0.3.0#execute" (func $execute))
-  (export "cabi_post_near:agent/tool@0.3.0#execute" (func $post))
-  (export "near:agent/tool@0.3.0#schema" (func $schema))
-  (export "cabi_post_near:agent/tool@0.3.0#schema" (func $post))
-  (export "near:agent/tool@0.3.0#description" (func $description))
-  (export "cabi_post_near:agent/tool@0.3.0#description" (func $post))
+  (export "near:agent/tool@0.4.0#execute" (func $execute))
+  (export "cabi_post_near:agent/tool@0.4.0#execute" (func $post))
+  (export "near:agent/tool@0.4.0#schema" (func $schema))
+  (export "cabi_post_near:agent/tool@0.4.0#schema" (func $post))
+  (export "near:agent/tool@0.4.0#description" (func $description))
+  (export "cabi_post_near:agent/tool@0.4.0#description" (func $post))
   (export "cabi_realloc" (func $realloc))
   (export "_initialize" (func $_initialize))
 )
@@ -99,12 +99,12 @@ const HTTP_TOOL_WAT: &str = r#"
   (type (;2;) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
   (type (;3;) (func (param i32 i32 i32 i32 i32)))
   (type (;4;) (func (param i32 i32) (result i32)))
-  (import "near:agent/host@0.3.0" "log" (func $log (type 0)))
-  (import "near:agent/host@0.3.0" "now-millis" (func $now (type 1)))
-  (import "near:agent/host@0.3.0" "workspace-read" (func $workspace_read (type 0)))
-  (import "near:agent/host@0.3.0" "http-request" (func $http_request (type 2)))
-  (import "near:agent/host@0.3.0" "tool-invoke" (func $tool_invoke (type 3)))
-  (import "near:agent/host@0.3.0" "secret-exists" (func $secret_exists (type 4)))
+  (import "near:agent/host@0.4.0" "log" (func $log (type 0)))
+  (import "near:agent/host@0.4.0" "now-millis" (func $now (type 1)))
+  (import "near:agent/host@0.4.0" "workspace-read" (func $workspace_read (type 0)))
+  (import "near:agent/host@0.4.0" "http-request" (func $http_request (type 2)))
+  (import "near:agent/host@0.4.0" "tool-invoke" (func $tool_invoke (type 3)))
+  (import "near:agent/host@0.4.0" "secret-exists" (func $secret_exists (type 4)))
   (memory (export "memory") 1)
   (global $heap (mut i32) (i32.const 4096))
   (data (i32.const 128) "POST")
@@ -146,16 +146,13 @@ const HTTP_TOOL_WAT: &str = r#"
     call $http_request
 
     i32.const 48
-    i32.const 1
-    i32.store
-    i32.const 52
-    i32.const 3072
+    i32.const 0
     i32.store
     i32.const 56
-    i32.const 1
+    i32.const 3072
     i32.store
     i32.const 60
-    i32.const 0
+    i32.const 1
     i32.store
     i32.const 48)
   (func $post (param i32))
@@ -169,12 +166,12 @@ const HTTP_TOOL_WAT: &str = r#"
     global.set $heap
     local.get $ret)
   (func $_initialize)
-  (export "near:agent/tool@0.3.0#execute" (func $execute))
-  (export "cabi_post_near:agent/tool@0.3.0#execute" (func $post))
-  (export "near:agent/tool@0.3.0#schema" (func $schema))
-  (export "cabi_post_near:agent/tool@0.3.0#schema" (func $post))
-  (export "near:agent/tool@0.3.0#description" (func $description))
-  (export "cabi_post_near:agent/tool@0.3.0#description" (func $post))
+  (export "near:agent/tool@0.4.0#execute" (func $execute))
+  (export "cabi_post_near:agent/tool@0.4.0#execute" (func $post))
+  (export "near:agent/tool@0.4.0#schema" (func $schema))
+  (export "cabi_post_near:agent/tool@0.4.0#schema" (func $post))
+  (export "near:agent/tool@0.4.0#description" (func $description))
+  (export "cabi_post_near:agent/tool@0.4.0#description" (func $post))
   (export "cabi_realloc" (func $realloc))
   (export "_initialize" (func $_initialize))
 )
@@ -296,10 +293,8 @@ fn executes_wit_tool_with_fresh_component_instance_per_call() {
         .execute(&prepared, host, WitToolRequest::new(r#"{"q":2}"#))
         .unwrap();
 
-    assert_eq!(first.output_json.as_deref(), Some("1"));
-    assert_eq!(second.output_json.as_deref(), Some("1"));
-    assert!(first.error.is_none());
-    assert!(second.error.is_none());
+    assert_eq!(first.outcome, WitToolOutcome::Success("1".to_string()));
+    assert_eq!(second.outcome, WitToolOutcome::Success("1".to_string()));
 }
 
 // Regression: the host runtime offloads `WitToolRuntime::execute` to the
@@ -330,8 +325,7 @@ async fn cloned_runtime_executes_inside_spawn_blocking_concurrently() {
 
     for handle in handles {
         let execution = handle.await.expect("blocking task must not panic").unwrap();
-        assert_eq!(execution.output_json.as_deref(), Some("1"));
-        assert!(execution.error.is_none());
+        assert_eq!(execution.outcome, WitToolOutcome::Success("1".to_string()));
     }
 }
 
@@ -651,7 +645,7 @@ fn execution_fails_when_host_import_returns_after_deadline() {
 
 fn trap_after_http_wat() -> String {
     HTTP_TOOL_WAT.replace(
-        "i32.const 48\n    i32.const 1\n    i32.store",
-        "unreachable\n\n    i32.const 48\n    i32.const 1\n    i32.store",
+        "i32.const 48\n    i32.const 0\n    i32.store",
+        "unreachable\n\n    i32.const 48\n    i32.const 0\n    i32.store",
     )
 }

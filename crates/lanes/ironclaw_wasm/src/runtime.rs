@@ -10,7 +10,10 @@ use crate::config::{EPOCH_TICK_INTERVAL, WIT_TOOL_VERSION, WitToolRuntimeConfig}
 use crate::error::WasmError;
 use crate::host::WitToolHost;
 use crate::store::StoreData;
-use crate::types::{PreparedWitTool, WitToolExecution, WitToolRequest};
+use crate::types::{
+    PreparedWitTool, WitBindingVersion, WitErrorKind, WitGuestFailure, WitToolExecution,
+    WitToolOutcome, WitToolRequest,
+};
 use crate::wasm_sandbox_core::SandboxLimits;
 
 /// Shared leak-detector registry (well-known vendor API-token shapes,
@@ -22,11 +25,14 @@ use crate::wasm_sandbox_core::SandboxLimits;
 /// response body that repeats the credential the caller sent) can carry live
 /// credential material. This is the single chokepoint every WIT tool's guest
 /// error crosses on the way out of the sandbox, so redacting here defends
-/// all WASM tools, not just one.
+/// all WASM tools, not just one. For the typed (current) response, this
+/// applies to `guest-failure`'s `code`/`message` fields — the only free-text
+/// carriers on that path; for the legacy response, it applies to the whole
+/// error string, as before.
 static GUEST_ERROR_LEAK_DETECTOR: LazyLock<LeakDetector> = LazyLock::new(LeakDetector::new);
 
-/// Redact secret-shaped values from a guest-authored error string before it
-/// becomes guest-visible (`WitToolExecution::error`). Downstream seams (the
+/// Redact secret-shaped values from a guest-authored string before it becomes
+/// guest-visible (`WitToolExecution::outcome`). Downstream seams (the
 /// model-visible diagnostic seam in `ironclaw_loop_host`) still apply their
 /// own scrubbing and injection fencing; this is the earlier, sandbox-exit
 /// boundary and only redacts secret values in place — it never blocks or
@@ -34,6 +40,10 @@ static GUEST_ERROR_LEAK_DETECTOR: LazyLock<LeakDetector> = LazyLock::new(LeakDet
 fn scrub_guest_error(error: String) -> String {
     let (scrubbed, _redacted) = GUEST_ERROR_LEAK_DETECTOR.redact_all_secrets(&error);
     scrubbed
+}
+
+fn scrub_guest_error_opt(error: Option<String>) -> Option<String> {
+    error.map(scrub_guest_error)
 }
 
 /// Reborn WIT-compatible WASM tool runtime.
@@ -77,7 +87,7 @@ impl WitToolRuntime {
         let component = wasmtime::component::Component::new(&self.engine, wasm_bytes)
             .map_err(|error| WasmError::CompilationFailed(error.to_string()))?;
         let limits = self.config.default_limits.clone();
-        let (description, schema) = self.extract_metadata(&component, &limits)?;
+        let (description, schema, binding_version) = self.extract_metadata(&component, &limits)?;
 
         Ok(PreparedWitTool {
             name: name.to_string(),
@@ -85,6 +95,7 @@ impl WitToolRuntime {
             schema,
             component,
             limits,
+            binding_version,
         })
     }
 
@@ -94,15 +105,94 @@ impl WitToolRuntime {
         host: WitToolHost,
         request: WitToolRequest,
     ) -> Result<WitToolExecution, WasmError> {
+        match prepared.binding_version {
+            WitBindingVersion::Current => self.execute_current(prepared, host, request),
+            // Legacy fallback — removed in PR 4.
+            WitBindingVersion::Legacy => self.execute_legacy(prepared, host, request),
+        }
+    }
+
+    fn execute_current(
+        &self,
+        prepared: &PreparedWitTool,
+        host: WitToolHost,
+        request: WitToolRequest,
+    ) -> Result<WitToolExecution, WasmError> {
         let started = Instant::now();
         let (mut store, instance) =
-            self.instantiate(&prepared.component, host, &prepared.limits)?;
+            self.instantiate_current(&prepared.component, host, &prepared.limits)?;
         let tool = instance.near_agent_tool();
-        let request = bindings::exports::near::agent::tool::Request {
+        let wit_request = bindings::exports::near::agent::tool::Request {
             params: request.params_json,
             context: request.context_json,
         };
-        let response = match tool.call_execute(&mut store, &request) {
+        let response = match tool.call_execute(&mut store, &wit_request) {
+            Ok(response) => response,
+            Err(error) => {
+                let message = if store.data().deadline_exceeded() {
+                    "WASM execution deadline exceeded".to_string()
+                } else {
+                    error.to_string()
+                };
+                return Err(execution_failed_with_usage(message, &store, started));
+            }
+        };
+        if store.data().deadline_exceeded() {
+            return Err(execution_failed_with_usage(
+                "WASM execution deadline exceeded".to_string(),
+                &store,
+                started,
+            ));
+        }
+
+        let output_bytes = match &response {
+            bindings::exports::near::agent::tool::Response::Success(output) => {
+                output.len().min(u64::MAX as usize) as u64
+            }
+            bindings::exports::near::agent::tool::Response::Failure(_) => 0,
+        };
+        let mut usage = store.data().usage.clone();
+        usage.wall_clock_ms = elapsed_millis(started);
+        usage.output_bytes = output_bytes;
+        let logs = store.data().logs.clone();
+
+        let outcome = match response {
+            bindings::exports::near::agent::tool::Response::Success(output) => {
+                WitToolOutcome::Success(output)
+            }
+            bindings::exports::near::agent::tool::Response::Failure(failure) => {
+                WitToolOutcome::Failure(WitGuestFailure {
+                    kind: map_error_kind(failure.kind),
+                    code: scrub_guest_error_opt(failure.code),
+                    message: scrub_guest_error_opt(failure.message),
+                    retry_after_ms: failure.retry_after_ms,
+                })
+            }
+        };
+
+        Ok(WitToolExecution {
+            outcome,
+            usage,
+            logs,
+        })
+    }
+
+    /// Legacy 0.3.0 binding fallback — removed in PR 4.
+    fn execute_legacy(
+        &self,
+        prepared: &PreparedWitTool,
+        host: WitToolHost,
+        request: WitToolRequest,
+    ) -> Result<WitToolExecution, WasmError> {
+        let started = Instant::now();
+        let (mut store, instance) =
+            self.instantiate_legacy(&prepared.component, host, &prepared.limits)?;
+        let tool = instance.near_agent_tool();
+        let wit_request = bindings::legacy::exports::near::agent::tool::Request {
+            params: request.params_json,
+            context: request.context_json,
+        };
+        let response = match tool.call_execute(&mut store, &wit_request) {
             Ok(response) => response,
             Err(error) => {
                 let message = if store.data().deadline_exceeded() {
@@ -130,9 +220,14 @@ impl WitToolRuntime {
             .unwrap_or(0);
         let logs = store.data().logs.clone();
 
+        let outcome = match (response.output, response.error) {
+            (_, Some(error)) => WitToolOutcome::LegacyFailure(scrub_guest_error(error)),
+            (Some(output), None) => WitToolOutcome::Success(output),
+            (None, None) => WitToolOutcome::LegacyMissingOutput,
+        };
+
         Ok(WitToolExecution {
-            output_json: response.output,
-            error: response.error.map(scrub_guest_error),
+            outcome,
             usage,
             logs,
         })
@@ -142,26 +237,45 @@ impl WitToolRuntime {
         &self,
         component: &wasmtime::component::Component,
         limits: &SandboxLimits,
-    ) -> Result<(String, serde_json::Value), WasmError> {
-        let (mut store, instance) = self.instantiate(component, WitToolHost::deny_all(), limits)?;
-        let tool = instance.near_agent_tool();
-        let description = tool
-            .call_description(&mut store)
-            .map_err(|error| WasmError::execution_failed(error.to_string()))?;
-        let schema_json = tool
-            .call_schema(&mut store)
-            .map_err(|error| WasmError::execution_failed(error.to_string()))?;
-        let schema = serde_json::from_str::<serde_json::Value>(&schema_json)
-            .map_err(|error| WasmError::InvalidSchema(error.to_string()))?;
-        if !schema.is_object() {
-            return Err(WasmError::InvalidSchema(
-                "schema export must return a JSON object".to_string(),
-            ));
+    ) -> Result<(String, serde_json::Value, WitBindingVersion), WasmError> {
+        match self.instantiate_current(component, WitToolHost::deny_all(), limits) {
+            Ok((mut store, instance)) => {
+                let tool = instance.near_agent_tool();
+                let description = tool
+                    .call_description(&mut store)
+                    .map_err(|error| WasmError::execution_failed(error.to_string()))?;
+                let schema_json = tool
+                    .call_schema(&mut store)
+                    .map_err(|error| WasmError::execution_failed(error.to_string()))?;
+                let schema = parse_schema(&schema_json)?;
+                Ok((description, schema, WitBindingVersion::Current))
+            }
+            // Legacy fallback — removed in PR 4. A component compiled against
+            // the frozen 0.3.0 world fails the current-world instantiation on
+            // an import/version mismatch; retry against the legacy world
+            // before giving up. If the legacy attempt also fails, the
+            // current-world error is the more useful diagnostic and is what
+            // gets returned.
+            Err(current_error) => {
+                match self.instantiate_legacy(component, WitToolHost::deny_all(), limits) {
+                    Ok((mut store, instance)) => {
+                        let tool = instance.near_agent_tool();
+                        let description = tool
+                            .call_description(&mut store)
+                            .map_err(|error| WasmError::execution_failed(error.to_string()))?;
+                        let schema_json = tool
+                            .call_schema(&mut store)
+                            .map_err(|error| WasmError::execution_failed(error.to_string()))?;
+                        let schema = parse_schema(&schema_json)?;
+                        Ok((description, schema, WitBindingVersion::Legacy))
+                    }
+                    Err(_legacy_error) => Err(current_error),
+                }
+            }
         }
-        Ok((description, schema))
     }
 
-    fn instantiate(
+    fn instantiate_current(
         &self,
         component: &wasmtime::component::Component,
         host: WitToolHost,
@@ -172,8 +286,26 @@ impl WitToolRuntime {
             StoreData::new(host, limits.memory_bytes, limits.timeout),
         );
         configure_store(&mut store, limits)?;
-        let linker = create_linker(&self.engine)?;
+        let linker = create_linker_current(&self.engine)?;
         let instance = bindings::SandboxedTool::instantiate(&mut store, component, &linker)
+            .map_err(|error| classify_instantiation_error(error.to_string()))?;
+        Ok((store, instance))
+    }
+
+    /// Legacy 0.3.0 binding fallback — removed in PR 4.
+    fn instantiate_legacy(
+        &self,
+        component: &wasmtime::component::Component,
+        host: WitToolHost,
+        limits: &SandboxLimits,
+    ) -> Result<(Store<StoreData>, bindings::legacy::SandboxedTool), WasmError> {
+        let mut store = Store::new(
+            &self.engine,
+            StoreData::new(host, limits.memory_bytes, limits.timeout),
+        );
+        configure_store(&mut store, limits)?;
+        let linker = create_linker_legacy(&self.engine)?;
+        let instance = bindings::legacy::SandboxedTool::instantiate(&mut store, component, &linker)
             .map_err(|error| classify_instantiation_error(error.to_string()))?;
         Ok((store, instance))
     }
@@ -184,6 +316,30 @@ impl std::fmt::Debug for WitToolRuntime {
         f.debug_struct("WitToolRuntime")
             .field("config", &self.config)
             .finish_non_exhaustive()
+    }
+}
+
+fn parse_schema(schema_json: &str) -> Result<serde_json::Value, WasmError> {
+    let schema = serde_json::from_str::<serde_json::Value>(schema_json)
+        .map_err(|error| WasmError::InvalidSchema(error.to_string()))?;
+    if !schema.is_object() {
+        return Err(WasmError::InvalidSchema(
+            "schema export must return a JSON object".to_string(),
+        ));
+    }
+    Ok(schema)
+}
+
+fn map_error_kind(kind: bindings::exports::near::agent::tool::ErrorKind) -> WitErrorKind {
+    use bindings::exports::near::agent::tool::ErrorKind as WitKind;
+    match kind {
+        WitKind::AuthRequired => WitErrorKind::AuthRequired,
+        WitKind::Input => WitErrorKind::Input,
+        WitKind::OutputTooLarge => WitErrorKind::OutputTooLarge,
+        WitKind::Executor => WitErrorKind::Executor,
+        WitKind::NetworkDenied => WitErrorKind::NetworkDenied,
+        WitKind::Client => WitErrorKind::Client,
+        WitKind::OperationFailed => WitErrorKind::OperationFailed,
     }
 }
 
@@ -229,11 +385,24 @@ fn configure_store(store: &mut Store<StoreData>, limits: &SandboxLimits) -> Resu
     Ok(())
 }
 
-fn create_linker(engine: &Engine) -> Result<Linker<StoreData>, WasmError> {
+fn create_linker_current(engine: &Engine) -> Result<Linker<StoreData>, WasmError> {
     let mut linker = Linker::new(engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
         .map_err(|error| WasmError::LinkerConfiguration(error.to_string()))?;
     bindings::SandboxedTool::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
+        &mut linker,
+        |state: &mut StoreData| state,
+    )
+    .map_err(|error| WasmError::LinkerConfiguration(error.to_string()))?;
+    Ok(linker)
+}
+
+/// Legacy 0.3.0 binding fallback — removed in PR 4.
+fn create_linker_legacy(engine: &Engine) -> Result<Linker<StoreData>, WasmError> {
+    let mut linker = Linker::new(engine);
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
+        .map_err(|error| WasmError::LinkerConfiguration(error.to_string()))?;
+    bindings::legacy::SandboxedTool::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
         &mut linker,
         |state: &mut StoreData| state,
     )

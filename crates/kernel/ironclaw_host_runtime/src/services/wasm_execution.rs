@@ -14,7 +14,8 @@ use super::wasm_diagnostics::{log_wasm_guest_error, log_wasm_runtime_error};
 use super::{
     CapabilityId, DispatchError, PreparedWitTool, ResourceGovernor, ResourceReservationId,
     ResourceUsage, RootFilesystem, RuntimeAdapterResult, RuntimeDispatchErrorKind,
-    RuntimeLaneRequest, WasmError, WitToolHost, WitToolRuntime,
+    RuntimeLaneRequest, WasmError, WitErrorKind, WitGuestFailure, WitToolHost, WitToolOutcome,
+    WitToolRuntime,
 };
 use ironclaw_host_api::dispatch::{
     ProviderDiagnostic, ProviderErrorCode, UntrustedProviderMessage,
@@ -233,17 +234,34 @@ where
             });
         }
     };
-    if let Some(error) = execution.error {
-        log_wasm_guest_error(request.capability_id, &execution.logs, &error);
-        guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
-        return Err(wasm_guest_dispatch_error(&error, request.capability_id));
-    }
-    let Some(output_json) = execution.output_json else {
-        guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
-        return Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::InvalidResult,
-            model_visible_cause: Some("WASM execution returned no output".to_string()),
-        });
+    let output_json = match execution.outcome {
+        WitToolOutcome::Success(output_json) => output_json,
+        WitToolOutcome::Failure(failure) => {
+            log_wasm_guest_error(
+                request.capability_id,
+                &execution.logs,
+                &format!("{failure:?}"),
+            );
+            guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
+            return Err(typed_wasm_guest_dispatch_error(
+                failure,
+                request.capability_id,
+            ));
+        }
+        // Legacy 0.3.0 binding fallback — removed in PR 4.
+        WitToolOutcome::LegacyFailure(error) => {
+            log_wasm_guest_error(request.capability_id, &execution.logs, &error);
+            guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
+            return Err(wasm_guest_dispatch_error(&error, request.capability_id));
+        }
+        // Legacy 0.3.0 binding fallback — removed in PR 4.
+        WitToolOutcome::LegacyMissingOutput => {
+            guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
+            return Err(DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::InvalidResult,
+                model_visible_cause: Some("WASM execution returned no output".to_string()),
+            });
+        }
     };
     let output = match serde_json::from_str(&output_json) {
         Ok(output) => output,
@@ -305,6 +323,87 @@ fn wasm_guest_dispatch_error(error: &str, capability: &CapabilityId) -> Dispatch
             model_visible_cause: wasm_guest_error_cause(error).or_else(|| Some(error.to_string())),
         },
     }
+}
+
+/// Maps a typed WIT `guest-failure` (near:agent@0.4.0) directly to a
+/// `DispatchError` — the closed `error-kind` vocabulary already carries what
+/// the legacy string-decode path (`wasm_guest_dispatch_error` above) had to
+/// recover by parsing a JSON-encoded convention on the plain error string.
+/// Reuses the exact same table `wasm_guest_dispatch_error` uses: `kind ==
+/// auth-required` maps to `DispatchError::AuthRequired` with empty
+/// `required_secrets`/`credential_requirements` (the capability host
+/// enriches these), everything else maps through
+/// `RuntimeDispatchErrorKind`.
+fn typed_wasm_guest_dispatch_error(
+    failure: WitGuestFailure,
+    capability: &CapabilityId,
+) -> DispatchError {
+    if matches!(failure.kind, WitErrorKind::AuthRequired) {
+        return DispatchError::AuthRequired {
+            capability: capability.clone(),
+            required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
+            model_visible_cause: typed_wasm_guest_provider_diagnostic(&failure).map(Box::new),
+        };
+    }
+    DispatchError::Wasm {
+        kind: typed_wasm_guest_runtime_kind(failure.kind),
+        model_visible_cause: typed_wasm_guest_cause(&failure),
+    }
+}
+
+fn typed_wasm_guest_runtime_kind(kind: WitErrorKind) -> RuntimeDispatchErrorKind {
+    match kind {
+        // Handled by the caller before this is reached.
+        WitErrorKind::AuthRequired => RuntimeDispatchErrorKind::OperationFailed,
+        WitErrorKind::Input => RuntimeDispatchErrorKind::InputEncode,
+        WitErrorKind::OutputTooLarge => RuntimeDispatchErrorKind::OutputTooLarge,
+        WitErrorKind::Executor => RuntimeDispatchErrorKind::Executor,
+        WitErrorKind::NetworkDenied => RuntimeDispatchErrorKind::NetworkDenied,
+        WitErrorKind::Client => RuntimeDispatchErrorKind::Client,
+        WitErrorKind::OperationFailed => RuntimeDispatchErrorKind::OperationFailed,
+    }
+}
+
+/// Sanitize a typed guest failure's `code` the same way the legacy
+/// string-decode path does (`wasm_guest_error_code_from`): reduced to
+/// `[A-Za-z0-9_.-]` identifier characters, bounded to 64, `None` if empty.
+fn sanitized_wasm_guest_code(code: Option<&str>) -> Option<String> {
+    let sanitized: String = code?
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
+        .take(64)
+        .collect();
+    (!sanitized.is_empty()).then_some(sanitized)
+}
+
+fn typed_wasm_guest_cause(failure: &WitGuestFailure) -> Option<String> {
+    let message = bounded_wasm_guest_message(failure.message.as_deref().unwrap_or_default().trim());
+    match sanitized_wasm_guest_code(failure.code.as_deref()) {
+        Some(code) => {
+            let stable_cause = format!("provider error code: {code}");
+            if message.is_empty() {
+                Some(stable_cause)
+            } else {
+                Some(format!("{stable_cause}; provider message: {message}"))
+            }
+        }
+        None => (!message.is_empty()).then_some(message),
+    }
+}
+
+fn typed_wasm_guest_provider_diagnostic(failure: &WitGuestFailure) -> Option<ProviderDiagnostic> {
+    let code = sanitized_wasm_guest_code(failure.code.as_deref()).map(ProviderErrorCode::new);
+    let message = bounded_wasm_guest_message(failure.message.as_deref().unwrap_or_default().trim());
+    let message = (!message.is_empty()).then(|| UntrustedProviderMessage::new(message));
+    let retry_after = failure.retry_after_ms.map(std::time::Duration::from_millis);
+    (code.is_some() || message.is_some() || retry_after.is_some()).then_some(ProviderDiagnostic {
+        code,
+        message,
+        retry_after,
+    })
 }
 
 /// Extract the stable error `code` from a structured guest error payload so
@@ -699,12 +798,12 @@ mod tests {
   (type (;2;) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
   (type (;3;) (func (param i32 i32 i32 i32 i32)))
   (type (;4;) (func (param i32 i32) (result i32)))
-  (import "near:agent/host@0.3.0" "log" (func $log (type 0)))
-  (import "near:agent/host@0.3.0" "now-millis" (func $now (type 1)))
-  (import "near:agent/host@0.3.0" "workspace-read" (func $workspace_read (type 0)))
-  (import "near:agent/host@0.3.0" "http-request" (func $http_request (type 2)))
-  (import "near:agent/host@0.3.0" "tool-invoke" (func $tool_invoke (type 3)))
-  (import "near:agent/host@0.3.0" "secret-exists" (func $secret_exists (type 4)))
+  (import "near:agent/host@0.4.0" "log" (func $log (type 0)))
+  (import "near:agent/host@0.4.0" "now-millis" (func $now (type 1)))
+  (import "near:agent/host@0.4.0" "workspace-read" (func $workspace_read (type 0)))
+  (import "near:agent/host@0.4.0" "http-request" (func $http_request (type 2)))
+  (import "near:agent/host@0.4.0" "tool-invoke" (func $tool_invoke (type 3)))
+  (import "near:agent/host@0.4.0" "secret-exists" (func $secret_exists (type 4)))
   (memory (export "memory") 1)
   (global $heap (mut i32) (i32.const 4096))
   (data (i32.const 1024) "{\"type\":\"object\"}")
@@ -726,18 +825,20 @@ mod tests {
     i32.const 12
     i32.store
     i32.const 32)
+  ;; Encode `response` as the `success(string)` case of the near:agent@0.4.0
+  ;; typed variant. Canonical ABI layout (align 8, size 56 bytes) for
+  ;; `variant response { success(string), failure(guest-failure) }`:
+  ;;   offset 0:  discriminant (0 = success, 1 = failure)
+  ;;   offset 8:  payload — success case is `string` (ptr: u32, len: u32)
   (func $execute (param i32 i32 i32 i32 i32) (result i32)
     i32.const 48
-    i32.const 1
-    i32.store
-    i32.const 52
-    i32.const 3072
+    i32.const 0
     i32.store
     i32.const 56
-    i32.const 1
+    i32.const 3072
     i32.store
     i32.const 60
-    i32.const 0
+    i32.const 1
     i32.store
     i32.const 48)
   (func $post (param i32))
@@ -751,12 +852,12 @@ mod tests {
     global.set $heap
     local.get $ret)
   (func $_initialize)
-  (export "near:agent/tool@0.3.0#execute" (func $execute))
-  (export "cabi_post_near:agent/tool@0.3.0#execute" (func $post))
-  (export "near:agent/tool@0.3.0#schema" (func $schema))
-  (export "cabi_post_near:agent/tool@0.3.0#schema" (func $post))
-  (export "near:agent/tool@0.3.0#description" (func $description))
-  (export "cabi_post_near:agent/tool@0.3.0#description" (func $post))
+  (export "near:agent/tool@0.4.0#execute" (func $execute))
+  (export "cabi_post_near:agent/tool@0.4.0#execute" (func $post))
+  (export "near:agent/tool@0.4.0#schema" (func $schema))
+  (export "cabi_post_near:agent/tool@0.4.0#schema" (func $post))
+  (export "near:agent/tool@0.4.0#description" (func $description))
+  (export "cabi_post_near:agent/tool@0.4.0#description" (func $post))
   (export "cabi_realloc" (func $realloc))
   (export "_initialize" (func $_initialize))
 )
@@ -772,12 +873,12 @@ mod tests {
   (type (;2;) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
   (type (;3;) (func (param i32 i32 i32 i32 i32)))
   (type (;4;) (func (param i32 i32) (result i32)))
-  (import "near:agent/host@0.3.0" "log" (func $log (type 0)))
-  (import "near:agent/host@0.3.0" "now-millis" (func $now (type 1)))
-  (import "near:agent/host@0.3.0" "workspace-read" (func $workspace_read (type 0)))
-  (import "near:agent/host@0.3.0" "http-request" (func $http_request (type 2)))
-  (import "near:agent/host@0.3.0" "tool-invoke" (func $tool_invoke (type 3)))
-  (import "near:agent/host@0.3.0" "secret-exists" (func $secret_exists (type 4)))
+  (import "near:agent/host@0.4.0" "log" (func $log (type 0)))
+  (import "near:agent/host@0.4.0" "now-millis" (func $now (type 1)))
+  (import "near:agent/host@0.4.0" "workspace-read" (func $workspace_read (type 0)))
+  (import "near:agent/host@0.4.0" "http-request" (func $http_request (type 2)))
+  (import "near:agent/host@0.4.0" "tool-invoke" (func $tool_invoke (type 3)))
+  (import "near:agent/host@0.4.0" "secret-exists" (func $secret_exists (type 4)))
   (memory (export "memory") 1)
   (global $heap (mut i32) (i32.const 4096))
   (data (i32.const 128) "POST")
@@ -803,6 +904,7 @@ mod tests {
     i32.const 12
     i32.store
     i32.const 32)
+  ;; See SIMPLE_TOOL_WAT above for the `response` success-case layout.
   (func $execute (param i32 i32 i32 i32 i32) (result i32)
     i32.const 128
     i32.const 4
@@ -819,16 +921,13 @@ mod tests {
     call $http_request
 
     i32.const 48
-    i32.const 1
-    i32.store
-    i32.const 52
-    i32.const 3072
+    i32.const 0
     i32.store
     i32.const 56
-    i32.const 1
+    i32.const 3072
     i32.store
     i32.const 60
-    i32.const 0
+    i32.const 1
     i32.store
     i32.const 48)
   (func $post (param i32))
@@ -842,12 +941,12 @@ mod tests {
     global.set $heap
     local.get $ret)
   (func $_initialize)
-  (export "near:agent/tool@0.3.0#execute" (func $execute))
-  (export "cabi_post_near:agent/tool@0.3.0#execute" (func $post))
-  (export "near:agent/tool@0.3.0#schema" (func $schema))
-  (export "cabi_post_near:agent/tool@0.3.0#schema" (func $post))
-  (export "near:agent/tool@0.3.0#description" (func $description))
-  (export "cabi_post_near:agent/tool@0.3.0#description" (func $post))
+  (export "near:agent/tool@0.4.0#execute" (func $execute))
+  (export "cabi_post_near:agent/tool@0.4.0#execute" (func $post))
+  (export "near:agent/tool@0.4.0#schema" (func $schema))
+  (export "cabi_post_near:agent/tool@0.4.0#schema" (func $post))
+  (export "near:agent/tool@0.4.0#description" (func $description))
+  (export "cabi_post_near:agent/tool@0.4.0#description" (func $post))
   (export "cabi_realloc" (func $realloc))
   (export "_initialize" (func $_initialize))
 )

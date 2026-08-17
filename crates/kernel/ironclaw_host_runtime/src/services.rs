@@ -63,8 +63,8 @@ use ironclaw_turns::{
 use ironclaw_wasm::{
     DenyWasmHostHttp, EmptyWasmRuntimeCredentials, PreparedWitTool, WasmError,
     WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder,
-    WasmStagedRuntimeCredentials, WitToolExecution, WitToolHost, WitToolRequest, WitToolRuntime,
-    WitToolRuntimeConfig,
+    WasmStagedRuntimeCredentials, WitErrorKind, WitGuestFailure, WitToolExecution, WitToolHost,
+    WitToolOutcome, WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
 };
 use secrecy::ExposeSecret;
 

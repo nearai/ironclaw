@@ -77,27 +77,25 @@ impl WasiView for StoreData {
     }
 }
 
-impl bindings::near::agent::host::Host for StoreData {
-    fn log(&mut self, level: bindings::near::agent::host::LogLevel, message: String) {
+/// Core (binding-agnostic) implementations of the WIT `host` import surface,
+/// shared by the current (near:agent@0.4.0) and legacy (near:agent@0.3.0,
+/// removed in PR 4) `Host` trait impls below — the `host` interface itself
+/// is unchanged between the two package versions, only `tool.response`
+/// differs.
+impl StoreData {
+    fn log_core(&mut self, level: WasmLogLevel, message: String) {
         if self.logs.len() >= MAX_LOGS_PER_EXECUTION {
             return;
         }
         let message = truncate_log_message(message);
-        let level = match level {
-            bindings::near::agent::host::LogLevel::Trace => WasmLogLevel::Trace,
-            bindings::near::agent::host::LogLevel::Debug => WasmLogLevel::Debug,
-            bindings::near::agent::host::LogLevel::Info => WasmLogLevel::Info,
-            bindings::near::agent::host::LogLevel::Warn => WasmLogLevel::Warn,
-            bindings::near::agent::host::LogLevel::Error => WasmLogLevel::Error,
-        };
         self.logs.push(WasmLogRecord { level, message });
     }
 
-    fn now_millis(&mut self) -> u64 {
+    fn now_millis_core(&mut self) -> u64 {
         self.host.clock.now_millis()
     }
 
-    fn workspace_read(&mut self, path: String) -> Option<String> {
+    fn workspace_read_core(&mut self, path: String) -> Option<String> {
         if self.deadline_exceeded() {
             return None;
         }
@@ -108,14 +106,14 @@ impl bindings::near::agent::host::Host for StoreData {
         result
     }
 
-    fn http_request(
+    fn http_request_core(
         &mut self,
         method: String,
         url: String,
         headers_json: String,
         body: Option<Vec<u8>>,
         timeout_ms: Option<u32>,
-    ) -> Result<bindings::near::agent::host::HttpResponse, String> {
+    ) -> Result<(u16, String, Vec<u8>), String> {
         if let Some(error) = self.deadline_error() {
             return Err(error);
         }
@@ -134,11 +132,7 @@ impl bindings::near::agent::host::Host for StoreData {
                 if let Some(error) = self.deadline_error() {
                     return Err(error);
                 }
-                Ok(bindings::near::agent::host::HttpResponse {
-                    status: response.status,
-                    headers_json: response.headers_json,
-                    body: response.body,
-                })
+                Ok((response.status, response.headers_json, response.body))
             }
             Err(error) => {
                 if error.request_was_sent() {
@@ -149,7 +143,7 @@ impl bindings::near::agent::host::Host for StoreData {
         }
     }
 
-    fn tool_invoke(&mut self, alias: String, params_json: String) -> Result<String, String> {
+    fn tool_invoke_core(&mut self, alias: String, params_json: String) -> Result<String, String> {
         if let Some(error) = self.deadline_error() {
             return Err(error);
         }
@@ -164,7 +158,7 @@ impl bindings::near::agent::host::Host for StoreData {
         result
     }
 
-    fn secret_exists(&mut self, name: String) -> bool {
+    fn secret_exists_core(&mut self, name: String) -> bool {
         if self.deadline_exceeded() {
             return false;
         }
@@ -173,6 +167,103 @@ impl bindings::near::agent::host::Host for StoreData {
             return false;
         }
         exists
+    }
+}
+
+impl bindings::near::agent::host::Host for StoreData {
+    fn log(&mut self, level: bindings::near::agent::host::LogLevel, message: String) {
+        let level = match level {
+            bindings::near::agent::host::LogLevel::Trace => WasmLogLevel::Trace,
+            bindings::near::agent::host::LogLevel::Debug => WasmLogLevel::Debug,
+            bindings::near::agent::host::LogLevel::Info => WasmLogLevel::Info,
+            bindings::near::agent::host::LogLevel::Warn => WasmLogLevel::Warn,
+            bindings::near::agent::host::LogLevel::Error => WasmLogLevel::Error,
+        };
+        self.log_core(level, message);
+    }
+
+    fn now_millis(&mut self) -> u64 {
+        self.now_millis_core()
+    }
+
+    fn workspace_read(&mut self, path: String) -> Option<String> {
+        self.workspace_read_core(path)
+    }
+
+    fn http_request(
+        &mut self,
+        method: String,
+        url: String,
+        headers_json: String,
+        body: Option<Vec<u8>>,
+        timeout_ms: Option<u32>,
+    ) -> Result<bindings::near::agent::host::HttpResponse, String> {
+        self.http_request_core(method, url, headers_json, body, timeout_ms)
+            .map(
+                |(status, headers_json, body)| bindings::near::agent::host::HttpResponse {
+                    status,
+                    headers_json,
+                    body,
+                },
+            )
+    }
+
+    fn tool_invoke(&mut self, alias: String, params_json: String) -> Result<String, String> {
+        self.tool_invoke_core(alias, params_json)
+    }
+
+    fn secret_exists(&mut self, name: String) -> bool {
+        self.secret_exists_core(name)
+    }
+}
+
+/// Legacy 0.3.0 binding fallback — removed in PR 4. Identical behavior to
+/// the current `Host` impl above; the `host` import surface did not change
+/// between package versions, only `tool.response` did.
+impl bindings::legacy::near::agent::host::Host for StoreData {
+    fn log(&mut self, level: bindings::legacy::near::agent::host::LogLevel, message: String) {
+        let level = match level {
+            bindings::legacy::near::agent::host::LogLevel::Trace => WasmLogLevel::Trace,
+            bindings::legacy::near::agent::host::LogLevel::Debug => WasmLogLevel::Debug,
+            bindings::legacy::near::agent::host::LogLevel::Info => WasmLogLevel::Info,
+            bindings::legacy::near::agent::host::LogLevel::Warn => WasmLogLevel::Warn,
+            bindings::legacy::near::agent::host::LogLevel::Error => WasmLogLevel::Error,
+        };
+        self.log_core(level, message);
+    }
+
+    fn now_millis(&mut self) -> u64 {
+        self.now_millis_core()
+    }
+
+    fn workspace_read(&mut self, path: String) -> Option<String> {
+        self.workspace_read_core(path)
+    }
+
+    fn http_request(
+        &mut self,
+        method: String,
+        url: String,
+        headers_json: String,
+        body: Option<Vec<u8>>,
+        timeout_ms: Option<u32>,
+    ) -> Result<bindings::legacy::near::agent::host::HttpResponse, String> {
+        self.http_request_core(method, url, headers_json, body, timeout_ms)
+            .map(
+                |(status, headers_json, body)| bindings::legacy::near::agent::host::HttpResponse {
+                    status,
+                    headers_json,
+                    body,
+                },
+            )
+    }
+
+    fn tool_invoke(&mut self, alias: String, params_json: String) -> Result<String, String> {
+        self.tool_invoke_core(alias, params_json)
+    }
+
+    fn secret_exists(&mut self, name: String) -> bool {
+        self.secret_exists_core(name)
     }
 }
 
