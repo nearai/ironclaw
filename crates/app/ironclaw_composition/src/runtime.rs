@@ -3498,8 +3498,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             trajectory_observer,
             Some(tool_diagnostic_sink),
             trigger_poller.enabled,
-        )
-        .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
+        )?;
         (
             capability_host.capability_factory,
             capability_host.capability_input_resolver,

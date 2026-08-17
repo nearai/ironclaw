@@ -257,8 +257,10 @@ single-active-fire lock. Paused triggers return a distinct refusal.
 A manual claim, successful submission, failure settlement, and terminal-run
 cleanup must preserve `next_run_at` byte-for-byte and must not complete a
 one-shot trigger. Run history records `Manual` provenance. Manual identities
-use additive manual domain labels; the scheduled identity labels and digest
-input ordering remain frozen for replay compatibility. Two manual claims in
+use additive manual domain labels: `route_thread_id` uses `manual-route-thread`
+and `external_event_id` uses `manual-external-event`. The scheduled identity
+labels, version label, and digest input ordering remain frozen for replay
+compatibility. Two manual claims in
 the same timestamp resolution cannot both mint an identity because the atomic
 active-fire claim rejects the second call.
 

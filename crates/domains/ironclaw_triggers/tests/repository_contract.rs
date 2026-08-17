@@ -1410,19 +1410,18 @@ async fn libsql_migration_upgrades_run_history_identity_to_include_source() {
             tenant_id TEXT NOT NULL,
             trigger_id TEXT NOT NULL,
             fire_slot TEXT NOT NULL,
-            source TEXT NOT NULL DEFAULT 'schedule',
             run_id TEXT,
-            thread_id TEXT,
+            thread_id TEXT NOT NULL,
             status TEXT NOT NULL,
             submitted_at TEXT NOT NULL,
             completed_at TEXT,
             PRIMARY KEY (tenant_id, trigger_id, fire_slot)
         );
         INSERT INTO trigger_run_history (
-            tenant_id, trigger_id, fire_slot, source, status, submitted_at
+            tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at
         ) VALUES (
-            'tenant-a', 'trigger-a', '2026-08-18T09:00:00Z', 'schedule', 'completed',
-            '2026-08-18T09:00:01Z'
+            'tenant-a', 'trigger-a', '2026-08-18T09:00:00Z', NULL,
+            'legacy-thread', 'completed', '2026-08-18T09:00:01Z'
         );",
     )
     .await
@@ -1611,19 +1610,18 @@ async fn postgres_migration_upgrades_run_history_identity_to_include_source() {
                 tenant_id TEXT NOT NULL,
                 trigger_id TEXT NOT NULL,
                 fire_slot TEXT NOT NULL,
-                source TEXT NOT NULL DEFAULT 'schedule',
                 run_id TEXT,
-                thread_id TEXT,
+                thread_id TEXT NOT NULL,
                 status TEXT NOT NULL,
                 submitted_at TEXT NOT NULL,
                 completed_at TEXT,
                 PRIMARY KEY (tenant_id, trigger_id, fire_slot)
             );
             INSERT INTO trigger_run_history (
-                tenant_id, trigger_id, fire_slot, source, status, submitted_at
+                tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at
             ) VALUES (
-                'tenant-a', 'trigger-a', '2026-08-18T09:00:00Z', 'schedule', 'completed',
-                '2026-08-18T09:00:01Z'
+                'tenant-a', 'trigger-a', '2026-08-18T09:00:00Z', NULL,
+                'legacy-thread', 'completed', '2026-08-18T09:00:01Z'
             );",
         )
         .await
@@ -2250,9 +2248,9 @@ mod fire_claim_contract {
     // safety: these contract tests intentionally issue multiple independent repository calls;
     // atomicity is asserted inside the repository methods under test.
     use ironclaw_triggers::{
-        ClaimDueFireOutcome, ClaimDueFireRequest, FireAcceptedRequest, FirePermanentFailedRequest,
-        FireReplayedRequest, FireRetryableFailedRequest, FireTerminalFailedRequest,
-        TriggerRunHistoryStatus,
+        ClaimDueFireOutcome, ClaimDueFireRequest, ClaimManualFireRequest, FireAcceptedRequest,
+        FirePermanentFailedRequest, FireReplayedRequest, FireRetryableFailedRequest,
+        FireTerminalFailedRequest, TriggerRunHistoryStatus,
     };
 
     async fn assert_fire_claim_and_update_contract(repo: &impl TriggerRepository) {
@@ -4084,7 +4082,7 @@ mod fire_claim_contract {
         );
 
         let other_trigger_history = repo
-            .list_trigger_run_history(tenant_id, other_trigger_id, 501)
+            .list_trigger_run_history(tenant_id.clone(), other_trigger_id, 501)
             .await
             .expect("list unrelated trigger history");
         assert_eq!(other_trigger_history.len(), 1);
@@ -4096,6 +4094,68 @@ mod fire_claim_contract {
             .expect("list unrelated tenant history");
         assert_eq!(other_tenant_history.len(), 1);
         assert_eq!(other_tenant_history[0].fire_slot, base_fire_slot);
+
+        let same_slot = repo
+            .get_trigger(tenant_id.clone(), trigger_id)
+            .await
+            .expect("read retention target")
+            .expect("retention target exists")
+            .next_run_at;
+        repo.claim_manual_fire(ClaimManualFireRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            now: same_slot,
+        })
+        .await
+        .expect("claim retention-boundary manual fire");
+        let manual_run_id = TurnRunId::new();
+        repo.mark_fire_accepted(FireAcceptedRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot: same_slot,
+            run_id: manual_run_id,
+            thread_id: ThreadId::new("thread-retention-same-slot-manual").expect("valid thread id"),
+            submitted_at: same_slot,
+        })
+        .await
+        .expect("accept retention-boundary manual fire")
+        .expect("manual fire remains claimed");
+        repo.clear_active_fire(ClearActiveFireRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot: same_slot,
+            run_id: manual_run_id,
+            status: TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .expect("clear retention-boundary manual fire")
+        .expect("manual fire clears");
+        repo.claim_due_fire(ClaimDueFireRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot: same_slot,
+            now: same_slot,
+        })
+        .await
+        .expect("claim same-slot scheduled fire at retention boundary");
+        let same_slot_history = repo
+            .list_trigger_run_history(tenant_id, trigger_id, 501)
+            .await
+            .expect("list same-slot retention history");
+        assert_eq!(same_slot_history.len(), 500);
+        assert!(same_slot_history.iter().any(|run| {
+            run.fire_slot == same_slot
+                && run.source == TriggerSourceKind::Manual
+                && run.status == TriggerRunHistoryStatus::Ok
+        }));
+        assert!(
+            same_slot_history.iter().any(|run| {
+                run.fire_slot == same_slot
+                    && run.source == TriggerSourceKind::Schedule
+                    && run.status == TriggerRunHistoryStatus::Running
+            }),
+            "retention must not evict the active same-slot scheduled row"
+        );
     }
 
     async fn seed_persisted_run_history(repo: &impl TriggerRepository) -> (TenantId, TriggerId) {
@@ -4856,7 +4916,8 @@ mod manual_fire_claim_contract {
     use super::*;
     use ironclaw_triggers::{
         ClaimDueFireOutcome, ClaimDueFireRequest, ClaimManualFireRequest, ClearActiveFireRequest,
-        FireAcceptedRequest, FireRetryableFailedRequest, TriggerRunHistoryStatus,
+        FireAcceptedRequest, FirePermanentFailedRequest, FireRetryableFailedRequest,
+        FireTerminalFailedRequest, TriggerRunHistoryStatus,
     };
 
     async fn assert_manual_fire_claim_contract(repo: &impl TriggerRepository) {
@@ -4976,6 +5037,40 @@ mod manual_fire_claim_contract {
         assert_eq!(retry_record.next_run_at, scheduled_next_run_at);
         assert_eq!(retry_record.state, TriggerState::Scheduled);
 
+        let permanent_id = TriggerId::parse("01J000000000000000000000M7").expect("ulid");
+        repo.upsert_trigger(sample_record(
+            permanent_id,
+            tenant_id.clone(),
+            scheduled_next_run_at,
+        ))
+        .await
+        .expect("insert manual permanent-failure target");
+        repo.claim_manual_fire(ClaimManualFireRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id: permanent_id,
+            now,
+        })
+        .await
+        .expect("claim manual permanent-failure target");
+        let permanent_record = repo
+            .mark_fire_permanently_failed(FirePermanentFailedRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id: permanent_id,
+                fire_slot: now,
+                next_run_at: ts(1_704_196_800),
+            })
+            .await
+            .expect("mark manual permanent failure")
+            .expect("manual permanent failure updates target");
+        assert_eq!(permanent_record.next_run_at, scheduled_next_run_at);
+        assert_eq!(permanent_record.state, TriggerState::Scheduled);
+        let permanent_history = repo
+            .list_trigger_run_history(tenant_id.clone(), permanent_id, 10)
+            .await
+            .expect("list manual permanent-failure history");
+        assert_eq!(permanent_history[0].source, TriggerSourceKind::Manual);
+        assert_eq!(permanent_history[0].status, TriggerRunHistoryStatus::Error);
+
         let once_id = TriggerId::parse("01J000000000000000000000M5").expect("ulid");
         let mut once = sample_record(once_id, tenant_id.clone(), scheduled_next_run_at);
         once.schedule = TriggerSchedule::Once {
@@ -5021,6 +5116,41 @@ mod manual_fire_claim_contract {
             .expect("one-shot manual fire clears");
         assert_eq!(once_cleared.state, TriggerState::Scheduled);
         assert_eq!(once_cleared.next_run_at, scheduled_next_run_at);
+
+        let terminal_id = TriggerId::parse("01J000000000000000000000M8").expect("ulid");
+        let mut terminal_once =
+            sample_record(terminal_id, tenant_id.clone(), scheduled_next_run_at);
+        terminal_once.schedule = TriggerSchedule::Once {
+            at: scheduled_next_run_at,
+            timezone: "UTC".to_string(),
+        };
+        repo.upsert_trigger(terminal_once)
+            .await
+            .expect("insert manual terminal-failure target");
+        repo.claim_manual_fire(ClaimManualFireRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id: terminal_id,
+            now,
+        })
+        .await
+        .expect("claim manual terminal-failure target");
+        let terminal_record = repo
+            .mark_fire_terminally_failed(FireTerminalFailedRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id: terminal_id,
+                fire_slot: now,
+            })
+            .await
+            .expect("mark manual terminal failure")
+            .expect("manual terminal failure updates target");
+        assert_eq!(terminal_record.next_run_at, scheduled_next_run_at);
+        assert_eq!(terminal_record.state, TriggerState::Scheduled);
+        let terminal_history = repo
+            .list_trigger_run_history(tenant_id.clone(), terminal_id, 10)
+            .await
+            .expect("list manual terminal-failure history");
+        assert_eq!(terminal_history[0].source, TriggerSourceKind::Manual);
+        assert_eq!(terminal_history[0].status, TriggerRunHistoryStatus::Error);
 
         let paused_id = TriggerId::parse("01J000000000000000000000M2").expect("ulid");
         let mut paused = sample_record(paused_id, tenant_id.clone(), scheduled_next_run_at);

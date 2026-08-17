@@ -1039,32 +1039,55 @@ impl TriggerRepository for LibSqlTriggerRepository {
             fire_slot,
         } = request;
         let conn = self.write_connection().await?;
-        let Some(record) = fetch_record(&conn, &tenant_id, trigger_id).await? else {
+        let transaction = begin_immediate(&conn, "begin retryable trigger fire failure").await?;
+        let Some(record) = fetch_record(&transaction, &tenant_id, trigger_id).await? else {
+            rollback(
+                transaction,
+                "roll back missing retryable trigger fire failure",
+            )
+            .await?;
             return Ok(None);
         };
         if record.active_fire_slot != Some(fire_slot) {
+            rollback(
+                transaction,
+                "roll back stale retryable trigger fire failure",
+            )
+            .await?;
             return Ok(None);
         }
-        reject_failed_result_after_active_run(record.active_run_ref)?;
+        if let Err(error) = reject_failed_result_after_active_run(record.active_run_ref) {
+            rollback(
+                transaction,
+                "roll back invalid retryable trigger fire failure",
+            )
+            .await?;
+            return Err(error);
+        }
         // silent-ok: this run-history read can miss only on recovery; the
         // single-active-fire invariant keeps the active claim row reachable.
-        let source = fetch_run_source(&conn, &tenant_id, trigger_id, fire_slot)
+        let source = fetch_run_source(&transaction, &tenant_id, trigger_id, fire_slot)
             .await?
             .unwrap_or(TriggerSourceKind::Schedule);
         if source == TriggerSourceKind::Schedule
             && matches!(record.schedule, TriggerSchedule::Cron { .. })
             && record.next_run_at > fire_slot
         {
-            return Err(TriggerError::InvalidRecord {
+            let error = TriggerError::InvalidRecord {
                 kind: crate::TriggerRecordValidationKind::Other,
                 reason: "retryable fire failure must leave next_run_at at or before the failed fire slot"
                     .to_string(),
-            });
+            };
+            rollback(
+                transaction,
+                "roll back invalid retryable trigger fire cadence",
+            )
+            .await?;
+            return Err(error);
         }
 
         let fire_slot_text = fmt_ts(&fire_slot);
         let last_status = crate::status_text_codec(TriggerRunStatus::Error);
-        let transaction = begin_immediate(&conn, "begin retryable trigger fire failure").await?;
         let update_result = async {
             let mut rows = transaction
                 .query(
@@ -1137,26 +1160,55 @@ impl TriggerRepository for LibSqlTriggerRepository {
             next_run_at,
         } = request;
         let conn = self.write_connection().await?;
-        let Some(record) = fetch_record(&conn, &tenant_id, trigger_id).await? else {
+        let transaction = begin_immediate(&conn, "begin permanent trigger fire failure").await?;
+        let Some(record) = fetch_record(&transaction, &tenant_id, trigger_id).await? else {
+            rollback(
+                transaction,
+                "roll back missing permanent trigger fire failure",
+            )
+            .await?;
             return Ok(None);
         };
         if record.active_fire_slot != Some(fire_slot) {
+            rollback(
+                transaction,
+                "roll back stale permanent trigger fire failure",
+            )
+            .await?;
             return Ok(None);
         }
-        reject_failed_result_after_active_run(record.active_run_ref)?;
-        reject_non_future_next_run_at(fire_slot, next_run_at)?;
+        if let Err(error) = reject_failed_result_after_active_run(record.active_run_ref) {
+            rollback(
+                transaction,
+                "roll back invalid permanent trigger fire failure",
+            )
+            .await?;
+            return Err(error);
+        }
+        let source = fetch_run_source(&transaction, &tenant_id, trigger_id, fire_slot)
+            .await?
+            .unwrap_or(TriggerSourceKind::Schedule);
+        if source == TriggerSourceKind::Schedule
+            && let Err(error) = reject_non_future_next_run_at(fire_slot, next_run_at)
+        {
+            rollback(
+                transaction,
+                "roll back invalid permanent trigger fire cadence",
+            )
+            .await?;
+            return Err(error);
+        }
 
         let fire_slot_text = fmt_ts(&fire_slot);
         let next_run_at = fmt_ts(&next_run_at);
         let last_status = crate::status_text_codec(TriggerRunStatus::Error);
-        let transaction = begin_immediate(&conn, "begin permanent trigger fire failure").await?;
         let update_result = async {
             let mut rows = transaction
                 .query(
                     &format!(
                         "UPDATE {TRIGGER_TABLE}
                          SET last_status = ?3,
-                             next_run_at = ?5,
+                             next_run_at = CASE WHEN ?6 = 1 THEN next_run_at ELSE ?5 END,
                              active_fire_slot = NULL,
                              active_run_ref = NULL
                          WHERE tenant_id = ?1
@@ -1171,6 +1223,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                         last_status,
                         fire_slot_text,
                         next_run_at,
+                        i64::from(source == TriggerSourceKind::Manual),
                     ],
                 )
                 .await
@@ -1185,7 +1238,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 &tenant_id,
                 trigger_id,
                 fire_slot,
-                TriggerSourceKind::Schedule,
+                source,
                 None,
                 TriggerRunHistoryStatus::Error,
                 Utc::now(),
@@ -1225,12 +1278,15 @@ impl TriggerRepository for LibSqlTriggerRepository {
         let completed = crate::state_text_codec(TriggerState::Completed);
         let conn = self.write_connection().await?;
         let transaction = begin_immediate(&conn, "begin terminal trigger fire failure").await?;
+        let source = fetch_run_source(&transaction, &tenant_id, trigger_id, fire_slot)
+            .await?
+            .unwrap_or(TriggerSourceKind::Schedule);
         let update_result = async {
             let mut rows = transaction
                 .query(
                     &format!(
                         "UPDATE {TRIGGER_TABLE}
-                         SET state = ?3,
+                         SET state = CASE WHEN ?6 = 1 THEN state ELSE ?3 END,
                              last_status = ?4,
                              active_fire_slot = NULL,
                              active_run_ref = NULL
@@ -1246,6 +1302,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                         completed,
                         last_status,
                         fire_slot_text,
+                        i64::from(source == TriggerSourceKind::Manual),
                     ],
                 )
                 .await
@@ -1260,7 +1317,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 &tenant_id,
                 trigger_id,
                 fire_slot,
-                TriggerSourceKind::Schedule,
+                source,
                 None,
                 TriggerRunHistoryStatus::Error,
                 Utc::now(),
@@ -1445,7 +1502,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                     "SELECT {TRIGGER_RUN_COLUMNS}
                      FROM {TRIGGER_RUN_TABLE}
                      WHERE tenant_id = ?1 AND trigger_id = ?2
-                     ORDER BY fire_slot DESC
+                     ORDER BY fire_slot DESC, source
                      LIMIT ?3"
                 ),
                 params![tenant_id.as_str(), trigger_id.to_string(), limit],
@@ -1479,7 +1536,9 @@ impl TriggerRepository for LibSqlTriggerRepository {
             "SELECT {TRIGGER_RUN_COLUMNS}
              FROM (
                  SELECT {TRIGGER_RUN_COLUMNS},
-                        ROW_NUMBER() OVER (PARTITION BY trigger_id ORDER BY fire_slot DESC) AS row_rank
+                        ROW_NUMBER() OVER (
+                            PARTITION BY trigger_id ORDER BY fire_slot DESC, source
+                        ) AS row_rank
                  FROM {TRIGGER_RUN_TABLE}
                  WHERE tenant_id = ?1 AND trigger_id IN (SELECT value FROM json_each(?2))
              )
@@ -2071,7 +2130,9 @@ async fn prune_run_history(
                    SELECT fire_slot, source
                    FROM {TRIGGER_RUN_TABLE}
                    WHERE tenant_id = ?1 AND trigger_id = ?2
-                   ORDER BY fire_slot DESC, source
+                   ORDER BY CASE WHEN status = 'running' THEN 0 ELSE 1 END,
+                            fire_slot DESC,
+                            source
                    LIMIT ?3
                )"
         ),

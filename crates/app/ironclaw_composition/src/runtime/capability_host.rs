@@ -122,7 +122,7 @@ pub(super) fn capability_wiring(
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     tool_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
     trigger_poller_enabled: bool,
-) -> Option<CapabilityPortWiring> {
+) -> Result<CapabilityPortWiring, crate::runtime::RebornRuntimeError> {
     let runtime = services.host_runtime.clone();
     let workspace_mounts = services.workspace_mounts.clone();
     let memory_mounts = services.memory_mounts.clone();
@@ -177,7 +177,13 @@ pub(super) fn capability_wiring(
     let unavailable_capability_ids = if trigger_poller_enabled {
         HashSet::new()
     } else {
-        HashSet::from([CapabilityId::new(ironclaw_host_runtime::TRIGGER_RUN_CAPABILITY_ID).ok()?])
+        HashSet::from([
+            CapabilityId::new(ironclaw_host_runtime::TRIGGER_RUN_CAPABILITY_ID).map_err(
+                |error| crate::runtime::RebornRuntimeError::MalformedConfig {
+                    reason: format!("invalid trigger-run capability id: {error}"),
+                },
+            )?,
+        ])
     };
     // Wire the durable gate-record and host-private replay-payload stores over
     // the composition-owned scoped filesystem (same backend + per-user mount view
@@ -220,7 +226,7 @@ pub(super) fn capability_wiring(
             external_tool_catalog,
             unavailable_capability_ids,
         });
-    Some(CapabilityPortWiring {
+    Ok(CapabilityPortWiring {
         capability_factory,
         capability_input_resolver,
         capability_result_writer,

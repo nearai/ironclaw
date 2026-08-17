@@ -543,11 +543,13 @@ impl TriggerRepository for InMemoryTriggerRepository {
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
-            |record, _source| {
+            |record, source| {
                 reject_failed_result_after_active_run(record.active_run_ref)?;
-                reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
+                if source == TriggerSourceKind::Schedule {
+                    reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
+                    record.next_run_at = request.next_run_at;
+                }
                 record.last_status = Some(TriggerRunStatus::Error);
-                record.next_run_at = request.next_run_at;
                 record.active_fire_slot = None;
                 record.active_run_ref = None;
                 Ok(())
@@ -576,9 +578,11 @@ impl TriggerRepository for InMemoryTriggerRepository {
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
-            |record, _source| {
+            |record, source| {
                 reject_failed_result_after_active_run(record.active_run_ref)?;
-                record.state = TriggerState::Completed;
+                if source == TriggerSourceKind::Schedule {
+                    record.state = TriggerState::Completed;
+                }
                 record.last_status = Some(TriggerRunStatus::Error);
                 record.active_fire_slot = None;
                 record.active_run_ref = None;
@@ -711,7 +715,12 @@ impl TriggerRepository for InMemoryTriggerRepository {
             .filter(|run| run.tenant_id == tenant_id && run.trigger_id == trigger_id)
             .cloned()
             .collect::<Vec<_>>();
-        runs.sort_by_key(|run| std::cmp::Reverse(run.fire_slot));
+        runs.sort_by(|left, right| {
+            right.fire_slot.cmp(&left.fire_slot).then_with(|| {
+                crate::source_kind_text_codec(left.source)
+                    .cmp(crate::source_kind_text_codec(right.source))
+            })
+        });
         runs.truncate(limit);
         Ok(runs)
     }
@@ -743,7 +752,12 @@ impl TriggerRepository for InMemoryTriggerRepository {
                 .push(run.clone());
         }
         for runs in runs_by_trigger.values_mut() {
-            runs.sort_by_key(|run| std::cmp::Reverse(run.fire_slot));
+            runs.sort_by(|left, right| {
+                right.fire_slot.cmp(&left.fire_slot).then_with(|| {
+                    crate::source_kind_text_codec(left.source)
+                        .cmp(crate::source_kind_text_codec(right.source))
+                })
+            });
             runs.truncate(limit);
         }
         Ok(runs_by_trigger)
@@ -895,7 +909,23 @@ fn prune_run_history_locked(
         .filter(|key| key.tenant_id == *tenant_id && key.trigger_id == trigger_id)
         .cloned()
         .collect::<Vec<_>>();
-    keys.sort_by_key(|key| std::cmp::Reverse(key.fire_slot));
+    keys.sort_by(|left, right| {
+        let left_running = state
+            .runs
+            .get(left)
+            .is_some_and(|run| run.status == TriggerRunHistoryStatus::Running);
+        let right_running = state
+            .runs
+            .get(right)
+            .is_some_and(|run| run.status == TriggerRunHistoryStatus::Running);
+        right_running
+            .cmp(&left_running)
+            .then_with(|| right.fire_slot.cmp(&left.fire_slot))
+            .then_with(|| {
+                crate::source_kind_text_codec(left.source)
+                    .cmp(crate::source_kind_text_codec(right.source))
+            })
+    });
     for key in keys.into_iter().skip(MAX_TRIGGER_RUN_HISTORY_RETAINED) {
         state.runs.remove(&key);
     }

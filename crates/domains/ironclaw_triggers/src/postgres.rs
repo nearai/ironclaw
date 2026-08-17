@@ -909,17 +909,36 @@ impl TriggerRepository for PostgresTriggerRepository {
             return Ok(None);
         }
         reject_failed_result_after_active_run(record.active_run_ref)?;
-        reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
+        let fire_slot = fmt_ts(&request.fire_slot);
+        let source = tx
+            .query_opt(
+                &format!("SELECT source FROM {TRIGGER_RUN_TABLE} WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3 AND status = $4"),
+                &[
+                    &request.tenant_id.as_str(),
+                    &trigger_id,
+                    &fire_slot,
+                    &trigger_run_history_status_text(TriggerRunHistoryStatus::Running),
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("read permanent trigger fire source", error))?
+            .map(|row| required_text(&row, "source"))
+            .transpose()?
+            .map(|value| crate::parse_source_kind_codec(&value))
+            .transpose()?
+            .unwrap_or(TriggerSourceKind::Schedule);
+        if source == TriggerSourceKind::Schedule {
+            reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
+        }
 
         let last_status = crate::status_text_codec(TriggerRunStatus::Error);
         let next_run_at = fmt_ts(&request.next_run_at);
-        let fire_slot = fmt_ts(&request.fire_slot);
         let row = tx
             .query_one(
                 &format!(
                     "UPDATE {TRIGGER_TABLE}
                      SET last_status = $3,
-                         next_run_at = $4,
+                         next_run_at = CASE WHEN $6 THEN next_run_at ELSE $4 END,
                          active_fire_slot = NULL,
                          active_run_ref = NULL
                      WHERE tenant_id = $1
@@ -934,6 +953,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                     &last_status,
                     &next_run_at,
                     &fire_slot,
+                    &(source == TriggerSourceKind::Manual),
                 ],
             )
             .await
@@ -944,7 +964,7 @@ impl TriggerRepository for PostgresTriggerRepository {
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
-            TriggerSourceKind::Schedule,
+            source,
             None,
             TriggerRunHistoryStatus::Error,
             Utc::now(),
@@ -978,11 +998,28 @@ impl TriggerRepository for PostgresTriggerRepository {
         let last_status = crate::status_text_codec(TriggerRunStatus::Error);
         let completed = crate::state_text_codec(TriggerState::Completed);
         let fire_slot = fmt_ts(&request.fire_slot);
+        let source = tx
+            .query_opt(
+                &format!("SELECT source FROM {TRIGGER_RUN_TABLE} WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3 AND status = $4"),
+                &[
+                    &request.tenant_id.as_str(),
+                    &trigger_id,
+                    &fire_slot,
+                    &trigger_run_history_status_text(TriggerRunHistoryStatus::Running),
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("read terminal trigger fire source", error))?
+            .map(|row| required_text(&row, "source"))
+            .transpose()?
+            .map(|value| crate::parse_source_kind_codec(&value))
+            .transpose()?
+            .unwrap_or(TriggerSourceKind::Schedule);
         let row = tx
             .query_opt(
                 &format!(
                     "UPDATE {TRIGGER_TABLE}
-                     SET state = $3,
+                     SET state = CASE WHEN $6 THEN state ELSE $3 END,
                          last_status = $4,
                          active_fire_slot = NULL,
                          active_run_ref = NULL
@@ -998,6 +1035,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                     &completed,
                     &last_status,
                     &fire_slot,
+                    &(source == TriggerSourceKind::Manual),
                 ],
             )
             .await
@@ -1014,7 +1052,7 @@ impl TriggerRepository for PostgresTriggerRepository {
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
-            TriggerSourceKind::Schedule,
+            source,
             None,
             TriggerRunHistoryStatus::Error,
             Utc::now(),
@@ -1194,7 +1232,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                     "SELECT {TRIGGER_RUN_COLUMNS}
                      FROM {TRIGGER_RUN_TABLE}
                      WHERE tenant_id = $1 AND trigger_id = $2
-                     ORDER BY fire_slot DESC
+                     ORDER BY fire_slot DESC, source
                      LIMIT $3"
                 ),
                 &[&tenant_id.as_str(), &trigger_id.to_string(), &limit],
@@ -1226,7 +1264,9 @@ impl TriggerRepository for PostgresTriggerRepository {
                     "SELECT {TRIGGER_RUN_COLUMNS}
                      FROM (
                          SELECT {TRIGGER_RUN_COLUMNS},
-                                ROW_NUMBER() OVER (PARTITION BY trigger_id ORDER BY fire_slot DESC) AS row_rank
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY trigger_id ORDER BY fire_slot DESC, source
+                                ) AS row_rank
                          FROM {TRIGGER_RUN_TABLE}
                          WHERE tenant_id = $1 AND trigger_id = ANY($2::text[])
                      ) AS ranked_trigger_run_history
@@ -1477,7 +1517,9 @@ async fn prune_run_history(
                        SELECT fire_slot, source
                        FROM {TRIGGER_RUN_TABLE}
                        WHERE tenant_id = $1 AND trigger_id = $2
-                       ORDER BY fire_slot DESC, source
+                       ORDER BY CASE WHEN status = 'running' THEN 0 ELSE 1 END,
+                                fire_slot DESC,
+                                source
                        LIMIT $3
                    )"
             ),
