@@ -2005,7 +2005,9 @@ async fn fetch_run_source(
             &format!(
                 "SELECT source FROM {TRIGGER_RUN_TABLE}
                  WHERE tenant_id = ?1 AND trigger_id = ?2 AND fire_slot = ?3
-                   AND status = ?4"
+                   AND status = ?4
+                 ORDER BY submitted_at DESC, source DESC
+                 LIMIT 1"
             ),
             params![
                 tenant_id.as_str(),
@@ -2029,6 +2031,27 @@ async fn upsert_run_history(
     conn: &libsql::Connection,
     run: &TriggerRunRecord,
 ) -> Result<(), TriggerError> {
+    if run.status == TriggerRunHistoryStatus::Running {
+        conn.execute(
+            &format!(
+                "UPDATE {TRIGGER_RUN_TABLE}
+                 SET status = ?5, completed_at = COALESCE(completed_at, ?6)
+                 WHERE tenant_id = ?1 AND trigger_id = ?2 AND fire_slot = ?3
+                   AND source != ?4 AND status = ?7"
+            ),
+            params![
+                run.tenant_id.as_str(),
+                run.trigger_id.to_string(),
+                fmt_ts(&run.fire_slot),
+                crate::source_kind_text_codec(run.source),
+                trigger_run_history_status_text(TriggerRunHistoryStatus::Error),
+                fmt_ts(&run.submitted_at),
+                trigger_run_history_status_text(TriggerRunHistoryStatus::Running),
+            ],
+        )
+        .await
+        .map_err(|error| backend_error("retire stale trigger run source", error))?;
+    }
     conn.execute(
         &format!(
             "INSERT INTO {TRIGGER_RUN_TABLE} (

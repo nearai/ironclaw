@@ -817,25 +817,14 @@ impl TriggerRepository for PostgresTriggerRepository {
         }
         reject_failed_result_after_active_run(record.active_run_ref)?;
         let fire_slot = fmt_ts(&request.fire_slot);
-        // silent-ok: this run-history read can miss only on recovery; the
-        // single-active-fire invariant keeps the active claim row reachable.
-        let source = tx
-            .query_opt(
-                &format!("SELECT source FROM {TRIGGER_RUN_TABLE} WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3 AND status = $4"),
-                &[
-                    &request.tenant_id.as_str(),
-                    &trigger_id,
-                    &fire_slot,
-                    &trigger_run_history_status_text(TriggerRunHistoryStatus::Running),
-                ],
-            )
-            .await
-            .map_err(|error| backend_error("read retryable trigger fire source", error))?
-            .map(|row| required_text(&row, "source"))
-            .transpose()?
-            .map(|value| crate::parse_source_kind_codec(&value))
-            .transpose()?
-            .unwrap_or(TriggerSourceKind::Schedule);
+        let source = fetch_running_run_source_or_schedule(
+            &tx,
+            request.tenant_id.as_str(),
+            &trigger_id,
+            &fire_slot,
+            "read retryable trigger fire source",
+        )
+        .await?;
         if source == TriggerSourceKind::Schedule
             && matches!(record.schedule, TriggerSchedule::Cron { .. })
             && record.next_run_at > request.fire_slot
@@ -910,23 +899,14 @@ impl TriggerRepository for PostgresTriggerRepository {
         }
         reject_failed_result_after_active_run(record.active_run_ref)?;
         let fire_slot = fmt_ts(&request.fire_slot);
-        let source = tx
-            .query_opt(
-                &format!("SELECT source FROM {TRIGGER_RUN_TABLE} WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3 AND status = $4"),
-                &[
-                    &request.tenant_id.as_str(),
-                    &trigger_id,
-                    &fire_slot,
-                    &trigger_run_history_status_text(TriggerRunHistoryStatus::Running),
-                ],
-            )
-            .await
-            .map_err(|error| backend_error("read permanent trigger fire source", error))?
-            .map(|row| required_text(&row, "source"))
-            .transpose()?
-            .map(|value| crate::parse_source_kind_codec(&value))
-            .transpose()?
-            .unwrap_or(TriggerSourceKind::Schedule);
+        let source = fetch_running_run_source_or_schedule(
+            &tx,
+            request.tenant_id.as_str(),
+            &trigger_id,
+            &fire_slot,
+            "read permanent trigger fire source",
+        )
+        .await?;
         if source == TriggerSourceKind::Schedule {
             reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
         }
@@ -998,23 +978,14 @@ impl TriggerRepository for PostgresTriggerRepository {
         let last_status = crate::status_text_codec(TriggerRunStatus::Error);
         let completed = crate::state_text_codec(TriggerState::Completed);
         let fire_slot = fmt_ts(&request.fire_slot);
-        let source = tx
-            .query_opt(
-                &format!("SELECT source FROM {TRIGGER_RUN_TABLE} WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3 AND status = $4"),
-                &[
-                    &request.tenant_id.as_str(),
-                    &trigger_id,
-                    &fire_slot,
-                    &trigger_run_history_status_text(TriggerRunHistoryStatus::Running),
-                ],
-            )
-            .await
-            .map_err(|error| backend_error("read terminal trigger fire source", error))?
-            .map(|row| required_text(&row, "source"))
-            .transpose()?
-            .map(|value| crate::parse_source_kind_codec(&value))
-            .transpose()?
-            .unwrap_or(TriggerSourceKind::Schedule);
+        let source = fetch_running_run_source_or_schedule(
+            &tx,
+            request.tenant_id.as_str(),
+            &trigger_id,
+            &fire_slot,
+            "read terminal trigger fire source",
+        )
+        .await?;
         let row = tx
             .query_opt(
                 &format!(
@@ -1091,25 +1062,14 @@ impl TriggerRepository for PostgresTriggerRepository {
             return Ok(None);
         }
         let fire_slot = fmt_ts(&request.fire_slot);
-        // silent-ok: this run-history read can miss only on recovery; the
-        // single-active-fire invariant keeps the active claim row reachable.
-        let source = tx
-            .query_opt(
-                &format!("SELECT source FROM {TRIGGER_RUN_TABLE} WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3 AND status = $4"),
-                &[
-                    &request.tenant_id.as_str(),
-                    &trigger_id,
-                    &fire_slot,
-                    &trigger_run_history_status_text(TriggerRunHistoryStatus::Running),
-                ],
-            )
-            .await
-            .map_err(|error| backend_error("read clearing trigger fire source", error))?
-            .map(|row| required_text(&row, "source"))
-            .transpose()?
-            .map(|value| crate::parse_source_kind_codec(&value))
-            .transpose()?
-            .unwrap_or(TriggerSourceKind::Schedule);
+        let source = fetch_running_run_source_or_schedule(
+            &tx,
+            request.tenant_id.as_str(),
+            &trigger_id,
+            &fire_slot,
+            "read clearing trigger fire source",
+        )
+        .await?;
         // Manual completion must not consume a once trigger or alter cadence.
         let next_slot = if source == TriggerSourceKind::Schedule {
             current.schedule.next_slot_after(request.fire_slot)?
@@ -1305,6 +1265,41 @@ async fn locked_record(
     row.map(|row| row_to_record(&row)).transpose()
 }
 
+async fn fetch_running_run_source_or_schedule(
+    client: &tokio_postgres::Transaction<'_>,
+    tenant_id: &str,
+    trigger_id: &str,
+    fire_slot: &str,
+    operation: &'static str,
+) -> Result<TriggerSourceKind, TriggerError> {
+    let source = client
+        .query_opt(
+            &format!(
+                "SELECT source FROM {TRIGGER_RUN_TABLE}
+                 WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3
+                   AND status = $4
+                 ORDER BY submitted_at DESC, source DESC
+                 LIMIT 1"
+            ),
+            &[
+                &tenant_id,
+                &trigger_id,
+                &fire_slot,
+                &trigger_run_history_status_text(TriggerRunHistoryStatus::Running),
+            ],
+        )
+        .await
+        .map_err(|error| backend_error(operation, error))?
+        .map(|row| required_text(&row, "source"))
+        .transpose()?
+        .map(|value| crate::parse_source_kind_codec(&value))
+        .transpose()?;
+    // silent-ok: settlement and recovery may encounter legacy active-fire
+    // state without a matching Running history row; scheduled semantics are
+    // the conservative compatibility default for that missing provenance.
+    Ok(source.unwrap_or(TriggerSourceKind::Schedule))
+}
+
 async fn mark_successful_fire_result(
     tx: &tokio_postgres::Transaction<'_>,
     update: SuccessfulFireResultUpdate<'_>,
@@ -1320,29 +1315,14 @@ async fn mark_successful_fire_result(
         return Ok(SuccessfulFireResultOutcome::AlreadyRecorded(current));
     }
     let fire_slot_text = fmt_ts(&update.fire_slot);
-    // silent-ok: this run-history read can miss only on recovery; the
-    // single-active-fire invariant keeps the active claim row reachable.
-    let source = tx
-        .query_opt(
-            &format!(
-                "SELECT source FROM {TRIGGER_RUN_TABLE}
-                 WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3
-                   AND status = $4"
-            ),
-            &[
-                &update.tenant_id,
-                &update.trigger_id,
-                &fire_slot_text,
-                &trigger_run_history_status_text(TriggerRunHistoryStatus::Running),
-            ],
-        )
-        .await
-        .map_err(|error| backend_error("read claimed trigger fire source", error))?
-        .map(|row| required_text(&row, "source"))
-        .transpose()?
-        .map(|value| crate::parse_source_kind_codec(&value))
-        .transpose()?
-        .unwrap_or(TriggerSourceKind::Schedule);
+    let source = fetch_running_run_source_or_schedule(
+        tx,
+        update.tenant_id,
+        update.trigger_id,
+        &fire_slot_text,
+        "read claimed trigger fire source",
+    )
+    .await?;
     let next_run_at = if source == TriggerSourceKind::Schedule {
         current.schedule.next_slot_after(update.fire_slot)?
     } else {
@@ -1418,6 +1398,28 @@ async fn upsert_run_history(
     let submitted_at = fmt_ts(&run.submitted_at);
     let completed_at = run.completed_at.as_ref().map(fmt_ts);
     let source = crate::source_kind_text_codec(run.source);
+    if run.status == TriggerRunHistoryStatus::Running {
+        client
+            .execute(
+                &format!(
+                    "UPDATE {TRIGGER_RUN_TABLE}
+                     SET status = $5, completed_at = COALESCE(completed_at, $6)
+                     WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3
+                       AND source != $4 AND status = $7"
+                ),
+                &[
+                    &run.tenant_id.as_str(),
+                    &run.trigger_id.to_string(),
+                    &fmt_ts(&run.fire_slot),
+                    &source,
+                    &trigger_run_history_status_text(TriggerRunHistoryStatus::Error),
+                    &submitted_at,
+                    &trigger_run_history_status_text(TriggerRunHistoryStatus::Running),
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("retire stale trigger run source", error))?;
+    }
     client
         .execute(
             &format!(

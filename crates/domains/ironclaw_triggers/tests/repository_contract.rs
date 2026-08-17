@@ -5279,6 +5279,78 @@ mod manual_fire_claim_contract {
         }));
     }
 
+    async fn assert_stale_manual_run_does_not_change_scheduled_settlement(
+        repo: &impl TriggerRepository,
+    ) {
+        let fire_slot = ts(1_704_067_200);
+        let tenant_id = tenant("tenant-stale-manual-same-slot");
+        let trigger_id = TriggerId::parse("01J000000000000000000000M9").expect("ulid");
+        repo.upsert_trigger(sample_record(trigger_id, tenant_id.clone(), fire_slot))
+            .await
+            .expect("insert stale-manual target");
+        repo.claim_manual_fire(ClaimManualFireRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            now: fire_slot,
+        })
+        .await
+        .expect("claim stale manual fire");
+
+        let mut record = repo
+            .get_trigger(tenant_id.clone(), trigger_id)
+            .await
+            .expect("read stale-manual target")
+            .expect("stale-manual target exists");
+        record.active_fire_slot = None;
+        record.active_run_ref = None;
+        repo.upsert_trigger(record)
+            .await
+            .expect("simulate a stale manual running row");
+
+        assert!(matches!(
+            repo.claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("claim scheduled fire after stale manual row"),
+            ClaimDueFireOutcome::Claimed(_)
+        ));
+        let settled = repo
+            .mark_fire_accepted(FireAcceptedRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                run_id: TurnRunId::new(),
+                thread_id: ThreadId::new("01890f0f-aa01-7000-8000-000000000074")
+                    .expect("valid thread id"),
+                submitted_at: fire_slot,
+            })
+            .await
+            .expect("settle scheduled fire after stale manual row")
+            .expect("scheduled fire remains claimed");
+        assert!(
+            settled.next_run_at > fire_slot,
+            "the current scheduled source must win over stale manual history"
+        );
+
+        let history = repo
+            .list_trigger_run_history(tenant_id, trigger_id, 10)
+            .await
+            .expect("list stale-manual history");
+        assert!(history.iter().any(|run| {
+            run.source == TriggerSourceKind::Manual
+                && run.status == TriggerRunHistoryStatus::Error
+                && run.completed_at.is_some()
+        }));
+        assert!(history.iter().any(|run| {
+            run.source == TriggerSourceKind::Schedule
+                && run.status == TriggerRunHistoryStatus::Running
+        }));
+    }
+
     #[tokio::test]
     async fn in_memory_manual_fire_claim() {
         assert_manual_fire_claim_contract(&InMemoryTriggerRepository::default()).await;
@@ -5323,6 +5395,31 @@ mod manual_fire_claim_contract {
         let repo = PostgresTriggerRepository::new(pool.clone());
         repo.run_migrations().await.expect("run migrations");
         assert_manual_and_scheduled_same_slot_remain_distinct(&repo).await;
+        super::clear_postgres_triggers(&pool).await;
+    }
+
+    #[tokio::test]
+    async fn in_memory_stale_manual_run_does_not_change_scheduled_settlement() {
+        assert_stale_manual_run_does_not_change_scheduled_settlement(
+            &InMemoryTriggerRepository::default(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn libsql_stale_manual_run_does_not_change_scheduled_settlement() {
+        let (_dir, repo) = super::build_libsql_repo().await;
+        assert_stale_manual_run_does_not_change_scheduled_settlement(&repo).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_stale_manual_run_does_not_change_scheduled_settlement() {
+        let Some((_container, pool)) = super::postgres_pool_or_skip().await else {
+            return;
+        };
+        let repo = PostgresTriggerRepository::new(pool.clone());
+        repo.run_migrations().await.expect("run migrations");
+        assert_stale_manual_run_does_not_change_scheduled_settlement(&repo).await;
         super::clear_postgres_triggers(&pool).await;
     }
 }

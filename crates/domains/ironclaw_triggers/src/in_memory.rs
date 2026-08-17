@@ -337,6 +337,14 @@ impl TriggerRepository for InMemoryTriggerRepository {
         record.active_fire_slot = Some(request.fire_slot);
         record.active_run_ref = None;
         let record = record.clone();
+        retire_stale_running_sources(
+            &mut state,
+            &request.tenant_id,
+            request.trigger_id,
+            request.fire_slot,
+            TriggerSourceKind::Schedule,
+            request.now,
+        );
         state.runs.insert(
             TriggerRunRepositoryKey::new(
                 &request.tenant_id,
@@ -389,6 +397,14 @@ impl TriggerRepository for InMemoryTriggerRepository {
         record.active_fire_slot = Some(request.now);
         record.active_run_ref = None;
         let record = record.clone();
+        retire_stale_running_sources(
+            &mut state,
+            &request.tenant_id,
+            request.trigger_id,
+            request.now,
+            TriggerSourceKind::Manual,
+            request.now,
+        );
         state.runs.insert(
             TriggerRunRepositoryKey::new(
                 &request.tenant_id,
@@ -888,14 +904,40 @@ fn active_run_source(
     state
         .runs
         .values()
-        .find(|run| {
+        .filter(|run| {
             run.tenant_id == *tenant_id
                 && run.trigger_id == trigger_id
                 && run.fire_slot == fire_slot
                 && run.status == TriggerRunHistoryStatus::Running
                 && run.completed_at.is_none()
         })
+        .max_by_key(|run| {
+            (
+                run.submitted_at,
+                u8::from(run.source == TriggerSourceKind::Schedule),
+            )
+        })
         .map(|run| run.source)
+}
+
+fn retire_stale_running_sources(
+    state: &mut InMemoryTriggerRepositoryState,
+    tenant_id: &TenantId,
+    trigger_id: TriggerId,
+    fire_slot: Timestamp,
+    claimed_source: TriggerSourceKind,
+    retired_at: Timestamp,
+) {
+    for run in state.runs.values_mut().filter(|run| {
+        run.tenant_id == *tenant_id
+            && run.trigger_id == trigger_id
+            && run.fire_slot == fire_slot
+            && run.source != claimed_source
+            && run.status == TriggerRunHistoryStatus::Running
+    }) {
+        run.status = TriggerRunHistoryStatus::Error;
+        run.completed_at = Some(retired_at);
+    }
 }
 
 fn prune_run_history_locked(

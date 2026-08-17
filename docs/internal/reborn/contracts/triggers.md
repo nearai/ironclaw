@@ -442,11 +442,12 @@ active-fire claim and does not become an in-flight sentinel.
 
 V1 also persists bounded per-trigger run-history rows for product-surface inspection:
 
-- each row is scoped by `(tenant_id, trigger_id, fire_slot)` and records the
+- each row is scoped by `(tenant_id, trigger_id, fire_slot, source)` and records the
   deterministic trigger route thread id, optional submitted `TurnRunId`,
   status, `submitted_at`, and optional `completed_at`;
 - `Running` means the fire was claimed or submitted and no terminal cleanup has
-  completed for that `fire_slot`;
+  completed for that `fire_slot` and source. Claiming the same slot from the
+  other source retires any stale `Running` row before recording the new claim;
 - `Ok` means active-run cleanup observed a completed terminal turn and cleared
   the exact active fire;
 - `Error` means poller-owned claim or submit processing failed before an active
@@ -455,7 +456,9 @@ V1 also persists bounded per-trigger run-history rows for product-surface inspec
 - list APIs return newest rows first and clamp caller limits to the repository
   maximum. A zero limit returns no rows. User-facing list paths must use the
   batched repository query when loading histories for multiple triggers;
-- durable repositories retain only the newest 500 run-history rows per trigger.
+- durable repositories retain at most 500 run-history rows per trigger,
+  retaining `Running` rows before completed rows and then the newest fire slots
+  with a deterministic source tie-break.
 
 Run-history rows are observational. They must not be used as the idempotency
 ledger for fire replay; deterministic fire identity and the trusted conversation
