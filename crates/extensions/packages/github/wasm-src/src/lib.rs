@@ -25,14 +25,17 @@ impl exports::near::agent::tool::Guest for GitHubTool {
     fn execute(req: exports::near::agent::tool::Request) -> exports::near::agent::tool::Response {
         match dispatch::execute_inner(&req.params, req.context.as_deref()) {
             Ok(result) => exports::near::agent::tool::Response::Success(result),
-            Err(error) => exports::near::agent::tool::Response::Failure(
-                exports::near::agent::tool::GuestFailure {
-                    kind: guest_error_kind(&error),
-                    code: Some(error),
-                    message: None,
-                    retry_after_ms: None,
-                },
-            ),
+            Err(error) => {
+                let message = request::take_last_error_message();
+                exports::near::agent::tool::Response::Failure(
+                    exports::near::agent::tool::GuestFailure {
+                        kind: guest_error_kind(&error),
+                        code: Some(error),
+                        message,
+                        retry_after_ms: None,
+                    },
+                )
+            }
         }
     }
 

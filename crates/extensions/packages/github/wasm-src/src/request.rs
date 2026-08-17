@@ -5,6 +5,41 @@ const GITHUB_API_VERSION: &str = "2026-03-10";
 #[cfg(not(test))]
 const HTTP_TIMEOUT_MS: u32 = 10_000;
 
+thread_local! {
+    /// The provider's bounded `message` field from the most recent `401`
+    /// GitHub API response body, if any. `github_request` stashes it here
+    /// immediately before returning its `Err(code)` so `lib.rs::execute`
+    /// can attach it to the typed `guest-failure.message` alongside the
+    /// stable `code` for the auth-required diagnostic the host carries onto
+    /// the auth gate — the host scrubs and bounds it before it becomes
+    /// guest-visible, so this only needs to carry the raw text out. Scoped
+    /// to `401` only: other provider error bodies are not validated end to
+    /// end onto a model-visible surface and echoing them verbatim would
+    /// widen what a guest-authored response body can put in front of the
+    /// model without the same scrutiny.
+    static LAST_ERROR_MESSAGE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Take (and clear) the provider message captured alongside the most recent
+/// `github_request` error, if any.
+pub(crate) fn take_last_error_message() -> Option<String> {
+    LAST_ERROR_MESSAGE.with(|cell| cell.borrow_mut().take())
+}
+
+#[cfg(not(test))]
+fn set_last_error_message(body: &[u8]) {
+    let message = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+    LAST_ERROR_MESSAGE.with(|cell| *cell.borrow_mut() = message);
+}
+
 #[cfg(not(test))]
 pub(crate) fn github_request(
     method: &str,
@@ -44,6 +79,10 @@ pub(crate) fn github_request(
 
     if response.status == 422 && is_github_validation_error_body(&response.body) {
         return Err("github_api_error_status_422_validation".to_string());
+    }
+
+    if response.status == 401 {
+        set_last_error_message(&response.body);
     }
 
     Err(format!("github_api_error_status_{}", response.status))
