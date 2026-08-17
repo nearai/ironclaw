@@ -80,5 +80,5 @@ cargo test -p ironclaw_architecture_tests
   sibling `CLAUDE.md` is a symlink alias of it).
 - Family boundary: [`../AGENTS.md`](../AGENTS.md).
 - Design record: PROPOSAL §6.3.2;
-  `docs/reborn/target-architecture/families/events.md`; storage-placement
-  rule: `docs/reborn/contracts/storage-placement.md`.
+  `docs/internal/reborn/target-architecture/families/events.md`; storage-placement
+  rule: `docs/internal/reborn/contracts/storage-placement.md`.

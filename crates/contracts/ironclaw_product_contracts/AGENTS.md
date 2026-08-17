@@ -5,7 +5,7 @@ Orientation and public surface: [`README.md`](./README.md). Family boundary
 and admission test: [`../AGENTS.md`](../AGENTS.md). Carved out of
 `ironclaw_host_api` (and `ironclaw_extension_contracts`) by WS1.4 of the
 target architecture (PROPOSAL §6.1.3,
-`docs/reborn/target-architecture/families/contracts.md`).
+`docs/internal/reborn/target-architecture/families/contracts.md`).
 
 ## What belongs here
 

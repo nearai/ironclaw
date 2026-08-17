@@ -12,8 +12,11 @@
 //! - [`RuntimeEvent`] / [`RuntimeEventKind`] are redacted event shapes.
 //!   Constructors collapse unsafe error categories into `Unclassified` and
 //!   keep only bounded, sanitized display summaries.
-//! - [`EventSink`] / [`AuditSink`] are best-effort delivery traits. Failures
-//!   are recorded but must not alter runtime or control-plane outcomes.
+//! - [`EventSink`] / [`AuditSink`] are best-effort delivery traits. Runtime-
+//!   critical producers require [`NonBlockingEventSink`] explicitly so an
+//!   async-only sink cannot be wired into a path that must never wait.
+//!   Failures are recorded but must not alter runtime or control-plane
+//!   outcomes.
 //! - [`DurableEventLog`] / [`DurableAuditLog`] are explicit-error append-log
 //!   traits with a monotonic per-stream [`EventCursor`] and replay-after
 //!   semantics. Append failures are propagated; replay against a cursor older
@@ -48,8 +51,8 @@ pub use in_memory::{
     InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
 };
 pub use runtime_event::{
-    RuntimeEvent, RuntimeEventId, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND,
-    UNCLASSIFIED_HOOK_LABEL, deserialize_trusted_runtime_event,
+    MAX_RUNTIME_EVENT_DURATION_MS, RuntimeEvent, RuntimeEventId, RuntimeEventKind,
+    UNCLASSIFIED_ERROR_KIND, UNCLASSIFIED_HOOK_LABEL, deserialize_trusted_runtime_event,
     runtime_event_from_trusted_json_slice, runtime_event_from_trusted_json_str,
     sanitize_error_kind, sanitize_error_summary, sanitize_hook_id, sanitize_hook_label,
     sanitize_recovery_label,
@@ -60,4 +63,5 @@ pub use security_audit::{
 };
 pub use sink::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
+    NonBlockingEventSink,
 };

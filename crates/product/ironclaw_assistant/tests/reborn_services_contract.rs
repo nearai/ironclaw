@@ -127,8 +127,7 @@ use ironclaw_host_api::product_adapter::{
 };
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
-    SanitizedFailure, SourceBindingRef, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope,
-    TurnStatus,
+    SanitizedFailure, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
@@ -165,7 +164,8 @@ use ironclaw_product_contracts::operator_llm::{
     ActiveModelReader, CodexLoginStart, LlmActiveSelection, LlmConfigService,
     LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
     LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
-    NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    NearAiWalletLoginResult, SetActiveLlmRequest, SetUserModelPreferenceRequest,
+    UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference,
 };
 use ironclaw_product_contracts::operator_service::{
     OperatorLogsService, OperatorServiceLifecycleService, OperatorStatusService,
@@ -590,14 +590,6 @@ impl FakeTurnCoordinator {
         self.run_state_requests.lock().expect("lock").len()
     }
 
-    fn last_resumption_source_binding_ref(&self) -> Option<String> {
-        self.resumptions
-            .lock()
-            .expect("lock")
-            .last()
-            .map(|request| request.source_binding_ref.as_str().to_string())
-    }
-
     fn last_resumption_precondition(&self) -> Option<ResumeTurnPrecondition> {
         self.resumptions
             .lock()
@@ -688,7 +680,6 @@ impl TurnCoordinator for FakeTurnCoordinator {
             resolved_run_profile_version: RunProfileVersion::new(1),
             event_cursor: EventCursor(7),
             accepted_message_ref: request.accepted_message_ref,
-            reply_target_binding_ref: request.reply_target_binding_ref,
         })
     }
 
@@ -758,14 +749,12 @@ impl TurnCoordinator for FakeTurnCoordinator {
             run_id,
             status,
             accepted_message_ref: AcceptedMessageRef::new("msg:replayed").expect("valid ref"),
-            source_binding_ref: SourceBindingRef::new("webui-src:replayed").expect("valid ref"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("webui-reply:replayed")
-                .expect("valid ref"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             allow_steering: true,
             resolved_model_route: self.run_state_model_route.lock().expect("lock").clone(),
             model_usage: *self.run_state_usage.lock().expect("lock"),
+            execution_outcome: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref,
@@ -833,7 +822,6 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
             resolved_run_profile_version: RunProfileVersion::new(1),
             event_cursor: EventCursor(23),
             accepted_message_ref: request.accepted_message_ref,
-            reply_target_binding_ref: request.reply_target_binding_ref,
         })
     }
 
@@ -863,15 +851,12 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
             run_id: request.run_id,
             status: TurnStatus::Queued,
             accepted_message_ref: AcceptedMessageRef::new("msg:blocked-submit").expect("valid ref"),
-            source_binding_ref: SourceBindingRef::new("webui-src:blocked-submit")
-                .expect("valid ref"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("webui-reply:blocked-submit")
-                .expect("valid ref"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             allow_steering: true,
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
@@ -2326,6 +2311,7 @@ impl SessionThreadService for ScriptedThreadService {
                     message_id: *message_id,
                     sequence: 1,
                     idempotent_replay: false,
+                    replay_metadata: Default::default(),
                 })
             }
             _ => scripted_stub_unreachable("accept_inbound_message"),
@@ -2348,6 +2334,7 @@ impl SessionThreadService for ScriptedThreadService {
                     source_binding_id: Some(request.source_binding_id),
                     reply_target_binding_id: Some("webui-reply:replayed".to_string()),
                     turn_run_id: turn_run_id.clone(),
+                    replay_metadata: Default::default(),
                 }))
             }
             ScriptedThreadBehavior::RejectedBusyReplay => Ok(Some(AcceptedInboundMessageReplay {
@@ -2360,6 +2347,7 @@ impl SessionThreadService for ScriptedThreadService {
                 source_binding_id: Some(request.source_binding_id),
                 reply_target_binding_id: Some("webui-reply:replayed".to_string()),
                 turn_run_id: None,
+                replay_metadata: Default::default(),
             })),
             ScriptedThreadBehavior::RejectedBusyMarkFails { message_id } => {
                 // replay_webui_send_message probes with two source-binding variants
@@ -2384,6 +2372,7 @@ impl SessionThreadService for ScriptedThreadService {
                         source_binding_id: Some(request.source_binding_id),
                         reply_target_binding_id: Some("webui-reply:replayed".to_string()),
                         turn_run_id: None,
+                        replay_metadata: Default::default(),
                     }))
                 }
             }
@@ -2409,6 +2398,7 @@ impl SessionThreadService for ScriptedThreadService {
                         source_binding_id: Some(request.source_binding_id),
                         reply_target_binding_id: Some("webui-reply:replayed".to_string()),
                         turn_run_id: None,
+                        replay_metadata: Default::default(),
                     }))
                 }
             }
@@ -3765,6 +3755,45 @@ async fn submit_turn_resolves_model_policy_before_persisting_or_submitting() {
     assert_eq!(
         coordinator.last_requested_model().as_deref(),
         Some("model-approved"),
+    );
+}
+
+#[tokio::test]
+async fn submit_turn_replay_preserves_model_resolved_at_session_acceptance() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::Unavailable {
+            reason: "injected first submission failure".to_string(),
+        },
+    ));
+    let policy = Arc::new(SetupRecordingLlmConfigService::default());
+    policy.resolve_next_model_as(Ok(Some("model-a".to_string())));
+    let services =
+        session_services(threads, coordinator.clone()).with_llm_config_service(policy.clone());
+    create_thread_for(&services, caller(), "thread-model-replay").await;
+    let request = || {
+        session_submit_request(json!({
+            "client_action_id": "send-model-replay",
+            "thread_id": "thread-model-replay",
+            "content": "hello from webui"
+        }))
+        .expect("request")
+    };
+
+    services
+        .submit_turn(caller(), request())
+        .await
+        .expect_err("the injected first coordinator submission must fail");
+
+    policy.resolve_next_model_as(Ok(Some("model-b".to_string())));
+    services
+        .submit_turn(caller(), request())
+        .await
+        .expect("idempotent session replay succeeds");
+
+    assert_eq!(
+        coordinator.last_requested_model().as_deref(),
+        Some("model-a")
     );
 }
 
@@ -5465,18 +5494,6 @@ async fn retry_run_uses_turn_service_and_stable_response() {
         retry.scope,
         caller().turn_scope(ThreadId::new("thread-alpha").expect("thread"))
     );
-    assert!(
-        retry
-            .source_binding_ref
-            .as_str()
-            .contains("webui-retry-src")
-    );
-    assert!(
-        retry
-            .reply_target_binding_ref
-            .as_str()
-            .contains("webui-retry-reply")
-    );
     assert_eq!(retry.idempotency_key.as_str(), "retry-1");
 }
 
@@ -5618,12 +5635,6 @@ async fn approved_gate_resolution_resumes_turn() {
     assert_eq!(
         coordinator.last_resumption_precondition(),
         Some(ResumeTurnPrecondition::AnyBlockedGate)
-    );
-    assert!(
-        coordinator
-            .last_resumption_source_binding_ref()
-            .expect("resume source binding")
-            .contains("gate-alpha")
     );
 }
 
@@ -10642,6 +10653,9 @@ struct SetupRecordingLlmConfigService {
     next_set_active_error: Mutex<Option<LlmConfigServiceError>>,
     next_login_error: Mutex<Option<LlmConfigServiceError>>,
     next_model_resolution: Mutex<Option<Result<Option<String>, LlmConfigServiceError>>>,
+    user_model_catalog: Mutex<UserModelCatalog>,
+    user_model_preferences: Mutex<HashMap<(String, String), UserModelPreference>>,
+    user_model_preference_updates: Mutex<Vec<(String, String, Option<String>)>>,
 }
 
 impl Default for SetupRecordingLlmConfigService {
@@ -10660,6 +10674,13 @@ impl Default for SetupRecordingLlmConfigService {
             next_set_active_error: Mutex::new(None),
             next_login_error: Mutex::new(None),
             next_model_resolution: Mutex::new(None),
+            user_model_catalog: Mutex::new(UserModelCatalog {
+                selection_enabled: true,
+                workspace_default: Some("model-a".to_string()),
+                models: vec!["model-a".to_string(), "model-b".to_string()],
+            }),
+            user_model_preferences: Mutex::new(HashMap::new()),
+            user_model_preference_updates: Mutex::new(Vec::new()),
         }
     }
 }
@@ -10723,6 +10744,24 @@ impl SetupRecordingLlmConfigService {
 
     fn resolve_next_model_as(&self, result: Result<Option<String>, LlmConfigServiceError>) {
         *self.next_model_resolution.lock().expect("lock") = Some(result);
+    }
+
+    fn user_model_preference_updates(&self) -> Vec<(String, String, Option<String>)> {
+        self.user_model_preference_updates
+            .lock()
+            .expect("lock")
+            .clone()
+    }
+
+    fn use_user_model_catalog(&self, catalog: UserModelCatalog) {
+        *self.user_model_catalog.lock().expect("lock") = catalog;
+    }
+
+    fn user_model_preference_key(caller: &ProductSurfaceCaller) -> (String, String) {
+        (
+            caller.tenant_id.as_str().to_string(),
+            caller.user_id.as_str().to_string(),
+        )
     }
 
     fn empty_snapshot() -> LlmConfigSnapshot {
@@ -10860,6 +10899,46 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
             .expect("lock")
             .take()
             .unwrap_or(Ok(requested_model))
+    }
+
+    async fn user_model_catalog(
+        &self,
+        _caller: ProductSurfaceCaller,
+    ) -> Result<UserModelCatalog, LlmConfigServiceError> {
+        Ok(self.user_model_catalog.lock().expect("lock").clone())
+    }
+
+    async fn user_model_preference(
+        &self,
+        caller: ProductSurfaceCaller,
+    ) -> Result<UserModelPreference, LlmConfigServiceError> {
+        Ok(self
+            .user_model_preferences
+            .lock()
+            .expect("lock")
+            .get(&Self::user_model_preference_key(&caller))
+            .cloned()
+            .unwrap_or(UserModelPreference { model: None }))
+    }
+
+    async fn set_user_model_preference(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: SetUserModelPreferenceRequest,
+    ) -> Result<UserModelPreference, LlmConfigServiceError> {
+        let key = Self::user_model_preference_key(&caller);
+        self.user_model_preference_updates
+            .lock()
+            .expect("lock")
+            .push((key.0.clone(), key.1.clone(), request.model.clone()));
+        let preference = UserModelPreference {
+            model: request.model,
+        };
+        self.user_model_preferences
+            .lock()
+            .expect("lock")
+            .insert(key, preference.clone());
+        Ok(preference)
     }
 
     // The three vendor logins answer with `next_login_error` when one is armed.
@@ -16609,14 +16688,8 @@ async fn member_command_list_excludes_admin_audience() {
         .find(|command| command.name == "model")
         .expect("model command listed");
     assert_eq!(model.title, "Model");
-    assert_eq!(
-        model.description,
-        "Show or switch the active LLM provider and model"
-    );
-    assert_eq!(
-        model.usage,
-        "/model [<model> | set-provider <provider> [--model <model>]]"
-    );
+    assert_eq!(model.description, "Show or choose your preferred LLM model");
+    assert_eq!(model.usage, "/model [use <model> | default]");
     let status = response
         .commands
         .iter()
@@ -16729,6 +16802,132 @@ async fn member_execute_model_read_returns_view() {
     assert!(response.rejection.is_none());
     let result = response.result.expect("model read must return a view");
     assert_eq!(result.title, "Model");
+}
+
+#[tokio::test]
+async fn member_model_preference_commands_update_only_the_callers_preference() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = command_palette_services(
+        FakeAdminUsers::with([
+            admin_record("user-alpha", AdminUserRole::Member, AdminUserStatus::Active),
+            admin_record("user-beta", AdminUserRole::Member, AdminUserStatus::Active),
+        ]),
+        llm_config.clone(),
+    );
+    let alice_tenant_a = caller();
+    let bob_tenant_a = caller_for_user("user-beta");
+    let alice_tenant_b = ProductSurfaceCaller::new(
+        TenantId::new("tenant-beta").expect("valid tenant"),
+        UserId::new("user-alpha").expect("valid user"),
+        Some(AgentId::new("agent-alpha").expect("valid agent")),
+        Some(ProjectId::new("project-alpha").expect("valid project")),
+    );
+
+    let selected = execute_product_command_via_invoke(
+        &services,
+        alice_tenant_a.clone(),
+        "thread-command-palette",
+        "/model use model-b",
+    )
+    .await
+    .expect("member may set a caller-scoped preference");
+    assert!(selected.rejection.is_none(), "{selected:?}");
+    assert_eq!(
+        selected.result.expect("selection view").title,
+        "Model preference updated"
+    );
+
+    for isolated_caller in [bob_tenant_a, alice_tenant_b] {
+        let isolated = execute_product_command_via_invoke(
+            &services,
+            isolated_caller,
+            "thread-command-palette",
+            "/model",
+        )
+        .await
+        .expect("another caller may read its own model status");
+        let view = isolated.result.expect("isolated status view");
+        assert_eq!(view.fields[0].value, "workspace default");
+        assert_eq!(view.fields[1].value, "model-a");
+    }
+
+    let selected_status = execute_product_command_via_invoke(
+        &services,
+        alice_tenant_a.clone(),
+        "thread-command-palette",
+        "/model",
+    )
+    .await
+    .expect("selecting caller may read its preference")
+    .result
+    .expect("selected status view");
+    assert_eq!(selected_status.fields[0].value, "model-b");
+    assert_eq!(selected_status.fields[1].value, "model-b");
+
+    let reset = execute_product_command_via_invoke(
+        &services,
+        alice_tenant_a,
+        "thread-command-palette",
+        "/model default",
+    )
+    .await
+    .expect("member may return to the workspace default");
+    assert!(reset.rejection.is_none(), "{reset:?}");
+    assert_eq!(
+        llm_config.user_model_preference_updates(),
+        vec![
+            (
+                "tenant-alpha".to_string(),
+                "user-alpha".to_string(),
+                Some("model-b".to_string()),
+            ),
+            ("tenant-alpha".to_string(), "user-alpha".to_string(), None),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn member_model_status_marks_a_stale_preference_unavailable() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = command_palette_services(
+        FakeAdminUsers::with([admin_record(
+            "user-alpha",
+            AdminUserRole::Member,
+            AdminUserStatus::Active,
+        )]),
+        llm_config.clone(),
+    );
+
+    execute_product_command_via_invoke(
+        &services,
+        caller(),
+        "thread-command-palette",
+        "/model use model-b",
+    )
+    .await
+    .expect("member may set an initially allowed preference");
+    llm_config.use_user_model_catalog(UserModelCatalog {
+        selection_enabled: true,
+        workspace_default: Some("model-a".to_string()),
+        models: vec!["model-a".to_string()],
+    });
+
+    let view =
+        execute_product_command_via_invoke(&services, caller(), "thread-command-palette", "/model")
+            .await
+            .expect("member may inspect a stale preference")
+            .result
+            .expect("model status view");
+
+    assert_eq!(view.fields[0].value, "model-b (unavailable)");
+    assert_eq!(view.fields[1].value, "unavailable");
+    assert!(
+        view.lines
+            .iter()
+            .any(|line| line
+                == "Your saved preference is no longer available. Use `/model default`."),
+        "status must explain how to recover: {view:?}"
+    );
 }
 
 #[tokio::test]

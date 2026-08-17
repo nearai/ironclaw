@@ -366,7 +366,7 @@ path keeps working as an undocumented fallback.
 
 ### Registration (docs, not code)
 
-`docs/reborn/setup-slack-for-reborn-binary.md` + `docs/channels/slack.mdx`
+`docs/internal/reborn/setup-slack-for-reborn-binary.md` + `docs/channels/slack.mdx`
 gain one app-manifest entry registering `/ironclaw` (description + usage
 hint `status | model set <model> | help` — Slack renders these in
 autocomplete) pointing at the events URL, with the rationale stated: the

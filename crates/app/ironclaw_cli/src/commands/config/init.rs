@@ -210,7 +210,7 @@ default_owner  = "reborn-cli"
 # id = "red-team"
 
 [runner]
-heartbeat_interval_secs = 5
+heartbeat_interval_secs = 15
 poll_interval_ms        = 200
 
 [skills]
@@ -332,6 +332,14 @@ mod tests {
         assert!(
             config_file.default_llm_slot().is_none(),
             "de-seeded stub must carry no `[llm.default]` slot at all: {config_text}"
+        );
+        assert_eq!(
+            config_file
+                .runner
+                .as_ref()
+                .and_then(|runner| runner.heartbeat_interval_secs),
+            Some(15),
+            "new configs must ship the conservative 15-second runner heartbeat"
         );
 
         // A pre-existing LLM env var in the ambient test environment would make

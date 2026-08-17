@@ -45,8 +45,9 @@
 //!   equivalent pin is that removal deletes the binding outright, so a fresh
 //!   reconnect succeeds with no stale-state conflict (`bind_user_identity`
 //!   would reject a binding held by a different user);
-//! - **bindings are deleted, not tombstoned**: `has_any_active_identity_binding`
-//!   reads record absence rather than tombstone state.
+//! - **bindings are logically deleted with a CAS tombstone**:
+//!   `has_any_active_identity_binding` ignores tombstones, while their retained
+//!   versions fence stale rollback receipts from deleting a later reconnect.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
@@ -65,7 +66,9 @@ const SLACK_OAUTH_CLIENT_SECRET: &str = "slack-oauth-secret";
 
 /// Mirrors the slack manifest's `[[tools.credentials]]` scope union
 /// (`crates/extensions/packages/slack/manifest.toml`):
-/// read scopes shared by every tool plus `chat:write` for `send_message`.
+/// read scopes shared by every tool plus the write additions — `chat:write`
+/// (send/edit/delete), `reactions:read` + `reactions:write` (the reaction
+/// pair), and `im:write` (`open_dm`).
 const SLACK_SCOPES: &[&str] = &[
     "search:read",
     "channels:history",
@@ -78,6 +81,9 @@ const SLACK_SCOPES: &[&str] = &[
     "mpim:read",
     "users:read",
     "chat:write",
+    "reactions:read",
+    "reactions:write",
+    "im:write",
 ];
 
 /// The administrator-configuration connection-scoping claims this scenario configures

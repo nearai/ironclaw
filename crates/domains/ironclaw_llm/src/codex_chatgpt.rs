@@ -401,7 +401,15 @@ impl CodexChatGptProvider {
 
         if !api_tools.is_empty() {
             body["tools"] = json!(api_tools);
-            body["tool_choice"] = json!(tool_choice.unwrap_or("auto"));
+            body["tool_choice"] = match tool_choice.unwrap_or("auto") {
+                mode @ ("auto" | "required" | "none") => json!(mode),
+                // A named tool: the Responses API object form, using the same
+                // sanitized provider-facing name the tools array declares.
+                specific => json!({
+                    "type": "function",
+                    "name": sanitize_tool_name(specific),
+                }),
+            };
         }
 
         body

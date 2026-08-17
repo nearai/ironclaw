@@ -11,6 +11,7 @@ import {
   hasChannelSurface,
   primaryAuthAccount,
   authAccountNeedsReconnect,
+  authAccountNeedsScopeUpdate,
   authAccountReasonLabelKey,
 } from "../lib/extensions-schema";
 import { extensionLifecycleState, primaryExtensionAction } from "../lib/extension-actions";
@@ -175,6 +176,9 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
   // and the notice key off it.
   const channelAccount = hasChannelSurface(ext) ? primaryAuthAccount(ext) : null;
   const needsReconnect = hasChannelSurface(ext) && authAccountNeedsReconnect(ext);
+  // #7660: outdated-but-working grant — offer re-consent on a healthy card.
+  const needsScopeUpdate =
+    state === "active" && hasChannelSurface(ext) && authAccountNeedsScopeUpdate(ext);
   const hasConnectedChannelAccount = channelAccount?.state === "connected";
 
   // Connectable channels are configured by pairing (Connect/Reconnect), not by
@@ -270,6 +274,24 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
           className="mt-2 rounded-[10px] border border-[color-mix(in_srgb,var(--v2-warning-text)_36%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] px-3 py-1.5 text-xs text-[var(--v2-warning-text)]"
         >
           {t(authAccountReasonLabelKey(channelAccount))}
+        </div>
+      )}
+
+      {needsScopeUpdate &&
+      (
+        <div
+          data-testid="extension-scope-update"
+          className="mt-2 flex items-center justify-between gap-2 rounded-md border border-white/12 bg-white/[0.04] px-3 py-2 text-xs leading-5 text-[var(--v2-text-muted)]"
+        >
+          <span>{t("extensions.updateAccessHint")}</span>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={(event) => onConfigure(configurePayload, event.currentTarget)}
+            disabled={isBusy}
+          >
+            {t("extensions.updateAccess")}
+          </Button>
         </div>
       )}
 

@@ -172,6 +172,30 @@ pub(super) fn compose_provider_client(
     )
 }
 
+/// The recipe resolver production auth composition uses: bundled recipes for
+/// built-in callers, the durable installed manifest for installed callers.
+/// Exposed for seams that need recipe resolution outside the engine itself —
+/// the device-link flow driver resolves the recipe's display name through it.
+pub(crate) fn compose_recipe_resolver(
+    first_party_bundles: &[ironclaw_extension_host::FirstPartyPackageBundle],
+    installation_store: Arc<dyn ExtensionInstallationStorePort>,
+) -> Result<Arc<dyn AuthRecipeResolver>, RebornBuildError> {
+    let static_recipes = Arc::new(StaticAuthRecipeResolver::new(
+        ironclaw_extension_host::AvailableExtensionCatalog::bundled_vendor_recipes(
+            first_party_bundles,
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("bundled vendor auth recipes could not be resolved: {error}"),
+        })?,
+    ));
+    Ok(Arc::new(CompositionAuthRecipeResolver {
+        static_recipes,
+        installed_recipes: ironclaw_extension_host::InstalledManifestAuthRecipeResolver::new(
+            installation_store,
+        ),
+    }))
+}
+
 /// Routes built-in callers to bundled recipes and installed callers to their
 /// own durable manifest. These paths must never fall back across the requester
 /// boundary: doing so would let an installed extension borrow another recipe.
@@ -214,14 +238,32 @@ fn register_vendor_client_config(
         );
         return;
     };
-    let ironclaw_extension_contracts::recipe::VendorAuthRecipe::Oauth2Code(recipe) =
-        &resolved.recipe
-    else {
-        tracing::warn!(
-            vendor = config.vendor,
-            "configured OAuth vendor's recipe is not oauth2_code; client material not wired"
-        );
-        return;
+    // Matched exhaustively rather than with a `let ... else`, so a new auth
+    // method has to state whether deployment-configured client material means
+    // anything to it. `device_link` is the case that proves the point: it is
+    // the one method with no client-credential concept at all — the recipe is
+    // display metadata and the handshake runs inside the extension's adapter —
+    // so it is a quiet, expected no-op, not the anomaly the `warn!` describes.
+    // Left on the fallthrough it would emit "recipe is not oauth2_code" at
+    // every boot of a deployment that legitimately configured a device-link
+    // vendor.
+    use ironclaw_extension_contracts::recipe::VendorAuthRecipe;
+    let recipe = match &resolved.recipe {
+        VendorAuthRecipe::Oauth2Code(recipe) => recipe,
+        VendorAuthRecipe::DeviceLink(_) => {
+            tracing::debug!(
+                vendor = config.vendor,
+                "vendor recipe is device_link; it holds no client credentials, nothing to wire"
+            );
+            return;
+        }
+        VendorAuthRecipe::ApiKey(_) => {
+            tracing::warn!(
+                vendor = config.vendor,
+                "configured OAuth vendor's recipe is not oauth2_code; client material not wired"
+            );
+            return;
+        }
     };
     let Some(handles) = &recipe.client_credentials else {
         tracing::debug!(

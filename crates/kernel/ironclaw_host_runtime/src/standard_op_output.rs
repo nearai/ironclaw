@@ -36,6 +36,20 @@ const MAX_ISSUE_CHARS: usize = 200;
 /// every core contract's schemas, so a missing entry for a core op is
 /// impossible by construction; [`standard_op_output_violations`] still
 /// handles it without a panic (see that function's fallback arm).
+///
+/// **This map is keyed by op, not by schema version — deliberately.** A
+/// binding pins a schema *ref* (`standard:messaging/<op>.output.<version>`)
+/// and keeps resolving that exact version for its own model-facing tool
+/// schema, but post-dispatch enforcement runs the op's CURRENT version
+/// (`StandardOpContract::output_schema`) against every binding regardless of
+/// what it pinned. That is only sound while each graduation is a strict
+/// superset of the version it supersedes — otherwise a shipped adapter would
+/// start failing at dispatch without its package changing a line. The one
+/// graduation so far (`send_message` `.v1` → `.v2`, the `sent_unverified`
+/// evidence branch) has that property pinned by
+/// `ironclaw_host_api::messaging`'s `send_message_v2_accepts_every_v1_valid_output`.
+/// A future graduation that is NOT a superset must make this map
+/// version-keyed instead of relying on that.
 static VALIDATORS: LazyLock<HashMap<StandardMessagingOp, jsonschema::Validator>> =
     LazyLock::new(build_validators);
 
@@ -166,11 +180,45 @@ mod tests {
 
     #[test]
     fn missing_message_ref_is_a_violation() {
-        let out = serde_json::json!({ "ok": true, "ts": "168.1" });
+        // `send_message.output.v2` states evidence as a `oneOf` disjunction
+        // (`message_ref` OR `sent_unverified`), so an output carrying neither
+        // fails that keyword rather than `required`. Still a violation: the
+        // graduation widened what counts as evidence, not whether evidence is
+        // needed. `thread` is a declared property, so the disjunction is the
+        // only thing this output can trip.
+        let out = serde_json::json!({ "thread": "T1" });
         let issues = standard_op_output_violations(StandardMessagingOp::SendMessage, &out)
             .expect("violation");
-        assert!(issues.iter().any(|i| i.contains("message_ref")));
+        assert!(issues.iter().any(|i| i.contains("oneOf")), "{issues:?}");
         assert!(issues.len() <= 3);
+
+        // An op still on a single `required` keeps naming the missing field —
+        // the `required` keyword's message is drawn from our own schema text,
+        // so `bounded_issue` surfaces it verbatim.
+        let out = serde_json::json!({});
+        let issues = standard_op_output_violations(StandardMessagingOp::EditMessage, &out)
+            .expect("violation");
+        assert!(
+            issues.iter().any(|i| i.contains("message_ref")),
+            "{issues:?}"
+        );
+        assert!(issues.len() <= 3);
+    }
+
+    /// The `.v2` graduation at the enforcement seam: a send the provider
+    /// accepted but could not correlate reports `sent_unverified` and must
+    /// reach `Completed`, not be failed by post-dispatch validation. Pinned
+    /// here (not only in the contract crate) because `VALIDATORS` is keyed by
+    /// op and compiles the op's current version — this is the test that would
+    /// fail if the runtime kept enforcing `.v1`.
+    #[test]
+    fn sent_unverified_send_output_passes() {
+        let out = serde_json::json!({ "sent_unverified": true });
+        assert!(standard_op_output_violations(StandardMessagingOp::SendMessage, &out).is_none());
+
+        // ...and the marker is not a way to opt out of the closed shape.
+        let out = serde_json::json!({ "sent_unverified": true, "surprise": 1 });
+        assert!(standard_op_output_violations(StandardMessagingOp::SendMessage, &out).is_some());
     }
 
     #[test]

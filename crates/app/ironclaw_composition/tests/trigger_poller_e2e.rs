@@ -25,6 +25,8 @@ use ironclaw_composition::{
 };
 use ironclaw_conversations::{AdapterInstallationId, AdapterKind};
 use ironclaw_extension_contracts::external::ExternalActorRef;
+use ironclaw_host_api::execution_policy::{ResultDeliveryPolicy, TurnExecutionPolicy};
+use ironclaw_host_api::prepared_context::STRUCTURED_RESULT_PROVIDER_TOOL_NAME;
 use ironclaw_host_api::product_adapter::AdapterInstallationId as ProductAdapterInstallationId;
 use ironclaw_host_api::{
     action::NetworkPolicy,
@@ -39,16 +41,16 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    RuntimeCapabilityOutcome, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    RuntimeCapabilityOutcome, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
 };
 use ironclaw_loop_contracts::{
     LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
 };
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
-    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse,
+    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -59,11 +61,11 @@ use ironclaw_outbound::{
 };
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerDeliveryTargetId, TriggerId,
-    TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
-    TriggerSourceKind, TriggerState,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerDeliveryTargetId, TriggerExecutionSpec,
+    TriggerId, TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository, TriggerRunStatus,
+    TriggerSchedule, TriggerSourceKind, TriggerState,
 };
-use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
+use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId, TurnScope};
 use serde_json::{Value, json};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -71,10 +73,22 @@ const TENANT: &str = "trigger-e2e-tenant";
 const USER: &str = "trigger-e2e-owner";
 const AGENT: &str = "trigger-e2e-agent";
 const TRIGGER_PROMPT: &str = "trigger-e2e-prompt-marker-do-not-rephrase";
+
+fn trigger_execution_contract(goal: impl Into<String>) -> Value {
+    json!({
+        "version": 1,
+        "goal": goal.into(),
+        "success_criteria": ["Complete the requested task"],
+        "output_instructions": "Return a concise result",
+        "no_result_text": "No result",
+        "policy": { "result_delivery": "deliver" }
+    })
+}
 const QA_9B_PROMPT: &str = "QA_9B scheduled health digest";
 const QA_9B_RESULT: &str = "QA_9B scheduled health digest complete";
 const QA_9D_PROMPT: &str = "QA_9D scheduled release digest";
 const QA_9D_RESULT: &str = "QA_9D scheduled release digest complete";
+const QA_SILENT_PROMPT: &str = "QA_SILENT scheduled no-change check";
 const SLACK_TEAM: &str = "T-TRIGGER-E2E";
 const SLACK_USER: &str = "U-TRIGGER-E2E";
 const SLACK_DEFAULT_DM: &str = "D-TRIGGER-DEFAULT";
@@ -192,6 +206,70 @@ impl HostManagedModelGateway for DeliveryJourneyGateway {
         };
         self.requests.lock().await.push(request);
         Ok(HostManagedModelResponse::assistant_reply(reply.to_string()))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        if !request
+            .messages
+            .iter()
+            .any(|message| message.content.contains(QA_SILENT_PROMPT))
+        {
+            return self.stream_model(request).await;
+        }
+        let request_number = {
+            let mut requests = self.requests.lock().await;
+            requests.push(request);
+            requests
+                .iter()
+                .filter(|request| {
+                    request
+                        .messages
+                        .iter()
+                        .any(|message| message.content.contains(QA_SILENT_PROMPT))
+                })
+                .count()
+        };
+        let (call_id, tool_name, arguments) = if request_number == 1 {
+            (
+                "scheduled-suppression-prior-tool",
+                "builtin__trigger_list",
+                json!({}),
+            )
+        } else {
+            (
+                "scheduled-suppression-result",
+                STRUCTURED_RESULT_PROVIDER_TOOL_NAME,
+                json!({"outcome": "nothing_to_report"}),
+            )
+        };
+        let call = ProviderToolCall {
+            provider_id: "scheduled-suppression-e2e-provider".to_string(),
+            provider_model_id: "scheduled-suppression-e2e-model".to_string(),
+            turn_id: Some("scheduled-suppression-e2e-turn".to_string()),
+            id: call_id.to_string(),
+            name: ProviderToolName::new(tool_name).expect("provider tool name"),
+            arguments,
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        };
+        let candidate = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
+            .await
+            .map_err(|error| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    error.safe_summary,
+                )
+            })?;
+        Ok(HostManagedModelResponse::capability_calls(
+            vec![candidate],
+            "",
+        ))
     }
 }
 
@@ -471,6 +549,76 @@ impl HostManagedModelGateway for TriggerMutatorAttemptGateway {
                 "",
             ))
         }
+    }
+}
+
+#[derive(Default)]
+struct CapabilityProbeGateway {
+    outcome: TokioMutex<Option<Result<(), String>>>,
+}
+
+impl CapabilityProbeGateway {
+    async fn outcome(&self) -> Option<Result<(), String>> {
+        self.outcome.lock().await.clone()
+    }
+}
+
+#[async_trait]
+impl HostManagedModelGateway for CapabilityProbeGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Ok(HostManagedModelResponse::assistant_reply(
+            "structured trigger probe had no capability port".to_string(),
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        _request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let call = ProviderToolCall {
+            provider_id: "structured-trigger-e2e-provider".to_string(),
+            provider_model_id: "structured-trigger-e2e-model".to_string(),
+            turn_id: Some("structured-trigger-e2e-turn".to_string()),
+            id: "structured-trigger-list-probe".to_string(),
+            name: ProviderToolName::new(provider_tool_name_for_capability_id(
+                TRIGGER_LIST_CAPABILITY_ID,
+            ))
+            .expect("trigger-list provider tool name"),
+            arguments: json!({}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        };
+        let outcome = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
+            .await
+            .map(|_| ())
+            .map_err(|error| error.safe_summary);
+        *self.outcome.lock().await = Some(outcome);
+        Ok(HostManagedModelResponse::assistant_reply(
+            "structured trigger capability probe complete".to_string(),
+        ))
+    }
+}
+
+async fn wait_for_capability_probe(
+    gateway: &CapabilityProbeGateway,
+    deadline: Duration,
+) -> Result<(), String> {
+    let stop = Instant::now() + deadline;
+    loop {
+        if let Some(outcome) = gateway.outcome().await {
+            return outcome;
+        }
+        assert!(
+            Instant::now() < stop,
+            "capability probe did not reach the model"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -789,6 +937,7 @@ async fn seed_due_delivery_trigger(
     repository: &Arc<dyn TriggerRepository>,
     prompt: &str,
     delivery_target: Option<&str>,
+    execution_spec: Option<TriggerExecutionSpec>,
 ) -> TriggerId {
     let trigger_id = TriggerId::new();
     let fire_at = Utc::now() - chrono::Duration::seconds(120);
@@ -799,10 +948,11 @@ async fn seed_due_delivery_trigger(
             creator_user_id: UserId::new(USER).expect("valid user id"),
             agent_id: Some(AgentId::new(AGENT).expect("valid agent id")),
             project_id: None,
-            name: format!("{prompt} trigger"),
+            name: format!("delivery test {trigger_id}"),
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::once(fire_at, "UTC").expect("valid once schedule"),
             prompt: prompt.to_string(),
+            execution_spec,
             delivery_target: delivery_target.map(|target| {
                 TriggerDeliveryTargetId::new(target).expect("valid trigger delivery target")
             }),
@@ -912,6 +1062,17 @@ fn seed_test_secret_master_key(root: &Path) {
 }
 
 async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
+    let outcome = invoke_trigger_create_outcome(runtime, input).await;
+    let RuntimeCapabilityOutcome::Completed(completed) = outcome else {
+        panic!("expected trigger create to complete, got {outcome:?}");
+    };
+    completed.output
+}
+
+async fn invoke_trigger_create_outcome(
+    runtime: &RebornRuntime,
+    input: Value,
+) -> RuntimeCapabilityOutcome {
     // The Tools-settings global auto-approve switch is authoritative for
     // first-party tool dispatch; turn it on for the trigger management
     // scope so the create call (and the poller-submitted turn that shares the
@@ -929,11 +1090,10 @@ async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
         })
         .await
         .expect("enable global auto-approve for trigger management dispatch");
-
     let host_runtime = runtime
         .host_runtime_for_test()
         .expect("runtime exposes host runtime");
-    let outcome = host_runtime
+    host_runtime
         .invoke_capability((
             trigger_management_execution_context(),
             CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID).expect("capability id"),
@@ -941,11 +1101,7 @@ async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
             input,
         ))
         .await
-        .expect("trigger create invocation completes");
-    let RuntimeCapabilityOutcome::Completed(completed) = outcome else {
-        panic!("expected trigger create to complete, got {outcome:?}");
-    };
-    completed.output
+        .expect("trigger create invocation completes")
 }
 
 fn trigger_management_execution_context() -> ExecutionContext {
@@ -1052,6 +1208,7 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
         schedule: TriggerSchedule::once(Utc::now() - chrono::Duration::seconds(120), "UTC")
             .expect("valid once schedule"),
         prompt: TRIGGER_PROMPT.to_string(),
+        execution_spec: None,
         delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: Utc::now() - chrono::Duration::seconds(120),
@@ -1222,6 +1379,7 @@ async fn stored_delivery_target_trigger_is_migrated_to_prompt_async() {
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::once(fire_at, "UTC").expect("valid once schedule"),
             prompt: LEGACY_PROMPT.to_string(),
+            execution_spec: None,
             delivery_target: Some(
                 TriggerDeliveryTargetId::new(QA_9B_TARGET_ID).expect("valid delivery target"),
             ),
@@ -1356,15 +1514,42 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
     let delivery_store = runtime
         .triggered_run_delivery_store_for_test()
         .expect("local runtime exposes the production triggered-delivery store");
-    let default_target_trigger = seed_due_delivery_trigger(&repository, QA_9B_PROMPT, None).await;
+    let default_target_trigger =
+        seed_due_delivery_trigger(&repository, QA_9B_PROMPT, None, None).await;
     let explicit_target_trigger =
-        seed_due_delivery_trigger(&repository, QA_9D_PROMPT, Some(QA_9D_TARGET_ID)).await;
+        seed_due_delivery_trigger(&repository, QA_9D_PROMPT, Some(QA_9D_TARGET_ID), None).await;
+    let suppressed_spec = TriggerExecutionSpec {
+        version: 1,
+        goal: QA_SILENT_PROMPT.to_string(),
+        success_criteria: vec!["Report only when changes exist".to_string()],
+        output_instructions: "Return a concise change summary".to_string(),
+        no_result_text: "No changes".to_string(),
+        policy: TurnExecutionPolicy {
+            result_delivery: ResultDeliveryPolicy::SuppressWhenNothingToReport,
+            ..TurnExecutionPolicy::default()
+        },
+    };
+    let suppressed_prompt = suppressed_spec.render_prompt();
+    let suppressed_trigger = seed_due_delivery_trigger(
+        &repository,
+        &suppressed_prompt,
+        Some(QA_9B_TARGET_ID),
+        Some(suppressed_spec),
+    )
+    .await;
 
     wait_for_recorded_outcome(
         &repository,
         &delivery_store,
         default_target_trigger,
         TriggeredRunDeliveryOutcomeKind::Skipped,
+    )
+    .await;
+    let suppressed_run_id = wait_for_recorded_outcome(
+        &repository,
+        &delivery_store,
+        suppressed_trigger,
+        TriggeredRunDeliveryOutcomeKind::Suppressed,
     )
     .await;
     wait_for_recorded_outcome(
@@ -1374,6 +1559,37 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
         TriggeredRunDeliveryOutcomeKind::Skipped,
     )
     .await;
+
+    let suppressed_thread_id = repository
+        .list_trigger_run_history(
+            TenantId::new(TENANT).expect("valid tenant id"),
+            suppressed_trigger,
+            1,
+        )
+        .await
+        .expect("read suppressed trigger run history")
+        .into_iter()
+        .find(|run| run.run_id == Some(suppressed_run_id))
+        .and_then(|run| run.thread_id)
+        .expect("suppressed run has a canonical thread id");
+    let outbound_state = runtime
+        .outbound_delivery_stores_for_test()
+        .expect("local runtime exposes the production outbound state store")
+        .0;
+    let suppressed_attempts = outbound_state
+        .list_delivery_attempts(TurnScope::new_with_owner(
+            TenantId::new(TENANT).expect("valid tenant id"),
+            Some(AgentId::new(AGENT).expect("valid agent id")),
+            None,
+            suppressed_thread_id,
+            Some(UserId::new(USER).expect("valid user id")),
+        ))
+        .await
+        .expect("read suppressed run delivery attempts");
+    assert!(
+        suppressed_attempts.is_empty(),
+        "suppression must happen before delivery reservation: {suppressed_attempts:?}"
+    );
 
     assert!(
         slack_provider.provider_messages().is_empty(),
@@ -1394,6 +1610,13 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
         model_gateway.request_count_containing(QA_9D_PROMPT).await,
         1,
         "QA-9D must execute exactly one model run"
+    );
+    assert_eq!(
+        model_gateway
+            .request_count_containing(QA_SILENT_PROMPT)
+            .await,
+        2,
+        "the suppressible routine must perform prior tool work before its typed result"
     );
 
     tokio::time::sleep(Duration::from_millis(250)).await;
@@ -1430,6 +1653,13 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
         1,
         "restart must not rerun QA-9D"
     );
+    assert_eq!(
+        model_gateway
+            .request_count_containing(QA_SILENT_PROMPT)
+            .await,
+        2,
+        "restart must not rerun or dispatch the suppressed result"
+    );
 }
 
 #[tokio::test]
@@ -1452,7 +1682,7 @@ async fn builtin_trigger_create_pairs_creator_and_poller_submits_turn() {
         &runtime,
         json!({
             "name": "trigger-e2e-created-by-tool",
-            "prompt": TRIGGER_PROMPT,
+            "execution_contract": trigger_execution_contract(TRIGGER_PROMPT),
             "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
         }),
     )
@@ -1482,7 +1712,14 @@ async fn builtin_trigger_create_pairs_creator_and_poller_submits_turn() {
         .await
         .expect("get created trigger")
         .expect("created trigger persisted");
-    assert_eq!(record.prompt, TRIGGER_PROMPT);
+    assert!(
+        record.prompt.contains(TRIGGER_PROMPT),
+        "rendered trigger prompt must preserve the frozen goal"
+    );
+    assert!(
+        record.execution_spec.is_some(),
+        "builtin trigger creation must persist the structured execution contract"
+    );
     assert_eq!(record.creator_user_id, user_id);
     assert_eq!(record.name, "trigger-e2e-created-by-tool");
 
@@ -1570,7 +1807,7 @@ async fn builtin_created_recurring_trigger_fires_again_after_first_run_settles()
         &runtime,
         json!({
             "name": "trigger-e2e-created-by-tool-fires-twice",
-            "prompt": TRIGGER_PROMPT,
+            "execution_contract": trigger_execution_contract(TRIGGER_PROMPT),
             "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
         }),
     )
@@ -1722,6 +1959,7 @@ async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
         prompt: TRIGGER_PROMPT.to_string(),
+        execution_spec: None,
         delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: Utc::now() + chrono::Duration::seconds(3600),
@@ -1828,6 +2066,7 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::once(fire_at, "UTC").expect("valid once schedule"),
         prompt: TRIGGER_PROMPT.to_string(),
+        execution_spec: None,
         delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: fire_at,
@@ -1952,6 +2191,7 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
         // Every minute — recurring cron stays Scheduled after each fire.
         schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
         prompt: TRIGGER_PROMPT.to_string(),
+        execution_spec: None,
         delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: original_next_run_at,
@@ -2053,6 +2293,129 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
     );
 }
 
+#[tokio::test]
+async fn structured_trigger_empty_allowlist_reaches_the_fired_run_and_exposes_no_tools() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let gateway = Arc::new(CapabilityProbeGateway::default());
+    let runtime = build_runtime_with_tool_disclosure(
+        &root,
+        Arc::clone(&gateway),
+        TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
+            TriggerPollerWorkerConfig::default().set_poll_interval(Duration::from_millis(20)),
+        ),
+        ToolDisclosureMode::Off,
+    )
+    .await;
+    let tenant_id = TenantId::new(TENANT).expect("tenant id");
+    let repo = runtime.trigger_repository();
+
+    let invalid = invoke_trigger_create_outcome(
+        &runtime,
+        json!({
+            "name": "structured-missing-capability",
+            "execution_contract": {
+                "version": 1,
+                "goal": "Use a missing capability",
+                "success_criteria": ["Return a result"],
+                "output_instructions": "Return concise Markdown",
+                "no_result_text": "No result is available",
+                "policy": {
+                    "allowed_capability_ids": ["missing.capability"],
+                    "result_delivery": "deliver"
+                }
+            },
+            "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
+        }),
+    )
+    .await;
+    assert!(
+        matches!(invalid, RuntimeCapabilityOutcome::Failed(_)),
+        "creation preflight must reject an unavailable capability before persistence: {invalid:?}"
+    );
+    assert!(
+        repo.list_triggers(tenant_id.clone())
+            .await
+            .expect("list triggers after rejected preflight")
+            .is_empty(),
+        "a failed creation preflight must not persist a trigger"
+    );
+    let missing_skill = invoke_trigger_create_outcome(
+        &runtime,
+        json!({
+            "name": "structured-missing-skill",
+            "execution_contract": {
+                "version": 1,
+                "goal": "Use a missing skill",
+                "success_criteria": ["Return a result"],
+                "output_instructions": "Return concise Markdown",
+                "no_result_text": "No result is available",
+                "policy": {
+                    "required_skills": ["missing-trigger-skill"],
+                    "result_delivery": "deliver"
+                }
+            },
+            "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
+        }),
+    )
+    .await;
+    assert!(
+        matches!(missing_skill, RuntimeCapabilityOutcome::Failed(_)),
+        "creation preflight must reject an unavailable skill before persistence: {missing_skill:?}"
+    );
+    assert!(
+        repo.list_triggers(tenant_id.clone())
+            .await
+            .expect("list triggers after rejected skill preflight")
+            .is_empty(),
+        "a failed skill preflight must not persist a trigger"
+    );
+
+    let created = invoke_trigger_create(
+        &runtime,
+        json!({
+            "name": "structured-empty-tool-surface",
+            "execution_contract": {
+                "version": 1,
+                "goal": "Report trigger status",
+                "success_criteria": ["Return a definitive status"],
+                "output_instructions": "Return concise Markdown",
+                "no_result_text": "No trigger status is available",
+                "policy": {
+                    "allowed_capability_ids": [],
+                    "result_delivery": "deliver"
+                }
+            },
+            "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
+        }),
+    )
+    .await;
+    let trigger_id = TriggerId::parse(
+        created["trigger"]["trigger_id"]
+            .as_str()
+            .expect("created trigger id"),
+    )
+    .expect("valid trigger id");
+    let mut record = repo
+        .get_trigger(tenant_id.clone(), trigger_id)
+        .await
+        .expect("get structured trigger")
+        .expect("structured trigger persisted");
+    assert!(record.execution_spec.is_some(), "contract must persist");
+    record.next_run_at = Utc::now() - chrono::Duration::seconds(120);
+    repo.upsert_trigger(record)
+        .await
+        .expect("make structured trigger due");
+
+    let outcome = wait_for_capability_probe(gateway.as_ref(), Duration::from_secs(15)).await;
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    assert_eq!(
+        outcome,
+        Err("provider tool call is outside the visible capability surface".to_string()),
+        "Some([]) must reach the scheduled run as an empty tool surface"
+    );
+}
+
 /// T0-5505-E2E: end-to-end proof that issue #5505's fix composes through the
 /// real Reborn runtime — a scheduled-trigger fire resolves the dedicated
 /// `scheduled_trigger` capability surface, and a fired run that tries to
@@ -2121,7 +2484,7 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
         &runtime,
         json!({
             "name": "trigger-e2e-self-create-guard",
-            "prompt": TRIGGER_PROMPT,
+            "execution_contract": trigger_execution_contract(TRIGGER_PROMPT),
             "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
         }),
     )

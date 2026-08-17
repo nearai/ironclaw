@@ -11,7 +11,7 @@
 //!
 //! `ironclaw_agent_loop`'s rule that it depends on contracts-layer crates and
 //! nothing else is satisfiable entirely through this crate — that is the point
-//! of it existing. See `docs/reborn/target-architecture/PROPOSAL.md` §6.1.4 and
+//! of it existing. See `docs/internal/reborn/target-architecture/PROPOSAL.md` §6.1.4 and
 //! `families/contracts.md`.
 //!
 //! Prompt bundle APIs are host-managed: drivers request a bounded bundle of
@@ -64,27 +64,28 @@ pub use host::{
     BeginAssistantDraft, CapabilityApprovalResume, CapabilityAuthResume, CapabilityCallCandidate,
     CapabilityDeniedReasonKind, CapabilityDeniedReasonKindValue, CapabilityDescriptionTrust,
     CapabilityDescriptorView, CapabilityFailure, CapabilityInputRef, CapabilityProgress,
-    CapabilityResultMessage, CapabilityResumeToken, CapabilitySurfaceVersion, ConcurrencyHint,
-    FinalizeAssistantMessage, LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES,
-    LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES, LoadCheckpointPayloadRequest,
-    LoadedCheckpointPayload, LoopCancelReasonKind, LoopCancellationPort, LoopCancellationSignal,
-    LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
-    LoopCheckpointStateRef, LoopContextBundle, LoopContextCompactionKind,
-    LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
-    LoopContextSnippet, LoopContextSnippetMetadata, LoopContextWindowTruncation,
-    LoopDriverNoteKind, LoopGateKind, LoopInlineMessage, LoopInlineMessageBody,
-    LoopInlineMessageRole, LoopInput, LoopInputAck, LoopInputAckToken, LoopInputBatch,
-    LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopInterruptKind,
+    CapabilityResultIntrinsicOutcome, CapabilityResultMessage, CapabilityResumeToken,
+    CapabilitySurfaceVersion, FinalizeAssistantMessage,
+    LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES,
+    LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancelReasonKind,
+    LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointKind,
+    LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle,
+    LoopContextCompactionKind, LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort,
+    LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata,
+    LoopContextWindowTruncation, LoopDriverNoteKind, LoopGateKind, LoopInlineMessage,
+    LoopInlineMessageBody, LoopInlineMessageRole, LoopInput, LoopInputAck, LoopInputAckToken,
+    LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopInterruptKind,
     LoopModelCapabilityView, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
-    LoopModelRouteSnapshot, LoopModelUsage, LoopProcessRef, LoopProgressEvent, LoopProgressPort,
-    LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleGrant, LoopPromptBundleRef,
-    LoopPromptBundleRequest, LoopPromptDiagnosticMetadata, LoopPromptPort, LoopRecoveryClass,
-    LoopRecoveryDisposition, LoopRecoveryStage, LoopRequest, LoopRequestBatch, LoopRunContext,
-    LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput,
-    PromptMode, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReference,
-    ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
-    StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, sanitize_model_visible_text, validate_model_route_component_value,
+    LoopModelRouteSnapshot, LoopModelToolChoice, LoopModelUsage, LoopProcessRef, LoopProgressEvent,
+    LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleGrant,
+    LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptDiagnosticMetadata, LoopPromptPort,
+    LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage, LoopRequest, LoopRequestBatch,
+    LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk,
+    ParentLoopOutput, PromptMode, ProviderToolCall, ProviderToolCallCapabilityIds,
+    ProviderToolCallReference, ProviderToolCallReplay, ProviderToolDefinition,
+    RegisterProviderToolCallRequest, StageCheckpointPayloadRequest, UpdateAssistantDraft,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
+    validate_model_route_component_value,
 };
 pub use instruction_bundle::{
     EphemeralInstructionMaterializationStore, InstructionBundle, InstructionBundleBuilder,
@@ -97,7 +98,9 @@ pub use loop_exit::{
     LoopCompletionKind, LoopExit, LoopFailed, LoopFailureKind,
 };
 pub use memory_context::{
-    EmptyMemoryPromptContextService, MemoryPromptContextRequest, MemoryPromptContextService,
+    EmptyMemoryPromptContextService, MemoryPromptContextLoad, MemoryPromptContextRequest,
+    MemoryPromptContextService, MemoryRetrievalDegradation, MemoryRetrievalFailureKind,
+    MemoryRetrievalLane,
 };
 pub use milestones::{
     HookDecisionSummary, HookMilestoneSink, InMemoryHookMilestoneSink,

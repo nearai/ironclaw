@@ -15,6 +15,7 @@ layer = "products"
 
 [dependencies]
 async-trait = "0.1"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 # Production deps only. `tracing` is here for one purpose: the attachment
 # transfer path must retain the cause of a provider parse failure server-side
@@ -37,6 +38,84 @@ serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
+
+# --- Linked-device (MTProto) session half -------------------------------
+#
+# EXACT pins, deliberately: `=0.10.0` is a **security control**, not API
+# hygiene. The design's DC-address validation is airtight only because
+# 0.10.0's `update_config` parses Telegram's server-pushed DC list and then
+# discards it without calling `set_dc_option` — so every address the dialer
+# can reach comes from the compiled-in table or from a value we wrote, and
+# `Session::dc_option` (our `IronclawSession`) gates 100% of dials. Upstream
+# commit `5f94e83` ("Fix update_config did not set_dc_option") lands after
+# this release; adopting it starts flowing server-pushed addresses into the
+# session, and the validation seam must be re-verified before the pin moves.
+# See docs/internal/design/telegram-linked-device/PROPOSAL.md §3.4.
+#
+# Every edge below is `default-features = false` with an explicit allowlist,
+# per PROPOSAL §11.1 and the ADR's "ships with the dependency, not in a later
+# hardening pass". Two distinct wins, worth separating because they are often
+# conflated:
+#
+#   1. What we *decline*. `grammers-client`'s `proxy` feature forwards to
+#      `grammers-mtsender/proxy` (socks5). A proxied dial is established by
+#      `tokio-socks` and never consults `Session::dc_option`, which is the only
+#      seam `IronclawSession`'s DC-address validation owns — enabling it would
+#      falsify the "100% of dials are validated" claim outright, not weaken it.
+#      It is off, and `reborn_linked_device_supply_chain_pin.rs` asserts it stays
+#      off under both the default and the `--all-features` resolution.
+#   2. What upstream cannot *add*. With `default = [...]` disabled and the set
+#      spelled out, a future `0.10.z` that widens its own `default` cannot widen
+#      ours. This is the half a version pin alone does not cover.
+#
+# Declaration is not resolution: Cargo unions features across every edge in the
+# graph, so `grammers-tl-types` still resolves with `tl-mtproto` and
+# `deserializable-functions` because `grammers-client` and `grammers-mtsender`
+# ask for them on edges we do not own. The **resolved** set is what compiles
+# into the binary and therefore what the supply-chain gate pins — it reads
+# `cargo metadata`, not this file. Transitive grammers crates
+# (`-crypto`, `-mtproto`, `-mtsender`, `-tl-gen`, `-tl-parser`) have no edge
+# here to pin; the lockfile gate is what holds their versions and checksums.
+#
+# `fs` (`grammers-client`'s only default) is genuinely unused: it gates
+# `Client::{upload_file, download_media}`, the path-taking helpers, and this
+# package moves attachment bytes through `ironclaw_attachments` instead. That
+# one is a verified minimum — drop it wrongly and the build breaks.
+grammers-client = { version = "=0.10.0", default-features = false, features = [] }
+# grammers-session's default feature is `sqlite-storage`, which pulls `libsql`
+# into this package for a storage backend we never use (custody is
+# `LinkedSessionPort`). Both grammers-client and grammers-mtsender already
+# disable it; matching them keeps a database driver out of a channel package.
+# `serde` supplies the `PeerInfo`/`UpdatesState` derives the session blob codec
+# needs.
+grammers-session = { version = "=0.10.0", default-features = false, features = [
+    "serde",
+] }
+# The four names below are exactly grammers-tl-types' own `default` set,
+# transcribed so upstream owns the code but not the switch: `tl-api` generates
+# the `api.tl` bindings the login and op modules call, and the three `impl-*`
+# features generate the `Debug`/`From`/`TryFrom` impls that code was written
+# against. Deliberately absent: `impl-serde` (nothing here serializes a TL type
+# — the session blob has its own codec), and `tl-mtproto` /
+# `deserializable-functions`, which this package does not ask for even though
+# unification delivers them.
+grammers-tl-types = { version = "=0.10.0", default-features = false, features = [
+    "tl-api",
+    "impl-debug",
+    "impl-from-enum",
+    "impl-from-type",
+] }
+# The device-link flow receives login codes and account passwords as
+# `SecretString`; reading one is a single greppable `expose_secret()`.
+secrecy = "0.10"
+static_assertions = "1"
+# The session blob carries 256-byte MTProto auth keys through an intermediate
+# base64 string on decode; that buffer is wiped rather than left in the heap.
+zeroize = "1"
+# Production `tokio` is new for this package (it was dev-only). The MTProto
+# sender runner is a spawned task — `rt` is the floor, `sync`/`time`/`macros`
+# carry the pool's locks, timers, and the per-link gate.
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 
 [dev-dependencies]
 # Property testing for the ingress boundary (#6524 workstream 9) — arrived

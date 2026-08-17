@@ -1,10 +1,7 @@
 use ironclaw_host_api::ids::ApprovalRequestId;
-use ironclaw_host_api::turn::{ReplyTargetBindingRef, SourceBindingRef, TurnGateRef};
+use ironclaw_host_api::turn::TurnGateRef;
 
 use super::{ApprovalInteractionRejectionKind, approval_rejected};
-use crate::binding_ref::{
-    DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_reply_target_binding_ref, bounded_source_binding_ref,
-};
 use crate::error::ProductSurfaceFailure;
 
 const APPROVAL_GATE_PREFIX: &str = "gate:approval-";
@@ -30,28 +27,6 @@ pub fn approval_request_id_from_gate_ref(
     };
     ApprovalRequestId::parse(value)
         .map_err(|_| approval_rejected(ApprovalInteractionRejectionKind::InvalidGateRef))
-}
-
-pub(super) fn approval_source_binding_ref(
-    gate_ref: &TurnGateRef,
-) -> Result<SourceBindingRef, ProductSurfaceFailure> {
-    bounded_source_binding_ref(
-        "approval-src",
-        gate_ref.as_str(),
-        DEFAULT_BINDING_REF_RAW_MAX_BYTES,
-    )
-    .map_err(|_| approval_rejected(ApprovalInteractionRejectionKind::InvalidBindingRef))
-}
-
-pub(super) fn approval_reply_binding_ref(
-    gate_ref: &TurnGateRef,
-) -> Result<ReplyTargetBindingRef, ProductSurfaceFailure> {
-    bounded_reply_target_binding_ref(
-        "approval-reply",
-        gate_ref.as_str(),
-        DEFAULT_BINDING_REF_RAW_MAX_BYTES,
-    )
-    .map_err(|_| approval_rejected(ApprovalInteractionRejectionKind::InvalidBindingRef))
 }
 
 #[cfg(test)]

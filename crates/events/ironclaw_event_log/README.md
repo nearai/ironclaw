@@ -26,6 +26,8 @@ Six private modules re-exported flat (`src/lib.rs`):
   that collapse unsafe error detail rather than leak it.
 - Best-effort sink traits: `EventSink` / `AuditSink` (+ `SecurityAuditSink`) —
   a sink failure must never alter a runtime or control-plane outcome.
+  `NonBlockingEventSink` is the stronger contract required by runtime-critical
+  producers; async-only sinks cannot be wired into those paths.
 - Explicit-error durable traits: `DurableEventLog` / `DurableAuditLog`, with
   the `DurableEventSink` / `DurableAuditSink` adapters composition uses to
   hand durable logs to producers expecting sink traits.
@@ -75,5 +77,5 @@ cargo test -p ironclaw_architecture_tests
   `CLAUDE.md` points here).
 - Family boundary and the one-way pipeline rule: [`../AGENTS.md`](../AGENTS.md).
 - Design record: PROPOSAL §6.3.1;
-  `docs/reborn/target-architecture/families/events.md`; frozen contract
-  `docs/reborn/contracts/events.md`.
+  `docs/internal/reborn/target-architecture/families/events.md`; frozen contract
+  `docs/internal/reborn/contracts/events.md`.

@@ -27,6 +27,8 @@ use ironclaw_product_contracts::inbound::{
     AcceptedTurnSubmission, BusyRunSnapshot, ProductInboundAck, ProductInboundBindingDirective,
     ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductSourceChannel,
 };
+use ironclaw_product_contracts::operator_llm::{LlmConfigService, LlmConfigServiceError};
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_product_contracts::surface::ProductSurfaceError;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest,
@@ -34,9 +36,8 @@ use ironclaw_threads::{
     SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, ReplyTargetBindingRef, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope,
-    TurnSurfaceType,
+    AcceptedMessageRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
+    TurnError, TurnRunId, TurnScope, TurnSurfaceType,
 };
 use uuid::Uuid;
 
@@ -291,6 +292,7 @@ pub struct DefaultInboundTurnService<B, T, C> {
     thread_service: T,
     turn_coordinator: C,
     inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
+    llm_config: Option<Arc<dyn LlmConfigService>>,
     input_enqueue: Arc<dyn HostInputEnqueuePort>,
     session_skill_activation: Option<SessionSkillActivationPorts>,
 }
@@ -317,9 +319,39 @@ where
             thread_service,
             turn_coordinator,
             inbound_attachments: None,
+            llm_config: None,
             input_enqueue,
             session_skill_activation: None,
         }
+    }
+
+    /// Resolve explicit model hints and caller-scoped saved preferences before
+    /// a message crosses the durable acceptance boundary.
+    pub fn with_llm_config_service(mut self, llm_config: Arc<dyn LlmConfigService>) -> Self {
+        self.llm_config = Some(llm_config);
+        self
+    }
+
+    async fn resolve_user_model(
+        &self,
+        binding: &ResolvedBinding,
+        requested_model: Option<String>,
+    ) -> Result<Option<String>, ProductSurfaceFailure> {
+        let Some(llm_config) = self.llm_config.as_ref() else {
+            return Ok(requested_model);
+        };
+        llm_config
+            .resolve_user_model(
+                ProductSurfaceCaller::new(
+                    binding.tenant_id.clone(),
+                    binding.actor_user_id.clone(),
+                    binding.agent_id.clone(),
+                    binding.project_id.clone(),
+                ),
+                requested_model,
+            )
+            .await
+            .map_err(inbound_model_resolution_failure)
     }
 
     /// Wire the port that lands inline attachment bytes into project storage
@@ -344,6 +376,12 @@ where
         self
     }
 
+    // Deliberate blind spot: `list_threads_for_scope` excludes
+    // prepared-context (unbound/subagent) threads, so their attachments —
+    // none exist today, the accept door seeds text and tool history only —
+    // would not be visible to this sweep. If prepared submissions ever gain
+    // attachment landing, reconcile them against the unbound scope
+    // explicitly rather than widening the listing.
     async fn reconcile_stale_attachment_batches(&self, thread_scope: &ThreadScope) {
         let Some(lander) = self.inbound_attachments.as_ref() else {
             return;
@@ -549,9 +587,21 @@ where
             attachments,
         )?;
 
-        self.accept_prepared_user_message(prepared_for_turn, envelope_for_turn, attachments)
-            .await
-            .map(|outcome| InboundUserMessageDispatch::Accepted(Box::new(outcome)))
+        let requested_model = self
+            .resolve_user_model(
+                &prepared_for_turn.binding,
+                rewritten_payload.requested_model.clone(),
+            )
+            .await?;
+
+        self.accept_prepared_user_message(
+            prepared_for_turn,
+            envelope_for_turn,
+            attachments,
+            requested_model,
+        )
+        .await
+        .map(|outcome| InboundUserMessageDispatch::Accepted(Box::new(outcome)))
     }
 
     async fn prepare_user_message(
@@ -800,6 +850,7 @@ where
         prepared: PreparedUserMessage,
         envelope: &ProductInboundEnvelope,
         attachments: Vec<InboundAttachment>,
+        requested_model: Option<String>,
     ) -> Result<InboundTurnOutcome, ProductSurfaceFailure> {
         let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
             return Err(ProductSurfaceFailure::UnsupportedActionKind {
@@ -855,15 +906,20 @@ where
         let reply_target_binding_id = prepared.reply_target_binding_id.clone();
         let accepted = match self
             .thread_service
-            .accept_inbound_message(AcceptInboundMessageRequest {
-                scope: prepared.thread_scope.clone(),
-                thread_id: prepared.binding.thread_id.clone(),
-                actor_id: prepared.binding.actor_user_id.as_str().to_string(),
-                source_binding_id: Some(prepared.source_binding_id.clone()),
-                reply_target_binding_id: Some(reply_target_binding_id.clone()),
-                external_event_id: Some(envelope.external_event_id().as_str().to_string()),
-                content,
-            })
+            .accept_inbound_message_with_replay_metadata(
+                AcceptInboundMessageRequest {
+                    scope: prepared.thread_scope.clone(),
+                    thread_id: prepared.binding.thread_id.clone(),
+                    actor_id: prepared.binding.actor_user_id.as_str().to_string(),
+                    source_binding_id: Some(prepared.source_binding_id.clone()),
+                    reply_target_binding_id: Some(reply_target_binding_id.clone()),
+                    external_event_id: Some(envelope.external_event_id().as_str().to_string()),
+                    content,
+                },
+                ironclaw_threads::InboundMessageReplayMetadata {
+                    resolved_model: requested_model,
+                },
+            )
             .await
         {
             Ok(accepted) => accepted,
@@ -900,13 +956,12 @@ where
                 thread_scope: prepared.thread_scope,
                 message_id: accepted.message_id,
                 source_binding_id: prepared.source_binding_id,
-                reply_target_binding_id,
                 idempotency_key_raw: prepared.submit_idempotency_key,
                 received_at: envelope.received_at(),
                 adapter_id: prepared.adapter_id,
                 source_channel: prepared.source_channel,
                 surface_type: prepared.surface_type,
-                requested_model: payload.requested_model.clone(),
+                requested_model: accepted.replay_metadata.resolved_model,
                 lane: prepared.lane,
                 skill_activation_text: prepared.skill_activation_text,
                 channel_context: payload.channel_context.clone(),
@@ -1025,6 +1080,29 @@ fn permanent_attachment_failure(reason: impl Into<String>) -> ProductSurfaceFail
     ProductSurfaceFailure::InboundAttachmentFailed {
         reason: reason.into(),
         retryable: false,
+    }
+}
+
+fn inbound_model_resolution_failure(error: LlmConfigServiceError) -> ProductSurfaceFailure {
+    match error {
+        LlmConfigServiceError::InvalidRequest { reason, .. } => {
+            ProductSurfaceFailure::InboundModelResolutionFailed {
+                reason,
+                retryable: false,
+            }
+        }
+        LlmConfigServiceError::NotFound => ProductSurfaceFailure::InboundModelResolutionFailed {
+            reason: "requested model was not found".into(),
+            retryable: false,
+        },
+        LlmConfigServiceError::Unavailable => ProductSurfaceFailure::InboundModelResolutionFailed {
+            reason: "model selection is temporarily unavailable".into(),
+            retryable: true,
+        },
+        LlmConfigServiceError::Internal => ProductSurfaceFailure::InboundModelResolutionFailed {
+            reason: "model selection failed".into(),
+            retryable: true,
+        },
     }
 }
 
@@ -1234,28 +1312,18 @@ impl ProductInboundTurnHandoff {
                 reason: "accepted replay missing source_binding_id".into(),
             }
         })?;
-        let reply_target_binding_id = replay.reply_target_binding_id.clone().ok_or_else(|| {
-            ProductSurfaceFailure::TurnSubmissionRejected {
-                reason: "accepted replay missing reply_target_binding_id".into(),
-            }
-        })?;
-
         Ok(Self::NeedsSubmission(Box::new(
             AcceptedProductInboundTurn {
                 binding,
                 thread_scope,
                 message_id: replay.message_id,
                 source_binding_id,
-                reply_target_binding_id,
                 idempotency_key_raw: submit_idempotency_key,
                 received_at,
                 adapter_id,
                 source_channel,
                 surface_type,
-                // The requested model is not persisted in the message store, so an
-                // idempotent resubmission of an accepted message falls back to the
-                // deployment's active model rather than recovering the original hint.
-                requested_model: None,
+                requested_model: replay.replay_metadata.resolved_model,
                 lane,
                 skill_activation_text,
                 // Channel conversation context is likewise not persisted in the
@@ -1370,7 +1438,6 @@ struct AcceptedProductInboundTurn {
     thread_scope: ThreadScope,
     message_id: ThreadMessageId,
     source_binding_id: String,
-    reply_target_binding_id: String,
     idempotency_key_raw: String,
     received_at: DateTime<Utc>,
     adapter_id: ProductAdapterId,
@@ -1399,7 +1466,6 @@ impl AcceptedProductInboundTurn {
             thread_scope,
             message_id,
             source_binding_id,
-            reply_target_binding_id,
             idempotency_key_raw,
             received_at,
             adapter_id,
@@ -1423,49 +1489,6 @@ impl AcceptedProductInboundTurn {
             Some(binding.actor_user_id.clone()),
         );
         let actor = TurnActor::new(binding.actor_user_id.clone());
-        // Ref construction is lane-split:
-        // - Webhook: the conversation resolution minted canonical per-event
-        //   refs ("source:…"/"reply:…") that `accept_inbound_message` stored
-        //   verbatim — rebuild them directly; re-wrapping with a
-        //   `bounded_*("src"/"reply", …)` prefix would produce
-        //   "src:source:…" / "reply:reply:…" and no longer match the
-        //   per-event refs anchored to this event's thread.
-        // - Session: keeps the exact scheme the browser transport has always
-        //   written ("webui-src"/"webui-reply" prefixes, the raw client
-        //   action id as the coordinator idempotency key) so durable records
-        //   and replays stay byte-compatible.
-        let (source_binding_ref, reply_target_binding_ref) = match lane {
-            SubmissionLane::Webhook => (
-                SourceBindingRef::new(source_binding_id.clone()).map_err(|e| {
-                    ProductSurfaceFailure::TurnSubmissionRejected {
-                        reason: format!("invalid src ref: {e}"),
-                    }
-                })?,
-                ReplyTargetBindingRef::new(reply_target_binding_id.clone()).map_err(|e| {
-                    ProductSurfaceFailure::TurnSubmissionRejected {
-                        reason: format!("invalid reply ref: {e}"),
-                    }
-                })?,
-            ),
-            SubmissionLane::Session => (
-                bounded_source_binding_ref(
-                    SESSION_SOURCE_BINDING_PREFIX,
-                    &source_binding_id,
-                    DEFAULT_BINDING_REF_RAW_MAX_BYTES,
-                )
-                .map_err(|e| ProductSurfaceFailure::TurnSubmissionRejected {
-                    reason: format!("invalid src ref: {e}"),
-                })?,
-                bounded_reply_target_binding_ref(
-                    SESSION_REPLY_BINDING_PREFIX,
-                    &reply_target_binding_id,
-                    DEFAULT_BINDING_REF_RAW_MAX_BYTES,
-                )
-                .map_err(|e| ProductSurfaceFailure::TurnSubmissionRejected {
-                    reason: format!("invalid reply ref: {e}"),
-                })?,
-            ),
-        };
         let accepted_message_ref = accepted_message_ref(message_id)?;
         let idempotency_key = match lane {
             SubmissionLane::Webhook => bounded_idempotency_key(
@@ -1517,8 +1540,6 @@ impl AcceptedProductInboundTurn {
             scope: turn_scope.clone(),
             actor,
             accepted_message_ref: accepted_message_ref.clone(),
-            source_binding_ref,
-            reply_target_binding_ref,
             requested_run_profile: None,
             requested_model,
             idempotency_key,
@@ -1792,6 +1813,7 @@ fn binding_from_replay(
             }
         })?,
     };
+    use ironclaw_host_api::turn::{ReplyTargetBindingRef, SourceBindingRef};
     let source_binding_ref = replay
         .source_binding_id
         .as_deref()

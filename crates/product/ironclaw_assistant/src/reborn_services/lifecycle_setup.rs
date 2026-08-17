@@ -671,6 +671,7 @@ mod tests {
                     ownership: ironclaw_auth::CredentialOwnership::UserReusable,
                     owner_extension: None,
                     granted_extensions: Vec::new(),
+                    scopes: Vec::new(),
                     secret_handle_count: 1,
                 }))
             } else {

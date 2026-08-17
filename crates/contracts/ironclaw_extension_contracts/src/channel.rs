@@ -20,7 +20,7 @@ const MAX_CHANNEL_COMMAND_NAME_BYTES: usize = 64;
 const MAX_CHANNEL_COMMAND_PREFIX_BYTES: usize = 32;
 
 /// How external conversations map to IronClaw conversations
-/// (`docs/reborn/extension-runtime/overview.md` §3). The host WebUI's
+/// (`docs/internal/reborn/extension-runtime/overview.md` §3). The host WebUI's
 /// internal channel uses the same enum, so the workflow reasons about every
 /// channel one way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -488,6 +488,7 @@ impl ChannelDescriptor {
 pub enum ChannelConnectionStrategy {
     AdminManagedChannels,
     WebGeneratedCode,
+    DeviceLink,
     #[serde(rename = "oauth", alias = "o_auth")]
     OAuth,
 }
@@ -1317,6 +1318,39 @@ kind = "authenticated_session"
             channel.validate().unwrap_err(),
             ChannelDescriptorError::InvalidConnectionCodePrefixes
         );
+    }
+
+    #[test]
+    fn device_link_connection_strategy_round_trips_without_pairing_metadata() {
+        let source = generated_code_connection_toml("[]")
+            .replace("web_generated_code", "device_link")
+            .replace(
+                "deep_link_template = \"https://vendor.example/connect?code={code}\"\n",
+                "",
+            );
+        let channel: ChannelDescriptor =
+            toml::from_str(&source).expect("parse device-link channel");
+        channel.validate().expect("validate device-link channel");
+        let connection = channel.connection.expect("connection");
+        assert_eq!(connection.strategy, ChannelConnectionStrategy::DeviceLink);
+        assert!(connection.deep_link_template.is_none());
+        assert!(connection.inbound_code_prefixes.is_empty());
+
+        let json = serde_json::to_value(connection).expect("serialize connection");
+        assert_eq!(json["strategy"], "device_link");
+    }
+
+    #[test]
+    fn device_link_connection_rejects_pairing_metadata() {
+        let source = generated_code_connection_toml("[\"/start\"]")
+            .replace("web_generated_code", "device_link");
+        let channel: ChannelDescriptor =
+            toml::from_str(&source).expect("parse device-link channel");
+        assert!(matches!(
+            channel.validate(),
+            Err(ChannelDescriptorError::InvalidConnectionDeepLink)
+                | Err(ChannelDescriptorError::InvalidConnectionCodePrefixes)
+        ));
     }
 
     #[test]

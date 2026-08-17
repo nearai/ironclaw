@@ -6,7 +6,7 @@ import vm from "node:vm";
 import { channelConnectionDisplayName } from "../../../lib/channel-connection-events";
 import { componentSourceForTest } from "../../../lib/vm-component-harness";
 import "../../../test/vm-tsx-setup";
-import { channelConnectionFromGate } from "./gates";
+import { channelConnectionFromGate, gateIsDeviceLink } from "./gates";
 import { messageBelongsToActiveRun } from "./message-types";
 import {
   inspectorDebugEnabled,
@@ -93,6 +93,7 @@ function renderChat({
   let refSlot = 0;
   const components = {
     ApprovalCard() {},
+    AuthDeviceLinkCard() {},
     AuthGenericCard() {},
     AuthOauthCard() {},
     AuthTokenCard() {},
@@ -110,6 +111,11 @@ function renderChat({
   const context = {
     ...components,
     React: {
+      // The device-link card is `React.lazy`'d from chat.tsx so its flow never
+      // ships on the initial /chat route. The harness resolves it to the same
+      // stub component the selector assertions look for.
+      lazy: () => components.AuthDeviceLinkCard,
+      Suspense: function Suspense() {},
       useCallback: (fn) => fn,
       useEffect: (effect) => {
         if (runEffects) effect();
@@ -139,6 +145,7 @@ function renderChat({
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     channelConnectionDisplayName,
     channelConnectionFromGate,
+    gateIsDeviceLink,
     inspectorDebugEnabled,
     latestInspectorRunId,
     persistInspectorDebugPreference,
@@ -1478,5 +1485,78 @@ test("Chat does not let a stale send from an earlier empty-thread cycle hijack a
     selections.length,
     1,
     "a stale send from the original batch must not hijack the new empty-thread cycle started by \"+ New\""
+  );
+});
+
+test("Chat renders the device-link card for a device_link gate and no other auth card", async () => {
+  // A device link is not a credential to paste and not a host-issued pairing
+  // code: the selector must reach the multi-step card, and cancel must abandon
+  // the parked turn the way the pairing card does.
+  const pendingGate = {
+    kind: "auth_required",
+    challengeKind: "device_link",
+    requestId: "request-1",
+    runId: "run-1",
+    gateRef: "gate-1",
+    provider: "telegram",
+    accountLabel: "Personal account",
+    headline: "Link your Telegram account",
+    deviceLink: {
+      provider: "telegram",
+      displayName: "Telegram",
+      step: "display",
+      instructions: "Open Telegram and scan this.",
+      qrPayload: "tg://login?token=AAAA",
+      revision: 3,
+      terminal: false,
+    },
+  };
+  const cancelReasons = [];
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: false,
+      pendingGate,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "awaiting_gate" },
+      send: async () => ({}),
+      cancelRun: async (reason) => cancelReasons.push(reason),
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const card = findComponent(tree, components.AuthDeviceLinkCard);
+  assert.ok(card, "a device_link gate renders the device-link card");
+  const props = componentProps(card, components.AuthDeviceLinkCard);
+  assert.equal(props.gate, pendingGate);
+  // Cancel abandons the parked turn through the run-cancel endpoint, exactly
+  // as the pairing card does — there is nothing to "deny" on a device link.
+  await props.onCancel();
+  assert.deepEqual(cancelReasons, ["user_requested"]);
+
+  assert.equal(
+    findComponent(tree, components.AuthTokenCard),
+    null,
+    "a device link is never a token-paste card",
+  );
+  assert.equal(
+    findComponent(tree, components.OnboardingPairingCard),
+    null,
+    "a device link is never a host-issued pairing card",
+  );
+  assert.equal(
+    findComponent(tree, components.AuthGenericCard),
+    null,
+    "a device link never falls through to the generic auth card",
   );
 });

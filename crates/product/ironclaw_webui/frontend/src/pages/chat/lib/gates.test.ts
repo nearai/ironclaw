@@ -4,15 +4,31 @@ import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
 
+// The real frame normalizer is injected rather than stubbed: a gate carrying a
+// device-link frame must be normalized by exactly the code the poll path uses,
+// or the two disagree about the same wire object.
+import { deviceLinkFrameFromWire } from "../../../lib/device-link-frame";
+
+const GATES_EXPORTS = [
+  "gateFromEvent",
+  "gateFromProjectionGate",
+  "channelConnectionFromGate",
+  "deviceLinkFromGate",
+  "gateIsDeviceLink",
+];
+
 function loadGates() {
   const source = readFileSync(new URL("./gates.ts", import.meta.url), "utf8")
+    .split("\n")
+    .filter((line) => !line.startsWith("import "))
+    .join("\n")
     .replace(
-      /export function (gateFromEvent|gateFromProjectionGate|channelConnectionFromGate)/g,
+      new RegExp(`export function (${GATES_EXPORTS.join("|")})`, "g"),
       "function $1",
     );
-  const context = { globalThis: {} };
+  const context = { globalThis: {}, deviceLinkFrameFromWire };
   vm.runInNewContext(
-    `${source}\nglobalThis.__testExports = { gateFromEvent, gateFromProjectionGate, channelConnectionFromGate };`,
+    `${source}\nglobalThis.__testExports = { ${GATES_EXPORTS.join(", ")} };`,
     context,
   );
   return context.globalThis.__testExports;
@@ -158,6 +174,7 @@ test("gateFromEvent keeps modern auth prompts without challenge kind off token c
       gateKind: "auth",
       challengeKind: "other",
       connection: null,
+      deviceLink: null,
       runId: "run-auth",
       gateRef: "gate:auth",
       invocationId: null,
@@ -189,6 +206,7 @@ test("gateFromEvent passes the oauth_url challenge kind through unchanged", () =
       gateKind: "auth",
       challengeKind: "oauth_url",
       connection: null,
+      deviceLink: null,
       runId: "run-auth",
       gateRef: "gate:auth",
       invocationId: null,
@@ -331,4 +349,82 @@ test("gateFromProjectionGate normalizes the connection context from auth_context
     submitLabel: null,
     errorMessage: null,
   });
+});
+
+test("gateFromEvent normalizes a device-link frame and gates it behind the challenge kind", () => {
+  const { gateFromEvent, deviceLinkFromGate, gateIsDeviceLink } = loadGates();
+
+  const wire = {
+    turn_run_id: "run-link",
+    auth_request_ref: "gate:link",
+    headline: "Link your account",
+    body: "Scan the code to link this device.",
+    challenge_kind: "device_link",
+    provider: "telegram",
+    device_link: {
+      provider: "telegram",
+      display_name: "Telegram",
+      step: "display",
+      instructions: "Open Telegram and scan this.",
+      qr_payload: "tg://login?token=AAAA",
+      expires_at: "2026-07-16T12:01:30Z",
+      revision: 3,
+      poll_interval_ms: 3000,
+    },
+  };
+
+  const gate = gateFromEvent("auth_required", wire);
+
+  assert.equal(gate.challengeKind, "device_link");
+  assert.equal(gateIsDeviceLink(gate), true);
+  assert.equal(gate.deviceLink.qrPayload, "tg://login?token=AAAA");
+  assert.equal(gate.deviceLink.revision, 3);
+  assert.equal(gate.deviceLink.step, "display");
+  assert.equal(gate.deviceLink.terminal, false);
+  assert.equal(deviceLinkFromGate(gate), gate.deviceLink);
+
+  // A device-link gate is never also a channel-connection gate: the two
+  // selectors must never both claim the same gate.
+  assert.equal(gate.connection, null);
+
+  // The frame is optional even on a device-link gate (a row written before the
+  // field existed); the card starts its own flow rather than refusing.
+  const frameless = gateFromEvent("auth_required", { ...wire, device_link: undefined });
+  assert.equal(gateIsDeviceLink(frameless), true);
+  assert.equal(deviceLinkFromGate(frameless), null);
+
+  // And a frame riding a NON-device-link gate is never treated as one.
+  const strayFrame = gateFromEvent("auth_required", { ...wire, challenge_kind: "manual_token" });
+  assert.equal(gateIsDeviceLink(strayFrame), false);
+  assert.equal(deviceLinkFromGate(strayFrame), null);
+  assert.equal(deviceLinkFromGate(null), null);
+});
+
+test("gateFromProjectionGate normalizes the device-link frame from auth_context", () => {
+  const { gateFromProjectionGate, deviceLinkFromGate } = loadGates();
+
+  const gate = gateFromProjectionGate({
+    run_id: "run-link",
+    gate_kind: "auth",
+    gate_ref: "gate:link",
+    auth_context: {
+      challenge_kind: "device_link",
+      device_link: {
+        provider: "telegram",
+        display_name: "Telegram",
+        step: "input_required",
+        instructions: "Telegram needs one more value.",
+        secret_label: "Login code",
+        input_kind: "code",
+        expires_at: "2026-07-16T12:01:30Z",
+        revision: 5,
+        poll_interval_ms: 3000,
+      },
+    },
+  });
+
+  assert.equal(gate.challengeKind, "device_link");
+  assert.equal(deviceLinkFromGate(gate).secretLabel, "Login code");
+  assert.equal(deviceLinkFromGate(gate).inputKind, "code");
+  assert.equal(deviceLinkFromGate(gate).revision, 5);
 });

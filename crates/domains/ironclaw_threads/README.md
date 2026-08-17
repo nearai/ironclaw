@@ -52,11 +52,18 @@ dumping ground.
 - Message identity and per-thread sequence survive redaction/deletion;
   model-visible reads go through policy-filtered APIs — pinned by the contract
   suites below (see `AGENTS.md` for the full working rules).
+- Inbound routing metadata that affects turn submission is committed atomically
+  when the backend supports transactions. Fallback backends persist a
+  content-free recovery intent before the transcript row, so retries resume
+  the original message id and routing metadata; that metadata is replayed
+  unchanged and never rendered as transcript content.
 - Raw attachment references remain durable, while extracted document text and
   audio transcripts are secret-redacted when projected into model context.
 - Context-window limits count the effective model-visible transcript, not
   hidden durable rows. Truncated windows report the exact last omitted
   sequence and kind so loop policy can react without guessing.
+- Exact message lookups by run, tool result, provider call, and first user are
+  indexed projections on the message row; they do not create sibling records.
 - Backend-neutral by construction: persistence is `ScopedFilesystem` only;
   backend choice happens in composition (`.claude/rules/database.md`).
 
@@ -74,5 +81,5 @@ cargo test -p ironclaw_threads --test filesystem_message_range_contract
 
 - Working rules: [`AGENTS.md`](./AGENTS.md) (canonical crate guidance).
 - Family boundary: [`../AGENTS.md`](../AGENTS.md).
-- Design record: `docs/reborn/target-architecture/families/domains.md` and
+- Design record: `docs/internal/reborn/target-architecture/families/domains.md` and
   PROPOSAL §6.4.1.

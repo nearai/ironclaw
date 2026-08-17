@@ -26,6 +26,12 @@ export function useAdminConfiguration() {
         groups.map((group) => group.group_id === saved.group_id ? saved : group),
       );
     },
+    onError: (error) => {
+      if (error?.status === 409) {
+        return queryClient.invalidateQueries({ queryKey });
+      }
+      return undefined;
+    },
   });
   return {
     groups: query.data || [],

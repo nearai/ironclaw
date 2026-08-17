@@ -17,7 +17,11 @@ use ironclaw_extension_host::{
     NativeExtensionFactory,
 };
 use ironclaw_host_api::ids::ExtensionId;
-use ironclaw_telegram_extension::{TelegramChannelAdapter, TelegramPreferenceTargetCodec};
+use ironclaw_telegram_extension::{
+    MtprotoAppIdentity, SessionPool, TELEGRAM_API_HASH_HANDLE, TELEGRAM_API_ID_CONFIG,
+    TelegramChannelAdapter, TelegramDeviceLinkAdapter, TelegramLinkedToolAdapter,
+    TelegramPreferenceTargetCodec,
+};
 use secrecy::ExposeSecret as _;
 
 /// Every native factory the binary assembles (`first_party`-runtime
@@ -167,31 +171,70 @@ impl FirstPartyChannelInitializer for WebAppChannelInitializer {
     }
 }
 
-/// `runtime.service = "telegram.extension/v1"` — the Telegram channel
-/// extension: channel adapter only, no tools.
+/// `runtime.service = "telegram.extension/v1"` — the Telegram extension: the
+/// bot channel, the linked-device auth surface, and the linked-account
+/// standard-op tools, all bound from one entrypoint.
 struct TelegramExtensionFactory;
 
+#[async_trait::async_trait]
 impl NativeExtensionFactory for TelegramExtensionFactory {
     fn service(&self) -> &str {
         "telegram.extension/v1"
     }
 
-    fn load(&self, _ctx: &LoadContext) -> Result<Box<dyn ExtensionEntrypoint>, BindError> {
-        Ok(Box::new(TelegramExtensionEntrypoint))
+    async fn load(&self, ctx: &LoadContext) -> Result<Box<dyn ExtensionEntrypoint>, BindError> {
+        // Load is the one I/O-legal point before bind, so the operator's
+        // MTProto `api_hash` (`secret = true`) is resolved here; an
+        // admin-configuration edit re-runs load via reactivation. Unset —
+        // both MTProto fields are `required = false` — the adapter binds
+        // anyway and fails every link attempt closed with an explicit
+        // not-configured error, so a bot-only deployment keeps working.
+        let api_hash_handle = ironclaw_host_api::ids::SecretHandle::new(TELEGRAM_API_HASH_HANDLE)
+            .map_err(|error| BindError::Load {
+            reason: format!("telegram api-hash handle is invalid: {error}"),
+        })?;
+        let api_hash = ctx.admin_secrets.secret(&api_hash_handle).await;
+        Ok(Box::new(TelegramExtensionEntrypoint { api_hash }))
     }
 }
 
-struct TelegramExtensionEntrypoint;
+struct TelegramExtensionEntrypoint {
+    /// Resolved at load; `None` when the deployment has not configured it.
+    api_hash: Option<secrecy::SecretString>,
+}
 
 impl ExtensionEntrypoint for TelegramExtensionEntrypoint {
-    fn bind(&self, _ctx: BindContext) -> Result<ExtensionBindings, BindError> {
+    fn bind(&self, ctx: BindContext) -> Result<ExtensionBindings, BindError> {
+        // silent-ok: a malformed operator value behaves exactly like an
+        // unset one — the identity stays `None`, the pool refuses every dial
+        // with its explicit not-configured error, and link attempts fail
+        // closed with the same sentence. Nothing downstream ever sees a
+        // garbage id; the config UI still shows the raw value for repair.
+        let api_id = ctx
+            .config
+            .iter()
+            .find(|(key, _)| key == TELEGRAM_API_ID_CONFIG)
+            .and_then(|(_, value)| value.trim().parse::<i32>().ok());
+        // One pool shared by both linked-surface adapters (PROPOSAL §3.3):
+        // the link adapter must be able to evict what the tool adapter would
+        // otherwise keep serving. Construction is allocation only — the pool
+        // connects lazily — so bind stays side-effect-free.
+        let pool = Arc::new(SessionPool::new(Arc::clone(&ctx.linked_sessions), api_id));
+        let identity = match (api_id, self.api_hash.clone()) {
+            (Some(api_id), Some(api_hash)) => Some(MtprotoAppIdentity { api_id, api_hash }),
+            _ => None,
+        };
+        let device_link = TelegramDeviceLinkAdapter::new(identity, &pool);
+        let tools =
+            TelegramLinkedToolAdapter::new(Arc::clone(&ctx.linked_accounts), Arc::clone(&pool));
         let adapter = Arc::new(TelegramChannelAdapter::default());
         Ok(ExtensionBindings {
-            tools: None,
+            tools: Some(Arc::new(tools)),
             channel: ChannelSurfaces::default()
                 .with_ingress(adapter.clone())
                 .with_reply(adapter.clone())
                 .with_delivery(adapter),
+            device_link: Some(Arc::new(device_link)),
         })
     }
 }

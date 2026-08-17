@@ -30,7 +30,7 @@ Composition deliberately stops at the
 fully composed `Router` but must never bind a socket. This crate is the
 host-owned counterpart that binds the `TcpListener` and drives the serve loop.
 
-The "Native host surface" rules of `docs/reborn/how-to-port-channel-to-reborn.md`
+The "Native host surface" rules of `docs/internal/reborn/how-to-port-channel-to-reborn.md`
 apply: host auth stays host-owned in this crate, and behavior is reached through
 `ironclaw_product_contracts::surface::ProductSurface`. The crate *does* carry a
 direct `ironclaw_assistant` dependency (see `Cargo.toml`), but as of the WS5
@@ -146,7 +146,7 @@ candidate module.
 | `admin-config` | Per-extension admin configuration: read, replace, idempotency, and its failure projections | Extension lifecycle — that is `extensions` | `ADMIN_CONFIGURATION_IDEMPOTENCY_KEY_MAX_BYTES`, `require_operator_webui_config`, `ExtensionAdminConfigurationPath`, `ExtensionAdminConfigurationValue`, `ReplaceExtensionAdminConfigurationBody`, `ReplaceExtensionAdminConfigurationInput`, `list_extension_admin_configuration`, `replace_extension_admin_configuration`, `query_extension_admin_configuration`, `select_extension_admin_configuration_group`, `admin_configuration_activity_id`, `admin_configuration_conflict`, `admin_configuration_unavailable`, `admin_configuration_forbidden`, `admin_configuration_done_failure`, `admin_configuration_blocked` |
 | `dispatch` | The shared `ProductSurface` call shapes every other owner goes through: invoke/query/page helpers, the generic activity-id derivation, and idempotency/client-action-id validation | A route-specific decision — those belong to the owner that made them | `CLIENT_ACTION_ID_MAX_BYTES`, `product_surface_input`, `invoke_product_capability`, `invoke_product_capability_with_activity_id`, `invoke_product_command`, `product_capability_activity_id`, `product_surface_activity_id`, `query_product_view`, `query_product_page`, `decode_product_outbound_events`, `validate_idempotency_key`, `parse_client_action_id` |
 | `operator` | The operator console: first-run setup, tool settings, operator config keys, diagnostics, status, logs, and service lifecycle | LLM provider administration — that is `llm-admin` | `SETTINGS_TOOLS_AUTO_APPROVE_KEY`, `SETTINGS_TOOL_CONFIG_PREFIX`, `SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES`, `get_operator_setup`, `query_operator_setup_response`, `run_operator_setup`, `list_settings_tools`, `SettingsToolsAutoApproveRequest`, `set_settings_tools_auto_approve`, `SettingsToolPermissionPath`, `SettingsToolPermissionRequest`, `set_settings_tool_permission`, `validate_settings_tool_capability_id`, `validate_settings_tool_config_response`, `list_operator_config`, `OperatorConfigKeyPath`, `OPERATOR_CONFIG_KEY_MAX_BYTES`, `OPERATOR_CONFIG_RESERVED_VALIDATE_KEY`, `validate_operator_config_key`, `operator_config_key_error`, `query_operator_config_key_response`, `get_operator_config_key`, `set_operator_config_key`, `reject_reserved_operator_config_key`, `validate_operator_config`, `get_operator_diagnostics`, `get_operator_status`, `query_operator_logs`, `query_logs`, `run_operator_service_lifecycle` |
-| `llm-admin` | LLM provider administration, tenant user-model policy/catalog, and the provider login flows: config snapshot, upsert/delete, active-model selection, connection test, model listing, NEAR AI and Codex login | Anything that *calls* a model | `LlmProviderPath`, `get_user_model_catalog`, `query_user_model_catalog`, `set_user_model_policy`, `get_llm_config`, `query_llm_config_snapshot`, `upsert_llm_provider`, `delete_llm_provider`, `set_active_llm`, `test_llm_connection`, `list_llm_models`, `start_nearai_login`, `complete_nearai_wallet_login`, `start_codex_login`, `llm_provider_upsert_activity_id` |
+| `llm-admin` | LLM provider administration, tenant user-model policy/catalog, caller-scoped model preference, and the provider login flows: config snapshot, upsert/delete, active-model selection, connection test, model listing, NEAR AI and Codex login | Anything that *calls* a model | `LlmProviderPath`, `get_user_model_catalog`, `query_user_model_catalog`, `set_user_model_policy`, `get_user_model_preference`, `query_user_model_preference`, `set_user_model_preference`, `get_llm_config`, `query_llm_config_snapshot`, `upsert_llm_provider`, `delete_llm_provider`, `set_active_llm`, `test_llm_connection`, `list_llm_models`, `start_nearai_login`, `complete_nearai_wallet_login`, `start_codex_login`, `llm_provider_upsert_activity_id` |
 | `run-artifact` | Run and thread artifact reads — already its own file, the one seam plan #5985 has taken so far | Anything not artifact-shaped | `handlers/run_artifact.rs::RunArtifactPath`, `handlers/run_artifact.rs::ThreadArtifactPath`, `handlers/run_artifact.rs::AdminThreadScrapeListQuery`, `handlers/run_artifact.rs::AdminThreadScrapeThreadPath`, `handlers/run_artifact.rs::AdminThreadScrapeRunPath`, `handlers/run_artifact.rs::query_single`, `handlers/run_artifact.rs::get_run_artifact`, `handlers/run_artifact.rs::get_thread_artifact`, `handlers/run_artifact.rs::admin_list_thread_scrape_threads`, `handlers/run_artifact.rs::admin_get_thread_scrape_artifact`, `handlers/run_artifact.rs::admin_get_thread_scrape_run_artifact` |
 
 Three placement calls worth stating, because each is an item whose *name*
@@ -226,12 +226,16 @@ is all-or-nothing and returns `413` when the thread exceeds 1,000 persisted
 messages, 16 MiB of stored message data, or 20 MiB after redaction and log
 assembly. The endpoint is limited to six requests per caller per minute.
 
-**Operator-gating.** LLM config, operator setup/config/service-control, and
-extension zip-import routes are operator-wide: `webui_v2_app` mounts them only
-when the authenticator advertises an operator config surface, and each handler
-still rejects with `403` when the injected `WebUiV2Capabilities` lacks
-`operator_webui_config`. Multi-user session/OIDC authenticators return
-non-operator capabilities. `webui.v2.admin.*` user management is
+**Operator-gating.** LLM provider/configuration routes (including provider
+credentials and model-policy mutation), operator setup/config/service-control,
+and extension zip-import routes are operator-wide: `webui_v2_app` mounts them
+only when the authenticator advertises an operator config surface, and each
+handler still rejects with `403` when the injected `WebUiV2Capabilities` lacks
+`operator_webui_config`. The safe LLM catalog and model-preference routes are
+normal authenticated-caller routes scoped to the caller's tenant and user;
+they expose neither provider metadata nor policy mutation. Multi-user
+session/OIDC authenticators return non-operator capabilities.
+`webui.v2.admin.*` user management is
 admin/operator-gated server-side in `ProductSurface` (`AdminUserService`,
 last-admin protection); `create_user` returns the one-time API bearer exactly
 once in `api_token`. `webui.v2.settings.tools` is a normal authenticated-caller
@@ -320,6 +324,12 @@ Cargo's `OUT_DIR` and served from `src/webui_v2/static_assets/`.
 `Dockerfile.reborn` installs `frontend/` deps before the `cargo build` so the
 release image bundles compiled assets; `frontend/README.md` covers the JS
 toolchain.
+
+The Inference tab keeps provider credentials and provider management
+operator-only. An operator also configures the active provider's tenant model
+allowlist and workspace default there before caller-scoped model selectors are
+enabled. Ordinary users receive only the safe catalog and their own preference
+selector; they never receive provider metadata or policy mutation controls.
 
 ## Why the OAuth login router lives here
 

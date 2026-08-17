@@ -641,15 +641,29 @@ impl HostedMcpPreparationService {
                 .await
                 .map_err(crate::product_lifecycle::map_extension_installation_error)?;
         }
-        if finalized.manifest().source == ManifestSource::UserRegistered {
-            self.catalog
-                .write()
-                .await
-                .extend(AvailableExtensionCatalog::from_packages(vec![
-                    crate::hosted_mcp_manifest::available_package(&finalized)?,
-                ]));
-        }
+        // Serialize the read/replace decision against catalog imports and
+        // removals. The guard spans lifecycle synchronization, but the catalog
+        // itself is not mutated until that fallible step succeeds.
+        let mut catalog = self.catalog.write().await;
+        let refreshed = catalog.refreshed_resolved_manifest(&finalized)?;
+        let replacement = match refreshed {
+            Some(refreshed) => Some(refreshed),
+            None if finalized.manifest().source == ManifestSource::UserRegistered => {
+                Some(crate::hosted_mcp_manifest::available_package(&finalized)?)
+            }
+            None => {
+                tracing::debug!(
+                    extension_id = extension_id.as_str(),
+                    source = ?finalized.manifest().source,
+                    "hosted MCP discovery finalized without a catalog entry to refresh"
+                );
+                None
+            }
+        };
         self.sync_lifecycle_package(extension_id).await?;
+        if let Some(replacement) = replacement {
+            catalog.extend(AvailableExtensionCatalog::from_packages(vec![replacement]));
+        }
         Ok(None)
     }
 

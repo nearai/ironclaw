@@ -87,6 +87,20 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
     ".github/workflows/ironclaw-release.yml": (
         "Smoke exact binaries before packaging upload",
         "scripts/ci/smoke-release-binary.py",
+        # The docs-live repoint: cargo-dist regeneration would silently drop
+        # this hand-added job, unhooking docs publication from releases. The
+        # prerelease guard is pinned literally so an edit that starts moving
+        # docs-live on rc tags fails here first.
+        "publish-docs-live:",
+        "refs/heads/docs-live",
+        "!fromJson(needs.host.outputs.val).announcement_is_prerelease",
+        # The newest-stable-tag guard: without it, re-running an older
+        # release's workflow force-moves docs-live backwards and silently
+        # reverts the live docs site. The comparison itself is pinned, not
+        # just its endpoint and skip message.
+        "git/matching-refs/tags/ironclaw-v",
+        'if [ "${GITHUB_REF_NAME}" != "${newest}" ]; then',
+        "skipping docs-live repoint:",
     ),
 }
 
@@ -108,7 +122,7 @@ UNCONDITIONAL_SKIP = re.compile(
 # pull_request/merge_group. Both are path filters, so neither can assert
 # anything about itself — a filter that matches nothing skips every job and the
 # roll-up reports success. That is the WS10 failure mode
-# (docs/reborn/target-architecture/CHECKLIST.md), and it arrives silently the
+# (docs/internal/reborn/target-architecture/CHECKLIST.md), and it arrives silently the
 # day crates move into family directories.
 #
 # So the pin lives here: extract the `changes`-job regex from the workflow text
@@ -129,7 +143,7 @@ E2E_SCOPE_PROBES: tuple[tuple[str, bool], ...] = (
     # every one of these.
     ("crates/substrates/ironclaw_event_log/src/lib.rs", True),
     ("crates/extensions/packages/slack/manifest.toml", True),
-    ("docs/reborn/target-architecture/CHECKLIST.md", True),
+    ("docs/internal/reborn/target-architecture/CHECKLIST.md", True),
     ("tests/e2e/scenarios/test_reborn_blackbox_smoke.py", True),
     ("Cargo.toml", True),
     # Still out of scope: the filter must stay a filter.
@@ -1187,6 +1201,9 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
             f"crates/{NESTED_FAMILY}/ironclaw_event_log/src/lib.rs",
             "crates/extensions/packages/slack/manifest.toml",
             "tests/integration/mod.rs",
+            # A PR touching only the release workflow must reach fast-checks,
+            # or its REQUIRED_MARKERS are only enforced post-merge.
+            ".github/workflows/ironclaw-release.yml",
         ),
         out_of_scope=("README.md", "docs/internal/plans/whatever.md", "openwiki/index.md"),
     ),
@@ -1207,7 +1224,13 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
             ".claude/skills/reborn-feature/SKILL.md",
             "AGENTS.md",
             "CLAUDE.md",
-            "docs/reborn/guidance-conventions.md",
+            "docs/internal/reborn/guidance-conventions.md",
+            # check-guidance.py scans the docs/ surface (published pages, the
+            # zh/ mirror, docs/internal/reborn/contracts/) since 2026-08-07 —
+            # a narrowed trigger that drops public docs must fail here, not
+            # silently skip the gate.
+            "docs/api/responses.mdx",
+            "docs/zh/index.mdx",
         ),
         out_of_scope=(
             # Crate-tier guidance rides `has_code`'s `crates/` prefix; this

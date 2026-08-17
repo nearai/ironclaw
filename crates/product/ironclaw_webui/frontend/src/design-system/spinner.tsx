@@ -10,11 +10,16 @@
  * Props
  *   className  extra classes (e.g. sizing / color); defaults to h-4 w-4.
  */
+import type { ComponentPropsWithoutRef } from "react";
+
 import { cn } from "../utils/cn";
 
-export function Spinner({ className = "" } = {}) {
+export type SpinnerProps = Omit<ComponentPropsWithoutRef<"svg">, "children">;
+
+export function Spinner({ className = "", ...rest }: SpinnerProps = {}) {
   return (
     <svg
+      {...rest}
       className={cn("v2-spin shrink-0", className || "h-4 w-4")}
       viewBox="0 0 24 24"
       fill="none"

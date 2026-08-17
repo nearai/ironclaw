@@ -1192,6 +1192,69 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Every `DriverNote` milestone summary recorded by this harness, in order.
+    ///
+    /// A driver note is the operator-visible channel for "a subsystem stopped
+    /// contributing but the run continued" — it reaches the live work summary
+    /// rather than only a log line.
+    fn driver_note_summaries(&self) -> Vec<String> {
+        self.loop_milestones()
+            .into_iter()
+            .filter_map(|milestone| match milestone.kind {
+                LoopHostMilestoneKind::DriverNote { safe_summary, .. } => {
+                    Some(safe_summary.as_str().to_string())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Assert an operator-visible driver note reported degraded memory
+    /// retrieval — the evidence that a retrieval/backend FAILURE is
+    /// distinguishable from "no matching memory" outside the returned value.
+    ///
+    /// Driver notes are emitted from a spawned task, so poll over a bounded
+    /// window rather than racing the emit.
+    pub async fn assert_memory_retrieval_degraded_note(&self) -> HarnessResult<()> {
+        let mut waited = std::time::Duration::ZERO;
+        while waited < std::time::Duration::from_secs(5) {
+            if self
+                .driver_note_summaries()
+                .iter()
+                .any(|summary| summary.contains("memory retrieval degraded"))
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            waited += std::time::Duration::from_millis(25);
+        }
+        Err(format!(
+            "no driver note reporting degraded memory retrieval; saw {:?}",
+            self.driver_note_summaries()
+        )
+        .into())
+    }
+
+    /// Assert NO memory-degradation driver note was emitted. Pairs with
+    /// [`Self::assert_memory_retrieval_degraded_note`]: a healthy backend that
+    /// simply matched nothing must not look like an outage.
+    pub async fn assert_no_memory_retrieval_degraded_note(&self) -> HarnessResult<()> {
+        // Give a stray emit the same window the positive assertion waits on, so
+        // this cannot pass merely by checking too early.
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let summaries = self.driver_note_summaries();
+        if summaries
+            .iter()
+            .any(|summary| summary.contains("memory retrieval degraded"))
+        {
+            return Err(format!(
+                "an empty-but-healthy memory retrieval reported degradation: {summaries:?}"
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Assert exactly one typed redaction milestone was emitted for the applied
     /// compaction since `baseline`, carrying `expected_redactions`.
     pub async fn assert_compaction_redacted_once_since(

@@ -282,8 +282,8 @@ fn capability_may_change_visible_surface(capability_id: &CapabilityId) -> bool {
 
 #[async_trait]
 impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
-    fn requires_ordered_batch_invocation(&self) -> bool {
-        self.inner.requires_ordered_batch_invocation()
+    fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
+        self.inner.requires_ordered_batch_invocation(invocations)
     }
 
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
@@ -314,14 +314,20 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
         &self,
         request: RegisterProviderToolCallRequest,
     ) -> Result<ironclaw_loop_contracts::CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner.register_provider_tool_call(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.inner.register_provider_tool_call(request)).await
     }
 
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let surface = self.inner.visible_capabilities(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let surface = Box::pin(self.inner.visible_capabilities(request)).await?;
         self.surface_state.set_current(surface.clone())?;
         Ok(surface)
     }
@@ -331,7 +337,10 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
         request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         let may_change_surface = capability_may_change_visible_surface(&request.capability_id);
-        let resolution = self.inner.invoke_capability(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let resolution = Box::pin(self.inner.invoke_capability(request)).await?;
         if may_change_surface {
             self.surface_state.clear_current()?;
         }
@@ -346,7 +355,10 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
             .invocations
             .iter()
             .any(|invocation| capability_may_change_visible_surface(&invocation.capability_id));
-        let resolution = self.inner.invoke_capability_batch(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let resolution = Box::pin(self.inner.invoke_capability_batch(request)).await?;
         if may_change_surface {
             self.surface_state.clear_current()?;
         }
@@ -1630,13 +1642,17 @@ where
             max_messages,
         )
         .with_context_window_cache(Arc::clone(&context_window_cache));
-        if let Some(source) = self.skill_context_source.as_ref() {
+        // An unbound run's prepared context is its COMPLETE input by
+        // contract: no skill, identity, or memory lane is folded in, so the
+        // caller's declared context is exactly what the model sees.
+        let unbound_run = run_context.resolved_run_profile.profile_id.is_unbound();
+        if !unbound_run && let Some(source) = self.skill_context_source.as_ref() {
             context_adapter = context_adapter.with_skill_context_source(source.clone());
         }
-        if let Some(source) = self.identity_context_source.as_ref() {
+        if !unbound_run && let Some(source) = self.identity_context_source.as_ref() {
             context_adapter = context_adapter.with_identity_context_source(source.clone());
         }
-        if let Some(service) = self.memory_context_service.as_ref() {
+        if !unbound_run && let Some(service) = self.memory_context_service.as_ref() {
             context_adapter = context_adapter.with_memory_context_service(service.clone());
         }
         // Channel-origin runs carry host-fetched conversation history on the
@@ -1933,8 +1949,12 @@ where
                         thread_scope: effective_scope.clone(),
                         host_gateway: gw,
                         max_messages,
-                        skill_context_source: self.skill_context_source.clone(),
-                        identity_context_source: self.identity_context_source.clone(),
+                        skill_context_source: (!unbound_run)
+                            .then(|| self.skill_context_source.clone())
+                            .flatten(),
+                        identity_context_source: (!unbound_run)
+                            .then(|| self.identity_context_source.clone())
+                            .flatten(),
                         instruction_materialization_store: Some(Arc::clone(
                             &instruction_materialization_store,
                         )),
@@ -1952,8 +1972,12 @@ where
                         thread_scope: effective_scope.clone(),
                         host_gateway: Arc::clone(&self.model_gateway),
                         max_messages,
-                        skill_context_source: self.skill_context_source.clone(),
-                        identity_context_source: self.identity_context_source.clone(),
+                        skill_context_source: (!unbound_run)
+                            .then(|| self.skill_context_source.clone())
+                            .flatten(),
+                        identity_context_source: (!unbound_run)
+                            .then(|| self.identity_context_source.clone())
+                            .flatten(),
                         instruction_materialization_store: Some(Arc::clone(
                             &instruction_materialization_store,
                         )),
@@ -2229,8 +2253,9 @@ impl LoopModelPort for RebornLoopDriverHost {
 
 #[async_trait]
 impl LoopCapabilityPort for RebornLoopDriverHost {
-    fn requires_ordered_batch_invocation(&self) -> bool {
-        self.capabilities.requires_ordered_batch_invocation()
+    fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
+        self.capabilities
+            .requires_ordered_batch_invocation(invocations)
     }
 
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
@@ -2248,14 +2273,20 @@ impl LoopCapabilityPort for RebornLoopDriverHost {
         &self,
         request: RegisterProviderToolCallRequest,
     ) -> Result<ironclaw_loop_contracts::CapabilityCallCandidate, AgentLoopHostError> {
-        self.capabilities.register_provider_tool_call(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.capabilities.register_provider_tool_call(request)).await
     }
 
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        self.capabilities.visible_capabilities(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.capabilities.visible_capabilities(request)).await
     }
 
     fn current_visible_capabilities(
@@ -2268,14 +2299,20 @@ impl LoopCapabilityPort for RebornLoopDriverHost {
         &self,
         request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
-        self.capabilities.invoke_capability(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.capabilities.invoke_capability(request)).await
     }
 
     async fn invoke_capability_batch(
         &self,
         request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
-        self.capabilities.invoke_capability_batch(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.capabilities.invoke_capability_batch(request)).await
     }
 }
 

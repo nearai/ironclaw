@@ -44,6 +44,11 @@ pub(crate) struct BackendExtensionHostAssemblyInput {
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     pub(crate) filesystem: Arc<CompositeRootFilesystem>,
     pub(crate) outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+    /// Linked-account custody over the auth domain's credential service, and
+    /// the per-extension resolver factory built beside it. `None` composes
+    /// fail-closed custody (a deployment without product auth).
+    pub(crate) linked_sessions: Option<Arc<ironclaw_extension_host::LinkedSessionStore>>,
+    pub(crate) linked_accounts: Option<Arc<dyn ironclaw_extension_host::LinkedAccountResolution>>,
     /// Host-owned per-user delivery registrations, handed to the coordinator
     /// so a channel with zero of them resolves to "no target" before any
     /// adapter call (design §8).
@@ -80,6 +85,8 @@ pub(crate) async fn build_backend_extension_host(
         deployment_channels,
         filesystem,
         outbound_state,
+        linked_sessions,
+        linked_accounts,
     } = input;
 
     let channel_egress_credentials = Arc::new(
@@ -130,6 +137,16 @@ pub(crate) async fn build_backend_extension_host(
                 std::time::Duration::from_secs(30),
             ),
             channel_egress_transport: channel_egress_transport.clone(),
+            // A deployment without product auth composes no custody; the
+            // fail-closed shapes are chosen here, at the boundary, so the
+            // host's own dependency struct stays honest about what
+            // production always supplies.
+            linked_sessions: linked_sessions
+                .unwrap_or_else(ironclaw_extension_host::LinkedSessionStore::unavailable),
+            linked_accounts: linked_accounts.unwrap_or_else(|| {
+                Arc::new(ironclaw_extension_host::UnavailableLinkedAccountResolution)
+            }),
+            admin_secrets: Some(Arc::clone(&admin_configuration_resolver)),
         },
     )
     .await;
@@ -350,6 +367,7 @@ pub(crate) struct ChannelHostAssemblyWiring {
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) turn_coordinator: Arc<dyn TurnCoordinator>,
     pub(crate) input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
+    pub(crate) llm_config: Option<Arc<ironclaw_operator::RebornLlmConfigService>>,
     pub(crate) approval_interaction: Option<Arc<dyn ApprovalInteractionService>>,
     pub(crate) auth_interaction: Option<Arc<dyn AuthInteractionService>>,
     pub(crate) identity: ironclaw_extension_host::channel_host::ChannelHostIdentity,
@@ -364,6 +382,7 @@ pub(crate) struct RuntimeExtensionHostAssemblyWiring<'a> {
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) turn_coordinator: Arc<dyn TurnCoordinator>,
     pub(crate) input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
+    pub(crate) llm_config: Option<Arc<ironclaw_operator::RebornLlmConfigService>>,
     pub(crate) approval_interaction: Arc<dyn ApprovalInteractionService>,
     pub(crate) auth_interaction: Arc<dyn AuthInteractionService>,
     pub(crate) thread_scope: &'a ThreadScope,
@@ -482,6 +501,7 @@ pub(crate) fn start_channel_host(
         thread_service,
         turn_coordinator,
         input_enqueue,
+        llm_config,
         approval_interaction,
         auth_interaction,
         identity,
@@ -531,6 +551,7 @@ pub(crate) fn start_channel_host(
             turn_coordinator,
             inbound_attachments: Arc::clone(inbound_attachments),
             input_enqueue,
+            llm_config: llm_config.map(|service| service as _),
             approval_interaction,
             auth_interaction,
             identity: ironclaw_assistant::ChannelWorkflowIdentity {
@@ -573,6 +594,7 @@ pub(crate) async fn build_runtime_channel_host(
         approval_interaction,
         auth_interaction,
         input_enqueue,
+        llm_config,
         thread_scope,
         actor_user_id,
         auth_challenges,
@@ -605,6 +627,7 @@ pub(crate) async fn build_runtime_channel_host(
             thread_service,
             turn_coordinator,
             input_enqueue,
+            llm_config,
             approval_interaction: Some(approval_interaction),
             auth_interaction: Some(auth_interaction),
             identity,
@@ -638,6 +661,8 @@ pub(crate) async fn build_runtime_channel_host(
                     assembly: Arc::clone(&assembly),
                     channel_config: Arc::clone(&local_runtime.channel_config_service),
                     dm_targets: local_runtime.channel_dm_target_store.clone(),
+                    identity_lookup: Arc::clone(&local_runtime.channel_identity_store)
+                        as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
                     identity: ironclaw_extension_host::channel_outbound_targets::ChannelOutboundTargetIdentity {
                         tenant_id: thread_scope.tenant_id.clone(),
                         agent_id: thread_scope.agent_id.clone(),

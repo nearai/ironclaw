@@ -71,7 +71,7 @@ fn reborn_boundary_rules_active_crates_are_workspace_members() {
         checked >= 30,
         "expected every active boundary rule's crate to resolve to a real manifest; only \
          {checked} did. A rule set that resolves to nothing checks nothing while passing \
-         (docs/reborn/target-architecture/CHECKLIST.md WS10)."
+         (docs/internal/reborn/target-architecture/CHECKLIST.md WS10)."
     );
 }
 
@@ -360,10 +360,10 @@ fn reborn_virtual_roots_match_storage_placement_contract() {
         std::fs::read_to_string(crate_path(&root, "crates/ironclaw_host_api/src/path.rs"))
             .expect("host API path source must be readable");
     let storage_contract =
-        std::fs::read_to_string(root.join("docs/reborn/contracts/storage-placement.md"))
+        std::fs::read_to_string(root.join("docs/internal/reborn/contracts/storage-placement.md"))
             .expect("storage placement contract must be readable");
     let filesystem_contract =
-        std::fs::read_to_string(root.join("docs/reborn/contracts/filesystem.md"))
+        std::fs::read_to_string(root.join("docs/internal/reborn/contracts/filesystem.md"))
             .expect("filesystem contract must be readable");
 
     let implemented = extract_virtual_roots_const(&path_source);
@@ -748,7 +748,54 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // Union re-measured on the merged tree (2026-08-12): the branch's
         // channel-contract vocabulary and main's memory-guidance field are
         // disjoint. Count read from this test's own failure message.
-        ("ironclaw_extension_contracts", 8_772),
+        //
+        // 8_772 -> <see below> (2026-08-10, telegram-linked-device): the
+        // device-link membrane. Two new modules — `linked_session` (the
+        // host-implemented custody port plus the value types its signature
+        // names: zeroizing `SessionBytes`, the CAS `LinkedSessionVersion`, the
+        // opaque `LinkedAccountRef`/`LinkedAccountGrant`, and the
+        // `LinkedAccountResolver` port) and `device_link` (`DeviceLinkAdapter`
+        // and its step/input/error vocabulary) — plus the
+        // `VendorAuthRecipe::DeviceLink` display-metadata variant and the
+        // `DeviceLinkPromptView` projection with §8.12's four additive fields
+        // (`flow_id`, `input_kind`, `mode`, `restartable`).
+        //
+        // Every type here is forced onto this side of the membrane: the
+        // implementing package's `BoundaryRule` forbids `ironclaw_auth`, so a
+        // port declared in contracts cannot name a domain type in its
+        // signature. `LinkedAccountResolver` in particular MOVED here from the
+        // telegram package, because PROPOSAL §5.1 requires the tool half's
+        // containment to be rooted in a HOST-minted grant and a port the
+        // package declared could only ever have been satisfied by the package.
+        //
+        // Nothing executes — the step machine and revision CAS live in
+        // `ironclaw_auth`, the driver glue and the resolver implementation in
+        // `ironclaw_extension_host`, and every protocol mechanic in the
+        // extension package. Roughly a third of the delta is the inline
+        // `#[cfg(test)]` modules this ratchet also counts, in `recipe.rs` and
+        // `auth_prompt.rs`; the two NEW modules do not pay that, their test
+        // modules being `device_link/tests.rs` and `linked_session/tests.rs`
+        // siblings that `production_rust_files` excludes — the same split
+        // #7157 made for `runtime_context`.
+        //
+        // Count read from this test's own failure message after the merge.
+        //
+        // 10_344 -> 10_512 (2026-08-13, device-link review fixes): +168 lines
+        // of declaration and doc, no logic. Three parts, each closing an
+        // audited defect: `DeviceLinkPromptView` gains the facts a card cannot
+        // derive — `alternate_available` and the recipe's two mode labels
+        // (without them the generic panel hardcoded one vendor's ceremony and
+        // wedged a vendor that declares no alternate), `display_kind` (the
+        // contract has always distinguished a scannable code from a link and
+        // it reached no consumer), `extension_id`, and `vendor_user_ref`
+        // (which used to double-book the `code` slot) — plus their four
+        // bounding validators; `DeviceLinkErrorCode` gains `HostThrottled` and
+        // `LimitReached` so a host budget stops impersonating a vendor
+        // pushback; and `DeviceLinkAdapter` gains the four cross-half
+        // obligations that were previously prose in a design doc no
+        // implementor reads. Enforcement of all of it stays where it was.
+        // Count read from this test's own failure message.
+        ("ironclaw_extension_contracts", 10_512),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -777,7 +824,7 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // its `with_channel_context` builder carry hydrated channel context on the
         // durable turn record. A DTO field only; the fetch and prompt framing live
         // in the slack package and loop_host. Count read from failure.
-        // 18_974 -> 18_994 (#7076 takeover): the
+        // 18_974 -> 18_994 (2026-08-10, main / #7076 takeover): the
         // `RuntimeCredentialTarget::Basic` declaration, username validation,
         // and wire-contract vocabulary; RFC 7617 composition remains in
         // ironclaw_host_runtime.
@@ -795,7 +842,24 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // in ironclaw_agent_loop; this crate owns only shared failure
         // vocabulary. Union re-measured on the merged tree (2026-08-12);
         // count read from this test's own failure message.
-        ("ironclaw_host_api", 19_026),
+        //
+        // 19_026 -> 19_483 (2026-08-10, telegram-linked-device): the
+        // `send_message.output` schema graduation (design §6.2) — a NEW `.v2`
+        // schema file carrying the `sent_unverified` evidence branch, the
+        // version-plural `StandardOpContract` (`StandardSchemaVersion`,
+        // `PublishedSchema`, `output_schema_for`) that keeps `.v1` resolving
+        // forever, and `RuntimeCredentialAccountSetup::DeviceLink`.
+        // 19_483 -> 19_718 (#7532): the provider-neutral turn execution
+        // policy and validated required-skill identity shared by trusted
+        // trigger ingress and the runner.
+        // + (2026-08-13, unbound turns): the `prepared_context` module —
+        // `PreparedTurnDeclarations`, `OutputContract`, `TurnLimits`, the
+        // `PreparedContextSource` admission-probe trait, and the
+        // structured-result capability id constants. Neutral authority
+        // vocabulary only.
+        // Union re-measured on the merged tree (2026-08-14); count read from
+        // this test's own failure message.
+        ("ironclaw_host_api", 19_966),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
@@ -925,7 +989,20 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // persisted-coordinate constant with its doc (the OpenAI-compat
         // unparameterized session lane), and `#[serde(rename_all)]` on the
         // two ledger-persisted inbound enums. Count read from this gate.
-        ("ironclaw_product_contracts", 16_167),
+        // 16_167 -> <see below> (2026-08-10, telegram-linked-device PR 2 — the
+        // exhaustive-match fallout of PR 1's three new enum variants): the
+        // `LifecycleExtensionCredentialSetup::DeviceLink` and
+        // `RebornExtensionCredentialSetup::DeviceLink` projection variants, and
+        // boxing `ProductOutboundPayload::AuthPrompt`. The two variants are the
+        // connect affordance a device-link credential projects onto — folding
+        // them onto `ManualToken` would render a paste form for a secret that
+        // does not exist. The `Box` is forced: PR 1's `device_link` frame took
+        // `AuthPromptView` to 664 bytes, 320 over the next-largest payload, and
+        // `clippy::large_enum_variant` denies at `-D warnings`; `Box` is
+        // transparent to serde so no wire shape moved. Declarations only — the
+        // device-link flow lives in ironclaw_auth and the telegram package.
+        // Count read from this test's own failure message.
+        ("ironclaw_product_contracts", 16_192),
         // 832 -> 432 (2026-08-12, #7373 refresh merge, main): re-pinned to the
         // measured count — this row still carried the +400 seed pad the
         // 2026-08-07 re-pin removed from its siblings.
@@ -1813,7 +1890,7 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
         obligations_dir.display()
     );
     let host_runtime_contract =
-        std::fs::read_to_string(root.join("docs/reborn/contracts/host-runtime.md"))
+        std::fs::read_to_string(root.join("docs/internal/reborn/contracts/host-runtime.md"))
             .expect("host runtime contract must be readable");
     // WS3 re-point: the script lane merged into `ironclaw_sandbox` and no longer
     // lives in a `lib.rs`. Scanning the whole crate source tree keeps the rule
@@ -2105,6 +2182,12 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         // ids and rebuild provider calls for the resolved target.
         "crates/ironclaw_loop_host/src/tool_disclosure.rs",
         "crates/ironclaw_loop_host/src/tool_disclosure_port.rs",
+        // Tool search stores the provider-encoded alias as an exact-match
+        // identifier so a query using the advertised provider name resolves to
+        // its capability. It consumes the single encoding owner
+        // (`ProviderToolName::encode_capability_str`) instead of re-deriving
+        // the `.` -> `__` mapping inline (unbound-turns follow-up, PR #7634).
+        "crates/ironclaw_loop_host/src/tool_search.rs",
         // Composition-local protocol surfaces that reconstruct provider-shaped
         // output or synthetic provider tools.
         "crates/ironclaw_composition/src/llm_admin/openai_compat_serve.rs",
@@ -2113,6 +2196,11 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         // stored replay metadata for the Trace Commons envelope; it moved out
         // of composition into the turn-runner observer seam (WS6, §6.10.1).
         "crates/ironclaw_turn_runner/src/trace_capture.rs",
+        // Prepared-context seeding is a replay boundary: caller-supplied tool
+        // history persists as provider-shaped tool-call reference envelopes
+        // under the seed sentinel identity so the gateway replays it exactly
+        // like live provider history (unbound-turns follow-up, PR #7634).
+        "crates/ironclaw_threads/src/prepared_context.rs",
     ]
     .into_iter()
     .map(|entry| resolve_crate_relative(&root, entry))
@@ -3059,7 +3147,7 @@ fn reborn_boot_config_file_layout_is_pinned() {
     assert!(
         config_file_src.contains("reject_inline_secret"),
         "RebornConfigFile::validate must call `reject_inline_secret` on operator-pasteable \
-         fields. See `docs/reborn/contracts/secrets.md` and epic #3036's `Pitfalls & \
+         fields. See `docs/internal/reborn/contracts/secrets.md` and epic #3036's `Pitfalls & \
          Landmines` section: \"Do not bake secret material into blueprints/config.\""
     );
 
@@ -4158,7 +4246,14 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_storage",
-                "ironclaw_threads",
+                // `ironclaw_threads` is permitted (unbound-turns, PR #7634):
+                // the prepared chat-completions lane maps wire messages onto
+                // the accept door's seed vocabulary (`agent_message`) and runs
+                // the door's own `validate_prepared_seed_content` BEFORE the
+                // idempotency reservation — one validator, no mirrored bounds
+                // to drift. Thread/turn SERVICES still arrive as
+                // composition-built ports; the edge is vocabulary + the door
+                // validator only (`ironclaw_webui` holds the same edge).
                 "ironclaw_trust",
                 "ironclaw_tui",
                 "ironclaw_turns",

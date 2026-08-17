@@ -48,6 +48,7 @@ mod skill_activation;
 mod skill_bundle_context_source;
 mod skill_bundle_source;
 mod skill_context;
+mod structured_result;
 mod subagent_prompt_port;
 mod subagent_spawn_port;
 mod surface_disclosure;
@@ -81,8 +82,7 @@ pub use capability_port::{
     CapabilityResultWrite, CapabilityTrajectoryObserver, CapabilityWriteResult,
     DecoratingLoopCapabilityPortFactory, DurablePersistence, HostRuntimeLoopCapabilityPort,
     HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityPortDecorator,
-    LoopCapabilityPortFactory, LoopCapabilityResultWriter, concurrency_hint_from_effects,
-    loop_driver_execution_extension_id,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, loop_driver_execution_extension_id,
 };
 pub use capability_surface_filter::{
     CapabilitySurfacePolicyFilter, CapabilitySurfaceVisibleFilter,
@@ -149,6 +149,7 @@ pub use skill_context::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextCandidatePayload,
     HostSkillContextSource, build_skill_run_snapshot,
 };
+pub use structured_result::{nothing_to_report_result_capability, structured_result_capability};
 pub use subagent_prompt_port::{
     DEFAULT_SUBAGENT_GOAL_MAX_BYTES, SubagentLoopPromptPort, SubagentPromptComposer,
     SubagentPromptGoal, SubagentPromptLimits, SubagentPromptMaterial, SubagentPromptMaterialSource,
@@ -204,16 +205,17 @@ use ironclaw_host_api::turn::TurnLeaseToken;
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
     AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
-    CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
-    LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind,
-    LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
-    LoopContextSnippet, LoopContextWindowTruncation, LoopDriverNoteKind, LoopHostMilestoneEmitter,
-    LoopHostMilestoneSink, LoopInlineMessageBody, LoopInputCursor, LoopModelMessage, LoopModelPort,
-    LoopModelRequest, LoopModelResponse, LoopModelUsage, LoopPromptBundleAuthority, LoopRequest,
-    LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
-    MemoryPromptContextService, ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode,
-    UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
-    sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
+    CapabilityResultIntrinsicOutcome, CapabilitySurfaceVersion, FinalizeAssistantMessage,
+    InstructionMaterializationStore, LoopCapabilityPort, LoopContextBundle,
+    LoopContextCompactionKind, LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort,
+    LoopContextRequest, LoopContextSnippet, LoopContextWindowTruncation, LoopDriverNoteKind,
+    LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInlineMessageBody, LoopInputCursor,
+    LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopModelUsage,
+    LoopPromptBundleAuthority, LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort,
+    LoopSafeSummary, LoopTranscriptPort, MemoryPromptContextLoad, MemoryPromptContextService,
+    ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
+    sort_instruction_snippets_for_prompt,
 };
 use ironclaw_outbound::{
     OutboundError, ReplyAttachmentHandle, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
@@ -224,8 +226,8 @@ use ironclaw_threads::{
     FinalizedAssistantMessageByRunRequest, LoadContextMessagesRequest, LoadContextWindowRequest,
     MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
     SessionThreadError, SessionThreadService, SummaryArtifact, ThreadHistoryRequest,
-    ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
-    ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultIntrinsicOutcome,
+    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
     AgentTurnSpawnTreeRuntimePort, LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope,
@@ -334,10 +336,22 @@ where
     /// non-optional null-object `user_profile_source`, this is a genuine `Option`.)
     // arch-exempt: optional_arc, deferred production wiring, issue #5013
     memory_context_service: Option<Arc<dyn MemoryPromptContextService>>,
-    /// Per-run cache for the fetched memory snippets. Shared across clones via
+    /// Per-run cache for the fetched memory load. Shared across clones via
     /// `Arc` so the "fetch once per run" guarantee holds even if the port is
-    /// cloned, exactly like `identity_candidates`.
-    memory_snippets_cache: Arc<OnceCell<Vec<LoopContextSnippet>>>,
+    /// cloned, exactly like `identity_candidates`. The cached value is the
+    /// whole [`MemoryPromptContextLoad`], degradations included: a failed
+    /// fetch must not be remembered as a plain empty result for the rest of
+    /// the run.
+    memory_snippets_cache: Arc<OnceCell<MemoryPromptContextLoad>>,
+    /// One-shot guard so a degraded memory retrieval produces exactly ONE
+    /// operator-visible driver note per run, however many prompt builds read
+    /// the cached load. `Arc`-shared for the same reason as the cache itself.
+    /// Set only AFTER the note is published, so a transient sink failure does
+    /// not permanently suppress it; `memory_degradation_note_in_flight` keeps
+    /// the window between claim and publish from producing duplicates. Same
+    /// pair, and same rationale, as `personal_context_admitted`.
+    memory_degradation_note_emitted: Arc<OnceCell<()>>,
+    memory_degradation_note_in_flight: Arc<AtomicBool>,
     /// Pre-resolved channel conversation history for shared-channel runs
     /// (UNTRUSTED third-party text carried on the run's persisted product
     /// context). Rendered as ONE framed system-context block per prompt
@@ -412,6 +426,8 @@ where
             milestone_sink: None,
             memory_context_service: None,
             memory_snippets_cache: Arc::new(OnceCell::new()),
+            memory_degradation_note_emitted: Arc::new(OnceCell::new()),
+            memory_degradation_note_in_flight: Arc::new(AtomicBool::new(false)),
             channel_conversation_context: None,
         }
     }
@@ -1084,6 +1100,11 @@ where
                     None
                 }
             });
+        let intrinsic_outcome = request.intrinsic_outcome.map(|outcome| match outcome {
+            CapabilityResultIntrinsicOutcome::NothingToReport => {
+                ToolResultIntrinsicOutcome::NothingToReport
+            }
+        });
         let turn_run_id = self.run_context.run_id.to_string();
         let append_request = AppendToolResultReferenceRequest {
             scope: self.thread_scope.clone(),
@@ -1095,6 +1116,7 @@ where
             provider_call: request
                 .provider_call
                 .map(provider_call_reference_to_envelope),
+            intrinsic_outcome,
         };
         let record =
             retry_transcript_backend_write(&turn_run_id, "append_tool_result_reference", || {
@@ -1289,7 +1311,7 @@ pub struct EmptyLoopCapabilityPort;
 
 #[async_trait]
 impl ironclaw_loop_contracts::LoopCapabilityPort for EmptyLoopCapabilityPort {
-    fn requires_ordered_batch_invocation(&self) -> bool {
+    fn requires_ordered_batch_invocation(&self, _invocations: &[LoopRequest]) -> bool {
         false
     }
 
@@ -1689,6 +1711,7 @@ where
             resolved_model_route: self.run_context.resolved_model_route.clone(),
             run_id: self.run_context.run_id,
             turn_id: self.run_context.turn_id,
+            tool_choice: request.tool_choice.clone(),
         };
         let gateway_result = if let Some(capabilities) = self.capabilities.as_ref() {
             let capabilities: Arc<dyn LoopCapabilityPort> =
@@ -2529,6 +2552,11 @@ pub struct HostManagedModelRequest {
     pub resolved_model_route: Option<HostManagedModelRouteSnapshot>,
     pub run_id: TurnRunId,
     pub turn_id: TurnId,
+    /// Loop-strategy tool-choice constraint carried through to the provider.
+    /// Only valid on tool-capable calls whose visible surface contains the
+    /// forced capability; the gateway rejects anything else as caller misuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ironclaw_loop_contracts::LoopModelToolChoice>,
 }
 
 /// Boundary alias for the route snapshot carried from turn/run state into

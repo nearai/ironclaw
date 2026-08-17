@@ -20,8 +20,8 @@ use ironclaw_host_api::{
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
     AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
-    CapabilityInputIssue, CapabilityInputRef, CapabilitySurfaceVersion,
-    EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
+    CapabilityInputIssue, CapabilityInputRef, CapabilityResultIntrinsicOutcome,
+    CapabilitySurfaceVersion, EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
     InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopCapabilityPort,
     LoopContextBundle, LoopContextCompactionKind, LoopContextMessage, LoopContextPort,
     LoopContextRequest, LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneKind,
@@ -314,6 +314,7 @@ async fn task_pin_evicts_complete_tool_exchange_at_a_compactable_boundary() {
     fixture
         .thread_service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: fixture.thread_scope.clone(),
             thread_id: fixture.thread_id.clone(),
             turn_run_id: fixture.run_context.run_id.to_string(),
@@ -386,6 +387,7 @@ async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallbac
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .unwrap();
@@ -423,6 +425,7 @@ async fn model_port_empty_request_pins_the_run_accepted_task_on_cache_miss() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .unwrap();
@@ -493,6 +496,7 @@ async fn model_port_records_resolved_prompt_with_fallback_model_at_the_host_boun
         capability_view: Some(LoopModelCapabilityView {
             visible_capability_ids: vec![CapabilityId::new("filesystem.read").expect("capability")],
         }),
+        tool_choice: None,
     })
     .await
     .expect("model response");
@@ -559,6 +563,7 @@ async fn model_port_keeps_effective_model_unavailable_without_provider_evidence(
         fallback_index: 2,
         iteration: 7,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .expect("model response");
@@ -607,6 +612,7 @@ async fn model_port_retains_usage_reported_by_failed_calls() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .expect_err("model call fails");
@@ -656,6 +662,7 @@ async fn model_port_keeps_omitted_usage_unavailable() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .expect("model call succeeds");
@@ -702,6 +709,7 @@ async fn model_port_records_full_capability_surface_when_request_has_no_view() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .expect("model response");
@@ -745,6 +753,7 @@ async fn model_port_continues_when_diagnostic_capability_lookup_fails() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .expect("diagnostic failure must not fail the model request");
@@ -817,6 +826,7 @@ async fn prompt_and_model_ports_share_cached_context_window_for_one_request() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -873,6 +883,7 @@ async fn model_port_reuses_smaller_prompt_context_window_for_explicit_prompt_ref
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -968,6 +979,7 @@ async fn context_window_cache_does_not_cross_thread_scope_boundaries() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -2053,6 +2065,7 @@ async fn prompt_and_model_ports_materialize_trusted_identity_content() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -2097,6 +2110,7 @@ async fn model_port_limits_provider_tool_definitions_to_model_visible_capability
             capability_view: Some(LoopModelCapabilityView {
                 visible_capability_ids: vec![allowed_id],
             }),
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -2139,6 +2153,7 @@ async fn model_port_maps_invalid_model_output_to_recoverable_model_error() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -2187,6 +2202,7 @@ async fn model_port_preserves_capability_info_for_filtered_capability_view() {
             capability_view: Some(LoopModelCapabilityView {
                 visible_capability_ids: vec![allowed_id],
             }),
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -2458,6 +2474,7 @@ async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -2562,6 +2579,7 @@ async fn prompt_and_model_ports_resolve_skill_refs_after_prompt_sorting() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -2655,6 +2673,7 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -2707,6 +2726,7 @@ async fn model_port_rejects_policy_denied_identity_ref_before_gateway_call() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -2909,6 +2929,7 @@ async fn prompt_and_model_ports_keep_duplicate_skill_names_distinct() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -2979,6 +3000,7 @@ async fn model_port_rejects_skill_context_refs_when_source_changes_after_prompt_
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -3516,6 +3538,7 @@ async fn transcript_port_retries_transient_tool_result_backend_failure() {
             safe_summary: "tool completed once".to_string(),
             provider_call: None,
             model_observation: None,
+            intrinsic_outcome: None,
         })
         .await
         .expect("the exact tool-result reference write is retried");
@@ -3537,6 +3560,49 @@ async fn transcript_port_retries_transient_tool_result_backend_failure() {
             .count(),
         1,
         "retry must not duplicate the tool-result reference"
+    );
+}
+
+#[tokio::test]
+async fn transcript_port_persists_explicit_intrinsic_outcome_without_provider_replay() {
+    let fixture = ThreadFixture::new().await;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+
+    adapter
+        .append_capability_result_ref(AppendCapabilityResultRef {
+            result_ref: LoopResultRef::new("result:typed-nothing-to-report").unwrap(),
+            safe_summary: "structured result recorded".to_string(),
+            provider_call: None,
+            model_observation: None,
+            intrinsic_outcome: Some(CapabilityResultIntrinsicOutcome::NothingToReport),
+        })
+        .await
+        .expect("host-authored intrinsic outcome is durable");
+
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope,
+            thread_id: fixture.thread_id,
+        })
+        .await
+        .unwrap();
+    let message = history
+        .messages
+        .iter()
+        .find(|message| message.kind == MessageKind::ToolResultReference)
+        .expect("tool result reference");
+    let envelope = ToolResultReferenceEnvelope::from_json_str(
+        message.content.as_deref().expect("envelope content"),
+    )
+    .expect("valid envelope");
+    assert_eq!(
+        envelope.intrinsic_outcome,
+        Some(ironclaw_threads::ToolResultIntrinsicOutcome::NothingToReport)
     );
 }
 
@@ -3589,6 +3655,7 @@ async fn transcript_port_stops_after_bounded_backend_write_attempts() {
             safe_summary: "tool completed once".to_string(),
             provider_call: None,
             model_observation: None,
+            intrinsic_outcome: None,
         })
         .await
         .expect_err("persistent backend failure remains terminal");
@@ -3634,6 +3701,7 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
             }),
             model_observation: None,
+            intrinsic_outcome: None,
         })
         .await
         .unwrap();
@@ -3643,6 +3711,7 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
             safe_summary: "retry summary ignored".to_string(),
             provider_call: None,
             model_observation: None,
+            intrinsic_outcome: None,
         })
         .await
         .unwrap();
@@ -3743,6 +3812,7 @@ async fn transcript_port_appends_model_observation_in_tool_result_reference_enve
             safe_summary: "tool failed".to_string(),
             provider_call: None,
             model_observation: Some(observation.clone()),
+            intrinsic_outcome: None,
         })
         .await
         .unwrap();
@@ -3795,6 +3865,7 @@ async fn transcript_port_drops_invalid_model_observation_without_failing_append(
             safe_summary: "tool failed".to_string(),
             provider_call: None,
             model_observation: Some(observation),
+            intrinsic_outcome: None,
         })
         .await
         .expect("invalid model observation should not fail append");
@@ -3857,6 +3928,7 @@ async fn transcript_port_degrades_control_char_result_reference_preview_without_
             safe_summary: "tool completed".to_string(),
             provider_call: None,
             model_observation: Some(observation),
+            intrinsic_outcome: None,
         })
         .await
         .expect("control-char preview should not fail append");
@@ -3929,6 +4001,7 @@ async fn transcript_port_persists_result_reference_item_count() {
             safe_summary: "tool completed".to_string(),
             provider_call: None,
             model_observation: Some(observation),
+            intrinsic_outcome: None,
         })
         .await
         .expect("item_count observation should not fail append");
@@ -3981,6 +4054,7 @@ async fn transcript_port_degrades_unsafe_tool_result_summary_without_borking() {
             safe_summary: "raw tool input includes secret".to_string(),
             provider_call: None,
             model_observation: None,
+            intrinsic_outcome: None,
         })
         .await
         .expect("unsafe summary must degrade to a fixed label, not end the run");
@@ -4357,6 +4431,7 @@ async fn model_port_resolves_thread_message_refs_and_delegates_to_gateway() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -4404,6 +4479,7 @@ async fn model_port_rejects_mismatched_fallback_route_evidence() {
             fallback_index: 2,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -4451,6 +4527,7 @@ async fn model_port_rejects_missing_fallback_route_evidence() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -4488,6 +4565,7 @@ async fn model_port_accepts_matching_fallback_route_evidence() {
             fallback_index: 2,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -4579,6 +4657,7 @@ async fn model_port_reads_image_attachment_bytes_into_model_image_parts() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .unwrap();
@@ -4628,6 +4707,7 @@ async fn model_port_merges_consecutive_text_user_messages_for_prompt() {
         capability_view: None,
         fallback_index: 0,
         iteration: 0,
+        tool_choice: None,
     })
     .await
     .unwrap();
@@ -4687,6 +4767,7 @@ async fn model_port_threads_resolved_model_route_snapshot_to_gateway() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .unwrap();
@@ -4733,6 +4814,7 @@ async fn model_port_resolves_explicit_refs_that_fall_outside_context_window() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .unwrap();
@@ -4747,6 +4829,7 @@ async fn model_port_preserves_provider_metadata_for_explicit_refs_outside_contex
     let tool_result = fixture
         .thread_service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: fixture.thread_scope.clone(),
             thread_id: fixture.thread_id.clone(),
             turn_run_id: fixture.run_context.run_id.to_string(),
@@ -4806,6 +4889,7 @@ async fn model_port_preserves_provider_metadata_for_explicit_refs_outside_contex
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .unwrap();
@@ -4873,6 +4957,7 @@ async fn model_port_round_trips_tool_result_reference_context_as_typed_model_inp
         result_ref: "result:round-trip".to_string(),
         safe_summary: ToolResultSafeSummary::new("tool result content").unwrap(),
         model_observation: None,
+        intrinsic_outcome: None,
     };
     let envelope_content = serde_json::to_string(&envelope).unwrap();
     let thread_service = Arc::new(StaticContextThreadService::new(ContextMessage {
@@ -4930,6 +5015,7 @@ async fn model_port_round_trips_tool_result_reference_context_as_typed_model_inp
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -4982,6 +5068,7 @@ async fn model_port_rejects_malformed_tool_result_reference_content() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .expect_err("malformed tool result reference content should fail");
@@ -5027,6 +5114,7 @@ async fn model_port_rejects_missing_explicit_tool_result_reference_before_gatewa
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .expect_err("missing tool result reference should fail before model call");
@@ -5072,6 +5160,7 @@ async fn model_port_emits_model_milestones_without_prompt_or_output_payloads() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -5132,6 +5221,7 @@ async fn model_port_emits_started_and_failed_milestones_when_gateway_fails() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -5192,6 +5282,7 @@ async fn model_port_logs_model_started_milestone_failure_without_losing_response
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -5235,6 +5326,7 @@ async fn model_port_logs_model_completed_milestone_failure_without_losing_respon
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -5276,6 +5368,7 @@ async fn model_port_rejects_message_role_that_disagrees_with_thread_record() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -5307,6 +5400,7 @@ async fn model_port_surfaces_fail_closed_gateway_policy_errors_without_raw_detai
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -5344,6 +5438,7 @@ async fn model_port_replaces_invalid_gateway_safe_summary_with_stable_summary() 
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -5405,6 +5500,7 @@ async fn model_port_preserves_gateway_safe_reason_kind() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -6898,14 +6994,16 @@ impl ironclaw_loop_contracts::MemoryPromptContextService for RecordingMemoryProm
     async fn load_memory_snippets(
         &self,
         request: ironclaw_loop_contracts::MemoryPromptContextRequest,
-    ) -> Result<Vec<LoopContextSnippet>, AgentLoopHostError> {
+    ) -> Result<ironclaw_loop_contracts::MemoryPromptContextLoad, AgentLoopHostError> {
         self.calls.lock().expect("memory calls lock").push(request);
-        Ok(vec![LoopContextSnippet {
-            snippet_ref: "memory-snippet:test".to_string(),
-            model_content: "remembered fact".to_string(),
-            safe_summary: "remembered fact".to_string(),
-            metadata: None,
-        }])
+        Ok(ironclaw_loop_contracts::MemoryPromptContextLoad::healthy(
+            vec![LoopContextSnippet {
+                snippet_ref: "memory-snippet:test".to_string(),
+                model_content: "remembered fact".to_string(),
+                safe_summary: "remembered fact".to_string(),
+                metadata: None,
+            }],
+        ))
     }
 }
 
@@ -6967,4 +7065,98 @@ async fn thread_context_port_loads_memory_snippets_through_wired_service_once_pe
     assert_eq!(calls[0].max_snippets, 8);
     assert_eq!(calls[0].scope, run_context.scope);
     assert_eq!(calls[0].actor.user_id, owner);
+}
+
+/// Reports a long-term lane that FAILED rather than matching nothing, so the
+/// port has a degradation to publish.
+struct DegradedMemoryPromptContextService;
+
+#[async_trait]
+impl ironclaw_loop_contracts::MemoryPromptContextService for DegradedMemoryPromptContextService {
+    async fn load_memory_snippets(
+        &self,
+        _request: ironclaw_loop_contracts::MemoryPromptContextRequest,
+    ) -> Result<ironclaw_loop_contracts::MemoryPromptContextLoad, AgentLoopHostError> {
+        Ok(ironclaw_loop_contracts::MemoryPromptContextLoad {
+            snippets: Vec::new(),
+            degradations: vec![ironclaw_loop_contracts::MemoryRetrievalDegradation::new(
+                ironclaw_loop_contracts::MemoryRetrievalLane::LongTerm,
+                ironclaw_loop_contracts::MemoryRetrievalFailureKind::Unavailable,
+            )],
+        })
+    }
+}
+
+/// A transient milestone-sink failure must not permanently suppress the
+/// degraded-retrieval note.
+///
+/// The note is the ONLY operator-visible signal that retrieval broke rather
+/// than simply matching nothing. Marking it emitted before the publish
+/// succeeds would mean one failed sink call put the operator back in exactly
+/// the state this behavior exists to escape — for the rest of the run, with no
+/// second chance. Same guarantee, and same two-step guard, as
+/// `context_port_survives_personal_context_admitted_milestone_sink_failure`.
+#[traced_test]
+#[tokio::test]
+async fn context_port_retries_memory_degradation_note_after_milestone_sink_failure() {
+    let fixture = ThreadFixture::new().await;
+    let owner = fixture
+        .thread_scope
+        .owner_user_id
+        .clone()
+        .expect("fixture thread scope carries an owner");
+    let run_context = fixture
+        .run_context
+        .clone()
+        .with_actor(TurnActor::new(owner));
+    let milestone_sink = Arc::new(FailOnceMilestoneSink::default());
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        run_context,
+        16,
+    )
+    .with_memory_context_service(Arc::new(DegradedMemoryPromptContextService) as Arc<_>)
+    .with_milestone_sink(milestone_sink.clone());
+
+    let request = || LoopContextRequest {
+        after: None,
+        limit: 16,
+        mode: ironclaw_loop_contracts::PromptMode::TextOnly,
+    };
+
+    // First prompt build: the publish is attempted and fails. The turn survives.
+    adapter.load_loop_context(request()).await.unwrap();
+    wait_for_fail_once_attempts(&milestone_sink, 1).await;
+    assert!(
+        milestone_sink.milestones().is_empty(),
+        "the first publish failed, so no note was delivered"
+    );
+    assert!(logs_contain("failed to emit memory degradation milestone"));
+
+    // Second prompt build of the SAME run: the cached load still records the
+    // degradation, and the note is retried rather than suppressed.
+    adapter.load_loop_context(request()).await.unwrap();
+    wait_for_fail_once_attempts(&milestone_sink, 2).await;
+    let milestones = milestone_sink.milestones();
+    assert_eq!(
+        milestones.len(),
+        1,
+        "exactly one note reaches the operator: retried after the failure, not duplicated"
+    );
+    assert!(matches!(
+        &milestones[0].kind,
+        LoopHostMilestoneKind::DriverNote { kind, safe_summary }
+            if *kind == LoopDriverNoteKind::Context
+                && safe_summary.as_str() == "memory retrieval degraded (long_term:unavailable)"
+    ));
+
+    // A third build must NOT publish again — the success is remembered.
+    adapter.load_loop_context(request()).await.unwrap();
+    tokio::task::yield_now().await;
+    assert_eq!(
+        milestone_sink.milestones().len(),
+        1,
+        "the note stays at one per run once it has actually been delivered"
+    );
 }

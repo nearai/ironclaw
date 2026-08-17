@@ -56,9 +56,9 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_processes::{
     ProcessCancellationRegistry, ProcessInvocationError, ProcessInvocationRecord,
-    ProcessInvocationStart, ProcessInvocationStatePort, ProcessJournalStore, ProcessResultStore,
-    ProcessResultStorePort, ProcessServices, ProcessStart, ProcessStatus,
-    capability_process_record, submit_capability_process,
+    ProcessInvocationStart, ProcessInvocationStatePort, ProcessInvocationStore,
+    ProcessJournalStore, ProcessResultStore, ProcessResultStorePort, ProcessServices, ProcessStart,
+    ProcessStatus, capability_process_record, submit_capability_process,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -769,7 +769,9 @@ async fn default_runtime_status_reports_running_invocations_only() {
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
-    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let process_services = ProcessServices::in_memory();
+    let process_runtime = process_services.process_runtime();
+    let run_state = Arc::new(ProcessInvocationStore::new(Arc::clone(&process_runtime)));
 
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -806,6 +808,15 @@ async fn default_runtime_status_reports_running_invocations_only() {
     );
     assert_eq!(status.active_work[0].capability_id, Some(capability_id()));
     assert_eq!(status.active_work[0].runtime, Some(RuntimeKind::Wasm));
+    let second_worker = ProcessInvocationStore::new(process_runtime);
+    assert!(
+        second_worker
+            .records_for_scope(&context.resource_scope)
+            .await
+            .unwrap()
+            .is_empty(),
+        "fresh inline invocation state is local until its first durable edge"
+    );
 }
 
 #[tokio::test]

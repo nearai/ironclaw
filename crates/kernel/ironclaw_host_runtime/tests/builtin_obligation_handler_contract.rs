@@ -1352,6 +1352,27 @@ impl SecretStorePort for SecretDisappearsAfterPreflight {
         self.inner.put(scope, handle, material, expires_at).await
     }
 
+    async fn put_versioned(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        material: SecretMaterial,
+        expires_at: Option<Timestamp>,
+        expected: ironclaw_secrets::SecretCasExpectation,
+    ) -> Result<ironclaw_secrets::SecretCasWriteOutcome, SecretStoreError> {
+        self.inner
+            .put_versioned(scope, handle, material, expires_at, expected)
+            .await
+    }
+
+    async fn read_versioned(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<Option<ironclaw_secrets::VersionedSecretMaterial>, SecretStoreError> {
+        self.inner.read_versioned(scope, handle).await
+    }
+
     async fn put_if_absent(
         &self,
         scope: ResourceScope,

@@ -9,7 +9,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::{
-    Args, ModelLatencyProfile, Scenario, StressPreset, StressSuite, compare, run_once, sweep,
+    Args, CliError, ModelLatencyProfile, Scenario, StressPreset, StressSuite, compare, run_once,
+    sweep,
 };
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -42,7 +43,7 @@ struct TopOperationGroup {
     p95_us: u128,
 }
 
-pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
+pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), CliError> {
     let suite = args
         .suite
         .ok_or_else(|| "suite mode is not enabled".to_string())?;
@@ -178,7 +179,7 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
         .iter()
         .map(|result| (result.label.to_string(), result.metrics))
         .collect::<Vec<_>>();
-    sweep::enforce_thresholds(args, &threshold_inputs)
+    sweep::enforce_thresholds(args, &threshold_inputs).map_err(CliError::from)
 }
 
 pub(crate) fn build_cases(suite: StressSuite) -> Vec<SuiteCase> {

@@ -20,7 +20,7 @@
 //!
 //! The composition is intentionally Reborn-owned and does **not** share
 //! middleware with the v1 gateway under `/src/channels/web/`. Path A in
-//! `docs/reborn/how-to-port-channel-to-reborn.md` requires native
+//! `docs/internal/reborn/how-to-port-channel-to-reborn.md` requires native
 //! surfaces to keep host auth host-owned and route/body/CORS security
 //! in gateway-owned code; the Reborn binary owns this stack itself.
 
@@ -87,7 +87,7 @@ const REBORN_HEALTH_PATH: &str = "/api/health";
 /// Implementations return `Some(UserId)` on success and `None` to
 /// reject. Concrete failure reasons stay inside the implementation
 /// (the gateway emits a generic 401), per the
-/// `docs/reborn/how-to-port-channel-to-reborn.md` Path A guidance that
+/// `docs/internal/reborn/how-to-port-channel-to-reborn.md` Path A guidance that
 /// auth evidence is host-owned and never leaks to clients.
 #[async_trait::async_trait]
 pub trait WebuiAuthenticator: Send + Sync + 'static {

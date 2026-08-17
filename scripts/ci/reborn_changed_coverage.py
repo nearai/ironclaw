@@ -72,7 +72,7 @@ Which files count as Reborn production is resolved from the **crate inventory**
 (`scripts/ci/lib/crate_tree.py`), not from a `crates/ironclaw_*` path pattern.
 A pattern keyed to the flat tree shape matches nothing once crates move into
 family directories (`crates/<family>/ironclaw_*`,
-docs/reborn/target-architecture/PROPOSAL.md §5): the gate would then see zero
+docs/internal/reborn/target-architecture/PROPOSAL.md §5): the gate would then see zero
 changed production files, find nothing to enforce, and report success — the
 WS10 silent-dark failure mode (CHECKLIST.md, #6963).
 """
@@ -211,7 +211,7 @@ class ProductionPaths:
             f"changed Rust file under {CRATES_ROOT}/ belongs to no discovered crate: "
             f"{path}. Refusing to treat it as 'not production' — an unattributable "
             "path means the crate inventory and the tree disagree "
-            "(docs/reborn/target-architecture/CHECKLIST.md WS10)."
+            "(docs/internal/reborn/target-architecture/CHECKLIST.md WS10)."
         )
 
     def diff_pathspecs(self) -> list[str]:
@@ -775,7 +775,7 @@ def screen_unattributable(
 
     That gap is the same shape as the bug this whole sweep is about: a
     fail-closed check that cannot fail is not a check
-    (docs/reborn/target-architecture/CHECKLIST.md WS10, #6963).
+    (docs/internal/reborn/target-architecture/CHECKLIST.md WS10, #6963).
     """
 
     result = subprocess.run(

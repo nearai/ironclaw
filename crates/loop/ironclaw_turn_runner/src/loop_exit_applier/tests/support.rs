@@ -5,9 +5,8 @@ use async_trait::async_trait;
 use ironclaw_host_api::ids::{ProcessId, TenantId, ThreadId};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef,
-    ReplyTargetBindingRef, RunProfileVersion, SanitizedFailure, SourceBindingRef, TurnActor,
-    TurnCheckpointId, TurnGateRef, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope,
-    TurnStatus,
+    RunProfileVersion, SanitizedFailure, TurnActor, TurnCheckpointId, TurnGateRef, TurnId,
+    TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
 };
 use ironclaw_loop_contracts::{
     CheckpointSchemaId, LoopBlocked, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStateRef,
@@ -147,6 +146,7 @@ where
 {
     thread_service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: thread_scope,
             thread_id,
             turn_run_id: run_id.to_string(),
@@ -174,13 +174,12 @@ pub(super) fn running_run_state(
         run_id,
         status: TurnStatus::Running,
         accepted_message_ref: AcceptedMessageRef::new("msg:accepted").expect("valid"),
-        source_binding_ref: SourceBindingRef::new("source").expect("valid"),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply").expect("valid"),
         resolved_run_profile_id: ironclaw_turns::RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref: None,
@@ -419,13 +418,12 @@ pub(super) fn claimed_run() -> ClaimedTurnRun {
             run_id: TurnRunId::new(),
             status: TurnStatus::Running,
             accepted_message_ref: AcceptedMessageRef::new("msg:accepted").expect("valid"),
-            source_binding_ref: SourceBindingRef::new("source").expect("valid"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply").expect("valid"),
             resolved_run_profile_id: ironclaw_turns::RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             allow_steering: true,
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: None,
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
@@ -482,6 +480,7 @@ fn test_profile(
             tier: ResourceBudgetTier::new("test_tier").expect("valid"),
             max_model_calls: 32,
             max_capability_invocations: 64,
+            max_wall_clock_seconds: None,
         },
         personal_context_policy: ironclaw_loop_contracts::PersonalContextPolicy::Excluded,
         runtime_constraints: RuntimeProfileConstraints {

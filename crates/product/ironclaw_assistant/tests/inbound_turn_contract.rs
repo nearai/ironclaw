@@ -2,6 +2,7 @@
 //! Contract tests for the InboundTurnService.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -44,6 +45,13 @@ use ironclaw_product_contracts::inbound::{
     ParsedProductInbound, ProductInboundEnvelope, ProductInboundPayload, TrustedInboundContext,
     UserMessagePayload,
 };
+use ironclaw_product_contracts::operator_llm::{
+    CodexLoginStart, LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult,
+    LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, SetActiveLlmRequest,
+    UpsertLlmProviderRequest,
+};
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_threads::{
     InMemorySessionThreadService, MessageStatus, SessionThreadService, ThreadHistoryRequest,
     ThreadScope,
@@ -104,7 +112,6 @@ impl TurnCoordinator for CapturingTurnCoordinator {
             resolved_run_profile_version: RunProfileVersion::new(1),
             event_cursor: EventCursor::default(),
             accepted_message_ref: request.accepted_message_ref.clone(),
-            reply_target_binding_ref: request.reply_target_binding_ref.clone(),
         };
         *self
             .last_submit
@@ -140,6 +147,114 @@ impl TurnCoordinator for CapturingTurnCoordinator {
 struct ScriptedTurnCoordinator {
     results: Arc<Mutex<VecDeque<Result<SubmitTurnResponse, TurnError>>>>,
     submissions: Arc<Mutex<Vec<SubmitTurnRequest>>>,
+}
+
+struct MutableModelResolver {
+    model: Mutex<Option<String>>,
+    resolve_count: AtomicUsize,
+}
+
+impl MutableModelResolver {
+    fn new(model: &str) -> Self {
+        Self {
+            model: Mutex::new(Some(model.to_string())),
+            resolve_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn set_model(&self, model: &str) {
+        *self.model.lock().expect("model resolver lock poisoned") = Some(model.to_string());
+    }
+
+    fn resolve_count(&self) -> usize {
+        self.resolve_count.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl LlmConfigService for MutableModelResolver {
+    async fn snapshot(
+        &self,
+        _caller: ProductSurfaceCaller,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn upsert_provider(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: UpsertLlmProviderRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn delete_provider(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _provider_id: String,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn set_active(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: SetActiveLlmRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn test_connection(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: LlmProbeRequest,
+    ) -> Result<LlmProbeResult, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn list_models(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: LlmProbeRequest,
+    ) -> Result<LlmModelsResult, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn resolve_user_model(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _requested_model: Option<String>,
+    ) -> Result<Option<String>, LlmConfigServiceError> {
+        self.resolve_count.fetch_add(1, Ordering::SeqCst);
+        Ok(self
+            .model
+            .lock()
+            .expect("model resolver lock poisoned")
+            .clone())
+    }
+
+    async fn start_nearai_login(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: NearAiLoginRequest,
+    ) -> Result<NearAiLoginStart, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn complete_nearai_wallet_login(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: NearAiWalletLoginRequest,
+    ) -> Result<NearAiWalletLoginResult, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn start_codex_login(
+        &self,
+        _caller: ProductSurfaceCaller,
+    ) -> Result<CodexLoginStart, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
 }
 
 impl ScriptedTurnCoordinator {
@@ -185,7 +300,6 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
                     resolved_run_profile_version: RunProfileVersion::new(1),
                     event_cursor: EventCursor::default(),
                     accepted_message_ref: request.accepted_message_ref.clone(),
-                    reply_target_binding_ref: request.reply_target_binding_ref.clone(),
                 })
             })
     }
@@ -219,8 +333,6 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
             run_id: request.run_id,
             status: TurnStatus::Running,
             accepted_message_ref: AcceptedMessageRef::new("msg:scripted").expect("valid"),
-            source_binding_ref: SourceBindingRef::new("src:scripted").expect("valid"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:scripted").expect("valid"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             allow_steering: true,
@@ -235,6 +347,7 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
             product_context: None,
             resume_disposition: None,
             model_usage: None,
+            execution_outcome: None,
         })
     }
 }
@@ -1766,6 +1879,52 @@ async fn retry_validates_live_binding_before_accepted_message_replay() {
 }
 
 #[tokio::test]
+async fn accepted_message_replay_reuses_the_persisted_resolved_model() {
+    let thread_service = InMemorySessionThreadService::default();
+    let coordinator = ScriptedTurnCoordinator::default();
+    coordinator.push_result(Err(TurnError::Unavailable {
+        reason: "transient submit failure".into(),
+    }));
+    let coordinator_handle = coordinator.clone();
+    let model_resolver = Arc::new(MutableModelResolver::new("model-a"));
+    let service = DefaultInboundTurnService::new(
+        FakeConversationBindingService::new(),
+        thread_service,
+        coordinator,
+        Arc::new(RejectingInputEnqueue),
+    )
+    .with_llm_config_service(model_resolver.clone());
+
+    let envelope = sample_user_message_envelope("model-replay");
+    service
+        .accept_user_message(&envelope)
+        .await
+        .expect_err("first submit fails after the resolved model is accepted");
+
+    model_resolver.set_model("model-b");
+    service
+        .accept_user_message(&envelope)
+        .await
+        .expect("accepted message replay succeeds");
+
+    let submitted_models = coordinator_handle
+        .submissions()
+        .into_iter()
+        .map(|request| request.requested_model)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        submitted_models,
+        vec![Some("model-a".to_string()), Some("model-a".to_string())],
+        "retry/replay must preserve the model resolved before message acceptance"
+    );
+    assert_eq!(
+        model_resolver.resolve_count(),
+        1,
+        "accepted-message replay must not consult live model preferences again"
+    );
+}
+
+#[tokio::test]
 async fn replay_lookup_is_namespaced_by_installation() {
     let binding_service = FakeConversationBindingService::new();
     let binding_handle = binding_service.clone();
@@ -1941,10 +2100,6 @@ async fn reply_target_binding_ref_has_single_reply_prefix() {
         .expect("captured submit lock poisoned")
         .clone()
         .expect("submit request captured");
-    let reply_ref = request.reply_target_binding_ref.as_str();
-    assert!(reply_ref.starts_with("reply:"));
-    assert!(!reply_ref.starts_with("reply:reply:"));
-    assert_eq!(reply_ref.matches("reply:").count(), 1);
     assert_eq!(
         request.product_context.as_ref().map(|c| c.origin),
         Some(TurnOriginKind::Inbound),
@@ -2467,19 +2622,6 @@ mod session_lane {
             "action-1",
             "session submissions keep the raw client action id as the idempotency key"
         );
-        assert!(
-            request.source_binding_ref.as_str().starts_with("webui-src"),
-            "session source ref keeps the webui prefix, got {}",
-            request.source_binding_ref.as_str()
-        );
-        assert!(
-            request
-                .reply_target_binding_ref
-                .as_str()
-                .starts_with("webui-reply"),
-            "session reply ref keeps the webui prefix, got {}",
-            request.reply_target_binding_ref.as_str()
-        );
         let product_context = request.product_context.expect("product context");
         assert_eq!(
             product_context.origin,
@@ -2870,7 +3012,6 @@ mod session_lane {
                 resolved_run_profile_version: RunProfileVersion::new(1),
                 event_cursor: EventCursor::default(),
                 accepted_message_ref: request.accepted_message_ref.clone(),
-                reply_target_binding_ref: request.reply_target_binding_ref.clone(),
             })
         }
 

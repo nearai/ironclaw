@@ -13,6 +13,8 @@
  *   Label       — <label> with consistent typography
  *   FormField   — Label + Input/children + optional error/hint
  */
+import type { ComponentPropsWithoutRef, ReactNode } from "react";
+
 import { cn } from "../utils/cn";
 
 /* ─── Shared base ─────────────────────────────────────────────────── */
@@ -33,6 +35,34 @@ const INPUT_SIZES = {
   lg: "h-[54px] rounded-[18px] px-4 text-ui-lg",
 };
 
+export type InputProps = Omit<ComponentPropsWithoutRef<"input">, "size"> & {
+  error?: boolean;
+  size?: keyof typeof INPUT_SIZES;
+};
+
+export type TextareaProps = ComponentPropsWithoutRef<"textarea"> & {
+  error?: boolean;
+};
+
+export type SelectProps = Omit<ComponentPropsWithoutRef<"select">, "size"> & {
+  error?: boolean;
+  size?: keyof typeof INPUT_SIZES;
+};
+
+export type LabelProps = ComponentPropsWithoutRef<"label"> & {
+  required?: boolean;
+};
+
+export type FormFieldProps = {
+  children?: ReactNode;
+  className?: string;
+  error?: ReactNode;
+  hint?: ReactNode;
+  htmlFor?: string;
+  label?: ReactNode;
+  required?: boolean;
+};
+
 /* ─── Input ───────────────────────────────────────────────────────── */
 
 export function Input({
@@ -40,7 +70,7 @@ export function Input({
   size = "md",
   error = false,
   ...rest
-}) {
+}: InputProps) {
   return (
     <input
       className={cn(
@@ -61,7 +91,7 @@ export function Textarea({
   error = false,
   rows = 4,
   ...rest
-}) {
+}: TextareaProps) {
   return (
     <textarea
       rows={rows}
@@ -85,7 +115,7 @@ export function Select({
   size = "md",
   error = false,
   ...rest
-}) {
+}: SelectProps) {
   return (
     <div className="relative w-full">
       <select
@@ -116,7 +146,12 @@ export function Select({
 
 /* ─── Label ───────────────────────────────────────────────────────── */
 
-export function Label({ children, className = "", required = false, ...rest }) {
+export function Label({
+  children,
+  className = "",
+  required = false,
+  ...rest
+}: LabelProps) {
   return (
     <label
       className={cn(
@@ -148,7 +183,7 @@ export function FormField({
   required = false,
   className = "",
   htmlFor = "",
-}) {
+}: FormFieldProps) {
   return (
     <div className={cn("flex flex-col gap-2", className)}>
       {label &&

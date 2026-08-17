@@ -9,7 +9,7 @@ tenant = "reborn-cli"
 default_agent = "reborn-cli-agent"
 
 [runner]
-heartbeat_interval_secs = 5
+heartbeat_interval_secs = 15
 poll_interval_ms = 200
 # Hosted single-tenant has one elected process as the turn-runner authority.
 # Do not cap global runner slots here: the LLM/provider and storage pool should

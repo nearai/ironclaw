@@ -414,7 +414,7 @@ class ChangedCoverageDiscoveryTests(unittest.TestCase):
     A `crates/ironclaw_*` pattern matches nothing once crates move into family
     directories, and this gate's "nothing matched" outcome is a silent pass
     ("no Reborn production lines added", exit 0). These pin the discovery so
-    that shape cannot come back (docs/reborn/target-architecture/CHECKLIST.md
+    that shape cannot come back (docs/internal/reborn/target-architecture/CHECKLIST.md
     WS10, #6963).
     """
 

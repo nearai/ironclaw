@@ -8,7 +8,8 @@ use tracing::debug;
 
 use crate::{
     state::{
-        CheckpointKind, LoopExecutionState, PendingModelRetryDirective, TerminalWarningObservation,
+        BudgetCharge, CheckpointKind, LoopExecutionState, PendingModelRetryDirective,
+        TerminalWarningObservation,
     },
     strategies::{
         GateKind, ModelErrorSummary, RecoveryOutcome, RetryAlteration, RetryScope,
@@ -67,6 +68,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
 
         let (model_preference, fallback_index) =
             model_preference_to_host(ctx.planner.model().preference(&state).await)?;
+        let tool_choice = ctx.planner.model().tool_choice(&state).await;
         state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
             CancelCheck::Continue(state) => *state,
             CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
@@ -81,6 +83,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
             fallback_index,
             iteration: state.iteration,
             capability_view: Some(capability_view.clone()),
+            tool_choice,
         };
         let visible_capability_count = capability_view.visible_capability_ids.len();
         debug!(
@@ -104,7 +107,31 @@ impl ExecutorStage<ModelInput> for ModelStage {
         let max_model_attempts = ctx.planner.recovery().max_total_model_attempts().max(1);
         let mut last_error_summary: Option<ModelErrorSummary> = None;
         let mut last_error_detail: Option<String> = None;
+        let resource_budget_policy = ctx
+            .host
+            .run_context()
+            .resolved_run_profile
+            .resource_budget_policy
+            .clone();
         for _ in 0..max_model_attempts {
+            // Budget accounting counts every dispatched provider attempt,
+            // including recovery retries: charge before dispatch so an
+            // exhausted budget never reaches the provider. `BudgetStage`
+            // only hard-stops the run between outer-loop iterations, so
+            // without this per-attempt check a retry loop could keep
+            // dispatching past the ceiling within a single `ModelStage`
+            // call. On `Exhausted` (in practice only reachable from a
+            // retry attempt — `BudgetStage` just passed before this call
+            // was entered) re-enter the outer loop instead of dispatching;
+            // the next `BudgetStage` pass then hard-stops the run through
+            // its existing `ModelCallLimit` exit. No new exit path.
+            if state
+                .budget_ledger
+                .try_charge_model_call(&resource_budget_policy)
+                == BudgetCharge::Exhausted
+            {
+                return Ok(ModelStep::RetryIteration(Box::new(state)));
+            }
             let model_result = ctx.host.stream_model(request.clone()).await;
             match model_result {
                 Ok(response) => {

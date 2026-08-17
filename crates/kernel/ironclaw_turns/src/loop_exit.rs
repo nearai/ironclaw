@@ -10,14 +10,16 @@ use serde::{Deserialize, Serialize, de};
 
 use ironclaw_loop_contracts::{
     LoopBlocked, LoopCancelled, LoopCheckpointKind, LoopCompleted, LoopCompletionKind, LoopExit,
-    LoopFailed, LoopModelUsage, ResolvedRunProfile,
+    LoopFailed, LoopModelUsage,
 };
 
 use crate::{
     BlockedReason, CapabilityActivityId, GateKind, LoopExitId, LoopMessageRef, LoopResultRef,
-    SanitizedFailure, TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
+    SanitizedFailure, TurnCheckpointId, TurnError, TurnExecutionOutcome, TurnId, TurnOriginKind,
+    TurnRunId, TurnRunState, TurnScope,
     runner::{ClaimedTurnRun, TurnRunnerOutcome},
 };
+use ironclaw_host_api::execution_policy::ResultDeliveryPolicy;
 
 /// Evidence request for completion refs returned by a driver.
 #[derive(Debug, Clone)]
@@ -25,6 +27,7 @@ pub struct CompletionEvidenceRequest<'a> {
     pub scope: &'a TurnScope,
     pub turn_id: TurnId,
     pub run_id: TurnRunId,
+    pub completion_kind: LoopCompletionKind,
     pub reply_message_refs: &'a [LoopMessageRef],
     pub result_refs: &'a [LoopResultRef],
 }
@@ -132,15 +135,43 @@ impl LoopExitApplier {
         // and collapses it to a coarse outcome; carry it so the terminal
         // transition can persist it on the run record.
         let model_usage = reported_model_usage(&exit);
+        let execution_outcome = self.execution_outcome(claimed, &exit).await?;
         let decision = validate_loop_exit(exit, policy);
         let snapshot = apply_validated_process_loop_exit(
             self.transition_port.as_ref(),
             claimed,
             decision.mapping,
             model_usage,
+            execution_outcome,
         )
         .await?;
         crate::turn_run_state_from_process_snapshot(snapshot)
+    }
+
+    async fn execution_outcome(
+        &self,
+        claimed: &ClaimedTurnRun,
+        exit: &LoopExit,
+    ) -> Result<Option<TurnExecutionOutcome>, TurnError> {
+        let LoopExit::Completed(completed) = exit else {
+            return Ok(None);
+        };
+        let suppress = claimed
+            .state
+            .product_context
+            .as_ref()
+            .filter(|context| context.origin == TurnOriginKind::ScheduledTrigger)
+            .and_then(|context| context.execution_policy.as_ref())
+            .is_some_and(|policy| {
+                policy.result_delivery == ResultDeliveryPolicy::SuppressWhenNothingToReport
+            });
+        Ok(Some(
+            if suppress && completed.completion_kind == LoopCompletionKind::NothingToReport {
+                TurnExecutionOutcome::NothingToReport
+            } else {
+                TurnExecutionOutcome::ResultAvailable
+            },
+        ))
     }
 
     pub async fn record_runner_failure(
@@ -164,6 +195,7 @@ impl LoopExitApplier {
                 metadata: Some(crate::process_projection::agent_turn_metadata_from_claimed(
                     claimed,
                     claimed.state.model_usage,
+                    None,
                 )),
             })
             .await?;
@@ -182,6 +214,15 @@ impl LoopExitApplier {
         let mut policy = LoopExitValidationPolicy {
             require_final_checkpoint: profile.checkpoint_policy.require_final_checkpoint,
             allow_no_reply_completion: profile.checkpoint_policy.allow_no_reply_completion,
+            allow_nothing_to_report_completion: claimed
+                .state
+                .product_context
+                .as_ref()
+                .filter(|context| context.origin == TurnOriginKind::ScheduledTrigger)
+                .and_then(|context| context.execution_policy.as_ref())
+                .is_some_and(|policy| {
+                    policy.result_delivery == ResultDeliveryPolicy::SuppressWhenNothingToReport
+                }),
             final_checkpoint_verified: false,
             host_cancellation_observed: false,
             completion_refs_verified: false,
@@ -191,12 +232,16 @@ impl LoopExitApplier {
 
         match exit {
             LoopExit::Completed(completed) => {
+                if completed.completion_kind == LoopCompletionKind::NothingToReport {
+                    policy.require_final_checkpoint = true;
+                }
                 policy.completion_refs_verified = self
                     .evidence_port
                     .verify_completion_refs(CompletionEvidenceRequest {
                         scope,
                         turn_id,
                         run_id,
+                        completion_kind: completed.completion_kind,
                         reply_message_refs: &completed.reply_message_refs,
                         result_refs: &completed.result_refs,
                     })
@@ -206,7 +251,7 @@ impl LoopExitApplier {
                         scope,
                         turn_id,
                         run_id,
-                        profile,
+                        policy.require_final_checkpoint,
                         completed.final_checkpoint_id.as_ref(),
                     )
                     .await?;
@@ -232,7 +277,7 @@ impl LoopExitApplier {
                         scope,
                         turn_id,
                         run_id,
-                        profile,
+                        profile.checkpoint_policy.require_final_checkpoint,
                         cancelled.checkpoint_id.as_ref(),
                     )
                     .await?;
@@ -252,7 +297,7 @@ impl LoopExitApplier {
                         scope,
                         turn_id,
                         run_id,
-                        profile,
+                        profile.checkpoint_policy.require_final_checkpoint,
                         failed.checkpoint_id.as_ref(),
                     )
                     .await?;
@@ -267,10 +312,10 @@ impl LoopExitApplier {
         scope: &TurnScope,
         turn_id: TurnId,
         run_id: TurnRunId,
-        profile: &ResolvedRunProfile,
+        required: bool,
         checkpoint_id: Option<&TurnCheckpointId>,
     ) -> Result<bool, TurnError> {
-        if !profile.checkpoint_policy.require_final_checkpoint {
+        if !required {
             return Ok(true);
         }
         let Some(checkpoint_id) = checkpoint_id else {
@@ -292,6 +337,7 @@ async fn apply_validated_process_loop_exit(
     claimed: &ClaimedTurnRun,
     mapping: LoopExitMapping,
     model_usage: Option<LoopModelUsage>,
+    execution_outcome: Option<TurnExecutionOutcome>,
 ) -> Result<JournaledProcessSnapshot, TurnError> {
     match mapping {
         LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Completed) => {
@@ -299,6 +345,7 @@ async fn apply_validated_process_loop_exit(
                 .complete_process(process_state_transition_request_from_claimed(
                     claimed,
                     model_usage,
+                    execution_outcome,
                 ))
                 .await
         }
@@ -307,6 +354,7 @@ async fn apply_validated_process_loop_exit(
                 .cancel_process(process_state_transition_request_from_claimed(
                     claimed,
                     model_usage,
+                    None,
                 ))
                 .await
         }
@@ -330,6 +378,7 @@ async fn apply_validated_process_loop_exit(
                     metadata: Some(crate::process_projection::agent_turn_metadata_from_claimed(
                         claimed,
                         model_usage,
+                        None,
                     )),
                 })
                 .await
@@ -357,6 +406,7 @@ async fn apply_validated_process_loop_exit(
                     metadata: Some(crate::process_projection::agent_turn_metadata_from_claimed(
                         claimed,
                         model_usage,
+                        None,
                     )),
                 })
                 .await
@@ -375,12 +425,14 @@ fn process_lease_request_from_claimed(claimed: &ClaimedTurnRun) -> ProcessLeaseR
 fn process_state_transition_request_from_claimed(
     claimed: &ClaimedTurnRun,
     model_usage: Option<LoopModelUsage>,
+    execution_outcome: Option<TurnExecutionOutcome>,
 ) -> ProcessStateTransitionRequest {
     ProcessStateTransitionRequest {
         lease: process_lease_request_from_claimed(claimed),
         metadata: Some(crate::process_projection::agent_turn_metadata_from_claimed(
             claimed,
             model_usage,
+            execution_outcome,
         )),
     }
 }
@@ -473,6 +525,7 @@ fn validate_loop_exit(
 pub(crate) struct LoopExitValidationPolicy {
     require_final_checkpoint: bool,
     allow_no_reply_completion: bool,
+    allow_nothing_to_report_completion: bool,
     final_checkpoint_verified: bool,
     host_cancellation_observed: bool,
     completion_refs_verified: bool,
@@ -583,6 +636,8 @@ impl<'de> Deserialize<'de> for LoopExitValidationPolicy {
             #[serde(default)]
             allow_no_reply_completion: bool,
             #[serde(default)]
+            allow_nothing_to_report_completion: bool,
+            #[serde(default)]
             final_checkpoint_verified: bool,
             #[serde(default)]
             host_cancellation_observed: bool,
@@ -596,6 +651,7 @@ impl<'de> Deserialize<'de> for LoopExitValidationPolicy {
 
         let wire = WirePolicy::deserialize(deserializer)?;
         if wire.allow_no_reply_completion
+            || wire.allow_nothing_to_report_completion
             || wire.final_checkpoint_verified
             || wire.host_cancellation_observed
             || wire.completion_refs_verified
@@ -668,6 +724,7 @@ pub enum LoopExitViolationKind {
     UnverifiedFailureEvidence,
     CancellationNotObserved,
     NoReplyNotAllowed,
+    NothingToReportNotAllowed,
 }
 
 impl LoopExitViolationKind {
@@ -681,6 +738,7 @@ impl LoopExitViolationKind {
             Self::UnverifiedFailureEvidence => "unverified_failure_evidence",
             Self::CancellationNotObserved => "cancellation_not_observed",
             Self::NoReplyNotAllowed => "no_reply_not_allowed",
+            Self::NothingToReportNotAllowed => "nothing_to_report_not_allowed",
         }
     }
 
@@ -693,7 +751,8 @@ impl LoopExitViolationKind {
             | Self::MissingFinalCheckpoint
             | Self::UnverifiedBlockedEvidence
             | Self::UnverifiedFailureEvidence
-            | Self::NoReplyNotAllowed => "driver_protocol_violation",
+            | Self::NoReplyNotAllowed
+            | Self::NothingToReportNotAllowed => "driver_protocol_violation",
         }
     }
 
@@ -760,6 +819,20 @@ fn completion_kind_ref_violation(
                 Some(LoopExitViolationKind::MismatchedCompletionReferenceKind)
             } else if !policy.allow_no_reply_completion {
                 Some(LoopExitViolationKind::NoReplyNotAllowed)
+            } else {
+                None
+            }
+        }
+        LoopCompletionKind::NothingToReport => {
+            if !exit.reply_message_refs.is_empty() {
+                Some(LoopExitViolationKind::MismatchedCompletionReferenceKind)
+            } else if !policy.allow_nothing_to_report_completion {
+                Some(LoopExitViolationKind::NothingToReportNotAllowed)
+            } else if exit.result_refs.is_empty() && !policy.completion_refs_verified {
+                // Suppressed exits intentionally carry no delivery refs. The
+                // host must instead verify the exact typed terminal call from
+                // the durable transcript before accepting the completion.
+                Some(LoopExitViolationKind::MissingCompletionReference)
             } else {
                 None
             }

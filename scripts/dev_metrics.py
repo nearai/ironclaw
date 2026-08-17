@@ -247,7 +247,7 @@ ARCHITECTURE_CRATE = "ironclaw_architecture_tests"
 # (`crates/<family>/ironclaw_*`, PROPOSAL §5): `find` finds no files, every
 # probe returns 0, and the report renders composition at 0% of a 0-line
 # codebase — a perfect score for a tool that measured nothing.
-# See docs/reborn/target-architecture/CHECKLIST.md WS10.
+# See docs/internal/reborn/target-architecture/CHECKLIST.md WS10.
 sys.path.insert(
     0,
     str(pathlib.Path(__file__).resolve().parent / "ci" / "lib"),

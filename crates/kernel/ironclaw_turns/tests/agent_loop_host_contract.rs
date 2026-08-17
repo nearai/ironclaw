@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, IdempotencyKey, LoopExitId, LoopGateRef, LoopMessageRef,
-    ReplyTargetBindingRef, RunOriginAdapter, RunProfileRequest, RunProfileVersion,
-    SourceBindingRef, TurnActor, TurnCheckpointId, TurnOwner, TurnRunId, TurnRunnerId, TurnStatus,
+    RunOriginAdapter, RunProfileRequest, RunProfileVersion, TurnActor, TurnCheckpointId, TurnOwner,
+    TurnRunId, TurnRunnerId, TurnStatus,
 };
 use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
@@ -20,28 +20,27 @@ use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply, BatchPolicyKind,
     CapabilityDeniedReasonKind, CapabilityDescriptionTrust, CapabilityDescriptorView,
     CapabilityInputRef, CapabilityProgress, CapabilitySurfaceVersion, CommunicationRuntimeContext,
-    ConcurrencyHint, ConnectedChannelSummary, ConnectedChannelsState,
-    EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
-    InMemoryLoopHostMilestoneSink, InstructionBundleBuilder, InstructionBundleFingerprint,
-    InstructionBundleRequest, InstructionMaterializationStore, InstructionSafetyContext,
-    LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopBlocked, LoopBlockedKind,
-    LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointKind,
-    LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError,
-    LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest, LoopCompactionResponse,
-    LoopCompleted, LoopCompletionKind, LoopContextBundle, LoopContextMessage, LoopContextPort,
-    LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata, LoopDriverId,
-    LoopDriverNoteKind, LoopExit, LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter,
-    LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
-    LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant,
-    LoopModelCapabilityView, LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest,
-    LoopModelMessage, LoopModelPolicyGuard, LoopModelPort, LoopModelProgressSink, LoopModelRequest,
-    LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
-    LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
-    LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext,
-    LoopSafeSummary, LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest,
-    NotificationChannelsState, ParentLoopOutput, PendingExtensionAuthState, PromptMode,
-    PromptSkillContextMetadata, SkillTrustLevel, SystemInferenceTaskId, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, resolution,
+    ConnectedChannelSummary, ConnectedChannelsState, EphemeralInstructionMaterializationStore,
+    FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink, InstructionBundleBuilder,
+    InstructionBundleFingerprint, InstructionBundleRequest, InstructionMaterializationStore,
+    InstructionSafetyContext, LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopBlocked,
+    LoopBlockedKind, LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort,
+    LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef,
+    LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest,
+    LoopCompactionResponse, LoopCompleted, LoopCompletionKind, LoopContextBundle,
+    LoopContextMessage, LoopContextPort, LoopContextRequest, LoopContextSnippet,
+    LoopContextSnippetMetadata, LoopDriverId, LoopDriverNoteKind, LoopExit, LoopGateKind,
+    LoopHostMilestone, LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink,
+    LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
+    LoopModelBudgetAccountant, LoopModelCapabilityView, LoopModelGateway, LoopModelGatewayError,
+    LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard, LoopModelPort,
+    LoopModelProgressSink, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
+    LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef,
+    LoopPromptBundleRequest, LoopPromptPort, LoopRequest, LoopRequestBatch, LoopRunContext,
+    LoopRunInfoPort, LoopRuntimeContext, LoopSafeSummary, LoopTranscriptPort, ModelWorkOutcome,
+    ModelWorkRequest, NotificationChannelsState, ParentLoopOutput, PendingExtensionAuthState,
+    PromptMode, PromptSkillContextMetadata, SkillTrustLevel, SystemInferenceTaskId,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
 };
 use ironclaw_processes::{ClaimProcessesRequest, ProcessKind, ProcessWorkerId};
 use ironclaw_turns::test_support::in_memory_agent_turn_process_system;
@@ -289,6 +288,7 @@ async fn host_managed_model_port_routes_gateway_and_emits_model_milestones() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -349,6 +349,7 @@ async fn host_managed_model_port_returns_response_when_model_started_milestone_f
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -395,6 +396,7 @@ async fn host_managed_model_port_returns_response_when_model_completed_milestone
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -438,6 +440,7 @@ async fn host_managed_model_port_sanitizes_gateway_errors() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -469,7 +472,6 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
             safe_name: "Echo".to_string(),
             safe_description: "Echo safe input".to_string(),
             description_trust: Default::default(),
-            concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
         }],
     };
@@ -683,7 +685,6 @@ fn prompt_capability_descriptor(
         safe_name: capability_id.to_string(),
         safe_description: description.to_string(),
         description_trust,
-        concurrency_hint: ConcurrencyHint::Exclusive,
         parameters_schema: serde_json::json!({"type": "object"}),
     }
 }
@@ -1867,7 +1868,6 @@ async fn loop_prompt_port_filters_visible_surface_by_capability_view() {
                 safe_name: "Echo".to_string(),
                 safe_description: "Returns an opaque result ref".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ConcurrencyHint::Exclusive,
                 parameters_schema: serde_json::json!({"type":"object"}),
             },
             CapabilityDescriptorView {
@@ -1877,7 +1877,6 @@ async fn loop_prompt_port_filters_visible_surface_by_capability_view() {
                 safe_name: "Hidden".to_string(),
                 safe_description: "Should not reach the prompt".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ConcurrencyHint::Exclusive,
                 parameters_schema: serde_json::json!({"type":"object"}),
             },
         ],
@@ -2463,7 +2462,6 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
             safe_name: "Echo".to_string(),
             safe_description: "Echo safe input".to_string(),
             description_trust: Default::default(),
-            concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
         }],
     };
@@ -2709,13 +2707,12 @@ async fn loop_prompt_bundle_public_serialization_hides_raw_content() {
         run_id: host.context.run_id,
         status: TurnStatus::Running,
         accepted_message_ref: AcceptedMessageRef::new("message-loop-host").unwrap(),
-        source_binding_ref: SourceBindingRef::new("source-loop-host").unwrap(),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-loop-host").unwrap(),
         resolved_run_profile_id: host.context.resolved_run_profile.profile_id.clone(),
         resolved_run_profile_version: host.context.resolved_run_profile.profile_version,
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap(),
         checkpoint_id: None,
         gate_ref: None,
@@ -2998,6 +2995,7 @@ impl AgentLoopDriver for ReplyDriver {
                 fallback_index: 0,
                 iteration: 0,
                 capability_view: None,
+                tool_choice: None,
             })
             .await
             .map_err(driver_error)?;
@@ -3291,6 +3289,7 @@ async fn host_managed_model_port_times_out_a_hung_gateway() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .expect_err("a hung gateway must surface a timeout error");
@@ -3330,6 +3329,7 @@ async fn host_managed_model_port_allows_long_calls_that_keep_streaming_progress(
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .expect("progress must reset the model-call idle timeout");
@@ -3374,7 +3374,6 @@ impl RecordingAgentLoopHost {
                     safe_name: "Echo".to_string(),
                     safe_description: "Returns an opaque result ref".to_string(),
                     description_trust: Default::default(),
-                    concurrency_hint: ConcurrencyHint::Exclusive,
                     parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
                 }],
             },
@@ -3764,8 +3763,6 @@ async fn claimed_run_context() -> LoopRunContext {
             scope: scope.clone(),
             actor: TurnActor::new(UserId::new("user-loop").unwrap()),
             accepted_message_ref: AcceptedMessageRef::new("message-loop-host").unwrap(),
-            source_binding_ref: SourceBindingRef::new("source-loop-host").unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-loop-host").unwrap(),
             requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
             idempotency_key: IdempotencyKey::new("idem-loop-host").unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap(),
@@ -3950,6 +3947,7 @@ fn simple_model_request(context: &LoopRunContext) -> LoopModelRequest {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     }
 }
 
@@ -4500,8 +4498,6 @@ fn submit_turn_request_product_context_defaults_to_none_when_missing_from_json()
         },
         "actor": {"user_id": "user-serde"},
         "accepted_message_ref": "accepted-serde",
-        "source_binding_ref": "source-serde",
-        "reply_target_binding_ref": "reply-serde",
         "idempotency_key": "idem-serde",
         "received_at": "2026-06-11T21:32:00Z"
     });
@@ -4523,13 +4519,12 @@ async fn turn_run_state_product_context_defaults_to_none_when_missing_from_json(
         run_id: context.run_id,
         status: TurnStatus::Queued,
         accepted_message_ref: AcceptedMessageRef::new("accepted-origin-serde").unwrap(),
-        source_binding_ref: SourceBindingRef::new("source-origin-serde").unwrap(),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-origin-serde").unwrap(),
         resolved_run_profile_id: context.resolved_run_profile.profile_id.clone(),
         resolved_run_profile_version: context.resolved_run_profile.profile_version,
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
         checkpoint_id: None,
         gate_ref: None,
@@ -4586,13 +4581,12 @@ async fn turn_run_state_resume_disposition_defaults_to_none_when_missing_from_js
         run_id: context.run_id,
         status: TurnStatus::Queued,
         accepted_message_ref: AcceptedMessageRef::new("accepted-ard-serde").unwrap(),
-        source_binding_ref: SourceBindingRef::new("source-ard-serde").unwrap(),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-ard-serde").unwrap(),
         resolved_run_profile_id: context.resolved_run_profile.profile_id.clone(),
         resolved_run_profile_version: context.resolved_run_profile.profile_version,
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
         checkpoint_id: None,
         gate_ref: None,
@@ -4632,8 +4626,6 @@ async fn turn_run_state_allow_steering_defaults_to_true_when_missing_from_json()
         run_id: context.run_id,
         status: TurnStatus::Queued,
         accepted_message_ref: AcceptedMessageRef::new("accepted-steer-serde").unwrap(),
-        source_binding_ref: SourceBindingRef::new("source-steer-serde").unwrap(),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-steer-serde").unwrap(),
         resolved_run_profile_id: context.resolved_run_profile.profile_id.clone(),
         resolved_run_profile_version: context.resolved_run_profile.profile_version,
         // Deliberately false so the assertion below can only pass through the
@@ -4641,6 +4633,7 @@ async fn turn_run_state_allow_steering_defaults_to_true_when_missing_from_json()
         allow_steering: false,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
         checkpoint_id: None,
         gate_ref: None,

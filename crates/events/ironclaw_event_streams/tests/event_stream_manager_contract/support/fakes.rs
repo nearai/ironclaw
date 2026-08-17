@@ -763,12 +763,6 @@ impl OutboundStateStorePort for FailingOutboundStore {
         Err(self.error())
     }
 
-    async fn advance_subscription_cursor(
-        &self,
-        _request: AdvanceSubscriptionCursorRequest,
-    ) -> Result<(), OutboundError> {
-        Err(self.error())
-    }
 
     async fn record_delivery_attempt(
         &self,

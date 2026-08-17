@@ -19,11 +19,12 @@ use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
     AppendToolResultReferenceRequest, ContextMessages, ContextWindow, CreateSummaryArtifactRequest,
-    EnsureThreadRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
-    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
-    ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    EnsureThreadRequest, InboundMessageReplayMetadata, ListThreadsForScopeRequest,
+    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
@@ -58,7 +59,6 @@ impl TurnCoordinator for CapturingTurnCoordinator {
     ) -> Result<SubmitTurnResponse, TurnError> {
         let run_id = TurnRunId::new();
         let message_ref = request.accepted_message_ref.clone();
-        let reply_ref = request.reply_target_binding_ref.clone();
         self.submissions.lock().unwrap().push(request);
         Ok(SubmitTurnResponse::Accepted {
             turn_id: TurnId::new(),
@@ -68,7 +68,6 @@ impl TurnCoordinator for CapturingTurnCoordinator {
             resolved_run_profile_version: RunProfileVersion::new(1),
             event_cursor: EventCursor(0),
             accepted_message_ref: message_ref,
-            reply_target_binding_ref: reply_ref,
         })
     }
 
@@ -610,6 +609,7 @@ fn replay(
         source_binding_id: source_binding_id.map(str::to_string),
         reply_target_binding_id: reply_target_binding_id.map(str::to_string),
         turn_run_id,
+        replay_metadata: InboundMessageReplayMetadata::default(),
     }
 }
 

@@ -137,6 +137,7 @@ export function useLlmProviders({ settings: _settings, gatewayStatus, enabled = 
     builtinOverrides,
     activeProviderId,
     selectedModel,
+    userModelPolicy: snapshot.user_model_policy || null,
     hasActiveProvider,
     isError,
     isLoading: providersQuery.isLoading,

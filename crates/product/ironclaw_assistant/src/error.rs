@@ -16,7 +16,7 @@
 //! [`From<ProductOperationFailure>`] below is total and 1:1, so a port failure
 //! reaching product through `?` keeps its exact discriminant.
 //!
-//! See `docs/reborn/target-architecture/PROPOSAL.md` §6.1.3 for the recorded
+//! See `docs/internal/reborn/target-architecture/PROPOSAL.md` §6.1.3 for the recorded
 //! ownership decision and the alternatives it beat.
 
 use ironclaw_host_api::error::HostApiError;
@@ -136,6 +136,11 @@ pub enum ProductSurfaceFailure {
     /// Before-inbound policy failed before it could produce an allow/rewrite/reject outcome.
     #[error("before-inbound policy failed: {reason}")]
     BeforeInboundPolicyFailed { reason: String, permanent: bool },
+
+    /// The caller's requested or saved model could not be resolved before the
+    /// inbound message was accepted.
+    #[error("inbound model resolution failed: {reason}")]
+    InboundModelResolutionFailed { reason: String, retryable: bool },
 
     /// Deferred channel attachment transfer failed before message acceptance.
     #[error("inbound attachment transfer failed: {reason}")]
@@ -291,6 +296,7 @@ pub fn lifecycle_product_surface_error(error: ProductSurfaceFailure) -> ProductS
         | ProductSurfaceFailure::AuthInteractionRejected { .. }
         | ProductSurfaceFailure::AuthContinuationRejected { .. }
         | ProductSurfaceFailure::BeforeInboundPolicyFailed { .. }
+        | ProductSurfaceFailure::InboundModelResolutionFailed { .. }
         | ProductSurfaceFailure::InboundAttachmentFailed { .. }
         | ProductSurfaceFailure::DuplicateAction { .. }
         | ProductSurfaceFailure::OutboundTargetNotDirectMessage
@@ -418,6 +424,20 @@ impl From<ProductSurfaceFailure> for ProductAdapterError {
                     }
                 } else {
                     ProductAdapterError::SurfaceTransient {
+                        reason: RedactedString::new(reason),
+                    }
+                }
+            }
+            ProductSurfaceFailure::InboundModelResolutionFailed { reason, retryable } => {
+                if retryable {
+                    ProductAdapterError::SurfaceTransient {
+                        reason: RedactedString::new(reason),
+                    }
+                } else {
+                    ProductAdapterError::SurfaceRejected {
+                        kind: ProductSurfaceRejectionKind::InvalidRequest,
+                        status_code: 400,
+                        retryable: false,
                         reason: RedactedString::new(reason),
                     }
                 }

@@ -131,6 +131,7 @@ impl OpenAiCodexProvider {
         &self,
         messages: &[ChatMessage],
         tools: Option<&[ToolDefinition]>,
+        tool_choice: Option<&str>,
     ) -> serde_json::Value {
         // Separate system messages into `instructions`
         let instructions: String = messages
@@ -171,7 +172,15 @@ impl OpenAiCodexProvider {
             let tools_json: Vec<serde_json::Value> =
                 tools.iter().map(convert_tool_definition).collect();
             body["tools"] = serde_json::Value::Array(tools_json);
-            body["tool_choice"] = serde_json::Value::String("auto".to_string());
+            body["tool_choice"] = match tool_choice.unwrap_or("auto") {
+                mode @ ("auto" | "required" | "none") => serde_json::json!(mode),
+                // A named tool: the Responses API object form, using the same
+                // sanitized provider-facing name the tools array declares.
+                specific => serde_json::json!({
+                    "type": "function",
+                    "name": sanitize_tool_name(specific),
+                }),
+            };
             body["parallel_tool_calls"] = serde_json::Value::Bool(true);
         }
 
@@ -268,7 +277,7 @@ impl OpenAiCodexProvider {
     ) -> Result<CompletionResponse, LlmError> {
         let mut messages = request.messages;
         crate::provider::sanitize_tool_messages(&mut messages);
-        let body = self.build_request_body(&messages, None);
+        let body = self.build_request_body(&messages, None, None);
         let parsed = self.send_request_with_sink(body, sink).await?;
 
         Ok(CompletionResponse {
@@ -297,7 +306,11 @@ impl OpenAiCodexProvider {
                 (sanitized != tool.name).then(|| (sanitized, tool.name.clone()))
             })
             .collect();
-        let body = self.build_request_body(&messages, Some(&request.tools));
+        let body = self.build_request_body(
+            &messages,
+            Some(&request.tools),
+            request.tool_choice.as_deref(),
+        );
         let mut parsed = self.send_request_with_sink(body, sink).await?;
 
         for tool_call in &mut parsed.tool_calls {
@@ -1522,7 +1535,7 @@ data: {"type":"response.output_item.done","item":{"type":"function_call","id":"f
             ChatMessage::user("Hello"),
         ];
 
-        let body = provider.build_request_body(&messages, None);
+        let body = provider.build_request_body(&messages, None, None);
 
         assert_eq!(body["model"], "gpt-5.3-codex");
         assert_eq!(body["store"], false);
@@ -1554,7 +1567,7 @@ data: {"type":"response.output_item.done","item":{"type":"function_call","id":"f
             parameters: serde_json::json!({"type": "object"}),
         }];
 
-        let body = provider.build_request_body(&messages, Some(&tools));
+        let body = provider.build_request_body(&messages, Some(&tools), None);
 
         assert!(body.get("tools").is_some());
         let tools_arr = body["tools"].as_array().unwrap();
@@ -1727,7 +1740,7 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
         )
         .unwrap();
 
-        let body = provider.build_request_body(&messages, None);
+        let body = provider.build_request_body(&messages, None, None);
         let input = body["input"].as_array().unwrap();
 
         // Should have 3 non-system items: user, assistant, rewritten-user

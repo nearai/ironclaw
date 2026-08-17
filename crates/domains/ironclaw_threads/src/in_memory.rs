@@ -24,14 +24,15 @@ use crate::{
     BoundedThreadMessageSnapshot, BoundedThreadMessages, BoundedThreadMessagesRequest,
     CapabilityDisplayPreviewEnvelope, ContextMessage, ContextMessages, ContextWindow,
     CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
-    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
-    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
-    ThreadMessageRecord, ThreadScope, ToolResultRecordChunk, ToolResultReferenceEnvelope,
-    UpdateAssistantDraftRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
+    InboundMessageReplayMetadata, LatestThreadMessageRequest, ListThreadsForScopeRequest,
+    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, MessageKind, MessageStatus, PutToolResultRecordRequest,
+    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
+    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact,
+    SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
+    ToolResultRecordChunk, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -43,6 +44,7 @@ pub struct InMemorySessionThreadService {
 struct InMemoryState {
     threads: HashMap<ThreadId, StoredThread>,
     inbound_idempotency: HashMap<InboundIdempotencyKey, InboundIdempotencyRecord>,
+    prepared_contexts: HashMap<ThreadId, crate::PreparedContextRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +67,7 @@ struct InboundIdempotencyKey {
 struct InboundIdempotencyRecord {
     thread_id: ThreadId,
     message_id: ThreadMessageId,
+    replay_metadata: InboundMessageReplayMetadata,
 }
 
 impl InboundIdempotencyKey {
@@ -75,6 +78,40 @@ impl InboundIdempotencyKey {
             external_event_id: request.external_event_id.clone()?,
         })
     }
+}
+
+/// Shared mint for the two thread-creating doors (`ensure_thread` and
+/// `accept_prepared_context`): one construction site so the stored shape —
+/// timestamps, empty collections, first sequence — cannot drift between the
+/// conversation and prepared-context paths. Callers scope-check BEFORE
+/// minting; this only inserts-or-returns.
+fn mint_thread_locked<'a>(
+    threads: &'a mut HashMap<ThreadId, StoredThread>,
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+    created_by_actor_id: &str,
+    title: Option<String>,
+    metadata_json: Option<String>,
+    now: chrono::DateTime<Utc>,
+) -> &'a mut StoredThread {
+    threads
+        .entry(thread_id.clone())
+        .or_insert_with(|| StoredThread {
+            record: SessionThreadRecord {
+                scope: scope.clone(),
+                thread_id: thread_id.clone(),
+                created_by_actor_id: created_by_actor_id.to_string(),
+                title,
+                metadata_json,
+                goal: None,
+                created_at: Some(now),
+                updated_at: Some(now),
+            },
+            messages: Vec::new(),
+            summary_artifacts: Vec::new(),
+            tool_result_records: HashMap::new(),
+            next_sequence: 1,
+        })
 }
 
 #[async_trait]
@@ -96,32 +133,34 @@ impl SessionThreadService for InMemorySessionThreadService {
         }
 
         let now = Utc::now();
-        let record = SessionThreadRecord {
-            scope: request.scope,
-            thread_id: thread_id.clone(),
-            created_by_actor_id: request.created_by_actor_id,
-            title: request.title,
-            metadata_json: request.metadata_json,
-            goal: None,
-            created_at: Some(now),
-            updated_at: Some(now),
-        };
-        state.threads.insert(
-            thread_id,
-            StoredThread {
-                record: record.clone(),
-                messages: Vec::new(),
-                summary_artifacts: Vec::new(),
-                tool_result_records: HashMap::new(),
-                next_sequence: 1,
-            },
-        );
-        Ok(record)
+        Ok(mint_thread_locked(
+            &mut state.threads,
+            &request.scope,
+            &thread_id,
+            &request.created_by_actor_id,
+            request.title,
+            request.metadata_json,
+            now,
+        )
+        .record
+        .clone())
     }
 
     async fn accept_inbound_message(
         &self,
         request: AcceptInboundMessageRequest,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        self.accept_inbound_message_with_replay_metadata(
+            request,
+            InboundMessageReplayMetadata::default(),
+        )
+        .await
+    }
+
+    async fn accept_inbound_message_with_replay_metadata(
+        &self,
+        request: AcceptInboundMessageRequest,
+        replay_metadata: InboundMessageReplayMetadata,
     ) -> Result<AcceptedInboundMessage, SessionThreadError> {
         let mut state = self.state.lock().await;
         if let Some(key) = InboundIdempotencyKey::from_request(&request)
@@ -152,6 +191,7 @@ impl SessionThreadService for InMemorySessionThreadService {
                 message_id: record.message_id,
                 sequence: existing.sequence,
                 idempotent_replay: true,
+                replay_metadata: record.replay_metadata.clone(),
             });
         }
 
@@ -198,6 +238,7 @@ impl SessionThreadService for InMemorySessionThreadService {
                 InboundIdempotencyRecord {
                     thread_id: request.thread_id.clone(),
                     message_id,
+                    replay_metadata: replay_metadata.clone(),
                 },
             );
         }
@@ -207,7 +248,108 @@ impl SessionThreadService for InMemorySessionThreadService {
             message_id,
             sequence,
             idempotent_replay: false,
+            replay_metadata,
         })
+    }
+
+    async fn accept_prepared_context(
+        &self,
+        request: crate::PreparedContextRequest,
+    ) -> Result<crate::AcceptedPreparedContext, SessionThreadError> {
+        crate::prepared_context::validate_prepared_context_request(&request)?;
+        let stamped_metadata =
+            crate::prepared_context::stamped_metadata_json(request.metadata_json.as_deref())?;
+        let thread_id = request.thread_id.clone();
+        let now = Utc::now();
+        let seed = crate::prepared_context::prepared_seed(&request, &thread_id, now)?;
+        let crate::prepared_context::PreparedSeed {
+            rows,
+            tool_result_records,
+        } = seed;
+
+        let mut state = self.state.lock().await;
+        if let Some(record) = state.prepared_contexts.get(&thread_id) {
+            let stored_scope_matches = state
+                .threads
+                .get(&thread_id)
+                .map(|stored| stored.record.scope == request.scope)
+                .unwrap_or(false);
+            if !stored_scope_matches {
+                return Err(SessionThreadError::ThreadScopeMismatch { thread_id });
+            }
+            return crate::prepared_context::replay_prepared_context(record, &request, &thread_id);
+        }
+
+        if let Some(existing) = state.threads.get(&thread_id)
+            && existing.record.scope != request.scope
+        {
+            return Err(SessionThreadError::ThreadScopeMismatch { thread_id });
+        }
+        let seeded_message_count = rows.len() as u64;
+        let last_message_id = rows.last().map(|row| row.message_id).ok_or_else(|| {
+            SessionThreadError::InvalidPreparedContext {
+                reason: "seeded rows must not be empty".to_string(),
+            }
+        })?;
+        let accepted_message_ref =
+            crate::prepared_context::accepted_prepared_message_ref(last_message_id)?;
+
+        let stored = mint_thread_locked(
+            &mut state.threads,
+            &request.scope,
+            &thread_id,
+            &request.actor_id,
+            request.title.clone(),
+            Some(stamped_metadata.clone()),
+            now,
+        );
+        for mut row in rows {
+            row.sequence = stored.next_sequence;
+            stored.next_sequence += 1;
+            stored.messages.push(row);
+        }
+        for (result_ref, bytes) in tool_result_records {
+            stored.tool_result_records.insert(result_ref, bytes);
+        }
+        stored.record.updated_at = Some(now);
+
+        let record = crate::PreparedContextRecord {
+            schema_version: crate::PREPARED_CONTEXT_RECORD_SCHEMA_VERSION,
+            idempotency_key: request.idempotency_key.clone(),
+            actor_id: request.actor_id.clone(),
+            accepted_message_ref: accepted_message_ref.as_str().to_string(),
+            declarations: request.declarations.clone(),
+            seeded_message_count,
+            created_at: now,
+        };
+        state.prepared_contexts.insert(thread_id.clone(), record);
+
+        Ok(crate::AcceptedPreparedContext {
+            thread_id,
+            accepted_message_ref,
+            idempotent_replay: false,
+        })
+    }
+
+    async fn read_prepared_context(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<crate::PreparedContextRecord>, SessionThreadError> {
+        let state = self.state.lock().await;
+        let stored =
+            state
+                .threads
+                .get(thread_id)
+                .ok_or_else(|| SessionThreadError::UnknownThread {
+                    thread_id: thread_id.clone(),
+                })?;
+        if &stored.record.scope != scope {
+            return Err(SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            });
+        }
+        Ok(state.prepared_contexts.get(thread_id).cloned())
     }
 
     async fn replay_accepted_inbound_message(
@@ -243,6 +385,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             source_binding_id: message.source_binding_id.clone(),
             reply_target_binding_id: message.reply_target_binding_id.clone(),
             turn_run_id: message.turn_run_id.clone(),
+            replay_metadata: record.replay_metadata.clone(),
         }))
     }
 
@@ -514,12 +657,13 @@ impl SessionThreadService for InMemorySessionThreadService {
                 .validate()
                 .map_err(SessionThreadError::Serialization)?;
         }
-        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+        let mut envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
             request.result_ref,
             request.safe_summary,
             request.model_observation,
         )
         .map_err(SessionThreadError::Serialization)?;
+        envelope.intrinsic_outcome = request.intrinsic_outcome;
         if let Some(existing) = thread.messages.iter_mut().find(|message| {
             message.kind == MessageKind::ToolResultReference
                 && message.status == MessageStatus::Finalized
@@ -563,6 +707,23 @@ impl SessionThreadService for InMemorySessionThreadService {
                     ToolResultReferenceEnvelope::merge_model_observation_content_if_absent(
                         content,
                         model_observation.clone(),
+                    )
+                    .map_err(SessionThreadError::Serialization)?
+                {
+                    existing.content = Some(content);
+                    changed = true;
+                }
+            }
+            if let Some(intrinsic_outcome) = envelope.intrinsic_outcome {
+                let content = existing.content.as_deref().ok_or_else(|| {
+                    SessionThreadError::Serialization(
+                        "tool result reference content is missing".to_string(),
+                    )
+                })?;
+                if let Some(content) =
+                    ToolResultReferenceEnvelope::merge_intrinsic_outcome_content_if_absent(
+                        content,
+                        intrinsic_outcome,
                     )
                     .map_err(SessionThreadError::Serialization)?
                 {
@@ -1078,6 +1239,10 @@ impl SessionThreadService for InMemorySessionThreadService {
         state
             .inbound_idempotency
             .retain(|_, record| &record.thread_id != thread_id);
+        // The prepared-context journal rides the thread (the filesystem
+        // backend stores it under the thread root, so its delete removes it
+        // implicitly); an orphaned record here would replay a deleted thread.
+        state.prepared_contexts.remove(thread_id);
         Ok(())
     }
 
@@ -1163,6 +1328,11 @@ impl SessionThreadService for InMemorySessionThreadService {
             .threads
             .values()
             .filter(|stored| stored.record.scope == request.scope)
+            // Prepared-context (unbound/subagent) threads are working state,
+            // not conversations: excluded from listings on every backend.
+            .filter(|stored| {
+                !crate::prepared_context::record_is_prepared_context_hidden(&stored.record)
+            })
             .map(|stored| {
                 let mut record = stored.record.clone();
                 if record.title.is_none()

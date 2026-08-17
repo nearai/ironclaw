@@ -3,6 +3,7 @@ mod api_capacity;
 mod capture;
 mod child_io;
 mod compare;
+#[path = "db_probe_cli.rs"]
 mod db_probe;
 mod human;
 mod process_metrics;
@@ -41,7 +42,6 @@ use crate::{
     api_capacity::ApiCapacitySummary,
     capture::CapturedRun,
     child_io::{join_child_stderr_reader, spawn_child_stderr_reader},
-    db_probe::DbProbeSummary,
     process_metrics::{ProcessMetrics, ProcessMetricsSampler},
     progress::{ProgressCounters, spawn_progress_reporter, stop_progress_reporter},
     redaction::redact_libsql_path,
@@ -65,6 +65,10 @@ use ironclaw_host_api::{
     path::{MountAlias, VirtualPath},
 };
 use ironclaw_resources::{FilesystemResourceGovernor, ResourceAccount, ResourceGovernor};
+use ironclaw_stress::db_probe::{
+    DbProbeError, DbProbeSummary, DbWriteMeasurement, StatsScope, summarize as summarize_db_probe,
+    summarize_measurement,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Parser)]
@@ -166,6 +170,15 @@ pub(crate) struct Args {
     /// Postgres pool size per process.
     #[arg(long, default_value_t = 4)]
     pub(crate) postgres_pool_size: usize,
+
+    /// Idle seconds captured after the single-turn DB write measurement.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) db_write_idle_seconds: u64,
+
+    /// Reset backend write counters before measurement.
+    /// PostgreSQL statistics are shared; use an isolated database.
+    #[arg(long)]
+    pub(crate) db_write_reset_stats: bool,
 
     /// Base URL for API-level scenarios, for example https://host or http://127.0.0.1:8080.
     #[arg(long)]
@@ -666,6 +679,7 @@ impl ModelLatencyProfile {
 pub(crate) enum StressPreset {
     ChatBaseline,
     HotThread,
+    DbWriteMeasurement,
     LargeContext,
     ToolHeavy,
     ModelTail,
@@ -682,6 +696,7 @@ impl StressPreset {
             Self::HotThread => "hot-thread",
             Self::LargeContext => "large-context",
             Self::ToolHeavy => "tool-heavy",
+            Self::DbWriteMeasurement => "db-write-measurement",
             Self::ModelTail => "model-tail",
             Self::ResourceContention => "resource-contention",
             Self::CpuBurn => "cpu-burn",
@@ -879,6 +894,26 @@ struct SummaryInput {
     api_capacity: Option<ApiCapacitySummary>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CliError {
+    #[error("{0}")]
+    Message(String),
+    #[error(transparent)]
+    DbProbe(#[from] DbProbeError),
+    #[error("{primary}; database measurement cleanup also failed: {cleanup}")]
+    MeasurementCleanup {
+        #[source]
+        primary: Box<CliError>,
+        cleanup: DbProbeError,
+    },
+}
+
+impl From<String> for CliError {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
@@ -887,7 +922,7 @@ async fn main() {
     }
 }
 
-async fn run() -> Result<(), String> {
+async fn run() -> Result<(), CliError> {
     let mut args = parse_args()?;
     validate_args(&args)?;
 
@@ -908,7 +943,7 @@ async fn run() -> Result<(), String> {
         None
     };
 
-    let result = if args.child_index.is_none() && args.suite.is_some() {
+    let result: Result<(), CliError> = if args.child_index.is_none() && args.suite.is_some() {
         suite::run(&args, &run_id).await
     } else if args.child_index.is_none() && ramp::is_enabled(&args) {
         ramp::run(&args, &run_id).await
@@ -920,11 +955,14 @@ async fn run() -> Result<(), String> {
         run_once(&args, &run_id)
             .await
             .and_then(|captured| {
-                report::print_captured_run(&args, &run_id, &captured).map(|_| captured)
+                report::print_captured_run(&args, &run_id, &captured)
+                    .map(|_| captured)
+                    .map_err(CliError::from)
             })
             .and_then(|captured| {
                 let metrics = captured.metrics();
                 sweep::enforce_thresholds(&args, &[("run".to_string(), metrics)])
+                    .map_err(CliError::from)
             })
     };
 
@@ -998,6 +1036,20 @@ fn apply_preset(args: &mut Args, matches: &ArgMatches) {
             set_default!(tool_output_bytes = 4096);
             set_default!(assistant_message_bytes = 1024);
         }
+        StressPreset::DbWriteMeasurement => {
+            set_default!(scenario = Scenario::ToolSession);
+            set_default!(concurrency = 1);
+            set_default!(operations = 1);
+            set_default!(duration_seconds = 0);
+            set_default!(warmup_seconds = 0);
+            set_default!(users = 1);
+            set_default!(active_thread_count = 1);
+            set_default!(tenants = 1);
+            set_default!(tool_calls_per_turn = 10);
+            set_default!(tool_latency_ms = 0);
+            set_default!(tool_failure_every = 0);
+            set_default!(db_write_idle_seconds = 300);
+        }
         StressPreset::ModelTail => {
             set_default!(scenario = Scenario::MixedUserSession);
             set_default!(concurrency = 6);
@@ -1052,7 +1104,7 @@ fn arg_is_defaulted(matches: &ArgMatches, id: &str) -> bool {
     !matches!(matches.value_source(id), Some(ValueSource::CommandLine))
 }
 
-pub(crate) async fn run_once(args: &Args, run_id: &str) -> Result<CapturedRun, String> {
+pub(crate) async fn run_once(args: &Args, run_id: &str) -> Result<CapturedRun, CliError> {
     if args.child_index.is_none() && args.processes > 1 {
         prewarm(args, run_id)
             .await
@@ -1061,6 +1113,7 @@ pub(crate) async fn run_once(args: &Args, run_id: &str) -> Result<CapturedRun, S
                 aggregate: report::parent_summary_value(args, run_id, &summaries),
                 summaries,
             })
+            .map_err(CliError::from)
     } else {
         run_in_process(args, run_id)
             .await
@@ -1089,6 +1142,54 @@ fn validate_args(args: &Args) -> Result<(), String> {
     }
     if args.postgres_pool_size == 0 {
         return Err("--postgres-pool-size must be greater than 0".to_string());
+    }
+    if args.db_write_reset_stats && !matches!(args.preset, Some(StressPreset::DbWriteMeasurement)) {
+        return Err(
+            "--db-write-reset-stats requires --preset db-write-measurement because it resets \
+             shared current-database statistics"
+                .to_string(),
+        );
+    }
+    if args.db_write_idle_seconds != 0
+        && !matches!(args.preset, Some(StressPreset::DbWriteMeasurement))
+    {
+        return Err("--db-write-idle-seconds requires --preset db-write-measurement".to_string());
+    }
+    if matches!(args.preset, Some(StressPreset::DbWriteMeasurement)) {
+        if !matches!(args.scenario, Scenario::ToolSession)
+            || args.processes != 1
+            || args.concurrency != 1
+            || args.operations != 1
+            || args.duration_seconds != 0
+            || args.warmup_seconds != 0
+            || args.users != 1
+            || args.active_thread_count != 1
+            || args.tenants != 1
+            || !matches!(
+                args.process_journal_backend,
+                ProcessJournalBackend::FilesystemJournal
+            )
+            || args.gate_blocked_every != 0
+            || args.tool_calls_per_turn != 10
+            || args.tool_failure_every != 0
+        {
+            return Err(
+                "--preset db-write-measurement is a fixed single-user, single-turn workload with \
+                 10 successful tool calls; do not override its workload shape"
+                    .to_string(),
+            );
+        }
+        if args.suite.is_some()
+            || ramp::is_enabled(args)
+            || sweep::is_enabled(args)
+            || args.repetitions > 1
+        {
+            return Err(
+                "--preset db-write-measurement cannot be combined with suite, ramp, sweep, or \
+                 repeated runs"
+                    .to_string(),
+            );
+        }
     }
     if args.scenario.is_api_capacity() {
         if args.api_base_url.is_none() {
@@ -1647,7 +1748,7 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
     Ok(summaries)
 }
 
-async fn run_in_process(args: &Args, run_id: &str) -> Result<RunSummary, String> {
+async fn run_in_process(args: &Args, run_id: &str) -> Result<RunSummary, CliError> {
     eprintln!(
         "{} preparing backend={} scenario={} run_id={}",
         log_prefix(args),
@@ -1657,18 +1758,26 @@ async fn run_in_process(args: &Args, run_id: &str) -> Result<RunSummary, String>
     );
     let operation_target = args.operation_target();
     if args.scenario.is_process_local() {
-        return run_process_pressure_in_process(args, run_id, operation_target).await;
+        return run_process_pressure_in_process(args, run_id, operation_target)
+            .await
+            .map_err(CliError::from);
     }
     if args.scenario.is_api_capacity() {
-        return run_api_capacity_in_process(args, run_id, operation_target).await;
+        return run_api_capacity_in_process(args, run_id, operation_target)
+            .await
+            .map_err(CliError::from);
     }
     let identities = Arc::new(SyntheticIds::new(args)?);
 
     if args.scenario.is_resource_governor() {
-        return run_resource_governor_in_process(args, run_id, operation_target, identities).await;
+        return run_resource_governor_in_process(args, run_id, operation_target, identities)
+            .await
+            .map_err(CliError::from);
     }
     if args.scenario.is_secret_control_plane() {
-        return run_secret_consume_in_process(args, run_id, operation_target, identities).await;
+        return run_secret_consume_in_process(args, run_id, operation_target, identities)
+            .await
+            .map_err(CliError::from);
     }
 
     run_user_turn_in_process(args, run_id, operation_target, identities).await
@@ -1885,7 +1994,7 @@ async fn run_resource_governor_in_process(
     })??;
     let elapsed = started.elapsed();
     let process = metrics.finish();
-    let db_probe = db_probe::summarize(db_probe_before, db_probe::capture(args).await);
+    let db_probe = summarize_db_probe(db_probe_before, db_probe::capture(args).await);
     let summary = summarize(
         args,
         run_id,
@@ -1916,7 +2025,7 @@ async fn run_user_turn_in_process(
     run_id: &str,
     operation_target: OperationTarget,
     identities: Arc<SyntheticIds>,
-) -> Result<RunSummary, String> {
+) -> Result<RunSummary, CliError> {
     let workload = Arc::new(build_user_turn_workload(args, run_id).await?);
     eprintln!(
         "{} running target={} concurrency={} operations_per_task={} {} warmup_seconds={} users={} tenants={} progress_interval_seconds={}",
@@ -1946,14 +2055,77 @@ async fn run_user_turn_in_process(
         let _ = run_user_turn_tasks(Arc::clone(&workload), &warmup_args, Arc::clone(&identities))
             .await?;
     }
+    let measurement_enabled = matches!(args.preset, Some(StressPreset::DbWriteMeasurement));
     let metrics = ProcessMetricsSampler::start(Duration::from_millis(100));
-    let db_probe_before = db_probe::capture(args).await;
+    let db_probe_before = if measurement_enabled {
+        db_probe::begin_measurement(args).await?
+    } else {
+        db_probe::capture(args).await
+    };
     let started = Instant::now();
     let target = workload.target().to_string();
-    let samples = run_user_turn_tasks(workload, args, identities).await?;
+    let samples = match run_user_turn_tasks(Arc::clone(&workload), args, identities).await {
+        Ok(samples) => samples,
+        Err(error) => {
+            if measurement_enabled && let Err(cleanup) = db_probe::finish_measurement(args).await {
+                return Err(CliError::MeasurementCleanup {
+                    primary: Box::new(CliError::Message(error)),
+                    cleanup,
+                });
+            }
+            return Err(CliError::Message(error));
+        }
+    };
     let elapsed = started.elapsed();
     let process = metrics.finish();
-    let db_probe = db_probe::summarize(db_probe_before, db_probe::capture(args).await);
+    let db_probe = if measurement_enabled {
+        let capture_result = async {
+            let after = db_probe::capture_measurement(args).await?;
+            let idle_after = if args.db_write_idle_seconds == 0 {
+                None
+            } else {
+                eprintln!(
+                    "{} observing idle database writes for {} seconds",
+                    log_prefix(args),
+                    args.db_write_idle_seconds
+                );
+                tokio::time::sleep(Duration::from_secs(args.db_write_idle_seconds)).await;
+                Some(db_probe::capture_measurement(args).await?)
+            };
+            Ok::<_, DbProbeError>((after, idle_after))
+        }
+        .await;
+        let cleanup_result = db_probe::finish_measurement(args).await;
+        let (after, idle_after) = match (capture_result, cleanup_result) {
+            (Ok(snapshots), Ok(())) => snapshots,
+            (Err(primary), Ok(())) => return Err(primary.into()),
+            (Ok(_), Err(cleanup)) => return Err(cleanup.into()),
+            (Err(primary), Err(cleanup)) => {
+                return Err(CliError::MeasurementCleanup {
+                    primary: Box::new(primary.into()),
+                    cleanup,
+                });
+            }
+        };
+        summarize_measurement(
+            db_probe_before,
+            after,
+            idle_after,
+            DbWriteMeasurement {
+                workload: "single-tool-heavy-user-turn".to_string(),
+                tool_calls_per_turn: args.tool_calls_per_turn,
+                idle_observation_seconds: args.db_write_idle_seconds,
+                reset_stats: args.db_write_reset_stats,
+                stats_scope: if args.db_write_reset_stats {
+                    StatsScope::ExplicitResetCurrentDatabase
+                } else {
+                    StatsScope::SnapshotDeltaCurrentDatabase
+                },
+            },
+        )
+    } else {
+        summarize_db_probe(db_probe_before, db_probe::capture(args).await)
+    };
     let summary = summarize(
         args,
         run_id,
@@ -2017,7 +2189,7 @@ async fn run_secret_consume_in_process(
     let samples = run_secret_consume_tasks(workload, args, identities).await?;
     let elapsed = started.elapsed();
     let process = metrics.finish();
-    let db_probe = db_probe::summarize(db_probe_before, db_probe::capture(args).await);
+    let db_probe = summarize_db_probe(db_probe_before, db_probe::capture(args).await);
     let summary = summarize(
         args,
         run_id,

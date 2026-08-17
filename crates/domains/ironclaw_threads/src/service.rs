@@ -9,9 +9,10 @@ use crate::{
     AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
     BoundedThreadMessages, BoundedThreadMessagesRequest, ContextMessages, ContextWindow,
     CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
-    FinalizedAssistantMessageByRunRequest, LatestThreadMessageRequest, ListThreadsForScopeRequest,
-    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    FinalizedAssistantMessageByRunRequest, InboundMessageReplayMetadata,
+    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
+    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent,
+    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
     ThreadGoal, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange,
     ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, ToolResultRecordChunk,
@@ -27,10 +28,69 @@ pub trait SessionThreadService: Send + Sync {
         request: EnsureThreadRequest,
     ) -> Result<SessionThreadRecord, SessionThreadError>;
 
+    /// Accept an inbound transcript row without product-routing metadata.
+    ///
+    /// An implementation that delegates this method to
+    /// [`Self::accept_inbound_message_with_replay_metadata`] must override that
+    /// method too. The default metadata method delegates default metadata back
+    /// here for legacy compatibility, so delegating only this method creates a
+    /// mutual-recursion trap.
     async fn accept_inbound_message(
         &self,
         request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, SessionThreadError>;
+
+    /// Accept an inbound transcript row together with product-routing metadata
+    /// that must be committed atomically and returned on idempotent replay.
+    /// Backends supporting non-default metadata must override this method. A
+    /// backend that implements [`Self::accept_inbound_message`] by delegating
+    /// here must also override this method; otherwise default metadata recurses
+    /// back through the legacy method indefinitely.
+    async fn accept_inbound_message_with_replay_metadata(
+        &self,
+        request: AcceptInboundMessageRequest,
+        replay_metadata: InboundMessageReplayMetadata,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        if replay_metadata == InboundMessageReplayMetadata::default() {
+            return self.accept_inbound_message(request).await;
+        }
+        Err(SessionThreadError::Backend(
+            "thread service does not support durable inbound replay metadata".to_string(),
+        ))
+    }
+
+    /// The ONE shared accept door for every non-channel caller (unbound
+    /// turns design §4.2), sibling of [`Self::accept_inbound_message`]:
+    /// mints an unbound thread, seeds the caller-authored context as
+    /// transcript rows, journals the per-run declarations beside them, and
+    /// replays idempotently by key — a crash-retry returns the SAME prepared
+    /// context instead of minting an orphan.
+    async fn accept_prepared_context(
+        &self,
+        request: crate::PreparedContextRequest,
+    ) -> Result<crate::AcceptedPreparedContext, SessionThreadError> {
+        let _ = request;
+        Err(SessionThreadError::Backend(
+            "accept_prepared_context is not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
+
+    /// Read the journaled unbound-context record for a thread, or `None`
+    /// when the thread exists but is not a prepared context.
+    /// Missing and cross-scope threads return the same non-enumerating
+    /// `UnknownThread` shape as every other read on this trait.
+    async fn read_prepared_context(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<crate::PreparedContextRecord>, SessionThreadError> {
+        let _ = (scope, thread_id);
+        Err(SessionThreadError::Backend(
+            "read_prepared_context is not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
 
     async fn replay_accepted_inbound_message(
         &self,
@@ -389,6 +449,31 @@ where
         request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, SessionThreadError> {
         self.as_ref().accept_inbound_message(request).await
+    }
+
+    async fn accept_inbound_message_with_replay_metadata(
+        &self,
+        request: AcceptInboundMessageRequest,
+        replay_metadata: InboundMessageReplayMetadata,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        self.as_ref()
+            .accept_inbound_message_with_replay_metadata(request, replay_metadata)
+            .await
+    }
+
+    async fn accept_prepared_context(
+        &self,
+        request: crate::PreparedContextRequest,
+    ) -> Result<crate::AcceptedPreparedContext, SessionThreadError> {
+        self.as_ref().accept_prepared_context(request).await
+    }
+
+    async fn read_prepared_context(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<crate::PreparedContextRecord>, SessionThreadError> {
+        self.as_ref().read_prepared_context(scope, thread_id).await
     }
 
     async fn replay_accepted_inbound_message(

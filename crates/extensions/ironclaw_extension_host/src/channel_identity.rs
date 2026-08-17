@@ -4,14 +4,66 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_extension_contracts::channel_identity::{
-    ChannelConnectionScope, ChannelConnectionScopeSource,
+use ironclaw_extension_contracts::{
+    channel::ChannelConnectionStrategy,
+    channel_identity::{ChannelConnectionScope, ChannelConnectionScopeSource},
 };
 use ironclaw_extension_registry::ExtensionInstallationStorePort;
 use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_host_api::product_adapter::AdapterInstallationId;
 
 use crate::ChannelConfigService;
+
+/// Durable identity-key namespace selected by the connection ceremony.
+///
+/// The proof-code pairing and OAuth paths write `{installation}:{actor}`.
+/// Device-linked channels write a versioned segment instead, and that prefix
+/// is a **fence, not a fallback**: a row written by the retired proof-code
+/// ceremony can never satisfy a device-link lookup, so switching a channel's
+/// strategy to `device_link` fails closed — previously paired users are back
+/// at setup and re-link, exactly the ceremony a fresh installation gets.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ChannelIdentityKeyspace {
+    #[default]
+    Unversioned,
+    DeviceLinkV1,
+}
+
+impl ChannelIdentityKeyspace {
+    /// The one keyspace a connection strategy reads and writes.
+    ///
+    /// Each strategy owns exactly one namespace — deliberately not a list, so
+    /// a cross-namespace fallback chain is not expressible. Rows the retired
+    /// proof-code ceremony left under `Unversioned` are inert data to a
+    /// device-link channel: never resolved for admission, connection status,
+    /// command roles, or outbound-target validation, and removed only by
+    /// their owner's explicit disconnect (the unversioned delete prefix
+    /// lexically contains the versioned one).
+    pub fn for_strategy(strategy: Option<ChannelConnectionStrategy>) -> Self {
+        match strategy {
+            Some(ChannelConnectionStrategy::DeviceLink) => Self::DeviceLinkV1,
+            _ => Self::Unversioned,
+        }
+    }
+
+    pub fn provider_user_id(
+        self,
+        installation_id: &AdapterInstallationId,
+        external_actor_id: &str,
+    ) -> String {
+        format!(
+            "{}{external_actor_id}",
+            self.provider_user_id_prefix(installation_id)
+        )
+    }
+
+    pub fn provider_user_id_prefix(self, installation_id: &AdapterInstallationId) -> String {
+        match self {
+            Self::Unversioned => format!("{}:", installation_id.as_str()),
+            Self::DeviceLinkV1 => format!("{}:device-link-v1:", installation_id.as_str()),
+        }
+    }
+}
 
 /// The generic `[channel.config]`-backed scope source: the installation record
 /// supplies the adapter installation id; non-secret config values whose
@@ -100,6 +152,7 @@ pub fn channel_config_connection_scope_source(
 pub struct DiscoveredChannelExtension {
     pub extension_id: String,
     pub providers: Vec<String>,
+    pub identity_keyspace: ChannelIdentityKeyspace,
 }
 
 /// Installed extensions whose manifest declares a channel surface, excluding
@@ -124,6 +177,13 @@ pub async fn discover_channel_extensions(
         }
         discovered.push(DiscoveredChannelExtension {
             extension_id,
+            identity_keyspace: ChannelIdentityKeyspace::for_strategy(
+                resolved
+                    .channel
+                    .as_ref()
+                    .and_then(|channel| channel.connection.as_ref())
+                    .map(|connection| connection.strategy),
+            ),
             providers: resolved
                 .auth
                 .iter()

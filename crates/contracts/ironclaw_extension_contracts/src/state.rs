@@ -1,5 +1,5 @@
 //! The installation-state projection (one enum, every extension;
-//! `docs/reborn/extension-runtime/overview.md` §6.1).
+//! `docs/internal/reborn/extension-runtime/overview.md` §6.1).
 //!
 //! This enum is the host-owned installation-lifecycle vocabulary. It lives in
 //! `ironclaw_host_api` — the crate every Reborn system-service and the product
@@ -95,7 +95,7 @@ impl InstallationState {
 }
 
 /// The public, user-actionable extension lifecycle state
-/// (`docs/reborn/extension-runtime/overview.md` §6.1).
+/// (`docs/internal/reborn/extension-runtime/overview.md` §6.1).
 ///
 /// ```text
 /// not a member                                        -> uninstalled

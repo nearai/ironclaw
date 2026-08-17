@@ -47,11 +47,11 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Area | Group | Flat int | Binary/QA | Python E2E |
 |---|---|---|---|---|
 | Approvals & permission gates | 10 | ✓ | ✓ | ✓ |
-| Auth / credentials / OAuth | 3 | 7 | ✓ | ✓ (heaviest) |
+| Auth / credentials / OAuth | 7 | 7 | ✓ | ✓ (heaviest) |
 | Extension lifecycle | 14 | 6 | ✓ | ✓ |
-| Channels (Slack/Telegram/webhook) | 2 | 3 | ✓ | ✓ |
+| Channels (Slack/Telegram/webhook) | 5 | 3 | ✓ | ✓ |
 | Triggers / automations / routines | 11 | 2 | ✓ | ✓ |
-| Memory & workspace | 6 | 2 | — | ✓ |
+| Memory & workspace | 8 | 2 | — | ✓ |
 | Skills | 1 | 1 | — | ✓ |
 | Multi-user / scope isolation | 5 | 2 | 9 | ✓ |
 | Tools & tool dispatch | — | 11 | ✓ | ✓ |
@@ -62,15 +62,15 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **53** group scenarios · **55** flat integration bins (49 in
-`tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
+Totals: **59** group scenarios · **59** flat integration bins (52 in
+`tests/integration/`, 7 in `tests/integration/auth/`) · **39** top-level Rust bins ·
 **102** Python scenario files (**869** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
 Python scenarios, so its exhaustive totals are intentionally broader.
 
 ---
 
-## 3. Group scenarios — `tests/integration/group_*/` (53)
+## 3. Group scenarios — `tests/integration/group_*/` (59)
 
 Multi-thread journeys over ONE shared runtime and ONE shared set of stores. These are
 the canonical "a user does X in one conversation and sees the effect in another" tests.
@@ -118,7 +118,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | Have a stored-but-expired credential rejected, reconnect, and have the tool retry **with the new credential** | `scenario_expired_credential_resume.rs` |
 | Not resolve another person's approval prompt — each user answers their own | `scenario_multi_actor_gate_isolation.rs` |
 
-### 3.4 Memory — `group_memory/` (7)
+### 3.4 Memory — `group_memory/` (9)
 
 | The user can… | Evidence |
 |---|---|
@@ -129,6 +129,8 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | Trust that only the memory hooks the provider declares actually fire | `scenario_lifecycle_gates_host_memory_calls.rs` |
 | Ask a natural punctuated question in a new chat and receive explicitly saved memory — and only your own, never another user's, and never another conversation's raw transcript — framed as a recollection to verify (#7294), through the proactive prompt lane on the shipping libSQL backend | `scenario_proactive_prompt_recall_libsql.rs` |
 | Have the assistant remember a preference you mentioned in passing and still know it in a later chat that opens on a completely unrelated subject — full-text retrieval cannot cover this, because it matches on the current message's words | `scenario_always_on_memory_recall_libsql.rs` |
+| Ask about a stored fact in their OWN words rather than the words it was saved in, and still have it recalled — the paraphrase shares only some of the saved sentence's terms and adds one it never contained (#7185) | `scenario_paraphrased_prompt_recall_libsql.rs` |
+| Tell from the run itself that memory retrieval BROKE rather than simply having nothing to say — the two used to be the same silent empty section (#7185/#7275) | `scenario_memory_retrieval_failure_is_visible.rs` |
 
 ### 3.5 Multi-user — `group_multiuser/` (5)
 
@@ -146,7 +148,24 @@ the canonical "a user does X in one conversation and sees the effect in another"
 |---|---|
 | List, install, and remove a skill, with each step visible from a different conversation | `scenario_install_list_remove.rs` |
 
-### 3.7 Triggers & automations — `group_triggers/` (11)
+### 3.7 Linked accounts (device link) — `group_device_link/` (4)
+
+Telegram's **linked-account** surfaces: the real bundled manifest (channel +
+`method = "device_link"` auth + fifteen `standard_op` tools), its
+`[admin_configuration]` satisfied through the production capability (including
+the MTProto `telegram_api_id` / `telegram_api_hash`), and all three surfaces
+bound through the same native-factory seam the binary uses. Only the vendor half
+is scripted (a `DeviceLinkAdapter` and a linked-account `ToolAdapter`) — the real
+ones speak MTProto over a raw socket with no injectable seam.
+
+| The user can… | Evidence |
+|---|---|
+| Configure the deployment, install Telegram, link their own account, have the assistant read it through a real tool call — and lose that tool the moment the link is revoked | `scenario_link_call_unlink.rs` |
+| Link their own Telegram account without inheriting (or leaking) someone else's — a second person's call acts as themselves | `scenario_actor_isolation.rs` |
+| Have a revoked link park the run on a connect prompt instead of failing silently, then re-link and have the parked call run for real | `scenario_revoked_session_reauth.rs` |
+| Link their account through the real multi-step handshake — scan, wait, type the account password — have the resulting credential automatically connect their bot-channel identity and become immediately usable by the assistant, then remove Telegram and have the provider device, identity binding, and connection all disappear | `scenario_handshake_mints_and_serves.rs` (drives the production `DeviceLinkFlowDriver`: start → poll → submit → completed, asserts the minted account's §4.5 ownership pin and durable custody, proves a linked tool call resolves to that account, then removes the extension through the production lifecycle and observes the scripted provider revoke) |
+
+### 3.8 Triggers & automations — `group_triggers/` (11)
 
 | The user can… | Evidence |
 |---|---|
@@ -162,7 +181,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 
 ---
 
-## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (55)
+## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (59)
 
 One thread, whole real turn. Grouped by what the user experiences.
 
@@ -175,10 +194,11 @@ One thread, whole real turn. Grouped by what the user experiences.
 | A flaky model provider is retried and recovered from, with typed errors | `model_recovery.rs` |
 | A turn receives the expected tool results after each model iteration | `golden_payload.rs` |
 | A turn that reads two file ranges in parallel receives both results in the requested order | `golden_payload.rs` |
-| Approaching the run limit surfaces a recoverable warning | `terminal_warning.rs` |
+| Approaching the run limit surfaces a recoverable warning, while repeated capability calls receive one advisory warning and may continue | `terminal_warning.rs` |
 | Repeating the same inbound message does not start a second run | `idempotent_replay.rs` |
 | Spend accounting fires on a real turn | `budget.rs` |
 | Sub-agents spawn and awaiting them behaves at the edges | `subagent_await_edge.rs` |
+| A caller hands the engine a prepared prompt and gets its outcome back: a schema-validated JSON result (invalid attempts are retried and the corrected payload is durably recorded) or a plain answer; seeded tool history is honored by the run; resubmitting the same request is replay-safe; the private work thread belongs to the calling user (stored under their owner scope, foreign-owner run-state reads rejected) yet never appears in conversation listings | `unbound_turns.rs` |
 
 **Tools**
 | Behavior | Evidence |
@@ -188,7 +208,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Shell commands dispatch through the real path without spawning an OS process | `process_port.rs` |
 | A sandbox-profile shell turn executes as an unprivileged user in a real Docker worker and keeps its workspace across calls | `reborn_sandbox_shell_turn.rs` |
 | MCP tools work over a real loopback HTTP MCP server | `mcp.rs` |
-| User-registered hosted MCP servers register, authenticate, restore, and invoke | `hosted_mcp_registration.rs` |
+| User-registered and bundled hosted MCP servers register, authenticate, project active, restore, and invoke | `hosted_mcp_registration.rs` |
 | Web search/fetch runs the real Exa MCP handshake | `web_access.rs` |
 | Outbound HTTP crosses the real security pipeline (network policy + leak scan) | `real_egress_pipeline.rs` |
 | Tools marked host-internal are never advertised to the model, and calls to them are rejected | `extension_visibility.rs`, `surface_disclosure.rs` |
@@ -199,6 +219,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | A capability whose lease expires mid-dispatch does not wedge the run | `lease_wedge.rs` |
 | A run whose lease expires while it is waiting on the model finishes normally instead of dying — it is resumed from its before-model checkpoint after a grace window, and the user never sees a failure | `lease_wedge.rs::run_parked_before_a_model_call_is_resumed_after_lease_expiry_not_failed` |
 | Attachments the user uploads are read back byte-for-byte by the model | `attach.rs` |
+| Uploaded DOCX files cannot be corrupted by raw text writes; structured DOCX/XLSX/PPTX edits produce new downloadable files without changing the originals; and HTML renders to a persisted PDF | `document_edit.rs` |
 | Skill activation injects skill context into a real turn | `skill_activate.rs` |
 | Creating a project through chat persists it | `project_create.rs` |
 | Profile writes reach the real profile source | `profile.rs` |
@@ -221,15 +242,16 @@ One thread, whole real turn. Grouped by what the user experiences.
 | An extension installs and activates through the real generic runtime | `extension_runtime.rs` |
 | An inbound channel message is verified and routed by the real generic ingress mount | `extension_ingress.rs` |
 | An outbound reply is delivered through the real inbound→outbound pipeline | `extension_delivery.rs` |
-| A Telegram reply quotes the message it answers; a DM arriving mid-run gets an immediate busy notice quoting that DM, and the late reply still quotes its own prompt (#6643/#6644) | `extension_delivery.rs::unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_to_the_paired_user` (step 8 + anchored delivery evidence) |
+| A Telegram reply quotes the message it answers; a DM arriving mid-run gets an immediate busy notice quoting that DM, and the late reply still quotes its own prompt (#6643/#6644) | `extension_delivery.rs::linked_telegram_actor_turns_attribute_to_the_linking_user_and_unlink_revokes_admission` (anchored delivery evidence) |
 | Tenant-admin configuration and per-user install/remove stay separate state machines | `extension_user_lifecycle_isolation.rs` |
-| The model sees channel setup guidance but not UI-only chrome | `channel_connection_projection.rs` |
+| The model sees Telegram's channel and linked tools without the retired proof-code setup recipe | `channel_connection_projection.rs` |
+| An ordinary Telegram user sees device-link setup without deployment secrets, and the retired bot proof-code pairing route stays unavailable | `webui_v2_product_api.rs::telegram_setup_hides_admin_configuration_and_excludes_legacy_pairing` |
 | Delivery preferences / connected channels render into the model prompt | `comm_context.rs` |
 
 **Durability, storage & restart**
 | Behavior | Evidence |
 |---|---|
-| Behavior is identical on in-memory and libSQL storage | `backend_matrix.rs` |
+| Behavior is identical on in-memory, libSQL, and PostgreSQL storage; message exact lookups avoid sibling entry rows on both durable databases | `backend_matrix.rs` |
 | Installed extensions survive a fresh store reopen | `durable.rs` |
 | Secrets survive a genuine on-disk reopen | `secrets.rs` |
 | Outbound preferences survive a process-level reopen | `outbound_store_durability.rs` |
@@ -247,8 +269,9 @@ One thread, whole real turn. Grouped by what the user experiences.
 | WebUI v2 routes work over the real services facade | `webui_v2_product_api.rs`, `webui_v2_router_smoke.rs` |
 | Enroll/refresh/remove a browser for web push over the real routes — advertised VAPID key, endpoint redacted to its push-service host, undeclared push hosts rejected, and the `web-app` catalog row selectable through the same notification-channels wire as every vendor channel | `webui_v2_product_api.rs::browser_channel_notification_setup_round_trip_through_production_facade` |
 | Identity resolution runs on the coverage lane | `identity_resolution_smoke.rs` |
+| A canonical 10-tool-call agent turn's database write volume is measured and reported (for tracking, not gated) on both libSQL and Postgres, and custom-actor group threads are rejected from canonical durable milestones | `db_write_canonical.rs` |
 
-One of the 55 registered bins, `delivery_user_journeys.rs`, holds the explicit
+One of the 59 registered bins, `delivery_user_journeys.rs`, holds the explicit
 channel-delivery journeys (two-lane model):
 
 | A user can… | Scenario |
@@ -317,7 +340,7 @@ enums), `trace_format.rs`, `trace_llm_tests.rs`,
 
 ---
 
-## 6. Python E2E scenarios — `tests/e2e/scenarios/` (103 files, 1,141 tests)
+## 6. Python E2E scenarios — `tests/e2e/scenarios/` (103 files, 1,143 tests)
 
 This is an exhaustive inventory, not a claim that every retained scenario is
 currently executable. Current Reborn coverage starts `ironclaw serve` through the
@@ -415,6 +438,7 @@ entries.
 | The user can… | Evidence |
 |---|---|
 | Search across settings sections and clear the search | `test_reborn_webui_v2_legacy_settings_search.py` (6), `test_settings_search.py` (5) |
+| As an admin, publish the active provider's allowlist/default from Settings; then, as a non-admin member, choose a long-name allowed model, verify the selector stacks at narrow width and right-aligns at wide width without overflow, and have that preference reach future provider requests across chats without changing another member's workspace-default routing | `test_reborn_webui_v2_smoke.py::test_reborn_v2_settings_model_preference_reaches_provider` |
 | Add, test, activate, edit and delete a custom inference provider | `test_reborn_webui_v2_legacy_settings_search.py` |
 | Add/edit/delete skills, with read-only sources locked | `test_reborn_webui_v2_legacy_skills.py` (3), `test_reborn_webui_v2_skills_api.py` (3), `test_portfolio.py` (10) |
 | Filter scoped logs by target and level with the shared SelectMenu while polling and pagination continue | `test_reborn_webui_v2_smoke.py::test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context` |
@@ -476,7 +500,8 @@ verify it.
 |---|---|
 | **Proactive / background execution** has no Reborn scenario at any tier | The v1 heartbeat loop has no Reborn equivalent yet — issue #6369. Nothing in §3–§6 drives it. |
 | **Skills** have only one group scenario (`install_list_remove`) | No group-tier coverage of skill activation under a gate, install failure/denial, or trusted-vs-installed tool attenuation. Attenuation rules are in `.claude/rules/skills.md`. |
-| **Telegram** has no group-tier lifecycle scenario | Slack has `scenario_slack_channel_lifecycle_state_machine.rs`; Telegram's setup resolves through a pairing mechanism the bare group harness doesn't mount (see `scenario_extension_install_github_normal_gate.rs`'s module doc). Telegram is covered at the Python tier only. |
+| **Telegram's device-link handshake against real MTProto** is untested at every tier | The handshake *through production wiring* is now covered — `group_device_link/scenario_handshake_mints_and_serves.rs` drives composition's `DeviceLinkFlowDriver` from start to a minted, ownership-pinned credential account and a linked tool call that resolves to it. What no Rust tier can reach is the **vendor** half: the shipped adapter speaks MTProto over a socket with no injectable seam, so QR acceptance, datacenter migration, 2FA, and flood-wait behaviour are exercised only by a scripted adapter. Closing this needs the gated live-smoke protocol (a real account and a human scanning a code), which no PR provisions. |
+| **A failed linked session must not reconnect until `link_revision` changes** | Still unimplemented and therefore untestable at any tier: the pool's revision key and the custody revision gate both exist and are now wired in every deployment, but nothing records a session-level *failure* or refuses reconnection until the revision moves. There is no production behavior to assert. |
 | **Memory deletion / retention** is uncovered | `group_memory/` covers write, read, search, tree, and binding gating — nothing covers removal, eviction, or the "LLM data is never deleted" invariant from the root `CLAUDE.md`. |
 | **Cross-actor isolation for triggers and extensions** is thin at group tier | `group_multiuser/` covers threads, memory, auto-approve and turn state. Extensions get one `with_actor_id` scenario; triggers get none. |
 | **Attachments** have no group scenario | Covered flat (`attach.rs`) and in the browser (`test_reborn_webui_v2_legacy_attachments.py`), but not cross-thread/cross-actor. |

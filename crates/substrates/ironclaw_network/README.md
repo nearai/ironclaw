@@ -77,6 +77,6 @@ cargo test -p ironclaw_architecture_tests   # boundary + single-egress gates
 ## See also
 
 Family boundary: [`crates/substrates/AGENTS.md`](../AGENTS.md). Contracts:
-`docs/reborn/contracts/network.md`, `docs/reborn/contracts/kernel-boundary.md`,
-`docs/reborn/contracts/resources.md`. (The crate's working rules were folded
+`docs/internal/reborn/contracts/network.md`, `docs/internal/reborn/contracts/kernel-boundary.md`,
+`docs/internal/reborn/contracts/resources.md`. (The crate's working rules were folded
 into the Invariants above on 2026-08-06; this README is the crate-local home.)

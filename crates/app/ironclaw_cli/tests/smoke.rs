@@ -429,6 +429,17 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         );
     }
 
+    let rust_cache_step = compile_workflow
+        .split("      - name: Restore Rust cache\n")
+        .nth(1)
+        .and_then(|tail| tail.split("      - id: build\n").next())
+        .expect("release compile workflow must contain the Rust cache step before the build step");
+    assert!(
+        rust_cache_step.contains("uses: Swatinem/rust-cache@")
+            && rust_cache_step.contains("cache-on-failure: true"),
+        "the release Rust cache step must preserve failed build caches"
+    );
+
     assert!(
         compile_workflow.contains("fail-fast: false")
             && compile_workflow.contains("cargo build --locked --profile dist")
@@ -676,6 +687,29 @@ fn docker_reborn_config_defaults_to_standalone() {
         parsed.policy.is_none(),
         "local Docker config must not include production-only policy"
     );
+}
+
+#[test]
+fn shipped_reborn_configs_use_conservative_runner_heartbeat() {
+    for name in [
+        "config.toml",
+        "config.production.toml",
+        "config.hosted-single-tenant.toml",
+        "config.hosted-single-tenant-volume.toml",
+    ] {
+        let path = workspace_root().join("docker/reborn").join(name);
+        let config = std::fs::read_to_string(&path).expect("docker reborn config");
+        let parsed =
+            ironclaw_config::RebornConfigFile::parse_text(&config, &path).expect("config parses");
+        assert_eq!(
+            parsed
+                .runner
+                .as_ref()
+                .and_then(|runner| runner.heartbeat_interval_secs),
+            Some(15),
+            "{name} must ship the conservative 15-second runner heartbeat"
+        );
+    }
 }
 
 #[test]

@@ -261,6 +261,7 @@ pub(crate) struct TrustedInboundTurnRequest {
     pub(crate) trusted_project_id: Option<ProjectId>,
     pub(crate) trusted_owner_user_id: Option<UserId>,
     pub(crate) kind: TrustedInboundKind,
+    pub(crate) execution_policy: Option<ironclaw_host_api::execution_policy::TurnExecutionPolicy>,
 }
 
 impl TrustedInboundTurnRequest {
@@ -270,6 +271,7 @@ impl TrustedInboundTurnRequest {
         trusted_project_id: Option<ProjectId>,
         trusted_owner_user_id: Option<UserId>,
         kind: TrustedInboundKind,
+        execution_policy: Option<ironclaw_host_api::execution_policy::TurnExecutionPolicy>,
     ) -> Self {
         Self {
             request,
@@ -277,6 +279,7 @@ impl TrustedInboundTurnRequest {
             trusted_project_id,
             trusted_owner_user_id,
             kind,
+            execution_policy,
         }
     }
 }

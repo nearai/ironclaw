@@ -22,10 +22,11 @@ use ironclaw_product_contracts::lifecycle_service::{
     LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
 };
 use ironclaw_product_contracts::operator_llm::{
-    ActiveModelReader, CodexLoginStart, LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID, LlmConfigService,
-    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
-    NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult,
-    USER_MODEL_CATALOG_VIEW, UpsertLlmProviderRequest,
+    ActiveModelReader, CodexLoginStart, LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID,
+    LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID, LlmConfigService, LlmConfigServiceError,
+    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest,
+    NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult, USER_MODEL_CATALOG_VIEW,
+    USER_MODEL_PREFERENCE_VIEW, UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference,
 };
 use ironclaw_product_contracts::operator_service::{
     OperatorLogsService, OperatorServiceLifecycleService, OperatorStatusService,
@@ -103,10 +104,6 @@ use crate::{
     UnsupportedLifecycleProductService,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
-    binding_ref::{
-        DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_reply_target_binding_ref,
-        bounded_source_binding_ref,
-    },
     declared_command_help_text, is_approval_gate_ref, is_auth_gate_ref,
     policy::{BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest},
     product_command_descriptors, required_audience, thread_metadata_is_automation_trigger,
@@ -685,6 +682,49 @@ fn model_command_view(title: &str, snapshot: &LlmConfigSnapshot) -> CommandResul
     CommandResultView {
         title: title.to_string(),
         fields,
+        lines,
+    }
+}
+
+fn user_model_preference_command_view(
+    title: &str,
+    catalog: &UserModelCatalog,
+    preference: &UserModelPreference,
+) -> CommandResultView {
+    let mut lines = Vec::new();
+    if catalog.selection_enabled {
+        lines.push(format!("Available models: {}", catalog.models.join(", ")));
+        lines.push("Use `/model use <model>` or `/model default`.".to_string());
+    } else {
+        lines.push("User model selection is not configured for this workspace.".to_string());
+    }
+    let (preferred, effective) = match preference.model.as_deref() {
+        Some(model)
+            if catalog.selection_enabled
+                && catalog.models.iter().any(|available| available == model) =>
+        {
+            (model.to_string(), model.to_string())
+        }
+        Some(model) => {
+            lines.push(
+                "Your saved preference is no longer available. Use `/model default`.".to_string(),
+            );
+            (format!("{model} (unavailable)"), "unavailable".to_string())
+        }
+        None => (
+            "workspace default".to_string(),
+            catalog
+                .workspace_default
+                .clone()
+                .unwrap_or_else(|| "not configured".to_string()),
+        ),
+    };
+    CommandResultView {
+        title: title.to_string(),
+        fields: vec![
+            command_result_field("Preference", preferred),
+            command_result_field("Effective model", effective),
+        ],
         lines,
     }
 }
@@ -3102,8 +3142,41 @@ where
     ) -> Result<CommandResultView, ProductSurfaceError> {
         match action {
             ProductModelCommand::Status => {
-                let snapshot = self.build_llm_config_view(caller).await?;
-                Ok(model_command_view("Model", &snapshot))
+                let catalog = self.build_user_model_catalog_view(caller.clone()).await?;
+                let preference = self.build_user_model_preference_view(caller).await?;
+                Ok(user_model_preference_command_view(
+                    "Model",
+                    &catalog,
+                    &preference,
+                ))
+            }
+            ProductModelCommand::Use { model } => {
+                self.invoke_user_model_preference_set(
+                    caller.clone(),
+                    serde_json::json!({ "model": model }),
+                )
+                .await?;
+                let catalog = self.build_user_model_catalog_view(caller.clone()).await?;
+                let preference = self.build_user_model_preference_view(caller).await?;
+                Ok(user_model_preference_command_view(
+                    "Model preference updated",
+                    &catalog,
+                    &preference,
+                ))
+            }
+            ProductModelCommand::Default => {
+                self.invoke_user_model_preference_set(
+                    caller.clone(),
+                    serde_json::json!({ "model": null }),
+                )
+                .await?;
+                let catalog = self.build_user_model_catalog_view(caller.clone()).await?;
+                let preference = self.build_user_model_preference_view(caller).await?;
+                Ok(user_model_preference_command_view(
+                    "Model preference updated",
+                    &catalog,
+                    &preference,
+                ))
             }
             ProductModelCommand::Set { model } => {
                 let snapshot = self.build_llm_config_view(caller.clone()).await?;
@@ -4145,6 +4218,11 @@ where
                 let response = self.build_user_model_catalog_view(caller).await?;
                 views::view_page(response)
             }
+            id if id == USER_MODEL_PREFERENCE_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_user_model_preference_view(caller).await?;
+                views::view_page(response)
+            }
             id if id == THREADS_VIEW.id => {
                 let mut request: ProductListThreadsRequest =
                     serde_json::from_value(query.params)
@@ -4871,21 +4949,12 @@ where
         // (the failed run is terminal) and then deletes the thread while
         // `retry_turn` enqueues a replacement run against it.
         let _thread_operation_guard = self.lock_thread_operation(&access.scope).await;
-        let binding_id = webui_retry_binding_id(&access.scope, run_id, &client_action_id);
         let response = self
             .turn_coordinator
             .retry_turn(RetryTurnRequest {
                 scope: access.scope,
                 actor: access.run_actor,
                 run_id,
-                source_binding_ref: webui_source_binding_ref_from_raw(
-                    "webui-retry-src",
-                    &binding_id,
-                )?,
-                reply_target_binding_ref: webui_reply_target_binding_ref_from_raw(
-                    "webui-retry-reply",
-                    &binding_id,
-                )?,
                 idempotency_key: client_action_id,
             })
             .await
@@ -6333,7 +6402,6 @@ where
                 if always {
                     return Err(persistent_approval_unavailable());
                 }
-                let binding_id = webui_gate_binding_id(&scope, &gate_ref_string(&gate_ref));
                 let response = self
                     .turn_coordinator
                     .resume_turn(ResumeTurnRequest {
@@ -6342,14 +6410,6 @@ where
                         run_id,
                         gate_resolution_ref: gate_ref,
                         precondition: ResumeTurnPrecondition::AnyBlockedGate,
-                        source_binding_ref: webui_source_binding_ref_from_raw(
-                            "webui-gate-src",
-                            &binding_id,
-                        )?,
-                        reply_target_binding_ref: webui_reply_target_binding_ref_from_raw(
-                            "webui-gate-reply",
-                            &binding_id,
-                        )?,
                         idempotency_key: client_action_id,
                         resume_disposition: None,
                     })
@@ -6632,24 +6692,6 @@ fn parse_run_id_field(
 
 fn parse_persisted_turn_run_id(value: &str) -> Result<TurnRunId, ProductSurfaceError> {
     TurnRunId::parse(value).map_err(ProductSurfaceError::internal_from)
-}
-
-fn webui_source_binding_ref_from_raw(
-    prefix: &str,
-    raw: &str,
-) -> Result<ironclaw_host_api::turn::SourceBindingRef, ProductSurfaceError> {
-    bounded_source_binding_ref(prefix, raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(|_| {
-        ProductSurfaceError::from_status(ProductSurfaceErrorCode::Internal, 500, false)
-    })
-}
-
-fn webui_reply_target_binding_ref_from_raw(
-    prefix: &str,
-    raw: &str,
-) -> Result<ironclaw_host_api::turn::ReplyTargetBindingRef, ProductSurfaceError> {
-    bounded_reply_target_binding_ref(prefix, raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(|_| {
-        ProductSurfaceError::from_status(ProductSurfaceErrorCode::Internal, 500, false)
-    })
 }
 
 /// Transport identity stamped on session-lane submissions that did not name
@@ -6946,35 +6988,6 @@ fn cap_summary_artifacts(
     artifacts
 }
 
-fn webui_gate_binding_id(scope: &TurnScope, gate_ref: &str) -> String {
-    format!(
-        "{}{}{}{}",
-        segment("surface", "webui"),
-        segment("tenant", scope.tenant_id.as_str()),
-        segment("thread", scope.thread_id.as_str()),
-        segment("gate", gate_ref)
-    )
-}
-
-fn webui_retry_binding_id(
-    scope: &TurnScope,
-    run_id: TurnRunId,
-    client_action_id: &IdempotencyKey,
-) -> String {
-    format!(
-        "{}{}{}{}{}",
-        segment("surface", "webui"),
-        segment("tenant", scope.tenant_id.as_str()),
-        segment("thread", scope.thread_id.as_str()),
-        segment("failed_run", run_id.as_uuid().to_string().as_str()),
-        segment("action", client_action_id.as_str())
-    )
-}
-
-fn gate_ref_string(gate_ref: &ironclaw_host_api::turn::TurnGateRef) -> String {
-    gate_ref.as_str().to_string()
-}
-
 fn persistent_approval_unavailable() -> ProductSurfaceError {
     ProductSurfaceError::from_status_kind(
         ProductSurfaceErrorCode::Unavailable,
@@ -7047,12 +7060,16 @@ fn map_thread_error(error: SessionThreadError) -> ProductSurfaceError {
         | SessionThreadError::OverlappingSummaryRange { .. } => {
             ProductSurfaceError::from_status(ProductSurfaceErrorCode::Conflict, 409, false)
         }
-        SessionThreadError::InvalidAttachment(_) => ProductSurfaceError::from_status_kind(
-            ProductSurfaceErrorCode::InvalidRequest,
-            ProductSurfaceErrorKind::Validation,
-            400,
-            false,
-        ),
+        SessionThreadError::InvalidAttachment(_)
+        | SessionThreadError::InvalidPreparedContext { .. }
+        | SessionThreadError::PreparedContextKeyMismatch { .. } => {
+            ProductSurfaceError::from_status_kind(
+                ProductSurfaceErrorCode::InvalidRequest,
+                ProductSurfaceErrorKind::Validation,
+                400,
+                false,
+            )
+        }
         SessionThreadError::GeneratedThreadId(_)
         | SessionThreadError::Serialization(_)
         | SessionThreadError::Deserialization(_)

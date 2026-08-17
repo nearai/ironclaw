@@ -84,7 +84,9 @@ class GuidanceGateTests(unittest.TestCase):
         self.write("AGENTS.md", "Start at [the family](crates/core/AGENTS.md).\n")
         self.write("CLAUDE.md", "Read `docs/guide.md` and `crates/core/ironclaw_alpha/README.md`.\n")
         self.symlink("crates/core/CLAUDE.md", "AGENTS.md")
-        self.write("docs/guide.md", "not scanned, only referenced\n")
+        self.write("docs/guide.md", "scanned like every docs/ page\n")
+        # Navigation defines the published surface the scan must cover.
+        self.write("docs/docs.json", '{"navigation": {"pages": ["guide"]}}\n')
         self.write(
             ".claude/rules/alpha.md",
             '---\npaths:\n  - "crates/**/*.rs"\n---\n# Alpha rule\n',
@@ -137,6 +139,7 @@ class GuidanceGateTests(unittest.TestCase):
         tracked: list[str] | None = None,
         known_missing: tuple | None = (),
         alias_exceptions: dict[str, str] | None = None,
+        internal_guidance: tuple[str, ...] = (),
     ) -> tuple[int, str]:
         listing = self.root / "tracked-files.txt"
         listing.write_text(
@@ -150,6 +153,9 @@ class GuidanceGateTests(unittest.TestCase):
             mock.patch.object(GATE, "MIN_PATH_REFERENCES", 1),
             mock.patch.object(GATE, "MIN_RULE_GLOBS", 1),
             mock.patch.object(GATE, "MIN_ALIAS_PAIRS", 1),
+            # Fixtures opt in per test; the production tuple names real-repo
+            # pages the fixture tree lacks.
+            mock.patch.object(GATE, "INTERNAL_GUIDANCE_PREFIXES", internal_guidance),
             mock.patch.object(
                 GATE,
                 "ALIAS_REAL_FILE_EXCEPTIONS",
@@ -539,6 +545,7 @@ class GuidanceGateTests(unittest.TestCase):
             stderr = io.StringIO()
             with (
                 mock.patch.object(GATE, "MIN_GUIDANCE_FILES", 1),
+                mock.patch.object(GATE, "INTERNAL_GUIDANCE_PREFIXES", ()),
                 mock.patch.object(GATE, "KNOWN_MISSING", ()),
                 mock.patch.object(crate_tree, "MIN_CRATE_DIRECTORIES", 1),
                 contextlib.redirect_stderr(stderr),
@@ -561,6 +568,210 @@ class GuidanceGateTests(unittest.TestCase):
         code, output = self.run_gate()
         self.assertEqual(code, 1)
         self.assertIn("unterminated ``` fence", output)
+
+    # -- the docs/ surface -------------------------------------------------
+    def test_docs_page_with_dangling_backticked_path_fails(self) -> None:
+        """A published page naming a dead repo path is the drift class that
+        motivated extending the scan (#7317)."""
+        self.build_fixture()
+        self.write(
+            "docs/api/responses.mdx",
+            "See `crates/core/ironclaw_gone/src/lib.rs` for details.\n",
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("crates/core/ironclaw_gone/src/lib.rs", output)
+
+    def test_docs_markdown_links_are_not_references(self) -> None:
+        """Mintlify link targets are site routes, not repo paths — the link
+        extractor is off for docs/ so neither form below is a claim."""
+        self.build_fixture()
+        self.write(
+            "docs/using/cli.mdx",
+            "Read [the CLI guide](/using/cli) and [service](service).\n"
+            "Also [a relative page](../capabilities/configuration).\n",
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 0, output)
+
+    def test_docs_mdx_comment_marker_suppresses_one_reference(self) -> None:
+        """`{/* check-guidance: path-ok */}` is the MDX form of the marker;
+        it vouches for the one reference immediately before it and no other."""
+        self.build_fixture()
+        self.write(
+            "docs/extensions/building.mdx",
+            "The retired `crates/core/ironclaw_gone/src/lib.rs` "
+            "{/* check-guidance: path-ok */} is an example; "
+            "`crates/core/ironclaw_also_gone/` is still checked.\n",
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertNotIn("ironclaw_gone/src/lib.rs", output)
+        self.assertIn("crates/core/ironclaw_also_gone/", output)
+
+    def test_docs_mdx_multiline_comment_hides_its_content(self) -> None:
+        """Paths inside a multi-line MDX comment block (the doc-fact marker
+        shape) are not references."""
+        self.build_fixture()
+        self.write(
+            "docs/api/policy.mdx",
+            "Real prose with `crates/core/ironclaw_alpha/README.md`.\n"
+            "{/* doc-fact:example\n"
+            "`crates/core/ironclaw_gone/src/lib.rs`\n"
+            "*/}\n",
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 0, output)
+
+    def test_docs_zh_mirror_is_discovered(self) -> None:
+        """The zh/ locale tree carries the same backticked repo paths as the
+        English pages and is scanned the same way."""
+        self.build_fixture()
+        self.write(
+            "docs/zh/index.md",
+            "参见 `crates/core/ironclaw_gone/src/lib.rs`。\n",
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("docs/zh/index.md", output)
+
+    def test_docs_historical_archives_are_excluded_but_contracts_are_not(self) -> None:
+        """docs/internal/ archives are excluded; the living contract corpus
+        inside is scanned."""
+        self.build_fixture()
+        self.write(
+            "docs/internal/plans/2026-01-01-old-plan.md",
+            "We will edit `crates/core/ironclaw_gone/src/lib.rs`.\n",
+        )
+        self.write(
+            "docs/internal/reborn/target-architecture/CHECKLIST.md",
+            "Milestone: `crates/core/ironclaw_gone/src/lib.rs`.\n",
+        )
+        self.write(
+            "docs/internal/reborn/contracts/example.md",
+            "Pinned by `crates/core/ironclaw_gone/tests/contract.rs`.\n",
+        )
+        code, output = self.run_gate(
+            internal_guidance=("docs/internal/reborn/contracts/",)
+        )
+        self.assertEqual(code, 1)
+        self.assertNotIn("2026-01-01-old-plan.md", output)
+        self.assertNotIn("CHECKLIST.md", output)
+        self.assertIn("docs/internal/reborn/contracts/example.md", output)
+        self.assertIn("crates/core/ironclaw_gone/tests/contract.rs", output)
+
+    def test_docs_unterminated_fence_refuses(self) -> None:
+        self.build_fixture()
+        self.write(
+            "docs/broken.mdx",
+            "Prose.\n```bash\nnever closed\n",
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("unterminated ``` fence", output)
+
+    def test_docs_unterminated_comment_refuses(self) -> None:
+        """An unterminated comment must refuse like an unterminated fence:
+        silently un-scanning the rest of the file (here, a dangling
+        reference after the typo'd closer) is the fail-open shape the gate's
+        charter forbids."""
+        self.build_fixture()
+        for name, body in (
+            (
+                "docs/typo.mdx",
+                "{/* doc-fact:example\nnever closed with */ only\n"
+                "See `crates/core/ironclaw_gone/src/lib.rs`.\n",
+            ),
+            (
+                "docs/typo2.md",
+                "Prose <!-- opened and abandoned\n"
+                "See `crates/core/ironclaw_gone/src/lib.rs`.\n",
+            ),
+        ):
+            with self.subTest(name=name):
+                self.write(name, body)
+                code, output = self.run_gate()
+                (self.root / name).unlink()
+                self.assertEqual(code, 1)
+                self.assertIn("unterminated", output)
+                self.assertIn(name, output)
+
+    def test_internal_spec_links_are_repo_claims(self) -> None:
+        """Internal spec pages are never published, so their relative links
+        are repo-path claims, not site routes."""
+        self.build_fixture()
+        self.write("docs/internal/reborn/contracts/kernel.md", "A real sibling.\n")
+        self.write(
+            "docs/internal/reborn/contracts/index.md",
+            "See [kernel](kernel.md) and [renamed](renamed-away.md).\n",
+        )
+        code, output = self.run_gate(
+            internal_guidance=("docs/internal/reborn/contracts/",)
+        )
+        self.assertEqual(code, 1)
+        self.assertNotIn("kernel.md`", output)
+        self.assertIn("renamed-away.md", output)
+
+    def test_internal_guidance_prefix_matching_no_pages_refuses(self) -> None:
+        """A stale spec prefix (the corpus moved) must refuse, not silently
+        drop the pages from the scan."""
+        self.build_fixture()
+        code, output = self.run_gate(
+            internal_guidance=("docs/internal/reborn/contracts/",)
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("matched no tracked", output)
+        self.assertIn("docs/internal/reborn/contracts/", output)
+
+    def test_nav_coverage_refuses_when_docs_discovery_breaks(self) -> None:
+        """A broken docs discovery filter refuses on the first nav page the
+        scan no longer covers."""
+        self.build_fixture()
+        with mock.patch.object(GATE, "DOCS_PREFIX", "docz/"):
+            code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("navigation publishes pages the reference scan", output)
+        self.assertIn("guide", output)
+
+    def test_nav_page_without_scanned_source_refuses(self) -> None:
+        """A nav entry with no scanned source file is published prose the
+        gate is not checking."""
+        self.build_fixture()
+        self.write(
+            "docs/docs.json",
+            '{"navigation": {"pages": ["guide", "ghost-page"]}}\n',
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("ghost-page", output)
+
+    def test_openapi_nav_pseudo_pages_are_not_coverage_claims(self) -> None:
+        """Generated endpoint entries ("GET /users") have no source file
+        and are skipped."""
+        self.build_fixture()
+        self.write(
+            "docs/docs.json",
+            '{"navigation": {"pages": ["guide", "GET /users"]}}\n',
+        )
+        code, output = self.run_gate()
+        self.assertEqual(code, 0, output)
+
+    def test_unreadable_docs_json_refuses(self) -> None:
+        """Missing, unparseable, or page-less docs.json refuses — never a
+        vacuous pass."""
+        self.build_fixture()
+        self.write("docs/docs.json", "{not json\n")
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("cannot read docs/docs.json", output)
+        (self.root / "docs/docs.json").unlink()
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("cannot read docs/docs.json", output)
+        self.write("docs/docs.json", '{"navigation": {"pages": []}}\n')
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("names no source-backed pages", output)
 
     def test_missing_tracked_files_override_refuses(self) -> None:
         stderr = io.StringIO()

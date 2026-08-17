@@ -1,8 +1,8 @@
 //! Caller-level regression for the model-visible `builtin.extension_search`
-//! channel-connection contract (#6618): a generated-code channel's setup
-//! guidance IS model-visible (the model needs it to explain the next step),
-//! while UI-only chrome — the static pairing failure copy — is intentionally
-//! excluded from this model-visible path.
+//! channel-connection contract (#6618): Telegram's linked-device flow must not
+//! regress to the retired generated proof-code recipe. Its channel and linked
+//! tools remain discoverable while device-link configuration stays on the
+//! extension's authenticated setup surface.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -16,7 +16,7 @@ use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
 #[tokio::test]
-async fn extension_search_retains_generated_code_guidance_without_ui_failure_copy() {
+async fn extension_search_omits_retired_proof_code_guidance_for_linked_device_telegram() {
     let group = RebornIntegrationGroup::extension_delivery()
         .await
         .expect("extension-delivery group builds with the Telegram manifest");
@@ -54,19 +54,14 @@ async fn extension_search_retains_generated_code_guidance_without_ui_failure_cop
             .is_some_and(|kinds| kinds.iter().any(|kind| kind == "channel")),
         "model-visible search must still identify Telegram as a channel: {telegram}"
     );
-    let connection = &telegram["channel_connection"];
-    assert_eq!(
-        connection["strategy"], "web_generated_code",
-        "generated-code connection guidance must remain model-visible: {telegram}"
+    assert!(
+        telegram["channel_connection"].is_null(),
+        "linked-device Telegram must not advertise the retired proof-code recipe: {telegram}"
     );
     assert!(
-        connection["instructions"]
-            .as_str()
-            .is_some_and(|instructions| instructions.contains("IronClaw pairing panel")),
-        "manifest-authored connection guidance must survive catalog projection: {connection}"
-    );
-    assert_eq!(
-        connection["error_message"], "",
-        "static pairing failure copy is UI-only, not live model state: {connection}"
+        telegram["visible_capability_ids"]
+            .as_array()
+            .is_some_and(|ids| ids.iter().any(|id| id == "telegram.whoami")),
+        "linked-account tools must remain model-visible: {telegram}"
     );
 }

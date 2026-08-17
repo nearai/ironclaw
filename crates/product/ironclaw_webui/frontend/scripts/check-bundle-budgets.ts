@@ -64,21 +64,42 @@ const LOGIN_GZIP_BUDGET = 180_000;
 //  - The shared native file-picker interaction (#7337) replaced three
 //    route-local impls; Vite emits its ~0.3 KB gzip helper as a shared chunk
 //    (Chat/Settings/Extensions all consume it).
-// Re-measured on the merged tree at 217.7 KB gzip. A 219.0 KB budget retains
-// the recovery safeguards and about 1.3 KB of explicit headroom while
-// accounting for these concurrent `main` changes.
+// Re-measured on the MERGED tree with `vite build` + this check. `main`
+// concurrently re-measured 217.7 KB gzip after its own changes (#7480, #7284
+// et al.); both deltas are in the measurement below.
+// The device-link card then added a multi-step link flow to /chat.
+// Everything deferrable was deferred FIRST, and measured at each step:
+//  - `auth-device-link-card.tsx` and the `device-link-panel` /
+//    `device-link-api` modules behind it load through `React.lazy` from
+//    `chat.tsx` (the inspector-panel pattern), so the card, its step machine,
+//    its polling, and its input forms emit as their own chunks and cost the
+//    initial route nothing. Measured: 220.5 KB eager -> 219.5 KB.
+// What stays eager, and why it cannot move:
+//  - `link-payload-panel.tsx` — the extracted QR/countdown/copy/renew
+//    presentation. It is not new weight so much as relocated weight: it
+//    replaces the identical implementation that already shipped inside the
+//    eager `pairing-web-code-panel.tsx`, and it is now shared with the lazy
+//    device-link chunk, so Vite hoists it into a shared chunk the eager
+//    pairing panel pulls anyway. Keeping a second copy to save the hoist is
+//    precisely the drift the extraction exists to prevent.
+//  - `lib/device-link-frame.ts` — the frame normalizer. The gate selector
+//    (`gates.ts`, eager) has to normalize a device-link gate to decide which
+//    card to render at all, so it cannot sit behind the lazy boundary; a
+//    second eager normalizer would let a polled frame and a gate frame
+//    disagree about the same wire object.
+//  - ~31 `deviceLink.*` keys in `en.ts`, which `i18n.tsx` loads eagerly as the
+//    fallback pack on every page. Measured at 0.5 KB gzip; the other ten
+//    locale packs stay lazy per-locale imports and cost nothing here.
+// Measured /chat closure on the merged tree is 220.4 KB gzip; 222.0 KB
+// retains about 1.6 KB of explicit headroom.
 // The OOBE first-run suggestion surface (behind an off-by-default
-// `oobe_suggestions` session flag) is lazy-loaded from `empty-state.tsx`
-// (`React.lazy` + `Suspense`, mirroring `CommandResult`/`AttachmentPreviewModal`
-// in `message-bubble.tsx`), and its two shared dependencies that were already
-// eager elsewhere (`app/auth.ts`'s `useOobeSuggestionsEnabled` gate,
-// `NearProcessIndicator`) were hoisted to the eager parent and passed down as
-// props specifically so the lazy chunk doesn't force them into their own
-// less-efficient standalone chunks. After both hoists the eager cost is
-// irreducible: gating the lazy-import decision itself, plus the flag-read
-// hook, must live in the eager `/chat` closure. Re-measured at 219.2 KB gzip;
-// a 220.0 KB budget keeps about 0.8 KB of explicit headroom.
-const CHAT_GZIP_BUDGET = 220_000;
+// `oobe_suggestions` session flag) — its cards, the `useSuggestions` data hook,
+// the suggestions API client, and the brand-icon SVGs — is lazy-loaded from
+// `empty-state.tsx` (`React.lazy` + `Suspense`), so it lands in its own chunk
+// and costs the eager /chat closure nothing. Only the flag-read gate and the
+// lazy-import decision stay eager (already accounted for above), so no further
+// budget bump is needed for OOBE.
+const CHAT_GZIP_BUDGET = 222_000;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {
