@@ -106,7 +106,7 @@ async fn github_auth_gate_denied_resume_completes_without_loop() {
 #[tokio::test]
 async fn runtime_401_after_injection_populates_provider_credential_requirement() {
     let harness = RebornIntegrationHarness::test_default()
-        .with_github_network_status(401)
+        .with_github_network_response(401, br#"{"message":"Bad credentials"}"#.to_vec())
         .script([
             RebornScriptedReply::tool_call(
                 "github.get_repo",
@@ -180,6 +180,20 @@ async fn runtime_401_after_injection_populates_provider_credential_requirement()
         .wait_for_status(run_id, TurnStatus::Completed)
         .await
         .expect("denied auth resume completes");
+
+    // The rejected credential's bounded, sanitized provider diagnostic must
+    // survive the parked AuthRequired path into the next model request. The
+    // provider message is the actionable explanation; the stable WASM code
+    // keeps its provenance/classification. A generic "authentication required"
+    // / "auth gate denied" message alone cannot tell the model that GitHub
+    // rejected the supplied credential.
+    harness
+        .assert_model_request_contains_all(&[
+            "Bad credentials",
+            "provider error code: github_api_error_status_401",
+        ])
+        .await
+        .expect("the provider 401 message and stable code reach eventual model context");
 }
 
 /// W4-AUTHGATE-WIRE: cancelling a run parked at `BlockedAuth` lands directly

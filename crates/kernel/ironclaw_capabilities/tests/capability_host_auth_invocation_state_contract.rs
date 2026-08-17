@@ -4,7 +4,8 @@ use ironclaw_capabilities::*;
 use ironclaw_host_api::{
     capability::{CapabilityDescriptor, CapabilitySet},
     decision::{Decision, Obligations},
-    dispatch::CapabilityDispatchResult,
+    dispatch::{CapabilityDispatchResult, DispatchError},
+    ids::SecretHandle,
     resource::ResourceEstimate,
     scope::ExecutionContext,
 };
@@ -53,7 +54,12 @@ async fn capability_host_blocks_auth_when_dispatch_returns_auth_required() {
     // P1 regression: dispatch-path DispatchError::AuthRequired must transition
     // the run to BlockedAuth, not Failed, so auth-resume can pick it up.
     let registry = registry_with_echo_capability();
-    let dispatcher = TestDispatcher::auth_required();
+    let dispatcher = TestDispatcher::scripted(vec![Err(DispatchError::AuthRequired {
+        capability: capability_id(),
+        required_secrets: vec![SecretHandle::new("echo_token").unwrap()],
+        credential_requirements: Vec::new(),
+        model_visible_cause: None,
+    })]);
     let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
     let authorizer = PlainAllowAuthorizer;
     let host =

@@ -258,16 +258,58 @@ fn status_fault_profiles_classify_to_their_declared_fate() {
 #[test]
 fn a_401_parks_for_reauth_and_is_never_reported_as_a_tool_failure() {
     let capability = CapabilityId::new("github.list_issues").expect("a legal capability id");
-    let payload = guest_error_payload(catalogue_status("expired_credential"));
+    let payload = serde_json::json!({
+        "code": format!(
+            "github_api_error_status_{}",
+            catalogue_status("expired_credential")
+        ),
+        "kind": "auth_required",
+        "message": "Bad credentials",
+    })
+    .to_string();
 
     // The variant matters, not just the fate: a re-auth gate needs the
     // capability and credential requirements carried through, which only
     // `DispatchError::AuthRequired` does.
     let dispatch = wasm_guest_dispatch_error(&payload, &capability);
-    assert!(
-        matches!(dispatch, DispatchError::AuthRequired { .. }),
-        "an expired credential must produce an auth gate, got {dispatch:?}"
+    let DispatchError::AuthRequired {
+        model_visible_cause,
+        ..
+    } = &dispatch
+    else {
+        panic!("an expired credential must produce an auth gate, got {dispatch:?}");
+    };
+    let cause = model_visible_cause
+        .as_ref()
+        .expect("auth rejection retains its raw model diagnostic");
+    assert_eq!(
+        cause.code.as_ref().map(|code| code.as_str()),
+        Some("github_api_error_status_401")
     );
+    assert_eq!(
+        cause.message.as_ref().map(|message| message.as_str()),
+        Some("Bad credentials")
+    );
+    assert!(!format!("{dispatch:?}").contains("Bad credentials"));
+
+    let code_only_payload = serde_json::json!({
+        "code": "github_api_error_status_401",
+        "kind": "auth_required",
+    })
+    .to_string();
+    let code_only_dispatch = wasm_guest_dispatch_error(&code_only_payload, &capability);
+    let DispatchError::AuthRequired {
+        model_visible_cause: Some(code_only_cause),
+        ..
+    } = code_only_dispatch
+    else {
+        panic!("a code-only auth rejection must retain its diagnostic");
+    };
+    assert_eq!(
+        code_only_cause.code.as_ref().map(|code| code.as_str()),
+        Some("github_api_error_status_401")
+    );
+    assert!(code_only_cause.message.is_none());
 
     let failure_kind: FailureKind = dispatch.failure_kind().into();
     assert_eq!(failure_kind.fate(), FailureFate::Park);

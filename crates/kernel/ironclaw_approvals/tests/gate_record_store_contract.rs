@@ -21,7 +21,7 @@ use ironclaw_host_api::{
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
     resource::ResourceScope,
-    result_meta::LoopRef,
+    result_meta::{LoopRef, ModelDiagnostic},
     safe_summary::SafeSummary,
 };
 
@@ -54,6 +54,10 @@ async fn gate_record_auth_variant_round_trips_credential_requirements() {
     let record = GateRecord::Auth {
         summary: summary(),
         credential_requirements: vec![credential_requirement()],
+        diagnostic: Some(
+            ModelDiagnostic::new("provider error code: github_api_error_status_401".to_string())
+                .unwrap(),
+        ),
     };
 
     store
@@ -66,9 +70,14 @@ async fn gate_record_auth_variant_round_trips_credential_requirements() {
     match store.load(&scope, gate_ref).await.unwrap() {
         Some(GateRecord::Auth {
             credential_requirements,
+            diagnostic,
             ..
         }) => {
             assert_eq!(credential_requirements, vec![credential_requirement()]);
+            assert_eq!(
+                diagnostic.as_ref().map(ModelDiagnostic::as_str),
+                Some("provider error code: github_api_error_status_401")
+            );
         }
         other => panic!("expected Auth gate record, got {other:?}"),
     }
@@ -204,6 +213,7 @@ fn every_gate_record_variant() -> Vec<GateRecord> {
         GateRecord::Auth {
             summary: summary(),
             credential_requirements: vec![credential_requirement()],
+            diagnostic: None,
         },
         GateRecord::Resource { summary: summary() },
         GateRecord::DependentRun {

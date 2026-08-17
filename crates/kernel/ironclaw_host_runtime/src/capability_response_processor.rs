@@ -1,9 +1,10 @@
 //! Canonical mapping from inline capability-host responses to runtime outcomes.
 //!
-//! Fresh invocation, approval resume, and auth resume all cross this seam. The
-//! processor owns response interpretation only; authorization, dispatch,
-//! obligation settlement, and durable/model projection remain with their
-//! existing owners.
+//! Fresh invocation, approval resume, and auth resume all cross this seam; the
+//! spawn path also reuses its error mapping while keeping successful spawn
+//! outcomes in `spawn_capability`. The processor owns response interpretation
+//! only; authorization, dispatch, obligation settlement, and durable/model
+//! projection remain with their existing owners.
 
 use ironclaw_capabilities::CapabilityInvocationError;
 use ironclaw_extension_registry::ExtensionRegistry;
@@ -52,10 +53,12 @@ pub(super) async fn process_capability_response(
             capability,
             required_secrets,
             credential_requirements,
+            model_visible_cause,
         }) => Ok(auth_required_outcome(
             capability,
             required_secrets,
             credential_requirements,
+            model_visible_cause,
         )),
         Err(CapabilityInvocationError::AuthorizationRequiresApproval { capability }) => {
             match context.mode {

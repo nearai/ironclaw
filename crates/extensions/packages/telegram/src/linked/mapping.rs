@@ -114,6 +114,7 @@ pub(crate) fn auth_required() -> ToolError {
             // generic re-auth gate, so this arm degrades rather than panics.
             _ => Vec::new(),
         },
+        model_visible_cause: None,
     }
 }
 

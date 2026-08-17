@@ -296,6 +296,7 @@ async fn first_party_adapter_maps_handler_auth_required_to_dispatch_auth_require
             capability,
             required_secrets,
             credential_requirements,
+            ..
         }) => {
             assert_eq!(capability, descriptor.id);
             assert!(
