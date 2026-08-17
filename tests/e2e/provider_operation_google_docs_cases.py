@@ -100,14 +100,15 @@ async def _semantic_edit_outcome(emulate_url: str, preview: dict) -> None:
     assert "user-owned agents" not in _document_text(document), document
 
 
-async def _semantic_table_outcome(emulate_url: str, preview: dict) -> None:
+async def _semantic_table_partial_outcome(emulate_url: str, preview: dict) -> None:
+    """Emulate acknowledges insertTable but does not materialize table state."""
     output = _output(preview)
-    assert output["verified"] is True, output
-    assert output["stage"] == "verified", output
-    assert "failure" not in output, output
-    assert output["populated_cells"] == 4, output
+    assert output["verified"] is False, output
+    assert output["stage"] == "table_inserted", output
+    assert output["failure"] == "inserted table was not found at index 2", output
+    assert output["populated_cells"] == 0, output
     document = await _document(emulate_url)
-    assert TABLE_DATA in _document_tables(document), document
+    assert TABLE_DATA not in _document_tables(document), document
 
 
 def _output(preview: dict) -> dict:
@@ -337,8 +338,8 @@ GOOGLE_DOCS_PROVIDER_OPERATION_CASES = (
             "bold_header": True,
         },
         assert_baseline=_baseline,
-        assert_outcome=_semantic_table_outcome,
-        expected_request_count=7,
+        assert_outcome=_semantic_table_partial_outcome,
+        expected_request_count=3,
     ),
     ProviderOperationCase(
         case_id="google_docs_insert_text",

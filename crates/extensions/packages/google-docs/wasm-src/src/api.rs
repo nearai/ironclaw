@@ -797,13 +797,7 @@ pub fn create_table_with_data(
     if let Some(revision_id) = inserted["revisionId"].as_str() {
         latest_revision = revision_id.to_string();
     }
-    let table_index = resolve_inserted_table_index(
-        &inserted,
-        index,
-        preferred_table_index,
-        rows,
-        columns,
-    );
+    let table_index = preferred_table_index;
     let population_requests =
         match build_table_population_requests(&inserted, table_index, table_data) {
             Ok(requests) => requests,
@@ -937,35 +931,6 @@ fn preferred_inserted_table_index(requested_index: i64) -> Result<i64, String> {
     requested_index
         .checked_add(1)
         .ok_or_else(|| "table insertion index is too large".to_string())
-}
-
-fn resolve_inserted_table_index(
-    document: &serde_json::Value,
-    requested_index: i64,
-    preferred_index: i64,
-    expected_rows: usize,
-    expected_columns: usize,
-) -> i64 {
-    if table_at_index(document, preferred_index).is_some() {
-        preferred_index
-    } else if table_at_index(document, requested_index).is_some() {
-        requested_index
-    } else {
-        document["body"]["content"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|element| table_dimensions(element) == Some((expected_rows, expected_columns)))
-            .filter_map(|element| element["startIndex"].as_i64())
-            .min_by_key(|index| index.abs_diff(preferred_index))
-            .unwrap_or(requested_index)
-    }
-}
-
-fn table_dimensions(element: &serde_json::Value) -> Option<(usize, usize)> {
-    let rows = element["table"]["tableRows"].as_array()?;
-    let columns = rows.first()?["tableCells"].as_array()?.len();
-    Some((rows.len(), columns))
 }
 
 fn partial_table_result(
@@ -1427,28 +1392,7 @@ mod tests {
 
     #[test]
     fn inserted_table_uses_provider_index_after_leading_newline() {
-        let google_document = serde_json::json!({
-            "body": { "content": [{ "startIndex": 6, "table": {
-                "tableRows": [{ "tableCells": [{}, {}] }, { "tableCells": [{}, {}] }]
-            }}] }
-        });
-        let legacy_emulator_document = serde_json::json!({
-            "body": { "content": [{ "startIndex": 0, "table": {
-                "tableRows": [{ "tableCells": [{}, {}] }, { "tableCells": [{}, {}] }]
-            }}] }
-        });
-
-        let preferred = preferred_inserted_table_index(5).unwrap();
-
-        assert_eq!(preferred, 6);
-        assert_eq!(
-            resolve_inserted_table_index(&google_document, 5, preferred, 2, 2),
-            6
-        );
-        assert_eq!(
-            resolve_inserted_table_index(&legacy_emulator_document, 5, preferred, 2, 2),
-            0
-        );
+        assert_eq!(preferred_inserted_table_index(5).unwrap(), 6);
         assert!(preferred_inserted_table_index(i64::MAX).is_err());
     }
 
