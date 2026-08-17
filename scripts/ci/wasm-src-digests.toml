@@ -11,9 +11,9 @@
 # gate, which is the exact failure it exists to catch.
 
 [packages]
-github = "d489fc478e4e1af20fec04752840c5cbd5f21335a75d98edeee556772e05379a"
-google-docs = "483c07798af8aa254f9aa87a734e1a90356961497f2c77da2bf655f3e253d7c0"
-google-drive = "ded4caf18b003687276bd0cecdbd2c21d2292d3a056f11eb0fb501a2aca8a6cc"
-google-sheets = "17e10421b03264b9fa8c00fd7d2f67868b7c558bcfc563e3d8e5c10db9f2a66d"
-google-slides = "7fd29c48b5c563f04ddbf8187ad2a8009e7ce5e7da3036fe0f67b3eaa05c6bb4"
-slack = "0a7a310f0f0047028aa4f9ca4714c9b3e9266e09e2f225c270a3d1b01d0b0224"
+github = "80439ac5a0ee707fb53fa972dfdbc85a98b8307b3992dca4eb3d4654369d1dd8"
+google-docs = "e5bdc34cf52a0f3771f0129dd2e86f78c2baf7d185bde09d3ae19187441f7918"
+google-drive = "94cce70d83af30efd93562395dd0ab9a5cd9142afb8f3fbeb8ef0b05cf2264c2"
+google-sheets = "838af152f0853da17e6d90136a3307e847b6dddceb05f2dd4edefd7bd26c653a"
+google-slides = "092838465668d4ab91478686b6fe529730338c6b69fed029586211ea71beea2c"
+slack = "ce9a7f3e14ef3b6be1287fb6c3418052fb68d571d6d3014997d095622e1f1773"

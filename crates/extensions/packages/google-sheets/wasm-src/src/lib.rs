@@ -50,19 +50,15 @@ wit_bindgen::generate!({
     path: "../../../../lanes/ironclaw_wasm/wit/tool.wit",
 });
 
+use exports::near::agent::tool::{ErrorKind, GuestFailure, Response};
+
 struct GoogleSheetsTool;
 
 impl exports::near::agent::tool::Guest for GoogleSheetsTool {
     fn execute(req: exports::near::agent::tool::Request) -> exports::near::agent::tool::Response {
         match execute_inner(&req.params, req.context.as_deref()) {
-            Ok(result) => exports::near::agent::tool::Response {
-                output: Some(result),
-                error: None,
-            },
-            Err(e) => exports::near::agent::tool::Response {
-                output: None,
-                error: Some(e),
-            },
+            Ok(result) => Response::Success(result),
+            Err(failure) => Response::Failure(failure),
         }
     }
 
@@ -86,11 +82,27 @@ impl exports::near::agent::tool::Guest for GoogleSheetsTool {
     }
 }
 
-fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> {
+/// Build an `input`-kind guest failure with a stable code and no free-text
+/// message (the code alone is the actionable signal for these host-plumbing
+/// failures).
+fn input_failure(code: &'static str) -> GuestFailure {
+    GuestFailure {
+        kind: ErrorKind::Input,
+        code: Some(code.to_string()),
+        message: None,
+        retry_after_ms: None,
+    }
+}
+
+fn execute_inner(params: &str, context: Option<&str>) -> Result<String, GuestFailure> {
     let action_name = action_from_context(context)?;
     let params = params_with_action(params, action_name)?;
-    let action: GoogleSheetsAction =
-        serde_json::from_value(params).map_err(|e| format!("Invalid parameters: {}", e))?;
+    let action: GoogleSheetsAction = serde_json::from_value(params).map_err(|e| GuestFailure {
+        kind: ErrorKind::Input,
+        code: Some("invalid_parameters".to_string()),
+        message: Some(api::bounded_message(&e.to_string())),
+        retry_after_ms: None,
+    })?;
 
     crate::near::agent::host::log(
         crate::near::agent::host::LogLevel::Debug,
@@ -100,12 +112,12 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
     let result = match action {
         GoogleSheetsAction::CreateSpreadsheet { title, sheet_names } => {
             let result = api::create_spreadsheet(&title, &sheet_names)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSheetsAction::GetSpreadsheet { spreadsheet_id } => {
             let result = api::get_spreadsheet(&spreadsheet_id)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSheetsAction::ReadValues {
@@ -113,7 +125,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             range,
         } => {
             let result = api::read_values(&spreadsheet_id, &range)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSheetsAction::BatchReadValues {
@@ -121,7 +133,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             ranges,
         } => {
             let result = api::batch_read_values(&spreadsheet_id, &ranges)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSheetsAction::WriteValues {
@@ -131,7 +143,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             value_input_option,
         } => {
             let result = api::write_values(&spreadsheet_id, &range, &values, &value_input_option)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSheetsAction::AppendValues {
@@ -141,7 +153,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             value_input_option,
         } => {
             let result = api::append_values(&spreadsheet_id, &range, &values, &value_input_option)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSheetsAction::ClearValues {
@@ -149,7 +161,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             range,
         } => {
             let result = api::clear_values(&spreadsheet_id, &range)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSheetsAction::AddSheet {
@@ -157,7 +169,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             title,
         } => {
             let result = api::add_sheet(&spreadsheet_id, &title)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSheetsAction::DeleteSheet {
@@ -165,7 +177,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             sheet_id,
         } => {
             let result = api::delete_sheet(&spreadsheet_id, sheet_id)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSheetsAction::RenameSheet {
@@ -174,7 +186,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             title,
         } => {
             let result = api::rename_sheet(&spreadsheet_id, sheet_id, &title)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSheetsAction::FormatCells {
@@ -209,17 +221,17 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
                 number_format: number_format.as_deref(),
                 number_format_type: number_format_type.as_deref(),
             })?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
     };
 
     Ok(result)
 }
 
-fn action_from_context(context: Option<&str>) -> Result<&'static str, String> {
-    let context = context.ok_or_else(|| "missing_invocation_context".to_string())?;
+fn action_from_context(context: Option<&str>) -> Result<&'static str, GuestFailure> {
+    let context = context.ok_or_else(|| input_failure("missing_invocation_context"))?;
     let context: ToolContext =
-        serde_json::from_str(context).map_err(|_| "invalid_invocation_context".to_string())?;
+        serde_json::from_str(context).map_err(|_| input_failure("invalid_invocation_context"))?;
     match context.capability_id.as_str() {
         "google-sheets.create_spreadsheet" => Ok("create_spreadsheet"),
         "google-sheets.get_spreadsheet" => Ok("get_spreadsheet"),
@@ -232,21 +244,21 @@ fn action_from_context(context: Option<&str>) -> Result<&'static str, String> {
         "google-sheets.delete_sheet" => Ok("delete_sheet"),
         "google-sheets.rename_sheet" => Ok("rename_sheet"),
         "google-sheets.format_cells" => Ok("format_cells"),
-        _ => Err("unsupported_google_sheets_capability".to_string()),
+        _ => Err(input_failure("unsupported_google_sheets_capability")),
     }
 }
 
-fn params_with_action(params: &str, action: &str) -> Result<serde_json::Value, String> {
+fn params_with_action(params: &str, action: &str) -> Result<serde_json::Value, GuestFailure> {
     let mut params: serde_json::Value = if params.trim().is_empty() {
         serde_json::json!({})
     } else {
-        serde_json::from_str(params).map_err(|_| "invalid_parameters".to_string())?
+        serde_json::from_str(params).map_err(|_| input_failure("invalid_parameters"))?
     };
     let obj = params
         .as_object_mut()
-        .ok_or_else(|| "invalid_parameters".to_string())?;
+        .ok_or_else(|| input_failure("invalid_parameters"))?;
     if obj.contains_key("action") {
-        return Err("invalid_parameters".to_string());
+        return Err(input_failure("invalid_parameters"));
     }
     obj.insert(
         "action".to_string(),

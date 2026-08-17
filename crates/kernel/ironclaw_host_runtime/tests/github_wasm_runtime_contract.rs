@@ -45,8 +45,9 @@ use ironclaw_trust::{
     AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, TrustDecision,
 };
 use ironclaw_wasm::{
-    PreparedWitTool, RecordingWasmHostHttp, WasmHostError, WasmHttpResponse, WitToolExecution,
-    WitToolHost, WitToolOutcome, WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
+    PreparedWitTool, RecordingWasmHostHttp, WasmHostError, WasmHttpResponse, WitGuestFailure,
+    WitToolExecution, WitToolHost, WitToolOutcome, WitToolRequest, WitToolRuntime,
+    WitToolRuntimeConfig,
 };
 use serde_json::json;
 
@@ -1334,7 +1335,7 @@ async fn bundled_github_wasm_executes_search_get_and_comment_operations() {
         json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
         Arc::clone(&search_http),
     );
-    assert_eq!(wasm_legacy_error(&search), None);
+    assert_eq!(wasm_typed_failure(&search), None);
     let search_output: serde_json::Value = serde_json::from_str(
         wasm_output_json(&search)
             .as_deref()
@@ -1362,7 +1363,7 @@ async fn bundled_github_wasm_executes_search_get_and_comment_operations() {
         json!({"owner": "nearai", "repo": "ironclaw", "issue_number": 2}),
         Arc::clone(&get_issue_http),
     );
-    assert_eq!(wasm_legacy_error(&get_issue), None);
+    assert_eq!(wasm_typed_failure(&get_issue), None);
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(wasm_output_json(&get_issue).as_deref().unwrap())
             .unwrap()["number"],
@@ -1390,7 +1391,7 @@ async fn bundled_github_wasm_executes_search_get_and_comment_operations() {
         }),
         Arc::clone(&comment_http),
     );
-    assert_eq!(wasm_legacy_error(&comment), None);
+    assert_eq!(wasm_typed_failure(&comment), None);
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(wasm_output_json(&comment).as_deref().unwrap())
             .unwrap()["body"],
@@ -1423,7 +1424,7 @@ async fn bundled_github_wasm_builds_query_from_structured_search_fields() {
         Arc::clone(&http),
     );
 
-    assert_eq!(wasm_legacy_error(&execution), None);
+    assert_eq!(wasm_typed_failure(&execution), None);
     assert_single_wasm_request(
         &http,
         "GET",
@@ -1452,7 +1453,7 @@ async fn bundled_github_wasm_replies_to_pull_request_comment_under_pr_path() {
         Arc::clone(&http),
     );
 
-    assert_eq!(wasm_legacy_error(&reply), None);
+    assert_eq!(wasm_typed_failure(&reply), None);
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(wasm_output_json(&reply).as_deref().unwrap())
             .unwrap()["body"],
@@ -1486,7 +1487,7 @@ async fn bundled_github_wasm_returns_json_for_empty_success_responses() {
         Arc::clone(&http),
     );
 
-    assert_eq!(wasm_legacy_error(&dispatch), None);
+    assert_eq!(wasm_typed_failure(&dispatch), None);
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(wasm_output_json(&dispatch).as_deref().unwrap())
             .unwrap(),
@@ -1612,7 +1613,7 @@ async fn bundled_github_wasm_builds_create_repo_fork_and_release_requests() {
         }),
         Arc::clone(&create_repo_http),
     );
-    assert_eq!(wasm_legacy_error(&create_repo), None);
+    assert_eq!(wasm_typed_failure(&create_repo), None);
     assert_single_wasm_request_json_body(
         &create_repo_http,
         "POST",
@@ -1635,7 +1636,7 @@ async fn bundled_github_wasm_builds_create_repo_fork_and_release_requests() {
         json!({"limit": 2}),
         Arc::clone(&list_my_repos_http),
     );
-    assert_eq!(wasm_legacy_error(&list_my_repos), None);
+    assert_eq!(wasm_typed_failure(&list_my_repos), None);
     assert_single_wasm_request(
         &list_my_repos_http,
         "GET",
@@ -1659,7 +1660,7 @@ async fn bundled_github_wasm_builds_create_repo_fork_and_release_requests() {
         }),
         Arc::clone(&fork_http),
     );
-    assert_eq!(wasm_legacy_error(&fork), None);
+    assert_eq!(wasm_typed_failure(&fork), None);
     assert_single_wasm_request_json_body(
         &fork_http,
         "POST",
@@ -1691,7 +1692,7 @@ async fn bundled_github_wasm_builds_create_repo_fork_and_release_requests() {
         }),
         Arc::clone(&release_http),
     );
-    assert_eq!(wasm_legacy_error(&release), None);
+    assert_eq!(wasm_typed_failure(&release), None);
     assert_single_wasm_request_json_body(
         &release_http,
         "POST",
@@ -1721,7 +1722,7 @@ async fn bundled_github_wasm_get_authenticated_user_uses_user_endpoint() {
         Arc::clone(&http),
     );
 
-    assert_eq!(wasm_legacy_error(&user), None);
+    assert_eq!(wasm_typed_failure(&user), None);
     let user: serde_json::Value =
         serde_json::from_str(wasm_output_json(&user).as_deref().unwrap()).unwrap();
     assert_eq!(user["login"], json!("serrrfirat"));
@@ -1887,7 +1888,7 @@ async fn bundled_github_wasm_leaves_success_json_for_host_output_decode() {
     );
 
     assert_eq!(wasm_output_json(&execution).as_deref(), Some("not-json"));
-    assert_eq!(wasm_legacy_error(&execution), None);
+    assert_eq!(wasm_typed_failure(&execution), None);
 }
 
 #[tokio::test]
@@ -1963,11 +1964,11 @@ fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected_kind: Failu
     }
 }
 
-/// The bundled `github.wasm`/`google-drive.wasm` fixtures are still compiled
-/// against the frozen near:agent@0.3.0 world, so every execution in this file
-/// runs through the host's legacy binding fallback (removed in PR 4) and
-/// lands in `WitToolOutcome::Success`/`LegacyFailure`/`LegacyMissingOutput`
-/// rather than the typed `Failure` case.
+/// The bundled `github.wasm`/`google-drive.wasm` fixtures are compiled
+/// against the typed near:agent@0.4.0 world, so every execution in this file
+/// lands in `WitToolOutcome::Success`/`Failure` — the legacy
+/// `LegacyFailure`/`LegacyMissingOutput` fallback cases (removed in PR 4)
+/// only exist for still-unmigrated 0.3.0 guests.
 fn wasm_output_json(execution: &WitToolExecution) -> Option<String> {
     match &execution.outcome {
         WitToolOutcome::Success(output) => Some(output.clone()),
@@ -1975,32 +1976,20 @@ fn wasm_output_json(execution: &WitToolExecution) -> Option<String> {
     }
 }
 
-fn wasm_legacy_error(execution: &WitToolExecution) -> Option<String> {
+fn wasm_typed_failure(execution: &WitToolExecution) -> Option<&WitGuestFailure> {
     match &execution.outcome {
-        WitToolOutcome::LegacyFailure(error) => Some(error.clone()),
+        WitToolOutcome::Failure(failure) => Some(failure),
         _ => None,
     }
 }
 
 fn structured_wasm_error_code(execution: &WitToolExecution) -> Option<String> {
-    let error = wasm_legacy_error(execution)?;
-    let parsed: serde_json::Value =
-        serde_json::from_str(&error).expect("WASM guest errors are structured JSON");
-    assert!(
-        parsed["kind"].as_str().is_some_and(|kind| !kind.is_empty()),
-        "structured WASM guest error must include a non-empty kind"
-    );
-    parsed["code"].as_str().map(str::to_string)
+    let failure = wasm_typed_failure(execution)?;
+    failure.code.clone()
 }
 
 fn wasm_error_code_or_text(execution: &WitToolExecution) -> Option<String> {
-    let error = wasm_legacy_error(execution)?;
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&error)
-        && let Some(code) = parsed["code"].as_str()
-    {
-        return Some(code.to_string());
-    }
-    Some(error)
+    structured_wasm_error_code(execution)
 }
 
 #[derive(Debug, Clone)]
