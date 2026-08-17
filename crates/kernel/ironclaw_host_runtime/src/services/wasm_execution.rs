@@ -22,7 +22,16 @@ use ironclaw_host_api::dispatch::{
 };
 use ironclaw_host_api::resource::ResourceReceipt;
 
-const MAX_WASM_GUEST_MESSAGE_BYTES: usize = 256;
+/// Bound for a guest-supplied provider message before it rides
+/// `model_visible_cause`/`ProviderDiagnostic.message`. Well under the
+/// downstream ceilings that would otherwise re-truncate it: `ProviderDiagnostic`
+/// bounds to `MODEL_DIAGNOSTIC_MAX_BYTES` (4096, via `bound_provider_text` in
+/// `ironclaw_host_api::dispatch`), and the general `Wasm` failure's
+/// `CapabilityFailureDetail::Diagnostic { text }` is bounded to the same 4096
+/// (`MODEL_OBSERVATION_DETAIL_MAX_BYTES` in `ironclaw_loop_contracts`) — so a
+/// real provider explanation now has room to survive intact instead of being
+/// clipped to a near-useless 256 bytes.
+const MAX_WASM_GUEST_MESSAGE_BYTES: usize = 2048;
 
 /// RAII guard over an in-flight `ResourceGovernor` reservation.
 ///

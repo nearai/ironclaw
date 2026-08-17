@@ -2396,6 +2396,50 @@ mod tests {
     }
 
     #[test]
+    fn failure_from_redacts_credential_shaped_token_from_non_401_provider_message() {
+        // Closes the scrub gap that motivated
+        // `github_wasm_runtime_contract.rs` capturing provider messages only
+        // on 401 (see that test file's
+        // `bundled_github_wasm_sanitizes_host_http_and_api_failures`): a
+        // credential-shaped token in a NON-401 (403) provider error body
+        // must be redacted by the belt scrub here — the layer immediately
+        // after guest dispatch — not solely by a downstream crate's
+        // re-scrub. Uses the shorter CI-fixture-shaped token (below the old
+        // 36-char `github_token` floor) that motivated lowering the floor
+        // to 16 in `ironclaw_safety::LeakDetector`.
+        let leaked_token = "ghp_fake_fixture_token";
+        let raw = format!(
+            "provider error code: github_api_error_status_403; provider message: bad credentials {leaked_token}"
+        );
+        let error = CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            safe_summary: Some(raw),
+            detail: None,
+            provider_diagnostic: None,
+        };
+
+        let failure = failure_from(error, CapabilityId::new("github.search_issues").unwrap());
+
+        let cause = failure
+            .model_visible_cause
+            .as_deref()
+            .expect("raw cause must ride the model-visible channel");
+        assert!(
+            !cause.contains(leaked_token),
+            "credential-shaped token in a non-401 provider body must not leak: {cause}"
+        );
+        assert!(
+            cause.contains("403"),
+            "status code must survive redaction: {cause}"
+        );
+        let rendered = format!("{failure:?}");
+        assert!(
+            !rendered.contains(leaked_token),
+            "Debug must not render the leaked token either: {rendered}"
+        );
+    }
+
+    #[test]
     fn failure_from_inlines_bounded_rejected_summary_and_keeps_complete_private_cause() {
         // A path-bearing (or newline-bearing) failure reason fails the strict
         // loop safe-summary validator, so the message degrades to the fixed
