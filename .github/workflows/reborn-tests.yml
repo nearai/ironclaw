@@ -330,7 +330,7 @@ jobs:
           test -x /usr/bin/mold
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           # ONE shared cache for all ~60 crate-test jobs instead of a per-crate
           # key. Per-crate keys produced ~60 caches (registry + target each,
@@ -504,7 +504,7 @@ jobs:
           test "$(/tmp/mold-link-check)" = "mold-link-ok"
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           # All 4 root partitions compile the *same* root-package build (they
           # only run different test partitions), so one shared cache is strictly
@@ -600,7 +600,7 @@ jobs:
           test "$(/tmp/mold-link-check)" = "mold-link-ok"
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           # REUSE the root partitions' cache key: the group `[[test]]` binaries
           # are part of the same root package build as the reborn_*.rs root tests,
@@ -654,7 +654,7 @@ jobs:
           test -x /usr/bin/mold
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           shared-key: reborn-sandbox-docker-tests
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
@@ -770,7 +770,7 @@ jobs:
           test -x /usr/bin/mold
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           # ONE shared key across all 5 instrumented lanes: they all
           # instrument the same workspace build, so a per-lane key would just
@@ -1095,7 +1095,7 @@ jobs:
           pnpm install --frozen-lockfile
 
       - name: Restore Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           key: reborn-qa-recorded-fixtures
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
