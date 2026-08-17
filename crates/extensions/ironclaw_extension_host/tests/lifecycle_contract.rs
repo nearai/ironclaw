@@ -708,7 +708,6 @@ async fn snapshot_resolver_preserves_typed_provider_rejection() {
                     retry_after: None,
                 }),
                 detail: None,
-                attempt: None,
             })
         }
     }

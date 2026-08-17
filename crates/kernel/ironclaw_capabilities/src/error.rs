@@ -332,7 +332,6 @@ mod tests {
                 retry_after: None,
             }),
             detail: None,
-            attempt: None,
         });
         assert!(!format!("{error:?}").contains("token lacks repo scope"));
 

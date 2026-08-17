@@ -19,8 +19,8 @@ use ironclaw_host_api::{
     action::NetworkMethod,
     decision::RuntimeCredentialAuthRequirement,
     dispatch::{
-        CapabilityDisplayOutputPreview, DispatchAttemptAccounting, DispatchFailureDetail,
-        DispatchFailureKind, ProviderDiagnostic, RuntimeDispatchErrorKind,
+        CapabilityDisplayOutputPreview, DispatchFailureDetail, DispatchFailureKind,
+        ProviderDiagnostic, RuntimeDispatchErrorKind,
     },
     ids::{CapabilityId, SecretHandle},
     mount::MountView,
@@ -87,9 +87,6 @@ pub enum ToolError {
         /// redacted until the host's model-diagnostic scrub/fence seam.
         diagnostic: Option<ProviderDiagnostic>,
         detail: Option<DispatchFailureDetail>,
-        /// `Some` means transport began and the runtime already reconciled the
-        /// reservation. `None` is valid only for pre-transport rejection.
-        attempt: Option<Box<DispatchAttemptAccounting>>,
     },
     #[error("tool invocation failed ({kind:?})")]
     Failed {
@@ -141,21 +138,18 @@ impl PartialEq for ToolError {
                     kind: left_kind,
                     diagnostic: left_diagnostic,
                     detail: left_detail,
-                    attempt: left_attempt,
                 },
                 Self::Rejected {
                     runtime: right_runtime,
                     kind: right_kind,
                     diagnostic: right_diagnostic,
                     detail: right_detail,
-                    attempt: right_attempt,
                 },
             ) => {
                 left_runtime == right_runtime
                     && left_kind == right_kind
                     && left_diagnostic == right_diagnostic
                     && left_detail == right_detail
-                    && left_attempt == right_attempt
             }
             _ => false,
         }
@@ -333,7 +327,6 @@ mod tests {
             kind,
             diagnostic,
             detail: None,
-            attempt: None,
         }
     }
 

@@ -233,7 +233,6 @@ fn binder_preserves_provider_rejection_across_the_tool_abi() {
                 retry_after: None,
             }),
             detail: None,
-            attempt: None,
         });
 
     let ToolError::Rejected {

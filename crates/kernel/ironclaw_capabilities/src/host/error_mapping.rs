@@ -323,7 +323,6 @@ pub(super) fn enrich_dispatch_error_credential_requirements(
                             ),
                         },
                     ),
-                    attempt: None,
                 },
             }
         }
