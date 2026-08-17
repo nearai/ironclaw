@@ -1,5 +1,7 @@
+use std::sync::LazyLock;
 use std::time::Instant;
 
+use ironclaw_safety::LeakDetector;
 use wasmtime::component::Linker;
 use wasmtime::{Config, Engine, Store};
 
@@ -10,6 +12,29 @@ use crate::host::WitToolHost;
 use crate::store::StoreData;
 use crate::types::{PreparedWitTool, WitToolExecution, WitToolRequest};
 use crate::wasm_sandbox_core::SandboxLimits;
+
+/// Shared leak-detector registry (well-known vendor API-token shapes,
+/// PEM/SSH keys, bearer/JWT, …) used to scrub guest-authored error text
+/// before it crosses the WASM sandbox boundary into host-controlled data.
+///
+/// Guests are sandboxed but not trusted with free text on the error channel:
+/// a provider HTTP body echoed verbatim by a guest (e.g. a rejected-request
+/// response body that repeats the credential the caller sent) can carry live
+/// credential material. This is the single chokepoint every WIT tool's guest
+/// error crosses on the way out of the sandbox, so redacting here defends
+/// all WASM tools, not just one.
+static GUEST_ERROR_LEAK_DETECTOR: LazyLock<LeakDetector> = LazyLock::new(LeakDetector::new);
+
+/// Redact secret-shaped values from a guest-authored error string before it
+/// becomes guest-visible (`WitToolExecution::error`). Downstream seams (the
+/// model-visible diagnostic seam in `ironclaw_loop_host`) still apply their
+/// own scrubbing and injection fencing; this is the earlier, sandbox-exit
+/// boundary and only redacts secret values in place — it never blocks or
+/// truncates the string, so the descriptive cause survives.
+fn scrub_guest_error(error: String) -> String {
+    let (scrubbed, _redacted) = GUEST_ERROR_LEAK_DETECTOR.redact_all_secrets(&error);
+    scrubbed
+}
 
 /// Reborn WIT-compatible WASM tool runtime.
 ///
@@ -107,7 +132,7 @@ impl WitToolRuntime {
 
         Ok(WitToolExecution {
             output_json: response.output,
-            error: response.error,
+            error: response.error.map(scrub_guest_error),
             usage,
             logs,
         })
