@@ -819,7 +819,7 @@ async fn host_runtime_services_routes_google_docs_wasm_get_document_with_scoped_
     assert_eq!(requests[0].method, NetworkMethod::Get);
     assert_eq!(
         requests[0].url,
-        "https://docs.googleapis.com/v1/documents/doc-1"
+        "https://docs.googleapis.com/v1/documents/doc-1?includeTabsContent=true"
     );
     assert_eq!(requests[0].body, Vec::<u8>::new());
     assert_eq!(requests[0].policy, policy);
@@ -894,7 +894,7 @@ async fn host_runtime_services_routes_google_docs_semantic_inspection_through_bu
     assert_eq!(requests[0].method, NetworkMethod::Get);
     assert_eq!(
         requests[0].url,
-        "https://docs.googleapis.com/v1/documents/doc-1"
+        "https://docs.googleapis.com/v1/documents/doc-1?includeTabsContent=true"
     );
     assert_eq!(requests[0].policy, policy);
     assert_google_bearer_header(&requests[0], "ya29.semantic_fixture_token");
