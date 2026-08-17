@@ -161,6 +161,7 @@ async fn append_tool_result_reference_is_finalized_and_idempotent_per_run_result
 
     let first = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -173,6 +174,7 @@ async fn append_tool_result_reference_is_finalized_and_idempotent_per_run_result
         .unwrap();
     let duplicate = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -679,6 +681,7 @@ async fn duplicate_tool_result_reference_accepts_matching_provider_metadata() {
 
     let first = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -692,6 +695,7 @@ async fn duplicate_tool_result_reference_accepts_matching_provider_metadata() {
 
     let duplicate = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope,
             thread_id: thread.thread_id,
             turn_run_id: "run-1".into(),
@@ -734,6 +738,7 @@ async fn append_tool_result_reference_accepts_multiline_provider_arguments() {
 
     let record = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope,
             thread_id: thread.thread_id,
             turn_run_id: "run-1".into(),
@@ -765,6 +770,7 @@ async fn append_tool_result_reference_backfills_provider_metadata_on_idempotent_
 
     let first = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -777,6 +783,7 @@ async fn append_tool_result_reference_backfills_provider_metadata_on_idempotent_
         .unwrap();
     let duplicate = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -833,6 +840,7 @@ async fn append_tool_result_reference_rejects_conflicting_provider_metadata_on_r
 
     service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -850,6 +858,7 @@ async fn append_tool_result_reference_rejects_conflicting_provider_metadata_on_r
 
     let error = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope,
             thread_id: thread.thread_id,
             turn_run_id: "run-1".into(),
@@ -884,6 +893,7 @@ async fn append_tool_result_reference_keeps_distinct_provider_calls_with_the_sam
 
     let first = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -896,6 +906,7 @@ async fn append_tool_result_reference_keeps_distinct_provider_calls_with_the_sam
         .unwrap();
     let duplicate = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -908,6 +919,7 @@ async fn append_tool_result_reference_keeps_distinct_provider_calls_with_the_sam
         .unwrap();
     let second = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -2025,6 +2037,7 @@ async fn redaction_removes_tool_result_provider_metadata() {
         .unwrap();
     let tool_result = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -2179,6 +2192,7 @@ async fn thread_message_serialization_omits_provider_replay_metadata() {
 
     let tool_result = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope,
             thread_id: thread.thread_id,
             turn_run_id: "run-1".into(),
@@ -2224,6 +2238,7 @@ async fn exact_context_message_lookup_preserves_provider_metadata_while_history_
 
     let tool_result = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -2313,6 +2328,7 @@ async fn append_tool_result_reference_persists_model_observation_in_envelope() {
 
     let tool_result = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -2347,6 +2363,7 @@ async fn append_tool_result_reference_persists_model_observation_in_envelope() {
 
     let unsafe_record = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -2368,6 +2385,7 @@ async fn append_tool_result_reference_persists_model_observation_in_envelope() {
 
     let unsafe_preview_record = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope,
             thread_id: thread.thread_id,
             turn_run_id: "run-2".into(),
@@ -2427,6 +2445,7 @@ async fn tool_result_preview_with_secretary_survives_model_context_replay() {
     let preview = "Report by the Secretary of the Treasury";
     let tool_result = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -2524,6 +2543,7 @@ async fn append_tool_result_reference_retains_full_size_result_preview() {
 
     let tool_result = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope,
             thread_id: thread.thread_id,
             turn_run_id: "run-1".into(),
@@ -2586,6 +2606,7 @@ async fn append_tool_result_reference_backfills_and_preserves_first_model_observ
 
     service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -2598,6 +2619,7 @@ async fn append_tool_result_reference_backfills_and_preserves_first_model_observ
         .unwrap();
     let backfilled = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -2614,6 +2636,7 @@ async fn append_tool_result_reference_backfills_and_preserves_first_model_observ
 
     service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -2627,6 +2650,7 @@ async fn append_tool_result_reference_backfills_and_preserves_first_model_observ
 
     let without_observation_retry = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -2648,6 +2672,7 @@ async fn append_tool_result_reference_backfills_and_preserves_first_model_observ
 
     let conflict = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope,
             thread_id: thread.thread_id,
             turn_run_id: "run-1".into(),
@@ -2687,6 +2712,7 @@ async fn append_tool_result_reference_drops_oversized_model_observation() {
 
     let record = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope,
             thread_id: thread.thread_id,
             turn_run_id: "run-1".into(),

@@ -2,6 +2,7 @@ use chrono::Utc;
 use ironclaw_host_api::{
     ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
     resource::ResourceScope,
+    turn::TurnExecutionOutcome,
 };
 use ironclaw_processes::{GetProcessSnapshotRequest, ProcessJournalPage, ProcessSnapshotSource};
 use std::sync::Arc;
@@ -45,6 +46,7 @@ fn record_with_status(status: TurnStatus) -> TurnRunRecord {
         profile: profile(),
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         checkpoint_id: None,
         gate_ref: GateKind::from_status(status)
             .map(|_| TurnGateRef::new("gate:process-journal").expect("gate")),
@@ -83,6 +85,7 @@ fn agent_turn_metadata(
         resolved_run_profile: None,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         subagent_depth,
         spawn_tree_descendant_cap: None,
         product_context: None,
@@ -846,6 +849,7 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
         resolved_run_profile: None,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: Some(TurnExecutionOutcome::NothingToReport),
         subagent_depth: 0,
         spawn_tree_descendant_cap: None,
         product_context: None,
@@ -936,6 +940,13 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
         })
         .await
         .expect("retried snapshot");
+    assert_eq!(
+        agent_turn_metadata_from_process_snapshot(&retried_snapshot)
+            .expect("retried agent-turn metadata")
+            .execution_outcome,
+        None,
+        "a retry must not inherit a terminal execution outcome from its source run"
+    );
     assert_eq!(
         retried_snapshot.checkpoint_kind,
         Some(ironclaw_processes::ProcessCheckpointKind::BeforeModel),
@@ -1084,6 +1095,7 @@ fn lifecycle_event_projects_to_process_journal_entry() {
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: Utc::now(),
         checkpoint_id: None,
         gate_ref: Some(TurnGateRef::new("gate:process-journal").expect("gate")),
@@ -1128,6 +1140,7 @@ fn claimed_turn_run_projects_to_process_claim() {
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: Utc::now(),
         checkpoint_id: None,
         gate_ref: None,
@@ -1183,6 +1196,7 @@ fn claimed_process_round_trips_to_turn_executor_view() {
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: Utc::now(),
         checkpoint_id: None,
         gate_ref: None,
@@ -1237,6 +1251,7 @@ fn ownerless_scope_round_trips_through_the_process_claim() {
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: Utc::now(),
         checkpoint_id: None,
         gate_ref: None,

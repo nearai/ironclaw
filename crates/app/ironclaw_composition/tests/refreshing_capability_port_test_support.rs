@@ -34,6 +34,7 @@ use ironclaw_composition::test_support::{
 };
 use ironclaw_host_api::{
     capability::{CapabilityDescriptor, EffectKind, PermissionMode},
+    execution_policy::{ResultDeliveryPolicy, TurnExecutionPolicy},
     ids::{
         AgentId, CapabilityId, ExtensionId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
     },
@@ -42,6 +43,7 @@ use ironclaw_host_api::{
     resolution::{Resolution, ToolVerdict},
     resource::ResourceEstimate,
     runtime::RuntimeKind,
+    turn::{ProductTurnContext, TurnOriginKind, TurnOwner},
 };
 use ironclaw_host_runtime::RuntimeCapabilityOutcome;
 use ironclaw_host_runtime::{
@@ -386,6 +388,23 @@ async fn run_context(label: &str) -> LoopRunContext {
     LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved)
 }
 
+async fn suppressed_scheduled_run_context(label: &str) -> LoopRunContext {
+    let mut context = run_context(label).await;
+    let user = UserId::new(format!("user-{label}")).expect("user id");
+    let mut product_context = ProductTurnContext::new(
+        TurnOriginKind::ScheduledTrigger,
+        None,
+        None,
+        TurnOwner::Personal { user },
+    );
+    product_context.execution_policy = Some(TurnExecutionPolicy {
+        result_delivery: ResultDeliveryPolicy::SuppressWhenNothingToReport,
+        ..TurnExecutionPolicy::default()
+    });
+    context.product_context = Some(product_context);
+    context
+}
+
 fn test_parts(
     run_context: LoopRunContext,
     runtime: Arc<StubHostRuntime>,
@@ -470,6 +489,39 @@ async fn port_builds_and_includes_synthetic_capabilities() {
             .iter()
             .any(|definition| definition.capability_id.as_str() == "builtin.echo"),
         "stub host-runtime builtin capability must be present: {definitions:?}"
+    );
+}
+
+#[tokio::test]
+async fn suppressed_scheduled_run_exposes_typed_nothing_to_report_result() {
+    let shared_io = Arc::new(SharedStubCapabilityIo::new());
+    let parts = test_parts(
+        suppressed_scheduled_run_context("suppressed-schedule").await,
+        Arc::new(StubHostRuntime::new()),
+        shared_io,
+        None,
+        HashMap::new(),
+        BTreeMap::new(),
+    );
+    let port = create_refreshing_capability_port_for_test(parts)
+        .await
+        .expect("port assembles through the real production factory");
+
+    let definitions = port.tool_definitions().expect("tool definitions");
+    let result = definitions
+        .iter()
+        .find(|definition| definition.capability_id.as_str() == "builtin.structured_result")
+        .expect("suppressed scheduled run must expose the structured result tool");
+    assert_eq!(
+        result.parameters,
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "outcome": { "const": "nothing_to_report" }
+            },
+            "required": ["outcome"],
+            "additionalProperties": false
+        })
     );
 }
 

@@ -98,6 +98,38 @@ selector before writing the trigger. The scheduler continues to submit the
 frozen prompt; only the neutral execution policy crosses the trusted-trigger
 turn boundary.
 
+New `trigger_create` calls must explicitly select
+`execution_contract.policy.result_delivery`; omission is a model-visible input
+error before persistence so the interactive model can ask the user. Legacy
+persisted policies still deserialize as `deliver` for compatibility.
+
+`execution_contract.policy.result_delivery` controls the no-result behavior:
+
+- `deliver` preserves the legacy contract. The rendered
+  prompt asks the model to return the human-readable `no_result_text`, and a
+  completed run has a normal deliverable result.
+- `suppress_when_nothing_to_report` is explicit opt-in. The scheduled-run
+  prompt names the contract's concrete `no_result_text` as the no-result
+  condition and makes that rule override any output instruction to describe a
+  negative, empty, unchanged, or no-match result. It instructs the model to
+  call the host-provided `builtin__structured_result` provider tool (capability
+  `builtin.structured_result`) with the exact argument
+  `{"outcome":"nothing_to_report"}` and not return an assistant response. The
+  loop records the typed result reference, writes a final checkpoint, and
+  produces `LoopCompletionKind::NothingToReport`. The turn kernel accepts that
+  completion kind only for a scheduled run carrying the explicit suppression
+  policy and the exact same-run structured-result evidence, then persists
+  `TurnExecutionOutcome::NothingToReport`. Ordinary assistant text, including
+  `[SILENT]`, and every reply outside the opted-in scheduled context remains a
+  normal deliverable result.
+
+Execution outcome and delivery outcome are separate durable facts. A
+`NothingToReport` completion records delivery as `Suppressed` and performs no
+transport dispatch or delivery reservation, even on replay. A result with no
+configured notification channel remains `NoDefaultConfigured`. Failed,
+cancelled, blocked, and recovery-required runs never qualify for suppression;
+their existing visible notification behavior is unchanged.
+
 Capability allowlists are intersections: absent preserves the scheduled
 surface, an empty list exposes no capabilities, and a non-empty list can only
 narrow the surface. Global and scheduled-trigger denials still win. Required

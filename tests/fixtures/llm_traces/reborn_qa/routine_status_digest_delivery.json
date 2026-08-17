@@ -30,7 +30,7 @@
             "name": "builtin__trigger_create",
             "arguments": {
               "name": "daily-status-page-slack-digest",
-              "execution_contract": {"version": 1, "goal": "Perform exactly one public HTTP GET to https://status.example.com/api/v2/status.json to check the status page. Compose a one-line summary of the current status. Then call builtin__outbound_deliver with target_id \"slack:qa-trace-dm\" to deliver the summary to my Slack DM. The final answer must include the exact marker ROUTINE_STATUS_DIGEST_DELIVERED_CANARY.", "success_criteria": ["Complete the requested task"], "output_instructions": "Return a concise result", "no_result_text": "No result"},
+              "execution_contract": {"version": 1, "goal": "Perform exactly one public HTTP GET to https://status.example.com/api/v2/status.json to check the status page. Compose a one-line summary of the current status. Then call builtin__outbound_deliver with target_id \"slack:qa-trace-dm\" to deliver the summary to my Slack DM. The final answer must include the exact marker ROUTINE_STATUS_DIGEST_DELIVERED_CANARY.", "success_criteria": ["Complete the requested task"], "output_instructions": "Return a concise result", "no_result_text": "No result", "policy": {"result_delivery": "deliver"}},
               "schedule": {
                 "kind": "cron",
                 "expression": "0 9 * * *",

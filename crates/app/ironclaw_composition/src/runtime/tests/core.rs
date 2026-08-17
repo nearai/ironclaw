@@ -4333,6 +4333,7 @@ async fn cancel_run_propagates_to_children_when_event_sink_is_unavailable() {
     runtime
         .thread_service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: runtime.thread_scope.clone(),
             thread_id: parent_scope.thread_id.clone(),
             turn_run_id: parent_run_id.to_string(),

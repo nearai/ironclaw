@@ -3684,7 +3684,7 @@ checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 
 [[package]]
 name = "ironclaw"
-version = "1.1.0-rc.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4395,6 +4395,7 @@ dependencies = [
  "tracing",
  "tracing-test",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

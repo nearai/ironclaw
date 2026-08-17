@@ -146,6 +146,7 @@ where
 {
     thread_service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: thread_scope,
             thread_id,
             turn_run_id: run_id.to_string(),
@@ -178,6 +179,7 @@ pub(super) fn running_run_state(
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref: None,
@@ -421,6 +423,7 @@ pub(super) fn claimed_run() -> ClaimedTurnRun {
             allow_steering: true,
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: None,
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,

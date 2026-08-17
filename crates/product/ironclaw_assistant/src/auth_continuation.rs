@@ -637,6 +637,7 @@ mod tests {
             allow_steering: true,
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: gate_ref.map(|value| TurnGateRef::new(value).unwrap()),

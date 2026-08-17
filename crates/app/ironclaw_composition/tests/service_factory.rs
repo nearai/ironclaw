@@ -1434,7 +1434,8 @@ async fn standalone_services_dispatch_trigger_management_through_composed_runtim
                 "goal": "Summarize production state",
                 "success_criteria": ["Complete the requested task"],
                 "output_instructions": "Return a concise result",
-                "no_result_text": "No result"
+                "no_result_text": "No result",
+                "policy": { "result_delivery": "deliver" }
             },
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),

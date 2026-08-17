@@ -192,6 +192,7 @@ where
     thread_index_declaration_lock: tokio::sync::Mutex<()>,
     thread_index_touch_state: Arc<thread_index::ThreadIndexTouchState>,
     thread_index_touch_flush_interval: Duration,
+    thread_index_projection_repair_state: Arc<thread_index::ThreadIndexProjectionRepairState>,
     one_shot_context_windows: Mutex<HashMap<String, ContextWindow>>,
 }
 
@@ -211,7 +212,7 @@ pub(super) enum IndexDeclarationPolicy {
 
 impl<F> FilesystemSessionThreadService<F>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + 'static,
 {
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
@@ -222,6 +223,9 @@ where
             thread_index_declaration_lock: tokio::sync::Mutex::new(()),
             thread_index_touch_state: Arc::new(thread_index::ThreadIndexTouchState::default()),
             thread_index_touch_flush_interval: DEFAULT_THREAD_INDEX_TOUCH_FLUSH_INTERVAL,
+            thread_index_projection_repair_state: Arc::new(
+                thread_index::ThreadIndexProjectionRepairState::default(),
+            ),
             one_shot_context_windows: Mutex::new(HashMap::new()),
         }
     }
@@ -1453,7 +1457,7 @@ where
 
 impl<F> FilesystemSessionThreadService<F>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + 'static,
 {
     /// One-time, per-scope backfill: stamp the `prepared_context` marker onto
     /// pre-marker subagent threads (their legacy metadata is
@@ -2420,12 +2424,13 @@ where
                 .validate()
                 .map_err(SessionThreadError::Serialization)?;
         }
-        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+        let mut envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
             request.result_ref,
             request.safe_summary,
             request.model_observation,
         )
         .map_err(SessionThreadError::Serialization)?;
+        envelope.intrinsic_outcome = request.intrinsic_outcome;
         if let Some(existing) = self
             .find_tool_result_reference_message(
                 &request.scope,
@@ -2456,7 +2461,11 @@ where
                 None
             };
             let model_observation = envelope.model_observation.clone();
-            if provider_call_update.is_some() || model_observation.is_some() {
+            let intrinsic_outcome = envelope.intrinsic_outcome;
+            if provider_call_update.is_some()
+                || model_observation.is_some()
+                || intrinsic_outcome.is_some()
+            {
                 let now = Utc::now();
                 let updated = self
                     .apply_message_update(
@@ -2478,6 +2487,22 @@ where
                                 if let Some(content) = ToolResultReferenceEnvelope::merge_model_observation_content_if_absent(
                                     content,
                                     model_observation.clone(),
+                                )
+                                .map_err(SessionThreadError::Serialization)?
+                                {
+                                    message.content = Some(content);
+                                    changed = true;
+                                }
+                            }
+                            if let Some(intrinsic_outcome) = intrinsic_outcome {
+                                let content = message.content.as_deref().ok_or_else(|| {
+                                    SessionThreadError::Serialization(
+                                        "tool result reference content is missing".to_string(),
+                                    )
+                                })?;
+                                if let Some(content) = ToolResultReferenceEnvelope::merge_intrinsic_outcome_content_if_absent(
+                                    content,
+                                    intrinsic_outcome,
                                 )
                                 .map_err(SessionThreadError::Serialization)?
                                 {

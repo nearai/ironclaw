@@ -1127,6 +1127,7 @@ fn turn_record(run_context: &LoopRunContext, subagent_depth: u32) -> TurnRunReco
         profile: TurnRunProfile::from_resolved(run_context.resolved_run_profile.clone()),
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         checkpoint_id: None,
         gate_ref: None,
         blocked_activity_id: None,

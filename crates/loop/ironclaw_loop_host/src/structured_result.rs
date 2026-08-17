@@ -43,6 +43,8 @@ use crate::{
 /// Model-facing description of the result tool (prompt asset, not code).
 const STRUCTURED_RESULT_TOOL_DESCRIPTION: &str =
     include_str!("../prompts/structured_result_tool.md");
+const NOTHING_TO_REPORT_TOOL_DESCRIPTION: &str =
+    include_str!("../prompts/nothing_to_report_tool.md");
 
 /// Bounded number of schema violations surfaced per rejected call.
 const MAX_REPORTED_SCHEMA_VIOLATIONS: usize = 3;
@@ -52,6 +54,31 @@ const MAX_REPORTED_SCHEMA_VIOLATIONS: usize = 3;
 /// caller bug surfaced at host build, before any model call.
 pub fn structured_result_capability(
     schema: serde_json::Value,
+) -> Result<SyntheticCapability, AgentLoopHostError> {
+    structured_result_capability_with_description(schema, STRUCTURED_RESULT_TOOL_DESCRIPTION)
+}
+
+/// Build the same generic structured-result terminal capability with the
+/// narrow schema and instructions used by suppression-enabled scheduled runs.
+/// Ordinary scheduled results remain assistant replies; this terminal output
+/// exists only for the typed no-result outcome.
+pub fn nothing_to_report_result_capability() -> Result<SyntheticCapability, AgentLoopHostError> {
+    structured_result_capability_with_description(
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "outcome": { "const": "nothing_to_report" }
+            },
+            "required": ["outcome"],
+            "additionalProperties": false
+        }),
+        NOTHING_TO_REPORT_TOOL_DESCRIPTION,
+    )
+}
+
+fn structured_result_capability_with_description(
+    schema: serde_json::Value,
+    description: &'static str,
 ) -> Result<SyntheticCapability, AgentLoopHostError> {
     let validator = jsonschema::validator_for(&schema).map_err(|error| {
         AgentLoopHostError::new(
@@ -64,7 +91,7 @@ pub fn structured_result_capability(
         SyntheticCapabilityDescriptor::new(
             STRUCTURED_RESULT_CAPABILITY_ID,
             STRUCTURED_RESULT_PROVIDER_TOOL_NAME,
-            STRUCTURED_RESULT_TOOL_DESCRIPTION,
+            description,
             schema,
         )?,
         Arc::new(StructuredResultHandler {

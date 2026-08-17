@@ -1597,6 +1597,7 @@ mod tests {
         let observation_value = serde_json::to_value(observation).expect("observation serializes");
         thread_service
             .append_tool_result_reference(AppendToolResultReferenceRequest {
+                intrinsic_outcome: None,
                 scope: thread_scope,
                 thread_id: run_context.thread_id.clone(),
                 turn_run_id: run_context.run_id.to_string(),
@@ -1913,6 +1914,7 @@ mod tests {
 
         thread_service
             .append_tool_result_reference(AppendToolResultReferenceRequest {
+                intrinsic_outcome: None,
                 scope: thread_scope.clone(),
                 thread_id: run_context.thread_id.clone(),
                 turn_run_id: run_context.run_id.to_string(),
@@ -3101,6 +3103,7 @@ mod tests {
             .expect("raw result exists for this thread");
         let stored_reference = thread_service
             .append_tool_result_reference(AppendToolResultReferenceRequest {
+                intrinsic_outcome: None,
                 scope: thread_scope.clone(),
                 thread_id: run_context.thread_id.clone(),
                 turn_run_id: run_context.run_id.to_string(),
@@ -3322,6 +3325,7 @@ mod tests {
         let missing_result_ref = "result:raw-record-missing".to_string();
         thread_service
             .append_tool_result_reference(AppendToolResultReferenceRequest {
+                intrinsic_outcome: None,
                 scope: thread_scope.clone(),
                 thread_id: run_context.thread_id.clone(),
                 turn_run_id: run_context.run_id.to_string(),
@@ -3373,6 +3377,7 @@ mod tests {
             .expect("opaque raw result exists for this thread");
         thread_service
             .append_tool_result_reference(AppendToolResultReferenceRequest {
+                intrinsic_outcome: None,
                 scope: thread_scope.clone(),
                 thread_id: run_context.thread_id.clone(),
                 turn_run_id: run_context.run_id.to_string(),
@@ -3871,6 +3876,7 @@ mod tests {
             .expect("raw result exists under thread a");
         thread_service
             .append_tool_result_reference(AppendToolResultReferenceRequest {
+                intrinsic_outcome: None,
                 scope: thread_scope.clone(),
                 thread_id: run_context_a.thread_id.clone(),
                 turn_run_id: run_context_a.run_id.to_string(),

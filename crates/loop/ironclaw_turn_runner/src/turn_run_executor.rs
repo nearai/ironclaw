@@ -380,6 +380,7 @@ impl RebornTurnRunExecutor {
                     runner_id = ?runner_id,
                     run_id = ?run_id,
                     status = ?state.status,
+                    failure = ?state.failure,
                     "loop exit applied successfully"
                 );
                 // After-turn memory recording (mem0 `add` seam): hand the

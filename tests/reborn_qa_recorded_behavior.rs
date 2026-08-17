@@ -1274,10 +1274,17 @@ async fn replay_routine_phrase_fires(case: &QaPhrase, cron_fragment: &str) {
         case.fixture
     );
 
-    trigger.next_run_at = Utc::now() - chrono::Duration::try_seconds(120).expect("duration");
-    repo.upsert_trigger(trigger)
-        .await
-        .expect("make replayed routine due");
+    let now = Utc::now();
+    // At an exact cron boundary the live poller may claim the trigger before
+    // the test forces it due. Do not schedule a second fire in that case.
+    let already_due_or_fired =
+        trigger.is_due_at(now) || trigger.has_active_fire() || trigger.last_fired_slot.is_some();
+    if !already_due_or_fired {
+        trigger.next_run_at = now - chrono::Duration::try_seconds(120).expect("duration");
+        repo.upsert_trigger(trigger)
+            .await
+            .expect("make replayed routine due");
+    }
 
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut settled = repo

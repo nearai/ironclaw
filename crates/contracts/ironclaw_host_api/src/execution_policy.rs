@@ -8,6 +8,18 @@ use crate::{error::HostApiError, ids::CapabilityId};
 
 const MAX_REQUIRED_SKILL_NAME_BYTES: usize = 64;
 
+/// How a successful run's ordinary result is handled after settlement.
+///
+/// This is explicit and defaults to delivery so legacy callers cannot acquire
+/// suppression when the policy field is absent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultDeliveryPolicy {
+    #[default]
+    Deliver,
+    SuppressWhenNothingToReport,
+}
+
 /// Exact skill name that must be activated before execution begins.
 ///
 /// Skill source scopes are intentionally not persisted here: the activation
@@ -112,11 +124,17 @@ pub struct TurnExecutionPolicy {
     pub allowed_capability_ids: Option<Vec<CapabilityId>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_skills: Vec<RequiredSkill>,
+    #[serde(default, skip_serializing_if = "is_default_result_delivery")]
+    pub result_delivery: ResultDeliveryPolicy,
+}
+
+fn is_default_result_delivery(policy: &ResultDeliveryPolicy) -> bool {
+    *policy == ResultDeliveryPolicy::Deliver
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{RequiredSkill, TurnExecutionPolicy};
+    use super::{RequiredSkill, ResultDeliveryPolicy, TurnExecutionPolicy};
 
     #[test]
     fn required_skill_uses_the_catalog_name_grammar() {
@@ -157,5 +175,17 @@ mod tests {
         let policy: TurnExecutionPolicy = serde_json::from_str(valid).expect("valid policy");
         assert_eq!(policy.allowed_capability_ids, Some(Vec::new()));
         assert_eq!(policy.required_skills.len(), 1);
+        assert_eq!(policy.result_delivery, ResultDeliveryPolicy::Deliver);
+    }
+
+    #[test]
+    fn suppression_policy_is_explicit_and_round_trips() {
+        let wire = r#"{"result_delivery":"suppress_when_nothing_to_report"}"#;
+        let policy: TurnExecutionPolicy = serde_json::from_str(wire).expect("valid policy");
+        assert_eq!(
+            policy.result_delivery,
+            ResultDeliveryPolicy::SuppressWhenNothingToReport
+        );
+        assert_eq!(serde_json::to_string(&policy).expect("serialize"), wire);
     }
 }

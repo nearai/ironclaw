@@ -45,7 +45,7 @@ fn transcript_migration_conflict(error: &ironclaw_filesystem::FilesystemError) -
 
 impl<F> FilesystemSessionThreadService<F>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + 'static,
 {
     /// Idempotent rebuild for message, summary, and exact-lookup projections.
     pub async fn migrate_transcript_indexes_for_scope(

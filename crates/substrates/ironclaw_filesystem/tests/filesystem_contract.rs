@@ -308,6 +308,51 @@ async fn local_put_absent_rejects_existing_file_without_overwrite() {
 }
 
 #[tokio::test]
+async fn concurrent_local_put_absent_has_exactly_one_winner() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+
+    let mut root = DiskFilesystem::new();
+    root.mount_local(
+        VirtualPath::new("/projects").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+    let root = std::sync::Arc::new(root);
+    let path = VirtualPath::new("/projects/project1/lock").unwrap();
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+
+    let writers = [b"first".to_vec(), b"second".to_vec()].map(|bytes| {
+        let root = std::sync::Arc::clone(&root);
+        let path = path.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            root.put(&path, Entry::bytes(bytes), CasExpectation::Absent)
+                .await
+        })
+    });
+    let [first_writer, second_writer] = writers;
+    let (first, second) = tokio::join!(first_writer, second_writer);
+    let results = [first.unwrap(), second.unwrap()];
+
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(FilesystemError::VersionMismatch { .. })))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        std::fs::read(storage.path().join("project1/lock"))
+            .unwrap()
+            .as_slice(),
+        b"first" | b"second"
+    ));
+}
+
+#[tokio::test]
 async fn scoped_write_is_denied_on_read_only_mount() {
     let storage = tempdir().unwrap();
     std::fs::create_dir_all(storage.path().join("project1")).unwrap();
@@ -873,6 +918,38 @@ async fn local_list_dir_bounded_returns_at_most_max_entries() {
         entries
             .iter()
             .all(|entry| entry.path.as_str().starts_with("/projects/project1/"))
+    );
+}
+
+#[tokio::test]
+async fn local_list_dir_page_continues_after_stable_name_cursor() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+    for name in ["c.txt", "a.txt", "b.txt"] {
+        std::fs::write(storage.path().join("project1").join(name), b"entry").unwrap();
+    }
+    let root = local_root_with_projects_mount(storage.path());
+    let path = VirtualPath::new("/projects/project1").unwrap();
+
+    let first = root.list_dir_page(&path, None, 2).await.unwrap();
+    let second = root
+        .list_dir_page(&path, first.last().map(|entry| entry.name.as_str()), 2)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        first
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a.txt", "b.txt"]
+    );
+    assert_eq!(
+        second
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["c.txt"]
     );
 }
 

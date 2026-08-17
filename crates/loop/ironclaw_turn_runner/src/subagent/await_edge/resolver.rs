@@ -931,6 +931,7 @@ mod tests {
             profile: ironclaw_turns::TurnRunProfile::from_resolved(resolved_run_profile),
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: None,
             checkpoint_id: None,
             gate_ref: None,
             blocked_activity_id: None,
@@ -1576,6 +1577,7 @@ mod tests {
                 .expect("append child final output");
             thread_service
                 .append_tool_result_reference(AppendToolResultReferenceRequest {
+                    intrinsic_outcome: None,
                     scope: parent_thread_scope.clone(),
                     thread_id: parent_thread_id.clone(),
                     turn_run_id: parent_run_id.to_string(),

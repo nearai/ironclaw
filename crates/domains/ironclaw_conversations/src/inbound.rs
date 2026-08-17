@@ -813,6 +813,7 @@ mod tests {
                     CapabilityId::new("mail.list_messages").expect("capability id"),
                 ]),
                 required_skills: Vec::new(),
+                ..TurnExecutionPolicy::default()
             }),
         };
         let content_ref =
