@@ -295,20 +295,20 @@ pub(super) fn enrich_dispatch_error_credential_requirements(
                     credential_requirements: vec![requirement.clone()],
                     model_visible_cause,
                 },
-                [] => DispatchError::Rejected {
-                    runtime: None,
-                    kind: ironclaw_host_api::dispatch::DispatchFailureKind::Runtime(
-                        ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::SecretDenied,
-                    ),
-                    diagnostic: model_visible_cause.map(|diagnostic| *diagnostic),
-                    detail: Some(
-                        ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic {
-                            text: format!(
-                                "capability {capability} reported authentication failure without a declared credential binding"
-                            ),
-                        },
-                    ),
-                    attempt: None,
+                // Zero declared credential obligations: the capability makes
+                // no credential claim at all, so there is nothing to attribute
+                // a provider-observed rejection to and no "no applicable
+                // binding" typed failure to raise either — this is the
+                // preflight-shaped signal (a runtime/dispatcher reporting
+                // AuthRequired with no obligation on file), which must still
+                // resolve to a stable auth gate rather than a terminal
+                // SecretDenied failure. Only >1 obligations is genuinely
+                // ambiguous attribution (see the `_` arm below).
+                [] => DispatchError::AuthRequired {
+                    capability,
+                    required_secrets,
+                    credential_requirements,
+                    model_visible_cause,
                 },
                 _ => DispatchError::Rejected {
                     runtime: None,

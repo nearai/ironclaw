@@ -134,23 +134,28 @@ fn enrich_leaves_non_empty_credential_requirements_unchanged() {
     );
 }
 
-// ZERO credential obligations → typed failure, never an empty auth gate.
+// ZERO credential obligations → unchanged (empty gate, not a guess). This is
+// the preflight-shaped signal (no declared credential obligation on file at
+// all), which must remain a stable auth gate rather than fall into the
+// "ambiguous attribution" typed failure reserved for >1 obligations.
 #[test]
-fn enrich_fails_without_gate_when_zero_credential_obligations() {
+fn enrich_leaves_unchanged_when_zero_credential_obligations() {
     let error = auth_required_empty("echo.say");
     let obligations: [Obligation; 0] = [];
 
     let result = enrich_dispatch_error_credential_requirements(error, &obligations);
 
-    assert!(matches!(
-        result,
-        DispatchError::Rejected {
-            kind: ironclaw_host_api::dispatch::DispatchFailureKind::Runtime(
-                ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::SecretDenied
-            ),
-            ..
-        }
-    ));
+    let DispatchError::AuthRequired {
+        credential_requirements,
+        ..
+    } = result
+    else {
+        panic!("expected AuthRequired");
+    };
+    assert!(
+        credential_requirements.is_empty(),
+        "zero obligations must leave credential_requirements empty"
+    );
 }
 
 // TWO credential obligations → typed failure; the host does not guess.
