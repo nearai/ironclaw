@@ -1519,7 +1519,7 @@ async fn prune_run_history(
                        SELECT fire_slot, source
                        FROM {TRIGGER_RUN_TABLE}
                        WHERE tenant_id = $1 AND trigger_id = $2
-                       ORDER BY CASE WHEN status = 'running' THEN 0 ELSE 1 END,
+                       ORDER BY CASE WHEN status = $4 THEN 0 ELSE 1 END,
                                 fire_slot DESC,
                                 source
                        LIMIT $3
@@ -1529,6 +1529,7 @@ async fn prune_run_history(
                 &tenant_id.as_str(),
                 &trigger_id.to_string(),
                 &retention_limit,
+                &trigger_run_history_status_text(TriggerRunHistoryStatus::Running),
             ],
         )
         .await

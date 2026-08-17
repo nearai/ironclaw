@@ -230,6 +230,9 @@ UTF-8 bytes for `tenant_id`, `trigger_id`, and `fire_slot`, prefixed by the
 literal version label `ironclaw.trigger-fire.v1`. Implementations must not use
 raw string concatenation. `route_thread_id` uses the domain label
 `route-thread`; `external_event_id` uses the domain label `external-event`.
+Manual fire uses the same length-prefixed `tenant_id`, `trigger_id`, and
+`fire_slot` components with the additive domain labels `manual-route-thread`
+and `manual-external-event`, respectively.
 Each output is encoded from a collision-resistant digest over
 `version_label || domain_label || length_prefixed_components`.
 
