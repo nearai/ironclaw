@@ -2,20 +2,23 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import vm from "node:vm";
-import { componentSourceForTest } from "../../../lib/vm-component-harness";
+import {
+  componentProps,
+  componentSourceForTest,
+  findComponent,
+} from "../../../lib/vm-component-harness";
 
 // Same vm-harness convention as empty-state.test.ts / chat-input.test.ts: read
 // the real source, strip imports, rename the export, and stub the module's free
-// variables (Button/Icon and the app-meta helpers) so the synthetic-JSX tree
-// can be walked directly. `useT` returns the key, so we assert on the i18n KEY
-// each state renders — exactly what the card wires up.
+// variables (Button/Icon) so the synthetic-JSX tree can be walked directly.
+// `useT` returns the key, so we assert on the i18n KEY each state renders.
 //
-// The card no longer imports NearProcessIndicator itself (see
-// suggested-task-card.tsx): the "running" state now calls a
-// `renderRunningIndicator` render prop supplied by its caller, so the card
-// stays reachable from the lazy suggested-task-surface chunk without pulling
-// in NearProcessIndicator a second time (it's already eager-reachable via
-// typing-indicator.tsx -> message-list.tsx -> chat.tsx).
+// The card takes a backend `Suggestion` — no app/tool metadata and no connect
+// state, because the backend card schema carries none (see
+// docs/internal/design/oobe/VISION-RECONCILIATION.md §3). It also does not
+// import NearProcessIndicator: the "starting" state calls a
+// `renderRunningIndicator` render prop supplied by its caller, keeping the
+// lazy surface chunk from pulling that component in a second time.
 function cardSourceForTest() {
   return componentSourceForTest(
     new URL("./suggested-task-card.tsx", import.meta.url),
@@ -23,143 +26,96 @@ function cardSourceForTest() {
   );
 }
 
-function renderCard(task, props = {}) {
-  const components = {
-    Button() {},
-    Icon() {},
-  };
+const SUGGESTION = {
+  id: "sug-1",
+  title: "Triage your inbox",
+  description: "Reply to routine mail and archive newsletters.",
+  suggested_prompt: "Triage my inbox.",
+};
+
+function renderCard({ suggestion = SUGGESTION, ...props } = {}) {
+  const components = { Button() {}, Icon() {} };
   const context = {
     ...components,
     globalThis: {},
     useT: () => (key) => key,
-    appMeta: () => ({
-      icon: "spark",
-      labelKey: "chat.oobe.app.demo",
-      accent: "#000",
-    }),
-    appChipStyle: () => ({
-      color: "#000",
-      background: "transparent",
-      borderColor: "transparent",
-    }),
   };
   vm.runInNewContext(cardSourceForTest(), context);
   const tree = context.globalThis.__testExports.SuggestedTaskCard({
-    task,
-    onConnect: () => {},
-    onApprove: () => {},
-    onAutomation: () => {},
-    onDismiss: () => {},
+    suggestion,
     ...props,
   });
   return { tree, components };
 }
 
-// Walk the synthetic tree for a scalar (string/number/bool) value anywhere.
-function containsScalar(value, expected, seen = new Set()) {
-  if (value === expected) return true;
-  if (!value || typeof value !== "object" || seen.has(value)) return false;
-  seen.add(value);
-  return Object.values(value).some((child) =>
-    Array.isArray(child)
-      ? child.some((item) => containsScalar(item, expected, seen))
-      : containsScalar(child, expected, seen),
-  );
+// Walk the synthetic tree for raw <button> onClick handlers (the dismiss
+// control is a plain button, not the design-system Button).
+function rawButtonHandlers(node, found = []) {
+  if (!node || typeof node !== "object" || !Array.isArray(node.values)) return found;
+  const strings = node.strings || [];
+  node.values.forEach((value, index) => {
+    if (typeof value === "function" && /onClick=\s*$/.test(strings[index] || "")) {
+      found.push(value);
+    }
+    rawButtonHandlers(value, found);
+  });
+  return found;
 }
 
-const baseTask = {
-  id: "t1",
-  app: "gmail",
-  title: "Triage your inbox",
-  summary: "Reply to routine mail and archive newsletters.",
-};
-
-test("unconnected card shows a Connect action and no Approve", () => {
-  const { tree } = renderCard({ ...baseTask, state: "unconnected", connectLabel: "Gmail" });
-  assert.equal(containsScalar(tree, "chat.oobe.action.connect"), true);
-  assert.equal(containsScalar(tree, "chat.oobe.action.approve"), false);
+test("an unstarted card offers Approve as its primary action", () => {
+  const { tree, components } = renderCard();
+  const button = findComponent(tree, components.Button);
+  assert.ok(button, "an unstarted card renders an action button");
+  assert.equal(componentProps(button, components.Button).variant, "primary");
+  assert.ok(JSON.stringify(tree).includes("chat.oobe.action.approve"));
 });
 
-test("suggested card shows Approve and never a Modify action (§2A: no Modify)", () => {
-  const { tree } = renderCard({ ...baseTask, state: "suggested" });
-  assert.equal(containsScalar(tree, "chat.oobe.action.approve"), true);
-  assert.equal(containsScalar(tree, "chat.oobe.action.modify"), false);
-  assert.equal(containsScalar(tree, "chat.oobe.action.connect"), false);
+test("Approve reports upward so the surface can start the suggestion server-side", () => {
+  const approvals = [];
+  const { tree, components } = renderCard({ onApprove: () => approvals.push(true) });
+  componentProps(findComponent(tree, components.Button), components.Button).onClick();
+  assert.deepEqual(approvals, [true]);
 });
 
-test("running card calls renderRunningIndicator with the running-status label and renders its result", () => {
-  // The card no longer imports NearProcessIndicator directly — it delegates
-  // the running-state UI to the caller-supplied renderRunningIndicator render
-  // prop (empty-state.tsx supplies the real NearProcessIndicator; see
-  // suggested-task-card.tsx).
-  const calls = [];
-  const renderRunningIndicator = (label) => {
-    calls.push(label);
-    return "RUNNING_INDICATOR_MARKER";
-  };
-  const { tree } = renderCard(
-    { ...baseTask, state: "running" },
-    { renderRunningIndicator },
-  );
-  assert.deepEqual(calls, ["chat.oobe.status.running"]);
-  assert.equal(containsScalar(tree, "RUNNING_INDICATOR_MARKER"), true);
-  // No action buttons while a run is live — activity lives in the thread.
-  assert.equal(containsScalar(tree, "chat.oobe.action.approve"), false);
-  assert.equal(containsScalar(tree, "chat.oobe.action.automation"), false);
-  assert.equal(containsScalar(tree, "chat.oobe.action.connect"), false);
+test("a card being started shows the running indicator instead of an action", () => {
+  // The start call is in flight: the card must not still offer Approve, or a
+  // second click would fire a second start.
+  const { tree, components } = renderCard({
+    starting: true,
+    renderRunningIndicator: (label) => `indicator:${label}`,
+  });
+  assert.equal(findComponent(tree, components.Button), null, "no action button while starting");
+  assert.ok(JSON.stringify(tree).includes("indicator:chat.oobe.status.starting"));
 });
 
-test("running card renders nothing when no renderRunningIndicator is supplied", () => {
-  // Presentational default: the card stays safely inert/testable without
-  // requiring every caller to supply the prop, though the real app
-  // (empty-state.tsx) always does.
-  const { tree } = renderCard({ ...baseTask, state: "running" });
-  assert.equal(containsScalar(tree, "chat.oobe.status.running"), false);
+test("a started card (durable thread binding) offers View in thread, not Approve", () => {
+  // `thread_id` is the backend's durable suggestion->thread binding, so a
+  // returning user rejoins the run rather than starting it twice.
+  const opened = [];
+  const { tree, components } = renderCard({
+    suggestion: { ...SUGGESTION, thread_id: "thread-9", run_id: "run-9" },
+    onOpenThread: () => opened.push(true),
+  });
+  const serialized = JSON.stringify(tree);
+  assert.ok(serialized.includes("chat.oobe.action.openThread"));
+  assert.ok(!serialized.includes("chat.oobe.action.approve"), "a started card cannot re-approve");
+
+  componentProps(findComponent(tree, components.Button), components.Button).onClick();
+  assert.deepEqual(opened, [true]);
 });
 
-test("completed card shows a Completed chip + '+ Automation' and no Revert/Modify (§2A)", () => {
-  const { tree } = renderCard({ ...baseTask, state: "completed" });
-  assert.equal(containsScalar(tree, "chat.oobe.status.completed"), true);
-  assert.equal(containsScalar(tree, "chat.oobe.action.automation"), true);
-  assert.equal(containsScalar(tree, "chat.oobe.action.revert"), false);
-  assert.equal(containsScalar(tree, "chat.oobe.action.modify"), false);
-  assert.equal(containsScalar(tree, "chat.oobe.action.approve"), false);
-  // Without `scheduled` the automation is still on offer, not yet a status chip.
-  assert.equal(containsScalar(tree, "chat.oobe.status.scheduled"), false);
+test("the card renders the suggestion's own title and description", () => {
+  const { tree } = renderCard();
+  const serialized = JSON.stringify(tree);
+  assert.ok(serialized.includes(SUGGESTION.title));
+  assert.ok(serialized.includes(SUGGESTION.description));
 });
 
-test("completed + scheduled swaps '+ Automation' for the 'Automation scheduled' chip (slice 4)", () => {
-  const { tree } = renderCard({ ...baseTask, state: "completed" }, { scheduled: true });
-  // The optimistic status chip replaces the action button entirely…
-  assert.equal(containsScalar(tree, "chat.oobe.status.scheduled"), true);
-  assert.equal(containsScalar(tree, "chat.oobe.action.automation"), false);
-  // …while the Completed chip stays (the card is still a finished result).
-  assert.equal(containsScalar(tree, "chat.oobe.status.completed"), true);
-});
-
-test("failed card shows a 'Couldn't complete' chip + Try again", () => {
-  const { tree } = renderCard({ ...baseTask, state: "failed" });
-  assert.equal(containsScalar(tree, "chat.oobe.status.failed"), true);
-  assert.equal(containsScalar(tree, "chat.oobe.action.tryAgain"), true);
-});
-
-test("every state offers a dismiss affordance", () => {
-  for (const state of ["unconnected", "suggested", "running", "completed", "failed"]) {
-    const { tree } = renderCard({ ...baseTask, state });
-    assert.equal(
-      containsScalar(tree, "chat.oobe.dismiss"),
-      true,
-      `${state} card should render the dismiss affordance`,
-    );
-  }
-});
-
-test("locked card is visually disabled (opacity + pointer-events-none)", () => {
-  const locked = renderCard({ ...baseTask, state: "suggested" }, { locked: true });
-  assert.match(locked.tree.props.className, /pointer-events-none/);
-  assert.match(locked.tree.props.className, /opacity-50/);
-  assert.equal(locked.tree.props["aria-disabled"], true);
-
-  const unlocked = renderCard({ ...baseTask, state: "suggested" });
-  assert.doesNotMatch(unlocked.tree.props.className, /pointer-events-none/);
+test("dismiss reports upward", () => {
+  const dismissed = [];
+  const { tree } = renderCard({ onDismiss: () => dismissed.push(true) });
+  const [dismissHandler] = rawButtonHandlers(tree);
+  assert.equal(typeof dismissHandler, "function", "the card renders a dismiss control");
+  dismissHandler();
+  assert.deepEqual(dismissed, [true]);
 });

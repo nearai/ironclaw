@@ -1,6 +1,16 @@
 # OOBE & Onboarding — Integration Proposal (Full Specification)
 
-**Status:** Proposal, under review · Companion to [README.md](README.md) (overview), [PLAN.md](PLAN.md) (execution), [CHECKLIST.md](CHECKLIST.md) (definition of done).
+**Status:** Proposal · **partially superseded** — see [VISION-RECONCILIATION.md](VISION-RECONCILIATION.md). Companion to [README.md](README.md) (overview), [PLAN.md](PLAN.md) (execution), [CHECKLIST.md](CHECKLIST.md) (definition of done).
+
+> **⚠ Superseded in part by PR #7694 (durable backend suggestions).** The Foundational
+> (Phase 1) UX is **cut**; the program retargets to **Vision** against the shipped
+> suggestions contract. Specifically superseded here: **§2's per-card "Connect &lt;Tool&gt;"
+> premise and *connect* card state** and **§3.1 P3** (cards carry no tool identity —
+> connect is re-homed to its own catalog-driven surface); **§3.2 N3/N4/N5** (store, routes,
+> and producer are shipped); **§4 V1** (re-homed, see the reconciliation §3.1); **§2A.3's
+> single-active lock** (each suggestion now starts its own thread, so no backend constraint
+> remains). §2A.2's "thread shows live activity" and the §5.2 producer discussion are
+> resolved by the backend. Read [VISION-RECONCILIATION.md](VISION-RECONCILIATION.md) first.
 
 This is the evidence-backed specification behind the overview. It states the problem, defines the two-phase model, inventories **what extends shipped code vs. what is net-new** (§3–§4 — the core framing), enumerates every dependency with an implementation approach (§5), maps the work onto the existing codebase and the #6918 family folders — now landed on `main` (§6), and records the security model, test strategy, risks, and open decisions. §11 explains how the APDD kit and PR #6918 frameworks are applied.
 

@@ -1,7 +1,14 @@
 # IronClaw OOBE & Onboarding — Integration Proposal (Executive Overview)
 
 **Status:** Proposal, under review · **Scope:** design + integration plan **and** the rolling Foundational v1 implementation (gated off by default) · **Reconciled against:** `origin/main` after the #6918 family-folder reorg (crates under `crates/{contracts,events,domains,product,app,…}/`; `ironclaw_events`→`ironclaw_event_log`, `ironclaw_product`→`ironclaw_assistant`) · **Track:** WebChat v2 first-run / onboarding
-**Documents:** this overview · [PROPOSAL.md](PROPOSAL.md) (full spec: phasing, shipped-vs-net-new scope, dependency inventory) · [PLAN.md](PLAN.md) (how to execute — phases, gates, PR sizing) · [IMPLEMENTATION.md](IMPLEMENTATION.md) (v1 build plan, grounded in current `main`) · [CHECKLIST.md](CHECKLIST.md) (definition of done) · [oobe.md](../oobe.md) (design brief) · [mockup.html](mockup.html) (interactive mockup — self-contained, open in any browser) · [integration-review.html](integration-review.html) (visual review — schematics)
+**Documents:** this overview · **[VISION-RECONCILIATION.md](VISION-RECONCILIATION.md) (governs — reconciles this package with the shipped backend contract)** · [PROPOSAL.md](PROPOSAL.md) (full spec: phasing, shipped-vs-net-new scope, dependency inventory) · [PLAN.md](PLAN.md) (how to execute — phases, gates, PR sizing) · [IMPLEMENTATION.md](IMPLEMENTATION.md) (build plan) · [CHECKLIST.md](CHECKLIST.md) (definition of done) · [oobe.md](../oobe.md) (design brief) · [mockup.html](mockup.html) (interactive mockup — self-contained, open in any browser) · [integration-review.html](integration-review.html) (visual review — schematics)
+
+> **⚠ Scope retargeted — Foundational is cut.** [PR #7694](https://github.com/nearai/ironclaw/pull/7694)
+> shipped the durable backend suggestions contract — the agent-driven producer this package
+> classified as *Vision-tier* — so the program now builds **Vision** against it, and PR #6994
+> becomes the frontend consumer. The two-phase framing below, and every "Foundational"
+> reference in this package, are historical.
+> **[VISION-RECONCILIATION.md](VISION-RECONCILIATION.md) governs.**
 
 This is the plan for taking OOBE from design into shipped product, **in two phases that match the mockup's two versions** — a near-term **Foundational** track that ships against current `main`, and a north-star **Vision** track that follows. It exists so the onboarding work has a fixed destination and a sequenced path, and so a reviewer can tell at a glance which pieces *extend code that already ships* and which are *net-new*.
 

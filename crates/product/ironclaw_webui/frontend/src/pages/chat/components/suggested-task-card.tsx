@@ -1,77 +1,59 @@
 /**
- * SuggestedTaskCard — one OOBE first-run suggestion rendered as a status
- * affordance (PROPOSAL §2A). Pure and presentational: it takes a `SuggestedTask`
- * plus optional action callbacks and renders exactly one action row for the
- * task's `state`. No data fetching, no `useAuth`, no automation wiring — the
- * callbacks are handed in by the surface.
+ * SuggestedTaskCard — one backend suggestion rendered as a startable card.
+ * Pure and presentational: it takes a `Suggestion` plus callbacks and renders
+ * exactly one action row. No data fetching, no auth, no connect state.
  *
- *   unconnected → Connect <tool>   (onConnect)
- *   suggested   → Approve          (onApprove)      — no Modify
- *   running     → live NEAR "working" indicator (activity lives in the thread)
- *   completed   → Completed chip + "+ Automation" (onAutomation) — no Revert/Modify
- *   failed      → "Couldn't complete" chip + Try again (onApprove)
+ *   not started  → Approve   (onApprove)   — starts the bound thread/run
+ *   starting     → live NEAR "working" indicator (the start call is in flight)
+ *   started      → View in thread (onOpenThread) — the card keeps its durable
+ *                  `thread_id` binding, so a returning user can rejoin the run
  *
- * `scheduled` (the completed card's automation was just kicked off — slice 4)
- * swaps the "+ Automation" button for an "Automation scheduled" status chip.
- * `locked` (another job is running — §2A change 3) visually disables the card.
+ * Cards carry no tool/extension identity: the backend's card schema is
+ * `{id, title, description, suggested_prompt, thread_id?, run_id?}` and its
+ * generator is explicitly instructed not to assume a capability is available.
+ * Connect is therefore a separate landing surface, not a card state — see
+ * docs/internal/design/oobe/VISION-RECONCILIATION.md §3.1.
+ *
+ * Live run status (running/completed/failed derived from the bound `run_id`)
+ * is a later slice; until it lands the card states nothing it cannot prove.
  */
 import type { ReactNode } from "react";
 
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
 import { useT } from "../../../lib/i18n";
-import { appChipStyle, appMeta, type SuggestedTask } from "../lib/suggested-tasks";
+import type { Suggestion } from "../lib/suggestions-api";
 
 export function SuggestedTaskCard({
-  task,
-  onConnect,
+  suggestion,
   onApprove,
-  onAutomation,
+  onOpenThread,
   onDismiss,
-  scheduled = false,
-  locked = false,
+  starting = false,
   renderRunningIndicator,
 }: {
-  task: SuggestedTask;
-  onConnect?: () => void;
+  suggestion: Suggestion;
   onApprove?: () => void;
-  onAutomation?: () => void;
+  onOpenThread?: () => void;
   onDismiss?: () => void;
-  scheduled?: boolean;
-  locked?: boolean;
+  starting?: boolean;
   renderRunningIndicator?: (label: string) => ReactNode;
 }) {
   const t = useT();
-  const meta = appMeta(task.app);
-  const appLabel = t(meta.labelKey);
+  const started = Boolean(suggestion.thread_id);
 
   return (
     <div
       role="group"
-      aria-label={task.title}
-      aria-disabled={locked || undefined}
-      className={[
-        "flex flex-col rounded-[13px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] p-3 text-left transition-colors",
-        locked
-          ? "pointer-events-none opacity-50"
-          : "hover:border-[color-mix(in_srgb,var(--v2-accent)_32%,var(--v2-panel-border))]",
-      ].join(" ")}
+      aria-label={suggestion.title}
+      className="flex flex-col rounded-[13px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] p-3 text-left transition-colors hover:border-[color-mix(in_srgb,var(--v2-accent)_32%,var(--v2-panel-border))]"
     >
-      {/* Identity + dismiss */}
+      {/* Dismiss */}
       <div className="mb-1.5 flex items-center gap-1.5">
-        <span
-          className="grid h-5 w-5 shrink-0 place-items-center rounded-[6px] border"
-          style={appChipStyle(task.app)}
-        >
-          <Icon name={meta.icon} className="h-3 w-3" />
-        </span>
-        <span className="truncate text-[11px] font-medium text-[var(--v2-text-muted)]">
-          {appLabel}
-        </span>
         <button
           type="button"
           onClick={() => onDismiss?.()}
-          disabled={locked}
+          disabled={starting}
           aria-label={t("chat.oobe.dismiss")}
           className="ml-auto grid h-5 w-5 shrink-0 place-items-center rounded-[6px] text-[var(--v2-text-faint)] transition-colors hover:text-[var(--v2-text-strong)] disabled:cursor-not-allowed"
         >
@@ -79,96 +61,38 @@ export function SuggestedTaskCard({
         </button>
       </div>
 
-      {/* Title + summary */}
+      {/* Title + description */}
       <div className="text-[13px] font-semibold leading-tight text-[var(--v2-text-strong)]">
-        {task.title}
+        {suggestion.title}
       </div>
       <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-[var(--v2-text-muted)]">
-        {task.summary}
+        {suggestion.description}
       </p>
 
-      {/* One action row per state */}
+      {/* One action row */}
       <div className="mt-2.5">{renderActions()}</div>
     </div>
   );
 
   function renderActions() {
-    switch (task.state) {
-      case "unconnected":
-        return (
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => onConnect?.()}
-            disabled={locked}
-          >
-            <Icon name="plug" className="mr-1 h-3.5 w-3.5" />
-            {t("chat.oobe.action.connect", {
-              tool: task.connectLabel ?? appLabel,
-            })}
-          </Button>
-        );
-      case "suggested":
-        return (
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={() => onApprove?.()}
-            disabled={locked}
-          >
-            <Icon name="check" className="mr-1 h-3.5 w-3.5" />
-            {t("chat.oobe.action.approve")}
-          </Button>
-        );
-      case "running":
-        return renderRunningIndicator
-          ? renderRunningIndicator(t("chat.oobe.status.running"))
-          : null;
-      case "completed":
-        return (
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="inline-flex items-center gap-1 rounded-full border border-[color-mix(in_srgb,var(--v2-positive-text)_45%,transparent)] bg-[var(--v2-positive-soft)] px-2 py-0.5 text-[11px] font-medium text-[var(--v2-positive-text)]">
-              <Icon name="check" className="h-3 w-3" />
-              {t("chat.oobe.status.completed")}
-            </span>
-            {scheduled ? (
-              <span className="inline-flex items-center gap-1 rounded-full border border-[color-mix(in_srgb,var(--v2-positive-text)_45%,transparent)] bg-[var(--v2-positive-soft)] px-2 py-0.5 text-[11px] font-medium text-[var(--v2-positive-text)]">
-                <Icon name="check" className="h-3 w-3" />
-                {t("chat.oobe.status.scheduled")}
-              </span>
-            ) : (
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => onAutomation?.()}
-                disabled={locked}
-              >
-                <Icon name="plus" className="mr-1 h-3.5 w-3.5" />
-                {t("chat.oobe.action.automation")}
-              </Button>
-            )}
-          </div>
-        );
-      case "failed":
-        return (
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="inline-flex items-center gap-1 rounded-full border border-[color-mix(in_srgb,var(--v2-danger-text)_45%,transparent)] bg-[var(--v2-danger-soft)] px-2 py-0.5 text-[11px] font-medium text-[var(--v2-danger-text)]">
-              <Icon name="alert" className="h-3 w-3" />
-              {t("chat.oobe.status.failed")}
-            </span>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => onApprove?.()}
-              disabled={locked}
-            >
-              <Icon name="retry" className="mr-1 h-3.5 w-3.5" />
-              {t("chat.oobe.action.tryAgain")}
-            </Button>
-          </div>
-        );
-      default:
-        return null;
+    if (starting) {
+      return renderRunningIndicator
+        ? renderRunningIndicator(t("chat.oobe.status.starting"))
+        : null;
     }
+    if (started) {
+      return (
+        <Button variant="secondary" size="sm" onClick={() => onOpenThread?.()}>
+          <Icon name="chat" className="mr-1 h-3.5 w-3.5" />
+          {t("chat.oobe.action.openThread")}
+        </Button>
+      );
+    }
+    return (
+      <Button variant="primary" size="sm" onClick={() => onApprove?.()}>
+        <Icon name="check" className="mr-1 h-3.5 w-3.5" />
+        {t("chat.oobe.action.approve")}
+      </Button>
+    );
   }
 }

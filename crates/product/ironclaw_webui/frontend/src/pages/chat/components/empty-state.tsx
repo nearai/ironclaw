@@ -31,8 +31,7 @@ function renderRunningIndicator(label: string) {
 export function EmptyState({
   onSuggestion,
   onSend,
-  onApproveTask,
-  onAutomationTask,
+  onOpenThread,
   commands = [],
   disabled,
   sendDisabled,
@@ -84,8 +83,7 @@ export function EmptyState({
       {oobeSuggestionsEnabled && (
         <React.Suspense fallback={null}>
           <SuggestedTaskSurface
-            onApproveTask={onApproveTask}
-            onAutomationTask={onAutomationTask}
+            onOpenThread={onOpenThread}
             renderRunningIndicator={renderRunningIndicator}
           />
         </React.Suspense>

@@ -1,126 +1,61 @@
 /**
- * SuggestedTaskSurface — the landing surface that shows the OOBE first-run
- * suggestion cards above the composer (PROPOSAL §2A, dep D-F5).
+ * SuggestedTaskSurface — the landing surface for backend-generated suggestion
+ * cards (VISION-RECONCILIATION §5.1).
  *
- * Gating happens in the eager parent (`empty-state.tsx`) before this lazy chunk
- * is even requested, so this component itself is unconditional/presentational:
- * whenever it's mounted, it renders a STATIC in-memory demo list — no
- * projection reads, no background jobs.
+ * Data comes from the durable backend contract (PR #7694) via `useSuggestions`:
+ * `GET /suggestions` for current state, `POST /suggestions/generate` to ask for
+ * a set, `POST /suggestions/{id}/start` to run one, `DELETE /suggestions/{id}`
+ * to dismiss. Nothing here is mock data, and the browser never invents card
+ * state.
  *
- * Slice 2 wires Approve: the card's approve action submits the task's
- * `approvePrompt` through the app's existing send path (via `onApproveTask`),
- * running the agent as a real foreground turn whose activity streams in the
- * thread by reuse. The just-approved card flips to `running` optimistically.
+ * Generation status drives the surface (V3 anticipatory states):
+ *   empty      → a CTA; generation costs a model run, so the user asks for it
+ *   generating → the branded working indicator (the anticipatory beat)
+ *   ready      → the cards
+ *   failed     → a retry affordance
  *
- * Slice 3 wires Connect WITHOUT cloning the OAuth flow: an unconnected card's
- * Connect resolves the card's `app` to a real catalog extension
- * (`resolveConnectExtension` over `useExtensions()`), then opens the EXISTING
- * extensions setup/OAuth modal (`ConfigureModal`) — the one real connect path,
- * lazy-loaded so its weight never touches the surface chunk until Connect is
- * clicked. On a successful save the card flips `unconnected → suggested`.
- *
- * Slice 4 wires "+ Automation" the same way as Approve: a completed card's
- * automation action submits the task's `automationPrompt` (via
- * `onAutomationTask`) so the agent schedules a recurring automation (it calls
- * `builtin.trigger_create` — prompt injection is the design, no REST create).
- * The card flips to a "scheduled" chip optimistically.
+ * Approve starts the suggestion's own thread/run server-side and reports the
+ * returned `thread_id` upward so the app can navigate to it — no prompt
+ * injection through the composer. Cards are tool-agnostic: connect is a
+ * separate surface (§3.1), so there is no connect state here.
  */
 import React from "react";
 import type { ReactNode } from "react";
 
+import { Button } from "../../../design-system/button";
+import { Icon } from "../../../design-system/icons";
 import { useT } from "../../../lib/i18n";
-import { useExtensions } from "../../extensions/hooks/useExtensions";
-import { resolveConnectExtension } from "../lib/connect-extension";
-import type { SuggestedTask } from "../lib/suggested-tasks";
+import { useSuggestions } from "../hooks/useSuggestions";
 import { SuggestedTaskCard } from "./suggested-task-card";
 
-// The real Connect UI (extensions setup/OAuth modal) loads only when a user
-// actually clicks Connect, so its weight — and the whole OAuth watcher/state
-// machine it pulls in — never pads the surface chunk. Same React.lazy pattern
-// empty-state.tsx uses to keep the surface itself out of eager /chat.
-const ConfigureModal = React.lazy(() =>
-  import("../../extensions/components/configure-modal").then(({ ConfigureModal }) => ({
-    default: ConfigureModal,
-  })),
-);
-
-// Static demo cards spanning the card states (§2A). Gate-guarded: never reached
-// unless `oobe_suggestions` is on, so real users never see fabricated tasks.
-const DEMO_TASKS: SuggestedTask[] = [
-  {
-    id: "demo-gmail-connect",
-    app: "gmail",
-    title: "Triage your inbox",
-    summary: "Reply to routine mail and archive newsletters so your inbox is clear.",
-    state: "unconnected",
-    connectLabel: "Gmail",
-    approvePrompt: "Triage my inbox — reply to routine mail and archive newsletters.",
-    automationPrompt:
-      "Set this up as a recurring automation: triage my inbox every morning — reply to routine mail and archive newsletters.",
-  },
-  {
-    id: "demo-calendar-suggested",
-    app: "google_calendar",
-    title: "Reschedule a conflicting meeting",
-    summary: "“Design sync” overlaps your 1:1 with Dana — I can move it to a free slot.",
-    state: "suggested",
-    approvePrompt:
-      "Reschedule my “Design sync” so it no longer overlaps my 1:1 with Dana — move it to a free slot.",
-    automationPrompt:
-      "Set this up as a recurring automation: each morning, scan my calendar for conflicts and reschedule them to free slots.",
-  },
-  {
-    id: "demo-docs-completed",
-    app: "google_docs",
-    title: "Summarized this week's docs",
-    summary: "Pulled 3 insights from the launch retro and two incoming PRDs.",
-    state: "completed",
-    approvePrompt:
-      "Summarize this week's docs — pull the key insights from the launch retro and the two incoming PRDs.",
-    automationPrompt:
-      "Set this up as a recurring automation: summarize my docs each week and share the key insights.",
-  },
-];
-
 export function SuggestedTaskSurface({
-  onApproveTask,
-  onAutomationTask,
+  onOpenThread,
   renderRunningIndicator,
 }: {
-  onApproveTask?: (task: SuggestedTask) => void;
-  onAutomationTask?: (task: SuggestedTask) => void;
+  onOpenThread?: (threadId: string) => void;
   renderRunningIndicator?: (label: string) => ReactNode;
 } = {}) {
   const t = useT();
-  // Reuse the extensions catalog so Connect resolves to a REAL extension and
-  // drives the real setup modal — no parallel connect implementation.
-  const { extensions, registry } = useExtensions();
-  // The id of the just-approved card, flipped to `running` optimistically so
-  // the surface reflects the kicked-off turn immediately (live status streams
-  // in the thread once the user is in it).
-  const [runningId, setRunningId] = React.useState<string | null>(null);
-  // The id of the just-scheduled card, flipped to its "scheduled" chip
-  // optimistically once "+ Automation" fires (same pattern as `runningId`).
-  const [scheduledId, setScheduledId] = React.useState<string | null>(null);
-  // The task whose Connect was clicked — drives the setup modal below.
-  const [connectingTask, setConnectingTask] = React.useState<SuggestedTask | null>(null);
-  // Ids of tasks whose extension is now connected — flips `unconnected` cards
-  // to `suggested` so the natural next step (Approve) becomes available.
-  const [connectedIds, setConnectedIds] = React.useState<string[]>([]);
+  const {
+    isLoading,
+    status,
+    suggestions,
+    generate,
+    isGenerating,
+    start,
+    startingId,
+    dismiss,
+  } = useSuggestions();
 
-  const connectExtension = connectingTask
-    ? resolveConnectExtension(connectingTask.app, extensions, registry)
-    : null;
-  // Connect was clicked but the app resolves to no installable extension (not
-  // in the catalog yet, or offline): surface a plain notice instead of opening
-  // an empty modal or leaving a dead button.
-  const connectUnavailable = Boolean(connectingTask) && !connectExtension;
+  // Don't render anything until the first read resolves: showing a "generate"
+  // CTA over a set that already exists would be a lie, and a flash of empty
+  // state on every landing visit is worse than a beat of nothing.
+  if (isLoading) return null;
 
-  function effectiveState(task: SuggestedTask): SuggestedTask["state"] {
-    if (runningId === task.id) return "running";
-    if (task.state === "unconnected" && connectedIds.includes(task.id)) return "suggested";
-    return task.state;
-  }
+  const hasCards = suggestions.length > 0;
+  // `generating` is the backend's own status; `isGenerating` also covers the
+  // moment between the click and the 202 landing.
+  const generating = isGenerating || status === "generating";
 
   return (
     <section
@@ -130,58 +65,70 @@ export function SuggestedTaskSurface({
       <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-[var(--v2-text-faint)]">
         {t("chat.oobe.heading")}
       </div>
-      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-        {DEMO_TASKS.map((task) => {
-          const state = effectiveState(task);
-          return (
-            <SuggestedTaskCard
-              key={task.id}
-              task={state === task.state ? task : { ...task, state }}
-              scheduled={scheduledId === task.id}
-              renderRunningIndicator={renderRunningIndicator}
-              // §2A change 3: only one suggested job may run at a time — every
-              // OTHER card disables (no queuing, no concurrent approve/connect/
-              // automation) while one is active. The acting card itself stays
-              // interactive so its own running/completed state still reads.
-              locked={runningId !== null && runningId !== task.id}
-              onConnect={() => setConnectingTask(task)}
-              onApprove={() => {
-                setRunningId(task.id);
-                onApproveTask?.(task);
-              }}
-              onAutomation={() => {
-                setScheduledId(task.id);
-                onAutomationTask?.(task);
-              }}
-            />
-          );
-        })}
-      </div>
-
-      {connectUnavailable && (
-        <p
-          role="status"
-          className="mt-2 text-[11px] text-[var(--v2-text-faint)]"
-        >
-          {t("chat.oobe.connectUnavailable")}
-        </p>
-      )}
-
-      {connectingTask && connectExtension && (
-        <React.Suspense fallback={null}>
-          <ConfigureModal
-            extension={connectExtension}
-            returnFocusTo={null}
-            onClose={() => setConnectingTask(null)}
-            onSaved={() => {
-              setConnectedIds((ids) =>
-                ids.includes(connectingTask.id) ? ids : [...ids, connectingTask.id],
-              );
-              setConnectingTask(null);
-            }}
-          />
-        </React.Suspense>
-      )}
+      {renderBody()}
     </section>
   );
+
+  function renderBody() {
+    // Cards win over any transient status: once a set exists, replacing it
+    // with a spinner on regeneration would blank the surface the user is using.
+    if (hasCards) {
+      return (
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          {suggestions.map((suggestion) => (
+            <SuggestedTaskCard
+              key={suggestion.id}
+              suggestion={suggestion}
+              starting={startingId === suggestion.id}
+              renderRunningIndicator={renderRunningIndicator}
+              onApprove={() => {
+                start(suggestion.id, {
+                  onSuccess: (response) => {
+                    if (response?.thread_id) onOpenThread?.(response.thread_id);
+                  },
+                });
+              }}
+              onOpenThread={() => {
+                if (suggestion.thread_id) onOpenThread?.(suggestion.thread_id);
+              }}
+              onDismiss={() => dismiss(suggestion.id)}
+            />
+          ))}
+        </div>
+      );
+    }
+
+    if (generating) {
+      return (
+        <div className="py-1">
+          {renderRunningIndicator
+            ? renderRunningIndicator(t("chat.oobe.status.generating"))
+            : null}
+        </div>
+      );
+    }
+
+    if (status === "failed") {
+      return (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="inline-flex items-center gap-1 rounded-full border border-[color-mix(in_srgb,var(--v2-danger-text)_45%,transparent)] bg-[var(--v2-danger-soft)] px-2 py-0.5 text-[11px] font-medium text-[var(--v2-danger-text)]">
+            <Icon name="alert" className="h-3 w-3" />
+            {t("chat.oobe.status.generateFailed")}
+          </span>
+          <Button variant="secondary" size="sm" onClick={() => generate()}>
+            <Icon name="retry" className="mr-1 h-3.5 w-3.5" />
+            {t("chat.oobe.action.tryAgain")}
+          </Button>
+        </div>
+      );
+    }
+
+    // `empty`, or a `ready` set the user has dismissed down to nothing.
+    return (
+      <Button variant="secondary" size="sm" onClick={() => generate()}>
+        <Icon name="spark" className="mr-1 h-3.5 w-3.5" />
+        {t("chat.oobe.action.generate")}
+      </Button>
+    );
+  }
 }

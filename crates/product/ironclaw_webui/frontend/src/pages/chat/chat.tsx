@@ -328,27 +328,16 @@ export function Chat({
     [composerSendDisabled, handleSend, setSuggestions]
   );
 
-  // Approving an OOBE suggestion card runs its task as a real foreground turn
-  // through the existing send path; the card's title is shown as the message
-  // display content while its `approvePrompt` drives the agent.
-  const handleApproveTask = React.useCallback(
-    (task) => {
-      void handleSend(task.approvePrompt, { displayContent: task.title });
+  // Starting an OOBE suggestion is a server-side operation: the backend creates
+  // the suggestion's own thread and submits its turn through the normal
+  // ProductSurface path, then returns the binding. The browser only navigates
+  // to the thread it is handed — it does not inject the prompt itself.
+  const handleOpenSuggestionThread = React.useCallback(
+    (threadId) => {
+      if (!threadId || !onSelectThread) return;
+      onSelectThread(threadId, { replace: true });
     },
-    [handleSend]
-  );
-
-  // "+ Automation" on a completed OOBE card schedules a recurring automation:
-  // it submits the task's `automationPrompt` through the same send path, so the
-  // agent calls `builtin.trigger_create` (prompt injection is the design — no
-  // REST create).
-  const handleAutomationTask = React.useCallback(
-    (task) => {
-      void handleSend(task.automationPrompt, {
-        displayContent: `Set up automation — ${task.title}`,
-      });
-    },
-    [handleSend]
+    [onSelectThread]
   );
 
   const handleCancelRun = React.useCallback(
@@ -449,8 +438,7 @@ export function Chat({
           <EmptyState
             onSuggestion={handleSuggestion}
             onSend={handleSend}
-            onApproveTask={handleApproveTask}
-            onAutomationTask={handleAutomationTask}
+            onOpenThread={handleOpenSuggestionThread}
             commands={activeThreadId ? chatCommands : []}
             disabled={false}
             sendDisabled={composerSendDisabled}

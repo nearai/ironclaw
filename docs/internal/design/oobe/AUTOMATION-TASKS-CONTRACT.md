@@ -1,5 +1,13 @@
 # Automation Tasks — wiring contract (proposed)
 
+> **⚠ §§1–3 are superseded by PR #7694.** This document specifies an `AutomationTask`
+> domain model with five durable events and a projection. The shipped backend instead uses
+> a **typed store over `ScopedFilesystem`** with bounded CAS and no SQL migration, and a
+> four-route product-surface contract (`suggestions.list` / `.generate` / `suggestion.start`
+> / `.dismiss`). Those sections remain useful only as a record of the original design
+> intent — do **not** build against them. See
+> [VISION-RECONCILIATION.md](VISION-RECONCILIATION.md) §1.1 for the real contract.
+
 Status: **design reference (proposed wiring)**. An earlier UI prototype
 implemented the frontend against a mock data seam (`lib/automation-tasks*.ts`,
 `hooks/useAutomationTasks.ts`); that code was **rolled back** so the branch stays

@@ -106,28 +106,18 @@ test("EmptyState never mounts the OOBE suggestion surface when the oobe_suggesti
   );
 });
 
-test("EmptyState forwards onApproveTask to the suggestion surface so approving a card runs it", () => {
-  // Test through the caller: EmptyState must hand the approve callback down to
-  // the surface (which wires it onto each card), exactly as it forwards the
-  // commands list to ChatInput above.
-  const onApproveTask = () => {};
-  const { tree, components } = renderEmptyState({ onApproveTask });
+test("EmptyState forwards onOpenThread to the suggestion surface so a started card can navigate", () => {
+  // Test through the caller: EmptyState must hand the navigation callback down
+  // to the surface (which wires it onto each card), exactly as it forwards the
+  // commands list to ChatInput above. Starting a suggestion is a server-side
+  // operation that returns a thread binding; this is how the browser is told
+  // where to go.
+  const onOpenThread = () => {};
+  const { tree, components } = renderEmptyState({ onOpenThread });
 
   const surface = findComponent(tree, components.SuggestedTaskSurface);
   const props = componentProps(surface, components.SuggestedTaskSurface);
-  assert.equal(props.onApproveTask, onApproveTask);
-});
-
-test("EmptyState forwards onAutomationTask to the suggestion surface so scheduling a card runs it", () => {
-  // Test through the caller: EmptyState must hand the automation callback down
-  // to the surface (which wires it onto each completed card), exactly as it
-  // forwards onApproveTask above.
-  const onAutomationTask = () => {};
-  const { tree, components } = renderEmptyState({ onAutomationTask });
-
-  const surface = findComponent(tree, components.SuggestedTaskSurface);
-  const props = componentProps(surface, components.SuggestedTaskSurface);
-  assert.equal(props.onAutomationTask, onAutomationTask);
+  assert.equal(props.onOpenThread, onOpenThread);
 });
 
 test("EmptyState supplies a renderRunningIndicator that renders NearProcessIndicator with the given label", () => {
