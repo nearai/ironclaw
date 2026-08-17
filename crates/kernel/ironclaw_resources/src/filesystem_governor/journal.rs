@@ -27,12 +27,14 @@ const DELTA_JOURNAL_MAX_BATCH: usize = 256;
 // transient `BackendBusy` exhausts it with zero retries. A local libSQL
 // backend attempt can block for the writer-pool checkout timeout (10s) plus
 // the connection's `busy_timeout` (5s) before returning `BackendBusy` — 15s
-// worst case, already triple the legacy 5s window. At 30s the journal can
-// survive one full 15s attempt and still retry; a persistent hold beyond the
-// window still fails closed (no budget guarantee is weakened).
+// worst case, already triple the legacy 5s window. 60s keeps the journal
+// retrying through a multi-attempt burst (run-start write storms on slow
+// runners have measured 20-30s+ of continuous writer contention in Reborn
+// E2E); a persistent hold beyond the window still fails closed (no budget
+// guarantee is weakened).
 const DEFAULT_BUSY_RETRY_POLICY: BusyRetryPolicy = BusyRetryPolicy {
     max_retries: 3,
-    max_elapsed: Duration::from_secs(30),
+    max_elapsed: Duration::from_secs(60),
     backoff_base: Duration::from_millis(25),
     backoff_max: Duration::from_millis(250),
     jitter: true,
