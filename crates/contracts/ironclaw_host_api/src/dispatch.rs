@@ -254,6 +254,29 @@ pub enum DispatchFailureDetail {
     HostRemediation {
         text: HostRemediation,
     },
+    /// Host-authored public label carried alongside a vendor/provider cause
+    /// riding [`DispatchError::Rejected`]'s `diagnostic` field — e.g. a
+    /// first-party capability's fixed rejection summary.
+    ///
+    /// Distinct from [`Self::Diagnostic`] (an internal-only raw cause) and
+    /// [`Self::HostRemediation`] (an operator remediation instruction): this
+    /// is the plain host-authored text that `ironclaw_capabilities`'s
+    /// `CapabilityInvocationError::from(DispatchError)` maps into the public
+    /// `safe_summary` field as its highest-precedence source. When present,
+    /// it wins over the vendor/provider cause riding `diagnostic` — the two
+    /// are never merged — so a caller with its own trusted label (e.g. a
+    /// first-party capability's fixed rejection summary) is guaranteed that
+    /// label reaches the user, not whatever vendor text happens to also be
+    /// attached. When this variant is absent, `safe_summary` falls back to
+    /// the vendor/provider diagnostic text (still validation-gated
+    /// downstream), and only then to the kind's fixed sentence — see
+    /// `CapabilityInvocationError::Dispatch`'s `safe_summary` field doc for
+    /// the full three-tier precedence. Carries no separate model-visible
+    /// representation; the loop projection drops it rather than duplicating
+    /// the safe-summary text into the diagnostic detail seam.
+    HostSummary {
+        text: String,
+    },
 }
 
 /// Stable, redacted runtime failure categories surfaced through the dispatch port.
@@ -723,6 +746,20 @@ impl DispatchError {
             *slot = Some(detail);
         }
         self
+    }
+
+    /// Attaches a host-authored public label to a [`Self::Rejected`] built
+    /// via [`Self::provider_rejected`]. Convenience wrapper over
+    /// [`Self::with_detail`] using [`DispatchFailureDetail::HostSummary`] —
+    /// keeps the vendor cause on the `diagnostic` channel (set by
+    /// `provider_rejected`) while carrying the caller's own trusted label
+    /// separately, so `ironclaw_capabilities`'s
+    /// `CapabilityInvocationError::from(DispatchError)` gives this label
+    /// precedence as the public `safe_summary` over the vendor cause,
+    /// instead of the two silently overwriting each other. A no-op on other
+    /// variants.
+    pub fn with_host_summary(self, text: impl Into<String>) -> Self {
+        self.with_detail(DispatchFailureDetail::HostSummary { text: text.into() })
     }
 }
 

@@ -119,10 +119,29 @@ pub enum CapabilityInvocationError {
         /// Provider-authored metadata remains typed and Debug-redacted until
         /// the runtime's model-diagnostic scrub/fence seam.
         provider_diagnostic: Option<Box<ProviderDiagnostic>>,
-        /// Candidate public label carrying the same untrusted provider text as
-        /// `provider_diagnostic` — Debug-redacted here too (see
-        /// `provider_diagnostic`'s doc) even though it is a plain `String`, so
-        /// Debug output never depends on which downstream seam scrubs first.
+        /// Candidate public label — persisted, published, and rendered by
+        /// product surfaces (the chat tool-failure card reads this field).
+        /// Three-tier precedence, most-trusted first:
+        ///
+        /// 1. A host-authored summary (`DispatchFailureDetail::HostSummary`,
+        ///    set via `DispatchError::with_host_summary`), when present —
+        ///    e.g. a first-party capability's fixed rejection summary.
+        /// 2. Otherwise the provider diagnostic's text (formatted
+        ///    `code`/`message`, or a bare `message`), carried forward
+        ///    deliberately — not accidentally — so the user still sees the
+        ///    real vendor reason ("token lacks repo scope") instead of a
+        ///    generic sentence. This is validation-gated downstream: only
+        ///    summaries that pass the strict `LoopSafeSummary` gate (bounded,
+        ///    no control chars, no delimiters, no credential markers)
+        ///    reach the public surface; anything that fails validation
+        ///    degrades to the kind's fixed sentence there.
+        /// 3. `None` when neither is available, which the downstream gate
+        ///    also renders as the kind's fixed sentence
+        ///    (`kind.human_summary()`).
+        ///
+        /// Debug-redacted here too (see `provider_diagnostic`'s doc) even
+        /// though it is a plain `String`, so Debug output never depends on
+        /// which downstream seam scrubs first.
         safe_summary: Option<String>,
         detail: Option<DispatchFailureDetail>,
     },
@@ -294,33 +313,37 @@ impl From<DispatchError> for CapabilityInvocationError {
                 detail,
                 ..
             } => {
-                // The cause rides both channels: `provider_diagnostic` stays
-                // typed and Debug-redacted for the raw model-visible
-                // Diagnostic seam, while the same text is the candidate
-                // public `safe_summary` label — fails closed downstream
-                // through the strict `LoopSafeSummary` gate
-                // (`dispatch_failure_message`), which degrades anything
-                // unsafe to the kind's fixed sentence. This mirrors the
-                // retired lane variants' `model_visible_cause`, which rode
-                // the identical two channels before the fold.
-                //
-                // A structured `code` (e.g. a WASM guest's stable taxonomy
-                // code) uses the formatted `code`/`message` combination so
-                // the code always surfaces; a bare `message` with no `code`
-                // (a plain already-final cause string, e.g. a lane's
-                // `error.to_string()` or a first-party handler's fixed
-                // summary) rides through unprefixed, matching the retired
-                // variants' raw text exactly.
-                let safe_summary = diagnostic.as_ref().and_then(|diagnostic| {
-                    if diagnostic.code.is_some() {
-                        provider_diagnostic_model_cause(diagnostic)
-                    } else {
-                        diagnostic
-                            .message
-                            .as_ref()
-                            .map(|message| message.as_str().to_string())
-                    }
-                });
+                // Three-tier precedence (see the `safe_summary` field doc):
+                // 1. A host-authored `DispatchFailureDetail::HostSummary`
+                //    wins outright — it is the caller's own trusted label,
+                //    set via `DispatchError::with_host_summary`.
+                // 2. Otherwise the vendor/provider diagnostic's text is
+                //    carried forward deliberately, so the user still sees
+                //    the real reason instead of a generic sentence. A
+                //    structured `code` (e.g. a WASM guest's stable taxonomy
+                //    code) uses the formatted `code`/`message` combination so
+                //    the code always surfaces; a bare `message` with no
+                //    `code` rides through unprefixed. This text still fails
+                //    closed downstream through the strict `LoopSafeSummary`
+                //    gate (`dispatch_failure_message`), which degrades
+                //    anything that doesn't validate to the kind's fixed
+                //    sentence — this layer only carries the candidate text
+                //    forward.
+                // 3. `None` when neither is available; the same downstream
+                //    gate renders the kind's fixed sentence.
+                let safe_summary = match &detail {
+                    Some(DispatchFailureDetail::HostSummary { text }) => Some(text.clone()),
+                    _ => diagnostic.as_ref().and_then(|diagnostic| {
+                        if diagnostic.code.is_some() {
+                            provider_diagnostic_model_cause(diagnostic)
+                        } else {
+                            diagnostic
+                                .message
+                                .as_ref()
+                                .map(|message| message.as_str().to_string())
+                        }
+                    }),
+                };
                 Self::Dispatch {
                     kind,
                     provider_diagnostic: diagnostic.map(Box::new),
@@ -499,11 +522,12 @@ mod tests {
             kind,
             DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client)
         );
-        // The formatted cause is the candidate public label too — it still
-        // fails closed downstream through the strict `LoopSafeSummary` gate
-        // (`dispatch_failure_message` in `ironclaw_host_runtime`), which
-        // degrades anything unsafe to the kind's fixed sentence; this layer
-        // only carries the candidate text forward.
+        // Tier 2 (no host summary attached): the formatted vendor cause is
+        // the candidate public label too — it still fails closed downstream
+        // through the strict `LoopSafeSummary` gate (`dispatch_failure_message`
+        // in `ironclaw_host_runtime`), which degrades anything unsafe to the
+        // kind's fixed sentence; this layer only carries the candidate text
+        // forward so the user still sees the real reason.
         assert_eq!(
             safe_summary.as_deref(),
             Some(
@@ -581,8 +605,11 @@ mod tests {
                         issues: vec![issue]
                     })
                 );
-                // `code: None` rides the bare-message branch unprefixed —
-                // no "provider error code:"/"provider message:" label.
+                // Tier 2: `detail` here is `InvalidInput`, not a host
+                // summary, so `safe_summary` falls through to the vendor
+                // diagnostic. `code: None` rides the bare-message branch
+                // unprefixed — no "provider error code:"/"provider message:"
+                // label.
                 assert_eq!(
                     safe_summary.as_deref(),
                     Some("trigger_create input failed validation")
@@ -605,13 +632,108 @@ mod tests {
             detail: Some(DispatchFailureDetail::Diagnostic {
                 text: "leak-me-not: /secret/path token=abc123".to_string(),
             }),
-            attempt: None,
         });
 
         let debug_output = format!("{err:?}");
         assert!(!debug_output.contains("leak-me-not"));
         assert!(!debug_output.contains("/secret/path"));
         assert!(!debug_output.contains("abc123"));
+    }
+
+    /// Invariant pin, tier 1: a `Rejected` carrying BOTH a host-authored
+    /// summary (`DispatchError::with_host_summary`) and a vendor-authored
+    /// cause keeps the host summary as the public `safe_summary` — it must
+    /// never be silently dropped in favor of the vendor cause (the defect
+    /// `registry.rs`'s old `model_visible_cause.or(safe_summary)` had) — while
+    /// the vendor text still rides `provider_diagnostic` for the
+    /// model-visible channel. The two channels are never merged into one.
+    #[test]
+    fn rejected_host_summary_wins_over_vendor_diagnostic() {
+        let vendor_cause = "vendor backend returned 503 at /internal/route";
+        let host_summary = "the tool's backend failed";
+        let error = DispatchError::provider_rejected(
+            Some(RuntimeKind::FirstParty),
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            Some(vendor_cause.to_string()),
+        )
+        .with_host_summary(host_summary);
+        let err = CapabilityInvocationError::from(error);
+
+        match err {
+            CapabilityInvocationError::Dispatch {
+                safe_summary,
+                provider_diagnostic,
+                ..
+            } => {
+                assert_eq!(safe_summary.as_deref(), Some(host_summary));
+                let diagnostic = provider_diagnostic.expect("vendor cause must ride diagnostic");
+                assert_eq!(
+                    provider_diagnostic_model_cause(&diagnostic).as_deref(),
+                    Some(format!("provider message: {vendor_cause}").as_str())
+                );
+            }
+            other => panic!("expected Dispatch variant, got {other:?}"),
+        }
+    }
+
+    /// Invariant pin, tier 2: no host summary attached — the vendor
+    /// diagnostic's text becomes the public `safe_summary` (carried forward
+    /// deliberately, still validation-gated downstream by the strict
+    /// `LoopSafeSummary` gate in `ironclaw_host_runtime`) rather than
+    /// dropping to `None`. This is the same text that also rides
+    /// `provider_diagnostic` for the model-visible channel.
+    #[test]
+    fn rejected_diagnostic_without_host_summary_becomes_the_public_label() {
+        let err = CapabilityInvocationError::from(DispatchError::Rejected {
+            runtime: Some(RuntimeKind::Mcp),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            diagnostic: Some(ProviderDiagnostic {
+                code: None,
+                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                    "backend exploded",
+                )),
+                retry_after: None,
+            }),
+            detail: None,
+        });
+
+        match err {
+            CapabilityInvocationError::Dispatch {
+                safe_summary,
+                provider_diagnostic,
+                ..
+            } => {
+                assert_eq!(safe_summary.as_deref(), Some("backend exploded"));
+                assert!(provider_diagnostic.is_some());
+            }
+            other => panic!("expected Dispatch variant, got {other:?}"),
+        }
+    }
+
+    /// Invariant pin, tier 3: neither a host summary nor a vendor diagnostic
+    /// is present — `safe_summary` is `None`, and the downstream strict
+    /// `LoopSafeSummary` gate renders the kind's fixed sentence
+    /// (`kind.human_summary()`) instead.
+    #[test]
+    fn rejected_without_host_summary_or_diagnostic_yields_none_safe_summary() {
+        let err = CapabilityInvocationError::from(DispatchError::Rejected {
+            runtime: Some(RuntimeKind::Wasm),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest),
+            diagnostic: None,
+            detail: None,
+        });
+
+        match err {
+            CapabilityInvocationError::Dispatch {
+                safe_summary,
+                provider_diagnostic,
+                ..
+            } => {
+                assert_eq!(safe_summary, None);
+                assert!(provider_diagnostic.is_none());
+            }
+            other => panic!("expected Dispatch variant, got {other:?}"),
+        }
     }
 
     #[test]

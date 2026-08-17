@@ -208,8 +208,21 @@ fn runtime_dispatch_error(
     safe_summary: Option<String>,
     model_visible_cause: Option<String>,
 ) -> DispatchError {
-    let cause = model_visible_cause.or(safe_summary);
-    DispatchError::provider_rejected(Some(runtime), DispatchFailureKind::Runtime(kind), cause)
+    // Two distinct channels, never merged: the vendor-authored cause rides
+    // `diagnostic` (untrusted, scrubbed downstream at the model-visible
+    // Diagnostic seam), and the host-authored `safe_summary` rides a
+    // separate trusted label so it still becomes the public safe summary
+    // even when a vendor cause is also present. See
+    // `DispatchFailureDetail::HostSummary`'s doc for the invariant.
+    let error = DispatchError::provider_rejected(
+        Some(runtime),
+        DispatchFailureKind::Runtime(kind),
+        model_visible_cause,
+    );
+    match safe_summary {
+        Some(text) => error.with_host_summary(text),
+        None => error,
+    }
 }
 
 impl ToolResolver for CapabilityDispatchRegistry {
@@ -246,8 +259,8 @@ mod tests {
     use ironclaw_host_api::{
         capability::{CapabilityDescriptor, EffectKind, PermissionMode},
         dispatch::{
-            CapabilityDispatchRequest, DispatchError, DispatchFailureKind, ProviderDiagnostic,
-            ProviderErrorCode, UntrustedProviderMessage,
+            CapabilityDispatchRequest, DispatchError, DispatchFailureDetail, DispatchFailureKind,
+            ProviderDiagnostic, ProviderErrorCode, UntrustedProviderMessage,
         },
         ids::{ExtensionId, InvocationId, ProductKind, TenantId, UserId},
         invocation::InvocationOrigin,
@@ -485,5 +498,71 @@ mod tests {
             }
             other => panic!("expected DispatchError::Rejected, got {other:?}"),
         }
+    }
+
+    /// Trace pin: a `ToolError::Failed` carrying both a host-authored
+    /// `safe_summary` and a vendor `model_visible_cause` — the
+    /// `extension_tool_binder`/FirstParty shape — must keep both channels
+    /// distinct through `runtime_dispatch_error`: the vendor cause rides
+    /// `diagnostic` (untrusted), the host summary rides `detail` as
+    /// `DispatchFailureDetail::HostSummary` so it survives as the public
+    /// `safe_summary` downstream, never merged into one `.or()`-picked
+    /// string.
+    #[test]
+    fn runtime_dispatch_error_keeps_host_summary_separate_from_vendor_cause() {
+        let error = runtime_dispatch_error(
+            RuntimeKind::FirstParty,
+            RuntimeDispatchErrorKind::Backend,
+            Some("the tool's backend failed".to_string()),
+            Some("vendor 503 at /internal/route".to_string()),
+        );
+
+        let DispatchError::Rejected {
+            diagnostic, detail, ..
+        } = &error
+        else {
+            panic!("expected Rejected variant");
+        };
+        assert_eq!(
+            diagnostic
+                .as_ref()
+                .and_then(|diagnostic| diagnostic.message.as_ref())
+                .map(|message| message.as_str()),
+            Some("vendor 503 at /internal/route")
+        );
+        assert_eq!(
+            detail,
+            &Some(DispatchFailureDetail::HostSummary {
+                text: "the tool's backend failed".to_string()
+            })
+        );
+    }
+
+    /// When no host summary is supplied, only the vendor cause rides the
+    /// diagnostic channel and `detail` stays empty — no default label is
+    /// synthesized from provider text.
+    #[test]
+    fn runtime_dispatch_error_without_host_summary_carries_only_vendor_cause() {
+        let error = runtime_dispatch_error(
+            RuntimeKind::Wasm,
+            RuntimeDispatchErrorKind::Guest,
+            None,
+            Some("guest trapped".to_string()),
+        );
+
+        let DispatchError::Rejected {
+            diagnostic, detail, ..
+        } = &error
+        else {
+            panic!("expected Rejected variant");
+        };
+        assert_eq!(
+            diagnostic
+                .as_ref()
+                .and_then(|diagnostic| diagnostic.message.as_ref())
+                .map(|message| message.as_str()),
+            Some("guest trapped")
+        );
+        assert_eq!(detail, &None);
     }
 }
