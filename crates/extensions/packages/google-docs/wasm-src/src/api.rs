@@ -756,7 +756,7 @@ pub fn create_table_with_data(
     }
     let columns = validate_table_data(table_data)?;
     let rows = table_data.len();
-    let table_index = inserted_table_index(index)?;
+    let preferred_table_index = preferred_inserted_table_index(index)?;
     let populated_cells = table_data
         .iter()
         .flatten()
@@ -797,6 +797,7 @@ pub fn create_table_with_data(
     if let Some(revision_id) = inserted["revisionId"].as_str() {
         latest_revision = revision_id.to_string();
     }
+    let table_index = resolve_inserted_table_index(&inserted, index, preferred_table_index);
     let population_requests =
         match build_table_population_requests(&inserted, table_index, table_data) {
             Ok(requests) => requests,
@@ -926,10 +927,22 @@ pub fn create_table_with_data(
     })
 }
 
-fn inserted_table_index(requested_index: i64) -> Result<i64, String> {
+fn preferred_inserted_table_index(requested_index: i64) -> Result<i64, String> {
     requested_index
         .checked_add(1)
         .ok_or_else(|| "table insertion index is too large".to_string())
+}
+
+fn resolve_inserted_table_index(
+    document: &serde_json::Value,
+    requested_index: i64,
+    preferred_index: i64,
+) -> i64 {
+    if table_at_index(document, preferred_index).is_some() {
+        preferred_index
+    } else {
+        requested_index
+    }
 }
 
 fn partial_table_result(
@@ -1391,8 +1404,22 @@ mod tests {
 
     #[test]
     fn inserted_table_uses_provider_index_after_leading_newline() {
-        assert_eq!(inserted_table_index(5).unwrap(), 6);
-        assert!(inserted_table_index(i64::MAX).is_err());
+        let google_document = serde_json::json!({
+            "body": { "content": [{ "startIndex": 6, "table": {} }] }
+        });
+        let legacy_emulator_document = serde_json::json!({
+            "body": { "content": [{ "startIndex": 5, "table": {} }] }
+        });
+
+        let preferred = preferred_inserted_table_index(5).unwrap();
+
+        assert_eq!(preferred, 6);
+        assert_eq!(resolve_inserted_table_index(&google_document, 5, preferred), 6);
+        assert_eq!(
+            resolve_inserted_table_index(&legacy_emulator_document, 5, preferred),
+            5
+        );
+        assert!(preferred_inserted_table_index(i64::MAX).is_err());
     }
 
     #[test]
