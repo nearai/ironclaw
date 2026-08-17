@@ -6463,6 +6463,35 @@ async fn host_runtime_services_wasm_operation_failed_reconciles_wall_clock_after
     );
 }
 
+// Pins `WitToolRuntime::instantiate_legacy` — the near:agent@0.3.0 binding
+// fallback removed in PR 4 — as still reachable through this harness. A
+// component built only against the old, untyped `record response { output,
+// error }` world must fail `instantiate_current`'s version check and
+// transparently retry against the legacy world instead of erroring out.
+// Delete this test (and `LEGACY_V0_3_HTTP_TOOL_WAT`) when the legacy
+// fallback itself is removed.
+#[tokio::test]
+async fn host_runtime_services_wasm_legacy_v0_3_component_still_dispatches_through_fallback() {
+    let runtime = wasm_runtime_for_legacy_component(
+        WASM_MANIFEST,
+        "wasm.count",
+        "tool.wasm",
+        LEGACY_V0_3_HTTP_TOOL_WAT,
+    )
+    .await;
+
+    let outcome = runtime
+        .runtime
+        .invoke_capability(wasm_runtime_request(
+            runtime.capability_id.clone(),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+
+    assert_completed_outcome(outcome, &runtime.capability_id);
+}
+
 /// `invoke_capability` on a capability that requires a credential + requires
 /// approval must return `AuthRequired` without persisting an approval request
 /// when the credential is absent.
