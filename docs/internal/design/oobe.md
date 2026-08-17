@@ -1,15 +1,15 @@
 # OOBE & First-Run Onboarding — webui_v2
 
-**Status:** design exploration. The automation concepts were prototyped in **PR #6994** (UI-only,
-mock data), since **rolled back** — the branch is code-free; the concepts now live in the mockup +
-the [integration plan](./oobe/README.md). **Interactive mockup:** [`oobe/mockup.html`](./oobe/mockup.html) — open in a
-browser, pick a **Version** (Vision / Foundational) and a **Scene** (First run / Thread / Plan),
-and on Vision → First run press **Play** to watch the journey. Toggle **Flags** and the theme.
+**Status:** design brief — **retargeted to Vision.** The program now builds the **Vision** UX
+directly against the durable backend suggestions contract shipped in
+[PR #7694](https://github.com/nearai/ironclaw/pull/7694); the earlier two-phase
+(Foundational → Vision) split is historical. **[`oobe/VISION-RECONCILIATION.md`](./oobe/VISION-RECONCILIATION.md) governs.**
+**Interactive mockup:** [`oobe/mockup.html`](./oobe/mockup.html) — open in a browser, pick a
+**Scene** (First run / Thread / Plan) and press **Play** on First run to watch the journey.
 
-> **Integration proposal & plan:** this brief is the design "what/why." The plan to phase it into
-> production — **Foundational** (near-term, extends shipped code) then **Vision** (north-star),
-> with the shipped-vs-net-new scope, dependencies, and code-integration map — lives in the
-> [`oobe/`](./oobe/) package: [README](./oobe/README.md) · [PROPOSAL](./oobe/PROPOSAL.md) ·
+> **Integration plan:** this brief is the design "what/why"; the current build plan and the
+> reconciliation with the shipped backend contract live in the [`oobe/`](./oobe/) package —
+> **[VISION-RECONCILIATION](./oobe/VISION-RECONCILIATION.md) (governs)** · [README](./oobe/README.md) · [PROPOSAL](./oobe/PROPOSAL.md) ·
 > [PLAN](./oobe/PLAN.md) · [CHECKLIST](./oobe/CHECKLIST.md).
 
 > File/symbol references are a point-in-time trace of `webui_v2`. Verify against live code

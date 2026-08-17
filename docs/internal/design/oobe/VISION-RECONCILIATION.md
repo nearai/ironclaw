@@ -136,17 +136,20 @@ Consequences:
 
 ---
 
-## 4. Three further divergences
+## 4. Decisions that fall out of the contract
 
-1. **The single-active lock loses its justification.** `PROPOSAL.md` §2A.3 grounded "one
-   active job at a time" in `submit_turn` returning `DeferredBusy`/`RejectedBusy` while a
-   run is active **on a thread**. But `suggestion.start` creates a **separate thread per
-   suggestion**, so cards can genuinely run in parallel. The lock is now a pure UX
-   preference with no backend constraint behind it — and Vision's multi-card drawer likely
-   *wants* concurrency. **Recommendation: drop the lock.**
-2. **"+ Automation" has no backing.** There is no `automation_prompt` field and no
-   automation route in #7694. It remains client-synthesized prompt injection
-   (`builtin.trigger_create`), or defers.
+1. **Cards run in parallel — the single-active lock is removed. (Decided.)**
+   `PROPOSAL.md` §2A.3 grounded "one active job at a time" in `submit_turn` returning
+   `DeferredBusy`/`RejectedBusy` while a run is active **on a thread**. But
+   `suggestion.start` creates a **separate thread per suggestion**, so there is no backend
+   constraint to reflect — cards can genuinely run at the same time, which is what Vision's
+   multi-card drawer wants. The lock (former slice 5) is gone from the code; approving one
+   card never disables the others.
+2. **"+ Automation" is removed. (Decided.)** The card schema has no `automation_prompt`
+   field and #7694 adds no automation route, so there is nothing to build against; rather
+   than carry a client-synthesized prompt-injection affordance with no durable backing, the
+   action is dropped from the card entirely. (If recurring automations become a first-run
+   goal later, they need their own backend contract — not a bolt-on here.)
 3. **The events/projection contract is superseded.**
    [`AUTOMATION-TASKS-CONTRACT.md`](AUTOMATION-TASKS-CONTRACT.md) §§1–3 specify an
    `AutomationTask` domain model with five durable events and a projection. #7694 instead
@@ -196,11 +199,12 @@ actually contain the routes before any browser QA conclusion is drawn.
 
 ## 6. Open questions for review
 
-1. **Drop the single-active lock?** (§4.1 — recommended yes; no backend constraint remains.)
-2. **"+ Automation" in Vision v1, or defer?** No backend support; prompt injection only.
-3. **`AuthRequired` on a suggestion-started run** — verify in QA before relying on
+*(Two earlier questions are now decided and moved to §4: cards run in parallel — the
+single-active lock is removed; and "+ Automation" is removed.)*
+
+1. **`AuthRequired` on a suggestion-started run** — verify in QA before relying on
    just-in-time auth as the connect story (§3.1).
-4. **Agent modes (P4 / N6 / V6 Bypass)** — untouched by #7694; still net-new, still needs a
+2. **Agent modes (P4 / N6 / V6 Bypass)** — untouched by #7694; still net-new, still needs a
    durable home and typed gate wiring.
-5. **Replacement UX** — a new generation clears the previous set. What does the drawer do
+3. **Replacement UX** — a new generation clears the previous set. What does the drawer do
    if the user is mid-read when a replacement lands?

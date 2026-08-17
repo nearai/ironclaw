@@ -1,13 +1,16 @@
 # OOBE Foundational v1 — Implementation Plan
 
-> **⚠ Historical — Foundational is cut.** This plan records the Foundational v1 build
-> (slices 1–5 landed behind the off-by-default `oobe_suggestions` flag). The program has
-> retargeted to **Vision** against the durable backend suggestions contract from
-> [PR #7694](https://github.com/nearai/ironclaw/pull/7694). The live slice plan is
-> [VISION-RECONCILIATION.md](VISION-RECONCILIATION.md) §5.1; the keep/change/delete map for
-> this branch's code is §5. Notably, **slice 3's connect model and slice 5's single-active
-> lock are both retired** by that contract, and the retired slice 2b (live card status)
-> becomes buildable. Retained below as the record of what shipped and why.
+> **⚠ Historical — Foundational is cut. Everything below is a superseded record.** This
+> plan describes the Foundational v1 build; the program has retargeted to **Vision** against
+> the durable backend suggestions contract from
+> [PR #7694](https://github.com/nearai/ironclaw/pull/7694). The live slice plan and the
+> keep/change/delete map for this branch's code are in
+> [VISION-RECONCILIATION.md](VISION-RECONCILIATION.md) §5, which **governs**. Reversed or
+> retired since this was written: **slice 3's connect model** (cards carry no tool identity;
+> connect is a separate surface), **slice 5's single-active lock** (each suggestion starts
+> its own thread — cards now **run in parallel**, no lock), and **slice 4's "+ Automation"**
+> (no backing in the shipped contract — **removed**). The retired slice 2b (live card
+> status) becomes buildable. Do not treat any "change 1–6" below as current.
 
 **Grounded in current `main`.** Every seam named here was verified to ship on `main` (backend + frontend). The premise this plan proves: **v1 is almost entirely a frontend build over already-enabled capabilities** — the only net-new backend piece is the first-run *suggestion producer*, and even that is optional for the first slices. Companion to [PROPOSAL.md](PROPOSAL.md) §2A (the wiring spec) and [CHECKLIST.md](CHECKLIST.md).
 
