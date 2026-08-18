@@ -14,6 +14,10 @@ ignore = [
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
+    # h2 empty DATA frames — h2 0.3.27 remains pinned by libsql 0.9.30 through
+    # tonic/hyper 0.14. The independently resolved h2 0.4 line is upgraded to
+    # the patched 0.4.16; remove this exception when libsql drops h2 0.3.
+    "RUSTSEC-2026-0258",
     # rsa Marvin timing side-channel — test-only dependency used to mint
     # throwaway local OIDC JWT fixtures; no production network-observable
     # private-key operation is exposed by this dependency.
