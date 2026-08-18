@@ -1259,12 +1259,14 @@ mod tests {
             snapshot.failure.as_ref().map(SanitizedFailure::category),
             Some("executor_rejected")
         );
-        let requests = faults
-            .fail_requests
-            .lock()
-            .expect("fault runtime request log lock");
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].metadata, Some(metadata));
+        {
+            let requests = faults
+                .fail_requests
+                .lock()
+                .expect("fault runtime request log lock");
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].metadata, Some(metadata));
+        }
         handle.shutdown().await;
     }
 
