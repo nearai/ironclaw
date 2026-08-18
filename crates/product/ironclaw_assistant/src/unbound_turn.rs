@@ -527,14 +527,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_structured_readback_returns_canonical_valid_json() {
+    async fn native_structured_readback_preserves_provider_native_json() {
         let (service, caller_scope, thread_id, run_id) =
             readback_service(" { \"value\": 7 } ", OutputContract::json_schema(schema())).await;
         let result = service
             .resolve_completed_output(&thread_scope(&caller_scope), &thread_id, run_id)
             .await
             .expect("valid native output reads back");
-        assert_eq!(result, r#"{"value":7}"#);
+        assert_eq!(result, " { \"value\": 7 } ");
     }
 
     #[tokio::test]
