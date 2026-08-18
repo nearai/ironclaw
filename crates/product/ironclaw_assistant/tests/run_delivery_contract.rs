@@ -33,6 +33,9 @@ use ironclaw_extension_contracts::external::{
 use ironclaw_extension_contracts::preference_target::{
     PreferenceTargetCodec, PreferenceTargetEncodeRequest,
 };
+use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
+use ironclaw_host_api::path::{MountAlias, VirtualPath};
 use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
 use ironclaw_host_api::product_adapter::{
     AdapterInstallationId, ProductAdapterError, ProductAdapterId,
@@ -46,6 +49,10 @@ use ironclaw_host_api::{
     attachment::WorkspaceFile,
     ids::{AgentId, ExtensionId, TenantId, ThreadId, UserId},
     path::ScopedPath,
+};
+use ironclaw_notifications::{
+    ListNotificationsRequest, NotificationInboxStore, NotificationInboxStorePort, NotificationKind,
+    NotificationRecipient,
 };
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceKey, CommunicationPreferenceRecord,
@@ -795,6 +802,36 @@ fn fallback_scope() -> TurnScope {
     )
 }
 
+fn notification_inbox() -> Arc<NotificationInboxStore<InMemoryBackend>> {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/notifications").expect("notification mount alias"),
+        VirtualPath::new("/engine/test/run-delivery-notifications")
+            .expect("notification mount target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("notification mount view");
+    Arc::new(NotificationInboxStore::new(Arc::new(
+        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
+    )))
+}
+
+async fn inbox_records(
+    inbox: &dyn NotificationInboxStorePort,
+) -> ironclaw_notifications::NotificationPage {
+    inbox
+        .list(ListNotificationsRequest {
+            recipient: NotificationRecipient {
+                tenant_id: tenant(),
+                user_id: user(),
+            },
+            limit: 10,
+            cursor: None,
+            include_archived: false,
+        })
+        .await
+        .expect("notification inbox")
+}
+
 fn envelope_for_conversation(
     payload: ProductInboundPayload,
     event_id: &str,
@@ -883,6 +920,7 @@ struct Harness {
     adapter: Arc<RecordingChannelAdapter>,
     store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     route_store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    notification_inbox: Arc<NotificationInboxStore<InMemoryBackend>>,
     turns: Arc<ScriptedTurnCoordinator>,
     threads: Arc<InMemorySessionThreadService>,
 }
@@ -970,6 +1008,7 @@ fn build_harness_with_gate_ports(
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let route_store =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let notification_inbox = notification_inbox();
     let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     let threads = Arc::new(InMemorySessionThreadService::default());
     let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
@@ -995,6 +1034,9 @@ fn build_harness_with_gate_ports(
         outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
+        notification_inbox: Some(
+            Arc::clone(&notification_inbox) as Arc<dyn NotificationInboxStorePort>
+        ),
         project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
         delivery_targets: Arc::new(StaticTargetCatalog {
             targets: Vec::new(),
@@ -1022,6 +1064,7 @@ fn build_harness_with_gate_ports(
         adapter,
         store,
         route_store,
+        notification_inbox,
         turns,
         threads,
     }
@@ -1678,6 +1721,13 @@ async fn observer_marks_needs_input_while_blocked_then_swaps_back_and_completes(
         2,
         "the working indicator is re-posted after the gate cycle: {texts:?}"
     );
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::ApprovalRequired
+    );
+    assert!(inbox.notifications[0].resolved_at.is_some());
 }
 
 /// A long-running run refreshes its working indicator in place with escalating
@@ -1838,6 +1888,13 @@ async fn observer_retracts_working_indicator_and_auth_prompt_after_auth_completi
             .iter()
             .all(|attempt| attempt.status == ironclaw_outbound::OutboundDeliveryStatus::Delivered)
     );
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::AuthenticationRequired
+    );
+    assert!(inbox.notifications[0].resolved_at.is_some());
 }
 
 #[tokio::test]
@@ -1900,6 +1957,13 @@ async fn observer_records_gate_route_after_approval_prompt() {
         .expect("route lookup")
         .expect("gate route recorded");
     assert_eq!(route.run_id, run_id);
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::ApprovalRequired
+    );
+    assert_eq!(inbox.unread_count, 1);
     assert!(
         !route.delivered_conversation_fingerprints.is_empty(),
         "fingerprints recorded"
@@ -2080,6 +2144,14 @@ async fn observer_delivers_a_prompt_for_each_distinct_auth_gate() {
         prompts.len(),
         2,
         "each distinct auth gate must deliver its own prompt: {texts:?}"
+    );
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 2);
+    assert!(
+        inbox
+            .notifications
+            .iter()
+            .all(|notification| { notification.kind == NotificationKind::AuthenticationRequired })
     );
 }
 
@@ -2672,6 +2744,7 @@ struct TriggeredHarness {
     store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     route_store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     delivery_store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    notification_inbox: Arc<NotificationInboxStore<InMemoryBackend>>,
     turns: Arc<ScriptedTurnCoordinator>,
     threads: Arc<InMemorySessionThreadService>,
 }
@@ -2770,6 +2843,7 @@ fn build_triggered_harness_with_turns_catalog(
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let delivery_store =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let notification_inbox = notification_inbox();
     let threads = Arc::new(InMemorySessionThreadService::default());
     let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
     let codecs = Arc::new(GrowableCodecs::with_initial(initially_active));
@@ -2796,6 +2870,9 @@ fn build_triggered_harness_with_turns_catalog(
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: communication_preferences
             .unwrap_or_else(|| Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>),
+        notification_inbox: Some(
+            Arc::clone(&notification_inbox) as Arc<dyn NotificationInboxStorePort>
+        ),
         project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
         delivery_targets: delivery_targets.unwrap_or_else(|| {
             Arc::new(StaticTargetCatalog { targets: catalog })
@@ -2836,6 +2913,7 @@ fn build_triggered_harness_with_turns_catalog(
         store,
         route_store,
         delivery_store,
+        notification_inbox,
         turns,
         threads,
     }
@@ -3777,6 +3855,12 @@ async fn triggered_empty_notification_set_delivers_nothing() {
         .await
         .expect("attempts");
     assert!(attempts.is_empty(), "no delivery attempt: {attempts:?}");
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::ApprovalRequired
+    );
 }
 
 #[tokio::test]
@@ -4189,6 +4273,7 @@ fn notify_user_fixture(
         outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
+        notification_inbox: None,
         project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
         delivery_targets: Arc::new(StaticTargetCatalog {
             targets: catalog.clone(),

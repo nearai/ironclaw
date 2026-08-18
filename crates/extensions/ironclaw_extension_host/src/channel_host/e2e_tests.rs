@@ -656,6 +656,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
                 outbound_store,
                 route_store: Arc::clone(&route_store),
                 communication_preferences: preferences,
+                notification_inbox: None,
                 // The creator-owned notification catalog the background-run
                 // notifier resolves stored channel ids through.
                 delivery_targets: notification_catalog(vec![
@@ -1633,6 +1634,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
         // route is what the inbound approve resolves against.
         route_store: harness.route_store.clone(),
         communication_preferences: preferences,
+        notification_inbox: None,
         delivery_targets: notification_catalog(vec![(
             DM_NOTIFICATION_TARGET_ID,
             dm_reply_target_binding_ref(),
@@ -1911,6 +1913,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
         outbound_store,
         route_store: route_store.clone(),
         communication_preferences: preferences,
+        notification_inbox: None,
         delivery_targets: notification_catalog(vec![(
             DM_NOTIFICATION_TARGET_ID,
             dm_reply_target_binding_ref(),
@@ -2038,6 +2041,7 @@ async fn triggered_auth_prompt_to_non_dm_channel_redacts_the_link_and_parks_the_
         outbound_store,
         route_store: route_store.clone(),
         communication_preferences: preferences,
+        notification_inbox: None,
         delivery_targets: notification_catalog(vec![(
             CHANNEL_NOTIFICATION_TARGET_ID,
             non_dm_channel_reply_target_binding_ref(),

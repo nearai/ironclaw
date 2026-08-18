@@ -16,6 +16,7 @@ use ironclaw_extension_contracts::channel_adapter::OutboundPart;
 use ironclaw_host_api::execution_policy::ResultDeliveryPolicy;
 use ironclaw_host_api::failure::summary::reborn_failure_summary_for_category;
 use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
+use ironclaw_notifications::NotificationKind;
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     OutboundError, OutboundPolicyService, PrepareCommunicationDeliveryRequest, ProjectionUpdateRef,
@@ -561,10 +562,12 @@ async fn notify_background_run(
     .await
     {
         Ok(resolved) => resolved,
-        Err(_error) => {
-            let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
-            record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-            return outcome;
+        Err(error) => {
+            tracing::warn!(target: TRACE_TARGET, %run_id, %error, "notification target lookup failed; continuing with the WebUI Inbox");
+            ResolvedNotificationTargets {
+                targets: Vec::new(),
+                lookup_failed: true,
+            }
         }
     };
     let ResolvedNotificationTargets {
@@ -572,40 +575,24 @@ async fn notify_background_run(
         lookup_failed,
     } = resolved;
 
-    // With no notification channels configured the notifier has nothing to do
-    // for ANY arm: it must not deliver, and it must not touch the run either.
-    // The web app is the whole surface — the automations hold badge and the
-    // in-app gate UI (spec §7) — including for a manual-token auth gate, which
-    // the user CAN complete there. Short-circuiting here also keeps a fire from
-    // holding a watcher open for the full `max_wait` with nothing to say.
-    if targets.is_empty() {
-        // An outage that ate every channel is NOT the same durable fact as a
-        // user who configured none. Recording it as `NoDefaultConfigured`
-        // would report a backend failure as the benign web-app-only state —
-        // exactly the conflation the preference-read arm above avoids.
-        if lookup_failed {
-            tracing::warn!(
-                target: TRACE_TARGET,
-                %run_id,
-                "background run resolved no notification channels because every catalog lookup failed"
-            );
-            let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
-            record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-            return outcome;
-        }
-        if result_delivery != ResultDeliveryPolicy::SuppressWhenNothingToReport {
-            tracing::debug!(
-                target: TRACE_TARGET,
-                %run_id,
-                "background run has no notification channels; notifications stay in the web app"
-            );
-            let outcome = TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured;
-            record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-            return outcome;
-        }
-        // An explicitly suppressible run must settle before we can tell
-        // whether the absence of delivery was intentional or merely had no
-        // configured target. Legacy/default runs retain the early return.
+    // The product Inbox is a first-class destination, so a run with no
+    // external channels must still be observed long enough to publish an
+    // actionable state. Keep a catalog outage distinguishable from an
+    // intentional WebUI-only configuration.
+    let web_inbox_only = targets.is_empty() && !lookup_failed;
+    let lookup_failed_without_targets = targets.is_empty() && lookup_failed;
+    if web_inbox_only {
+        tracing::debug!(
+            target: TRACE_TARGET,
+            %run_id,
+            "background run has no notification channels; notifications stay in the WebUI Inbox"
+        );
+    } else if lookup_failed_without_targets {
+        tracing::warn!(
+            target: TRACE_TARGET,
+            %run_id,
+            "background run resolved no notification channels because every catalog lookup failed"
+        );
     }
 
     let mut delivered_blocked_marker: Option<BlockedActionableMarker> = None;
@@ -660,11 +647,6 @@ async fn notify_background_run(
                 return outcome;
             }
             Err(RunDeliveryError::RunWaitTimedOut { .. }) => {
-                if targets.is_empty() {
-                    let outcome = TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured;
-                    record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                    return outcome;
-                }
                 // The run never reached an actionable state before `max_wait`.
                 // A scheduled/triggered fire has no user watching the channel,
                 // so silence here is the exact gap #6896 closes: deliver the
@@ -735,7 +717,13 @@ async fn notify_background_run(
                                 let fan =
                                     fan_out_plan(services, &notification_context, &plan, &targets)
                                         .await;
-                                let outcome = delivery_outcome_for_fan(&fan);
+                                let outcome = if web_inbox_only {
+                                    TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+                                } else if lookup_failed_without_targets {
+                                    TriggeredRunDeliveryOutcomeKind::Failed
+                                } else {
+                                    delivery_outcome_for_fan(&fan)
+                                };
                                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
                                 return outcome;
                             }
@@ -768,9 +756,24 @@ async fn notify_background_run(
                     gate_ref_for_routing: None,
                     keeps_run_parked: false,
                 };
+                services
+                    .publish_inbox_notification(
+                        &creator_user_id,
+                        &scope,
+                        run_id,
+                        NotificationKind::RunBlocked,
+                        Some("timeout"),
+                    )
+                    .await;
                 let fan =
                     fan_out_plan(services, &notification_context, &timeout_plan, &targets).await;
-                let outcome = delivery_outcome_for_fan(&fan);
+                let outcome = if web_inbox_only {
+                    TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+                } else if lookup_failed_without_targets {
+                    TriggeredRunDeliveryOutcomeKind::Failed
+                } else {
+                    delivery_outcome_for_fan(&fan)
+                };
                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
                 return outcome;
             }
@@ -788,6 +791,31 @@ async fn notify_background_run(
         };
 
         let trigger_label = prompts::triggered_label_from_prompt(&prompt);
+        if let Some(previous) = delivered_blocked_marker.as_ref()
+            && blocked_actionable_marker(&state).as_ref() != Some(previous)
+            && let Some(kind) = inbox_kind_for_triggered_gate_status(previous.status)
+        {
+            services
+                .resolve_inbox_notification(
+                    &creator_user_id,
+                    &scope,
+                    run_id,
+                    kind,
+                    previous.gate_ref.as_deref(),
+                )
+                .await;
+        }
+        if let Some(kind) = inbox_kind_for_triggered_gate_status(state.status) {
+            services
+                .publish_inbox_notification(
+                    &creator_user_id,
+                    &scope,
+                    run_id,
+                    kind,
+                    state.gate_ref.as_ref().map(|gate| gate.as_str()),
+                )
+                .await;
+        }
         if result_delivery == ResultDeliveryPolicy::SuppressWhenNothingToReport
             && state.status == TurnStatus::Completed
             && state.execution_outcome == Some(TurnExecutionOutcome::NothingToReport)
@@ -803,8 +831,13 @@ async fn notify_background_run(
             record_triggered_run_outcome(delivery_store, run_id, outcome).await;
             return outcome;
         }
-        if targets.is_empty() {
+        if web_inbox_only {
             let outcome = TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured;
+            record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+            return outcome;
+        }
+        if lookup_failed_without_targets {
+            let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
             record_triggered_run_outcome(delivery_store, run_id, outcome).await;
             return outcome;
         }
@@ -904,6 +937,14 @@ async fn notify_background_run(
         let outcome = TriggeredRunDeliveryOutcomeKind::Delivered;
         record_triggered_run_outcome(delivery_store, run_id, outcome).await;
         return outcome;
+    }
+}
+
+fn inbox_kind_for_triggered_gate_status(status: TurnStatus) -> Option<NotificationKind> {
+    match status {
+        TurnStatus::BlockedApproval => Some(NotificationKind::ApprovalRequired),
+        TurnStatus::BlockedAuth => Some(NotificationKind::AuthenticationRequired),
+        _ => None,
     }
 }
 

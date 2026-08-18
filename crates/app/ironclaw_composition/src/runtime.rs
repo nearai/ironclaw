@@ -1183,6 +1183,7 @@ impl RebornRuntime {
             outbound_state: Arc::clone(&self.outbound_state.state),
             delivered_gate_routes: Arc::clone(&self.delivered_gate_routes),
             outbound_preferences: Arc::clone(&self.outbound_preferences),
+            notification_inbox: Arc::clone(&self.notification_inbox),
             triggered_delivery_store: Arc::clone(&self.triggered_run_delivery),
             outbound_delivery_targets: Arc::clone(self.outbound_delivery_target_registry.as_ref()?)
                 as Arc<dyn ironclaw_outbound::OutboundDeliveryTargetProvider>,
