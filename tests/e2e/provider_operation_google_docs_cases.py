@@ -153,6 +153,127 @@ def _setup_table_revision_drift(proxy) -> None:
     )
 
 
+def _table_document(revision_id: str, *, populated: bool) -> dict:
+    cell_values = TABLE_DATA if populated else [["", ""], ["", ""]]
+    cell_indexes = [[3, 5], [7, 9]]
+    return {
+        "documentId": DOCUMENT_ID,
+        "revisionId": revision_id,
+        "body": {
+            "content": [
+                {
+                    "startIndex": 2,
+                    "table": {
+                        "tableRows": [
+                            {
+                                "tableCells": [
+                                    {
+                                        "content": [
+                                            {
+                                                "startIndex": cell_indexes[row][column],
+                                                "paragraph": {
+                                                    "elements": (
+                                                        [
+                                                            {
+                                                                "textRun": {
+                                                                    "content": f"{value}\n"
+                                                                }
+                                                            }
+                                                        ]
+                                                        if value
+                                                        else []
+                                                    )
+                                                },
+                                            }
+                                        ]
+                                    }
+                                    for column, value in enumerate(values)
+                                ]
+                            }
+                            for row, values in enumerate(cell_values)
+                        ]
+                    },
+                }
+            ]
+        },
+    }
+
+
+def _batch_update_response(revision_id: str) -> dict:
+    return {
+        "documentId": DOCUMENT_ID,
+        "replies": [],
+        "writeControl": {"requiredRevisionId": revision_id},
+    }
+
+
+def _empty_document(revision_id: str) -> dict:
+    return {
+        "documentId": DOCUMENT_ID,
+        "revisionId": revision_id,
+        "body": {"content": []},
+    }
+
+
+def _arm_json_response(proxy, profile_name: str, method: str, path: str, payload: dict) -> None:
+    proxy.arm(
+        ProviderFaultProfile(
+            name=profile_name,
+            action="respond",
+            status=200,
+            body=json.dumps(payload, separators=(",", ":")),
+        ),
+        method=method,
+        path=path,
+    )
+
+
+def _setup_table_drift_after_population(proxy) -> None:
+    profile = "revision_drift_after_population"
+    document_path = f"/v1/documents/{DOCUMENT_ID}"
+    update_path = f"{document_path}:batchUpdate"
+    responses = [
+        ("GET", document_path, _empty_document("1")),
+        ("POST", update_path, _batch_update_response("2")),
+        ("GET", document_path, _table_document("2", populated=False)),
+        ("POST", update_path, _batch_update_response("3")),
+        ("GET", document_path, _table_document("4", populated=True)),
+    ]
+    for method, path, payload in responses:
+        _arm_json_response(proxy, profile, method, path, payload)
+
+
+def _setup_table_drift_after_header(proxy) -> None:
+    profile = "revision_drift_after_header"
+    document_path = f"/v1/documents/{DOCUMENT_ID}"
+    update_path = f"{document_path}:batchUpdate"
+    responses = [
+        ("GET", document_path, _empty_document("1")),
+        ("POST", update_path, _batch_update_response("2")),
+        ("GET", document_path, _table_document("2", populated=False)),
+        ("POST", update_path, _batch_update_response("3")),
+        ("GET", document_path, _table_document("3", populated=True)),
+        ("POST", update_path, _batch_update_response("4")),
+        ("GET", document_path, _table_document("5", populated=True)),
+    ]
+    for method, path, payload in responses:
+        _arm_json_response(proxy, profile, method, path, payload)
+
+
+def _table_drift_outcome(expected_stage: str, expected_revision: str, failure: str):
+    async def assert_outcome(emulate_url: str, preview: dict) -> None:
+        output = _output(preview)
+        assert output["verified"] is False, output
+        assert output["stage"] == expected_stage, output
+        assert output["revision_id"] == expected_revision, output
+        assert output["failure"] == failure, output
+        document = await _document(emulate_url)
+        assert document["revisionId"] == "1", document
+        assert TABLE_DATA not in _document_tables(document), document
+
+    return assert_outcome
+
+
 def _output(preview: dict) -> dict:
     assert preview["truncated"] is False, preview
     output = json.loads(preview["output_preview"])
@@ -400,6 +521,48 @@ GOOGLE_DOCS_PROVIDER_OPERATION_CASES = (
         expected_proxy_profile="revision_drift",
         expected_forwarded_request_count=2,
         expected_profile_request_count=2,
+    ),
+    ProviderOperationCase(
+        case_id="google_docs_create_table_with_data_drift_after_population",
+        provider_service="google",
+        capability_id="google-docs.create_table_with_data",
+        arguments={
+            "document_id": DOCUMENT_ID,
+            "index": 1,
+            "table_data": TABLE_DATA,
+            "bold_header": True,
+        },
+        assert_baseline=_baseline,
+        assert_outcome=_table_drift_outcome(
+            "table_populated",
+            "4",
+            "document revision changed after table population: expected 3, found 4",
+        ),
+        expected_request_count=5,
+        setup_provider_proxy=_setup_table_drift_after_population,
+        expect_provider_forward=False,
+        expected_proxy_profile="revision_drift_after_population",
+    ),
+    ProviderOperationCase(
+        case_id="google_docs_create_table_with_data_drift_after_header",
+        provider_service="google",
+        capability_id="google-docs.create_table_with_data",
+        arguments={
+            "document_id": DOCUMENT_ID,
+            "index": 1,
+            "table_data": TABLE_DATA,
+            "bold_header": True,
+        },
+        assert_baseline=_baseline,
+        assert_outcome=_table_drift_outcome(
+            "header_styled",
+            "5",
+            "document revision changed after header styling: expected 4, found 5",
+        ),
+        expected_request_count=7,
+        setup_provider_proxy=_setup_table_drift_after_header,
+        expect_provider_forward=False,
+        expected_proxy_profile="revision_drift_after_header",
     ),
     ProviderOperationCase(
         case_id="google_docs_insert_text",

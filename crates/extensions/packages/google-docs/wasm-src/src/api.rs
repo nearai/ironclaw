@@ -798,7 +798,7 @@ pub fn create_table_with_data(
     if let Some(revision_id) = inserted["revisionId"].as_str() {
         latest_revision = revision_id.to_string();
     }
-    if let Err(reason) = validate_post_insert_revision(&insert_revision, &inserted) {
+    if let Err(reason) = validate_read_revision(&insert_revision, &inserted, "table insertion") {
         return Ok(partial_table_result(
             &result_document_id,
             &latest_revision,
@@ -863,8 +863,22 @@ pub fn create_table_with_data(
                 ));
             }
         };
+        let expected_revision = latest_revision.clone();
         if let Some(revision_id) = populated["revisionId"].as_str() {
             latest_revision = revision_id.to_string();
+        }
+        if let Err(reason) =
+            validate_read_revision(&expected_revision, &populated, "table population")
+        {
+            return Ok(partial_table_result(
+                &result_document_id,
+                &latest_revision,
+                rows,
+                columns,
+                populated_cells,
+                completed_stage,
+                reason,
+            ));
         }
         let header_requests = match build_header_style_requests(&populated, table_index) {
             Ok(requests) => requests,
@@ -918,8 +932,27 @@ pub fn create_table_with_data(
             ));
         }
     };
+    let expected_revision = latest_revision.clone();
     if let Some(revision_id) = verified_document["revisionId"].as_str() {
         latest_revision = revision_id.to_string();
+    }
+    let last_mutation = if completed_stage == CreateTableStage::HeaderStyled {
+        "header styling"
+    } else {
+        "table population"
+    };
+    if let Err(reason) =
+        validate_read_revision(&expected_revision, &verified_document, last_mutation)
+    {
+        return Ok(partial_table_result(
+            &result_document_id,
+            &latest_revision,
+            rows,
+            columns,
+            populated_cells,
+            completed_stage,
+            reason,
+        ));
     }
     let verified = table_at_index(&verified_document, table_index)
         .is_some_and(|table_element| table_element_matches(table_element, table_data));
@@ -945,19 +978,20 @@ fn preferred_inserted_table_index(requested_index: i64) -> Result<i64, String> {
         .ok_or_else(|| "table insertion index is too large".to_string())
 }
 
-fn validate_post_insert_revision(
+fn validate_read_revision(
     expected_revision: &str,
     document: &serde_json::Value,
+    mutation: &str,
 ) -> Result<(), String> {
     if expected_revision.is_empty() {
-        return Err("insertTable response did not include a revision ID".to_string());
+        return Err(format!("{mutation} response did not include a revision ID"));
     }
     let actual_revision = document["revisionId"]
         .as_str()
-        .ok_or_else(|| "post-insert document did not include a revision ID".to_string())?;
+        .ok_or_else(|| format!("document read after {mutation} did not include a revision ID"))?;
     if actual_revision != expected_revision {
         return Err(format!(
-            "document revision changed after table insertion: expected {expected_revision}, found {actual_revision}"
+            "document revision changed after {mutation}: expected {expected_revision}, found {actual_revision}"
         ));
     }
     Ok(())
@@ -1430,7 +1464,8 @@ mod tests {
     fn table_population_rejects_revision_drift_after_insertion() {
         let concurrent_document = serde_json::json!({ "revisionId": "3" });
 
-        let error = validate_post_insert_revision("2", &concurrent_document).unwrap_err();
+        let error =
+            validate_read_revision("2", &concurrent_document, "table insertion").unwrap_err();
 
         assert_eq!(
             error,
