@@ -165,7 +165,9 @@ fn thread_artifact_too_large() -> ProductSurfaceError {
     ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 413, false)
 }
 
-fn group_messages_by_run(messages: &[RunArtifactMessage]) -> (
+fn group_messages_by_run(
+    messages: &[RunArtifactMessage],
+) -> (
     Vec<String>,
     std::collections::HashMap<String, Vec<&RunArtifactMessage>>,
 ) {
