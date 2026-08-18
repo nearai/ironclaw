@@ -4593,6 +4593,7 @@ async fn turn_run_state_output_contract_defaults_to_assistant_message_when_missi
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
         checkpoint_id: None,
         gate_ref: None,

@@ -113,6 +113,7 @@ fn legacy_agent_turn_process_metadata_without_output_contract_defaults_to_assist
         allow_steering: false,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         subagent_depth: 0,
         product_context: None,
         resume_disposition: None,
