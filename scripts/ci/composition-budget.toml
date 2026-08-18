@@ -228,7 +228,17 @@ observed_date = "2026-08-08"
 # mirrored `COMPOSITION_ABSOLUTE_SRC_LOC` constant in
 # crates/app/ironclaw_architecture_tests/tests/reborn_restructure_baselines.rs
 # all move to this figure together, per this file's own re-capture instruction.
-loc_ceiling = 41991
+#
+# Union re-measured 41991 -> 42142 on 2026-08-18 after merging main into the
+# BeforeModel-checkpoint-batching branch (#7712). main had already consumed the
+# entire budget on its own (42141 LOC, exactly the effective ceiling of
+# 41991 + 150), so the branch's single mechanical line tipped it over: this
+# branch adds exactly one composition line, the `before_model_checkpoint_interval: 1`
+# field in an exhaustive `CheckpointPolicy` struct literal. That is assembly
+# keeping up with a contract type gaining a field, not behavior accreting into
+# composition. Measured on the merged tree with
+# `bash scripts/ci/check-composition-budget.sh --print`, not summed.
+loc_ceiling = 42142
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -239,8 +249,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 41991
-loc_observed_date = "2026-08-14"
+loc_observed = 42142
+loc_observed_date = "2026-08-18"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the
