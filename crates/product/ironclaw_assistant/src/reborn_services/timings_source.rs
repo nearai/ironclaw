@@ -49,7 +49,8 @@ where
             Err(error) => {
                 // debug!, not info!/warn!: the operator log buffer captures
                 // INFO+ and those entries are embedded into this same
-                // artifact's `logs` block (see reborn_services.rs:3525).
+                // artifact's `logs` block (see `build_run_artifact` in
+                // `run_artifact.rs`).
                 tracing::debug!(
                     ?error,
                     "run artifact exported without optional process-local timings"
