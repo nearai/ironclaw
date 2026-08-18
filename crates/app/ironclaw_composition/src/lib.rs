@@ -450,6 +450,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/replay-payloads",
     "/threads",
     "/conversations",
+    "/suggestions",
     "/turns",
     "/resources",
     "/engine",
@@ -503,10 +504,17 @@ fn invocation_mount_view_for_segments(
     let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 4);
     for alias in PER_USER_ALIASES {
         let target = format!("{tenant_user_prefix}{alias}");
+        let permissions = if *alias == "/suggestions" {
+            // Suggestions are retained model output. Their store performs no
+            // deletion, so do not grant filesystem deletion authority.
+            MountPermissions::read_write()
+        } else {
+            MountPermissions::read_write_list_delete()
+        };
         grants.push(MountGrant::new(
             MountAlias::new(*alias)?,
             VirtualPath::new(target)?,
-            MountPermissions::read_write_list_delete(),
+            permissions,
         ));
     }
     grants.push(MountGrant::new(
@@ -647,6 +655,8 @@ pub enum RebornCompositionError {
     Mount(#[from] ironclaw_host_api::error::HostApiError),
     #[error("reborn filesystem substrate failed: {0}")]
     Filesystem(#[from] ironclaw_filesystem::FilesystemError),
+    #[error("reborn libSQL runtime substrate failed: {0}")]
+    LibSqlRuntime(#[from] ironclaw_libsql_runtime::LibSqlRuntimeError),
     #[error("reborn resource governor substrate failed: {0}")]
     Resource(#[from] ResourceError),
     #[error("reborn approval store substrate failed: {0}")]
@@ -667,6 +677,11 @@ pub enum RebornCompositionError {
         "production runtime policy uses {process_backend:?} but a user sandbox process binding was supplied"
     )]
     UnexpectedUserSandboxProcessPort { process_backend: ProcessBackendKind },
+    /// Carries the store's filesystem cause; flattening it into a message
+    /// would leave an operator unable to tell a broken database from a
+    /// rejected index.
+    #[error("process journal startup migration failed")]
+    ProcessJournalMigration(#[from] ironclaw_processes::ProcessJournalStoreError),
     #[error("reborn production wiring failed: {report:?}")]
     ProductionWiring {
         report: ironclaw_host_runtime::ProductionWiringReport,
@@ -753,6 +768,18 @@ mod mount_view_tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn invocation_mount_view_denies_suggestion_deletion() {
+        let view = invocation_mount_view(&sample_scope()).unwrap();
+        let (_, grant) = view
+            .resolve_with_grant(&ScopedPath::new("/suggestions/doc.json").unwrap())
+            .unwrap();
+        assert!(grant.permissions.read);
+        assert!(grant.permissions.write);
+        assert!(grant.permissions.list);
+        assert!(!grant.permissions.delete);
     }
 
     #[tokio::test]

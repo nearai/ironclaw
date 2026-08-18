@@ -339,6 +339,16 @@ fn is_zero_u32(value: &u32) -> bool {
 }
 
 impl LoopModelUsage {
+    /// Add an optional supplemental call to an optional cumulative snapshot.
+    pub fn merge_optional(cumulative: Option<Self>, supplemental: Option<Self>) -> Option<Self> {
+        let Some(supplemental) = supplemental else {
+            return cumulative;
+        };
+        let mut cumulative = cumulative.unwrap_or_default();
+        cumulative.add_assign(&supplemental);
+        Some(cumulative)
+    }
+
     /// Accumulate another call's usage into this running per-run total.
     pub fn add_assign(&mut self, other: &LoopModelUsage) {
         self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);

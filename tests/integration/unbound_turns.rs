@@ -9,11 +9,10 @@
 //!   engine-level tests drive the still-supported ownerless scope; the
 //!   PRODUCT lane threads its authenticated caller as the thread owner
 //!   (pinned by `unbound_service_threads_caller_as_thread_owner`).
-//! - Admission derives the unbound profile from the journaled declarations
-//!   (no requested profile on the wire; JSON-schema output → structured).
-//! - A structured run completes by recording a validated result through
-//!   `builtin.structured_result` — including the invalid-then-valid repair
-//!   loop — with no assistant reply required.
+//! - Admission persists the output contract independently from loop-family
+//!   selection; JSON-schema output still uses the ordinary unbounded loop.
+//! - A structured run reaches an ordinary assistant candidate, then performs
+//!   exactly one host-owned, tools-disabled native-schema finalization call.
 //! - A default (assistant-message) unbound run completes on a plain final.
 //! - A prepared thread never appears in the owner-scoped listing a
 //!   conversation UI reads — hidden by the prepared-context stamp, whether
@@ -30,12 +29,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
-use ironclaw_host_api::prepared_context::{OutputContract, PreparedTurnDeclarations};
 use ironclaw_host_api::turn::{TurnScope, TurnThreadOwner};
+use ironclaw_host_api::{output::OutputContract, prepared_context::PreparedTurnDeclarations};
 use ironclaw_llm::agent_message::{AgentMessage, AgentMessageRole, ContentPart};
+use ironclaw_llm::{CompletionResponseFormat, Role};
 use ironclaw_threads::{
-    ListThreadsForScopeRequest, PreparedContextRequest, SessionThreadService, ThreadHistoryRequest,
-    ThreadScope,
+    ListThreadsForScopeRequest, PreparedContextRequest, ReadStructuredFinalizationRequest,
+    SessionThreadService, ThreadHistoryRequest, ThreadScope,
 };
 use ironclaw_turns::{
     GetRunStateRequest, IdempotencyKey, RunProfileId, SubmitTurnRequest, SubmitTurnResponse,
@@ -47,8 +47,6 @@ use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
-
-const STRUCTURED_RESULT: &str = "builtin.structured_result";
 
 /// Group scope axes (`test_product_scope` in the group support).
 const TENANT: &str = "tenant-itest";
@@ -102,6 +100,7 @@ fn structured_declarations() -> PreparedTurnDeclarations {
     PreparedTurnDeclarations {
         tools: Vec::new(),
         output: OutputContract::JsonSchema {
+            name: "sentiment_v1".to_string(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -126,6 +125,7 @@ fn submit_request(
         actor: TurnActor::new(UserId::new(CALLER)?),
         accepted_message_ref,
         requested_run_profile: None,
+        output_contract: None,
         requested_model: None,
         idempotency_key: IdempotencyKey::new(idempotency_key)?,
         received_at: chrono::Utc::now(),
@@ -170,6 +170,7 @@ async fn wait_for_terminal(
 struct UnboundRun {
     thread_id: ironclaw_host_api::ids::ThreadId,
     state: TurnRunState,
+    scripted_llm: Arc<support::trace_llm::TraceLlm>,
 }
 
 async fn run_unbound(
@@ -189,7 +190,7 @@ async fn run_unbound(
         .await?;
     assert!(!accepted.idempotent_replay, "first accept must not replay");
     let scope = unbound_turn_scope(&accepted.thread_id)?;
-    group
+    let scripted_llm = group
         .register_scope_script_for_test(scope.clone(), label, replies)
         .await?;
     let coordinator = harness.turn_coordinator_for_test();
@@ -205,16 +206,16 @@ async fn run_unbound(
     Ok(UnboundRun {
         thread_id: accepted.thread_id,
         state,
+        scripted_llm,
     })
 }
 
-/// Structured happy path: the model answers with one `builtin.structured_result`
-/// call whose payload validates; the run completes with NO assistant reply,
-/// the derived profile is `unbound_structured`, and the validated result is a
-/// durable tool-result row on the ownerless thread.
+/// Structured happy path: the ordinary unbounded loop produces a candidate,
+/// then the host performs one native-schema finalizer inference and durably
+/// records the raw JSON plus its parsed view.
 #[tokio::test(flavor = "multi_thread")]
 async fn structured_unbound_run_completes_by_recording_a_validated_result() -> HarnessResult<()> {
-    let group = RebornIntegrationGroup::builtin_tools_with_durable_capability_io().await?;
+    let group = RebornIntegrationGroup::builtin_tools().await?;
     let harness = group.thread("conv-unbound-anchor").build().await?;
 
     let run = run_unbound(
@@ -222,10 +223,12 @@ async fn structured_unbound_run_completes_by_recording_a_validated_result() -> H
         &harness,
         "unbound-structured-happy",
         structured_declarations(),
-        vec![RebornScriptedReply::tool_call(
-            STRUCTURED_RESULT,
-            json!({"sentiment": "positive", "confidence": 0.9}),
-        )],
+        vec![
+            RebornScriptedReply::text("The release sentiment is strongly positive."),
+            RebornScriptedReply::text(serde_json::to_string(
+                &json!({"sentiment": "positive", "confidence": 0.9}),
+            )?),
+        ],
     )
     .await?;
 
@@ -237,56 +240,77 @@ async fn structured_unbound_run_completes_by_recording_a_validated_result() -> H
     );
     assert_eq!(
         run.state.resolved_run_profile_id,
-        RunProfileId::unbound_structured(),
-        "admission must derive the structured profile from the journaled schema"
+        RunProfileId::unbound_default(),
+        "the output contract must not select a distinct loop family"
+    );
+    assert!(run.state.output_contract.is_json_schema());
+
+    assert_eq!(run.scripted_llm.captured_requests().len(), 2);
+    let requests = run.scripted_llm.captured_requests();
+    assert!(
+        requests[0].iter().any(|message| {
+            message.role == Role::System
+                && message
+                    .content
+                    .contains("work phase for a structured response")
+                && message.content.contains("\"sentiment\"")
+        }),
+        "the initial work-phase prompt must embed the durable schema guidance"
+    );
+    for expected in [
+        "You are a background extraction task.",
+        "Classify the sentiment of: the release went great",
+        "The release sentiment is strongly positive.",
+    ] {
+        assert!(
+            requests[1]
+                .iter()
+                .any(|message| message.content.contains(expected)),
+            "the one finalizer request must retain canonical context: {expected}"
+        );
+    }
+    let formats = run.scripted_llm.captured_response_formats();
+    assert!(formats[0].is_none(), "the work phase is ordinary inference");
+    let final_format = match formats[1].as_ref() {
+        Some(CompletionResponseFormat::JsonSchema(format)) => format,
+        Some(CompletionResponseFormat::JsonObject) => {
+            return Err("the finalizer must request a native JSON schema".into());
+        }
+        None => return Err("the finalizer must request a native JSON schema".into()),
+    };
+    assert_eq!(final_format.name, "sentiment_v1");
+    assert!(final_format.is_strict());
+    assert_eq!(
+        final_format.schema,
+        json!({
+            "type": "object",
+            "properties": {
+                "sentiment": {"type": "string", "enum": ["positive", "negative"]},
+                "confidence": {"type": "number"}
+            },
+            "required": ["sentiment"],
+            "additionalProperties": false
+        }),
+        "the finalizer must forward the exact durable schema payload"
+    );
+    let offered_tools = run.scripted_llm.captured_tool_definitions();
+    assert!(
+        offered_tools[1].is_empty(),
+        "the structured finalizer must expose no tools"
     );
 
-    // Seam assertion: the validated result is a durable tool-result row on
-    // the ownerless thread (the caller's read-back surface), and no
-    // assistant reply was required to complete.
     let thread_service = harness.thread_service_for_test()?;
-    let history = thread_service
-        .list_thread_history(ThreadHistoryRequest {
+    let record = thread_service
+        .read_structured_finalization(ReadStructuredFinalizationRequest {
             scope: ownerless_thread_scope()?,
             thread_id: run.thread_id.clone(),
-        })
-        .await?;
-    let result_ref = history
-        .messages
-        .iter()
-        .filter(|message| {
-            message
-                .tool_result_ref
-                .as_deref()
-                .is_some_and(|value| !value.is_empty())
-        })
-        .filter_map(|message| message.tool_result_ref.clone())
-        .next_back()
-        .unwrap_or_else(|| {
-            panic!(
-                "the structured result must land as a durable tool-result row; rows={:?}",
-                history
-                    .messages
-                    .iter()
-                    .map(|m| (m.kind, m.status))
-                    .collect::<Vec<_>>()
-            )
-        });
-    let chunk = thread_service
-        .read_tool_result_record(ironclaw_threads::ReadToolResultRecordRequest {
-            scope: ownerless_thread_scope()?,
-            thread_id: run.thread_id.clone(),
-            result_ref,
-            offset: 0,
-            max_bytes: ironclaw_threads::effective_tool_result_read_max_bytes(),
+            turn_run_id: run.state.run_id,
         })
         .await?
-        .ok_or("the recorded structured result must be durable")?;
-    let payload: serde_json::Value = serde_json::from_slice(&chunk.content)?;
+        .ok_or("the structured finalization record must be durable")?;
     assert_eq!(
-        payload,
-        json!({"sentiment": "positive", "confidence": 0.9}),
-        "the durable record must hold the exact validated payload"
+        serde_json::from_str::<serde_json::Value>(&record.raw_json)?,
+        json!({"sentiment": "positive", "confidence": 0.9})
     );
 
     // Taxonomy: the ownerless thread is structurally invisible to the
@@ -330,12 +354,12 @@ async fn structured_unbound_run_completes_by_recording_a_validated_result() -> H
     Ok(())
 }
 
-/// The repair loop: an invalid result payload is a model-correctable failure
-/// (schema violations echoed back), and the corrected second call completes
-/// the run — never a host error, never a silent success.
+/// Provider-native structured output is authoritative after the one terminal
+/// inference. The host neither reparses it nor adds a schema-repair loop.
 #[tokio::test(flavor = "multi_thread")]
-async fn structured_unbound_run_repairs_an_invalid_result_payload() -> HarnessResult<()> {
-    let group = RebornIntegrationGroup::builtin_tools_with_durable_capability_io().await?;
+async fn structured_unbound_run_does_not_revalidate_or_retry_provider_output() -> HarnessResult<()>
+{
+    let group = RebornIntegrationGroup::builtin_tools().await?;
     let harness = group.thread("conv-unbound-repair-anchor").build().await?;
 
     let run = run_unbound(
@@ -344,11 +368,8 @@ async fn structured_unbound_run_repairs_an_invalid_result_payload() -> HarnessRe
         "unbound-structured-repair",
         structured_declarations(),
         vec![
-            RebornScriptedReply::tool_call(
-                STRUCTURED_RESULT,
-                json!({"sentiment": "confused", "extra": true}),
-            ),
-            RebornScriptedReply::tool_call(STRUCTURED_RESULT, json!({"sentiment": "negative"})),
+            RebornScriptedReply::text("The sentiment is negative."),
+            RebornScriptedReply::text("not json"),
         ],
     )
     .await?;
@@ -356,58 +377,24 @@ async fn structured_unbound_run_repairs_an_invalid_result_payload() -> HarnessRe
     assert_eq!(
         run.state.status,
         TurnStatus::Completed,
-        "failure={:?}",
-        run.state.failure
+        "the native structured-response contract is authoritative"
     );
-
-    // The durable record holds the CORRECTED payload, not the rejected one.
+    assert_eq!(
+        run.scripted_llm.captured_requests().len(),
+        2,
+        "the host must not run a schema-repair inference"
+    );
     let thread_service = harness.thread_service_for_test()?;
-    let history = thread_service
-        .list_thread_history(ThreadHistoryRequest {
+    let record = thread_service
+        .read_structured_finalization(ReadStructuredFinalizationRequest {
             scope: ownerless_thread_scope()?,
             thread_id: run.thread_id.clone(),
+            turn_run_id: run.state.run_id,
         })
         .await?;
-    let result_refs: Vec<String> = history
-        .messages
-        .iter()
-        .filter_map(|message| message.tool_result_ref.clone())
-        .collect();
-    assert!(
-        !result_refs.is_empty(),
-        "the repaired structured result must land as a durable row"
-    );
-    let mut stored_payloads = Vec::new();
-    for result_ref in result_refs {
-        // The rejected attempt's row may carry no durable record; only the
-        // validated result is required to be durable.
-        if let Some(chunk) = thread_service
-            .read_tool_result_record(ironclaw_threads::ReadToolResultRecordRequest {
-                scope: ownerless_thread_scope()?,
-                thread_id: run.thread_id.clone(),
-                result_ref,
-                offset: 0,
-                max_bytes: ironclaw_threads::effective_tool_result_read_max_bytes(),
-            })
-            .await?
-        {
-            stored_payloads.push(serde_json::from_slice::<serde_json::Value>(&chunk.content)?);
-        }
-    }
-    assert!(
-        stored_payloads.contains(&json!({"sentiment": "negative"})),
-        "the durable record must hold the corrected payload; stored={stored_payloads:?} rows={:?}",
-        history
-            .messages
-            .iter()
-            .map(|m| (m.kind, m.tool_result_ref.clone(), m.content.clone()))
-            .collect::<Vec<_>>()
-    );
-    assert!(
-        !stored_payloads
-            .iter()
-            .any(|payload| payload.get("sentiment") == Some(&json!("confused"))),
-        "the rejected payload must not be recorded as a validated result; stored={stored_payloads:?}"
+    assert_eq!(
+        record.map(|record| record.raw_json),
+        Some("not json".to_string())
     );
     Ok(())
 }
@@ -621,6 +608,7 @@ async fn unbound_accept_and_submit_replay_idempotently() -> HarnessResult<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn unbound_service_threads_caller_as_thread_owner() -> HarnessResult<()> {
     use ironclaw_assistant::{UnboundTurnService, UnboundTurnSubmission};
+    use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 
     let group = RebornIntegrationGroup::builtin_tools().await?;
     let harness = group.thread("conv-unbound-owner-anchor").build().await?;
@@ -631,7 +619,6 @@ async fn unbound_service_threads_caller_as_thread_owner() -> HarnessResult<()> {
     let service = UnboundTurnService::new(
         thread_service.clone(),
         coordinator.clone(),
-        TenantId::new(TENANT)?,
         AgentId::new(AGENT)?,
         Some(ProjectId::new(PROJECT)?),
     );
@@ -657,7 +644,12 @@ async fn unbound_service_threads_caller_as_thread_owner() -> HarnessResult<()> {
 
     let ack = service
         .accept_and_submit(UnboundTurnSubmission {
-            actor_user_id: caller.clone(),
+            caller: ProductSurfaceCaller::new(
+                TenantId::new(TENANT)?,
+                caller.clone(),
+                Some(AgentId::new(AGENT)?),
+                Some(ProjectId::new(PROJECT)?),
+            ),
             public_id: public_id.to_string(),
             system_prompt: "You are a background extraction task.".to_string(),
             messages: vec![AgentMessage {
@@ -683,7 +675,12 @@ async fn unbound_service_threads_caller_as_thread_owner() -> HarnessResult<()> {
     let outcome = service
         .wait_for_completion(
             public_id,
-            &caller,
+            &ProductSurfaceCaller::new(
+                TenantId::new(TENANT)?,
+                caller.clone(),
+                Some(AgentId::new(AGENT)?),
+                Some(ProjectId::new(PROJECT)?),
+            ),
             submitted_run_id,
             Duration::from_millis(50),
         )

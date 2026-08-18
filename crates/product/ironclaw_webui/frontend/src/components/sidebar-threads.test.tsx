@@ -101,7 +101,7 @@ function findNodeByType(root, type) {
   return found;
 }
 
-function renderInteractiveSidebarThreads(props = {}, windowOverrides = {}) {
+function renderInteractiveSidebarThreads(props = {}, contextOverrides = {}) {
   const stateUpdates = [];
   function ConfirmDialog(dialogProps) {
     return { type: "confirm-dialog", props: dialogProps };
@@ -136,13 +136,13 @@ function renderInteractiveSidebarThreads(props = {}, windowOverrides = {}) {
     getPinnedIds: () => new Set(),
     subscribePins: () => () => {},
     threadActivityIso: (thread) => thread.updated_at || thread.created_at || null,
+    toast: (...args) => context.toasts.push(args),
+    toasts: [],
     togglePin: () => {},
     useT: () => (key) => key,
     useThreadStates: () => new Map(),
-    window: {
-      alert: () => {},
-      ...windowOverrides,
-    },
+    window: { alert: () => {} },
+    ...contextOverrides,
   };
   const { SidebarThreads } = runVmModuleForTest(
     "./sidebar-threads.tsx",
@@ -221,18 +221,25 @@ test("SidebarThreads exposes a visible delete action for listed threads", async 
   );
 });
 
-test("SidebarThreads surfaces delete handler failures from the delete button", async () => {
-  const alerts = [];
+test("SidebarThreads shows one sanitized error toast and allows a successful retry", async () => {
   const deletions = [];
+  let shouldFail = true;
   const { context, rendered } = renderInteractiveSidebarThreads(
     {
       onDelete: async (threadId) => {
         deletions.push(threadId);
-        throw { status: 409, payload: { kind: "busy" }, message: "Busy" };
+        if (shouldFail) {
+          shouldFail = false;
+          throw { status: 500, message: "database password leaked" };
+        }
       },
     },
     {
-      alert: (message) => alerts.push(message),
+      window: {
+        alert: () => {
+          throw new Error("thread deletion must not use window.alert");
+        },
+      },
     },
   );
 
@@ -246,10 +253,23 @@ test("SidebarThreads surfaces delete handler failures from the delete button", a
   await flushPromises();
 
   assert.deepEqual(deletions, ["thread-old"]);
-  assert.deepEqual(alerts, ["chat.deleteBusy"]);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(context.toasts)),
+    [["chat.deleteFailed", { tone: "error" }]],
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(context.errors)),
+    [["Failed to delete thread"]],
+    "browser diagnostics must not include the raw deletion error",
+  );
+
+  confirmDialog.props.onConfirm();
+  await flushPromises();
+
+  assert.deepEqual(deletions, ["thread-old", "thread-old"]);
+  assert.equal(context.toasts.length, 1, "successful retry must not emit another toast");
   assert.equal(event.defaultPrevented, true);
   assert.equal(event.propagationStopped, true);
-  assert.equal(context.errors.length, 1);
 });
 
 test("SidebarThreads offers pagination when older conversations are available", async () => {

@@ -29,11 +29,12 @@ use std::str::FromStr;
 
 use crate::error::LlmError;
 use crate::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason,
-    LlmProvider, ReasoningDetail as IronReasoningDetail, ReasoningDetails as IronReasoningDetails,
-    ToolCall as IronToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition as IronToolDefinition, map_provider_finish_token, normalized_model_override,
-    resolve_finish_reason, strip_unsupported_completion_params, strip_unsupported_tool_params,
+    ChatMessage, CompletionRequest, CompletionResponse, CompletionResponseFormat,
+    CompletionStreamSink, FinishReason, LlmProvider, ReasoningDetail as IronReasoningDetail,
+    ReasoningDetails as IronReasoningDetails, ToolCall as IronToolCall, ToolCompletionRequest,
+    ToolCompletionResponse, ToolDefinition as IronToolDefinition, map_provider_finish_token,
+    normalized_model_override, resolve_finish_reason, strip_unsupported_completion_params,
+    strip_unsupported_tool_params,
 };
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 #[cfg(test)]
@@ -67,6 +68,17 @@ pub struct RigAdapter<M: CompletionModel> {
     /// Whether this provider has been live-validated for rig-core streaming.
     /// Untested rig-backed providers retain the buffered trait fallback.
     native_streaming: bool,
+    /// Whether this rig-core provider serializes `CompletionRequest::output_schema`.
+    ///
+    /// rig-core 0.33's dedicated DeepSeek and OpenRouter request paths accept
+    /// the field in the shared request type but omit it from their wire
+    /// payloads. Keep that limitation explicit at the adapter boundary rather
+    /// than silently dispatching a request whose structured-output contract is
+    /// lost.
+    structured_output_supported: bool,
+    /// Whether this rig-core path is an OpenAI-compatible Chat Completions
+    /// adapter that can preserve native `json_object` mode.
+    json_object_supported: bool,
     /// Optional model-discovery endpoint. When set, [`LlmProvider::list_models`]
     /// issues a `GET` instead of returning the empty default. rig-core's
     /// `CompletionModel` does not expose model discovery, so this is wired
@@ -267,6 +279,8 @@ impl<M: CompletionModel> RigAdapter<M> {
             default_additional_params: None,
             default_max_tokens: None,
             native_streaming: false,
+            structured_output_supported: false,
+            json_object_supported: false,
             models_endpoint: None,
         }
     }
@@ -278,6 +292,20 @@ impl<M: CompletionModel> RigAdapter<M> {
     /// its provider.
     pub(crate) fn with_provider_id(mut self, provider_id: impl Into<String>) -> Self {
         self.provider_id = provider_id.into();
+        self
+    }
+
+    /// Mark whether this rig-core provider preserves the request's structured
+    /// output schema on the wire.
+    pub(crate) fn with_structured_output_support(mut self, supported: bool) -> Self {
+        self.structured_output_supported = supported;
+        self
+    }
+
+    /// Mark this adapter as an OpenAI-compatible Chat Completions path that
+    /// can serialize the native JSON-object response mode.
+    pub(crate) fn with_json_object_support(mut self, supported: bool) -> Self {
+        self.json_object_supported = supported;
         self
     }
 
@@ -358,6 +386,22 @@ impl<M: CompletionModel> RigAdapter<M> {
     /// Strip unsupported fields from a `ToolCompletionRequest` in place.
     fn strip_unsupported_tool_params(&self, req: &mut ToolCompletionRequest) {
         strip_unsupported_tool_params(&self.unsupported_params, req);
+    }
+
+    fn ensure_structured_output_supported(
+        &self,
+        requested: Option<&CompletionResponseFormat>,
+    ) -> Result<(), LlmError> {
+        if matches!(requested, Some(CompletionResponseFormat::JsonSchema(_)))
+            && !self.structured_output_supported
+        {
+            return Err(LlmError::InvalidRequest {
+                provider: self.provider_id.clone(),
+                reason: "structured output is not supported by this rig-core provider path"
+                    .to_string(),
+            });
+        }
+        Ok(())
     }
 
     async fn drain_streaming_response(
@@ -1184,6 +1228,70 @@ fn inject_model_override(rig_req: &mut RigRequest, model_override: Option<&str>)
     rig_req.model = model_override.map(str::to_owned);
 }
 
+/// Convert the provider-neutral response schema into rig-core's typed schema.
+///
+/// All four completion paths use the same request field, so keep conversion
+/// and its stable error mapping in one helper rather than letting a path drift.
+fn set_output_schema(
+    rig_req: &mut RigRequest,
+    response_format: Option<CompletionResponseFormat>,
+    provider_id: &str,
+    json_object_supported: bool,
+) -> Result<(), LlmError> {
+    match response_format {
+        None => {}
+        Some(CompletionResponseFormat::JsonSchema(format)) => {
+            // rig-core derives the OpenAI `json_schema.name` from the root
+            // schema's `title` and otherwise falls back to
+            // `response_schema`.  The provider-neutral contract carries its
+            // name separately, so copy that identity into the annotation
+            // rig-core reads before handing the schema over.  `title` is a
+            // JSON Schema annotation and does not change the schema's
+            // validation semantics; overwriting a stale title is required so
+            // the durable response-format name remains authoritative.
+            let mut schema = format.schema;
+            let object = schema
+                .as_object_mut()
+                .ok_or_else(|| LlmError::InvalidRequest {
+                    provider: provider_id.to_string(),
+                    reason: "JSON Schema response format must be an object".to_string(),
+                })?;
+            object.insert("title".to_string(), serde_json::Value::String(format.name));
+            rig_req.output_schema =
+                Some(
+                    serde_json::from_value(schema).map_err(|error| LlmError::InvalidRequest {
+                        provider: provider_id.to_string(),
+                        reason: format!("invalid JSON Schema response format: {error}"),
+                    })?,
+                );
+        }
+        Some(CompletionResponseFormat::JsonObject) => {
+            if !json_object_supported {
+                return Err(LlmError::InvalidRequest {
+                    provider: provider_id.to_string(),
+                    reason:
+                        "native JSON-object response mode is not supported by this provider path"
+                            .to_string(),
+                });
+            }
+            let params = rig_req
+                .additional_params
+                .get_or_insert_with(|| serde_json::json!({}));
+            let object = params
+                .as_object_mut()
+                .ok_or_else(|| LlmError::InvalidRequest {
+                    provider: provider_id.to_string(),
+                    reason: "provider additional parameters must be a JSON object".to_string(),
+                })?;
+            object.insert(
+                "response_format".to_string(),
+                serde_json::json!({"type": "json_object"}),
+            );
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl<M> LlmProvider for RigAdapter<M>
 where
@@ -1231,7 +1339,9 @@ where
         &self,
         mut request: CompletionRequest,
     ) -> Result<CompletionResponse, LlmError> {
+        self.ensure_structured_output_supported(request.response_format.as_ref())?;
         let model_override = request.take_model_override();
+        let response_format = request.response_format.take();
 
         self.strip_unsupported_completion_params(&mut request);
 
@@ -1247,6 +1357,12 @@ where
             request.temperature,
             self.max_tokens_or_default(request.max_tokens),
             self.cache_retention,
+        )?;
+        set_output_schema(
+            &mut rig_req,
+            response_format,
+            &self.provider_id,
+            self.json_object_supported,
         )?;
 
         merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
@@ -1291,11 +1407,13 @@ where
         mut request: CompletionRequest,
         sink: std::sync::Arc<dyn CompletionStreamSink>,
     ) -> Result<CompletionResponse, LlmError> {
+        self.ensure_structured_output_supported(request.response_format.as_ref())?;
         if !self.native_streaming {
             return self.complete(request).await;
         }
 
         let model_override = request.take_model_override();
+        let response_format = request.response_format.take();
 
         self.strip_unsupported_completion_params(&mut request);
 
@@ -1311,6 +1429,12 @@ where
             request.temperature,
             self.max_tokens_or_default(request.max_tokens),
             self.cache_retention,
+        )?;
+        set_output_schema(
+            &mut rig_req,
+            response_format,
+            &self.provider_id,
+            self.json_object_supported,
         )?;
 
         merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
@@ -1350,7 +1474,9 @@ where
         &self,
         mut request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        self.ensure_structured_output_supported(request.response_format.as_ref())?;
         let model_override = request.take_model_override();
+        let response_format = request.response_format.take();
 
         self.strip_unsupported_tool_params(&mut request);
 
@@ -1371,6 +1497,12 @@ where
             request.temperature,
             self.max_tokens_or_default(request.max_tokens),
             self.cache_retention,
+        )?;
+        set_output_schema(
+            &mut rig_req,
+            response_format,
+            &self.provider_id,
+            self.json_object_supported,
         )?;
 
         merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
@@ -1440,11 +1572,13 @@ where
         mut request: ToolCompletionRequest,
         sink: std::sync::Arc<dyn CompletionStreamSink>,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        self.ensure_structured_output_supported(request.response_format.as_ref())?;
         if !self.native_streaming {
             return self.complete_with_tools(request).await;
         }
 
         let model_override = request.take_model_override();
+        let response_format = request.response_format.take();
 
         self.strip_unsupported_tool_params(&mut request);
 
@@ -1465,6 +1599,12 @@ where
             request.temperature,
             self.max_tokens_or_default(request.max_tokens),
             self.cache_retention,
+        )?;
+        set_output_schema(
+            &mut rig_req,
+            response_format,
+            &self.provider_id,
+            self.json_object_supported,
         )?;
 
         merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
@@ -1607,6 +1747,7 @@ mod tests {
     use rig::completion::CompletionError;
     use rig::streaming::{RawStreamingChoice, RawStreamingToolCall, StreamingCompletionResponse};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tokio::sync::{mpsc, oneshot};
 
@@ -1615,6 +1756,38 @@ mod tests {
     fn with_native_streaming<M: CompletionModel>(mut adapter: RigAdapter<M>) -> RigAdapter<M> {
         adapter.native_streaming = true;
         adapter
+    }
+
+    #[test]
+    fn output_schema_rejects_non_object_root_before_dispatch() {
+        let mut request = build_rig_request(
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            CacheRetention::None,
+        )
+        .expect("empty rig request");
+        let error = set_output_schema(
+            &mut request,
+            Some(CompletionResponseFormat::JsonSchema(
+                crate::provider::JsonSchemaResponseFormat::strict(
+                    "suggestions",
+                    serde_json::json!(["not", "an", "object"]),
+                ),
+            )),
+            "test-provider",
+            true,
+        )
+        .expect_err("a JSON Schema response format must have an object root");
+
+        assert!(matches!(
+            error,
+            LlmError::InvalidRequest { provider, reason }
+                if provider == "test-provider" && reason.contains("must be an object")
+        ));
     }
 
     async fn capture_one_http_request() -> (String, oneshot::Receiver<String>) {
@@ -1730,6 +1903,84 @@ mod tests {
 
         let body = captured_request_body(captured_body).await;
         assert_single_model_override(&body);
+    }
+
+    #[tokio::test]
+    async fn completion_request_serializes_native_output_schema() {
+        use rig::client::CompletionClient;
+        use rig::providers::openai;
+
+        let (base_url, captured_body) = capture_one_http_request().await;
+        let client = openai::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("build OpenAI-compatible client")
+            .completions_api();
+        let adapter = RigAdapter::new(
+            client.completion_model("configured-model"),
+            "configured-model",
+        )
+        .with_structured_output_support(true);
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("Return suggestions")]);
+        request.response_format = Some(crate::provider::CompletionResponseFormat::JsonSchema(
+            crate::provider::JsonSchemaResponseFormat::strict(
+                "suggestions",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {"items": {"type": "array"}}
+                }),
+            ),
+        ));
+        adapter
+            .complete(request)
+            .await
+            .expect_err("capture server intentionally rejects the request");
+
+        let body = captured_request_body(captured_body).await;
+        let body: serde_json::Value = serde_json::from_str(&body).expect("request JSON");
+        assert_eq!(body["response_format"]["type"], "json_schema");
+        assert_eq!(
+            body["response_format"]["json_schema"]["name"],
+            "suggestions"
+        );
+        assert_eq!(body["response_format"]["json_schema"]["strict"], true);
+        assert_eq!(
+            body["response_format"]["json_schema"]["schema"]["properties"]["items"]["type"],
+            "array"
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_request_serializes_native_json_object_mode() {
+        use rig::client::CompletionClient;
+        use rig::providers::openai;
+
+        let (base_url, captured_body) = capture_one_http_request().await;
+        let client = openai::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("build OpenAI-compatible client")
+            .completions_api();
+        let adapter = RigAdapter::new(
+            client.completion_model("configured-model"),
+            "configured-model",
+        )
+        .with_json_object_support(true);
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("Return an object")]);
+        request.response_format = Some(crate::provider::CompletionResponseFormat::JsonObject);
+        adapter
+            .complete(request)
+            .await
+            .expect_err("capture server intentionally rejects the request");
+
+        let body = captured_request_body(captured_body).await;
+        let body: serde_json::Value = serde_json::from_str(&body).expect("request JSON");
+        assert_eq!(
+            body["response_format"],
+            serde_json::json!({"type": "json_object"})
+        );
     }
 
     #[derive(Clone)]
@@ -2271,6 +2522,45 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct DispatchCountingCompletionModel {
+        completions: Arc<AtomicUsize>,
+        streams: Arc<AtomicUsize>,
+    }
+
+    impl CompletionModel for DispatchCountingCompletionModel {
+        type Response = serde_json::Value;
+        type StreamingResponse = StubStreamingResponse;
+        type Client = ();
+
+        fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
+            unimplemented!("constructed directly in tests")
+        }
+
+        async fn completion(
+            &self,
+            _request: RigRequest,
+        ) -> Result<rig::completion::CompletionResponse<Self::Response>, CompletionError> {
+            self.completions.fetch_add(1, Ordering::Relaxed);
+            Ok(rig::completion::CompletionResponse {
+                choice: OneOrMany::one(AssistantContent::text("dispatched")),
+                usage: RigUsage::new(),
+                raw_response: serde_json::json!({}),
+                message_id: None,
+            })
+        }
+
+        async fn stream(
+            &self,
+            _request: RigRequest,
+        ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
+            self.streams.fetch_add(1, Ordering::Relaxed);
+            Err(CompletionError::ProviderError(
+                "structured-output test must reject before dispatch".to_string(),
+            ))
+        }
+    }
+
+    #[derive(Clone)]
     struct MaxTokensCompletionModel {
         expected_max_tokens: Option<u64>,
     }
@@ -2411,6 +2701,91 @@ mod tests {
     impl CompletionStreamSink for RecordingCompletionStreamSink {
         async fn text_delta(&self, delta: String) {
             let _ = self.sender.send(delta);
+        }
+    }
+
+    #[tokio::test]
+    async fn deepseek_and_openrouter_reject_structured_output_before_any_dispatch() {
+        for provider in ["deepseek", "openrouter"] {
+            let completions = Arc::new(AtomicUsize::new(0));
+            let streams = Arc::new(AtomicUsize::new(0));
+            let adapter = RigAdapter::new(
+                DispatchCountingCompletionModel {
+                    completions: Arc::clone(&completions),
+                    streams: Arc::clone(&streams),
+                },
+                "test-model",
+            )
+            .with_provider_id(provider)
+            .with_structured_output_support(false);
+            let structured_format = || {
+                crate::provider::CompletionResponseFormat::JsonSchema(
+                    crate::provider::JsonSchemaResponseFormat::strict(
+                        "suggestions",
+                        serde_json::json!({"type": "object"}),
+                    ),
+                )
+            };
+
+            let mut completion_request =
+                CompletionRequest::new(vec![ChatMessage::user("return structured output")]);
+            completion_request.response_format = Some(structured_format());
+            let error = adapter
+                .complete(completion_request)
+                .await
+                .expect_err("unsupported structured output must fail before dispatch");
+            assert!(matches!(
+                error,
+                LlmError::InvalidRequest { provider: actual, reason }
+                    if actual == provider && reason.contains("structured output")
+            ));
+
+            let mut streaming_request =
+                CompletionRequest::new(vec![ChatMessage::user("return structured output")]);
+            streaming_request.response_format = Some(structured_format());
+            let (delta_tx, _delta_rx) = mpsc::unbounded_channel();
+            let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
+            let error = adapter
+                .complete_streaming(streaming_request, sink)
+                .await
+                .expect_err("unsupported structured streaming must fail before dispatch");
+            assert!(matches!(
+                error,
+                LlmError::InvalidRequest { provider: actual, .. } if actual == provider
+            ));
+
+            let mut tool_request = ToolCompletionRequest::new(
+                vec![ChatMessage::user("return structured output")],
+                Vec::new(),
+            );
+            tool_request.response_format = Some(structured_format());
+            let error = adapter
+                .complete_with_tools(tool_request)
+                .await
+                .expect_err("unsupported tool structured output must fail before dispatch");
+            assert!(matches!(
+                error,
+                LlmError::InvalidRequest { provider: actual, .. } if actual == provider
+            ));
+
+            let mut tool_streaming_request = ToolCompletionRequest::new(
+                vec![ChatMessage::user("return structured output")],
+                Vec::new(),
+            );
+            tool_streaming_request.response_format = Some(structured_format());
+            let (delta_tx, _delta_rx) = mpsc::unbounded_channel();
+            let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
+            let error = adapter
+                .complete_with_tools_streaming(tool_streaming_request, sink)
+                .await
+                .expect_err("unsupported tool structured streaming must fail before dispatch");
+            assert!(matches!(
+                error,
+                LlmError::InvalidRequest { provider: actual, .. } if actual == provider
+            ));
+
+            assert_eq!(completions.load(Ordering::Relaxed), 0);
+            assert_eq!(streams.load(Ordering::Relaxed), 0);
         }
     }
 

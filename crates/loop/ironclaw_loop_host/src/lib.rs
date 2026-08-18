@@ -48,6 +48,7 @@ mod skill_activation;
 mod skill_bundle_context_source;
 mod skill_bundle_source;
 mod skill_context;
+mod structured_output;
 mod structured_result;
 mod subagent_prompt_port;
 mod subagent_spawn_port;
@@ -149,7 +150,11 @@ pub use skill_context::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextCandidatePayload,
     HostSkillContextSource, build_skill_run_snapshot,
 };
-pub use structured_result::{nothing_to_report_result_capability, structured_result_capability};
+pub use structured_output::{
+    STRUCTURED_OUTPUT_FINALIZATION_PROMPT, STRUCTURED_OUTPUT_GUIDANCE_PROMPT,
+    StructuredOutputLoopPromptPort, add_structured_output_guidance, structured_output_guidance,
+};
+pub use structured_result::nothing_to_report_result_capability;
 pub use subagent_prompt_port::{
     DEFAULT_SUBAGENT_GOAL_MAX_BYTES, SubagentLoopPromptPort, SubagentPromptComposer,
     SubagentPromptGoal, SubagentPromptLimits, SubagentPromptMaterial, SubagentPromptMaterialSource,
@@ -213,8 +218,9 @@ use ironclaw_loop_contracts::{
     LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopModelUsage,
     LoopPromptBundleAuthority, LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort,
     LoopSafeSummary, LoopTranscriptPort, MemoryPromptContextLoad, MemoryPromptContextService,
-    ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
+    ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode, SystemInferenceContextMessage,
+    SystemInferenceContextRole, UpdateAssistantDraft, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
     sort_instruction_snippets_for_prompt,
 };
 use ironclaw_outbound::{
@@ -834,6 +840,45 @@ struct RunLeaseFence {
     lease_token: TurnLeaseToken,
 }
 
+/// Verify that a claimed run still belongs to `lease_token` before publishing
+/// a side effect that does not carry its own journal lease.
+///
+/// The journal is the sole authority on ownership. A missing run, a run with a
+/// replacement lease, and a backend error all fail closed. Keeping this check
+/// here lets other host-owned publication paths share the same fence without
+/// duplicating the ownership protocol.
+pub async fn ensure_run_lease_is_current(
+    runtime: &dyn AgentTurnSpawnTreeRuntimePort,
+    run_context: &LoopRunContext,
+    lease_token: TurnLeaseToken,
+) -> Result<(), AgentLoopHostError> {
+    let record = runtime
+        .get_run_record(&run_context.scope, run_context.run_id)
+        .await
+        .map_err(|error| {
+            tracing::debug!(
+                run_id = %run_context.run_id,
+                %error,
+                "run lease ownership check failed; refusing the publication"
+            );
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::TranscriptWriteFailed,
+                "run lease ownership could not be verified",
+            )
+        })?;
+    if record.is_some_and(|record| record.lease_token == Some(lease_token)) {
+        return Ok(());
+    }
+    tracing::debug!(
+        run_id = %run_context.run_id,
+        "run lease was reclaimed by recovery; refusing this worker's publication"
+    );
+    Err(AgentLoopHostError::new(
+        AgentLoopHostErrorKind::TranscriptWriteFailed,
+        "run lease was reclaimed; this worker no longer owns the run",
+    ))
+}
+
 const TRANSCRIPT_WRITE_MAX_ATTEMPTS: usize = 3;
 const TRANSCRIPT_WRITE_RETRY_BASE_DELAY_MS: u64 = 10;
 
@@ -914,37 +959,8 @@ where
         let Some(fence) = self.run_lease_fence.as_ref() else {
             return Ok(());
         };
-        // Bounded, exact-key journal read — the journal is the only authority
-        // on who holds the lease. A run that recovery reclaimed carries either
-        // no lease (requeued, not yet re-claimed) or the replacement worker's
-        // token; both compare unequal, which is exactly the answer wanted.
-        let record = fence
-            .runtime
-            .get_run_record(&self.run_context.scope, self.run_context.run_id)
+        ensure_run_lease_is_current(fence.runtime.as_ref(), &self.run_context, fence.lease_token)
             .await
-            .map_err(|error| {
-                tracing::debug!(
-                    run_id = %self.run_context.run_id,
-                    %error,
-                    "run lease ownership check failed; refusing the transcript write"
-                );
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::TranscriptWriteFailed,
-                    "run lease ownership could not be verified",
-                )
-            })?;
-        // A missing run (or one outside this scope) is not ours to write for.
-        if record.is_some_and(|record| record.lease_token == Some(fence.lease_token)) {
-            return Ok(());
-        }
-        tracing::debug!(
-            run_id = %self.run_context.run_id,
-            "run lease was reclaimed by recovery; refusing this worker's transcript write"
-        );
-        Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::TranscriptWriteFailed,
-            "run lease was reclaimed; this worker no longer owns the run",
-        ))
     }
 }
 
@@ -1712,6 +1728,7 @@ where
             run_id: self.run_context.run_id,
             turn_id: self.run_context.turn_id,
             tool_choice: request.tool_choice.clone(),
+            response_format: None,
         };
         let gateway_result = if let Some(capabilities) = self.capabilities.as_ref() {
             let capabilities: Arc<dyn LoopCapabilityPort> =
@@ -2557,6 +2574,11 @@ pub struct HostManagedModelRequest {
     /// forced capability; the gateway rejects anything else as caller misuse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ironclaw_loop_contracts::LoopModelToolChoice>,
+    /// Host-owned native structured-output format. This field is only set on
+    /// host-owned system inference (for example, a finalizer); ordinary loop
+    /// model requests leave it absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ironclaw_llm::CompletionResponseFormat>,
 }
 
 /// Boundary alias for the route snapshot carried from turn/run state into
@@ -3041,6 +3063,68 @@ where
     context.messages.push(pinned);
     context.messages.sort_by_key(|message| message.sequence);
     Ok(context)
+}
+
+/// Load the same bounded, task-pinned transcript suffix used by the ordinary
+/// model path and project it into the role-preserving messages accepted by a
+/// host-owned system inference.  This keeps structured finalization at the
+/// host boundary: it reuses the canonical context-window and token selector,
+/// but does not consume or mutate the model context cache.
+pub async fn load_canonical_system_inference_context<S>(
+    thread_service: &S,
+    thread_scope: &ThreadScope,
+    run_context: &LoopRunContext,
+    max_messages: usize,
+    prompt_context_budget: PromptContextTokenBudget,
+) -> Result<Vec<SystemInferenceContextMessage>, AgentLoopHostError>
+where
+    S: SessionThreadService + ?Sized + Send + Sync,
+{
+    validate_thread_scope_for_run(thread_scope, run_context)?;
+    let context = load_task_pinned_context_window(
+        thread_service,
+        thread_scope,
+        run_context,
+        max_messages.max(1),
+    )
+    .await
+    .map_err(context_read_error)?;
+    let selected = prompt_context_budget::select_prompt_context_messages(
+        context.messages,
+        prompt_context_budget,
+        accepted_task_message_id(run_context),
+    )?;
+
+    selected
+        .into_iter()
+        .map(|(message, _)| {
+            let (role, content) = match message.kind {
+                MessageKind::User => (SystemInferenceContextRole::User, message.content),
+                MessageKind::Assistant => (SystemInferenceContextRole::Assistant, message.content),
+                MessageKind::ToolResultReference => {
+                    let envelope = ToolResultReferenceEnvelope::from_json_str(&message.content)
+                        .map_err(|error| {
+                            tracing::debug!(%error, "structured finalization tool result context is invalid");
+                            AgentLoopHostError::new(
+                                AgentLoopHostErrorKind::InvalidInvocation,
+                                "tool result context is invalid for structured finalization",
+                            )
+                        })?;
+                    (
+                        SystemInferenceContextRole::Tool,
+                        envelope.model_visible_content_or_safe_summary(),
+                    )
+                }
+                MessageKind::System
+                | MessageKind::Summary
+                | MessageKind::CheckpointReference
+                | MessageKind::CapabilityDisplayPreview => {
+                    (SystemInferenceContextRole::System, message.content)
+                }
+            };
+            Ok(SystemInferenceContextMessage { role, content })
+        })
+        .collect()
 }
 
 fn validate_context_cursor(

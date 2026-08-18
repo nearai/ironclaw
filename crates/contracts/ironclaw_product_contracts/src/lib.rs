@@ -63,6 +63,7 @@ pub mod projection;
 pub mod prompt_source;
 pub mod session_ingress;
 pub mod shared_admission;
+pub mod suggestions;
 pub mod surface;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

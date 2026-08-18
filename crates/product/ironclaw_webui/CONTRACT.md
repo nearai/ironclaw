@@ -107,7 +107,7 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 
 ## `handlers.rs` module-charter map
 
-`src/webui_v2/handlers.rs` is **4,593 lines** and carries a live
+`src/webui_v2/handlers.rs` is **4,890 lines** and carries a live
 `// arch-exempt: large_file` waiver naming plan #5985 (the WebUI route split).
 This map is **not** that split and does not discharge that waiver — PROPOSAL
 §6.4.15 calls this shape "module-charter work, **not a split**", and §6.9.1
@@ -139,6 +139,7 @@ candidate module.
 | `runs` | Run control: cancel, retry, and gate resolution | Anything that reads a run — that is `threads` or `streaming` | `cancel_run`, `CancelRunPath`, `resolve_gate`, `ResolveGatePath`, `retry_run`, `RetryRunPath` |
 | `commands` | The product command surface: listing and executing | A command *constant* — those are `ironclaw_assistant`'s frozen inventory | `list_commands`, `ExecuteCommandBody`, `execute_command` |
 | `automations` | Automation listing and lifecycle (pause/resume/rename/delete) | Trigger evaluation — that is the triggers domain | `list_automations`, `pause_automation`, `resume_automation`, `rename_automation`, `delete_automation`, `ListAutomationsQuery` |
+| `suggestions` | Suggestion snapshot reads and generation/start/dismiss actions | Suggestion orchestration and durable state — those belong behind `ProductSurface` | `SUGGESTIONS_MAX_RETRY_AFTER_SECONDS`, `list_suggestions`, `generate_suggestions`, `start_suggestion`, `dismiss_suggestion` |
 | `traces` | Trace credits, account traces, the account login link, and hold authorization | Trace *content* — that is `ironclaw_trace_commons` | `trace_credits`, `trace_account_traces`, `trace_account_login_link`, `authorize_trace_hold` |
 | `outbound` | Outbound notification channels, delivery targets, the generic host-owned delivery-registration surface, and its capability-failure→HTTP classification | Delivery itself — the host owns the coordinator; channel-specific enrollment parsing belongs in the channel package | `get_notification_channels`, `set_notification_channels`, `CapabilityFailureHttpClass`, `capability_failure_http_class`, `capability_failure_bad_request`, `capability_resolution_succeeded`, `parse_thread_id_for_response`, `outbound_preferences_forbidden`, `outbound_preferences_unavailable`, `list_outbound_delivery_targets`, `notification_setup_status`, `notification_setup_enable`, `notification_setup_disable` |
 | `skills` | Skill discovery, install/update/remove, content reads, and auto-activation | Skill *selection* — that is `ironclaw_skills` | `list_skills`, `search_skills`, `install_skill`, `get_skill_content`, `update_skill`, `remove_skill`, `set_skill_auto_activate`, `set_auto_activate_learned`, `skill_mutation_succeeded`, `skill_mutation_forbidden`, `skill_mutation_unavailable`, `SkillPath`, `SearchSkillsBody`, `InstallSkillBody`, `UpdateSkillBody`, `SetSkillAutoActivateBody` |
@@ -193,6 +194,7 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | **WebSocket** | `ProjectionOnly` |
 | `webui.v2.cancel_run` / `retry_run` / `resolve_gate` | POST | `…/runs/{run_id}/…` | — | `TurnCoordinator` |
 | `webui.v2.list/pause/resume/rename/delete_automation` | GET/POST/DELETE | `/api/webchat/v2/automations…` | — | `ProductSurface` |
+| `webui.v2.suggestions.list/generate/start/dismiss` | GET/POST/DELETE | `/api/webchat/v2/suggestions…` | — | `ProductSurface` |
 | `webui.v2.list/install/import/remove/get_setup/setup_extension/register_hosted_mcp` | GET/POST | `/api/webchat/v2/extensions…` | — | `ProjectionOnly` / `ProductSurface` |
 | `webui.v2.ironhub_deliver_install` | POST | `/api/webchat/v2/ironhub/install` | — | `ProductSurface` |
 | `webui.v2.*_llm_*` | GET/POST | `/api/webchat/v2/llm/…` | — | `ProjectionOnly` / `ProductSurface` |
@@ -203,6 +205,12 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.trace_*` (credit, account, account-login-link, holds/authorize) | GET/POST | `/api/webchat/v2/traces/…` | — | `ProductSurface` |
 | `webui.v2.notification_setup_status` | GET | `/api/webchat/v2/channels/{extension_id}/notifications` | — | `ProductSurface` |
 | `webui.v2.notification_setup_enable` / `notification_setup_disable` | POST | `/api/webchat/v2/channels/{extension_id}/notifications/{enable,disable}` | — | `ProductSurface` |
+
+`GET /api/webchat/v2/suggestions` is read-only and returns the persisted
+generation status (`empty`, `generating`, `ready`, or `failed`).
+`POST /api/webchat/v2/suggestions/generate` requires a bounded
+`client_action_id`, returns `202 Accepted` with `Retry-After` while generation
+is in progress, and returns `200 OK` for terminal snapshots.
 
 The exact per-route set (methods, query params, auth, rate/body limits) is the
 descriptor table in `src/webui_v2/descriptors.rs`; the count/shape is locked by

@@ -60,7 +60,14 @@ impl ModelWorkRequest {
             .identity
             .system_prompt
             .len()
-            .saturating_add(request.input_text.len()) as u64;
+            .saturating_add(request.input_text.len())
+            .saturating_add(
+                request
+                    .context_messages
+                    .iter()
+                    .map(|message| message.content.len())
+                    .sum::<usize>(),
+            ) as u64;
         Self {
             kind: ModelWorkKind::SystemInference {
                 task_kind: request.identity.task_kind,
@@ -102,6 +109,7 @@ impl ModelWorkOutcome {
                     .map(|chunk| chunk.safe_text_delta.len() as u64)
                     .sum(),
                 wall_clock_ms: 0,
+                provider_usage: response.usage,
             }),
             ModelCallOutcome::Failure(error) => Self::from_gateway_error(error),
         }
@@ -116,9 +124,10 @@ impl ModelWorkOutcome {
     ) -> Self {
         match result {
             Ok(response) => Self::Success(ModelWorkUsage {
-                output_tokens: None,
+                output_tokens: response.usage.map(|usage| u64::from(usage.output_tokens)),
                 output_bytes: response.output_text.len() as u64,
                 wall_clock_ms: response.elapsed_ms,
+                provider_usage: response.usage,
             }),
             Err(SystemInferenceError::Cancelled) => {
                 Self::Failure(AgentLoopHostErrorKind::Cancelled)
@@ -141,4 +150,8 @@ pub struct ModelWorkUsage {
     pub output_tokens: Option<u64>,
     pub output_bytes: u64,
     pub wall_clock_ms: u64,
+    /// Provider-reported usage, when the host path received it. Keeping the
+    /// complete value here lets system inference reconcile spend with the
+    /// same cost policy as ordinary model calls.
+    pub provider_usage: Option<super::host::LoopModelUsage>,
 }

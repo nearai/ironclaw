@@ -169,7 +169,9 @@ use ironclaw_outbound::{CommunicationPreferenceRepository, ReplyAttachmentIntent
 use ironclaw_outbound::{
     DeliveredGateRouteStore, OutboundStateStorePort, TriggeredRunDeliveryStore,
 };
-use ironclaw_processes::{ProcessConcurrencyLimits, ProcessJournalStore, ProcessServices};
+use ironclaw_processes::{
+    ProcessConcurrencyLimits, ProcessJournalStore, ProcessResultStore, ProcessServices,
+};
 use ironclaw_product_contracts::account_setup::{
     ChannelConnectionNoticePolicy, ExtensionAccountSetupDescriptor,
 };

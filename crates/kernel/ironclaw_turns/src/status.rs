@@ -1,3 +1,4 @@
+use ironclaw_host_api::output::OutputContract;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -181,6 +182,10 @@ pub struct TurnRunState {
     pub accepted_message_ref: AcceptedMessageRef,
     pub resolved_run_profile_id: RunProfileId,
     pub resolved_run_profile_version: RunProfileVersion,
+    /// Immutable terminal output contract admitted for this run. Defaults to
+    /// the historical assistant-message result for legacy state snapshots.
+    #[serde(default, skip_serializing_if = "OutputContract::is_assistant_message")]
+    pub output_contract: OutputContract,
     /// Whether the resolved run profile admits mid-run steering input
     /// (`SteeringPolicy::allow_steering`, snapshotted at submit resolution).
     /// The busy-submit enqueue gateway consults this before queueing a message

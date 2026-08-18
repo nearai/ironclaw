@@ -130,6 +130,22 @@ pub struct OriginGateMatrix {
 /// (PROPOSAL §6.6.4, CHECKLIST WS10).
 pub const PROCESS_SANDBOX_CAPABILITY_ID: &str = "system.process_sandbox.run";
 
+/// Neutral identity of the read-only extension catalog search capability.
+///
+/// The lifecycle manager implements this capability, but the identity is a
+/// host-facing contract because product-owned prepared contexts may narrow a
+/// run to discovery without depending on that manager.
+pub const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
+
+/// Stable capability identity of the model-facing tool discovery bridge.
+pub const TOOL_SEARCH_CAPABILITY_ID: &str = "ironclaw.tool_search";
+
+/// Stable capability identity of the model-facing tool schema bridge.
+pub const TOOL_DESCRIBE_CAPABILITY_ID: &str = "ironclaw.tool_describe";
+
+/// Stable capability identity of the model-facing tool dispatch bridge.
+pub const TOOL_CALL_CAPABILITY_ID: &str = "ironclaw.tool_call";
+
 pub const UNGATED_LOOP_RUN_CAPABILITIES: &[&str] = &[
     "builtin.echo",
     "builtin.time",
@@ -155,7 +171,7 @@ pub const UNGATED_LOOP_RUN_CAPABILITIES: &[&str] = &[
     "builtin.grep",
     "builtin.skill_list",
     "builtin.trigger_list",
-    "builtin.extension_search",
+    EXTENSION_SEARCH_CAPABILITY_ID,
 ];
 
 impl OriginGateMatrix {
@@ -682,5 +698,28 @@ mod process_sandbox_capability_id_tests {
         let parsed = CapabilityId::new(PROCESS_SANDBOX_CAPABILITY_ID)
             .expect("PROCESS_SANDBOX_CAPABILITY_ID must be a valid CapabilityId");
         assert_eq!(parsed.as_str(), PROCESS_SANDBOX_CAPABILITY_ID);
+    }
+}
+
+#[cfg(test)]
+mod tool_discovery_capability_id_tests {
+    use super::{
+        EXTENSION_SEARCH_CAPABILITY_ID, TOOL_CALL_CAPABILITY_ID, TOOL_DESCRIBE_CAPABILITY_ID,
+        TOOL_SEARCH_CAPABILITY_ID,
+    };
+    use crate::ids::CapabilityId;
+
+    #[test]
+    fn tool_discovery_capability_id_literals_are_valid_and_stable() {
+        for (id, expected) in [
+            (EXTENSION_SEARCH_CAPABILITY_ID, "builtin.extension_search"),
+            (TOOL_SEARCH_CAPABILITY_ID, "ironclaw.tool_search"),
+            (TOOL_DESCRIBE_CAPABILITY_ID, "ironclaw.tool_describe"),
+            (TOOL_CALL_CAPABILITY_ID, "ironclaw.tool_call"),
+        ] {
+            let parsed = CapabilityId::new(id)
+                .expect("tool discovery capability ids must be valid CapabilityIds");
+            assert_eq!(parsed.as_str(), expected);
+        }
     }
 }
