@@ -54,7 +54,11 @@ const DEFAULT_COMPACTION_INTERVAL: usize = 1024;
 
 enum AuthorityLifecycle {
     Vacant,
-    Ready(Arc<ResourceAuthority>),
+    /// The loaded authority plus the delta-journal generation it was loaded
+    /// under. Deltas computed from this authority are only appendable while
+    /// the journal still reports that generation; a failed durable append
+    /// retires it (see `ResourceDeltaJournal::generation`).
+    Ready(Arc<ResourceAuthority>, u64),
     Recovering,
 }
 
@@ -141,7 +145,7 @@ where
             reason: "resource governor authority lock poisoned".to_string(),
         })?;
         match &*guard {
-            AuthorityLifecycle::Ready(authority) => return Ok(Arc::clone(authority)),
+            AuthorityLifecycle::Ready(authority, _) => return Ok(Arc::clone(authority)),
             AuthorityLifecycle::Recovering => {
                 return Err(ResourceError::Storage {
                     reason: "resource governor authority recovery in progress".to_string(),
@@ -150,8 +154,11 @@ where
             AuthorityLifecycle::Vacant => {}
         }
         let started = Instant::now();
+        // Read the generation before the load: a retirement racing the replay
+        // then makes this authority stale rather than silently current.
+        let generation = self.delta_journal.generation();
         let loaded = Arc::new(self.load_authority()?);
-        *guard = AuthorityLifecycle::Ready(Arc::clone(&loaded));
+        *guard = AuthorityLifecycle::Ready(Arc::clone(&loaded), generation);
         tracing::debug!(
             elapsed_ms = started.elapsed().as_millis(),
             "resource governor durable authority loaded"
@@ -182,17 +189,31 @@ where
         let guard = self.authority.lock().map_err(|_| ResourceError::Storage {
             reason: "resource governor authority lock poisoned while enqueueing delta".to_string(),
         })?;
-        let is_current = matches!(
-            &*guard,
-            AuthorityLifecycle::Ready(current) if Arc::ptr_eq(current, authority)
-        );
-        if !is_current {
-            return Err(ResourceError::Storage {
-                reason: "resource governor authority changed before delta enqueue".to_string(),
-            });
-        }
+        let mut guard = guard;
+        let generation = match &*guard {
+            AuthorityLifecycle::Ready(current, generation) if Arc::ptr_eq(current, authority) => {
+                *generation
+            }
+            _ => {
+                return Err(ResourceError::Storage {
+                    reason: "resource governor authority changed before delta enqueue".to_string(),
+                });
+            }
+        };
         authority.check_available()?;
-        self.delta_journal.enqueue(delta)
+        match self.delta_journal.enqueue(delta, generation) {
+            Ok(pending) => Ok(pending),
+            Err(error) => {
+                // The journal retired this generation, so the in-memory
+                // authority has diverged from the log. Drop it here — while we
+                // still hold the lock — so no further delta can be built on it,
+                // and so the caller's `invalidate_authority` finds the slot
+                // already vacated and skips the journal replacement that turned
+                // congestion into a cascade in issue #7714.
+                *guard = AuthorityLifecycle::Vacant;
+                Err(error)
+            }
+        }
     }
 
     fn finish_delta(
@@ -240,8 +261,11 @@ where
     /// an option: the per-account commit gate is released before the durable
     /// ack is awaited, so later operations may already be stacked on top of
     /// the value being undone. Concurrent holders of the discarded authority
-    /// cannot commit anything — `enqueue_delta` rejects a non-current
-    /// authority — so no diverged state can reach the log.
+    /// cannot commit anything: `enqueue_delta` rejects a non-current authority,
+    /// and the journal retires the authority generation before acking the
+    /// failure, so deltas already queued behind the failed batch — and any
+    /// enqueued while this discard is still in flight — are refused too. No
+    /// state built on the diverged authority can reach the log.
     fn discard_authority_for_retry<T>(
         &self,
         authority: &Arc<ResourceAuthority>,
@@ -259,7 +283,7 @@ where
         };
         let is_current = matches!(
             &*guard,
-            AuthorityLifecycle::Ready(current) if Arc::ptr_eq(current, authority)
+            AuthorityLifecycle::Ready(current, _) if Arc::ptr_eq(current, authority)
         );
         if is_current {
             *guard = AuthorityLifecycle::Vacant;
@@ -325,7 +349,7 @@ where
         };
         let restart_journal = matches!(
             &*guard,
-            AuthorityLifecycle::Ready(current) if Arc::ptr_eq(current, authority)
+            AuthorityLifecycle::Ready(current, _) if Arc::ptr_eq(current, authority)
         );
         if restart_journal {
             let error_kind = match &error {
@@ -369,7 +393,10 @@ where
                 // Preserve the primary request error and keep the poisoned
                 // authority installed. A secondary recovery failure must fail
                 // later work closed. Do not log the raw secondary error.
-                *guard = AuthorityLifecycle::Ready(Arc::clone(authority));
+                *guard = AuthorityLifecycle::Ready(
+                    Arc::clone(authority),
+                    self.delta_journal.generation(),
+                );
                 warn!(
                     error_kind = "journal_restart",
                     recovery_elapsed_ms = started.elapsed().as_millis(),

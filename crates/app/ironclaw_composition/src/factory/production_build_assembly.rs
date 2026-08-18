@@ -325,6 +325,12 @@ async fn build_local_storage_production_shaped(
     // the data plane is already a multi-connection pool that does not serialize
     // writers, so only the process journal takes the dedicated pool (#7471) and
     // the governor stays on the data plane, unchanged.
+    //
+    // One lane serves both journals on purpose: #7714 was queue depth (every
+    // bulk writer ahead of a journal append, each holding the slot for a whole
+    // lease), and two journal producers put at most one short append ahead of
+    // each other. A lane each would add a third process-wide contender for
+    // SQLite's write lock — see `LibSqlRuntime::split_journal_lane`.
     let libsql_journal_lane = match &filesystem_bundle.durable_backend {
         DurableBackend::LibSql { runtime, .. } => Some(
             crate::filesystem_assembly::libsql_journal_lane_filesystem(runtime, |backend| {

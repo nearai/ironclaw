@@ -1039,6 +1039,92 @@ mod tests {
         );
     }
 
+    /// The other recovery category, driven through the same caller. Without
+    /// this, a regression that stopped classifying `crash_retry_exhausted`
+    /// would surface as a generic `Backend` error and no test would notice.
+    ///
+    /// The process is submitted straight to the journal rather than through
+    /// `ProcessInvocationStore::start`: `start` is worker-local, and every
+    /// durable record it goes on to create carries a checkpoint ref, which is
+    /// the `lease_expired` shape. A checkpointless record is what recovery
+    /// requeues until the reclaim budget runs out.
+    #[tokio::test]
+    async fn transition_after_crash_retry_exhaustion_reports_lease_lost() {
+        let (store, journal) = process_store();
+        let runtime = Arc::clone(&journal) as Arc<dyn ProcessRuntimePort>;
+        let invocation_id = InvocationId::new();
+        let scope = scope(invocation_id);
+        let process_id = ProcessInvocationStore::process_id(invocation_id);
+
+        runtime
+            .submit_process(crate::SubmitProcessRequest {
+                process_id,
+                process_kind: ProcessKind::CapabilityInvocationState,
+                scope: scope.clone(),
+                exclusive_within_scope: false,
+                operation_id: None,
+                owner_user_id: Some(scope.user_id.clone()),
+                concurrency_class: None,
+                parent_process_id: None,
+                root_process_id: None,
+                spawn_tree_descendant_cap: None,
+                dependency: None,
+                checkpoint_ref: None,
+                input: None,
+                created_at: chrono::Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .unwrap();
+
+        for attempt in 0..crate::MAX_CRASH_RECOVERY_RECLAIMS {
+            let claimed = runtime
+                .claim_next_processes(ClaimProcessesRequest {
+                    worker_id: ProcessWorkerId::from_trusted(CAPABILITY_RUN_WORKER),
+                    scope_filter: Some(scope.clone()),
+                    process_id_filter: Some(process_id),
+                    process_kind_filter: Some(ProcessKind::CapabilityInvocationState),
+                    max_processes: 1,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                claimed.len(),
+                1,
+                "process must be claimable on attempt {attempt}"
+            );
+            // Each round has to clear the previous requeue's grace window, so
+            // the clock moves forward rather than repeating one offset.
+            let recovered = runtime
+                .recover_expired_process_leases(crate::RecoverExpiredProcessLeasesRequest {
+                    now: chrono::Utc::now() + chrono::Duration::hours(1 + attempt as i64),
+                    scope_filter: Some(scope.clone()),
+                    process_kind_filter: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                recovered.recovered.len(),
+                1,
+                "expired lease must be recovered on attempt {attempt}"
+            );
+        }
+
+        let error = store
+            .complete(&scope, invocation_id)
+            .await
+            .expect_err("a transition after retry exhaustion must fail");
+        assert!(
+            matches!(
+                &error,
+                ProcessInvocationError::LeaseLost { invocation_id: id, reason }
+                    if *id == invocation_id
+                        && reason == crate::journal_store::CRASH_RETRY_EXHAUSTED_FAILURE_CATEGORY
+            ),
+            "exhausted crash retries must report a lost lease, got {error:?}"
+        );
+    }
+
     #[tokio::test]
     async fn transition_for_an_unknown_invocation_still_reports_unknown_invocation() {
         let (store, _journal) = process_store();

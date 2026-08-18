@@ -286,7 +286,20 @@ impl LibSqlRuntime {
     /// This deliberately admits exactly one extra process-wide writer. Raising
     /// [`LIBSQL_WRITER_POOL_MAX_CONNECTIONS`] instead would let unbounded bulk
     /// writers fight over the write lock, which is the contention the
-    /// single-slot pool exists to prevent.
+    /// single-slot pool exists to prevent. For the same reason all journals
+    /// share this one lane rather than taking a lane each.
+    ///
+    /// Constraint: the reentrancy guard is lane-local, and so is the writer
+    /// slot. A data-plane transaction that holds SQLite's write lock (the
+    /// filesystem's `BEGIN IMMEDIATE` batches) therefore blocks a journal-lane
+    /// write for up to the connection's `busy_timeout` before it surfaces as
+    /// `BackendBusy` — the lane bounds queueing, it does not bypass the file
+    /// lock. That is why the journals' own retry windows must exceed a single
+    /// backend attempt (see `DEFAULT_BUSY_RETRY_POLICY` in the resource
+    /// governor). Callers must not hold a data-plane write lease across a
+    /// journal-lane write: the guard cannot see the other lane's holder, so the
+    /// self-deadlock that `ReentrantWriter` catches within a lane goes
+    /// undetected across lanes and stalls for the full `busy_timeout` instead.
     pub fn split_journal_lane(&self) -> Result<Self, LibSqlRuntimeError> {
         Self::with_read_pool_size(
             Arc::clone(&self.db),

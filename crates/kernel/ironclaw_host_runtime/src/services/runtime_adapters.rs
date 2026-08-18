@@ -540,6 +540,27 @@ impl FirstPartyRuntimeAdapter {
         }
     }
 
+    /// Releases a prepared reservation, queueing it for retry when the
+    /// release fails.
+    ///
+    /// Every cleanup path that abandons a prepared reservation must go through
+    /// here. Logging the failure and continuing leaves the reservation held
+    /// with nothing to reclaim it, which is the permanent capacity leak in
+    /// issue #7714.
+    fn release_or_defer<G>(&self, governor: &G, reservation_id: ResourceReservationId)
+    where
+        G: ResourceGovernor + ?Sized,
+    {
+        if let Err(error) = governor.release(reservation_id) {
+            tracing::warn!(
+                reservation_id = %reservation_id,
+                error = %error,
+                "failed to release prepared first-party reservation; deferring retry"
+            );
+            self.defer_release(reservation_id);
+        }
+    }
+
     /// Retries every queued release once, re-queueing the ones that fail again.
     fn retry_deferred_releases<G>(&self, governor: &G)
     where
@@ -598,15 +619,8 @@ where
         self.retry_deferred_releases(request.governor);
         let lookup_started_at = latency_started_at();
         let Some(handler) = self.registry.get(request.capability_id) else {
-            if let Some(reservation) = request.resource_reservation
-                && let Err(error) = request.governor.release(reservation.id)
-            {
-                tracing::warn!(
-                    reservation_id = %reservation.id,
-                    error = %error,
-                    "failed to release prepared resource reservation after missing first-party handler"
-                );
-                self.defer_release(reservation.id);
+            if let Some(reservation) = request.resource_reservation {
+                self.release_or_defer(request.governor, reservation.id);
             }
             tracing::debug!("first-party runtime adapter missing handler");
             trace_first_party_stage_and_dispatch_error(
@@ -640,7 +654,7 @@ where
                     "first-party runtime adapter policy planning failed"
                 );
                 if let Some(reservation) = &request.resource_reservation {
-                    release_first_party_reservation(request.governor, reservation.id);
+                    self.release_or_defer(request.governor, reservation.id);
                 }
                 trace_first_party_stage_and_dispatch_error(
                     "plan_capability",
@@ -684,7 +698,7 @@ where
                     "first-party runtime adapter service resolution failed"
                 );
                 if let Some(reservation) = &request.resource_reservation {
-                    release_first_party_reservation(request.governor, reservation.id);
+                    self.release_or_defer(request.governor, reservation.id);
                 }
                 trace_first_party_stage_and_dispatch_error(
                     "resolve_services",
@@ -1157,19 +1171,6 @@ struct NetworkPolicyDiscarder {
 impl WasmRuntimePolicyDiscarder for NetworkPolicyDiscarder {
     fn discard(&self, scope: &ResourceScope, capability_id: &CapabilityId) {
         self.store.discard_for_capability(scope, capability_id);
-    }
-}
-
-fn release_first_party_reservation<G>(governor: &G, reservation_id: ResourceReservationId)
-where
-    G: ResourceGovernor + ?Sized,
-{
-    if let Err(error) = governor.release(reservation_id) {
-        tracing::warn!(
-            reservation_id = %reservation_id,
-            error = %error,
-            "failed to release prepared first-party reservation"
-        );
     }
 }
 

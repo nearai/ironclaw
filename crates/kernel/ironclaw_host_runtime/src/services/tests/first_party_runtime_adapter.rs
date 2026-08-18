@@ -7,12 +7,16 @@ use ironclaw_host_api::{
     dispatch::{DispatchError, RuntimeDispatchErrorKind},
     ids::{ExtensionId, RunId, SecretHandle, UserId, VendorId},
     invocation::InvocationOrigin,
-    resource::ResourceEstimate,
+    resource::{ResourceEstimate, ResourceReservation, ResourceScope},
     runtime::RuntimeKind,
 };
 use serde_json::json;
 
 use super::*;
+use crate::invocation_services::{
+    InvocationServices, InvocationServicesError, InvocationServicesResolutionRequest,
+    InvocationServicesResolver,
+};
 
 #[tokio::test]
 async fn reply_attachment_builtin_is_discoverable_but_default_handler_fails_closed() {
@@ -913,6 +917,176 @@ async fn first_party_adapter_retries_a_failed_reservation_release_on_the_next_di
         governor.inner.reserved_for(&tenant_account),
         ResourceTally::default(),
         "no reservation may remain held, got {attempts:?}"
+    );
+}
+
+/// Resolver that always fails, so a test can drive the service-resolution
+/// cleanup branch without depending on which backend combinations happen to be
+/// unsupported.
+struct FailingInvocationServicesResolver;
+
+impl InvocationServicesResolver for FailingInvocationServicesResolver {
+    fn resolve(
+        &self,
+        _request: InvocationServicesResolutionRequest<'_>,
+    ) -> Result<InvocationServices, InvocationServicesError> {
+        Err(InvocationServicesError::UnsupportedFilesystemBackend {
+            backend: FilesystemBackendKind::HostWorkspace,
+        })
+    }
+}
+
+/// Reserves through the governor and hands back the prepared reservation a
+/// dispatch would carry.
+fn prepared_reservation<G>(governor: &G, scope: &ResourceScope) -> ResourceReservation
+where
+    G: ResourceGovernor,
+{
+    governor
+        .reserve_with_outcome(scope.clone(), ResourceEstimate::default())
+        .expect("prepared reservation")
+        .reservation
+}
+
+/// Regression for issue #7714: a prepared reservation abandoned because policy
+/// planning failed used to be released best-effort and forgotten. When that
+/// release fails the hold leaks permanently, so it must land in the deferred
+/// queue like every other cleanup path.
+#[tokio::test]
+async fn first_party_adapter_defers_a_failed_release_after_planner_failure() {
+    // `Network` effect against `NetworkMode::Deny` is what makes planning fail.
+    let descriptor = test_descriptor(RuntimeKind::FirstParty, vec![EffectKind::Network]);
+    let registry = Arc::new(
+        FirstPartyCapabilityRegistry::new()
+            .with_handler(descriptor.id.clone(), Arc::new(SucceedingFirstPartyHandler)),
+    );
+    let adapter = FirstPartyRuntimeAdapter::from_registry(
+        registry,
+        Arc::new(ConfiguredInvocationServicesResolver::new(
+            Arc::new(DiskFilesystem::new()),
+            None,
+            Arc::new(HostProcessPort::new()),
+            None,
+        )),
+    );
+    let filesystem = DiskFilesystem::new();
+    let governor = ReleaseFailsOnceGovernor::new();
+    let scope = sample_scope();
+    let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let package = test_package(WASM_MANIFEST, "test-wasm");
+    let policy = policy_with(
+        FilesystemBackendKind::HostWorkspace,
+        ProcessBackendKind::LocalHost,
+        NetworkMode::Deny,
+        SecretMode::ScrubbedEnv,
+    );
+    let reservation = prepared_reservation(&governor, &scope);
+    let request = |reservation: Option<ResourceReservation>| RuntimeLaneRequest {
+        run_id: None,
+        origin: None,
+        package: &package,
+        descriptor: &descriptor,
+        filesystem: &filesystem,
+        governor: &governor,
+        runtime_policy: &policy,
+        capability_id: &descriptor.id,
+        scope: scope.clone(),
+        authenticated_actor_user_id: None,
+        estimate: ResourceEstimate::default(),
+        mounts: None,
+        resource_reservation: reservation,
+        input: json!({}),
+    };
+
+    adapter
+        .dispatch_json(request(Some(reservation.clone())))
+        .await
+        .expect_err("planning must fail");
+    assert_eq!(
+        governor.release_attempts(),
+        vec![reservation.id],
+        "the abandoned reservation must at least be attempted"
+    );
+
+    // The next dispatch is the retry seam; it carries no reservation of its
+    // own, so any further release attempt is the deferred retry.
+    adapter
+        .dispatch_json(request(None))
+        .await
+        .expect_err("planning must fail again");
+    assert_eq!(
+        governor.release_attempts(),
+        vec![reservation.id, reservation.id],
+        "the failed release must be retried with the same reservation id"
+    );
+    assert_eq!(
+        governor.inner.reserved_for(&tenant_account),
+        ResourceTally::default(),
+        "no reservation may remain held"
+    );
+}
+
+/// Same contract as the planner path, for the service-resolution cleanup
+/// branch (issue #7714).
+#[tokio::test]
+async fn first_party_adapter_defers_a_failed_release_after_service_resolution_failure() {
+    let descriptor = test_descriptor(RuntimeKind::FirstParty, Vec::new());
+    let registry = Arc::new(
+        FirstPartyCapabilityRegistry::new()
+            .with_handler(descriptor.id.clone(), Arc::new(SucceedingFirstPartyHandler)),
+    );
+    let adapter = FirstPartyRuntimeAdapter::from_registry(
+        registry,
+        Arc::new(FailingInvocationServicesResolver),
+    );
+    let filesystem = DiskFilesystem::new();
+    let governor = ReleaseFailsOnceGovernor::new();
+    let scope = sample_scope();
+    let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let package = test_package(WASM_MANIFEST, "test-wasm");
+    let policy = policy_with(
+        FilesystemBackendKind::HostWorkspace,
+        ProcessBackendKind::LocalHost,
+        NetworkMode::DirectLogged,
+        SecretMode::ScrubbedEnv,
+    );
+    let reservation = prepared_reservation(&governor, &scope);
+    let request = |reservation: Option<ResourceReservation>| RuntimeLaneRequest {
+        run_id: None,
+        origin: None,
+        package: &package,
+        descriptor: &descriptor,
+        filesystem: &filesystem,
+        governor: &governor,
+        runtime_policy: &policy,
+        capability_id: &descriptor.id,
+        scope: scope.clone(),
+        authenticated_actor_user_id: None,
+        estimate: ResourceEstimate::default(),
+        mounts: None,
+        resource_reservation: reservation,
+        input: json!({}),
+    };
+
+    adapter
+        .dispatch_json(request(Some(reservation.clone())))
+        .await
+        .expect_err("service resolution must fail");
+    assert_eq!(governor.release_attempts(), vec![reservation.id]);
+
+    adapter
+        .dispatch_json(request(None))
+        .await
+        .expect_err("service resolution must fail again");
+    assert_eq!(
+        governor.release_attempts(),
+        vec![reservation.id, reservation.id],
+        "the failed release must be retried with the same reservation id"
+    );
+    assert_eq!(
+        governor.inner.reserved_for(&tenant_account),
+        ResourceTally::default(),
+        "no reservation may remain held"
     );
 }
 

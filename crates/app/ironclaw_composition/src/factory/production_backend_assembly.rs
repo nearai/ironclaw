@@ -1592,6 +1592,15 @@ pub(super) async fn build_libsql_production(
     // the process journal queue behind every event and message write and time
     // out on a healthy database (#7714). They get a second write lane over the
     // same rows; see `libsql_journal_lane_filesystem`.
+    //
+    // Both journals deliberately share that one lane rather than taking a lane
+    // each. What made #7714 a timeout was queue *depth*: an unbounded number of
+    // bulk writers ahead of a journal append, each holding the slot for a whole
+    // lease. Two journal producers put at most one short append ahead of the
+    // other, which is well inside the checkout timeout. A third process-wide
+    // writer would instead add another contender for SQLite's single write
+    // lock, which is the contention the one-slot pool exists to prevent (see
+    // `LibSqlRuntime::split_journal_lane`).
     let journal_lane = crate::filesystem_assembly::libsql_journal_lane_filesystem(
         lane_runtime.as_ref(),
         |backend| {
