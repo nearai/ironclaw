@@ -61,6 +61,7 @@
                     "pages": [
                       {
                         "group": "Security",
+                        "expanded": false,
                         "pages": [
                           "security",
                           "security/secrets-and-sandboxing"
