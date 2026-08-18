@@ -66,6 +66,9 @@ mod reborn_services;
 mod run_delivery;
 mod scoped_fs;
 mod steering;
+mod suggestions;
+mod suggestions_observer;
+mod suggestions_store;
 mod unbound_turn;
 mod workflow;
 
@@ -386,6 +389,8 @@ pub use reborn_services::{
     parse_notification_channels_set_input, parse_outbound_delivery_targets_list_input,
     set_notification_channels_for_model,
 };
+pub use suggestions_observer::SuggestionsProcessCommitObserver;
+pub use suggestions_store::{FilesystemSuggestionsStore, SuggestionsStore};
 pub use unbound_turn::{
     UnboundTurnError, UnboundTurnOutcome, UnboundTurnService, UnboundTurnSubmission,
 };

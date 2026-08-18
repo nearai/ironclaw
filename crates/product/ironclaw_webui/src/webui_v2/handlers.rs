@@ -83,6 +83,7 @@ use ironclaw_product_contracts::inbound_requests::{
     ProductCancelRunRequest, ProductCreateThreadRequest, ProductListAutomationsRequest,
     ProductListThreadsRequest, ProductRenameAutomationRequest, ProductResolveGateRequest,
     ProductRetryRunRequest, ProductSetupExtensionRequest, ProductSubmitTurnRequest,
+    RebornSuggestionDismissRequest, RebornSuggestionStartRequest, RebornSuggestionsGenerateRequest,
 };
 use ironclaw_product_contracts::ironhub::{
     IRONHUB_DELIVER_INSTALL_COMMAND, IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult,
@@ -119,9 +120,10 @@ use ironclaw_product_contracts::product_wire::{
     RebornRenameAutomationProductRequest, RebornResolveGateResponse, RebornRetryRunResponse,
     RebornSetNotificationChannelsRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeProductRequest, RebornTraceHoldAuthorizeResponse,
-    SettingsToolPermissionState,
+    RebornSubmitTurnResponse, RebornSuggestionDismissResponse, RebornSuggestionGenerationStatus,
+    RebornSuggestionStartResponse, RebornSuggestionsResponse, RebornTimelineRequest,
+    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
+    RebornTraceHoldAuthorizeResponse, SettingsToolPermissionState,
 };
 use ironclaw_product_contracts::product_wire::{
     RebornNotificationSetupMutationRequest, RebornNotificationSetupStatusResponse,
@@ -152,6 +154,10 @@ use ironclaw_host_api::{
     resolution::{Blocked, Resolution},
     result_meta::FailureKind,
 };
+use ironclaw_product_contracts::suggestions::{
+    SUGGESTION_DISMISS_COMMAND, SUGGESTION_START_COMMAND, SUGGESTIONS_GENERATE_COMMAND,
+    SUGGESTIONS_LIST_VIEW,
+};
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
     ProductSurfaceErrorKind, ProductSurfaceValidationCode,
@@ -174,6 +180,7 @@ const SETTINGS_TOOL_CONFIG_PREFIX: &str = "tool.";
 const SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES: usize =
     OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_TOOL_CONFIG_PREFIX.len();
 const CLIENT_ACTION_ID_MAX_BYTES: usize = 256;
+const SUGGESTIONS_MAX_RETRY_AFTER_SECONDS: u32 = 60;
 const ADMIN_CONFIGURATION_IDEMPOTENCY_KEY_MAX_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Serialize)]
@@ -1977,6 +1984,100 @@ pub async fn delete_automation(
         caller,
         AUTOMATION_DELETE_COMMAND,
         RebornAutomationRequest { automation_id },
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/suggestions`
+///
+/// Returns the current persisted snapshot without starting generation.
+pub async fn list_suggestions(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<RebornSuggestionsResponse>, WebUiV2HttpError> {
+    let response = query_product_view(
+        state.services(),
+        caller,
+        SUGGESTIONS_LIST_VIEW.descriptor(),
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/suggestions/generate`
+///
+/// Begins or observes one durable, idempotent generation. The request action
+/// id is an idempotency key only; generation identity and authorization remain
+/// owned by the product service and its durable store.
+pub async fn generate_suggestions(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Json(request): Json<RebornSuggestionsGenerateRequest>,
+) -> Result<Response, WebUiV2HttpError> {
+    let client_action_id = parse_client_action_id(Some(request.client_action_id))?;
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        SUGGESTIONS_GENERATE_COMMAND,
+        RebornSuggestionsGenerateRequest {
+            client_action_id: client_action_id.as_str().to_string(),
+        },
+    )
+    .await?;
+    let accepted = response.status == RebornSuggestionGenerationStatus::Generating;
+    let retry_after = response
+        .retry_after_seconds
+        .unwrap_or(1)
+        .clamp(1, SUGGESTIONS_MAX_RETRY_AFTER_SECONDS);
+    let mut http_response = (
+        if accepted {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::OK
+        },
+        Json(response),
+    )
+        .into_response();
+    if accepted {
+        let value = HeaderValue::from_str(&retry_after.to_string())
+            .map_err(ProductSurfaceError::internal_from)?;
+        http_response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, value);
+    }
+    Ok(http_response)
+}
+
+/// `POST /api/webchat/v2/suggestions/:suggestion_id/start`
+pub async fn start_suggestion(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(suggestion_id): Path<String>,
+) -> Result<Json<RebornSuggestionStartResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        SUGGESTION_START_COMMAND,
+        RebornSuggestionStartRequest { suggestion_id },
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `DELETE /api/webchat/v2/suggestions/:suggestion_id`
+pub async fn dismiss_suggestion(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(suggestion_id): Path<String>,
+) -> Result<Json<RebornSuggestionDismissResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        SUGGESTION_DISMISS_COMMAND,
+        RebornSuggestionDismissRequest { suggestion_id },
     )
     .await?;
     Ok(Json(response))

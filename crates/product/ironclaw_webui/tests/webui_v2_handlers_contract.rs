@@ -132,7 +132,15 @@ use ironclaw_product_contracts::outbound::{
     ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
-use ironclaw_product_contracts::product_wire::{RebornLogQueryRequest, RebornLogQueryResponse};
+use ironclaw_product_contracts::product_wire::{
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornSuggestion,
+    RebornSuggestionDismissResponse, RebornSuggestionGenerationStatus,
+    RebornSuggestionStartResponse, RebornSuggestionsResponse,
+};
+use ironclaw_product_contracts::suggestions::{
+    SUGGESTION_DISMISS_COMMAND_ID, SUGGESTION_START_COMMAND_ID, SUGGESTIONS_GENERATE_COMMAND_ID,
+    SUGGESTIONS_LIST_VIEW,
+};
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
     ProductSurfaceErrorKind, ProductSurfaceEventSubscription, ProductSurfaceStreamResponse,
@@ -183,6 +191,9 @@ enum ProductSurfaceCallId {
     AutomationRename,
     AutomationDelete,
     NotificationChannelsSet,
+    SuggestionsGenerate,
+    SuggestionStart,
+    SuggestionDismiss,
 }
 
 impl ProductSurfaceCallId {
@@ -214,6 +225,9 @@ impl ProductSurfaceCallId {
             Self::AutomationRename => "automation.rename",
             Self::AutomationDelete => "automation.delete",
             Self::NotificationChannelsSet => NOTIFICATION_CHANNELS_SET_COMMAND_ID,
+            Self::SuggestionsGenerate => SUGGESTIONS_GENERATE_COMMAND_ID,
+            Self::SuggestionStart => SUGGESTION_START_COMMAND_ID,
+            Self::SuggestionDismiss => SUGGESTION_DISMISS_COMMAND_ID,
         }
     }
 
@@ -245,6 +259,9 @@ impl ProductSurfaceCallId {
             "automation.rename" => Some(Self::AutomationRename),
             "automation.delete" => Some(Self::AutomationDelete),
             NOTIFICATION_CHANNELS_SET_COMMAND_ID => Some(Self::NotificationChannelsSet),
+            SUGGESTIONS_GENERATE_COMMAND_ID => Some(Self::SuggestionsGenerate),
+            SUGGESTION_START_COMMAND_ID => Some(Self::SuggestionStart),
+            SUGGESTION_DISMISS_COMMAND_ID => Some(Self::SuggestionDismiss),
             _ => None,
         }
     }
@@ -1022,6 +1039,16 @@ impl StubServices {
                     next_cursor: None,
                 })
             }
+            id if id == SUGGESTIONS_LIST_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(RebornSuggestionsResponse {
+                    status: RebornSuggestionGenerationStatus::Ready,
+                    generation_id: Some("generation-list".to_string()),
+                    retry_after_seconds: None,
+                    suggestions: Vec::new(),
+                })
+                .expect("suggestions payload"),
+                next_cursor: None,
+            }),
             id if id == GLOBAL_AUTO_APPROVE_VIEW.id => {
                 let _: RebornGlobalAutoApproveRequest =
                     serde_json::from_value(query.params).expect("global auto approve params");
@@ -1892,6 +1919,9 @@ impl StubServices {
                     .push((caller, request));
                 RecordedProductSurfaceCallResponse::json(notification_channels_response())
             }
+            ProductSurfaceCallId::SuggestionsGenerate
+            | ProductSurfaceCallId::SuggestionStart
+            | ProductSurfaceCallId::SuggestionDismiss => Err(service_unavailable_error(false)),
         }
     }
 }
@@ -3637,6 +3667,253 @@ async fn delete_automation_dispatches_path_id_to_service() {
         calls[0].input,
         serde_json::json!({ "automation_id": "automation-alpha" })
     );
+}
+
+#[tokio::test]
+async fn suggestion_routes_dispatch_typed_path_inputs_through_product_surface() {
+    let cases = [
+        (
+            Method::POST,
+            "/api/webchat/v2/suggestions/generate",
+            ProductSurfaceCallId::SuggestionsGenerate,
+            serde_json::json!({ "client_action_id": "suggestions-action-1" }),
+        ),
+        (
+            Method::POST,
+            "/api/webchat/v2/suggestions/suggestion-alpha/start",
+            ProductSurfaceCallId::SuggestionStart,
+            serde_json::json!({ "suggestion_id": "suggestion-alpha" }),
+        ),
+        (
+            Method::DELETE,
+            "/api/webchat/v2/suggestions/suggestion-alpha",
+            ProductSurfaceCallId::SuggestionDismiss,
+            serde_json::json!({ "suggestion_id": "suggestion-alpha" }),
+        ),
+    ];
+
+    for (method, uri, call_id, input) in cases {
+        let services = Arc::new(StubServices::default());
+        services.enqueue_operation_response(Err(service_unavailable_error(true)));
+        let router = router_with(services.clone());
+
+        let body = if method == Method::POST && uri.ends_with("/generate") {
+            Body::from(input.to_string())
+        } else {
+            Body::empty()
+        };
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(body)
+                    .expect("suggestion request"),
+            )
+            .await
+            .expect("suggestion oneshot");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let calls = services.surface_calls.lock().expect("lock").clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].call_id, call_id.as_str());
+        assert_eq!(calls[0].input, input);
+    }
+}
+
+#[tokio::test]
+async fn suggestion_routes_serialize_success_responses() {
+    let cases = [
+        (
+            Method::POST,
+            "/api/webchat/v2/suggestions/generate",
+            ProductSurfaceCallId::SuggestionsGenerate,
+            serde_json::json!({ "client_action_id": "suggestions-action-1" }),
+            RecordedProductSurfaceCallResponse::json(RebornSuggestionsResponse {
+                status: RebornSuggestionGenerationStatus::Ready,
+                generation_id: Some("generation-1".to_string()),
+                retry_after_seconds: None,
+                suggestions: vec![RebornSuggestion {
+                    id: "suggestion-alpha".to_string(),
+                    title: "Review".to_string(),
+                    description: "Review the release".to_string(),
+                    suggested_prompt: "Review the release".to_string(),
+                    icon: "extension".to_string(),
+                    sources: vec!["Web Search".to_string()],
+                    thread_id: None,
+                    run_id: None,
+                }],
+            })
+            .expect("suggestions response serializes"),
+            serde_json::json!({
+                "status": "ready",
+                "generation_id": "generation-1",
+                "suggestions": [{
+                    "id": "suggestion-alpha",
+                    "title": "Review",
+                    "description": "Review the release",
+                    "suggested_prompt": "Review the release",
+                    "icon": "extension",
+                    "sources": ["Web Search"]
+                }]
+            }),
+        ),
+        (
+            Method::POST,
+            "/api/webchat/v2/suggestions/suggestion-alpha/start",
+            ProductSurfaceCallId::SuggestionStart,
+            serde_json::json!({ "suggestion_id": "suggestion-alpha" }),
+            RecordedProductSurfaceCallResponse::json(RebornSuggestionStartResponse {
+                suggestion_id: "suggestion-alpha".to_string(),
+                thread_id: "thread:alpha".to_string(),
+                run_id: "run-alpha".to_string(),
+            })
+            .expect("start response serializes"),
+            serde_json::json!({
+                "suggestion_id": "suggestion-alpha",
+                "thread_id": "thread:alpha",
+                "run_id": "run-alpha"
+            }),
+        ),
+        (
+            Method::DELETE,
+            "/api/webchat/v2/suggestions/suggestion-alpha",
+            ProductSurfaceCallId::SuggestionDismiss,
+            serde_json::json!({ "suggestion_id": "suggestion-alpha" }),
+            RecordedProductSurfaceCallResponse::json(RebornSuggestionDismissResponse {
+                suggestion_id: "suggestion-alpha".to_string(),
+                dismissed: true,
+            })
+            .expect("dismiss response serializes"),
+            serde_json::json!({ "suggestion_id": "suggestion-alpha", "dismissed": true }),
+        ),
+    ];
+
+    for (method, uri, call_id, expected_input, response, expected_body) in cases {
+        let services = Arc::new(StubServices::default());
+        services.enqueue_operation_response(Ok(response));
+        let router = router_with(services.clone());
+
+        let body = if method == Method::POST && uri.ends_with("/generate") {
+            Body::from(expected_input.to_string())
+        } else {
+            Body::empty()
+        };
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(body)
+                    .expect("suggestion request"),
+            )
+            .await
+            .expect("suggestion oneshot");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(read_json(response).await, expected_body);
+        let calls = services.surface_calls.lock().expect("lock").clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].call_id, call_id.as_str());
+        assert_eq!(calls[0].input, expected_input);
+    }
+}
+
+#[tokio::test]
+async fn suggestions_list_is_read_only_and_returns_two_hundred() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/suggestions")
+                .body(Body::empty())
+                .expect("suggestions list request"),
+        )
+        .await
+        .expect("suggestions list oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(read_json(response).await["status"], "ready");
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id, SUGGESTIONS_LIST_VIEW.id);
+    assert_eq!(queries[0].params, serde_json::json!({}));
+    assert!(services.surface_calls.lock().expect("lock").is_empty());
+}
+
+#[tokio::test]
+async fn suggestions_generate_maps_generating_to_accepted_with_retry_after() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_operation_response(RecordedProductSurfaceCallResponse::json(
+        RebornSuggestionsResponse {
+            status: RebornSuggestionGenerationStatus::Generating,
+            generation_id: Some("generation-2".to_string()),
+            retry_after_seconds: Some(2),
+            suggestions: Vec::new(),
+        },
+    ));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/suggestions/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "client_action_id": "action-2" }).to_string(),
+                ))
+                .expect("suggestions generate request"),
+        )
+        .await
+        .expect("suggestions generate oneshot");
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(response.headers()[header::RETRY_AFTER], "2");
+    assert_eq!(read_json(response).await["status"], "generating");
+    let calls = services.surface_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].call_id,
+        ProductSurfaceCallId::SuggestionsGenerate.as_str()
+    );
+    assert_eq!(
+        calls[0].input,
+        serde_json::json!({ "client_action_id": "action-2" })
+    );
+}
+
+#[tokio::test]
+async fn suggestions_generate_rejects_missing_or_oversized_client_action_id() {
+    for (body, expected_status) in [
+        (serde_json::json!({}), StatusCode::UNPROCESSABLE_ENTITY),
+        (
+            serde_json::json!({ "client_action_id": "a".repeat(257) }),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let services = Arc::new(StubServices::default());
+        let router = router_with(services.clone());
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/suggestions/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("suggestions generate request"),
+            )
+            .await
+            .expect("suggestions generate oneshot");
+
+        assert_eq!(response.status(), expected_status);
+        assert!(services.surface_calls.lock().expect("lock").is_empty());
+    }
 }
 
 #[tokio::test]
