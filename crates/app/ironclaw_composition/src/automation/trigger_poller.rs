@@ -67,14 +67,9 @@ impl ironclaw_triggers::TriggerManualFireRunner for LateBoundTriggerManualFireRu
 pub(crate) struct TriggerPollerRuntimeHandle {
     cancel: CancellationToken,
     handle: JoinHandle<()>,
-    manual_fire_runner: Arc<dyn ironclaw_triggers::TriggerManualFireRunner>,
 }
 
 impl TriggerPollerRuntimeHandle {
-    pub(crate) fn manual_fire_runner(&self) -> Arc<dyn ironclaw_triggers::TriggerManualFireRunner> {
-        Arc::clone(&self.manual_fire_runner)
-    }
-
     pub(crate) async fn shutdown(self, timeout: Duration) {
         self.cancel.cancel();
         self.join_with_timeout(timeout).await;
@@ -109,6 +104,7 @@ pub(crate) struct TriggerPollerCompositionDeps {
     pub(crate) materializer: Arc<dyn TriggerPromptMaterializer>,
     pub(crate) trusted_submitter: Arc<dyn TrustedTriggerFireSubmitter>,
     pub(crate) active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    pub(crate) manual_fire_runner: Arc<LateBoundTriggerManualFireRunner>,
     /// Late-binding slot for the post-submit delivery hook.
     pub(crate) post_submit_hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
 }
@@ -137,16 +133,12 @@ pub(crate) fn spawn_trigger_poller(
             fire_settlement_observer,
         },
     )?);
-    let manual_fire_runner: Arc<dyn ironclaw_triggers::TriggerManualFireRunner> = worker.clone();
+    deps.manual_fire_runner.bind(worker.clone())?;
     let task_cancel = cancel.clone();
     let handle = tokio::spawn(async move {
         run_trigger_poller(worker, settings, task_cancel).await;
     });
-    Ok(Some(TriggerPollerRuntimeHandle {
-        cancel,
-        handle,
-        manual_fire_runner,
-    }))
+    Ok(Some(TriggerPollerRuntimeHandle { cancel, handle }))
 }
 
 const POST_SUBMIT_HOOK_PENDING_CAPACITY: usize = 256;
@@ -390,11 +382,7 @@ mod tests {
             task_cancel.cancelled().await;
             std::future::pending::<()>().await;
         });
-        let runtime_handle = TriggerPollerRuntimeHandle {
-            cancel,
-            handle,
-            manual_fire_runner: Arc::new(ironclaw_triggers::MissingTriggerManualFireRunner),
-        };
+        let runtime_handle = TriggerPollerRuntimeHandle { cancel, handle };
 
         runtime_handle.shutdown(Duration::from_millis(1)).await;
     }

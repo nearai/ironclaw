@@ -4334,20 +4334,13 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 materializer: trigger_poller_services.materializer,
                 trusted_submitter: trigger_poller_services.trusted_submitter,
                 active_run_lookup,
+                manual_fire_runner: Arc::clone(&services.trigger_manual_fire_runner),
                 post_submit_hook_slot: hook_slot,
             },
         )
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("trigger poller could not be started: {error}"),
         })?;
-        if let Some(handle) = trigger_poller_handle.as_ref() {
-            services
-                .trigger_manual_fire_runner
-                .bind(handle.manual_fire_runner())
-                .map_err(|error| RebornRuntimeError::InvalidArgument {
-                    reason: format!("manual trigger fire runner could not be bound: {error}"),
-                })?;
-        }
     } else {
         trigger_poller_handle = None;
         runtime_post_submit_hook_slot = None;
