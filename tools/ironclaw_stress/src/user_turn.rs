@@ -872,6 +872,7 @@ where
                 accepted_message_ref: AcceptedMessageRef::new(accepted.message_id.to_string())
                     .map_err(|error| OperationFailure::invalid_request("prefill_submit", error))?,
                 requested_run_profile: None,
+                output_contract: None,
                 requested_model: None,
                 idempotency_key: IdempotencyKey::new(format!(
                     "ironclaw-stress-prefill:{operation_ref}"
@@ -1066,6 +1067,7 @@ where
                     ))
                     .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
                     requested_run_profile: None,
+                    output_contract: None,
                     requested_model: None,
                     idempotency_key: IdempotencyKey::new(format!(
                         "ironclaw-stress:{operation_ref}"
@@ -1166,6 +1168,7 @@ where
                     accepted_message_ref: AcceptedMessageRef::new(accepted.message_id.to_string())
                         .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
                     requested_run_profile: None,
+                    output_contract: None,
                     requested_model: None,
                     idempotency_key: IdempotencyKey::new(format!(
                         "ironclaw-stress:{operation_ref}"
@@ -1575,6 +1578,7 @@ where
                 &mut stages.append_tool_result,
                 self.thread_service.append_tool_result_reference(
                     AppendToolResultReferenceRequest {
+                        intrinsic_outcome: None,
                         scope: context.thread_scope.clone(),
                         thread_id: thread_id.clone(),
                         turn_run_id: claimed.state.run_id.to_string(),
@@ -2461,7 +2465,12 @@ fn thread_failure(stage: impl Into<String>, error: SessionThreadError) -> Operat
         }
         SessionThreadError::InvalidMessageTimestamp { .. } => "thread_timestamp_invalid",
         SessionThreadError::InvalidPreparedContext { .. }
-        | SessionThreadError::PreparedContextKeyMismatch { .. } => "thread_invalid_request",
+        | SessionThreadError::PreparedContextKeyMismatch { .. }
+        | SessionThreadError::InvalidStructuredFinalization { .. }
+        | SessionThreadError::StructuredFinalizationPublishMismatch { .. } => {
+            "thread_invalid_request"
+        }
+        SessionThreadError::StructuredFinalizationConflict { .. } => "thread_conflict",
         SessionThreadError::Backend(_) => "thread_backend",
     };
     OperationFailure::new(bucket, stage, error)

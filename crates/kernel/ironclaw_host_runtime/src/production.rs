@@ -1265,6 +1265,7 @@ impl ironclaw_capabilities::HostPolicyFacts for DefaultHostRuntime {
 fn unavailable_from_invocation_state(error: ProcessInvocationError) -> HostRuntimeError {
     let reason = match error {
         ProcessInvocationError::UnknownInvocation { .. } => "process invocation not found",
+        ProcessInvocationError::LeaseLost { .. } => "process invocation lease lost or expired",
         ProcessInvocationError::InvocationAlreadyExists { .. } => {
             "process invocation already exists"
         }

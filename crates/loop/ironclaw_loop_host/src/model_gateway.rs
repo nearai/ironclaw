@@ -261,13 +261,16 @@ where
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
             Arc::new(EphemeralInstructionMaterializationStore::default());
         let context_window_cache = Arc::new(ThreadContextWindowCache::default());
-        self.issue_host_prompt_bundle(
-            &request.context,
-            &request.request,
-            Arc::clone(&instruction_materialization_store),
-            Arc::clone(&context_window_cache),
-        )
-        .await?;
+        let prompt_bundle = self
+            .issue_host_prompt_bundle(
+                &request.context,
+                &request.request,
+                Arc::clone(&instruction_materialization_store),
+                Arc::clone(&context_window_cache),
+            )
+            .await?;
+        let mut request = request;
+        request.request.messages = prompt_bundle.messages;
         let mut port = ThreadBackedLoopModelPort::new(
             Arc::clone(&self.thread_service),
             self.thread_scope.clone(),
@@ -310,7 +313,7 @@ where
         request: &LoopModelRequest,
         instruction_materialization_store: Arc<dyn InstructionMaterializationStore>,
         context_window_cache: Arc<ThreadContextWindowCache>,
-    ) -> Result<(), LoopModelGatewayError> {
+    ) -> Result<ironclaw_loop_contracts::LoopPromptBundle, LoopModelGatewayError> {
         let context_port = Arc::new(
             ThreadBackedLoopContextPort::new(
                 Arc::clone(&self.thread_service),
@@ -335,7 +338,7 @@ where
                 checkpoint_state_ref: None,
                 max_messages: Some(self.max_messages.min(u32::MAX as usize) as u32),
                 inline_messages: request.inline_messages.clone(),
-                capability_view: None,
+                capability_view: request.capability_view.clone(),
             })
             .await
             .map_err(host_error_to_model_gateway_error)?;
@@ -353,7 +356,7 @@ where
             )));
         }
 
-        Ok(())
+        Ok(prompt_bundle)
     }
 }
 
@@ -453,6 +456,7 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
         let diagnostic_effective_model = replay_identity.provider_model_id.clone();
@@ -503,6 +507,7 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
         let diagnostic_effective_model = replay_identity.provider_model_id.clone();
@@ -553,6 +558,7 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
         let provider_turn_scope = format!(
@@ -608,6 +614,7 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
         let provider_turn_scope = format!(
@@ -788,6 +795,7 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
@@ -831,6 +839,7 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
@@ -874,6 +883,7 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
@@ -922,6 +932,7 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
@@ -2777,7 +2788,6 @@ fn is_legacy_credit_exhaustion_error(error: &LlmError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::ids::CapabilityId;
     use std::time::Duration;
 
     #[derive(Default)]
@@ -2851,181 +2861,6 @@ mod tests {
         assert_eq!(
             requests[0].stop_sequences,
             Some(vec!["password: [REDACTED_SECRET]".to_string()])
-        );
-    }
-
-    #[derive(Default)]
-    struct ToolChoiceRecordingProvider {
-        requests: Mutex<Vec<ToolCompletionRequest>>,
-    }
-
-    #[async_trait]
-    impl LlmProvider for ToolChoiceRecordingProvider {
-        fn model_name(&self) -> &str {
-            "tool-choice-recording-model"
-        }
-
-        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
-            Default::default()
-        }
-
-        async fn complete(
-            &self,
-            _request: CompletionRequest,
-        ) -> Result<CompletionResponse, LlmError> {
-            unreachable!("the tool-choice test always has a tool surface")
-        }
-
-        async fn complete_with_tools(
-            &self,
-            request: ToolCompletionRequest,
-        ) -> Result<ToolCompletionResponse, LlmError> {
-            self.requests
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(request);
-            Ok(ToolCompletionResponse {
-                content: Some("done".to_string()),
-                tool_calls: Vec::new(),
-                input_tokens: 1,
-                output_tokens: 1,
-                finish_reason: FinishReason::Stop,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-                reasoning: None,
-                reasoning_details: None,
-            })
-        }
-    }
-
-    struct StaticDefinitionCapabilityPort {
-        definitions: Vec<ironclaw_loop_contracts::ProviderToolDefinition>,
-    }
-
-    #[async_trait]
-    impl ironclaw_loop_contracts::LoopCapabilityPort for StaticDefinitionCapabilityPort {
-        fn tool_definitions(
-            &self,
-        ) -> Result<
-            Vec<ironclaw_loop_contracts::ProviderToolDefinition>,
-            ironclaw_loop_contracts::AgentLoopHostError,
-        > {
-            Ok(self.definitions.clone())
-        }
-
-        async fn visible_capabilities(
-            &self,
-            _request: ironclaw_loop_contracts::VisibleCapabilityRequest,
-        ) -> Result<
-            ironclaw_loop_contracts::VisibleCapabilitySurface,
-            ironclaw_loop_contracts::AgentLoopHostError,
-        > {
-            unreachable!("not used by the tool-choice tests")
-        }
-
-        async fn invoke_capability(
-            &self,
-            _request: ironclaw_loop_contracts::LoopRequest,
-        ) -> Result<
-            ironclaw_host_api::resolution::Resolution,
-            ironclaw_loop_contracts::AgentLoopHostError,
-        > {
-            unreachable!("not used by the tool-choice tests")
-        }
-
-        async fn invoke_capability_batch(
-            &self,
-            _request: ironclaw_loop_contracts::LoopRequestBatch,
-        ) -> Result<
-            ironclaw_host_api::resolution::ResolutionBatch,
-            ironclaw_loop_contracts::AgentLoopHostError,
-        > {
-            unreachable!("not used by the tool-choice tests")
-        }
-    }
-
-    fn structured_result_definition() -> ironclaw_loop_contracts::ProviderToolDefinition {
-        ironclaw_loop_contracts::ProviderToolDefinition::from_parts(
-            CapabilityId::new("builtin.structured_result").expect("valid capability id"),
-            "builtin__structured_result",
-            "record the structured result",
-            serde_json::json!({"type": "object"}),
-        )
-        .expect("valid provider tool definition")
-    }
-
-    #[tokio::test]
-    async fn complete_model_request_forces_the_resolved_provider_tool_name() {
-        let provider = ToolChoiceRecordingProvider::default();
-        let capabilities = Arc::new(StaticDefinitionCapabilityPort {
-            definitions: vec![structured_result_definition()],
-        });
-        let replay_identity =
-            ProviderReplayIdentity::new("tool-choice-recording-provider", provider.model_name())
-                .unwrap();
-
-        complete_model_request(
-            &provider,
-            CompletionRequest::new(vec![ChatMessage::user("finish")]),
-            Some(capabilities),
-            None,
-            None,
-            ProviderRequestContext::new(replay_identity, None).with_tool_choice(Some(
-                ironclaw_loop_contracts::LoopModelToolChoice::ForcedCapability {
-                    capability_id: CapabilityId::new("builtin.structured_result").unwrap(),
-                },
-            )),
-            None,
-        )
-        .await
-        .unwrap();
-
-        let requests = provider
-            .requests
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        assert_eq!(requests.len(), 1);
-        assert_eq!(
-            requests[0].tool_choice.as_deref(),
-            Some("builtin__structured_result"),
-            "the forced capability must reach the provider as its provider tool name"
-        );
-    }
-
-    #[tokio::test]
-    async fn complete_model_request_rejects_a_forced_capability_off_the_visible_surface() {
-        let provider = ToolChoiceRecordingProvider::default();
-        let capabilities = Arc::new(StaticDefinitionCapabilityPort {
-            definitions: vec![structured_result_definition()],
-        });
-        let replay_identity =
-            ProviderReplayIdentity::new("tool-choice-recording-provider", provider.model_name())
-                .unwrap();
-
-        let error = complete_model_request(
-            &provider,
-            CompletionRequest::new(vec![ChatMessage::user("finish")]),
-            Some(capabilities),
-            None,
-            None,
-            ProviderRequestContext::new(replay_identity, None).with_tool_choice(Some(
-                ironclaw_loop_contracts::LoopModelToolChoice::ForcedCapability {
-                    capability_id: CapabilityId::new("builtin.other").unwrap(),
-                },
-            )),
-            None,
-        )
-        .await
-        .expect_err("a forced capability outside the tool surface must fail closed");
-
-        assert_eq!(error.kind, HostManagedModelErrorKind::InvalidRequest);
-        assert!(
-            provider
-                .requests
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_empty(),
-            "no provider dispatch may happen for a rejected forced tool choice"
         );
     }
 

@@ -262,7 +262,7 @@ before assuming any of these ports is wired.
 
 ## Response Cache
 
-`CachedProvider` in `response_cache.rs` caches `complete()` responses. `complete_with_tools()` is never cached (side effects). Cache key is SHA-256 of `(model_name, messages_json, max_tokens, temperature, stop_sequences)`. LRU eviction when `max_entries` is reached; TTL-based expiry on access.
+`CachedProvider` in `response_cache.rs` caches `complete()` responses. `complete_with_tools()` is never cached (side effects). Cache key is SHA-256 of `(model_name, messages_json, max_tokens, temperature, stop_sequences, response_format)`. The `response_format` identity includes an explicit ordinary-vs-structured variant marker and, for structured output, the complete `(name, schema, strict)` envelope. LRU eviction when `max_entries` is reached; TTL-based expiry on access.
 
 **Defaults:** TTL = 1 hour, max entries = 1000. Configure via `LlmConfig` fields: `response_cache_enabled` (env: `LLM_RESPONSE_CACHE_ENABLED`, falls back to `RESPONSE_CACHE_ENABLED`), `response_cache_ttl_secs` (env: `LLM_RESPONSE_CACHE_TTL_SECS`), `response_cache_max_entries` (env: `LLM_RESPONSE_CACHE_MAX_ENTRIES`). Cache is in-memory only — evicted on restart.
 

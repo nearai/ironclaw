@@ -68,7 +68,7 @@ Root cause, in two parts:
 | --- | --- | --- |
 | `scripts/ci/check-guidance.py` (docs surface) | Every backticked repo path in published pages, the `zh/` mirror, and `docs/internal/reborn/contracts/` resolves against `git ls-files`. Mintlify link targets are a different namespace and deliberately unchecked; dated archives (`docs/internal/`, non-contract `docs/internal/reborn/`) are excluded as classes. MDX comment form of the suppress marker: `{/* check-guidance: path-ok */}`. | `fast-checks` job, `has_guidance` trigger (probes pinned in `ws12_workflow_contracts.py`) |
 | `crates/app/ironclaw_cli/tests/docs_cli_reference.rs` | `docs/using/cli.mdx` ↔ the real binary's `--help`, both directions, subcommand granularity, alias-aware, row-count floor. | `cargo test -p ironclaw` |
-| `crates/extensions/ironclaw_extension_registry/tests/docs_manifest_schema_version.rs` | Zero retired `reborn.extension_manifest.v2` literals in published pages (fences included); `building-a-tool.md` names `MANIFEST_SCHEMA_VERSION_V3` and documents `origin_gate_matrix`. | `cargo test -p ironclaw_extension_registry` |
+| `crates/extensions/ironclaw_extension_registry/tests/docs_manifest_schema_version.rs` | Every `reborn.extension_manifest.<version>` mention in a published page (fences included) names the current `MANIFEST_SCHEMA_VERSION_V3`; `building-a-tool.md` names it and documents `origin_gate_matrix`. | `cargo test -p ironclaw_extension_registry` |
 | `crates/product/ironclaw_openai_compat/tests/docs_responses_contract.rs` | The `doc-fact:responses-request-policy` marker block in `docs/api/responses.mdx`, driven behaviorally through the real router — the marker's values parameterize the assertions. | `cargo test -p ironclaw_openai_compat` |
 | `scripts/ci/docs_publication_boundary.py` (pre-existing) | Publication fence: every page published or fenced; `.mintignore` frozen. | `docs-publication-boundary` job |
 
@@ -138,7 +138,7 @@ compensating control.
 | --- | --- | --- |
 | Any published page, `zh/`, `docs/internal/reborn/contracts/` | dead repo path in backticks | check-guidance docs surface |
 | `docs/using/cli.mdx` | missing/retired subcommand rows | `docs_cli_reference.rs` |
-| `docs/extensions/building-a-tool.md` + published tree | retired schema literal; missing v3/gate-matrix teaching | `docs_manifest_schema_version.rs` |
+| `docs/extensions/building-a-tool.md` + published tree | non-current schema version named; missing v3/gate-matrix teaching | `docs_manifest_schema_version.rs` |
 | `docs/api/responses.mdx` | request-policy claims (rejections, ranges, caps, unknown-field tolerance) | `docs_responses_contract.rs` |
 | `docs/changelog.mdx` | stable release missing its entry | cut-script changelog gate |
 | whole site | describing unreleased behavior | `docs-live` deployment branch |

@@ -669,6 +669,7 @@ mod openai_compat_mount_tests {
                             accepted_message_ref: accepted_message_ref.clone(),
                             requested_run_profile: None,
                             requested_model: input.model,
+                            output_contract: None,
                             idempotency_key: IdempotencyKey::new(
                                 input
                                     .client_action_id

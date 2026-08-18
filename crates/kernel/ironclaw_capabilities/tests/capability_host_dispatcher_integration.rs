@@ -92,11 +92,14 @@ async fn capability_host_invokes_through_runtime_dispatcher_and_completes_run() 
 async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_dispatcher() {
     let (registry, dispatcher, _governor, events, adapter) =
         runtime_dispatcher_stack(json!({"approved":true}));
-    let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
+    let process_services = ProcessServices::in_memory();
+    let process_runtime = process_services.process_runtime();
+    let block_run_state = ProcessInvocationStore::new(Arc::clone(&process_runtime));
+    let resume_run_state = ProcessInvocationStore::new(Arc::clone(&process_runtime));
     let approval_requests = ironclaw_approvals::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let block_host = capability_host(registry.as_ref(), &dispatcher, &ApprovalAuthorizer)
-        .with_invocation_state(&run_state)
+        .with_invocation_state(&block_run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
     let scope = context.resource_scope.clone();
@@ -119,7 +122,11 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
         CapabilityInvocationError::AuthorizationRequiresApproval { .. }
     ));
     assert_eq!(adapter.request_count(), 0);
-    let blocked = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    let blocked = resume_run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(blocked.status, ProcessInvocationStatus::BlockedApproval);
     let approval_id = blocked.approval_request_id.unwrap();
     let lease = approve_dispatch(&approval_requests, &leases, &scope, approval_id, None)
@@ -128,7 +135,7 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
 
     let resume_authorizer = GrantAuthorizer::new();
     let resume_host = capability_host(registry.as_ref(), &dispatcher, &resume_authorizer)
-        .with_invocation_state(&run_state)
+        .with_invocation_state(&resume_run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
     let result = resume_host
@@ -148,8 +155,9 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
     assert_eq!(recorded.scope, scope);
     assert_eq!(recorded.estimate, estimate);
     assert_eq!(recorded.input, input);
+    let reloaded_run_state = ProcessInvocationStore::new(Arc::clone(&process_runtime));
     assert_eq!(
-        run_state
+        reloaded_run_state
             .get(&scope, invocation_id)
             .await
             .unwrap()

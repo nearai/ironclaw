@@ -9,21 +9,17 @@ use crate::runtime_event::RuntimeEvent;
 
 /// Async event sink used by runtime/composition services.
 ///
-/// **Best-effort observability.** The contract requires that a sink failure
-/// **must not** change runtime outcomes. The trait returns `Result` so
-/// implementations can surface diagnostics to a separate observer/log,
-/// **never** so callers can `?`-propagate the error and short-circuit the
-/// surrounding workflow.
+/// [`EventSink::emit`] is **best-effort observability**. A failure must not
+/// change runtime outcomes. The trait returns `Result` so implementations can
+/// surface diagnostics to a separate observer/log, never so best-effort
+/// callers can short-circuit the surrounding workflow.
 ///
-/// Callers (dispatcher, process manager, host runtime) must:
+/// Best-effort callers (dispatcher, process manager, host runtime) must:
 ///
-/// 1. invoke `emit(...).await`;
+/// 1. invoke `emit(...).await` only where awaiting the sink cannot delay
+///    runtime work;
 /// 2. record any returned error to a diagnostics channel of their choice;
 /// 3. continue with their original success/failure result.
-///
-/// A type-level enforcement of this contract (no-fail emit + separate
-/// fallible diagnostics surface) is a deliberate follow-up; see the
-/// "best-effort sink contract" follow-up issue.
 #[async_trait]
 pub trait EventSink: Send + Sync {
     async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError>;
@@ -34,6 +30,17 @@ pub trait EventSink: Send + Sync {
     async fn flush(&self) -> Result<(), EventError> {
         Ok(())
     }
+}
+
+/// Event sink with an explicitly non-blocking emission path.
+///
+/// Runtime-critical callers require this stronger contract so an ordinary
+/// [`EventSink`] cannot be wired accidentally and silently discard every
+/// event. Implementations must return without waiting for queue capacity or
+/// durable I/O; bounded implementations may drop best-effort events under
+/// overload as documented by their own contract.
+pub trait NonBlockingEventSink: EventSink {
+    fn try_emit(&self, event: RuntimeEvent) -> Result<(), EventError>;
 }
 
 /// Async audit sink used by control-plane services.

@@ -29,7 +29,8 @@ fn execution_contract(goal: impl Into<String>) -> Value {
         "goal": goal,
         "success_criteria": ["Complete the requested task"],
         "output_instructions": "Return a concise result",
-        "no_result_text": "No result"
+        "no_result_text": "No result",
+        "policy": { "result_delivery": "deliver" }
     })
 }
 
@@ -44,6 +45,15 @@ fn execution_contract(goal: impl Into<String>) -> Value {
 /// input, which no longer exists on this capability.
 #[test]
 fn trigger_create_description_teaches_contract_owned_delivery_with_no_stored_target() {
+    assert!(
+        TRIGGER_CREATE_DESCRIPTION
+            .contains("Derive execution_contract.policy.result_delivery from the user's wording")
+            && TRIGGER_CREATE_DESCRIPTION.contains(
+                "use suppress_when_nothing_to_report when the user says to notify only on a match, change, or actionable result",
+            )
+            && TRIGGER_CREATE_DESCRIPTION.contains("otherwise use deliver"),
+        "trigger_create must derive no-result delivery with a deterministic deliver fallback: {TRIGGER_CREATE_DESCRIPTION}"
+    );
     assert!(
         TRIGGER_CREATE_DESCRIPTION.contains("full task each fire performs"),
         "trigger_create description must say the goal is the whole task: {TRIGGER_CREATE_DESCRIPTION}"
@@ -199,7 +209,8 @@ fn trigger_create_input_accepts_cron_schedule() {
             "goal": "Check mail",
             "success_criteria": ["Report the mail check result"],
             "output_instructions": "Return a concise summary",
-            "no_result_text": "No mail found"
+            "no_result_text": "No mail found",
+            "policy": { "result_delivery": "deliver" }
         },
         "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "America/Los_Angeles" }
     });
@@ -246,7 +257,8 @@ fn trigger_create_input_accepts_structured_contract_without_legacy_prompt() {
             "no_result_text": "No failed payments",
             "policy": {
                 "allowed_capability_ids": ["stripe.list_payments"],
-                "required_skills": ["payment-operations"]
+                "required_skills": ["payment-operations"],
+                "result_delivery": "suppress_when_nothing_to_report"
             }
         },
         "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
@@ -254,6 +266,10 @@ fn trigger_create_input_accepts_structured_contract_without_legacy_prompt() {
 
     let parsed: TriggerCreateInput = serde_json::from_value(input).expect("structured input");
     assert_eq!(parsed.execution_contract.version, 1);
+    assert_eq!(
+        parsed.execution_contract.policy.result_delivery,
+        ironclaw_host_api::execution_policy::ResultDeliveryPolicy::SuppressWhenNothingToReport
+    );
 }
 
 #[test]
@@ -266,7 +282,8 @@ fn trigger_create_input_rejects_legacy_prompt_and_missing_contract() {
             "goal": "Find failures",
             "success_criteria": ["Include every failure"],
             "output_instructions": "Return Markdown",
-            "no_result_text": "No failures"
+            "no_result_text": "No failures",
+            "policy": { "result_delivery": "deliver" }
         },
         "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
     });
@@ -295,7 +312,10 @@ async fn structured_trigger_create_persists_contract_and_frozen_prompt() {
             "success_criteria": ["Include every failure"],
             "output_instructions": "Return Markdown",
             "no_result_text": "No failed payments",
-            "policy": { "allowed_capability_ids": ["stripe.list_payments"] }
+            "policy": {
+                "allowed_capability_ids": ["stripe.list_payments"],
+                "result_delivery": "deliver"
+            }
         },
         "schedule": { "kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC" }
     });
@@ -341,7 +361,10 @@ async fn preflight_less_path_rejects_restrictive_policy_and_persists_nothing() {
             "success_criteria": ["Include every failure"],
             "output_instructions": "Return Markdown",
             "no_result_text": "No failed payments",
-            "policy": { "allowed_capability_ids": ["stripe.list_payments"] }
+            "policy": {
+                "allowed_capability_ids": ["stripe.list_payments"],
+                "result_delivery": "deliver"
+            }
         },
         "schedule": { "kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC" }
     });

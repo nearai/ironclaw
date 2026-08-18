@@ -7,7 +7,10 @@
 use std::{
     fmt,
     ops::Deref,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -19,6 +22,11 @@ use thiserror::Error;
 pub const LIBSQL_READ_POOL_MAX_CONNECTIONS: usize = 8;
 
 const LIBSQL_WRITER_POOL_MAX_CONNECTIONS: usize = 1;
+/// Read slots on a journal lane (`LibSqlRuntime::split_journal_lane`).
+///
+/// A journal lane serves one latency-sensitive writer plus its replay reads,
+/// not the data plane's fan-out, so it keeps a deliberately small reader pool.
+const LIBSQL_JOURNAL_LANE_READ_POOL_MAX_CONNECTIONS: usize = 2;
 const LIBSQL_POOL_CHECKOUT_TIMEOUT: Duration = Duration::from_secs(10);
 const LIBSQL_CONNECT_ATTEMPTS: u32 = 3;
 const LIBSQL_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
@@ -105,6 +113,8 @@ pub enum LibSqlRuntimeError {
     },
     #[error("libSQL writer acquisition is not reentrant")]
     ReentrantWriter,
+    #[error("libSQL journal lane was already split from this runtime")]
+    JournalLaneAlreadySplit,
 }
 
 /// Checkout from a connection pool configured with `PRAGMA query_only = ON`.
@@ -172,9 +182,11 @@ impl Drop for LibSqlWriterHolderGuard {
 
 /// One process-local connection runtime for one libSQL database.
 pub struct LibSqlRuntime {
+    db: Arc<libsql::Database>,
     read_pool: LibSqlPool,
     write_pool: LibSqlPool,
     writer_holder: Arc<Mutex<Option<tokio::task::Id>>>,
+    journal_lane_split: Arc<AtomicBool>,
     /// Exact connection target used when this runtime opened its own database.
     /// Caller-supplied handles intentionally carry no target provenance.
     opened_target: Option<Arc<str>>,
@@ -235,16 +247,86 @@ impl LibSqlRuntime {
         db: Arc<libsql::Database>,
         opened_target: Option<Arc<str>>,
     ) -> Result<Self, LibSqlRuntimeError> {
+        Self::with_read_pool_size(
+            db,
+            opened_target,
+            LIBSQL_READ_POOL_MAX_CONNECTIONS,
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    fn with_read_pool_size(
+        db: Arc<libsql::Database>,
+        opened_target: Option<Arc<str>>,
+        read_pool_max_connections: usize,
+        journal_lane_split: Arc<AtomicBool>,
+    ) -> Result<Self, LibSqlRuntimeError> {
         Ok(Self {
-            read_pool: build_pool(
+            read_pool: build_pool(Arc::clone(&db), read_pool_max_connections, LibSqlLane::Read)?,
+            write_pool: build_pool(
                 Arc::clone(&db),
-                LIBSQL_READ_POOL_MAX_CONNECTIONS,
-                LibSqlLane::Read,
+                LIBSQL_WRITER_POOL_MAX_CONNECTIONS,
+                LibSqlLane::Write,
             )?,
-            write_pool: build_pool(db, LIBSQL_WRITER_POOL_MAX_CONNECTIONS, LibSqlLane::Write)?,
+            db,
             writer_holder: Arc::new(Mutex::new(None)),
+            journal_lane_split,
             opened_target,
         })
+    }
+
+    /// A second admission runtime over the same database, for one
+    /// latency-sensitive journal writer.
+    ///
+    /// The data-plane runtime admits exactly one writer at a time, and callers
+    /// queue for that slot FIFO with a multi-second checkout timeout. Bulk
+    /// per-turn traffic (events, messages) therefore parks a journal write —
+    /// the resource-governor delta journal, the process journal — behind an
+    /// arbitrarily deep queue of unrelated writes, which is how a heartbeat
+    /// times out on a database that is not actually overloaded
+    /// (nearai/ironclaw#7714). Postgres solves this with a dedicated pool
+    /// (#7471); this is the libSQL equivalent.
+    ///
+    /// Why a second connection helps even though SQLite has one writer per
+    /// database file: the two lanes contend for SQLite's write lock, not for a
+    /// pool slot. `run_migrations` puts the database in WAL journaling, so a
+    /// write lock is held only for the duration of one short transaction and
+    /// `busy_timeout` retries across it, whereas a pool slot is held for as
+    /// long as its holder keeps the lease and grants nothing to a starved
+    /// waiter. The queue the journal waits in goes from "every writer in the
+    /// process" to "one transaction".
+    ///
+    /// This deliberately admits exactly one extra process-wide writer. Raising
+    /// [`LIBSQL_WRITER_POOL_MAX_CONNECTIONS`] instead would let unbounded bulk
+    /// writers fight over the write lock, which is the contention the
+    /// single-slot pool exists to prevent. For the same reason all journals
+    /// share this one lane rather than taking a lane each.
+    ///
+    /// Constraint: the reentrancy guard is lane-local, and so is the writer
+    /// slot. A data-plane transaction that holds SQLite's write lock (the
+    /// filesystem's `BEGIN IMMEDIATE` batches) therefore blocks a journal-lane
+    /// write for up to the connection's `busy_timeout` before it surfaces as
+    /// `BackendBusy` — the lane bounds queueing, it does not bypass the file
+    /// lock. That is why the journals' own retry windows must exceed a single
+    /// backend attempt (see `DEFAULT_BUSY_RETRY_POLICY` in the resource
+    /// governor). Callers must not hold a data-plane write lease across a
+    /// journal-lane write: the guard cannot see the other lane's holder, so the
+    /// self-deadlock that `ReentrantWriter` catches within a lane goes
+    /// undetected across lanes and stalls for the full `busy_timeout` instead.
+    pub fn split_journal_lane(&self) -> Result<Self, LibSqlRuntimeError> {
+        self.journal_lane_split
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| LibSqlRuntimeError::JournalLaneAlreadySplit)?;
+        let lane = Self::with_read_pool_size(
+            Arc::clone(&self.db),
+            self.opened_target.clone(),
+            LIBSQL_JOURNAL_LANE_READ_POOL_MAX_CONNECTIONS,
+            Arc::clone(&self.journal_lane_split),
+        );
+        if lane.is_err() {
+            self.journal_lane_split.store(false, Ordering::Release);
+        }
+        lane
     }
 
     pub async fn read(&self) -> Result<LibSqlReadConnectionLease, LibSqlRuntimeError> {
@@ -482,6 +564,90 @@ mod tests {
             .await
             .expect("second writer admitted")
             .expect("writer task");
+    }
+
+    /// The starvation fix for nearai/ironclaw#7714: a journal lane must be
+    /// admitted while the data-plane writer slot is occupied, and its write
+    /// must land in the same database the data plane reads. If the lane ever
+    /// shared the data-plane pool again, this checkout would block until the
+    /// pool timeout instead — exactly the ~10s-per-attempt stall from the
+    /// bench log.
+    #[tokio::test]
+    async fn journal_lane_writes_while_the_data_plane_writer_is_held() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("journal-lane.db");
+        let database = Arc::new(
+            libsql::Builder::new_local(path)
+                .build()
+                .await
+                .expect("database"),
+        );
+        let data_plane = LibSqlRuntime::new(Arc::clone(&database)).expect("data-plane runtime");
+        let journal_lane = data_plane.split_journal_lane().expect("journal lane");
+
+        let setup = data_plane.write().await.expect("setup writer");
+        setup
+            .execute_batch("PRAGMA journal_mode = WAL")
+            .await
+            .expect("wal journaling");
+        setup
+            .execute("CREATE TABLE journal (value TEXT NOT NULL)", ())
+            .await
+            .expect("create journal table");
+        drop(setup);
+
+        // Bulk traffic occupies the sole data-plane writer slot for the whole
+        // journal write, the way a per-turn write burst does in production.
+        let data_plane_writer = data_plane.write().await.expect("data-plane writer");
+
+        let journal_writer = tokio::time::timeout(Duration::from_millis(500), journal_lane.write())
+            .await
+            .expect("journal lane must not queue behind the data-plane writer")
+            .expect("journal writer");
+        journal_writer
+            .execute("INSERT INTO journal (value) VALUES ('heartbeat')", ())
+            .await
+            .expect("journal write must commit while the data plane holds its slot");
+        drop(journal_writer);
+        drop(data_plane_writer);
+
+        let reader = data_plane.read().await.expect("reader");
+        let mut rows = reader
+            .query("SELECT value FROM journal", ())
+            .await
+            .expect("read journal rows");
+        let value: String = rows
+            .next()
+            .await
+            .expect("row lookup")
+            .expect("journal row")
+            .get(0)
+            .expect("journal value");
+        assert_eq!(
+            value, "heartbeat",
+            "the journal lane must address the same database the data plane reads"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_one_journal_lane_can_be_split_from_a_runtime() {
+        let database = Arc::new(
+            libsql::Builder::new_local(":memory:")
+                .build()
+                .await
+                .expect("database"),
+        );
+        let data_plane = LibSqlRuntime::new(database).expect("data-plane runtime");
+
+        let journal_lane = data_plane.split_journal_lane().expect("journal lane");
+        assert!(matches!(
+            journal_lane.split_journal_lane(),
+            Err(LibSqlRuntimeError::JournalLaneAlreadySplit)
+        ));
+        assert!(matches!(
+            data_plane.split_journal_lane(),
+            Err(LibSqlRuntimeError::JournalLaneAlreadySplit)
+        ));
     }
 
     #[tokio::test]

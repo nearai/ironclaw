@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use ironclaw_host_api::output::OutputContract;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -52,6 +53,11 @@ pub struct SubmitTurnRequest {
     pub actor: TurnActor,
     pub accepted_message_ref: AcceptedMessageRef,
     pub requested_run_profile: Option<RunProfileRequest>,
+    /// Optional caller declaration of the terminal output contract. Admission
+    /// snapshots it into the durable run record; omission preserves the
+    /// historical assistant-message default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_contract: Option<OutputContract>,
     /// Caller-requested model for this turn. A hint the coordinator resolves to a
     /// concrete per-run model route when the operator has it configured; when it
     /// can't be resolved the run falls back to the deployment's active model.
@@ -85,6 +91,10 @@ pub struct SubmitChildRunRequest {
     pub actor: TurnActor,
     pub accepted_message_ref: AcceptedMessageRef,
     pub requested_run_profile: Option<RunProfileRequest>,
+    /// Optional terminal output contract for a child run. It is carried into
+    /// the same durable process metadata as a top-level submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_contract: Option<OutputContract>,
     pub idempotency_key: IdempotencyKey,
     pub received_at: TurnTimestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]

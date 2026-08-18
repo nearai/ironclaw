@@ -7,6 +7,7 @@ use std::{
 };
 
 use ironclaw_host_api::{
+    capability::{TOOL_CALL_CAPABILITY_ID, TOOL_DESCRIBE_CAPABILITY_ID, TOOL_SEARCH_CAPABILITY_ID},
     capability_surface::CapabilitySurfacePolicy,
     ids::{CapabilityId, ProviderToolName},
     runtime::RuntimeKind,
@@ -1040,7 +1041,12 @@ fn bridge_tool_definition(
 }
 
 fn bridge_capability_id(name: &'static str) -> CapabilityId {
-    let raw = format!("{BRIDGE_CAPABILITY_PREFIX}.{name}");
+    let raw = match name {
+        TOOL_SEARCH_NAME => TOOL_SEARCH_CAPABILITY_ID.to_string(),
+        TOOL_DESCRIBE_NAME => TOOL_DESCRIBE_CAPABILITY_ID.to_string(),
+        TOOL_CALL_NAME => TOOL_CALL_CAPABILITY_ID.to_string(),
+        _ => format!("{BRIDGE_CAPABILITY_PREFIX}.{name}"),
+    };
     match CapabilityId::new(raw) {
         Ok(capability_id) => capability_id,
         Err(error) => {

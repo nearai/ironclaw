@@ -81,10 +81,11 @@ pub use openai_codex_provider::OpenAiCodexProvider;
 pub use openai_codex_session::{DeviceCodeStart, OpenAiCodexSessionManager};
 pub use provider::sanitize_tool_messages;
 pub use provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
-    FinishReason, ImageUrl, LlmProvider, ModelFallbackRoute, ModelMetadata, ReasoningDetail,
-    ReasoningDetails, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition, ToolResult, generate_tool_call_id, normalized_model_override,
+    ChatMessage, CompletionRequest, CompletionResponse, CompletionResponseFormat,
+    CompletionStreamSink, ContentPart, FinishReason, ImageUrl, JsonSchemaResponseFormat,
+    LlmProvider, ModelFallbackRoute, ModelMetadata, ReasoningDetail, ReasoningDetails, Role,
+    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
+    generate_tool_call_id, normalized_model_override,
 };
 pub use reasoning::{
     clean_response, contains_codex_text_tool_call_syntax,
@@ -445,6 +446,8 @@ fn create_openai_compat_from_registry(
     };
     let adapter = RigAdapter::new(model, &config.model)
         .with_provider_id(config.provider_id.clone())
+        .with_structured_output_support(true)
+        .with_json_object_support(true)
         .with_unsupported_params(config.unsupported_params.clone())
         .with_model_listing(models_endpoint);
     Ok(Arc::new(adapter))
@@ -680,6 +683,10 @@ fn create_deepseek_from_registry(
     Ok(Arc::new(
         RigAdapter::new(model, &config.model)
             .with_provider_id(config.provider_id.clone())
+            // rig-core 0.33's DeepSeek request serializer silently omits
+            // `output_schema`; reject structured-output requests at the
+            // provider boundary instead of claiming the contract was sent.
+            .with_structured_output_support(false)
             .with_unsupported_params(config.unsupported_params.clone()),
     ))
 }
@@ -772,6 +779,10 @@ fn create_openrouter_from_registry(
     Ok(Arc::new(
         RigAdapter::new(model, &config.model)
             .with_provider_id(config.provider_id.clone())
+            // rig-core 0.33's OpenRouter request serializer silently omits
+            // `output_schema`; reject structured-output requests at the
+            // provider boundary instead of claiming the contract was sent.
+            .with_structured_output_support(false)
             .with_unsupported_params(config.unsupported_params.clone()),
     ))
 }

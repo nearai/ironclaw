@@ -22,6 +22,7 @@
 //! /threads[/agents/<agent>][/projects/<project>][/owners/<owner_user>][/missions/<mission>]/threads/<thread_id>/thread.json
 //! /threads[/.../...]/threads/<thread_id>/messages/<message_id>.json
 //! /threads[/.../...]/threads/<thread_id>/summaries/<summary_id>.json
+//! /threads[/.../...]/structured-finalizations/<thread_id>/<incarnation>/<run_id>.json
 //! /threads/idempotency/<sha256>.json
 //! ```
 //!
@@ -79,13 +80,15 @@ use crate::{
     CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
     InboundMessageReplayMetadata, LatestThreadMessageRequest, ListThreadsForScopeRequest,
     ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, MessageKind, MessageStatus, PutToolResultRecordRequest,
-    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact,
-    SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
-    ToolResultRecordChunk, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
-    UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
+    MessageContent, MessageKind, MessageStatus, PublishStructuredFinalizationMessageRequest,
+    PutStructuredFinalizationRequest, PutToolResultRecordRequest,
+    ReadStructuredFinalizationRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    SessionThreadService, StructuredFinalizationRecord, SummaryArtifact, SummaryModelContextPolicy,
+    ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange,
+    ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, ToolResultRecordChunk,
+    ToolResultReferenceEnvelope, UpdateAssistantDraftRequest, UpdateToolResultRecordRequest,
+    UpdateToolResultReferenceRequest,
 };
 use message_lookup_index::MessageLookupIndexStore;
 use message_read::{MessageReadBudget, MessageReadResult};
@@ -95,7 +98,7 @@ use message_read::{MessageReadBudget, MessageReadResult};
 /// small enough to surface pathological loops loudly.
 const FILESYSTEM_CAS_RETRIES: usize = 8;
 
-/// [`RecordKind`] discriminants for the four record types persisted by this
+/// [`RecordKind`] discriminants for the six record types persisted by this
 /// service. Setting `entry.kind` makes writes record-shaped so
 /// [`DiskFilesystem`] (which rejects record-shaped puts) triggers the
 /// fail-closed path on the CAS gate instead of accepting a byte-only first
@@ -105,6 +108,7 @@ const THREAD_MESSAGE_KIND: &str = "thread_message";
 const THREAD_SUMMARY_KIND: &str = "thread_summary";
 const THREAD_IDEMPOTENCY_KIND: &str = "thread_idempotency";
 const THREAD_PREPARED_CONTEXT_KIND: &str = "thread_prepared_context";
+const THREAD_STRUCTURED_FINALIZATION_KIND: &str = "thread_structured_finalization";
 
 /// Conservative fan-out for per-thread title derivation during sidebar listing.
 const TITLE_DERIVATION_READ_CONCURRENCY: usize = 8;
@@ -140,6 +144,13 @@ struct StoredThreadRecord {
     #[serde(flatten)]
     record: SessionThreadRecord,
     next_sequence: u64,
+    /// Backend-owned identity for this lifetime of an explicit thread id.
+    /// Finalization evidence uses it as its archive partition so deleting and
+    /// recreating an id can never replay the predecessor's output. The nil
+    /// default keeps records written before this field readable; newly created
+    /// records always receive a random UUID.
+    #[serde(default)]
+    incarnation_id: Uuid,
 }
 
 /// On-disk inbound idempotency record. Includes the originating scope so a
@@ -192,6 +203,7 @@ where
     thread_index_declaration_lock: tokio::sync::Mutex<()>,
     thread_index_touch_state: Arc<thread_index::ThreadIndexTouchState>,
     thread_index_touch_flush_interval: Duration,
+    thread_index_projection_repair_state: Arc<thread_index::ThreadIndexProjectionRepairState>,
     one_shot_context_windows: Mutex<HashMap<String, ContextWindow>>,
 }
 
@@ -211,7 +223,7 @@ pub(super) enum IndexDeclarationPolicy {
 
 impl<F> FilesystemSessionThreadService<F>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + 'static,
 {
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
@@ -222,6 +234,9 @@ where
             thread_index_declaration_lock: tokio::sync::Mutex::new(()),
             thread_index_touch_state: Arc::new(thread_index::ThreadIndexTouchState::default()),
             thread_index_touch_flush_interval: DEFAULT_THREAD_INDEX_TOUCH_FLUSH_INTERVAL,
+            thread_index_projection_repair_state: Arc::new(
+                thread_index::ThreadIndexProjectionRepairState::default(),
+            ),
             one_shot_context_windows: Mutex::new(HashMap::new()),
         }
     }
@@ -298,7 +313,7 @@ where
         })?;
         let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
         entry.kind = Some(kind);
-        Ok(entry
+        let entry = entry
             .with_indexed(
                 fs_index_key("thread_id")?,
                 IndexValue::Text(record.thread_id.to_string()),
@@ -322,7 +337,8 @@ where
             .with_indexed(
                 fs_index_key("message_status")?,
                 IndexValue::Text(serde_enum_index_value(&record.status)?),
-            ))
+            );
+        message_lookup_index::with_message_lookup_projections(entry, record)
     }
 
     fn summary_entry(record: &SummaryArtifact) -> Result<Entry, SessionThreadError> {
@@ -445,6 +461,20 @@ where
         Ok(entry)
     }
 
+    fn structured_finalization_entry(
+        record: &StructuredFinalizationRecord,
+    ) -> Result<Entry, SessionThreadError> {
+        let body = serialize_pretty(record)?;
+        let kind = RecordKind::new(THREAD_STRUCTURED_FINALIZATION_KIND).map_err(|error| {
+            SessionThreadError::Backend(format!(
+                "invalid thread_structured_finalization record kind: {error}"
+            ))
+        })?;
+        let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
+        entry.kind = Some(kind);
+        Ok(entry)
+    }
+
     async fn read_prepared_context_record(
         &self,
         scope: &ThreadScope,
@@ -458,9 +488,42 @@ where
         else {
             return Ok(None);
         };
-        Ok(Some(deserialize::<crate::PreparedContextRecord>(
-            &versioned.entry.body,
-        )?))
+        let record = deserialize::<crate::PreparedContextRecord>(&versioned.entry.body)?;
+        crate::validate_output_contract(&record.declarations.output)?;
+        Ok(Some(record))
+    }
+
+    async fn read_structured_finalization_record(
+        &self,
+        request: &ReadStructuredFinalizationRequest,
+        incarnation_id: Uuid,
+    ) -> Result<Option<StructuredFinalizationRecord>, SessionThreadError> {
+        let path = structured_finalization_record_path(
+            &request.scope,
+            &request.thread_id,
+            incarnation_id,
+            request.turn_run_id,
+        )?;
+        let Some(versioned) = self
+            .filesystem
+            .get(&request.scope.to_resource_scope(), &path)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let record = deserialize::<StructuredFinalizationRecord>(&versioned.entry.body)?;
+        if record.scope != request.scope
+            || record.thread_id != request.thread_id
+            || record.turn_run_id != request.turn_run_id
+        {
+            return Err(SessionThreadError::Backend(
+                "structured finalization record key does not match requested scope".to_string(),
+            ));
+        }
+        record
+            .validate()
+            .map_err(|reason| SessionThreadError::InvalidStructuredFinalization { reason })?;
+        Ok(Some(record))
     }
 
     async fn read_thread_versioned(
@@ -504,44 +567,6 @@ where
         Ok(Some((record, versioned.version)))
     }
 
-    async fn write_message_lookup_indexes(
-        &self,
-        scope: &ThreadScope,
-        thread_id: &ThreadId,
-        message: &ThreadMessageRecord,
-    ) -> Result<(), SessionThreadError> {
-        MessageLookupIndexStore::new(self.filesystem.as_ref())
-            .write_for_message(scope, thread_id, message)
-            .await
-    }
-
-    async fn write_message_lookup_indexes_best_effort(
-        &self,
-        scope: &ThreadScope,
-        thread_id: &ThreadId,
-        message: &ThreadMessageRecord,
-        context: &'static str,
-    ) {
-        if let Err(error) = self
-            .write_message_lookup_indexes(scope, thread_id, message)
-            .await
-        {
-            // The source message is already durable. Lookup projection failure
-            // is observable as a missing exact lookup; requests never repair it
-            // by scanning the transcript.
-            tracing::debug!(
-                ?error,
-                ?scope,
-                thread_id = %thread_id.as_str(),
-                message_id = %message.message_id,
-                kind = ?message.kind,
-                status = ?message.status,
-                context = context,
-                "message lookup projection write failed; exact lookup remains unavailable",
-            );
-        }
-    }
-
     async fn write_new_message(
         &self,
         scope: &ThreadScope,
@@ -563,20 +588,6 @@ where
                 {
                     txn.rollback().await;
                     return Err(absent_put_error(error, description, &path));
-                }
-                for (lookup_path, lookup_entry, expectation) in
-                    MessageLookupIndexStore::<F>::entries_for_message(scope, thread_id, message)?
-                {
-                    let virtual_path = self.filesystem.resolve(&resource_scope, &lookup_path)?;
-                    if matches!(expectation, CasExpectation::Absent)
-                        && txn.get(&virtual_path).await?.is_some()
-                    {
-                        continue;
-                    }
-                    if let Err(error) = txn.put(&virtual_path, lookup_entry, expectation).await {
-                        txn.rollback().await;
-                        return Err(absent_put_error(error, "message lookup", &lookup_path));
-                    }
                 }
                 txn.commit().await?;
                 self.invalidate_one_shot_context_window(scope, thread_id);
@@ -600,15 +611,6 @@ where
         let thread_virtual_path = self.filesystem.resolve(&resource_scope, &thread_path)?;
         let message_path = message_record_path(scope, thread_id, message.message_id)?;
         let message_virtual_path = self.filesystem.resolve(&resource_scope, &message_path)?;
-        let lookup_entries =
-            MessageLookupIndexStore::<F>::entries_for_message(scope, thread_id, message)?
-                .into_iter()
-                .map(|(path, entry, expectation)| {
-                    self.filesystem
-                        .resolve(&resource_scope, &path)
-                        .map(|virtual_path| (path, virtual_path, entry, expectation))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
         let idempotency_record = idempotency_record
             .map(|(path, entry)| {
                 self.filesystem
@@ -706,18 +708,6 @@ where
                 txn.rollback().await;
                 return Err(absent_put_error(error, "message", &message_path));
             }
-            for (lookup_path, virtual_path, entry, expectation) in &lookup_entries {
-                if matches!(expectation, CasExpectation::Absent)
-                    && txn.get(virtual_path).await?.is_some()
-                {
-                    continue;
-                }
-                if let Err(error) = txn.put(virtual_path, entry.clone(), *expectation).await {
-                    txn.rollback().await;
-                    return Err(absent_put_error(error, "message lookup", lookup_path));
-                }
-            }
-
             match txn.commit().await {
                 Ok(()) => return Ok(TransactionalMessageWrite::Written),
                 // Optimistic-concurrency conflict on the thread record: another
@@ -1486,13 +1476,6 @@ where
             .await
             {
                 Ok(()) => {
-                    self.write_message_lookup_indexes_best_effort(
-                        scope,
-                        thread_id,
-                        &message,
-                        "message update",
-                    )
-                    .await;
                     self.invalidate_one_shot_context_window(scope, thread_id);
                     return Ok(message);
                 }
@@ -1532,7 +1515,7 @@ where
 
 impl<F> FilesystemSessionThreadService<F>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + 'static,
 {
     /// One-time, per-scope backfill: stamp the `prepared_context` marker onto
     /// pre-marker subagent threads (their legacy metadata is
@@ -1708,6 +1691,7 @@ where
                         let stored = StoredThreadRecord {
                             record: record.clone(),
                             next_sequence: 1,
+                            incarnation_id: Uuid::new_v4(),
                         };
                         Ok(CasApply::new(stored, (record, true)))
                     }
@@ -2046,15 +2030,7 @@ where
                 .put(&resource_scope, &path, entry, CasExpectation::Absent)
                 .await
             {
-                Ok(_) => {
-                    self.write_message_lookup_indexes_best_effort(
-                        &request.scope,
-                        &thread_id,
-                        row,
-                        "prepared context seed",
-                    )
-                    .await;
-                }
+                Ok(_) => {}
                 // A crashed prior attempt already landed this row; its stored
                 // sequence stays authoritative (the reservation above only
                 // burned a counter slot, which is harmless).
@@ -2141,6 +2117,192 @@ where
                 thread_id: thread_id.clone(),
             })?;
         self.read_prepared_context_record(scope, thread_id).await
+    }
+
+    async fn read_structured_finalization(
+        &self,
+        request: ReadStructuredFinalizationRequest,
+    ) -> Result<Option<StructuredFinalizationRecord>, SessionThreadError> {
+        let (thread, _) = self
+            .read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            })?;
+        self.read_structured_finalization_record(&request, thread.incarnation_id)
+            .await
+    }
+
+    async fn put_structured_finalization(
+        &self,
+        request: PutStructuredFinalizationRequest,
+    ) -> Result<StructuredFinalizationRecord, SessionThreadError> {
+        request
+            .record
+            .validate()
+            .map_err(|reason| SessionThreadError::InvalidStructuredFinalization { reason })?;
+        let (thread, _) = self
+            .read_thread_versioned(&request.record.scope, &request.record.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.record.thread_id.clone(),
+            })?;
+        let path = structured_finalization_record_path(
+            &request.record.scope,
+            &request.record.thread_id,
+            thread.incarnation_id,
+            request.record.turn_run_id,
+        )?;
+        let resource_scope = request.record.scope.to_resource_scope();
+
+        // A record is immutable.  Read first to make the normal replay path
+        // explicit, then use an absent-write CAS for the first winner.
+        if let Some(existing) = self
+            .read_structured_finalization_record(
+                &ReadStructuredFinalizationRequest {
+                    scope: request.record.scope.clone(),
+                    thread_id: request.record.thread_id.clone(),
+                    turn_run_id: request.record.turn_run_id,
+                },
+                thread.incarnation_id,
+            )
+            .await?
+        {
+            if existing.same_immutable_content(&request.record) {
+                return Ok(existing);
+            }
+            return Err(SessionThreadError::StructuredFinalizationConflict {
+                turn_run_id: request.record.turn_run_id,
+            });
+        }
+
+        let entry = Self::structured_finalization_entry(&request.record)?;
+        match self
+            .filesystem
+            .put(&resource_scope, &path, entry, CasExpectation::Absent)
+            .await
+        {
+            Ok(_) => Ok(request.record),
+            Err(FilesystemError::VersionMismatch { .. }) => {
+                let existing = self
+                    .read_structured_finalization_record(
+                        &ReadStructuredFinalizationRequest {
+                            scope: request.record.scope.clone(),
+                            thread_id: request.record.thread_id.clone(),
+                            turn_run_id: request.record.turn_run_id,
+                        },
+                        thread.incarnation_id,
+                    )
+                    .await?
+                    .ok_or_else(|| {
+                        SessionThreadError::Backend(
+                            "structured finalization record missing after CAS conflict".to_string(),
+                        )
+                    })?;
+                if existing.same_immutable_content(&request.record) {
+                    Ok(existing)
+                } else {
+                    Err(SessionThreadError::StructuredFinalizationConflict {
+                        turn_run_id: request.record.turn_run_id,
+                    })
+                }
+            }
+            Err(FilesystemError::Unsupported { .. }) => Err(SessionThreadError::Backend(
+                "structured finalization persistence requires compare-and-swap support".to_string(),
+            )),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn publish_structured_finalization_message(
+        &self,
+        request: PublishStructuredFinalizationMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let (thread, _) = self
+            .read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            })?;
+        let run_id = request.turn_run_id;
+        let record = self
+            .read_structured_finalization_record(
+                &ReadStructuredFinalizationRequest {
+                    scope: request.scope.clone(),
+                    thread_id: request.thread_id.clone(),
+                    turn_run_id: run_id,
+                },
+                thread.incarnation_id,
+            )
+            .await?
+            .ok_or(SessionThreadError::StructuredFinalizationPublishMismatch {
+                message_id: request.message_id,
+                reason: "durable finalization record is missing",
+            })?;
+        if record.scope != request.scope
+            || record.thread_id != request.thread_id
+            || record.turn_run_id != run_id
+        {
+            return Err(SessionThreadError::StructuredFinalizationPublishMismatch {
+                message_id: request.message_id,
+                reason: "durable finalization record identity does not match request",
+            });
+        }
+        if record.raw_json != request.replacement {
+            return Err(SessionThreadError::StructuredFinalizationPublishMismatch {
+                message_id: request.message_id,
+                reason: "replacement does not match durable finalization output",
+            });
+        }
+
+        let candidate = record.candidate.clone();
+        let replacement = request.replacement.clone();
+        let turn_run_id = request.turn_run_id.to_string();
+        let message_id = request.message_id;
+        let now = Utc::now();
+        let mut did_replace = false;
+        let published = self
+            .apply_message_update(&request.scope, &request.thread_id, message_id, |message| {
+                did_replace = false;
+                if message.kind != MessageKind::Assistant
+                    || message.status != MessageStatus::Finalized
+                {
+                    return Err(SessionThreadError::StructuredFinalizationPublishMismatch {
+                        message_id,
+                        reason: "message is not a finalized assistant",
+                    });
+                }
+                if message.turn_run_id.as_deref() != Some(turn_run_id.as_str()) {
+                    return Err(SessionThreadError::StructuredFinalizationPublishMismatch {
+                        message_id,
+                        reason: "message belongs to a different turn run",
+                    });
+                }
+                let current_content = message.content.as_deref().ok_or(
+                    SessionThreadError::StructuredFinalizationPublishMismatch {
+                        message_id,
+                        reason: "message content is missing",
+                    },
+                )?;
+                if current_content != candidate && current_content != replacement {
+                    return Err(SessionThreadError::StructuredFinalizationPublishMismatch {
+                        message_id,
+                        reason: "message content does not match durable candidate",
+                    });
+                }
+                if current_content == candidate {
+                    message.content = Some(replacement.clone());
+                    message.updated_at = Some(now);
+                    did_replace = true;
+                }
+                Ok(())
+            })
+            .await?;
+        if did_replace {
+            self.touch_thread_updated_at_best_effort_at(&request.scope, &request.thread_id, now)
+                .await;
+        }
+        Ok(published)
     }
 
     async fn replay_accepted_inbound_message(
@@ -2507,12 +2669,13 @@ where
                 .validate()
                 .map_err(SessionThreadError::Serialization)?;
         }
-        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+        let mut envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
             request.result_ref,
             request.safe_summary,
             request.model_observation,
         )
         .map_err(SessionThreadError::Serialization)?;
+        envelope.intrinsic_outcome = request.intrinsic_outcome;
         if let Some(existing) = self
             .find_tool_result_reference_message(
                 &request.scope,
@@ -2543,7 +2706,11 @@ where
                 None
             };
             let model_observation = envelope.model_observation.clone();
-            if provider_call_update.is_some() || model_observation.is_some() {
+            let intrinsic_outcome = envelope.intrinsic_outcome;
+            if provider_call_update.is_some()
+                || model_observation.is_some()
+                || intrinsic_outcome.is_some()
+            {
                 let now = Utc::now();
                 let updated = self
                     .apply_message_update(
@@ -2565,6 +2732,22 @@ where
                                 if let Some(content) = ToolResultReferenceEnvelope::merge_model_observation_content_if_absent(
                                     content,
                                     model_observation.clone(),
+                                )
+                                .map_err(SessionThreadError::Serialization)?
+                                {
+                                    message.content = Some(content);
+                                    changed = true;
+                                }
+                            }
+                            if let Some(intrinsic_outcome) = intrinsic_outcome {
+                                let content = message.content.as_deref().ok_or_else(|| {
+                                    SessionThreadError::Serialization(
+                                        "tool result reference content is missing".to_string(),
+                                    )
+                                })?;
+                                if let Some(content) = ToolResultReferenceEnvelope::merge_intrinsic_outcome_content_if_absent(
+                                    content,
+                                    intrinsic_outcome,
                                 )
                                 .map_err(SessionThreadError::Serialization)?
                                 {
@@ -2688,16 +2871,7 @@ where
         )
         .await
         {
-            Ok(()) => {
-                self.write_message_lookup_indexes_best_effort(
-                    &request.scope,
-                    &request.thread_id,
-                    &message,
-                    "capability display preview",
-                )
-                .await;
-                Ok(message)
-            }
+            Ok(()) => Ok(message),
             Err(PutError::VersionMismatch) => self
                 .read_message_versioned(&request.scope, &request.thread_id, message_id)
                 .await?
@@ -3631,6 +3805,21 @@ fn prepared_context_record_path(
     ))
 }
 
+fn structured_finalization_record_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+    incarnation_id: Uuid,
+    turn_run_id: ironclaw_host_api::turn::TurnRunId,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/structured-finalizations/{}/{}/{}.json",
+        scope_axes_string(scope),
+        thread_id,
+        incarnation_id,
+        turn_run_id
+    ))
+}
+
 fn idempotency_record_path(record_key: &str) -> Result<ScopedPath, SessionThreadError> {
     scoped_path(&format!("{}/idempotency/{record_key}.json", THREADS_PREFIX))
 }
@@ -3708,13 +3897,15 @@ fn fs_index_name(raw: &str) -> Result<IndexName, SessionThreadError> {
 /// Every ordered-index spec this crate queries, all declared together at the
 /// `/threads` alias root. Each leads with its partition key, so one
 /// declaration above the per-thread paths serves every thread on the mount.
-fn root_index_specs() -> Result<[IndexSpec; 4], SessionThreadError> {
-    Ok([
+fn root_index_specs() -> Result<Vec<IndexSpec>, SessionThreadError> {
+    let mut indexes = vec![
         message_sequence_index_spec()?,
         message_kind_status_index_spec()?,
         summary_index_spec()?,
         thread_index::thread_activity_index_spec()?,
-    ])
+    ];
+    indexes.extend(message_lookup_index::lookup_index_specs()?);
+    Ok(indexes)
 }
 
 fn summary_index_spec() -> Result<IndexSpec, SessionThreadError> {

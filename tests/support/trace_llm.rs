@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use ironclaw_llm::LlmError;
 use ironclaw_llm::trace_binding::{ObservedToolResult, resolve_trace_result_bindings};
 use ironclaw_llm::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    ChatMessage, CompletionRequest, CompletionResponse, CompletionResponseFormat, FinishReason,
+    LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 
 // Re-export shared types from `recording` so downstream test files can
@@ -282,13 +282,17 @@ pub struct TraceLlm {
     /// Total non-error calls served, regardless of which step they returned.
     calls_served: AtomicUsize,
     hint_mismatches: AtomicUsize,
-    captured_requests: Mutex<Vec<Vec<ChatMessage>>>,
-    /// Captured `tools` argument from each `complete_with_tools` call. Lets
-    /// Tier B tests assert what tool surface the dispatcher / worker shipped
-    /// to the model on each iteration (used for runtime-policy filtering
-    /// caller-tier coverage). Captured in lock-step with `captured_requests`
-    /// — same index = same call.
-    captured_tool_definitions: Mutex<Vec<Vec<ToolDefinition>>>,
+    /// Every model call's request, tools, and response format are captured as
+    /// one record. Keeping these fields under one lock preserves their shared
+    /// index when concurrent model calls interleave.
+    captured_calls: Mutex<Vec<CapturedCall>>,
+}
+
+#[derive(Debug, Clone)]
+struct CapturedCall {
+    messages: Vec<ChatMessage>,
+    tools: Vec<ToolDefinition>,
+    response_format: Option<CompletionResponseFormat>,
 }
 
 /// Return the `last_user_message_contains` substring of a step, if any.
@@ -434,8 +438,7 @@ impl TraceLlm {
             steps: Mutex::new(steps),
             calls_served: AtomicUsize::new(0),
             hint_mismatches: AtomicUsize::new(0),
-            captured_requests: Mutex::new(Vec::new()),
-            captured_tool_definitions: Mutex::new(Vec::new()),
+            captured_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -457,14 +460,35 @@ impl TraceLlm {
 
     /// Clone of all captured request message lists.
     pub fn captured_requests(&self) -> Vec<Vec<ChatMessage>> {
-        self.captured_requests.lock().unwrap().clone()
+        self.captured_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.messages.clone())
+            .collect()
     }
 
     /// Clone of every `tools` argument the dispatcher / worker shipped to the
     /// model. Index `i` matches the `i`-th `captured_requests()` entry.
     /// Empty for `complete()`-only calls (text-only paths).
     pub fn captured_tool_definitions(&self) -> Vec<Vec<ToolDefinition>> {
-        self.captured_tool_definitions.lock().unwrap().clone()
+        self.captured_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.tools.clone())
+            .collect()
+    }
+
+    /// Clone every provider-native response format sent to the model. Index
+    /// `i` matches `captured_requests()`; `None` means ordinary inference.
+    pub fn captured_response_formats(&self) -> Vec<Option<CompletionResponseFormat>> {
+        self.captured_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.response_format.clone())
+            .collect()
     }
 
     /// Enqueue one more step at the back of the FIFO. For scenarios where a
@@ -488,17 +512,15 @@ impl TraceLlm {
         &self,
         messages: &[ChatMessage],
         tools: Option<&[ToolDefinition]>,
+        response_format: Option<CompletionResponseFormat>,
     ) -> Result<TraceStep, LlmError> {
-        // Capture the request messages for inspection-based assertions.
-        self.captured_requests
-            .lock()
-            .unwrap()
-            .push(messages.to_vec());
-        // Capture the `tools` argument in lock-step (empty for `complete()`).
-        self.captured_tool_definitions
-            .lock()
-            .unwrap()
-            .push(tools.map(|t| t.to_vec()).unwrap_or_default());
+        // Capture the complete provider call atomically so concurrent calls
+        // cannot associate one request's format with another request.
+        self.captured_calls.lock().unwrap().push(CapturedCall {
+            messages: messages.to_vec(),
+            tools: tools.map(|t| t.to_vec()).unwrap_or_default(),
+            response_format,
+        });
 
         let last_user_content: Option<String> = messages
             .iter()
@@ -759,7 +781,7 @@ impl LlmProvider for TraceLlm {
         // return the next Text step, since in real usage the LLM would
         // produce text when no tools are offered.
         loop {
-            let step = self.next_step(&request.messages, None)?;
+            let step = self.next_step(&request.messages, None, request.response_format.clone())?;
             match step.response {
                 TraceResponse::Text {
                     content,
@@ -797,7 +819,11 @@ impl LlmProvider for TraceLlm {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let step = self.next_step(&request.messages, Some(&request.tools))?;
+        let step = self.next_step(
+            &request.messages,
+            Some(&request.tools),
+            request.response_format.clone(),
+        )?;
         match step.response {
             TraceResponse::Text {
                 content,

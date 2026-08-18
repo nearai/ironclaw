@@ -392,6 +392,7 @@ impl SystemInferencePort for SlowSystemInference {
             task_id: request.task_id,
             output_text: "too late".to_string(),
             elapsed_ms: 2000,
+            usage: None,
         })
     }
 }
@@ -455,9 +456,11 @@ fn turn_run_state(
         accepted_message_ref: AcceptedMessageRef::new("message:auth-required").unwrap(),
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
+        output_contract: Default::default(),
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref: Some(TurnGateRef::new("gate:auth-required").unwrap()),

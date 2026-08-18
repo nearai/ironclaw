@@ -202,6 +202,7 @@ impl AgentTurnProcessRuntime {
             accepted_message_ref: request.accepted_message_ref.clone(),
             resolved_run_profile_id: profile.id.clone(),
             resolved_run_profile_version: profile.version,
+            output_contract: request.output_contract.clone().unwrap_or_default(),
             allow_steering: profile.allow_steering,
             resolved_run_profile: Some(resolved),
             resolved_model_route: request
@@ -209,6 +210,7 @@ impl AgentTurnProcessRuntime {
                 .as_deref()
                 .and_then(LoopModelRouteSnapshot::advisory),
             model_usage: None,
+            execution_outcome: None,
             subagent_depth: 0,
             spawn_tree_descendant_cap: None,
             product_context: request.product_context,
@@ -281,6 +283,7 @@ impl AgentTurnProcessRuntime {
             actor: request.actor.clone(),
             accepted_message_ref: request.accepted_message_ref.clone(),
             requested_run_profile: request.requested_run_profile.clone(),
+            output_contract: request.output_contract.clone(),
             idempotency_key: request.idempotency_key.clone(),
             received_at: request.received_at,
             requested_run_id: request.requested_run_id,
@@ -307,10 +310,12 @@ impl AgentTurnProcessRuntime {
             accepted_message_ref: request.accepted_message_ref.clone(),
             resolved_run_profile_id: profile.id.clone(),
             resolved_run_profile_version: profile.version,
+            output_contract: request.output_contract.clone().unwrap_or_default(),
             allow_steering: profile.allow_steering,
             resolved_run_profile: Some(resolved),
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: None,
             subagent_depth,
             spawn_tree_descendant_cap: Some(request.spawn_tree_descendant_cap),
             product_context: parent_metadata.product_context,
@@ -520,6 +525,7 @@ impl AgentTurnProcessRuntime {
             });
         }
         metadata.model_usage = None;
+        metadata.execution_outcome = None;
         metadata.resume_disposition = None;
         let concurrency_class = process_concurrency_class(
             metadata.product_context.as_ref(),
@@ -1099,7 +1105,9 @@ fn turn_run_record_from_process_snapshot(
         status: state.status,
         profile,
         resolved_model_route: state.resolved_model_route,
+        output_contract: state.output_contract,
         model_usage: state.model_usage,
+        execution_outcome: state.execution_outcome,
         checkpoint_id: state.checkpoint_id,
         gate_ref: state.gate_ref,
         blocked_activity_id: state.blocked_activity_id,
@@ -1156,7 +1164,9 @@ pub fn turn_run_state_from_process_snapshot(
         resolved_run_profile_version: metadata.resolved_run_profile_version,
         allow_steering: metadata.allow_steering,
         resolved_model_route: metadata.resolved_model_route,
+        output_contract: metadata.output_contract,
         model_usage: metadata.model_usage,
+        execution_outcome: metadata.execution_outcome,
         received_at: snapshot.created_at,
         checkpoint_id: snapshot
             .checkpoint_ref

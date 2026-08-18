@@ -60,8 +60,8 @@ use crate::{
     AgentTurnSpawnTreeRuntimePort, CancelRunRequest, CancelRunResponse, EventCursor,
     GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse,
     RunProfileId, RunProfileRequest, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
-    TurnCapacityResource, TurnError, TurnRunId, TurnRunState, TurnScope, TurnStatus,
-    process_projection::AgentTurnProcessRuntime,
+    TurnCapacityResource, TurnError, TurnOriginKind, TurnRunId, TurnRunState, TurnScope,
+    TurnStatus, process_projection::AgentTurnProcessRuntime,
 };
 use ironclaw_host_api::prepared_context::{
     PreparedContextSource, PreparedTurnDeclarations, TurnLimits,
@@ -238,19 +238,30 @@ where
     }
 
     /// Unbound-profile derivation (unbound-turn design §4.2): admission
-    /// derives the run profile from what the submitted thread holds. When the
-    /// caller passes no profile hint, the coordinator probes the thread's
-    /// prepared-context record — prepared threads resolve the unbound
-    /// profiles (`unbound_structured` when the journaled output contract is a
-    /// JSON schema, `unbound_default` otherwise) and their declared limits
-    /// narrow the resolved budget; ordinary conversation threads resolve
-    /// exactly as before. An explicit `unbound_*` hint must match a prepared
-    /// thread's derived profile (fail-closed); any other explicit hint is a
-    /// trusted product path (triggers, subagents) and skips the probe.
+    /// derives the run profile from what the submitted thread holds. The
+    /// coordinator probes the thread's prepared-context record for submissions
+    /// that need unbound derivation. Explicit ordinary profiles and scheduled
+    /// triggers have an independent admission path and do not depend on this
+    /// optional source. A prepared declaration is the accepted turn's
+    /// immutable output contract and must not be lost regardless of the
+    /// resolved profile.
+    /// Prepared threads resolve the ordinary `unbound_default` profile when
+    /// no profile was supplied, regardless of output representation, and
+    /// their declared limits narrow the resolved budget. An explicit
+    /// `unbound_*` hint must match the prepared thread's derived profile
+    /// (fail-closed); other explicit profiles remain valid trusted product
+    /// paths.
     async fn derive_unbound_submission(
         &self,
         mut request: SubmitTurnRequest,
     ) -> Result<(SubmitTurnRequest, Option<PreparedTurnDeclarations>), TurnError> {
+        if let Some(output_contract) = &request.output_contract {
+            output_contract
+                .validate()
+                .map_err(|error| TurnError::InvalidRequest {
+                    reason: error.to_string(),
+                })?;
+        }
         if request.parent_run_id.is_some() {
             return Ok((request, None));
         }
@@ -258,9 +269,21 @@ where
             .requested_run_profile
             .as_ref()
             .is_some_and(|hint| RunProfileId::from_request(hint).is_unbound());
-        if request.requested_run_profile.is_some() && !hint_is_unbound {
-            return Ok((request, None));
-        }
+        // Prepared-context lookup is authoritative for unbound admission, but
+        // it remains useful as a best-effort source of the immutable output
+        // contract on trusted profile paths. Explicit ordinary profiles and
+        // scheduled triggers must not become unavailable merely because the
+        // optional prepared-context store is absent or temporarily unhealthy.
+        let has_explicit_non_unbound_profile = request
+            .requested_run_profile
+            .as_ref()
+            .is_some_and(|hint| !RunProfileId::from_request(hint).is_unbound());
+        let is_scheduled_trigger = request
+            .product_context
+            .as_ref()
+            .is_some_and(|context| context.origin == TurnOriginKind::ScheduledTrigger);
+        let trusted_profile_path =
+            has_explicit_non_unbound_profile || (is_scheduled_trigger && !hint_is_unbound);
         let Some(source) = &self.prepared_context_source else {
             if hint_is_unbound {
                 // An explicit unbound hint without a wired probe cannot be
@@ -287,17 +310,38 @@ where
             }
             Err(error) => {
                 // debug!, not warn!: background diagnostics stay off the REPL.
-                debug!(%error, "prepared-context read failed during unbound admission");
+                debug!(%error, "prepared-context read failed during admission");
+                if trusted_profile_path {
+                    return Ok((request, None));
+                }
                 return Err(TurnError::AdmissionRejected(AdmissionRejection::new(
                     AdmissionRejectionReason::Unavailable,
                 )));
             }
         };
-        let derived = if declarations.output.is_json_schema() {
-            RunProfileId::unbound_structured()
-        } else {
-            RunProfileId::unbound_default()
-        };
+        declarations
+            .output
+            .validate()
+            .map_err(|error| TurnError::InvalidRequest {
+                reason: error.to_string(),
+            })?;
+        // Output representation is a host-owned immutable contract, not a
+        // profile selector. Every new unbound submission uses the ordinary
+        // unbounded profile; legacy callers that explicitly name a profile
+        // are still handled by the explicit-profile branch above.
+        let derived = RunProfileId::unbound_default();
+        if let Some(caller_contract) = &request.output_contract
+            && caller_contract != &declarations.output
+        {
+            return Err(profile_rejected());
+        }
+        request.output_contract = Some(declarations.output.clone());
+        if trusted_profile_path {
+            // A trusted profile remains authoritative for the runtime lane;
+            // only carry the prepared declaration's immutable output contract
+            // (and its narrowing limits) across admission.
+            return Ok((request, Some(declarations)));
+        }
         match &request.requested_run_profile {
             None => {
                 request.requested_run_profile = Some(
@@ -306,6 +350,20 @@ where
                 );
             }
             Some(hint) if hint.as_str() == derived.as_str() => {}
+            Some(hint)
+                if hint.as_str() == RunProfileId::unbound_structured().as_str()
+                    && declarations.output.is_structured_output() =>
+            {
+                // `unbound_structured` selected the retired synthetic result
+                // tool. Preserve compatibility for callers that still send
+                // the hint, but normalize execution onto the ordinary
+                // unbounded family: the immutable output contract now drives
+                // the host-owned post-loop finalizer independently of family.
+                request.requested_run_profile = Some(
+                    RunProfileRequest::new(derived.as_str())
+                        .map_err(|reason| TurnError::InvalidRequest { reason })?,
+                );
+            }
             Some(_) => return Err(profile_rejected()),
         }
         Ok((request, Some(declarations)))

@@ -476,7 +476,7 @@ impl OpenAiChatCompletionsWorkflow {
         caller: &OpenAiCompatAuthenticatedCaller,
         public_id: &OpenAiChatCompletionId,
         request: &OpenAiChatCompletionRequest,
-        prepared_output: Option<&ironclaw_host_api::prepared_context::OutputContract>,
+        prepared_output: Option<&ironclaw_host_api::output::OutputContract>,
         prepared_seed: Option<(String, Vec<ironclaw_threads::agent_message::AgentMessage>)>,
         conversation_submission: Option<(UserMessagePayload, Vec<InboundAttachment>)>,
     ) -> Result<ProductInboundAck, OpenAiCompatHttpError> {
@@ -516,7 +516,7 @@ impl OpenAiChatCompletionsWorkflow {
         caller: &OpenAiCompatAuthenticatedCaller,
         public_id: &OpenAiChatCompletionId,
         request: &OpenAiChatCompletionRequest,
-        output: ironclaw_host_api::prepared_context::OutputContract,
+        output: ironclaw_host_api::output::OutputContract,
         seed: (String, Vec<ironclaw_threads::agent_message::AgentMessage>),
     ) -> Result<ProductInboundAck, OpenAiCompatHttpError> {
         let (system_prompt, messages) = seed;

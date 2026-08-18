@@ -4111,6 +4111,7 @@ fn submit_turn_request(submission: ConversationTurnSubmission) -> SubmitTurnRequ
     }
     SubmitTurnRequest {
         requested_model: None,
+        output_contract: None,
         scope: submission.scope,
         actor: submission.actor,
         accepted_message_ref: submission.accepted_message_ref,

@@ -337,6 +337,52 @@ jobs:
     secrets:
       DOCKER_REGISTRY_TOKEN: ${{ secrets.DOCKER_REGISTRY_TOKEN }}
 
+  # Point `docs-live` (the Mintlify deployment branch) at each stable
+  # release so the public docs site tracks the released binary, not main.
+  # Force-moved by design: stable tags need not be ancestor-related, and
+  # the branch is a pointer, not a history. Prereleases never move it.
+  # See docs/internal/weekly-release-strategy.md, "Docs publication".
+  publish-docs-live:
+    needs:
+      - plan
+      - host
+    if: ${{ always() && needs.host.result == 'success' && !fromJson(needs.host.outputs.val).announcement_is_prerelease }}
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: "ubuntu-22.04"
+    steps:
+      - name: Point docs-live at the stable release commit
+        run: |
+          set -euo pipefail
+          # A re-run of an older release's workflow must not move the live
+          # docs site backwards: only the newest stable tag may repoint.
+          newest="$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/ironclaw-v" \
+            --jq '.[].ref' \
+            | sed 's#^refs/tags/##' \
+            | grep -E '^ironclaw-v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V | tail -n 1)"
+          test -n "${newest}"
+          if [ "${GITHUB_REF_NAME}" != "${newest}" ]; then
+            echo "skipping docs-live repoint: ${GITHUB_REF_NAME} is not the newest stable tag (${newest})"
+            exit 0
+          fi
+          # POST bootstraps the branch only when it does not exist yet, so a
+          # real PATCH failure (e.g. branch protection blocking the forced
+          # update) fails the step with its own error. Ref updates raise
+          # ordinary push events, so the Mintlify App deploys from them.
+          if gh api --silent "repos/${GITHUB_REPOSITORY}/git/ref/heads/docs-live"; then
+            gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/git/refs/heads/docs-live" \
+              -f "sha=${GITHUB_SHA}" -F "force=true"
+          else
+            gh api --method POST \
+              "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f "ref=refs/heads/docs-live" -f "sha=${GITHUB_SHA}"
+          fi
+
   announce:
     needs:
       - plan

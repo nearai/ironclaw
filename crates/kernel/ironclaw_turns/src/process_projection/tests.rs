@@ -2,6 +2,7 @@ use chrono::Utc;
 use ironclaw_host_api::{
     ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
     resource::ResourceScope,
+    turn::TurnExecutionOutcome,
 };
 use ironclaw_processes::{GetProcessSnapshotRequest, ProcessJournalPage, ProcessSnapshotSource};
 use std::sync::Arc;
@@ -43,8 +44,10 @@ fn record_with_status(status: TurnStatus) -> TurnRunRecord {
             .expect("accepted"),
         status,
         profile: profile(),
+        output_contract: Default::default(),
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         checkpoint_id: None,
         gate_ref: GateKind::from_status(status)
             .map(|_| TurnGateRef::new("gate:process-journal").expect("gate")),
@@ -79,16 +82,57 @@ fn agent_turn_metadata(
             .expect("accepted message"),
         resolved_run_profile_id: run_profile.id,
         resolved_run_profile_version: run_profile.version,
+        output_contract: Default::default(),
         allow_steering: true,
         resolved_run_profile: None,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         subagent_depth,
         spawn_tree_descendant_cap: None,
         product_context: None,
         resume_disposition: None,
         ownerless_thread: false,
     }
+}
+
+#[test]
+fn legacy_agent_turn_process_metadata_without_output_contract_defaults_to_assistant_message() {
+    let metadata = AgentTurnProcessMetadata {
+        turn_id: TurnId::new(),
+        accepted_message_ref: AcceptedMessageRef::new("accepted-metadata-output-contract")
+            .expect("accepted message"),
+        resolved_run_profile_id: RunProfileId::default_profile(),
+        resolved_run_profile_version: RunProfileVersion::new(1),
+        // Use a non-default value before removing the field so this exercises
+        // the serde default rather than merely round-tripping a default.
+        output_contract: ironclaw_host_api::output::OutputContract::JsonSchema {
+            name: "legacy-metadata_v1".to_string(),
+            schema: serde_json::json!({"type": "object"}),
+        },
+        allow_steering: false,
+        resolved_model_route: None,
+        model_usage: None,
+        execution_outcome: None,
+        subagent_depth: 0,
+        product_context: None,
+        resume_disposition: None,
+        ownerless_thread: false,
+    };
+    let mut wire = serde_json::to_value(&metadata).expect("serialize metadata");
+    assert!(
+        wire.as_object_mut()
+            .expect("metadata object")
+            .remove("output_contract")
+            .is_some(),
+        "current wire shape must serialize a non-default output contract"
+    );
+    let restored: AgentTurnProcessMetadata =
+        serde_json::from_value(wire).expect("restore legacy metadata");
+    assert_eq!(
+        restored.output_contract,
+        ironclaw_host_api::output::OutputContract::AssistantMessage
+    );
 }
 
 fn child_request(
@@ -106,6 +150,7 @@ fn child_request(
         actor,
         accepted_message_ref: AcceptedMessageRef::new("accepted-child").expect("accepted child"),
         requested_run_profile: None,
+        output_contract: None,
         idempotency_key: IdempotencyKey::new(idempotency_key).expect("idempotency key"),
         received_at: Utc::now(),
         requested_run_id: Some(requested_run_id),
@@ -842,10 +887,12 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
         accepted_message_ref: AcceptedMessageRef::new("accepted-retry").expect("accepted"),
         resolved_run_profile_id: run_profile.id,
         resolved_run_profile_version: run_profile.version,
+        output_contract: Default::default(),
         allow_steering: true,
         resolved_run_profile: None,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: Some(TurnExecutionOutcome::NothingToReport),
         subagent_depth: 0,
         spawn_tree_descendant_cap: None,
         product_context: None,
@@ -936,6 +983,13 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
         })
         .await
         .expect("retried snapshot");
+    assert_eq!(
+        agent_turn_metadata_from_process_snapshot(&retried_snapshot)
+            .expect("retried agent-turn metadata")
+            .execution_outcome,
+        None,
+        "a retry must not inherit a terminal execution outcome from its source run"
+    );
     assert_eq!(
         retried_snapshot.checkpoint_kind,
         Some(ironclaw_processes::ProcessCheckpointKind::BeforeModel),
@@ -1081,9 +1135,11 @@ fn lifecycle_event_projects_to_process_journal_entry() {
             .expect("accepted"),
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
+        output_contract: Default::default(),
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: Utc::now(),
         checkpoint_id: None,
         gate_ref: Some(TurnGateRef::new("gate:process-journal").expect("gate")),
@@ -1125,9 +1181,11 @@ fn claimed_turn_run_projects_to_process_claim() {
             .expect("accepted"),
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
+        output_contract: Default::default(),
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: Utc::now(),
         checkpoint_id: None,
         gate_ref: None,
@@ -1180,9 +1238,11 @@ fn claimed_process_round_trips_to_turn_executor_view() {
             .expect("accepted"),
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
+        output_contract: Default::default(),
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: Utc::now(),
         checkpoint_id: None,
         gate_ref: None,
@@ -1234,9 +1294,11 @@ fn ownerless_scope_round_trips_through_the_process_claim() {
             .expect("accepted"),
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
+        output_contract: Default::default(),
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: Utc::now(),
         checkpoint_id: None,
         gate_ref: None,

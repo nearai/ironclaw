@@ -550,7 +550,7 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
     async fn post_model_work(
         &self,
         context: &LoopRunContext,
-        _request: &ModelWorkRequest,
+        request: &ModelWorkRequest,
         outcome: ModelWorkOutcome,
     ) -> Result<(), LoopModelGatewayError> {
         let entry = match self.in_flight.get(&context.run_id) {
@@ -563,7 +563,13 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
         };
         let pending = match outcome {
             ModelWorkOutcome::Success(usage) => {
-                let usage = usage_for_model_work(usage, &entry.estimate);
+                let usage = usage_for_model_work(
+                    usage,
+                    &entry.estimate,
+                    self.cost_table.as_ref(),
+                    &request.model_profile_id,
+                    &self.default_cost,
+                );
                 PendingAccounting::Reconcile(usage)
             }
             ModelWorkOutcome::Failure(_) => PendingAccounting::Release,
@@ -754,11 +760,25 @@ fn usage_for_reported_usage(
 fn usage_for_model_work(
     usage: ironclaw_loop_contracts::ModelWorkUsage,
     estimate: &ResourceEstimate,
+    cost_table: &dyn ModelCostTable,
+    effective_model: &ModelProfileId,
+    default_cost: &ModelCost,
 ) -> ResourceUsage {
-    // Provider-supplied token counts and USD have not yet been threaded into
-    // loop model responses or system inference responses. Until they are,
-    // reconcile the original reservation estimate as the recorded USD spend:
-    // this is conservative and ensures daily USD budgets actually deplete.
+    // Prefer provider-reported usage when the host path received it. This
+    // keeps system inference (including a structured finalizer) on the same
+    // cost policy as ordinary model work while retaining the conservative
+    // reservation fallback for providers that do not report usage.
+    if let Some(provider_usage) = usage.provider_usage {
+        let mut reconciled = usage_for_reported_usage(
+            provider_usage,
+            usage.output_bytes,
+            cost_table,
+            effective_model,
+            default_cost,
+        );
+        reconciled.wall_clock_ms = usage.wall_clock_ms;
+        return reconciled;
+    }
     ResourceUsage {
         usd: estimate.usd.unwrap_or(Decimal::ZERO),
         input_tokens: estimate.input_tokens.unwrap_or(0),
@@ -1409,6 +1429,68 @@ mod tests {
         assert_eq!(snapshot.ledger.spent.usd, dec!(0.81));
         assert_eq!(snapshot.ledger.spent.input_tokens, 11);
         assert_eq!(snapshot.ledger.spent.output_tokens, 7);
+    }
+
+    #[tokio::test]
+    async fn post_model_work_reconciles_provider_usage_for_system_inference() {
+        // System inference uses the neutral ModelWorkOutcome boundary rather
+        // than post_model_call. Provider usage must still replace the
+        // reservation estimate so structured-finalization calls are charged
+        // by actual tokens.
+        let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
+        let context = run_context();
+        let user_account = ResourceAccount::user(
+            context.scope.tenant_id.clone(),
+            UserId::new("acct-user").unwrap(),
+        );
+        governor
+            .set_limit(
+                user_account.clone(),
+                ResourceLimits::default()
+                    .set_max_usd(dec!(10_000.00))
+                    .set_period(BudgetPeriod::Rolling24h),
+            )
+            .unwrap();
+        let cost = ModelCost {
+            input_per_token: dec!(0.01),
+            output_per_token: dec!(0.10),
+            max_output_tokens: 1024,
+        };
+        let accountant = GovernorBackedAccountant::new(governor.clone(), Arc::new(CostStub(cost)));
+        let assistant_request = sample_request();
+        let work_request = ModelWorkRequest::for_assistant(&context, &assistant_request);
+        accountant
+            .pre_model_work(&context, &work_request)
+            .await
+            .unwrap();
+        accountant
+            .post_model_work(
+                &context,
+                &work_request,
+                ModelWorkOutcome::Success(ironclaw_loop_contracts::ModelWorkUsage {
+                    output_tokens: Some(3),
+                    output_bytes: 12,
+                    wall_clock_ms: 25,
+                    provider_usage: Some(ironclaw_loop_contracts::LoopModelUsage {
+                        input_tokens: 7,
+                        output_tokens: 3,
+                        ..Default::default()
+                    }),
+                }),
+            )
+            .await
+            .unwrap();
+
+        let snapshot = governor.account_snapshot(&user_account).unwrap().unwrap();
+        assert_eq!(
+            snapshot.ledger.spent.usd,
+            dec!(0.37),
+            "system inference spend must reconcile from provider usage, got {}",
+            snapshot.ledger.spent.usd,
+        );
+        assert_eq!(snapshot.ledger.spent.input_tokens, 7);
+        assert_eq!(snapshot.ledger.spent.output_tokens, 3);
+        assert_eq!(snapshot.ledger.spent.wall_clock_ms, 25);
     }
 
     #[tokio::test]

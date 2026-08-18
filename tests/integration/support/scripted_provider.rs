@@ -111,6 +111,18 @@ impl ParkingModelGate {
         }))
     }
 
+    /// Arm the gate for one later model call after the previous parked call has
+    /// been released. This keeps restart/replacement integration scenarios on
+    /// the same provider seam without creating a second provider.
+    pub fn rearm(&self) {
+        let (parked_tx, parked_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        *lock(&self.0.parked_tx) = Some(parked_tx);
+        *lock(&self.0.parked_rx) = Some(parked_rx);
+        *lock(&self.0.release_tx) = Some(release_tx);
+        *lock(&self.0.release_rx) = Some(release_rx);
+    }
+
     /// Await until the parked model call has signalled it is blocked. Returns
     /// immediately on any subsequent call (the channel is consumed once).
     pub async fn wait_until_parked(&self) {

@@ -66,9 +66,9 @@ pub use ironclaw_host_api::turn::{
     GateResumeDisposition, IdempotencyKey, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef,
     ModelInvalidOutputDetailReason, ProductTurnContext, ReplyTargetBindingRef, RunOriginAdapter,
     RunProfileId, RunProfileRequest, RunProfileVersion, SanitizedCancelReason, SanitizedFailure,
-    SourceBindingRef, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnGateRef, TurnId,
-    TurnLeaseToken, TurnOriginKind, TurnOwner, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
-    TurnSurfaceType,
+    SourceBindingRef, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnExecutionOutcome,
+    TurnGateRef, TurnId, TurnLeaseToken, TurnOriginKind, TurnOwner, TurnRunId, TurnRunnerId,
+    TurnScope, TurnStatus, TurnSurfaceType,
 };
 pub use loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,

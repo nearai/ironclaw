@@ -510,6 +510,7 @@ jobs:
           LANE: ${{ matrix.lane }}
           PROVIDER_SHARD: ${{ matrix.shard }}
           IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
+          IRONCLAW_E2E_ARTIFACT_DIR: ${{ runner.temp }}/e2e-artifacts
         run: |
           set -euo pipefail
           case "${LANE}" in
@@ -621,6 +622,14 @@ jobs:
         with:
           name: reborn-webui-v2-screenshots
           path: tests/e2e/screenshots/
+          if-no-files-found: ignore
+
+      - name: Upload E2E diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reborn-e2e-${{ matrix.lane }}-diagnostics
+          path: ${{ runner.temp }}/e2e-artifacts/
           if-no-files-found: ignore
 
   reborn-e2e:

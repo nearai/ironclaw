@@ -228,6 +228,55 @@ impl RootFilesystem for InMemoryBackend {
         Ok(out)
     }
 
+    async fn list_dir_page(
+        &self,
+        path: &VirtualPath,
+        after: Option<&str>,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        if max_entries == 0 {
+            return Ok(Vec::new());
+        }
+        let state = self.state.lock().await;
+        let prefix = with_trailing_slash(path.as_str());
+        let mut page = std::collections::BTreeMap::<String, FileType>::new();
+        for stored_path in state.entries.keys() {
+            let Some(suffix) = stored_path.as_str().strip_prefix(&prefix) else {
+                continue;
+            };
+            let (head, has_more) = first_segment(suffix);
+            if head.is_empty() || after.is_some_and(|cursor| head <= cursor) {
+                continue;
+            }
+            if let Some(existing) = page.get_mut(head) {
+                if has_more {
+                    *existing = FileType::Directory;
+                }
+                continue;
+            }
+            page.insert(
+                head.to_string(),
+                if has_more {
+                    FileType::Directory
+                } else {
+                    FileType::File
+                },
+            );
+            if page.len() > max_entries {
+                page.pop_last();
+            }
+        }
+        page.into_iter()
+            .map(|(name, file_type)| {
+                Ok(DirEntry {
+                    path: VirtualPath::new(join_path(path.as_str(), &name))?,
+                    name,
+                    file_type,
+                })
+            })
+            .collect()
+    }
+
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         let state = self.state.lock().await;
         if let Some(stored) = state.entries.get(path) {
@@ -1922,6 +1971,50 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, "a.md");
         assert_eq!(entries[1].name, "b.md");
+    }
+
+    #[tokio::test]
+    async fn list_dir_page_uses_stable_name_keyset_without_duplicates() {
+        let fs = InMemoryBackend::new();
+        for p in [
+            "/projects/a.md",
+            "/projects/b.md",
+            "/projects/c.md",
+            "/projects/sub/nested.md",
+        ] {
+            fs.put(&vpath(p), Entry::bytes(vec![]), CasExpectation::Absent)
+                .await
+                .unwrap();
+        }
+
+        let first = fs
+            .list_dir_page(&vpath("/projects"), None, 2)
+            .await
+            .unwrap();
+        let second = fs
+            .list_dir_page(
+                &vpath("/projects"),
+                first.last().map(|entry| entry.name.as_str()),
+                2,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            first
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.md", "b.md"]
+        );
+        assert_eq!(
+            second
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c.md", "sub"]
+        );
+        assert_eq!(second[1].file_type, FileType::Directory);
     }
 
     #[tokio::test]

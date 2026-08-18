@@ -1207,11 +1207,10 @@ review_after = "2026-11-02"
 [[exemption]]
 path = "crates/domains/ironclaw_threads/src/filesystem_service/transcript_migration.rs"
 lines = [
-  39, 62, 63, 103, 104, 159, 168, 169, 170, 171,
-  173, 178, 190, 202, 203, 204, 205, 207, 212, 213,
-  214, 216, 221, 222, 233, 238, 239, 241, 273, 274, 275,
+  39, 62, 63, 100, 101, 155, 164, 165, 166, 167,
+  169, 174, 183, 184, 195, 200, 201, 203, 235, 236, 237,
 ]
-branch_lines = [62, 101, 156, 169, 175, 183, 203, 212, 229, 238, 267]
+branch_lines = [62, 98, 152, 165, 171, 179, 191, 200, 229]
 owner = "@nearai/reborn"
 reason = "Contract tests deterministically cover writer-admission BackendBusy, VersionMismatch page retry, bounded exhaustion, successful message/summary rebuild, and durable marker read-back. Residuals are alternate failure sites inside the same bounded state machine, malformed legacy records, disappearing rows, and non-durable marker/backend failures not separately selectable through FaultInjecting."
 issue = "https://github.com/nearai/ironclaw/issues/6974"

@@ -26,6 +26,7 @@ use crate::error::LlmError;
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason,
     LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    openai_json_schema_response_format,
 };
 use crate::tool_args::parse_tool_call_args_allow_trailing_lossy;
 
@@ -760,6 +761,7 @@ impl LlmProvider for NearAiChatProvider {
             temperature: req.temperature,
             max_tokens: req.max_tokens,
             stop: req.stop_sequences,
+            response_format: req.response_format.map(openai_json_schema_response_format),
             tools: None,
             tool_choice: None,
             stream: false,
@@ -837,6 +839,7 @@ impl LlmProvider for NearAiChatProvider {
             temperature: req.temperature,
             max_tokens: req.max_tokens,
             stop: req.stop_sequences,
+            response_format: req.response_format.map(openai_json_schema_response_format),
             tools: None,
             tool_choice: None,
             stream: true,
@@ -899,7 +902,10 @@ impl LlmProvider for NearAiChatProvider {
             req.temperature,
             req.max_tokens,
             req.stop_sequences,
-            req.tool_choice,
+            ChatCompletionOutputOptions {
+                response_format: req.response_format,
+                tool_choice: req.tool_choice,
+            },
         );
 
         let response: ChatCompletionResponse = self.send_request(&request).await?;
@@ -1011,7 +1017,10 @@ impl LlmProvider for NearAiChatProvider {
             req.temperature,
             req.max_tokens,
             req.stop_sequences,
-            req.tool_choice,
+            ChatCompletionOutputOptions {
+                response_format: req.response_format,
+                tool_choice: req.tool_choice,
+            },
         );
         request.stream = true;
         request.stream_options = Some(ChatCompletionStreamOptions {
@@ -1117,6 +1126,8 @@ struct ChatCompletionRequest {
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stop: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<ChatCompletionTool>>,
     /// `"auto"`/`"required"`/`"none"` serialize as bare strings; a named
@@ -1442,12 +1453,12 @@ fn build_chat_completion_request(
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     stop: Option<Vec<String>>,
-    tool_choice: Option<String>,
+    output: ChatCompletionOutputOptions,
 ) -> ChatCompletionRequest {
     let tools: Vec<ChatCompletionTool> = tools.into_iter().map(convert_tool_definition).collect();
     let has_tools = !tools.is_empty();
     let tool_choice = if has_tools {
-        tool_choice.map(|tc| match tc.as_str() {
+        output.tool_choice.map(|tc| match tc.as_str() {
             "auto" | "required" | "none" => serde_json::Value::String(tc),
             specific => serde_json::json!({
                 "type": "function",
@@ -1464,11 +1475,19 @@ fn build_chat_completion_request(
         temperature,
         max_tokens,
         stop,
+        response_format: output
+            .response_format
+            .map(openai_json_schema_response_format),
         tools: if has_tools { Some(tools) } else { None },
         tool_choice,
         stream: false,
         stream_options: None,
     }
+}
+
+struct ChatCompletionOutputOptions {
+    response_format: Option<crate::provider::CompletionResponseFormat>,
+    tool_choice: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3883,7 +3902,10 @@ data: [DONE]
             Some(0.2),
             Some(16),
             None,
-            Some("auto".to_string()),
+            ChatCompletionOutputOptions {
+                response_format: None,
+                tool_choice: Some("auto".to_string()),
+            },
         );
 
         let tools = request.tools.expect("tools present");
@@ -3949,6 +3971,7 @@ data: [DONE]
             temperature: None,
             max_tokens: None,
             stop: None,
+            response_format: None,
             tools: None,
             tool_choice: None,
             stream: false,
@@ -3973,6 +3996,7 @@ data: [DONE]
             temperature: Some(0.7),
             max_tokens: Some(1024),
             stop: None,
+            response_format: None,
             tools: Some(vec![ChatCompletionTool {
                 tool_type: "function".to_string(),
                 function: ChatCompletionFunction {
@@ -4005,6 +4029,61 @@ data: [DONE]
     }
 
     #[test]
+    fn test_request_serialization_with_native_response_schema() {
+        let schema = crate::provider::JsonSchemaResponseFormat::strict(
+            "suggestions",
+            serde_json::json!({"type": "object", "properties": {"items": {"type": "array"}}}),
+        );
+        let request = build_chat_completion_request(
+            "gpt-4o".to_string(),
+            vec![ChatMessage::user("Return suggestions").into()],
+            vec![],
+            None,
+            None,
+            None,
+            ChatCompletionOutputOptions {
+                response_format: Some(crate::provider::CompletionResponseFormat::JsonSchema(
+                    schema,
+                )),
+                tool_choice: None,
+            },
+        );
+        let json = serde_json::to_value(request).expect("serialize request");
+        assert_eq!(
+            json["response_format"],
+            serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "suggestions",
+                    "strict": true,
+                    "schema": {"type": "object", "properties": {"items": {"type": "array"}}}
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn test_request_serialization_preserves_native_json_object_mode() {
+        let request = build_chat_completion_request(
+            "gpt-4o".to_string(),
+            vec![ChatMessage::user("Return an object").into()],
+            vec![],
+            None,
+            None,
+            None,
+            ChatCompletionOutputOptions {
+                response_format: Some(crate::provider::CompletionResponseFormat::JsonObject),
+                tool_choice: None,
+            },
+        );
+        let json = serde_json::to_value(request).expect("serialize request");
+        assert_eq!(
+            json["response_format"],
+            serde_json::json!({"type": "json_object"})
+        );
+    }
+
+    #[test]
     fn test_request_omits_tool_choice_without_tools() {
         let request = build_chat_completion_request(
             "gpt-4o".to_string(),
@@ -4013,7 +4092,10 @@ data: [DONE]
             None,
             None,
             None,
-            Some("auto".to_string()),
+            ChatCompletionOutputOptions {
+                response_format: None,
+                tool_choice: Some("auto".to_string()),
+            },
         );
 
         let json = serde_json::to_value(&request).unwrap();
@@ -4037,7 +4119,10 @@ data: [DONE]
             None,
             None,
             None,
-            Some("builtin__structured_result".to_string()),
+            ChatCompletionOutputOptions {
+                response_format: None,
+                tool_choice: Some("builtin__structured_result".to_string()),
+            },
         );
 
         let json = serde_json::to_value(&request).unwrap();
@@ -4061,7 +4146,10 @@ data: [DONE]
                 None,
                 None,
                 None,
-                Some("required".to_string()),
+                ChatCompletionOutputOptions {
+                    response_format: None,
+                    tool_choice: Some("required".to_string()),
+                },
             ))
             .unwrap()["tool_choice"],
             serde_json::json!("required"),

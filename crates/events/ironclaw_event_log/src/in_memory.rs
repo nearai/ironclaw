@@ -7,7 +7,7 @@ use ironclaw_host_api::audit::AuditEnvelope;
 use crate::cursor::{EventCursor, EventLogEntry, EventReplay, EventStreamKey, ReadScope};
 use crate::error::EventError;
 use crate::runtime_event::RuntimeEvent;
-use crate::sink::{AuditSink, DurableAuditLog, DurableEventLog, EventSink};
+use crate::sink::{AuditSink, DurableAuditLog, DurableEventLog, EventSink, NonBlockingEventSink};
 
 /// In-memory event sink used by tests and live demos.
 #[derive(Debug, Clone, Default)]
@@ -28,6 +28,12 @@ impl InMemoryEventSink {
 #[async_trait]
 impl EventSink for InMemoryEventSink {
     async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
+        NonBlockingEventSink::try_emit(self, event)
+    }
+}
+
+impl NonBlockingEventSink for InMemoryEventSink {
+    fn try_emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
         lock_or_recover(&self.events).push(event);
         Ok(())
     }

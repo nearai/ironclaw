@@ -14,12 +14,10 @@ ignore = [
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
-    # h2 unbounded empty DATA frames. Our own h2 is bumped to the patched 0.4.16;
-    # the remaining hit is h2 0.3.27, which has no patched 0.3.x release and is
-    # pinned transitively by libsql 0.9.30 (→ tonic 0.11 → axum 0.6 → hyper 0.14).
-    # That h2 0.3 is a gRPC *client* to the libsql server, not an inbound server
-    # surface, so the DoS vector is not attacker-reachable here. Keep ignored
-    # until the libsql pin is gone — same tracking as the rustls-webpki entries.
+    # h2 unbounded empty DATA frames — h2 0.4 is patched in Cargo.lock, but
+    # libsql 0.9.30 still pins tonic/hyper to h2 0.3.27. The advisory provides
+    # no patched 0.3.x release, so keep the legacy line ignored until libsql's
+    # transport stack can move to h2 >=0.4.16.
     "RUSTSEC-2026-0258",
     # rsa Marvin timing side-channel — test-only dependency used to mint
     # throwaway local OIDC JWT fixtures; no production network-observable

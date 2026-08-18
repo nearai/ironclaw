@@ -47,7 +47,7 @@ pub(super) enum MessageReadResult {
 
 impl<F> FilesystemSessionThreadService<F>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + 'static,
 {
     pub(super) async fn read_thread_messages(
         &self,

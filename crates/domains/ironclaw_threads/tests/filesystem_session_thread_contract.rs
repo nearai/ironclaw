@@ -45,10 +45,13 @@ use ironclaw_threads::{
     PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
     SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
-    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
-    UpdateToolResultReferenceRequest,
+    ToolResultIntrinsicOutcome, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
-use tokio::sync::{Barrier, Mutex, OwnedMutexGuard};
+use tokio::{
+    sync::{Barrier, Mutex, OwnedMutexGuard},
+    time::{Duration, timeout},
+};
 
 fn provider_call_reference(call_id: &str) -> ProviderToolCallReferenceEnvelope {
     ProviderToolCallReferenceEnvelope {
@@ -64,6 +67,101 @@ fn provider_call_reference(call_id: &str) -> ProviderToolCallReferenceEnvelope {
         reasoning: None,
         signature: None,
     }
+}
+
+#[tokio::test]
+async fn filesystem_history_preserves_typed_intrinsic_outcome_without_provider_metadata() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-provider-evidence", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("fs-provider-evidence");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-provider-evidence").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let first = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: Some(ToolResultIntrinsicOutcome::NothingToReport),
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:provider-evidence".into(),
+            safe_summary: ToolResultSafeSummary::new("structured result recorded").unwrap(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    let thread_after_first = service
+        .read_thread(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    drop(service);
+    let scoped = scoped_threads_fs_at(backend, "tenant-provider-evidence", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let duplicate = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: Some(ToolResultIntrinsicOutcome::NothingToReport),
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:provider-evidence".into(),
+            safe_summary: ToolResultSafeSummary::new("retry ignored").unwrap(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    let thread_after_duplicate = service
+        .read_thread(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(first, duplicate, "atomic replay must be side-effect free");
+    assert_eq!(
+        thread_after_first.updated_at, thread_after_duplicate.updated_at,
+        "atomic replay must not move thread activity ordering"
+    );
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        history
+            .messages
+            .iter()
+            .all(|message| message.tool_result_provider_call.is_none()),
+        "ordinary history must keep host-only provider metadata redacted"
+    );
+
+    let envelope = history
+        .messages
+        .first()
+        .and_then(|message| message.content.as_deref())
+        .map(ToolResultReferenceEnvelope::from_json_str)
+        .transpose()
+        .unwrap()
+        .expect("history contains the result envelope");
+    assert_eq!(
+        envelope.intrinsic_outcome,
+        Some(ToolResultIntrinsicOutcome::NothingToReport),
+        "host-validated intrinsic evidence must survive the redacted history projection"
+    );
 }
 
 #[tokio::test]
@@ -84,6 +182,7 @@ async fn filesystem_tool_result_update_targets_the_exact_provider_call_row() {
         .unwrap();
     let spawn = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -96,6 +195,7 @@ async fn filesystem_tool_result_update_targets_the_exact_provider_call_row() {
         .unwrap();
     let page = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -157,6 +257,7 @@ async fn filesystem_tool_result_dedup_keys_distinct_provider_calls_sharing_a_res
 
     let first = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -169,6 +270,7 @@ async fn filesystem_tool_result_dedup_keys_distinct_provider_calls_sharing_a_res
         .unwrap();
     let duplicate = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -181,6 +283,7 @@ async fn filesystem_tool_result_dedup_keys_distinct_provider_calls_sharing_a_res
         .unwrap();
     let second = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -465,6 +568,7 @@ async fn filesystem_redaction_retains_durable_tool_result_record() {
     let result_ref = "result:fs-redacted-tool".to_string();
     let result = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-fs-tool-redaction".into(),
@@ -904,7 +1008,7 @@ async fn filesystem_delete_thread_removes_inbound_idempotency_records() {
 #[tokio::test]
 async fn filesystem_finalized_assistant_lookup_by_run_uses_persisted_message() {
     let backend = Arc::new(InMemoryBackend::new());
-    let scoped = scoped_threads_fs_at(backend, "tenant-finalized-by-run", "alice");
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-finalized-by-run", "alice");
     let service = FilesystemSessionThreadService::new(scoped);
     let scope = scope("finalized-by-run");
     let thread = service
@@ -949,7 +1053,7 @@ async fn filesystem_finalized_assistant_lookup_by_run_uses_persisted_message() {
 
     let finalized = service
         .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
-            scope,
+            scope: scope.clone(),
             thread_id: thread.thread_id,
             turn_run_id: "run-finalized-lookup".into(),
         })
@@ -959,6 +1063,21 @@ async fn filesystem_finalized_assistant_lookup_by_run_uses_persisted_message() {
     assert_eq!(finalized.message_id, draft.message_id);
     assert_eq!(finalized.status, MessageStatus::Finalized);
     assert_eq!(finalized.content.as_deref(), Some("final"));
+
+    let stored_rows = backend
+        .query(
+            &VirtualPath::new("/tenants/tenant-finalized-by-run/users/alice/threads").unwrap(),
+            &Filter::All,
+            Page::new(0, Page::MAX_LIMIT),
+        )
+        .await
+        .unwrap();
+    assert!(
+        stored_rows
+            .iter()
+            .all(|row| !row.path.as_str().contains("/indexes/")),
+        "message lookup must not amplify one message row into sibling index entries"
+    );
 }
 
 #[tokio::test]
@@ -1438,8 +1557,8 @@ async fn filesystem_redacts_append_only_finalized_assistant_message() {
 }
 
 #[tokio::test]
-async fn filesystem_lookup_index_write_failure_rolls_back_source_message() {
-    let backend = Arc::new(lookup_index_write_failure_backend());
+async fn filesystem_message_row_write_failure_rejects_source_message() {
+    let backend = Arc::new(message_row_write_failure_backend());
     let scoped = scoped_threads_fs_at(backend, "tenant-lookup-index-failure", "alice");
     let service = FilesystemSessionThreadService::new(scoped);
     let scope = scope("lookup-index-failure");
@@ -1461,7 +1580,7 @@ async fn filesystem_lookup_index_write_failure_rolls_back_source_message() {
             content: MessageContent::text("draft"),
         })
         .await
-        .expect_err("required lookup projection failure must reject the atomic append");
+        .expect_err("message-row projection failure must reject the append");
 
     let history = service
         .list_thread_history(ThreadHistoryRequest {
@@ -1911,6 +2030,7 @@ async fn filesystem_context_limit_counts_only_model_visible_messages() {
             .unwrap();
         service
             .append_tool_result_reference(AppendToolResultReferenceRequest {
+                intrinsic_outcome: None,
                 scope: scope.clone(),
                 thread_id: thread.thread_id.clone(),
                 turn_run_id: "run-visible-window".into(),
@@ -2853,9 +2973,8 @@ async fn filesystem_thread_create_declares_indexes_once_per_mount() {
     create("ddl-000").await;
     let after_first = backend.count(FilesystemOperation::EnsureIndex);
     assert_eq!(
-        after_first, 4,
-        "a mount's first thread declares exactly the four root specs \
-         (message sequence, message kind/status, summary, thread activity)"
+        after_first, 9,
+        "a mount's first thread declares four transcript specs and five message lookup specs"
     );
 
     for index in 1..5 {
@@ -3196,7 +3315,7 @@ async fn filesystem_transcript_migration_retries_writer_admission_contention() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -3255,7 +3374,7 @@ async fn filesystem_transcript_migration_retries_a_lost_cas_race() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -3279,7 +3398,7 @@ async fn filesystem_transcript_migration_retries_a_lost_cas_race() {
     let marker_writes = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .filter(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .filter(|path| path.as_str().contains("transcript-index-v2.complete"))
         .count();
     assert_eq!(
         marker_writes, 2,
@@ -3318,7 +3437,7 @@ async fn filesystem_transcript_migration_conflict_retries_are_bounded() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -3632,6 +3751,872 @@ async fn filesystem_list_threads_merges_partial_thread_index_with_source_rows() 
         .collect();
     assert!(ids.contains(&"legacy-indexed"));
     assert!(ids.contains(&"legacy-missing"));
+}
+
+/// Break caught: an index row can exist with its projection keys missing —
+/// observed in staging, where a thread kept its record, its index row and all
+/// of its messages but never appeared in the sidebar. The ordered projection
+/// only emits a row when `indexed` carries the listing keys, so such a row is
+/// invisible to `list_threads`, and the scope's completion marker makes the
+/// repair pass skip the scope on every later start. Without self-healing the
+/// thread stays unreachable for the rest of the volume's life.
+#[tokio::test]
+async fn filesystem_list_threads_recovers_index_row_without_projection_keys() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-index-unprojected", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("index-unprojected");
+
+    for id in ["projected-thread", "unprojected-thread"] {
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(ThreadId::new(id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    // Listing once writes the scope's thread-index completion marker, which is
+    // what later suppresses the repair pass.
+    let seeded = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        seeded.threads.len(),
+        2,
+        "both threads must list before the index row is damaged"
+    );
+
+    // Reproduce the staging row shape: no ordered-projection metadata on the
+    // entry while the durable record body remains intact.
+    let index_path = thread_index_record_path_for_test(&scope, "unprojected-thread");
+    let damaged: serde_json::Value = serde_json::from_slice(
+        &scoped
+            .get(&scope.to_resource_scope(), &index_path)
+            .await
+            .unwrap()
+            .expect("ensure_thread writes a derived index row")
+            .entry
+            .body,
+    )
+    .unwrap();
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &index_path,
+            Entry::bytes(serde_json::to_vec_pretty(&damaged).unwrap()),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("test setup rewrites the index row without projection keys");
+
+    // A fresh service stands in for a process restart: no in-memory scope
+    // cache, so the scope is re-declared from durable state alone.
+    let restarted = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    restarted
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    wait_for_thread_index_projection_repair(scoped.as_ref(), &scope).await;
+    let listed = restarted
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = listed
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert!(
+        ids.contains(&"projected-thread"),
+        "the undamaged thread must still list; got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"unprojected-thread"),
+        "a thread whose index row lost its projection keys must still be \
+         listable after a restart; got {ids:?}"
+    );
+}
+
+/// Break caught: repairing through the merge helper is not enough. `cas_update`
+/// compares only the decoded body, so an index row whose body already matches a
+/// rebuilt record — but whose projection keys are gone — takes the equality
+/// no-op path and is never physically rewritten. The repair then reports
+/// success while the thread stays invisible, and every later start repeats the
+/// scan for nothing. Recovery must not depend on the body differing.
+#[tokio::test]
+async fn filesystem_list_threads_recovers_current_version_index_row_without_projection_keys() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-index-unprojected-current", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("index-unprojected-current");
+
+    for id in ["projected-thread", "unprojected-thread"] {
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(ThreadId::new(id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    }
+    service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+
+    // Strip only the projection metadata: the body is left byte-for-byte as
+    // written, so a rebuilt record compares equal to it.
+    let index_path = thread_index_record_path_for_test(&scope, "unprojected-thread");
+    let body = scoped
+        .get(&scope.to_resource_scope(), &index_path)
+        .await
+        .unwrap()
+        .expect("ensure_thread writes a derived index row")
+        .entry
+        .body;
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &index_path,
+            Entry::bytes(body),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("test setup strips the projection metadata only");
+
+    let restarted = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    restarted
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    wait_for_thread_index_projection_repair(scoped.as_ref(), &scope).await;
+    let listed = restarted
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = listed
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert!(
+        ids.contains(&"unprojected-thread"),
+        "recovery must not depend on the record body differing from a rebuild; \
+         got {ids:?}"
+    );
+}
+
+/// Break caught: the repair's completeness check only looked for `scope_key`.
+/// The ordered projection also sorts and paginates on `activity_sort` and
+/// `thread_id`, so a row that kept `scope_key` but lost either of those two
+/// keys took the early-return "already projected" path and was never
+/// rewritten — invisible to `list_threads` forever, same as a row missing all
+/// three keys.
+#[tokio::test]
+async fn filesystem_list_threads_recovers_index_row_missing_only_activity_sort_key() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-index-partial-keys", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("index-partial-keys");
+
+    for id in ["projected-thread", "partial-keys-thread"] {
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(ThreadId::new(id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    }
+    service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+
+    // Rewrite the row keeping `scope_key` (the only key the old check looked
+    // at) but dropping `activity_sort` and `thread_id` — the two keys
+    // `query_ordered` actually sorts and paginates on.
+    let index_path = thread_index_record_path_for_test(&scope, "partial-keys-thread");
+    let versioned = scoped
+        .get(&scope.to_resource_scope(), &index_path)
+        .await
+        .unwrap()
+        .expect("ensure_thread writes a derived index row");
+    let mut damaged = versioned.entry.clone();
+    damaged.indexed.retain(|key, _| key.as_str() == "scope_key");
+    assert_eq!(
+        damaged.indexed.len(),
+        1,
+        "test setup must strip every key except scope_key"
+    );
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &index_path,
+            damaged,
+            CasExpectation::Any,
+        )
+        .await
+        .expect("test setup rewrites the index row missing activity_sort/thread_id");
+
+    let restarted = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    restarted
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    wait_for_thread_index_projection_repair(scoped.as_ref(), &scope).await;
+    let listed = restarted
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = listed
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert!(
+        ids.contains(&"projected-thread"),
+        "the undamaged thread must still list; got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"partial-keys-thread"),
+        "a row retaining scope_key but missing activity_sort/thread_id must \
+         still be repaired and listable; got {ids:?}"
+    );
+}
+
+/// Break caught: `ensure_thread` (an optional, `required: false` caller of
+/// `ensure_thread_index_query`) declared the scope and cached it as "ready"
+/// without ever running repair. A later `required: true` listing call then
+/// saw the scope already declared *and* the durable migration marker already
+/// complete (written by an earlier process) and returned early before
+/// reaching the reconcile step — so in the common production ordering, where
+/// a write happens before the first list in a process, self-healing never ran
+/// at all.
+#[tokio::test]
+async fn filesystem_list_threads_recovers_index_row_when_write_precedes_first_list() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-index-write-before-list", "alice");
+    let scope = scope("index-write-before-list");
+
+    // Seed durable state, including the scope's migration-complete marker,
+    // using a first process that lists before ever writing again.
+    {
+        let seeding_service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+        for id in ["projected-thread", "unprojected-thread"] {
+            seeding_service
+                .ensure_thread(EnsureThreadRequest {
+                    scope: scope.clone(),
+                    thread_id: Some(ThreadId::new(id).unwrap()),
+                    created_by_actor_id: "actor-a".into(),
+                    title: Some(id.into()),
+                    metadata_json: None,
+                })
+                .await
+                .unwrap();
+        }
+        seeding_service
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope: scope.clone(),
+                limit: None,
+                cursor: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    // Damage one row's projection keys, same shape as the other recovery
+    // tests, so a fresh process has real repair work to do.
+    let index_path = thread_index_record_path_for_test(&scope, "unprojected-thread");
+    let damaged: serde_json::Value = serde_json::from_slice(
+        &scoped
+            .get(&scope.to_resource_scope(), &index_path)
+            .await
+            .unwrap()
+            .expect("ensure_thread writes a derived index row")
+            .entry
+            .body,
+    )
+    .unwrap();
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &index_path,
+            Entry::bytes(serde_json::to_vec_pretty(&damaged).unwrap()),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("test setup rewrites the index row without projection keys");
+
+    // Fresh process, durable migration marker already complete from seeding.
+    // Critically, perform a WRITE (`ensure_thread`) before the first list —
+    // the ordering that reproduces the bug — so the optional declaration path
+    // caches the scope as "ready" before any required call ever runs. Uses a
+    // brand-new thread id, distinct from the damaged row: `ensure_thread`
+    // would otherwise refresh the damaged row's own index entry as a side
+    // effect (because the fresh process's in-memory "known row" cache is
+    // empty too), which would repair it incidentally and defeat the test.
+    let restarted = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    restarted
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("write-before-list-thread").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("write-before-list-thread".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    restarted
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    wait_for_thread_index_projection_repair(scoped.as_ref(), &scope).await;
+    let listed = restarted
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = listed
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert!(
+        ids.contains(&"projected-thread"),
+        "the undamaged thread must still list; got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"unprojected-thread"),
+        "a damaged row must still be repaired and listable even when a write \
+         happens before the first list in the process; got {ids:?}"
+    );
+}
+
+/// Projection repair is background work. A blocked repair must not delay the
+/// listing that scheduled it or a listing for another scope.
+#[tokio::test]
+async fn filesystem_list_threads_reconciles_unrelated_scopes_independently() {
+    let blocked_scope = scope("index-scope-lock-blocked");
+    let unrelated_scope = scope("index-scope-lock-unrelated");
+    let backend = Arc::new(BlockingScopeReconcileBackend::new(format!(
+        "/agents/{}/",
+        blocked_scope.agent_id.as_str()
+    )));
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-index-scope-lock", "alice");
+    let seeding_service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+
+    for (scope, thread_id) in [
+        (&blocked_scope, "blocked-scope-thread"),
+        (&unrelated_scope, "unrelated-scope-thread"),
+    ] {
+        seeding_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(ThreadId::new(thread_id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(thread_id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        seeding_service
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope: scope.clone(),
+                limit: None,
+                cursor: None,
+            })
+            .await
+            .expect("seed listing writes the completed migration marker");
+    }
+
+    backend.arm();
+    let restarted = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let blocked = timeout(
+        Duration::from_secs(2),
+        restarted.list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: blocked_scope.clone(),
+            limit: None,
+            cursor: None,
+        }),
+    )
+    .await
+    .expect("listing must not wait for its background projection repair")
+    .expect("blocked scope listing succeeds");
+    assert_eq!(blocked.threads.len(), 1);
+    timeout(Duration::from_secs(5), backend.reconcile_entered.wait())
+        .await
+        .expect("the blocked scope enters its background repair scan");
+
+    let unrelated = timeout(
+        Duration::from_secs(2),
+        restarted.list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: unrelated_scope.clone(),
+            limit: None,
+            cursor: None,
+        }),
+    )
+    .await
+    .expect("unrelated scope must not wait behind another scope's repair")
+    .expect("unrelated scope listing succeeds");
+    assert_eq!(unrelated.threads.len(), 1);
+
+    backend.release_reconcile.wait().await;
+    wait_for_thread_index_projection_repair(scoped.as_ref(), &blocked_scope).await;
+    wait_for_thread_index_projection_repair(scoped.as_ref(), &unrelated_scope).await;
+}
+
+/// Reconciliation is a best-effort repair for rows that the listing projection
+/// cannot see. A transient failure while discovering those rows must not turn
+/// an otherwise-readable sidebar page into a hard listing failure.
+#[tokio::test]
+async fn filesystem_list_threads_degrades_to_projected_rows_when_reconcile_fails() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(
+        Arc::clone(&backend),
+        "tenant-index-reconcile-failure",
+        "alice",
+    );
+    let seeding_service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("index-reconcile-failure");
+
+    for id in ["projected-before-failure-a", "projected-before-failure-b"] {
+        seeding_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(ThreadId::new(id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    }
+    seeding_service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .expect("seed listing writes the completed migration marker");
+
+    let damaged_path = thread_index_record_path_for_test(&scope, "projected-before-failure-b");
+    let damaged_body = scoped
+        .get(&scope.to_resource_scope(), &damaged_path)
+        .await
+        .unwrap()
+        .expect("seeded index row exists")
+        .entry
+        .body;
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &damaged_path,
+            Entry::bytes(damaged_body),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("test setup removes the damaged row's projection keys");
+
+    // A fresh process reaches the marker-complete repair branch. Fail its
+    // first background directory discovery; the listing itself must still
+    // return the projected rows.
+    backend.add_fault(
+        Fault::on(FilesystemOperation::ListDir)
+            .path("/thread_index")
+            .nth(1)
+            .backend("projection reconcile directory listing fails once"),
+    );
+    let restarted = FilesystemSessionThreadService::new(scoped);
+    let degraded = restarted
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .expect("a reconcile failure must degrade to projected listing rows");
+    let degraded_ids: Vec<&str> = degraded
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(degraded_ids.len(), 1);
+    assert!(degraded_ids.contains(&"projected-before-failure-a"));
+    assert!(!degraded_ids.contains(&"projected-before-failure-b"));
+
+    // A failed background pass must not write its durable completion marker.
+    // Once the transient fault is spent, a later list admits a retry.
+    let repaired = timeout(Duration::from_secs(5), async {
+        loop {
+            let listed = restarted
+                .list_threads_for_scope(ListThreadsForScopeRequest {
+                    scope: scope.clone(),
+                    limit: None,
+                    cursor: None,
+                })
+                .await
+                .expect("listing remains available while repair retries");
+            if listed.threads.len() == 2 {
+                break listed;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("a later listing retries the failed background repair");
+    let repaired_ids: Vec<&str> = repaired
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(repaired_ids.len(), 2);
+    assert!(repaired_ids.contains(&"projected-before-failure-a"));
+    assert!(repaired_ids.contains(&"projected-before-failure-b"));
+}
+
+/// A corrupt row or permanently unavailable backend path must not trigger a
+/// full-scope repair scan on every later sidebar request. The process gives
+/// transient failures a bounded retry budget, then stops admitting the scope
+/// without ever writing the durable completion marker for partial work.
+#[tokio::test]
+async fn filesystem_list_threads_bounds_persistent_projection_repair_failures() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(
+        Arc::clone(&backend),
+        "tenant-index-reconcile-persistent-failure",
+        "alice",
+    );
+    let scope = scope("index-reconcile-persistent-failure");
+    let seeding_service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    seeding_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("persistent-failure-thread").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("persistent failure thread".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    seeding_service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .expect("seed listing writes the completed v1 migration marker");
+
+    backend.add_fault(
+        Fault::on(FilesystemOperation::ListDir)
+            .path("/thread_index")
+            .backend("projection repair remains unavailable"),
+    );
+    let baseline = backend.count(FilesystemOperation::ListDir);
+    let restarted = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+
+    for expected_attempts in 1..=3 {
+        restarted
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope: scope.clone(),
+                limit: None,
+                cursor: None,
+            })
+            .await
+            .expect("listing remains available while background repair fails");
+        timeout(Duration::from_secs(5), async {
+            while backend.count(FilesystemOperation::ListDir) < baseline + expected_attempts {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the admitted background repair attempt must finish");
+    }
+
+    for _ in 0..5 {
+        restarted
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope: scope.clone(),
+                limit: None,
+                cursor: None,
+            })
+            .await
+            .expect("listing remains available after the retry budget is exhausted");
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        backend.count(FilesystemOperation::ListDir),
+        baseline + 3,
+        "persistent failure must stop scheduling a full-scope scan on every listing"
+    );
+    assert!(
+        scoped
+            .get(
+                &scope.to_resource_scope(),
+                &thread_index_projection_repair_marker_path_for_test(&scope),
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "a scope that exhausted its retry budget must remain durably incomplete"
+    );
+}
+
+/// A current-version record can still be invisible when its entry sidecar
+/// loses the ordered keys. Repair must use the shared CAS retry loop rather
+/// than a one-shot conditional put, because a benign concurrent rewrite can
+/// race this best-effort projection repair.
+#[tokio::test]
+async fn filesystem_list_threads_retries_reconcile_projection_repair_after_cas_race() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(
+        Arc::clone(&backend),
+        "tenant-index-reconcile-cas-race",
+        "alice",
+    );
+    let scope = scope("index-reconcile-cas-race");
+    let thread_id = ThreadId::new("current-version-damaged-row").unwrap();
+    let seeding_service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    seeding_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("current version damaged row".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    seeding_service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .expect("seed listing writes the completed migration marker");
+
+    let index_path = thread_index_record_path_for_test(&scope, thread_id.as_str());
+    let current_body = scoped
+        .get(&scope.to_resource_scope(), &index_path)
+        .await
+        .unwrap()
+        .expect("seeded index row exists")
+        .entry
+        .body;
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &index_path,
+            Entry::bytes(current_body),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("test setup removes current row projection keys");
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path(format!("/thread_index/{}.json", thread_id.as_str()))
+            .nth(1)
+            .version_mismatch(),
+    );
+
+    let restarted = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    restarted
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .expect("listing retries the projection repair after a CAS race");
+    wait_for_thread_index_projection_repair(scoped.as_ref(), &scope).await;
+    let listed = restarted
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .expect("listing observes the repaired projection after a CAS race");
+    assert_eq!(listed.threads.len(), 1);
+    assert_eq!(listed.threads[0].thread_id, thread_id);
+}
+
+/// Regression for the old live-reconcile cap: scopes larger than one backend
+/// page must still repair every hidden row. Repair runs in bounded chunks in
+/// the background and writes completion only after the entire scope succeeds.
+#[tokio::test]
+async fn filesystem_list_threads_repairs_oversized_scope_in_background() {
+    let backend = Arc::new(QueryCountingBackend::new());
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-index-oversized", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("index-oversized");
+    let damaged_id = ThreadId::new("thread-oversized-hidden").unwrap();
+
+    for index in 0..Page::MAX_LIMIT {
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(ThreadId::new(format!("thread-oversized-{index:04}")).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(format!("thread {index}")),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    }
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(damaged_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("damaged oversized row".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // Make the fresh service take its marker-complete reconcile branch instead
+    // of the full migration. Then remove the damaged row's projection keys.
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &thread_index_migration_marker_path_for_test(&scope),
+            Entry::bytes(b"thread-index-v1".to_vec()),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("seed completed thread-index migration marker");
+    let damaged_path = thread_index_record_path_for_test(&scope, damaged_id.as_str());
+    let damaged_body = scoped
+        .get(&scope.to_resource_scope(), &damaged_path)
+        .await
+        .unwrap()
+        .expect("damaged row exists")
+        .entry
+        .body;
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &damaged_path,
+            Entry::bytes(damaged_body),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("strip damaged row projection keys");
+
+    let restarted = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    restarted
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: Some(200),
+            cursor: None,
+        })
+        .await
+        .expect("listing schedules oversized repair without waiting for it");
+    wait_for_thread_index_projection_repair(scoped.as_ref(), &scope).await;
+
+    let mut listed_ids = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = restarted
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope: scope.clone(),
+                limit: Some(200),
+                cursor,
+            })
+            .await
+            .expect("oversized scope remains listable after background repair");
+        listed_ids.extend(page.threads.into_iter().map(|record| record.thread_id));
+        let Some(next_cursor) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+
+    assert_eq!(listed_ids.len(), Page::MAX_LIMIT as usize + 1);
+    assert!(
+        listed_ids.contains(&damaged_id),
+        "the background repair must restore a damaged row beyond one backend page"
+    );
+    let page_calls = backend.directory_page_calls().await;
+    assert_eq!(
+        page_calls.len(),
+        2,
+        "1,025 durable rows must be enumerated as two bounded keyset pages"
+    );
+    assert_eq!(page_calls[0], (None, Page::MAX_LIMIT as usize));
+    assert!(
+        page_calls[1].0.is_some(),
+        "the second page must continue after the prior page's stable final name"
+    );
+    assert_eq!(page_calls[1].1, Page::MAX_LIMIT as usize);
 }
 
 #[tokio::test]
@@ -4741,9 +5726,51 @@ fn thread_index_migration_marker_path_for_test(scope: &ThreadScope) -> ScopedPat
     .unwrap()
 }
 
+fn thread_index_projection_repair_marker_path_for_test(scope: &ThreadScope) -> ScopedPath {
+    ScopedPath::new(format!(
+        "/threads/agents/{}/projects/{}/owners/{}/index-migrations/thread-index-projection-v2.complete",
+        scope.agent_id.as_str(),
+        scope
+            .project_id
+            .as_ref()
+            .expect("test scope has project")
+            .as_str(),
+        scope
+            .owner_user_id
+            .as_ref()
+            .expect("test scope has owner")
+            .as_str()
+    ))
+    .unwrap()
+}
+
+async fn wait_for_thread_index_projection_repair<F>(
+    scoped: &ScopedFilesystem<F>,
+    scope: &ThreadScope,
+) where
+    F: RootFilesystem,
+{
+    timeout(Duration::from_secs(5), async {
+        let marker = thread_index_projection_repair_marker_path_for_test(scope);
+        loop {
+            if scoped
+                .get(&scope.to_resource_scope(), &marker)
+                .await
+                .expect("projection repair marker read succeeds")
+                .is_some()
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("background thread-index projection repair completes");
+}
+
 fn transcript_index_migration_marker_path_for_test(scope: &ThreadScope) -> ScopedPath {
     ScopedPath::new(format!(
-        "/threads/agents/{}/projects/{}/owners/{}/index-migrations/transcript-index-v1.complete",
+        "/threads/agents/{}/projects/{}/owners/{}/index-migrations/transcript-index-v2.complete",
         scope.agent_id.as_str(),
         scope
             .project_id
@@ -4825,29 +5852,19 @@ where
     Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
 }
 
-/// Real thread store backend that fails every write to a message lookup-index
-/// row (`/indexes/assistant-runs/…`, `/indexes/tool-results/…`) so the store
-/// runs its genuine "lookup-index backfill is best-effort, fall back to a
-/// transcript scan" path. Folds the former hand-rolled
-/// `LookupIndexWriteFailureBackend` onto `FaultInjecting` — two path-scoped
-/// `WriteFile` faults, one per lookup-index family.
-fn lookup_index_write_failure_backend() -> FaultInjecting<InMemoryBackend> {
-    FaultInjecting::new(InMemoryBackend::new())
-        .with_fault(
-            Fault::on(FilesystemOperation::WriteFile)
-                .path("/indexes/assistant-runs/")
-                .backend("lookup index writes disabled by contract test"),
-        )
-        .with_fault(
-            Fault::on(FilesystemOperation::WriteFile)
-                .path("/indexes/tool-results/")
-                .backend("lookup index writes disabled by contract test"),
-        )
+/// Real thread store backend that fails message-row writes. Lookup projections
+/// share that row, so projection failure cannot leave a source message without
+/// its exact-lookup keys.
+fn message_row_write_failure_backend() -> FaultInjecting<InMemoryBackend> {
+    FaultInjecting::new(InMemoryBackend::new()).with_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path("/messages/")
+            .backend("message row writes disabled by contract test"),
+    )
 }
 
-/// As [`lookup_index_write_failure_backend`], but fails every lookup-index
-/// *read* so the store must fall back to a transcript scan. Folds the former
-/// hand-rolled `LookupIndexReadFailureBackend`.
+/// Fails every legacy lookup-index read so a missing message-row projection
+/// cannot silently degrade into a transcript scan.
 fn lookup_index_read_failure_backend() -> FaultInjecting<InMemoryBackend> {
     FaultInjecting::new(InMemoryBackend::new())
         .with_fault(
@@ -4867,6 +5884,18 @@ struct QueryCountingBackend {
     query_count: AtomicUsize,
     get_count: AtomicUsize,
     thread_index_put_count: AtomicUsize,
+    directory_page_calls: Mutex<Vec<(Option<String>, usize)>>,
+}
+
+/// Holds the first reconcile directory scan for one scope so the caller test
+/// can prove another scope's required listing still makes progress.
+struct BlockingScopeReconcileBackend {
+    inner: InMemoryBackend,
+    blocked_scope_path: String,
+    armed: AtomicBool,
+    blocked_once: AtomicBool,
+    reconcile_entered: Arc<Barrier>,
+    release_reconcile: Arc<Barrier>,
 }
 
 struct MigrationRaceBackend {
@@ -4902,6 +5931,7 @@ impl QueryCountingBackend {
             query_count: AtomicUsize::new(0),
             get_count: AtomicUsize::new(0),
             thread_index_put_count: AtomicUsize::new(0),
+            directory_page_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -4917,8 +5947,36 @@ impl QueryCountingBackend {
         self.thread_index_put_count.load(Ordering::SeqCst)
     }
 
+    async fn directory_page_calls(&self) -> Vec<(Option<String>, usize)> {
+        self.directory_page_calls.lock().await.clone()
+    }
+
     fn reset_thread_index_put_count(&self) {
         self.thread_index_put_count.store(0, Ordering::SeqCst);
+    }
+}
+
+impl BlockingScopeReconcileBackend {
+    fn new(blocked_scope_path: String) -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+            blocked_scope_path,
+            armed: AtomicBool::new(false),
+            blocked_once: AtomicBool::new(false),
+            reconcile_entered: Arc::new(Barrier::new(2)),
+            release_reconcile: Arc::new(Barrier::new(2)),
+        }
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    fn blocks_reconcile_for(&self, path: &VirtualPath) -> bool {
+        self.armed.load(Ordering::SeqCst)
+            && path.as_str().contains(&self.blocked_scope_path)
+            && path.as_str().ends_with("/thread_index")
+            && !self.blocked_once.swap(true, Ordering::SeqCst)
     }
 }
 
@@ -5066,6 +6124,19 @@ impl RootFilesystem for QueryCountingBackend {
         self.inner.list_dir(path).await
     }
 
+    async fn list_dir_page(
+        &self,
+        path: &VirtualPath,
+        after: Option<&str>,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.directory_page_calls
+            .lock()
+            .await
+            .push((after.map(str::to_owned), max_entries));
+        self.inner.list_dir_page(path, after, max_entries).await
+    }
+
     async fn query(
         &self,
         path: &VirtualPath,
@@ -5083,6 +6154,76 @@ impl RootFilesystem for QueryCountingBackend {
         page: &OrderedPage,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
         self.query_count.fetch_add(1, Ordering::SeqCst);
+        self.inner.query_ordered(path, filter, page).await
+    }
+
+    async fn ensure_index(
+        &self,
+        path: &VirtualPath,
+        spec: &IndexSpec,
+    ) -> Result<(), FilesystemError> {
+        self.inner.ensure_index(path, spec).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+        self.inner.begin(path).await
+    }
+
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        self.inner.reserve_sequence(path).await
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for BlockingScopeReconcileBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        if self.blocks_reconcile_for(path) {
+            self.reconcile_entered.wait().await;
+            self.release_reconcile.wait().await;
+        }
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn query_ordered(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: &OrderedPage,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
         self.inner.query_ordered(path, filter, page).await
     }
 
@@ -6344,7 +7485,8 @@ fn filesystem_prepared_request(label: &str, key: &str) -> ironclaw_threads::Prep
         }],
         declarations: ironclaw_host_api::prepared_context::PreparedTurnDeclarations {
             tools: Vec::new(),
-            output: ironclaw_host_api::prepared_context::OutputContract::JsonSchema {
+            output: ironclaw_host_api::output::OutputContract::JsonSchema {
+                name: "filesystem_v1".to_string(),
                 schema: serde_json::json!({ "type": "object" }),
             },
             limits: ironclaw_host_api::prepared_context::TurnLimits {
@@ -6692,6 +7834,57 @@ async fn filesystem_accept_prepared_context_mints_seeds_and_journals() {
         .await
         .expect("context window over seeded thread");
     assert_eq!(window.messages.len(), 2);
+}
+
+#[tokio::test]
+async fn filesystem_read_prepared_context_rejects_a_corrupt_durable_output_contract() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let request = filesystem_prepared_request("unbound-fs-corrupt", "unbound-fs-key-corrupt");
+    let accepted = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("prepared-context accept succeeds");
+    let project_id = request.scope.project_id.as_ref().expect("project scope");
+    let path = ScopedPath::new(format!(
+        "/threads/agents/{}/projects/{}/threads/{}/prepared_context.json",
+        request.scope.agent_id, project_id, accepted.thread_id
+    ))
+    .expect("prepared-context path");
+    let mut stored: serde_json::Value = serde_json::from_slice(
+        &scoped
+            .get(&request.scope.to_resource_scope(), &path)
+            .await
+            .expect("prepared-context read")
+            .expect("prepared-context entry")
+            .entry
+            .body,
+    )
+    .expect("prepared-context JSON");
+    let mut overly_deep_schema = serde_json::json!({"type": "object"});
+    for _ in 0..40 {
+        overly_deep_schema = serde_json::json!({"properties": {"nested": overly_deep_schema}});
+    }
+    stored["declarations"]["output"]["schema"] = overly_deep_schema;
+    scoped
+        .put(
+            &request.scope.to_resource_scope(),
+            &path,
+            Entry::bytes(serde_json::to_vec_pretty(&stored).expect("serialize corruption")),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("write corrupt prepared context");
+
+    let error = service
+        .read_prepared_context(&request.scope, &accepted.thread_id)
+        .await
+        .expect_err("durable output contracts are revalidated on read");
+    assert!(matches!(
+        error,
+        SessionThreadError::InvalidPreparedContext { .. }
+    ));
 }
 
 /// Replay discipline on the durable backend: same request → same thread and

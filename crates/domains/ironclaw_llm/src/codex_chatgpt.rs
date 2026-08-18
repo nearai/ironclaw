@@ -363,6 +363,7 @@ impl CodexChatGptProvider {
         messages: &[ChatMessage],
         tools: &[ToolDefinition],
         tool_choice: Option<&str>,
+        response_format: Option<&crate::provider::CompletionResponseFormat>,
     ) -> Value {
         // Extract system instructions
         let instructions: String = messages
@@ -392,6 +393,11 @@ impl CodexChatGptProvider {
             "stream": true,
             "store": false,
         });
+
+        if let Some(format) = crate::provider::openai_responses_json_schema_format(response_format)
+        {
+            body["text"]["format"] = format;
+        }
 
         // Only add `reasoning` for models that support it;
         // the Responses API hard-rejects it on non-reasoning models.
@@ -1167,10 +1173,20 @@ impl CodexChatGptProvider {
         request: CompletionRequest,
         sink: Option<Arc<dyn CompletionStreamSink>>,
     ) -> Result<CompletionResponse, LlmError> {
+        crate::provider::ensure_openai_responses_response_format_supported(
+            request.response_format.as_ref(),
+            "codex_chatgpt",
+        )?;
         let model = self.resolve_model().await;
         let mut messages = request.messages;
         crate::provider::sanitize_tool_messages(&mut messages);
-        let body = self.build_request_body(model, &messages, &[], None);
+        let body = self.build_request_body(
+            model,
+            &messages,
+            &[],
+            None,
+            request.response_format.as_ref(),
+        );
         let result = self.send_request_with_sink(body, sink).await?;
 
         Ok(CompletionResponse {
@@ -1189,6 +1205,10 @@ impl CodexChatGptProvider {
         request: ToolCompletionRequest,
         sink: Option<Arc<dyn CompletionStreamSink>>,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        crate::provider::ensure_openai_responses_response_format_supported(
+            request.response_format.as_ref(),
+            "codex_chatgpt",
+        )?;
         let mut messages = request.messages;
         crate::provider::sanitize_tool_messages(&mut messages);
         let name_map = build_sanitized_tool_name_map(&request.tools)?;
@@ -1198,6 +1218,7 @@ impl CodexChatGptProvider {
             &messages,
             &request.tools,
             request.tool_choice.as_deref(),
+            request.response_format.as_ref(),
         );
         let result = self.send_request_with_sink(body, sink).await?;
 
@@ -1585,12 +1606,38 @@ mod tests {
             ChatMessage::system("You are helpful."),
             ChatMessage::user("hello"),
         ];
-        let body = provider.build_request_body("gpt-4o", &messages, &[], None);
+        let body = provider.build_request_body("gpt-4o", &messages, &[], None, None);
         assert_eq!(body["instructions"], "You are helpful.");
         // input should only contain the user message, not the system message
         assert_eq!(body["input"].as_array().unwrap().len(), 1);
         // store must be false for ChatGPT backend
         assert_eq!(body["store"], false);
+    }
+
+    #[test]
+    fn test_build_request_encodes_native_response_schema() {
+        let provider = CodexChatGptProvider::new("https://example.com", "key", "gpt-4o");
+        let schema = crate::provider::JsonSchemaResponseFormat::strict(
+            "suggestions",
+            json!({"type": "object", "properties": {"items": {"type": "array"}}}),
+        );
+        let format = crate::provider::CompletionResponseFormat::JsonSchema(schema.clone());
+        let body = provider.build_request_body(
+            "gpt-4o",
+            &[ChatMessage::user("Return suggestions")],
+            &[],
+            None,
+            Some(&format),
+        );
+        assert_eq!(
+            body["text"]["format"],
+            json!({
+                "type": "json_schema",
+                "name": "suggestions",
+                "schema": schema.schema,
+                "strict": true,
+            })
+        );
     }
 
     #[test]
@@ -1602,7 +1649,7 @@ mod tests {
             description: "Echo input".to_string(),
             parameters: json!({"type": "object"}),
         }];
-        let body = provider.build_request_body("gpt-4o", &messages, &tools, None);
+        let body = provider.build_request_body("gpt-4o", &messages, &tools, None, None);
         assert_eq!(body["tools"][0]["name"], "builtin_echo");
     }
 
@@ -1615,7 +1662,7 @@ mod tests {
             description: "Apply a patch".to_string(),
             parameters: json!({"$ref": "schemas/builtin/apply-patch.input.v1.json"}),
         }];
-        let body = provider.build_request_body("gpt-4o", &messages, &tools, None);
+        let body = provider.build_request_body("gpt-4o", &messages, &tools, None, None);
         assert_eq!(body["tools"][0]["parameters"]["type"], "object");
         assert!(body["tools"][0]["parameters"].get("properties").is_some());
     }

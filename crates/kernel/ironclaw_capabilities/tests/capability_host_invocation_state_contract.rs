@@ -563,6 +563,46 @@ async fn capability_host_returns_specific_error_for_authorizer_fingerprint_misma
 }
 
 #[tokio::test]
+async fn capability_host_discards_fresh_pending_invocation_when_dispatch_fails() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = TestDispatcher::responding(|_, _| {
+        Err(DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::Backend,
+            model_visible_cause: None,
+        })
+    });
+    let authorizer = GrantAuthorizer::new();
+    let process_services = ProcessServices::in_memory();
+    let run_state = ProcessInvocationStore::new(process_services.process_runtime());
+    let host =
+        capability_host(&registry, &dispatcher, &authorizer).with_invocation_state(&run_state);
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+
+    let error = host
+        .invoke_json(
+            context,
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "dispatch fails"}),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            ..
+        }
+    ));
+    assert_eq!(run_state.get(&scope, invocation_id).await.unwrap(), None);
+}
+
+#[tokio::test]
 async fn capability_host_returns_dispatch_result_when_run_completion_fails_after_invoke() {
     let registry = registry_with_echo_capability();
     let dispatcher = recording_dispatcher();
