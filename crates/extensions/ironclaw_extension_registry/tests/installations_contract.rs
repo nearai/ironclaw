@@ -2336,7 +2336,10 @@ async fn v2_rows_carrying_activation_state_load_and_preserve_it() {
     );
 
     // A later write must not silently drop the operator's setting.
-    reopened.upsert_installation(installed.clone()).await.unwrap();
+    reopened
+        .upsert_installation(installed.clone())
+        .await
+        .unwrap();
     let rows = filesystem
         .query(&installations, &Filter::All, Page::first(10))
         .await
