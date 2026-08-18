@@ -55,6 +55,15 @@ pub struct RunArtifactMessage {
     pub sequence: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
+    /// When the message row was first persisted. `None` for records written
+    /// before per-message timestamps existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    /// Last time the message row materially changed. For an assistant reply
+    /// this is the finalization time, which is what makes step-to-step gaps
+    /// meaningful.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
     pub kind: MessageKind,
     pub status: MessageStatus,
     pub content: String,
@@ -301,6 +310,8 @@ pub(super) fn artifact_messages(
                 message_id: record.message_id.to_string(),
                 sequence: record.sequence,
                 run_id: record.turn_run_id.clone(),
+                created_at: record.created_at,
+                updated_at: record.updated_at,
                 kind: record.kind,
                 status: record.status,
                 content,
@@ -423,6 +434,32 @@ mod tests {
         assert!(!serialized.contains("/Users/alice"));
         assert!(!serialized.contains("secret-value"));
         assert!(serialized.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn assembler_exports_durable_message_timestamps() {
+        let thread_id = ThreadId::new("thread-a").expect("thread id");
+        let created = Utc::now();
+        let updated = created + chrono::Duration::seconds(41);
+        let mut source = record(
+            &thread_id,
+            ThreadMessageId::new(),
+            1,
+            MessageKind::Assistant,
+            "hello",
+        );
+        source.created_at = Some(created);
+        source.updated_at = Some(updated);
+
+        let (messages, _) = artifact_messages(
+            vec![source],
+            &HashMap::new(),
+            &DeterministicTraceRedactor::new(Vec::new()),
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].created_at, Some(created));
+        assert_eq!(messages[0].updated_at, Some(updated));
     }
 
     fn record(
