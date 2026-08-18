@@ -1,71 +1,63 @@
 # Suggestion card icons — enum + schema addendum
 
-Companion to [VISION-RECONCILIATION.md](VISION-RECONCILIATION.md). Defines the
-brand-icon vocabulary for the durable suggestions contract
-([PR #7694](https://github.com/nearai/ironclaw/pull/7694)) and how the frontend
-consumes it.
+Companion to [VISION-RECONCILIATION.md](VISION-RECONCILIATION.md). The brand-icon
+vocabulary for the durable suggestions contract
+([PR #7694](https://github.com/nearai/ironclaw/pull/7694), **now on `main`**) and
+how the frontend consumes it. **This matches the shipped schema** — no longer a
+proposal.
 
-## Context
-
-The #7694 author is adding two fields to the generated card schema:
+## The shipped card
 
 ```jsonc
 { "title": "...", "description": "...", "suggested_prompt": "...",
-  "icon": "<enum>", "source_ids": ["gmail", "slack"] }
+  "icon": "slack", "sources": ["Gmail", "Slack"] }
 ```
 
-- `source_ids` — the extension ids a suggestion relates to (from
-  `crates/extensions/packages/`).
-- `icon` — a required brand-icon enum; making it required forces the model to
-  reason about which tool a suggestion touches.
+- `icon` — **required** brand-icon enum (values are exactly the list below). The
+  model must choose one enum value; making it required forces it to reason about
+  which tool a suggestion touches. **This is the authoritative icon source.**
+- `sources` — 1–5 **concise human-readable tool names** ("Gmail", "Slack",
+  "Web Search"), translated from the discovered extension/tool metadata. They are
+  **display strings, not extension ids and not the icon source** — the
+  generation prompt explicitly forbids exposing internal capability ids.
 
-**This reverses a finding.** VISION-RECONCILIATION §3 said cards carried no tool
-identity, which drove the connect-model conflict. With `source_ids`/`icon`,
-cards *do* carry tool identity. The connect model **stays decoupled** (a
-catalog-driven surface, VISION-RECONCILIATION §3.1) — `source_ids` now also
-powers the card's brand mark and a just-in-time in-thread `AuthRequired` prompt
-on start — but per-card "Connect &lt;tool&gt;" is viable again if the review
-wants it. Recorded as an open question, not a reversal of the decision.
+**This reversed a finding.** VISION-RECONCILIATION §3 said cards carried no tool
+identity, which drove the connect-model conflict. With `icon`/`sources`, cards
+*do* carry tool identity. The connect model **stays decoupled** (a catalog-driven
+surface, §3.1); `icon` drives the card's brand mark and `sources` are available
+for display, while per-card "Connect &lt;tool&gt;" is reopened as a review
+question (VISION-RECONCILIATION §6.4).
 
-## `icon` is derivable — constrain, don't duplicate
+## Icon comes straight from `icon`
 
-`icon` can be derived from `source_ids[0]`. Two model fields that must agree
-invite drift (icon says slack, source_ids says gmail). Options:
+`icon` is required and enum-constrained, so the frontend trusts it directly —
+`resolveIconId` returns the `icon` value when it is a known enum member, else
+`generic`. It does **not** derive the icon from `sources` (those are free-form
+display names, not mappable ids), which also removes any icon-vs-sources drift.
 
-1. **Drop `icon`**, derive frontend-side from `source_ids[0]`. Simplest; one
-   source of truth. The frontend already does this (`iconIdForSource`).
-2. **Keep `icon`** as the explicit "which tool is this about" signal, but
-   **constrain the enum to the same namespace** so it can't meaningfully
-   diverge, and have the frontend prefer `icon` then fall back to deriving from
-   `source_ids` then to `generic` (what `resolveIconId` does today).
+## The enum (shipped)
 
-Either works with the shipped frontend — `resolveIconId` handles both. If `icon`
-stays, it should be the enum below.
+`generic` is the **guaranteed-valid** value for tool-less suggestions
+(e.g. "draft a project plan"). The frontend `BrandIconId` union equals this list
+exactly, and a test pins every enum value to a renderable glyph.
 
-## The enum
+| enum value | glyph |
+|---|---|
+| `gmail` | Gmail |
+| `google_calendar` | Google Calendar |
+| `google_docs` | Google Docs |
+| `google_drive` | Google Drive |
+| `google_sheets` | Google Sheets |
+| `google_slides` | Google Slides |
+| `github` | GitHub |
+| `slack` | Slack |
+| `notion` | Notion |
+| `telegram` | Telegram |
+| `web` | globe |
+| `memory` | store |
+| `generic` | sparkle |
 
-Values mirror the extension-package namespace (snake_case), so cards, the
-connect surface, and the extensions page can share one id → glyph table.
-`generic` is the **required guaranteed-valid** value for tool-less suggestions
-(e.g. "draft a project plan") — without it the model is forced to mislabel.
-
-| enum value | source_ids it covers | glyph |
-|---|---|---|
-| `gmail` | `gmail` | Gmail |
-| `google_calendar` | `google-calendar` | Google Calendar |
-| `google_docs` | `google-docs` | Google Docs |
-| `google_drive` | `google-drive` | Google Drive |
-| `google_sheets` | `google-sheets` | Google Sheets |
-| `google_slides` | `google-slides` | Google Slides |
-| `github` | `github` | GitHub |
-| `slack` | `slack` | Slack |
-| `notion` | `notion-mcp` | Notion |
-| `telegram` | `telegram` | Telegram |
-| `web` | `web-access`, `web-app` | globe |
-| `memory` | `mem0`, `memory-native` | store |
-| `generic` | *(none / unknown / nearai-mcp)* | sparkle |
-
-### JSON-schema block for `suggestions.output.v1.json`
+### Shipped schema (`suggestions.output.json`)
 
 ```jsonc
 "icon": {
@@ -74,42 +66,30 @@ connect surface, and the extensions page can share one id → glyph table.
            "google_sheets","google_slides","github","slack","notion",
            "telegram","web","memory","generic"]
 },
-"source_ids": {
-  "type": "array",
-  "items": { "type": "string" },
-  "maxItems": 4
+"sources": {
+  "type": "array", "minItems": 1, "maxItems": 5, "uniqueItems": true,
+  "items": { "type": "string", "minLength": 1, "maxLength": 128 }
 }
 ```
 
-Add both to `required` if the field is meant to force the model's hand (with
-`generic` always available, `icon` can safely be required).
+Both are in `required`, so every card carries an `icon` and ≥1 `source`.
 
-### Suggested Rust contract type
+### Shipped Rust contract
 
-```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SuggestionIconId {
-    Gmail, GoogleCalendar, GoogleDocs, GoogleDrive, GoogleSheets, GoogleSlides,
-    Github, Slack, Notion, Telegram, Web, Memory, Generic,
-}
-```
+`RebornSuggestion` (in `ironclaw_product_contracts`) carries
+`pub icon: String,` and `pub sources: Vec<String>,`.
 
-On `RebornSuggestion`: `pub icon: SuggestionIconId,` and
-`pub source_ids: Vec<String>,` (bounded, e.g. ≤4).
+## Frontend (PR #6994)
 
-## Frontend (already built in this branch, PR #6994)
-
-- `pages/chat/lib/brand-icons.tsx` — `BrandIconId`, `BRAND_ICON_IDS`,
-  `iconIdForSource(sourceId)`, `resolveIconId(suggestion)`, and `<BrandIcon>`.
-  The colored marks reuse the license-clean inline SVGs already committed in
-  the OOBE mockup; sheets/slides/web/memory/generic are neutral in-house glyphs.
-  It lives in the lazy suggestion-surface chunk, so it adds **nothing** to the
-  eager `/chat` bundle.
-- `Suggestion` (in `suggestions-api.ts`) carries optional `icon` +
-  `source_ids`, and the card renders the resolved brand mark. All fields are
-  optional and everything degrades to `generic`, so the card is correct **now**,
-  before the backend field lands.
+- `pages/chat/lib/brand-icons.tsx` — `BrandIconId`, `BRAND_ICON_IDS` (equal to
+  the shipped enum), `resolveIconId(suggestion)` (trusts the required `icon`,
+  falls back to `generic`), and `<BrandIcon>`. The colored marks reuse the
+  license-clean inline SVGs already committed in the OOBE mockup;
+  sheets/slides/web/memory/generic are neutral in-house glyphs. It lives in the
+  lazy suggestion-surface chunk, so it adds **nothing** to the eager `/chat`
+  bundle.
+- `Suggestion` (in `suggestions-api.ts`) carries `icon` + `sources` (typed
+  optional for defensive rendering); the card renders the resolved brand mark.
 
 ## Assets & sourcing
 

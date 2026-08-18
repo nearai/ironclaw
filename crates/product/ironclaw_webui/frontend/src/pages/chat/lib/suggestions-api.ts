@@ -26,11 +26,12 @@ export interface Suggestion {
   title: string;
   description: string;
   suggested_prompt: string;
-  // Brand-icon enum + the extension ids this suggestion relates to (PR #7694
-  // incoming schema field). Both optional so the card is safe before the field
-  // lands; the card resolves an icon defensively (see `brand-icons.ts`).
+  // Brand-icon enum (values are `BrandIconId`) + `sources`, concise
+  // human-readable tool names for display ("Gmail", "Slack"). Both are required
+  // in the shipped contract (PR #7694); typed optional here so the card renders
+  // defensively even if a value is ever missing (see `brand-icons.ts`).
   icon?: string;
-  source_ids?: string[];
+  sources?: string[];
   thread_id?: string;
   run_id?: string;
 }

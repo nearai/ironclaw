@@ -1,17 +1,16 @@
 /**
  * Brand icons for OOBE suggestion cards.
  *
- * The backend suggestion card (PR #7694, incoming schema field) carries an
- * `icon` enum plus `source_ids` (the extension ids a suggestion relates to).
- * This module is the single id → glyph mapping shared by the card today and the
- * connect surface later — see docs/internal/design/oobe/SUGGESTION-ICONS.md for
- * the enum, the JSON-schema block, and the source_id → icon derivation.
+ * The backend suggestion card (PR #7694, now on `main`) carries a **required**
+ * `icon` enum whose values are exactly `BRAND_ICON_IDS` below, plus `sources`
+ * (concise human-readable tool names like "Gmail", for display — NOT extension
+ * ids, and NOT the icon source). This module is the single icon → glyph map.
+ * See docs/internal/design/oobe/SUGGESTION-ICONS.md for the enum + schema.
  *
- * `icon` is largely derivable from `source_ids`, so `resolveIconId` prefers an
- * explicit valid `icon`, then derives from the first `source_id`, then falls
- * back to `generic` — the enum's guaranteed-valid value for tool-less
- * suggestions (e.g. "draft a project plan"). Everything degrades to `generic`,
- * so the card is safe before the backend field lands.
+ * `resolveIconId` trusts the authoritative `icon` field when it is a known enum
+ * value, and otherwise falls back to `generic` — the enum's guaranteed-valid
+ * value (a model could still emit an out-of-enum string, and the field is typed
+ * optional here so the card renders even if it is ever absent).
  *
  * The colored brand marks (gmail/calendar/docs/drive/slack/notion/github/
  * telegram) are the same license-clean inline SVGs already committed in the
@@ -41,43 +40,13 @@ export type BrandIconId = (typeof BRAND_ICON_IDS)[number];
 
 const ICON_ID_SET = new Set<string>(BRAND_ICON_IDS);
 
-// Extension package id (as it appears in `source_ids`) → brand icon. Kept beside
-// the enum so the card, the connect surface, and the extensions page share one
-// table. Unknown ids fall through to `generic`.
-const SOURCE_TO_ICON: Record<string, BrandIconId> = {
-  gmail: "gmail",
-  "google-calendar": "google_calendar",
-  "google-docs": "google_docs",
-  "google-drive": "google_drive",
-  "google-sheets": "google_sheets",
-  "google-slides": "google_slides",
-  github: "github",
-  slack: "slack",
-  notion: "notion",
-  "notion-mcp": "notion",
-  telegram: "telegram",
-  "web-access": "web",
-  "web-app": "web",
-  mem0: "memory",
-  "memory-native": "memory",
-};
-
-/** Map one extension/source id to its brand icon (or `generic`). */
-export function iconIdForSource(sourceId: string | null | undefined): BrandIconId {
-  if (!sourceId) return "generic";
-  return SOURCE_TO_ICON[sourceId] ?? "generic";
-}
-
-/** The icon a suggestion should render: explicit `icon` wins (if a known enum
- *  value), else derive from the first `source_id`, else `generic`. */
+/** The icon a suggestion should render: the backend's required `icon` enum when
+ *  it is a known value, else `generic` (the guaranteed-valid fallback). */
 export function resolveIconId(
-  suggestion: { icon?: string | null; source_ids?: string[] | null } | null | undefined,
+  suggestion: { icon?: string | null } | null | undefined,
 ): BrandIconId {
-  const explicit = suggestion?.icon;
-  if (explicit && ICON_ID_SET.has(explicit)) return explicit as BrandIconId;
-  const firstSource = suggestion?.source_ids?.[0];
-  if (firstSource) return iconIdForSource(firstSource);
-  return "generic";
+  const icon = suggestion?.icon;
+  return icon && ICON_ID_SET.has(icon) ? (icon as BrandIconId) : "generic";
 }
 
 // Colored brand marks (native viewBoxes) + neutral currentColor glyphs for the

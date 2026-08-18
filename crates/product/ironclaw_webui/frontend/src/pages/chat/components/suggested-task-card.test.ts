@@ -39,11 +39,11 @@ function renderCard({ suggestion = SUGGESTION, ...props } = {}) {
     ...components,
     globalThis: {},
     useT: () => (key) => key,
-    // The card resolves a brand icon from the suggestion's icon/source_ids; the
-    // resolution logic itself is covered in brand-icons.test.ts, so here we just
-    // hand back the first source id (or 'generic') to observe what the card
-    // forwards to BrandIcon.
-    resolveIconId: (s) => (s && s.source_ids && s.source_ids[0]) || "generic",
+    // The card resolves a brand icon from the suggestion's required `icon`
+    // enum; the resolution logic is covered in brand-icons.test.ts, so here we
+    // just echo `icon` (or 'generic') to observe what the card forwards to
+    // BrandIcon.
+    resolveIconId: (s) => (s && s.icon) || "generic",
   };
   vm.runInNewContext(cardSourceForTest(), context);
   const tree = context.globalThis.__testExports.SuggestedTaskCard({
@@ -118,14 +118,14 @@ test("the card renders the suggestion's own title and description", () => {
 
 test("the card renders a BrandIcon for the suggestion's resolved tool", () => {
   const { tree, components } = renderCard({
-    suggestion: { ...SUGGESTION, source_ids: ["slack"] },
+    suggestion: { ...SUGGESTION, icon: "slack" },
   });
   const brand = findComponent(tree, components.BrandIcon);
   assert.ok(brand, "the card mounts a BrandIcon");
   assert.equal(
     componentProps(brand, components.BrandIcon).id,
     "slack",
-    "the icon id comes from the suggestion's source",
+    "the icon id comes from the suggestion's icon field",
   );
 });
 

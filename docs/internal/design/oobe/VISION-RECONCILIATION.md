@@ -85,24 +85,22 @@ because the suggestion→thread/run binding is durable and survives restart.
 
 ## 3. The conflict: the connect model has no backing
 
-> **⚠ Update (incoming schema change).** The #7694 author is adding **`icon`** (a
-> brand-icon enum) and **`source_ids`** (the extension ids a suggestion relates to) to the
-> card. That **reverses the premise of this section** — cards *will* carry tool identity.
-> The connect model **stays decoupled** (§3.1) and cards stay startable regardless of
-> connection, but `source_ids` now also drives the card's brand mark and a just-in-time
-> in-thread auth prompt, and per-card connect becomes viable again (open question §6.4).
-> Enum, schema block, and the frontend mapping: [SUGGESTION-ICONS.md](SUGGESTION-ICONS.md).
-> The rest of this section describes the contract **as it stands on the branch today**
-> (fields not yet present).
+> **⚠ Superseded by the shipped contract.** #7694 landed on `main` (and is merged into
+> this branch) carrying **`icon`** (a required brand-icon enum) and **`sources`** (1–5
+> human-readable tool names, for display). That **reverses the premise of this section** —
+> cards *do* carry tool identity. The connect model **stays decoupled** (§3.1) and cards
+> stay startable regardless of connection; `icon` drives the card's brand mark and per-card
+> connect is reopened as a review question (§6.4). The paragraph below describes the
+> *original* branch state (before the merge) and is kept only to explain why the connect
+> conflict existed. Current icon/enum details: [SUGGESTION-ICONS.md](SUGGESTION-ICONS.md).
 
-The generated card as it stands on the branch carries **no tool or extension identity**
-and **no connect state**:
+The generated card **originally** carried no tool identity and no connect state:
 
 ```
-{ id, title, description, suggested_prompt, thread_id?, run_id? }
+{ id, title, description, suggested_prompt, thread_id?, run_id? }   // pre-#7694
 ```
 
-This is deliberate, not an oversight. `prompts/suggestion_generation.md` instructs the
+That absence was deliberate, not an oversight. `prompts/suggestion_generation.md` instructs the
 generator: *"Do not claim that an account, extension, credential, or capability is
 available when you have not been given evidence that it is,"* and to prefer *"work the
 assistant can carry out in a normal conversation."* The model can *see* extensions
@@ -198,13 +196,14 @@ Consequences:
 
 Slices 1–4 are the mechanical refactor of what #6994 already has; 5–9 are the Vision build.
 
-### 5.2 Sequencing risk
+### 5.2 Sequencing — resolved
 
-#7694 targets `native-structured-output`, **not `main`**. #6994's refactor cannot merge
-until that stack lands. The DTOs are frozen in `ironclaw_product_contracts`, so the
-frontend can be built and tested against the contract now — but **it cannot be QA'd against
-a live preview** until the stack is deployed, and the deployed preview must be verified to
-actually contain the routes before any browser QA conclusion is drawn.
+#7694 (durable backend suggestions) and #7693 (native structured output) **landed on
+`main`** and are merged into this branch, so the `/api/webchat/v2/suggestions` routes and
+the `RebornSuggestion` contract are present here. The frontend was reconciled to the shipped
+shape (field `sources` not `source_ids`; `icon` required + authoritative — see
+[SUGGESTION-ICONS.md](SUGGESTION-ICONS.md)). Live preview QA is now possible end-to-end;
+verify the deployed preview actually serves the routes before drawing a QA conclusion.
 
 ---
 
@@ -219,8 +218,9 @@ single-active lock is removed; and "+ Automation" is removed.)*
    durable home and typed gate wiring.
 3. **Replacement UX** — a new generation clears the previous set. What does the drawer do
    if the user is mid-read when a replacement lands?
-4. **Per-card connect, now that `source_ids` exists?** The incoming `icon`/`source_ids`
+4. **Per-card connect, now that cards carry tool identity?** The shipped `icon`/`sources`
    fields (§3, [SUGGESTION-ICONS.md](SUGGESTION-ICONS.md)) make a per-card "Connect
-   &lt;tool&gt;" CTA viable again. Current decision keeps connect decoupled (§3.1) and uses
-   `source_ids` only for the brand mark + just-in-time in-thread auth; revisit if the review
-   wants connect-first activation back on the card.
+   &lt;tool&gt;" CTA viable again. Current decision keeps connect decoupled (§3.1) — `icon`
+   drives only the brand mark, and auth stays a just-in-time in-thread prompt; revisit if
+   the review wants connect-first activation back on the card. (`sources` are human-readable
+   names, not extension ids, so a connect CTA would still resolve the tool via the catalog.)
