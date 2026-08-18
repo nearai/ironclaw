@@ -16,9 +16,14 @@ where
         });
     }
     ensure_libsql_resource_governor_authority(config.process_local_resource_governor_singleton)?;
-    let filesystem = Arc::new(LibSqlRootFilesystem::from_runtime(config.runtime));
+    let journal_runtime = Arc::new(config.runtime.split_journal_lane()?);
+    let filesystem = Arc::new(LibSqlRootFilesystem::from_runtime(Arc::clone(
+        &config.runtime,
+    )));
     filesystem.run_migrations().await?;
-    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
+    let scoped_filesystem = crate::wrap_scoped(Arc::new(LibSqlRootFilesystem::from_runtime(
+        journal_runtime,
+    )));
     let resource_governor = FilesystemResourceGovernor::new(scoped_filesystem);
     let event_store = ironclaw_event_store::RebornEventStoreConfig::LibsqlFilesystem {
         filesystem: Arc::clone(&filesystem),

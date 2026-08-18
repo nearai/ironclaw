@@ -59,6 +59,10 @@ impl Drop for EnvVarGuard {
 async fn libsql_substrate_builder_wires_production_components_without_local_only_seams() {
     let fixture = build_libsql_test_services().await;
 
+    assert!(matches!(
+        fixture.runtime.split_journal_lane(),
+        Err(ironclaw_libsql_runtime::LibSqlRuntimeError::JournalLaneAlreadySplit)
+    ));
     assert!(
         !fixture.unexpected_events_db_path.exists(),
         "the libSQL substrate builder must not open a second event-store database"
@@ -276,6 +280,7 @@ fn production_runtime_policy() -> EffectiveRuntimePolicy {
 struct LibSqlTestServices {
     _dir: tempfile::TempDir,
     unexpected_events_db_path: std::path::PathBuf,
+    runtime: Arc<ironclaw_libsql_runtime::LibSqlRuntime>,
     services: ironclaw_composition::LibSqlProductionHostRuntimeServices,
 }
 
@@ -284,12 +289,13 @@ async fn build_libsql_test_services() -> LibSqlTestServices {
     let state_db_path = dir.path().join("state.db");
     let unexpected_events_db_path = dir.path().join("events.db");
 
+    let runtime = Arc::new(
+        ironclaw_libsql_runtime::LibSqlRuntime::open(state_db_path.display().to_string(), None)
+            .await
+            .expect("libSQL runtime"),
+    );
     let services = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
-        runtime: Arc::new(
-            ironclaw_libsql_runtime::LibSqlRuntime::open(state_db_path.display().to_string(), None)
-                .await
-                .expect("libSQL runtime"),
-        ),
+        runtime: Arc::clone(&runtime),
         database_path_or_url: state_db_path.display().to_string(),
         process_local_resource_governor_singleton: true,
         secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
@@ -309,6 +315,7 @@ async fn build_libsql_test_services() -> LibSqlTestServices {
     LibSqlTestServices {
         _dir: dir,
         unexpected_events_db_path,
+        runtime,
         services,
     }
 }

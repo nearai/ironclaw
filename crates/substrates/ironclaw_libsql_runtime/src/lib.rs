@@ -639,7 +639,11 @@ mod tests {
         );
         let data_plane = LibSqlRuntime::new(database).expect("data-plane runtime");
 
-        data_plane.split_journal_lane().expect("journal lane");
+        let journal_lane = data_plane.split_journal_lane().expect("journal lane");
+        assert!(matches!(
+            journal_lane.split_journal_lane(),
+            Err(LibSqlRuntimeError::JournalLaneAlreadySplit)
+        ));
         assert!(matches!(
             data_plane.split_journal_lane(),
             Err(LibSqlRuntimeError::JournalLaneAlreadySplit)

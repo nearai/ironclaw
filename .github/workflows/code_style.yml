@@ -169,6 +169,8 @@ jobs:
           python-version: "3.12"
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Validate h2 advisory exception
+        run: python3 scripts/ci/check_h2_advisory_exception.py
       - name: Run cargo deny
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
       - name: Reject tracked files that match .gitignore
@@ -204,6 +206,7 @@ jobs:
           python3 scripts/ci/test_ws12_workflow_contracts.py
           python3 scripts/ci/test-check-target-tree.py
           python3 scripts/ci/test-check-guidance.py
+          python3 scripts/ci/test_check_h2_advisory_exception.py
           python3 scripts/ci/test_cut_ironclaw_release.py
           scripts/ci/test-hermetic-test-process.sh
           scripts/ci/test-reborn-docker-entrypoint.sh
