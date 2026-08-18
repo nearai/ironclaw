@@ -60,8 +60,8 @@ use crate::webui_v2::descriptors::{
     WEBUI_V2_PATTERN_STREAM_EVENTS_WS, WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,
     WEBUI_V2_PATTERN_TRACE_ACCOUNT_LOGIN_LINK, WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES,
     WEBUI_V2_PATTERN_TRACE_CREDITS, WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE,
-    WEBUI_V2_PATTERN_USER_MODEL_CATALOG, WEBUI_V2_PATTERN_USER_MODEL_POLICY,
-    WEBUI_V2_PATTERN_USER_MODEL_PREFERENCE,
+    WEBUI_V2_PATTERN_TRANSCRIBE_AUDIO, WEBUI_V2_PATTERN_USER_MODEL_CATALOG,
+    WEBUI_V2_PATTERN_USER_MODEL_POLICY, WEBUI_V2_PATTERN_USER_MODEL_PREFERENCE,
 };
 use crate::webui_v2::handlers;
 use crate::webui_v2::sse_capacity::SseCapacity;
@@ -109,6 +109,10 @@ pub struct WebUiV2State {
     workspace_requires_scoped_projection: bool,
     regression_artifact_export_enabled: bool,
     admin_thread_scrape_enabled: bool,
+    /// Whether this deployment has a transcription-capable backend wired.
+    /// Advertised on `GET /session` so the composer renders its microphone
+    /// button only where the transcribe route can actually answer.
+    voice_input_enabled: bool,
     session_channel_extension_id: Option<String>,
 }
 
@@ -129,6 +133,7 @@ impl WebUiV2State {
             workspace_requires_scoped_projection: false,
             regression_artifact_export_enabled: false,
             admin_thread_scrape_enabled: false,
+            voice_input_enabled: false,
             session_channel_extension_id: None,
         }
     }
@@ -200,6 +205,21 @@ impl WebUiV2State {
 
     pub fn admin_thread_scrape_enabled(&self) -> bool {
         self.admin_thread_scrape_enabled
+    }
+
+    /// Deployment gate for composer voice input. Host composition reads whether
+    /// a transcription provider resolved (`RebornRuntime::voice_input_enabled`)
+    /// and feeds it here; the browser learns it from `GET /session`'s
+    /// `features.voice_input`. The transcribe route stays mounted either way —
+    /// it fails closed with "unavailable" — so a stale flag can never turn into
+    /// an unguarded route.
+    pub fn with_voice_input_enabled(mut self, enabled: bool) -> Self {
+        self.voice_input_enabled = enabled;
+        self
+    }
+
+    pub fn voice_input_enabled(&self) -> bool {
+        self.voice_input_enabled
     }
 
     pub fn services(&self) -> &Arc<dyn ProductSurface> {
@@ -328,6 +348,10 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         .route(
             WEBUI_V2_PATTERN_GET_ATTACHMENT,
             get(handlers::get_attachment),
+        )
+        .route(
+            WEBUI_V2_PATTERN_TRANSCRIBE_AUDIO,
+            post(handlers::transcribe_audio),
         )
         .route(WEBUI_V2_PATTERN_STREAM_EVENTS, get(handlers::stream_events))
         .route(

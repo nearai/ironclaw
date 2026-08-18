@@ -562,6 +562,24 @@ export function sendMessage({
   );
 }
 
+/**
+ * Transcribe one recorded voice clip.
+ *
+ * The clip is uploaded base64-encoded in a JSON body like every other v2
+ * mutation; the host bounds it, transcribes it, and returns `{ text }`. Audio
+ * is never persisted — only the transcript comes back, and it becomes
+ * conversation content only if the user sends it.
+ */
+export function transcribeAudio({ mimeType, audioBase64 } = {}) {
+  return apiFetch(`${V2_BASE}/transcribe`, {
+    method: "POST",
+    body: JSON.stringify({
+      mime_type: mimeType,
+      audio_base64: audioBase64,
+    }),
+  });
+}
+
 // --- Product commands ---
 
 export function listChatCommands() {

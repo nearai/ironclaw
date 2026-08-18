@@ -13,6 +13,8 @@ import {
   commandMenuToken,
 } from "../lib/chat-commands";
 import { useAttachmentConfig } from "../hooks/useAttachmentConfig";
+import { useVoiceConfig, useVoiceInput } from "../hooks/useVoiceInput";
+import { formatElapsed, insertTranscript } from "../lib/voice";
 import {
   NEW_DRAFT_KEY,
   clearDraft,
@@ -441,6 +443,90 @@ export function ChatInput({
     textareaRef.current?.focus();
   }, [draftKey, flushDraft]);
 
+  // --- Voice input ---
+  //
+  // The mic button is absent (not disabled) when the deployment has no
+  // transcription backend or the browser cannot record, so the composer never
+  // offers an affordance that could only fail.
+  const voice = useVoiceConfig();
+  const [voiceError, setVoiceError] = React.useState("");
+
+  // Insert the transcript at the caret and leave it there — never auto-send,
+  // so a mis-transcription is always correctable before it becomes a message.
+  const applyTranscript = React.useCallback(
+    (transcript) => {
+      const textarea = textareaRef.current;
+      const { text: next, caret } = insertTranscript(
+        textRef.current,
+        transcript,
+        textarea?.selectionStart ?? null,
+        textarea?.selectionEnd ?? null
+      );
+      textRef.current = next;
+      setText(next);
+      setVoiceError("");
+      // Same debounced persist the keyboard path uses, so a thread switch
+      // right after dictating does not drop the transcript.
+      pendingDraftRef.current = { key: draftKey, text: next, scope: authScope() };
+      if (draftTimerRef.current) window.clearTimeout(draftTimerRef.current);
+      draftTimerRef.current = window.setTimeout(flushDraft, 300);
+      // Restore focus and put the caret past the inserted text so the user can
+      // keep typing where the dictation left off.
+      window.requestAnimationFrame(() => {
+        const node = textareaRef.current;
+        if (!node) return;
+        node.focus();
+        node.setSelectionRange(caret, caret);
+      });
+    },
+    [draftKey, flushDraft]
+  );
+
+  // Distinct reasons stay distinct: a denied permission, a clip the server
+  // refused, and a transient outage need different responses from the user,
+  // so each maps to its own message instead of one generic failure string.
+  const handleVoiceError = React.useCallback(
+    (failure) => {
+      const { reason, detail } = failure || {};
+      const key = {
+        permissionDenied: "chat.voicePermissionDenied",
+        noMicrophone: "chat.voiceNoMicrophone",
+        unsupported: "chat.voiceUnsupported",
+        empty: "chat.voiceEmpty",
+        noSpeech: "chat.voiceNoSpeech",
+        tooLarge: "chat.voiceTooLarge",
+        rejected: "chat.voiceRejected",
+        encodeFailed: "chat.voiceEncodeFailed",
+      }[reason];
+      if (key) {
+        setVoiceError(t(key));
+        return;
+      }
+      // The server's own reason (already redacted at the boundary) is more
+      // useful than a generic string; fall back only when there is none.
+      setVoiceError(detail ? t("chat.voiceFailedDetail", { detail }) : t("chat.voiceFailed"));
+    },
+    [t]
+  );
+
+  const { status: voiceStatus, elapsedSecs, start: startRecording, stop: stopRecording, cancel: cancelRecording } =
+    useVoiceInput({
+      limits: voice.limits,
+      onTranscript: applyTranscript,
+      onError: handleVoiceError,
+    });
+  const isRecording = voiceStatus === "recording";
+  const isTranscribing = voiceStatus === "transcribing";
+
+  const toggleRecording = React.useCallback(() => {
+    if (isRecording) {
+      stopRecording();
+      return;
+    }
+    setVoiceError("");
+    void startRecording();
+  }, [isRecording, startRecording, stopRecording]);
+
   // Hover selects a row without completing it (click still completes).
   const selectMenuIndex = React.useCallback((index) => {
     const next = commandMenuSelectionReducer(menuSelectionRef.current, {
@@ -766,6 +852,26 @@ export function ChatInput({
           </div>
         )}
 
+        {voiceError &&
+        (
+          <div
+            role="alert"
+            data-testid="chat-voice-error"
+            className="mb-3 flex items-start gap-2 rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-2 text-xs leading-5 text-[var(--v2-danger-text)]"
+          >
+            <span className="min-w-0 flex-1">{voiceError}</span>
+            <button
+              type="button"
+              onClick={() => setVoiceError("")}
+              aria-label={t("common.dismiss")}
+              title={t("common.dismiss")}
+              className="-mr-1 -mt-0.5 shrink-0 rounded p-0.5 text-[color-mix(in_srgb,var(--v2-danger-text)_80%,transparent)] transition hover:bg-[color-mix(in_srgb,var(--v2-danger-text)_14%,transparent)] hover:text-[var(--v2-danger-text)]"
+            >
+              <Icon name="close" className="h-3.5 w-3.5" strokeWidth={2} />
+            </button>
+          </div>
+        )}
+
         {attachments.length > 0 &&
         (
           <div className="mb-2 flex flex-wrap gap-2 px-1">
@@ -841,7 +947,34 @@ export function ChatInput({
         />
 
         <div className="mt-2 flex items-center gap-2">
-          {isSubmitDisabled && statusText &&
+          {isRecording &&
+          (
+            <span
+              data-testid="chat-voice-recording"
+              className="inline-flex items-center gap-2 text-xs text-[var(--v2-danger-text)]"
+            >
+              <span className="h-2 w-2 animate-pulse rounded-full bg-[var(--v2-danger-text)]" />
+              <span className="font-mono tabular-nums">{formatElapsed(elapsedSecs)}</span>
+              <button
+                type="button"
+                onClick={cancelRecording}
+                className="underline underline-offset-2 hover:no-underline"
+              >
+                {t("common.cancel")}
+              </button>
+            </span>
+          )}
+          {isTranscribing &&
+          (
+            <span
+              data-testid="chat-voice-transcribing"
+              className="inline-flex items-center gap-2 text-xs text-[var(--v2-text-muted)]"
+            >
+              <span className="h-2 w-2 animate-pulse rounded-full bg-[var(--v2-accent)]" />
+              {t("chat.voiceTranscribing")}
+            </span>
+          )}
+          {!isRecording && !isTranscribing && isSubmitDisabled && statusText &&
           (
             <span className="inline-flex items-center gap-2 text-xs text-[var(--v2-text-muted)]">
               <span className="h-2 w-2 rounded-full bg-[var(--v2-accent)]" />
@@ -849,6 +982,26 @@ export function ChatInput({
             </span>
           )}
           <div className="ml-auto flex items-center gap-1.5">
+            {voice.enabled &&
+            (
+              <button
+                type="button"
+                data-testid="chat-voice-toggle"
+                onClick={toggleRecording}
+                disabled={disabled || isTranscribing}
+                aria-pressed={isRecording}
+                aria-label={isRecording ? t("chat.voiceStop") : t("chat.voiceStart")}
+                title={isRecording ? t("chat.voiceStop") : t("chat.voiceStart")}
+                className={[
+                  "flex h-9 w-9 shrink-0 items-center justify-center rounded-full disabled:cursor-not-allowed disabled:opacity-50",
+                  isRecording
+                    ? "bg-[var(--v2-danger-soft)] text-[var(--v2-danger-text)]"
+                    : "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-accent-text)]",
+                ].join(" ")}
+              >
+                <Icon name={isRecording ? "square" : "mic"} className="h-5 w-5" />
+              </button>
+            )}
             <button
               type="button"
               onClick={openFilePicker}

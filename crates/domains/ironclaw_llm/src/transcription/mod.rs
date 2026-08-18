@@ -54,17 +54,64 @@ impl AudioFormat {
     }
 }
 
+/// How a transcription failure should be handled by the boundary that asked
+/// for it.
+///
+/// A transport maps this to a stable outcome (retryable vs not, 4xx vs 5xx)
+/// without ever forwarding the provider's own message — see
+/// [`TranscriptionError`]'s detail fields, which are for host logs only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptionErrorKind {
+    /// The same clip may succeed on a retry: a network fault, a provider 5xx,
+    /// or a 429.
+    Transient,
+    /// The request will fail the same way again — an empty clip, a format the
+    /// provider rejects, or any other non-auth 4xx.
+    Permanent,
+    /// The deployment's transcription credentials or model id are wrong (401 /
+    /// 403 / 404). Retrying cannot help; an operator has to fix configuration.
+    /// Provider-side entitlement denial lands here too: from the host's side an
+    /// account that may not call the model is indistinguishable from a
+    /// misconfigured one, and both need the same operator action.
+    Misconfigured,
+}
+
 /// Errors from the transcription pipeline.
 #[derive(Debug, thiserror::Error)]
 pub enum TranscriptionError {
+    /// The request never produced an HTTP status — DNS, TLS, connect, or
+    /// timeout.
     #[error("Transcription request failed: {0}")]
     RequestFailed(String),
+
+    /// The provider answered with a non-success status. `detail` carries the
+    /// provider body for host logs and must not be forwarded to a client.
+    #[error("Transcription provider returned HTTP {status}: {detail}")]
+    ProviderStatus { status: u16, detail: String },
 
     #[error("Unsupported audio format: {mime_type}")]
     UnsupportedFormat { mime_type: String },
 
     #[error("Audio data is empty")]
     EmptyAudio,
+}
+
+impl TranscriptionError {
+    /// Classify this failure for a transport boundary.
+    pub fn kind(&self) -> TranscriptionErrorKind {
+        match self {
+            // No status came back at all: a connect/TLS/timeout fault is the
+            // canonical retryable case.
+            Self::RequestFailed(_) => TranscriptionErrorKind::Transient,
+            Self::ProviderStatus { status, .. } => match status {
+                401 | 403 | 404 => TranscriptionErrorKind::Misconfigured,
+                408 | 429 => TranscriptionErrorKind::Transient,
+                status if *status >= 500 => TranscriptionErrorKind::Transient,
+                _ => TranscriptionErrorKind::Permanent,
+            },
+            Self::UnsupportedFormat { .. } | Self::EmptyAudio => TranscriptionErrorKind::Permanent,
+        }
+    }
 }
 
 /// Trait for speech-to-text providers.
@@ -298,6 +345,75 @@ mod tests {
             Some("Transcription")
         );
         assert_eq!(content, "User typed this");
+    }
+
+    /// The transport maps every failure through `kind()`, so an unclassified
+    /// status would silently become whatever the catch-all arm says. Pin the
+    /// three families at their boundaries.
+    #[test]
+    fn provider_status_classification_splits_retryable_from_operator_faults() {
+        let misconfigured = [401_u16, 403, 404];
+        for status in misconfigured {
+            assert_eq!(
+                TranscriptionError::ProviderStatus {
+                    status,
+                    detail: String::new(),
+                }
+                .kind(),
+                TranscriptionErrorKind::Misconfigured,
+                "HTTP {status} needs an operator, not a retry",
+            );
+        }
+        for status in [408_u16, 429, 500, 502, 503] {
+            assert_eq!(
+                TranscriptionError::ProviderStatus {
+                    status,
+                    detail: String::new(),
+                }
+                .kind(),
+                TranscriptionErrorKind::Transient,
+                "HTTP {status} is retryable",
+            );
+        }
+        for status in [400_u16, 413, 415, 422] {
+            assert_eq!(
+                TranscriptionError::ProviderStatus {
+                    status,
+                    detail: String::new(),
+                }
+                .kind(),
+                TranscriptionErrorKind::Permanent,
+                "HTTP {status} will fail the same way again",
+            );
+        }
+        assert_eq!(
+            TranscriptionError::RequestFailed("connect timeout".into()).kind(),
+            TranscriptionErrorKind::Transient,
+        );
+        assert_eq!(
+            TranscriptionError::EmptyAudio.kind(),
+            TranscriptionErrorKind::Permanent,
+        );
+        assert_eq!(
+            TranscriptionError::UnsupportedFormat {
+                mime_type: "video/mp4".into(),
+            }
+            .kind(),
+            TranscriptionErrorKind::Permanent,
+        );
+    }
+
+    /// The provider body is for host logs only. Keeping it in `detail` (rather
+    /// than folded into a display string a transport might echo) is what lets
+    /// the boundary drop it; assert it is still reachable for logging.
+    #[test]
+    fn provider_status_keeps_the_body_out_of_the_classification() {
+        let error = TranscriptionError::ProviderStatus {
+            status: 400,
+            detail: "{\"error\":{\"message\":\"bad audio\"}}".to_string(),
+        };
+        assert_eq!(error.kind(), TranscriptionErrorKind::Permanent);
+        assert!(error.to_string().contains("bad audio"));
     }
 
     #[test]

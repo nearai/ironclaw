@@ -109,6 +109,7 @@ use ironclaw_assistant::{
     RebornAdminUpdateUserRequest, RebornAdminUserListQuery, RebornAdminUserListResponse,
     RebornAdminUserRequest, RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
 };
+use ironclaw_attachments::DEFAULT_VOICE_CLIP_BUDGET;
 use ironclaw_attachments::{InboundAttachmentLander, InboundAttachmentReader};
 use ironclaw_auth::{
     AuthAccountLastError, AuthAccountState, ChannelAuthAccountState, ChannelConnectionService,
@@ -193,6 +194,7 @@ use ironclaw_product_contracts::surface::{
     ProductSurfaceErrorKind, ProductSurfaceInvokeRequest, ProductSurfaceStreamRequest,
     ProductSurfaceValidationCode,
 };
+use ironclaw_product_contracts::transcription::RebornTranscribeAudioRequest;
 use ironclaw_product_contracts::views::{RebornViewPage, RebornViewQuery};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -18016,4 +18018,244 @@ async fn submit_turn_admits_a_declared_session_channel() {
         RebornSubmitTurnResponse::Submitted { .. }
     ));
     assert_eq!(coordinator.submission_count(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Voice-to-text (`transcribe_audio`)
+// ---------------------------------------------------------------------------
+
+/// A transcription port that records every call it receives.
+///
+/// The recording half is the point: the bound checks only mean something if
+/// nothing reaches the provider when they reject, and "nothing reached the
+/// provider" is not observable from the error alone.
+struct RecordingTranscription {
+    text: String,
+    calls: Mutex<Vec<(Vec<u8>, String)>>,
+}
+
+impl RecordingTranscription {
+    fn new(text: &str) -> Arc<Self> {
+        Arc::new(Self {
+            text: text.to_string(),
+            calls: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn calls(&self) -> Vec<(Vec<u8>, String)> {
+        self.calls.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl ironclaw_product_contracts::transcription::TranscriptionService for RecordingTranscription {
+    async fn transcribe(
+        &self,
+        _caller: &ProductSurfaceCaller,
+        audio: &[u8],
+        mime_type: &str,
+    ) -> Result<String, ProductSurfaceError> {
+        self.calls
+            .lock()
+            .expect("lock")
+            .push((audio.to_vec(), mime_type.to_string()));
+        Ok(self.text.clone())
+    }
+}
+
+fn transcribe_request(mime_type: &str, bytes: &[u8]) -> RebornTranscribeAudioRequest {
+    RebornTranscribeAudioRequest {
+        mime_type: mime_type.to_string(),
+        audio_base64: STANDARD.encode(bytes),
+    }
+}
+
+fn transcription_services(transcription: Arc<RecordingTranscription>) -> RebornServices {
+    session_services(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_transcription(transcription)
+}
+
+#[tokio::test]
+async fn transcribe_audio_returns_the_transcript_for_a_valid_clip() {
+    let transcription = RecordingTranscription::new("  book a table for two  ");
+    let services = transcription_services(transcription.clone());
+
+    let response = services
+        .transcribe_audio(
+            caller_for_user("user-alpha"),
+            transcribe_request("audio/webm", &[0xDE, 0xAD, 0xBE, 0xEF]),
+        )
+        .await
+        .expect("a valid clip transcribes");
+
+    // The port's text is returned as-is; trimming is the provider's job, not a
+    // second normalization here.
+    assert_eq!(response.text, "  book a table for two  ");
+
+    let calls = transcription.calls();
+    assert_eq!(calls.len(), 1, "exactly one provider call per clip");
+    assert_eq!(calls[0].0, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    assert_eq!(calls[0].1, "audio/webm");
+}
+
+/// Safari records `audio/mp4` where Chrome records `audio/webm`, and a
+/// recorder reports its type with codec parameters attached. Both spellings
+/// must reach the provider as the normalized base type, or voice input works
+/// on exactly one browser.
+#[tokio::test]
+async fn transcribe_audio_normalizes_every_browser_recorder_type() {
+    for (declared, normalized) in [
+        ("audio/webm", "audio/webm"),
+        ("audio/mp4", "audio/mp4"),
+        ("AUDIO/OGG", "audio/ogg"),
+        ("audio/ogg; codecs=opus", "audio/ogg"),
+    ] {
+        let transcription = RecordingTranscription::new("ok");
+        let services = transcription_services(transcription.clone());
+        services
+            .transcribe_audio(
+                caller_for_user("user-alpha"),
+                transcribe_request(declared, &[1, 2, 3]),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{declared} must transcribe: {error:?}"));
+        assert_eq!(
+            transcription.calls()[0].1,
+            normalized,
+            "{declared} must reach the provider as {normalized}",
+        );
+    }
+}
+
+/// Every bound rejects *before* egress. The recording double seeing nothing is
+/// the assertion that matters: a rejection that still spent a billable
+/// inference call would pass a status-code-only test.
+#[tokio::test]
+async fn transcribe_audio_rejects_bad_clips_before_reaching_the_provider() {
+    struct Case {
+        name: &'static str,
+        request: RebornTranscribeAudioRequest,
+        field: &'static str,
+        validation_code: ProductSurfaceValidationCode,
+    }
+
+    let oversize = vec![0u8; DEFAULT_VOICE_CLIP_BUDGET.max_bytes + 1];
+    let cases = vec![
+        Case {
+            name: "a non-audio media type",
+            request: transcribe_request("image/png", &[1, 2, 3]),
+            field: "mime_type",
+            validation_code: ProductSurfaceValidationCode::InvalidValue,
+        },
+        Case {
+            name: "an audio type the registry does not recognize",
+            request: transcribe_request("audio/x-made-up", &[1, 2, 3]),
+            field: "mime_type",
+            validation_code: ProductSurfaceValidationCode::InvalidValue,
+        },
+        Case {
+            name: "malformed base64",
+            request: RebornTranscribeAudioRequest {
+                mime_type: "audio/webm".to_string(),
+                audio_base64: "not!valid!base64".to_string(),
+            },
+            field: "audio_base64",
+            validation_code: ProductSurfaceValidationCode::InvalidValue,
+        },
+        Case {
+            name: "an empty clip",
+            request: transcribe_request("audio/webm", &[]),
+            field: "audio_base64",
+            validation_code: ProductSurfaceValidationCode::Blank,
+        },
+        Case {
+            name: "a clip over the decoded-byte ceiling",
+            request: transcribe_request("audio/webm", &oversize),
+            field: "audio_base64",
+            validation_code: ProductSurfaceValidationCode::TooLong,
+        },
+    ];
+
+    for case in cases {
+        let transcription = RecordingTranscription::new("should not be reached");
+        let services = transcription_services(transcription.clone());
+        let error = services
+            .transcribe_audio(caller_for_user("user-alpha"), case.request)
+            .await
+            .expect_err(case.name);
+
+        assert_eq!(
+            error.code,
+            ProductSurfaceErrorCode::InvalidRequest,
+            "{}: must be a client error",
+            case.name
+        );
+        assert_eq!(error.field.as_deref(), Some(case.field), "{}", case.name);
+        assert_eq!(
+            error.validation_code,
+            Some(case.validation_code),
+            "{}",
+            case.name
+        );
+        assert!(
+            transcription.calls().is_empty(),
+            "{}: the bound must reject before any provider call",
+            case.name
+        );
+    }
+}
+
+/// A deployment with no transcription-capable backend answers "unavailable",
+/// non-retryable — an absent port does not appear on a retry, it needs
+/// configuration.
+#[tokio::test]
+async fn transcribe_audio_without_a_wired_port_is_unavailable() {
+    let services = session_services(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    assert!(
+        !services.transcription_available(),
+        "no port is wired, so the surface must advertise voice as unavailable"
+    );
+
+    let error = services
+        .transcribe_audio(
+            caller_for_user("user-alpha"),
+            transcribe_request("audio/webm", &[1, 2, 3]),
+        )
+        .await
+        .expect_err("an unwired port cannot transcribe");
+
+    assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
+    assert_eq!(error.status_code, 503);
+    assert!(
+        !error.retryable,
+        "a missing port needs configuration, not a retry"
+    );
+}
+
+/// Validation runs before the port check. Reporting a malformed request as
+/// "service unavailable" would send the browser (and its user) hunting for a
+/// deployment problem that is really a bad clip.
+#[tokio::test]
+async fn transcribe_audio_reports_a_bad_clip_as_invalid_even_with_no_port_wired() {
+    let services = session_services(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let error = services
+        .transcribe_audio(
+            caller_for_user("user-alpha"),
+            transcribe_request("image/png", &[1, 2, 3]),
+        )
+        .await
+        .expect_err("a non-audio clip is invalid regardless of wiring");
+
+    assert_eq!(error.code, ProductSurfaceErrorCode::InvalidRequest);
+    assert_eq!(error.field.as_deref(), Some("mime_type"));
 }

@@ -66,6 +66,7 @@ pub mod shared_admission;
 pub mod surface;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+pub mod transcription;
 pub mod views;
 pub mod workspace_views;
 

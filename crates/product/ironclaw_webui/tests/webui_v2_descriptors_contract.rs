@@ -69,8 +69,9 @@ use ironclaw_webui::webui_v2::{
     WEBUI_V2_ROUTE_STREAM_EVENTS_WS, WEBUI_V2_ROUTE_TEST_LLM_CONNECTION,
     WEBUI_V2_ROUTE_TRACE_ACCOUNT_LOGIN_LINK, WEBUI_V2_ROUTE_TRACE_ACCOUNT_TRACES,
     WEBUI_V2_ROUTE_TRACE_CREDITS, WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE,
-    WEBUI_V2_ROUTE_UPDATE_PROJECT, WEBUI_V2_ROUTE_UPDATE_PROJECT_MEMBER,
-    WEBUI_V2_ROUTE_UPDATE_SKILL, WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER, webui_v2_routes,
+    WEBUI_V2_ROUTE_TRANSCRIBE_AUDIO, WEBUI_V2_ROUTE_UPDATE_PROJECT,
+    WEBUI_V2_ROUTE_UPDATE_PROJECT_MEMBER, WEBUI_V2_ROUTE_UPDATE_SKILL,
+    WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER, webui_v2_routes,
 };
 
 /// Expected policy surface for one route. Everything host composition
@@ -298,6 +299,28 @@ fn expected_table() -> Vec<Expected> {
             scope_source: IngressScopeSource::AuthenticatedCaller,
             body_limit: BodyLimitPolicy::NoBody,
             rate_limit_max: 120,
+            rate_limit_window_seconds: 60,
+            rate_limit_scope: RateLimitScope::PerCaller,
+            cors: CorsPolicy::SameOriginOnly,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::UserAction,
+            effect_path: AllowedEffectPath::ProductSurface,
+        },
+        // Voice-to-text. The tightest rate budget on the surface (20/60s vs the
+        // shared 60/60s mutation budget): each accepted request is a billable
+        // inference call over a multi-megabyte upload. The 14 MiB body budget
+        // matches the session-message route because both carry base64 payloads
+        // sized to the same ~10 MiB decoded ceiling.
+        Expected {
+            route_id: WEBUI_V2_ROUTE_TRANSCRIBE_AUDIO,
+            method: NetworkMethod::Post,
+            pattern: "/api/webchat/v2/transcribe",
+            listener_class: ListenerClass::LocalGateway,
+            auth_schemes: &[IngressAuthScheme::BearerToken],
+            scope_source: IngressScopeSource::AuthenticatedCaller,
+            body_limit: body_limit_kib(14 * 1024),
+            rate_limit_max: 20,
             rate_limit_window_seconds: 60,
             rate_limit_scope: RateLimitScope::PerCaller,
             cors: CorsPolicy::SameOriginOnly,

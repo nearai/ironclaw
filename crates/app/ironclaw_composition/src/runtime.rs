@@ -626,6 +626,12 @@ pub struct RebornRuntime {
     pub(crate) session_channel_directory:
         Arc<dyn ironclaw_product_contracts::session_ingress::SessionChannelDirectory>,
     pub(crate) session_channel_extension_id: Option<String>,
+    /// Host-side speech-to-text, when this deployment's model backend serves
+    /// an audio endpoint. `None` is the ordinary no-voice deployment: the
+    /// product surface reports the capability unavailable and the WebUI hides
+    /// its microphone button rather than offering one that always fails.
+    pub(crate) transcription_provider:
+        Option<Arc<dyn ironclaw_llm::transcription::TranscriptionProvider>>,
     /// The deployment's single workspace scoping decision, carried so the WebUI
     /// attachment handle addresses the same subtree as agent tool writes.
     pub(crate) workspace_mount_policy: crate::runtime_mounts::WorkspaceMountPolicy,
@@ -890,6 +896,13 @@ impl RebornRuntime {
     /// exactly one is declared. The serve path advertises it to the SPA.
     pub fn session_channel_extension_id(&self) -> Option<&str> {
         self.session_channel_extension_id.as_deref()
+    }
+
+    /// Whether this deployment can transcribe voice input. The serve path reads
+    /// it to advertise the composer's microphone affordance, so the button and
+    /// the route agree on one answer.
+    pub fn voice_input_enabled(&self) -> bool {
+        self.transcription_provider.is_some()
     }
 
     pub fn readiness(&self) -> &RebornReadiness {
@@ -3274,6 +3287,15 @@ pub(crate) async fn build_runtime_with_resource_governor(
         Some(resolved) => build_skill_learning_provider(resolved.config()).await,
         None => None,
     };
+    // Voice-to-text reuses the resolved LLM credentials and egress host with
+    // only the model changed — no new credential, no new allowlisted
+    // destination. `None` disables voice input everywhere at once.
+    let transcription_provider = match llm.as_ref() {
+        Some(resolved) => {
+            crate::support::transcription::build_transcription_provider(resolved.config())
+        }
+        None => None,
+    };
     // Caller instrumentation seam (e.g. a benchmark harness layering
     // token/reasoning capture): carry the resolved LLM's provider factory into
     // the cold-boot gateway so the wrapper wraps the swappable and stays in the
@@ -4521,6 +4543,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         session_inbound_ledger,
         session_channel_directory,
         session_channel_extension_id,
+        transcription_provider,
         workspace_mount_policy: services.workspace_mounts.clone(),
         system_extensions_lifecycle_mounts: services.system_extensions_lifecycle_mounts.clone(),
         outbound_preferences: services.outbound_preferences.clone(),

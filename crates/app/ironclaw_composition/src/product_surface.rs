@@ -101,6 +101,14 @@ pub(crate) fn build_product_surface_with_channel_connection(
     if let Some(ironhub_link) = runtime.ironhub_link_service() {
         api = api.with_ironhub_link_service(ironhub_link);
     }
+    // Voice-to-text. Absent when the deployment's model backend serves no audio
+    // endpoint, in which case the transcribe command reports the capability
+    // unavailable and the WebUI never renders a microphone button.
+    if let Some(provider) = runtime.transcription_provider.as_ref() {
+        api = api.with_transcription(Arc::new(
+            crate::support::transcription::LlmTranscriptionService::new(Arc::clone(provider)),
+        ));
+    }
     // Admin user-management surface: the directory and secret provisioner are
     // core runtime handles; only token minting is deployment-supplied.
     if let Some(minter) = runtime.reborn_admin_token_minter() {

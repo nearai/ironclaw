@@ -1,5 +1,8 @@
 use super::*;
 use crate::LifecycleProductAction;
+// Declared at the product boundary, not here: WebUI consumes the same
+// descriptor without compiling this crate (PROPOSAL §6.1.3).
+use ironclaw_product_contracts::transcription::TRANSCRIBE_AUDIO_COMMAND_ID;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProductCommandHandler {
@@ -19,6 +22,7 @@ pub(super) enum ProductCommandHandler {
     ProjectFsRead,
     FsRead,
     AttachmentRead,
+    TranscribeAudio,
     IronhubDeliverInstall,
     TraceAccountLoginLink,
     TraceHoldAuthorize,
@@ -59,6 +63,7 @@ impl ProductCommandHandler {
             PROJECT_FS_READ_COMMAND_ID => Some(Self::ProjectFsRead),
             FS_READ_COMMAND_ID => Some(Self::FsRead),
             ATTACHMENT_READ_COMMAND_ID => Some(Self::AttachmentRead),
+            TRANSCRIBE_AUDIO_COMMAND_ID => Some(Self::TranscribeAudio),
             IRONHUB_DELIVER_INSTALL_COMMAND_ID => Some(Self::IronhubDeliverInstall),
             TRACE_ACCOUNT_LOGIN_LINK_COMMAND_ID => Some(Self::TraceAccountLoginLink),
             TRACE_HOLD_AUTHORIZE_COMMAND_ID => Some(Self::TraceHoldAuthorize),
@@ -200,6 +205,11 @@ impl ProductCommandHandler {
             Self::AttachmentRead => command_output(
                 services
                     .read_attachment(caller, product_command_input(input)?)
+                    .await?,
+            ),
+            Self::TranscribeAudio => command_output(
+                services
+                    .transcribe_audio(caller, product_command_input(input)?)
                     .await?,
             ),
             Self::IronhubDeliverInstall => command_output(
@@ -730,6 +740,10 @@ mod tests {
             (
                 ATTACHMENT_READ_COMMAND_ID,
                 ProductCommandHandler::AttachmentRead,
+            ),
+            (
+                TRANSCRIBE_AUDIO_COMMAND_ID,
+                ProductCommandHandler::TranscribeAudio,
             ),
             (
                 TRACE_ACCOUNT_LOGIN_LINK_COMMAND_ID,

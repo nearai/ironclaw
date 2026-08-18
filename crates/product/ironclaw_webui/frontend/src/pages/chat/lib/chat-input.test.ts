@@ -19,6 +19,7 @@ import {
   componentSourceForTest,
   findComponent,
 } from "../../../lib/vm-component-harness";
+import { formatElapsed, insertTranscript } from "./voice";
 
 // Wire shape from `GET /api/webchat/v2/commands`. Two commands share the
 // "mo" prefix so ArrowDown/wraparound has somewhere to move.
@@ -142,6 +143,22 @@ function renderChatInput({
       maxFileBytes: 1024,
       maxTotalBytes: 2048,
     }),
+    // Voice input defaults to unavailable so the existing composer assertions
+    // describe a deployment without a transcription backend; the voice-specific
+    // tests opt in by overriding `useVoiceConfig`.
+    useVoiceConfig: () => ({
+      enabled: false,
+      limits: { accept: [], maxBytes: 1024, maxDurationSecs: 300 },
+    }),
+    useVoiceInput: () => ({
+      status: "idle",
+      elapsedSecs: 0,
+      start: () => {},
+      stop: () => {},
+      cancel: () => {},
+    }),
+    formatElapsed,
+    insertTranscript,
     useFilePicker: ({ accept, multiple = false, disabled = false, onSelect }) => {
       const ref = context.React.useRef(null);
       return [
@@ -745,6 +762,22 @@ function renderChatInputStateful({ getDraftByKey = {} } = {}) {
       maxFileBytes: 1024,
       maxTotalBytes: 2048,
     }),
+    // Voice input defaults to unavailable so the existing composer assertions
+    // describe a deployment without a transcription backend; the voice-specific
+    // tests opt in by overriding `useVoiceConfig`.
+    useVoiceConfig: () => ({
+      enabled: false,
+      limits: { accept: [], maxBytes: 1024, maxDurationSecs: 300 },
+    }),
+    useVoiceInput: () => ({
+      status: "idle",
+      elapsedSecs: 0,
+      start: () => {},
+      stop: () => {},
+      cancel: () => {},
+    }),
+    formatElapsed,
+    insertTranscript,
     useFilePicker: ({ accept, multiple = false, disabled = false, onSelect }) => {
       const ref = context.React.useRef(null);
       return [

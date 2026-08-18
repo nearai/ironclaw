@@ -112,10 +112,10 @@ impl TranscriptionProvider for OpenAiWhisperProvider {
                 .text()
                 .await
                 .unwrap_or_else(|_| "unknown error".to_string());
-            return Err(TranscriptionError::RequestFailed(format!(
-                "HTTP {}: {}",
-                status, body
-            )));
+            return Err(TranscriptionError::ProviderStatus {
+                status: status.as_u16(),
+                detail: body,
+            });
         }
 
         let text = response

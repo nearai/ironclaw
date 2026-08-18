@@ -65,7 +65,9 @@ use ironclaw_assistant::{
     TRACE_ACCOUNT_LOGIN_LINK_COMMAND, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
     TRACE_HOLD_AUTHORIZE_COMMAND,
 };
-use ironclaw_attachments::{AttachmentCapabilities, attachment_capabilities};
+use ironclaw_attachments::{
+    AttachmentCapabilities, VoiceCapabilities, attachment_capabilities, voice_capabilities,
+};
 use ironclaw_product_contracts::admin_users::{
     RebornAdminCreateUserRequest, RebornAdminDeleteSecretProductRequest,
     RebornAdminPutSecretProductRequest, RebornAdminPutSecretRequest,
@@ -125,6 +127,9 @@ use ironclaw_product_contracts::product_wire::{
 };
 use ironclaw_product_contracts::product_wire::{
     RebornNotificationSetupMutationRequest, RebornNotificationSetupStatusResponse,
+};
+use ironclaw_product_contracts::transcription::{
+    RebornTranscribeAudioRequest, RebornTranscribeAudioResponse, TRANSCRIBE_AUDIO_COMMAND,
 };
 use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewPage, RebornViewQuery};
 use ironclaw_product_contracts::workspace_views::{
@@ -190,6 +195,11 @@ pub struct WebUiV2SessionResponse {
     /// format registry so the picker can never drift from the server's
     /// allowed set; the send-message decode remains authoritative.
     pub attachments: AttachmentCapabilities,
+    /// Voice-capture contract (accepted recorder MIME types + clip budget) for
+    /// the composer's microphone. Generated from the shared format registry so
+    /// the recorder can never pick a container the transcribe route rejects;
+    /// meaningful only when `features.voice_input` is set.
+    pub voice: VoiceCapabilities,
     /// The deployment's authenticated-session channel — the extension id the
     /// browser plugs into the generic session-inbound route. Absent when the
     /// deployment has no session channel (sends fail closed client-side).
@@ -223,6 +233,11 @@ pub struct WebUiV2Features {
     /// `regression_artifact_export` so QA self-export never implies
     /// tenant-wide admin transcript access.
     pub admin_thread_scrape: bool,
+    /// Whether this deployment can transcribe voice input. Off when no
+    /// transcription-capable model backend resolved, in which case the composer
+    /// renders no microphone button at all — an absent affordance rather than
+    /// one that always fails.
+    pub voice_input: bool,
     /// Effective global auto-approve setting for the authenticated caller.
     /// The browser treats it as a bootstrap UI flag and does not inspect the
     /// operator settings payload shape. Settings mutations should update local
@@ -257,9 +272,11 @@ pub async fn get_session(
             workspace_requires_scoped_projection,
             regression_artifact_export: state.regression_artifact_export_enabled(),
             admin_thread_scrape: state.admin_thread_scrape_enabled(),
+            voice_input: state.voice_input_enabled(),
             global_auto_approve,
         },
         attachments: attachment_capabilities(),
+        voice: voice_capabilities(),
         session_channel_extension_id: state.session_channel_extension_id().map(str::to_string),
     })
 }
@@ -1329,6 +1346,28 @@ pub async fn get_attachment(
         HeaderValue::from_static("private, max-age=300"),
     );
     Ok((StatusCode::OK, headers, attachment.bytes).into_response())
+}
+
+/// `POST /api/webchat/v2/transcribe`
+///
+/// Turns one recorded voice clip into text for the composer. A pure transform:
+/// it starts no turn, writes no durable state, and the audio is never persisted
+/// — it lives only in this request and is dropped when the handler returns.
+/// Only the transcript is returned, and it becomes conversation data solely if
+/// the user then chooses to send it.
+///
+/// Every bound (accepted media type, decoded-byte ceiling) is enforced by the
+/// product service *before* the clip reaches a provider, so a rejected request
+/// never spends a billable inference call. Provider failures are classified
+/// into stable product errors host-side; no provider body reaches the browser.
+pub async fn transcribe_audio(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Json(body): Json<RebornTranscribeAudioRequest>,
+) -> Result<Json<RebornTranscribeAudioResponse>, WebUiV2HttpError> {
+    let response =
+        invoke_product_command(state.services(), caller, TRANSCRIBE_AUDIO_COMMAND, body).await?;
+    Ok(Json(response))
 }
 
 /// SSE polling cadence for product surfaces that expose only the legacy

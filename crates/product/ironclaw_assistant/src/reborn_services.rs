@@ -40,6 +40,9 @@ pub use ironclaw_product_contracts::product_wire::{
     RebornAdminThreadScrapeRunArtifactRequest,
 };
 use ironclaw_product_contracts::projection::ProjectionStream;
+use ironclaw_product_contracts::transcription::{
+    RebornTranscribeAudioRequest, RebornTranscribeAudioResponse, TranscriptionService,
+};
 use ironclaw_product_contracts::views::{RebornViewPage, RebornViewProvider, RebornViewQuery};
 
 use async_trait::async_trait;
@@ -2349,6 +2352,10 @@ pub struct RebornServices<
     filesystem_browser: Option<Arc<dyn FilesystemBrowseReader>>,
     project_service: Option<Arc<dyn ProjectService>>,
     inbound_attachment_reader: Option<Arc<dyn InboundAttachmentReader>>,
+    /// Host-side speech-to-text. Genuinely optional: a deployment whose
+    /// model backend serves no transcription endpoint ships without it, and
+    /// the surface reports voice input unavailable rather than broken.
+    transcription: Option<Arc<dyn TranscriptionService>>,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     lifecycle_service: Arc<dyn LifecycleProductService>,
     automation_service: Arc<dyn AutomationProductService>,
@@ -2436,6 +2443,7 @@ where
             filesystem_browser: None,
             project_service: None,
             inbound_attachment_reader: None,
+            transcription: None,
             event_stream: None,
             lifecycle_service: Arc::new(UnsupportedLifecycleProductService::new_static(
                 "reborn_lifecycle_service_unwired",
@@ -2542,6 +2550,20 @@ where
     ) -> Self {
         self.inbound_attachment_reader = Some(reader);
         self
+    }
+
+    /// Wire host-side speech-to-text. Without it, `transcribe_audio` reports
+    /// the capability unavailable and the WebUI hides its microphone button —
+    /// voice input is absent, never a button that always fails.
+    pub fn with_transcription(mut self, transcription: Arc<dyn TranscriptionService>) -> Self {
+        self.transcription = Some(transcription);
+        self
+    }
+
+    /// Whether host-side speech-to-text is wired. Transports read this to gate
+    /// the voice affordance they advertise, so the button and the route agree.
+    pub fn transcription_available(&self) -> bool {
+        self.transcription.is_some()
     }
 
     pub fn with_llm_config_service(mut self, llm_config: Arc<dyn LlmConfigService>) -> Self {
@@ -4795,6 +4817,39 @@ where
             filename: attachment.filename.clone(),
             bytes,
         })
+    }
+
+    /// Transcribe one voice clip for the authenticated caller.
+    ///
+    /// Bounds first, egress second: [`DecodeVoiceClip`] rejects a wrong media
+    /// type or an oversized clip before the provider is reached, so a rejected
+    /// request never spends a billable inference call. The audio is not
+    /// persisted anywhere — it lives in this call frame and is dropped when it
+    /// returns (see the retention note in
+    /// `crates/product/ironclaw_webui/CONTRACT.md`).
+    pub async fn transcribe_audio(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: RebornTranscribeAudioRequest,
+    ) -> Result<RebornTranscribeAudioResponse, ProductSurfaceError> {
+        use crate::product_surface_inbound::DecodeVoiceClip;
+
+        // Validate before checking for the port: a malformed request is a
+        // client error whether or not the deployment has voice wired, and
+        // reporting it as "unavailable" would send the browser hunting for a
+        // configuration problem it does not have.
+        let clip = request.decode_clip()?;
+
+        // Not retryable: an absent port won't appear on a retry, it needs
+        // deployment configuration (a transcription-capable model backend).
+        let Some(transcription) = self.transcription.as_ref() else {
+            return Err(ProductSurfaceError::service_unavailable(false));
+        };
+
+        let text = transcription
+            .transcribe(&caller, &clip.bytes, &clip.mime_type)
+            .await?;
+        Ok(RebornTranscribeAudioResponse { text })
     }
 
     pub async fn stream_events(

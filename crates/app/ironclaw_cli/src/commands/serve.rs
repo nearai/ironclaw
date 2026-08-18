@@ -566,7 +566,12 @@ impl ServeCommand {
                     // owns the answer. Any future reason for composition to
                     // decline (see `WorkspaceMountPolicy::resolve`) moves the
                     // browser with it instead of silently drifting.
-                    .with_workspace_requires_scoped_projection(effective_workspace_scoping);
+                    .with_workspace_requires_scoped_projection(effective_workspace_scoping)
+                    // Read back from the runtime rather than re-resolving the
+                    // model config here: composition owns whether a
+                    // transcription backend resolved, so the composer's
+                    // microphone button can never disagree with the route.
+                    .with_voice_input_enabled(runtime.voice_input_enabled());
             if let Some(project_id) = default_project_id.clone() {
                 serve_config = serve_config.with_default_project_id(project_id);
             }

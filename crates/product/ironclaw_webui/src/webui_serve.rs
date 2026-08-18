@@ -242,6 +242,11 @@ pub struct WebuiServeConfig {
     /// profiles keep it off so single-user workspaces stay visible. The flag
     /// controls filesystem-handler path selection, not only UI display.
     pub(crate) workspace_requires_scoped_projection: bool,
+    /// Whether this deployment resolved a transcription-capable model backend.
+    /// Advertised to the browser on `/session` so the composer shows its
+    /// microphone button only where voice-to-text can actually answer; the
+    /// transcribe route itself stays mounted and fails closed regardless.
+    pub(crate) voice_input_enabled: bool,
     /// Trusted default agent id stamped onto every
     /// [`ProductSurfaceCaller`]. The browser body cannot influence
     /// this — it comes from host installation config / runtime
@@ -307,6 +312,7 @@ impl WebuiServeConfig {
             session_channel_extension_id: None,
             canonical_host: None,
             workspace_requires_scoped_projection: false,
+            voice_input_enabled: false,
             default_agent_id: None,
             default_project_id: None,
             public_mounts: Vec::new(),
@@ -377,6 +383,14 @@ impl WebuiServeConfig {
     /// raw single-user `/workspace` roots remain visible.
     pub fn with_workspace_requires_scoped_projection(mut self, enabled: bool) -> Self {
         self.workspace_requires_scoped_projection = enabled;
+        self
+    }
+
+    /// Advertise composer voice input. Set from
+    /// `RebornRuntime::voice_input_enabled` so the browser affordance and the
+    /// resolved backend agree.
+    pub fn with_voice_input_enabled(mut self, enabled: bool) -> Self {
+        self.voice_input_enabled = enabled;
         self
     }
 
@@ -647,7 +661,8 @@ pub fn webui_v2_app_with_lifecycle(
         .with_session_channel_extension_id(config.session_channel_extension_id.clone())
         .with_workspace_requires_scoped_projection(config.workspace_requires_scoped_projection)
         .with_regression_artifact_export_enabled(regression_artifact_export_enabled)
-        .with_admin_thread_scrape_enabled(admin_thread_scrape_enabled);
+        .with_admin_thread_scrape_enabled(admin_thread_scrape_enabled)
+        .with_voice_input_enabled(config.voice_input_enabled);
     let v2_inner: Router<()> = webui_v2_router_with_options(v2_state, route_options).with_state(());
 
     let mut protected_inner = Router::new().merge(v2_inner);

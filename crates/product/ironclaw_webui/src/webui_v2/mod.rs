@@ -101,10 +101,11 @@ pub use descriptors::{
     WEBUI_V2_ROUTE_STREAM_EVENTS_WS, WEBUI_V2_ROUTE_TEST_LLM_CONNECTION,
     WEBUI_V2_ROUTE_TRACE_ACCOUNT_LOGIN_LINK, WEBUI_V2_ROUTE_TRACE_ACCOUNT_TRACES,
     WEBUI_V2_ROUTE_TRACE_CREDITS, WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE,
-    WEBUI_V2_ROUTE_UPDATE_PROJECT, WEBUI_V2_ROUTE_UPDATE_PROJECT_MEMBER,
-    WEBUI_V2_ROUTE_UPDATE_SKILL, WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER,
-    is_webui_v2_operator_webui_config_route_id, webui_v2_routes,
-    webui_v2_routes_with_artifact_flags, webui_v2_routes_with_regression_artifact_export,
+    WEBUI_V2_ROUTE_TRANSCRIBE_AUDIO, WEBUI_V2_ROUTE_UPDATE_PROJECT,
+    WEBUI_V2_ROUTE_UPDATE_PROJECT_MEMBER, WEBUI_V2_ROUTE_UPDATE_SKILL,
+    WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER, is_webui_v2_operator_webui_config_route_id,
+    webui_v2_routes, webui_v2_routes_with_artifact_flags,
+    webui_v2_routes_with_regression_artifact_export,
 };
 pub use error::{WebUiV2HttpError, WebUiV2HttpErrorBody};
 pub use handlers::{
@@ -126,7 +127,7 @@ pub use handlers::{
     set_settings_tools_auto_approve, set_skill_auto_activate, set_user_model_policy,
     set_user_model_preference, setup_extension, start_codex_login, start_nearai_login,
     stat_fs_path, stream_events, stream_events_ws, test_llm_connection, trace_account_traces,
-    trace_credits, update_skill, upsert_llm_provider,
+    trace_credits, transcribe_audio, update_skill, upsert_llm_provider,
 };
 pub use inspector::{
     get_inspector_prompt, get_inspector_snapshot, get_inspector_tool, stream_inspector_updates,

@@ -92,7 +92,31 @@ const LOGIN_GZIP_BUDGET = 180_000;
 //    locale packs stay lazy per-locale imports and cost nothing here.
 // Measured /chat closure on the merged tree is 220.4 KB gzip; 222.0 KB
 // retains about 1.6 KB of explicit headroom.
-const CHAT_GZIP_BUDGET = 222_000;
+// Composer voice-to-text then added a microphone to /chat. The recording
+// engine was deferred FIRST and measured: `lib/voice-recorder.ts` (container
+// selection, the `MediaRecorder` lifecycle, base64 encoding, the upload) loads
+// through a dynamic `import()` on the first microphone press from
+// `hooks/useVoiceInput.ts`, so a session that never dictates never fetches it.
+// Measured: 223.1 KB eager -> 222.5 KB.
+// What stays eager, and why it cannot move:
+//  - `useVoiceInput` itself — hooks cannot be called conditionally, so the
+//    state/refs wrapper has to be present even though the engine it drives is
+//    not. It is deliberately thin for exactly this reason.
+//  - The microphone button, elapsed-time indicator, and inline error notice in
+//    `chat-input.tsx`. The button must render with the composer when the
+//    deployment supports voice; lazy-loading an always-visible control buys
+//    ~0.2 KB in exchange for a flash of missing chrome on every chat load.
+//  - `lib/voice.ts` — the server-contract mapping, the secure-context/
+//    MediaRecorder capability probe, and the transcript-insertion and
+//    `m:ss` arithmetic. The probe and the contract decide whether the button
+//    renders at all, so they are needed strictly before the engine is.
+//  - 11 `chat.voice*` keys in `en.ts`, which `i18n.tsx` loads eagerly as the
+//    fallback pack on every page (the same shape as the `deviceLink.*` row
+//    above). The other ten locale packs stay lazy per-locale imports and cost
+//    nothing here.
+// Measured /chat closure is 222.5 KB gzip; 224.0 KB retains about 1.5 KB of
+// explicit headroom.
+const CHAT_GZIP_BUDGET = 224_000;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {

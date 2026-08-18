@@ -166,6 +166,7 @@ enum ProductSurfaceCallId {
     ProjectFsRead,
     FsRead,
     AttachmentRead,
+    TranscribeAudio,
     IronhubDeliverInstall,
     TraceAccountLoginLink,
     TraceHoldAuthorize,
@@ -197,6 +198,7 @@ impl ProductSurfaceCallId {
             Self::ProjectFsRead => "project.fs.read",
             Self::FsRead => "fs.read",
             Self::AttachmentRead => "attachment.read",
+            Self::TranscribeAudio => "audio.transcribe",
             Self::IronhubDeliverInstall => "ironhub.deliver_install",
             Self::TraceAccountLoginLink => "trace.account_login_link",
             Self::TraceHoldAuthorize => "trace.hold_authorize",
@@ -228,6 +230,7 @@ impl ProductSurfaceCallId {
             "project.fs.read" => Some(Self::ProjectFsRead),
             "fs.read" => Some(Self::FsRead),
             "attachment.read" => Some(Self::AttachmentRead),
+            "audio.transcribe" => Some(Self::TranscribeAudio),
             "ironhub.deliver_install" => Some(Self::IronhubDeliverInstall),
             "trace.account_login_link" => Some(Self::TraceAccountLoginLink),
             "trace.hold_authorize" => Some(Self::TraceHoldAuthorize),
@@ -1748,6 +1751,11 @@ impl StubServices {
                     .await?,
                 ))
             }
+            // No default transcript: every voice test stages its own response
+            // (or error) with `enqueue_operation_response`, so a route that
+            // reaches the surface without a staged answer fails loudly rather
+            // than passing against a stub's built-in string.
+            ProductSurfaceCallId::TranscribeAudio => Err(service_unavailable_error(false)),
             ProductSurfaceCallId::IronhubDeliverInstall => {
                 let request: IronhubInstallDeliveryRequest =
                     serde_json::from_value(request.input).expect("input");
@@ -9357,4 +9365,200 @@ async fn remove_extension_uses_client_gesture_idempotency_not_permanent_input_de
         calls[1].2, calls[2].2,
         "the remove client action id must survive response-lost retries as the ProductSurface activity id"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Voice-to-text route (`POST /api/webchat/v2/transcribe`)
+// ---------------------------------------------------------------------------
+
+/// The happy path through the real router: the body reaches the product
+/// surface unmodified under the authenticated caller, and only `{ "text" }`
+/// comes back.
+#[tokio::test]
+async fn transcribe_audio_dispatches_the_clip_through_the_product_surface() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_operation_response(RecordedProductSurfaceCallResponse::json(
+        serde_json::json!({ "text": "remind me to water the plants" }),
+    ));
+    let app = router_with(services.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/transcribe")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "mime_type": "audio/webm",
+                        "audio_base64": "AQIDBA==",
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["text"], "remind me to water the plants");
+    // The transcript is the whole response: no echoed audio, no provider or
+    // model metadata riding along.
+    assert_eq!(
+        body.as_object().expect("object").len(),
+        1,
+        "the response carries the transcript and nothing else: {body}"
+    );
+
+    let calls = services.surface_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].call_id,
+        ProductSurfaceCallId::TranscribeAudio.as_str()
+    );
+    assert_eq!(calls[0].caller_user_id, "user-alpha");
+    assert_eq!(
+        calls[0].input,
+        serde_json::json!({
+            "mime_type": "audio/webm",
+            "audio_base64": "AQIDBA==",
+        }),
+        "the handler forwards the body unmodified; bounds are the service's"
+    );
+}
+
+/// A deployment with no transcription backend answers 503 through the route,
+/// with a retryable=false body — the browser's cue to stop offering a retry.
+/// The route stays mounted either way, so a stale feature flag can never
+/// expose an unguarded path.
+#[tokio::test]
+async fn transcribe_audio_reports_an_unwired_backend_as_unavailable() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_operation_response(Err(service_unavailable_error(false)));
+    let app = router_with(services.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/transcribe")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "mime_type": "audio/webm",
+                        "audio_base64": "AQIDBA==",
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = read_json(response).await;
+    assert_eq!(body["retryable"], false);
+}
+
+/// A rejected clip comes back as a 400 naming the offending field, and the
+/// provider's own message never appears — the boundary forwards a
+/// classification, not a body.
+#[tokio::test]
+async fn transcribe_audio_surfaces_a_rejected_clip_without_leaking_provider_detail() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_operation_response(Err(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::InvalidRequest,
+        kind: ProductSurfaceErrorKind::Validation,
+        status_code: 400,
+        retryable: false,
+        field: Some("audio_base64".to_string()),
+        validation_code: Some(ProductSurfaceValidationCode::InvalidValue),
+    }));
+    let app = router_with(services.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/transcribe")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "mime_type": "audio/webm",
+                        "audio_base64": "AQIDBA==",
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_json(response).await;
+    assert_eq!(body["field"], "audio_base64");
+    assert_eq!(body["validation_code"], "invalid_value");
+    let rendered = body.to_string();
+    for leaked in ["whisper", "cloud-api.near.ai", "Bearer", "openai"] {
+        assert!(
+            !rendered.to_lowercase().contains(leaked),
+            "the error body must not name the provider ({leaked}): {rendered}"
+        );
+    }
+}
+
+/// The session bootstrap is the only thing the composer reads to decide
+/// whether to render a microphone at all, so both halves must be there: the
+/// deployment gate and the recorder contract it must record against.
+#[tokio::test]
+async fn session_advertises_the_voice_gate_and_recorder_contract() {
+    for enabled in [false, true] {
+        let services = Arc::new(StubServices::default());
+        let app = webui_v2_router(
+            WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+                .with_voice_input_enabled(enabled),
+        )
+        .layer(axum::Extension(caller()))
+        .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/webchat/v2/session")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+
+        assert_eq!(
+            body["features"]["voice_input"], enabled,
+            "features.voice_input must mirror the deployment gate"
+        );
+
+        // The contract is advertised regardless of the gate: it is generated
+        // from the shared format registry, and a browser that flips the gate
+        // on (a settings change, a reload) must not need a second shape.
+        let accept = body["voice"]["accept"]
+            .as_array()
+            .expect("voice.accept is a list");
+        for required in ["audio/webm", "audio/mp4"] {
+            assert!(
+                accept.iter().any(|token| token == required),
+                "voice.accept must cover the browser recorders ({required}): {accept:?}"
+            );
+        }
+        assert!(
+            body["voice"]["max_bytes"].as_u64().unwrap_or(0) > 0,
+            "voice.max_bytes must be advertised so the recorder can stop itself"
+        );
+        assert!(
+            body["voice"]["max_duration_secs"].as_u64().unwrap_or(0) > 0,
+            "voice.max_duration_secs must be advertised"
+        );
+    }
 }

@@ -391,6 +391,7 @@ pub use unbound_turn::{
 };
 
 pub use product_surface_inbound::{
-    DecodeInboundAttachments, IntoProductInboundCommand, ProductInboundCommand,
+    DecodeInboundAttachments, DecodeVoiceClip, DecodedVoiceClip, IntoProductInboundCommand,
+    ProductInboundCommand,
 };
 pub use workflow::DefaultProductSurface;

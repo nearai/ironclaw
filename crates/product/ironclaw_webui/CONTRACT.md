@@ -135,6 +135,7 @@ candidate module.
 | `workspace-fs` | Project-file and mount-catalog reads, and the workspace path-scoping rules that keep a served path inside its projection | Attachment download (that is `attachments`) | `PROJECT_FS_ROOT`, `ProjectFsQuery`, `list_project_files`, `stat_project_file`, `read_project_file`, `project_fs_download_response`, `FsBrowseQuery`, `list_fs_mounts`, `browse_fs_dir`, `stat_fs_path`, `read_fs_file`, `require_fs_browse_path`, `workspace_scoped_projection_required`, `workspace_projection_for`, `workspace_served_path`, `strip_workspace_prefix`, `project_fs_list_path`, `require_project_fs_path` |
 | `projects` | Project CRUD and project membership | Project *files* — those are `workspace-fs` | `ListProjectsQuery`, `list_projects`, `create_project`, `get_project`, `update_project`, `delete_project`, `list_project_members`, `add_project_member`, `update_project_member`, `remove_project_member`, `read_project_member` |
 | `attachments` | Attachment download and the filename sanitizing that download depends on | A filesystem path rule — that is `workspace-fs` | `MAX_DOWNLOAD_FILENAME_BYTES`, `sanitized_download_filename`, `get_attachment` |
+| `voice` | Composer voice-to-text: the transcribe route that turns one recorded clip into composer text | The recording itself (that is the browser) or the model call (that is the transcription port behind `ProductSurface`) | `transcribe_audio` |
 | `streaming` | Both live transports and everything that shapes a frame: SSE poll/keepalive tuning, capacity and concurrency rejection, cursor tokens, the envelope→event mapping, and the WebSocket drain loop | A product decision — a stream carries what the surface already produced | `SSE_POLL_INTERVAL`, `SSE_IDLE_POLL_MAX_INTERVAL`, `SSE_KEEPALIVE_INTERVAL`, `LAST_EVENT_ID_HEADER`, `sse_poll_interval_for_idle_polls`, `stream_events`, `sse_capacity_rejected`, `sse_concurrency_exhausted`, `StreamEventsQuery`, `stream_connection_id`, `SseErrorPayload`, `webchat_sse_event_from_envelope`, `sse_error_event`, `sse_keep_alive_event`, `build_sse_stream`, `parse_cursor_token`, `cursor_token`, `stream_events_ws`, `ws_drain_loop`, `ws_send_with_timeout` |
 | `runs` | Run control: cancel, retry, and gate resolution | Anything that reads a run — that is `threads` or `streaming` | `cancel_run`, `CancelRunPath`, `resolve_gate`, `ResolveGatePath`, `retry_run`, `RetryRunPath` |
 | `commands` | The product command surface: listing and executing | A command *constant* — those are `ironclaw_assistant`'s frozen inventory | `list_commands`, `ExecuteCommandBody`, `execute_command` |
@@ -163,6 +164,11 @@ suggests one owner and whose *use* is another:
   routes introduced and its callers are all in that owner. If a second concern
   starts calling it, it moves to `dispatch` — which is the trigger, stated in
   advance rather than argued later.
+- **`transcribe_audio` is `voice`, not `attachments`.** Both accept bytes from
+  the browser, but an attachment is *landed* — it becomes a durable, re-readable
+  part of a message — while a voice clip is transcribe-and-discard and produces
+  only composer text. Filing them together would invite the retention rules for
+  one to be assumed for the other, which is exactly backwards.
 - **`get_attachment` is `attachments`, not `workspace-fs`.** Both serve bytes,
   but attachment identity is a thread-scoped ref, not a mount path, and the
   path-scoping rules in `workspace-fs` do not apply to it. Keeping them apart
@@ -186,6 +192,7 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.delete_thread` | DELETE | `/api/webchat/v2/threads/{thread_id}` | — | `ProductSurface` |
 | `webui.v2.session_channel_message` | POST | `/api/webchat/v2/channels/{extension_id}/messages` | — | `TurnCoordinator` |
 | `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` (`?limit&cursor`) | — | `ProjectionOnly` |
+| `webui.v2.transcribe_audio` | POST | `/api/webchat/v2/transcribe` | — | `ProductSurface` |
 | `webui.v2.get_run_artifact` | GET | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/artifact` | — | `ProjectionOnly` |
 | `webui.v2.get_thread_artifact` | GET | `/api/webchat/v2/threads/{thread_id}/artifact` | — | `ProjectionOnly` |
 | `webui.v2.logs` | GET | `/api/webchat/v2/logs` | — | `ProjectionOnly` |
@@ -225,6 +232,35 @@ fixture importer to reconstruct multiple turns without mixing threads. Export
 is all-or-nothing and returns `413` when the thread exceeds 1,000 persisted
 messages, 16 MiB of stored message data, or 20 MiB after redaction and log
 assembly. The endpoint is limited to six requests per caller per minute.
+
+**Voice-to-text retention.** `webui.v2.transcribe_audio` is
+transcribe-and-discard: the uploaded clip exists only for the lifetime of the
+request and is never written to a store, an attachment mount, or an event. Only
+the returned transcript survives, and only inside the browser's composer until
+the user chooses to send it — at which point it is ordinary message content
+governed by the usual retention rule. This is a deliberate exception in shape,
+not in spirit, to "LLM data is never deleted": that rule governs conversation
+data, and a clip the user never sent never became conversation data. **Upload format.** The browser always uploads 16 kHz mono WAV, whatever it
+recorded. `MediaRecorder` produces `audio/webm` (Chrome/Firefox) or `audio/mp4`
+(Safari) and the NEAR AI transcription endpoint decodes neither — measured
+2026-08-17: it accepts wav/ogg/mp3/flac and answers HTTP 400 "supported format"
+for webm and mp4. No container both browsers record is accepted, so the SPA
+decodes its own recording (`decodeAudioData`, using the decoder the browser
+already has for the container it just wrote) and re-encodes to the rate Whisper
+works at. The host neither transcodes nor cares what was recorded; it validates
+the declared type against the shared registry like any other upload. The clip
+ceiling and the recorder's duration hint are therefore coupled — 16 kHz mono
+16-bit is a fixed 32,000 B/s — and
+`voice_duration_ceiling_fits_the_byte_ceiling_as_wav` pins that they agree.
+
+The route
+is bounded before egress (registry-recognized audio types only, decoded-byte
+ceiling from `ironclaw_attachments::DEFAULT_VOICE_CLIP_BUDGET`) and rate-limited
+more tightly than other mutations (20/min per caller) because each accepted
+request is a billable inference call. It is advertised to the browser through
+`GET /session`'s `features.voice_input` and `voice`; when no
+transcription-capable backend resolved, the flag is false, the composer renders
+no microphone button, and the route itself answers `503`.
 
 **Operator-gating.** LLM provider/configuration routes (including provider
 credentials and model-policy mutation), operator setup/config/service-control,

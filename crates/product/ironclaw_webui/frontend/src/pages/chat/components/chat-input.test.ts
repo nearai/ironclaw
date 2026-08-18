@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 import vm from "node:vm";
 import { componentSourceForTest } from "../../../lib/vm-component-harness";
+import { formatElapsed, insertTranscript } from "../lib/voice";
 
 function chatInputSourceForTest() {
   return componentSourceForTest(
@@ -33,6 +34,22 @@ function renderChatInput({ sendDisabled = true, statusText = "" } = {}) {
     INITIAL_COMMAND_MENU_SELECTION: { index: 0, dismissed: false },
     NEW_DRAFT_KEY: "new",
     useAttachmentConfig: () => ({ accept: [] }),
+    // Voice input defaults to unavailable so the existing composer assertions
+    // describe a deployment without a transcription backend; the voice-specific
+    // tests opt in by overriding `useVoiceConfig`.
+    useVoiceConfig: () => ({
+      enabled: false,
+      limits: { accept: [], maxBytes: 1024, maxDurationSecs: 300 },
+    }),
+    useVoiceInput: () => ({
+      status: "idle",
+      elapsedSecs: 0,
+      start: () => {},
+      stop: () => {},
+      cancel: () => {},
+    }),
+    formatElapsed,
+    insertTranscript,
     useFilePicker: ({ accept, multiple = false, disabled = false, onSelect }) => {
       const ref = context.React.useRef(null);
       return [

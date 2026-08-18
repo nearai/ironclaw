@@ -37,6 +37,7 @@ pub const WEBUI_V2_ROUTE_GET_TIMELINE: &str = "webui.v2.get_timeline";
 pub const WEBUI_V2_ROUTE_GET_RUN_ARTIFACT: &str = "webui.v2.get_run_artifact";
 pub const WEBUI_V2_ROUTE_GET_THREAD_ARTIFACT: &str = "webui.v2.get_thread_artifact";
 pub const WEBUI_V2_ROUTE_GET_ATTACHMENT: &str = "webui.v2.get_attachment";
+pub const WEBUI_V2_ROUTE_TRANSCRIBE_AUDIO: &str = "webui.v2.transcribe_audio";
 pub const WEBUI_V2_ROUTE_STREAM_EVENTS: &str = "webui.v2.stream_events";
 pub const WEBUI_V2_ROUTE_STREAM_EVENTS_WS: &str = "webui.v2.stream_events_ws";
 pub const WEBUI_V2_ROUTE_LIST_COMMANDS: &str = "webui.v2.list_commands";
@@ -160,6 +161,7 @@ pub const WEBUI_V2_PATTERN_GET_THREAD_ARTIFACT: &str =
 pub const WEBUI_V2_PATTERN_LOGS: &str = "/api/webchat/v2/logs";
 pub const WEBUI_V2_PATTERN_GET_ATTACHMENT: &str =
     "/api/webchat/v2/threads/{thread_id}/messages/{message_id}/attachments/{attachment_id}";
+pub const WEBUI_V2_PATTERN_TRANSCRIBE_AUDIO: &str = "/api/webchat/v2/transcribe";
 pub const WEBUI_V2_PATTERN_STREAM_EVENTS: &str = "/api/webchat/v2/threads/{thread_id}/events";
 pub const WEBUI_V2_PATTERN_STREAM_EVENTS_WS: &str = "/api/webchat/v2/threads/{thread_id}/ws";
 pub const WEBUI_V2_PATTERN_LIST_COMMANDS: &str = "/api/webchat/v2/commands";
@@ -316,6 +318,7 @@ pub fn webui_v2_routes_with_artifact_flags(
         get_timeline_descriptor(),
         logs_descriptor(),
         get_attachment_descriptor(),
+        transcribe_audio_descriptor(),
         stream_events_descriptor(),
         stream_events_ws_descriptor(),
         cancel_run_descriptor(),
@@ -509,6 +512,31 @@ fn session_channel_message_descriptor() -> IngressRouteDescriptor {
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
             AllowedEffectPath::TurnCoordinator,
+        ),
+    )
+}
+
+/// Voice-to-text for the composer.
+///
+/// Thread-independent by design: transcription starts no turn and writes no
+/// durable state, so it is addressed like a pure transform rather than hung off
+/// a thread the recording does not belong to yet. Body budget matches the
+/// session-message route — a base64 voice clip is the same kind of payload as a
+/// base64 inline attachment, and `DEFAULT_VOICE_CLIP_BUDGET`'s decoded ceiling
+/// is sized to fit inside it.
+///
+/// `AllowedEffectPath::ProductSurface`: the handler reaches the transcription
+/// port only through the product surface, never a model client of its own.
+fn transcribe_audio_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_TRANSCRIBE_AUDIO,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_TRANSCRIBE_AUDIO,
+        mutation_policy(
+            body_limit_kib(14 * 1024),
+            transcribe_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -2071,6 +2099,15 @@ fn mutation_rate_limit() -> RateLimitPolicy {
 
 fn read_rate_limit() -> RateLimitPolicy {
     rate_limit_per_caller(120, 60)
+}
+
+fn transcribe_rate_limit() -> RateLimitPolicy {
+    // Tighter than the shared mutation budget (60/60s): every accepted request
+    // is a billable inference call against a multi-megabyte upload, and a
+    // person dictating into the composer produces single-digit clips a minute.
+    // 20/60s leaves room for retries after a failed transcription without
+    // making the route a cheap way to spend a deployment's model budget.
+    rate_limit_per_caller(20, 60)
 }
 
 fn thread_artifact_rate_limit() -> RateLimitPolicy {

@@ -23,7 +23,7 @@
 //! traits rather than inherent methods; call sites are unchanged apart from
 //! bringing the trait into scope.
 
-use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
+use ironclaw_attachments::{DEFAULT_ATTACHMENT_BUDGETS, DEFAULT_VOICE_CLIP_BUDGET};
 use ironclaw_host_api::turn::{IdempotencyKey, SanitizedCancelReason, TurnGateRef, TurnRunId};
 use ironclaw_host_api::{
     attachment::InboundAttachment,
@@ -37,6 +37,7 @@ use ironclaw_product_contracts::inbound_requests::{
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode,
 };
+use ironclaw_product_contracts::transcription::RebornTranscribeAudioRequest;
 use ironclaw_turns::CancelRunRequest;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -129,6 +130,85 @@ impl DecodeInboundAttachments for ProductSubmitTurnRequest {
             });
         }
         Ok(decoded)
+    }
+}
+
+/// One validated voice clip: bytes plus the normalized media type they were
+/// declared as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedVoiceClip {
+    pub bytes: Vec<u8>,
+    /// Lowercased, parameter-stripped media type, resolved against the shared
+    /// format registry.
+    pub mime_type: String,
+}
+
+/// Decode the voice clip a transcription request carries.
+pub trait DecodeVoiceClip {
+    /// Validate and decode the clip.
+    ///
+    /// Every bound is enforced here, before the clip reaches a provider: the
+    /// media type must be a registry-recognized *audio* format, and the decoded
+    /// clip must be non-empty and within
+    /// [`DEFAULT_VOICE_CLIP_BUDGET`]. That ordering is the contract — an
+    /// oversized or wrong-typed clip must never reach egress.
+    fn decode_clip(&self) -> Result<DecodedVoiceClip, ProductSurfaceError>;
+}
+
+impl DecodeVoiceClip for RebornTranscribeAudioRequest {
+    fn decode_clip(&self) -> Result<DecodedVoiceClip, ProductSurfaceError> {
+        use base64::Engine;
+
+        let mime = ironclaw_common::normalize_mime_type(&self.mime_type);
+        // Require a registry entry *and* the audio kind. `kind_for_mime` alone
+        // would admit an unregistered `audio/…` spelling through its prefix
+        // fallback, which the transcription provider then cannot map to a
+        // container.
+        let is_audio = ironclaw_common::attachment_format::lookup(&mime)
+            .is_some_and(|format| format.kind == ironclaw_common::AttachmentKind::Audio);
+        if !is_audio {
+            return Err(validation_error(
+                "mime_type",
+                ProductSurfaceValidationCode::InvalidValue,
+            ));
+        }
+
+        // Bound the *encoded* length before decoding: allocating the decoded
+        // buffer just to reject it would let an oversized body spend host
+        // memory. Base64 is 4 characters per 3 bytes, so this is the largest
+        // encoding a clip within budget can have.
+        let max_encoded_len = DEFAULT_VOICE_CLIP_BUDGET.max_bytes.div_ceil(3) * 4;
+        if self.audio_base64.len() > max_encoded_len {
+            return Err(validation_error(
+                "audio_base64",
+                ProductSurfaceValidationCode::TooLong,
+            ));
+        }
+
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(self.audio_base64.as_bytes())
+            .map_err(|_| {
+                validation_error("audio_base64", ProductSurfaceValidationCode::InvalidValue)
+            })?;
+        if bytes.is_empty() {
+            return Err(validation_error(
+                "audio_base64",
+                ProductSurfaceValidationCode::Blank,
+            ));
+        }
+        // Re-check after decoding: the encoded-length bound above is an upper
+        // estimate, not the enforced ceiling.
+        if bytes.len() > DEFAULT_VOICE_CLIP_BUDGET.max_bytes {
+            return Err(validation_error(
+                "audio_base64",
+                ProductSurfaceValidationCode::TooLong,
+            ));
+        }
+
+        Ok(DecodedVoiceClip {
+            bytes,
+            mime_type: mime,
+        })
     }
 }
 
