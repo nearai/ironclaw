@@ -33,6 +33,8 @@ pub use ironclaw_product_contracts::product_wire::RebornRunArtifactRequest;
 
 pub mod timings;
 
+use timings::RunArtifactTimings;
+
 pub const RUN_ARTIFACT_SCHEMA: &str = "ironclaw.run_artifact.v1";
 pub const RUN_ARTIFACT_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "run_artifact",
@@ -48,6 +50,10 @@ pub struct RebornRunArtifact {
     pub run: RebornGetRunStateResponse,
     pub messages: Vec<RunArtifactMessage>,
     pub logs: RunArtifactLogs,
+    /// Best-effort per-iteration and per-tool timing. `#[serde(default)]` so a
+    /// `v1` artifact downloaded before timings existed still deserializes.
+    #[serde(default)]
+    pub timings: RunArtifactTimings,
     pub redaction: RunArtifactRedaction,
 }
 
@@ -151,6 +157,9 @@ where
         let (messages, message_redaction_applied) = self
             .artifact_messages_for_records(thread_scope, &thread_id, run_records, &redactor)
             .await?;
+        // Borrow `caller` here, before `artifact_logs` takes it by value below.
+        let timings =
+            self.artifact_timings(&caller, &thread_id, &run_id, run.received_at, &messages);
         let (logs, log_redaction_applied) = self
             .artifact_logs(caller, &thread_id, Some(&run_id), &redactor)
             .await;
@@ -162,6 +171,7 @@ where
             run,
             messages,
             logs,
+            timings,
             redaction: RunArtifactRedaction {
                 pipeline: ARTIFACT_REDACTION_PIPELINE.to_string(),
                 applied: message_redaction_applied || log_redaction_applied,

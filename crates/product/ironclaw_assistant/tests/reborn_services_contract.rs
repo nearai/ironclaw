@@ -23,6 +23,7 @@ use ironclaw_approvals::{
     ToolPermissionOverrideKey,
 };
 use ironclaw_assistant::EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID;
+use ironclaw_assistant::inspector_store::{DiagnosticStoreError, DiagnosticStorePort};
 use ironclaw_assistant::{
     ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW, ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW,
     ADMIN_THREAD_SCRAPE_THREADS_VIEW, ADMIN_USER_DELETE_CAPABILITY_ID,
@@ -62,7 +63,7 @@ use ironclaw_assistant::{
     ProductCapabilityInvoker, ProductNewCommandInput, ProductNewCommandOutput,
     ProductStatusCommandInput, ProductSurfaceFailure, ProjectCaller, ProjectFilesystemReader,
     ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat,
-    RUN_ARTIFACT_VIEW, RebornAccountTracesResponse, RebornAddMemberRequest,
+    RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountTracesResponse, RebornAddMemberRequest,
     RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
     RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRequest,
     RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
@@ -126,8 +127,9 @@ use ironclaw_host_api::product_adapter::{
     ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_host_api::turn::{
-    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
-    SanitizedFailure, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
+    AcceptedMessageRef, CapabilityActivityId, EventCursor, ReplyTargetBindingRef, RunProfileId,
+    RunProfileVersion, SanitizedFailure, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope,
+    TurnStatus,
 };
 use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
@@ -152,6 +154,10 @@ use ironclaw_product_contracts::inbound_requests::{
     ProductCancelRunRequest, ProductCreateThreadRequest, ProductListAutomationsRequest,
     ProductListThreadsRequest, ProductRenameAutomationRequest, ProductResolveGateRequest,
     ProductRetryRunRequest, ProductSetupExtensionRequest, ProductSubmitTurnRequest,
+};
+use ironclaw_product_contracts::inspector::{
+    DiagnosticActivityEvent, DiagnosticCursor, DiagnosticScope, DiagnosticSnapshot,
+    DiagnosticUpdateBatch, PromptDiagnostic, ToolExecutionDiagnostic,
 };
 use ironclaw_product_contracts::ironhub::{
     IRONHUB_DELIVER_INSTALL_COMMAND_ID, IronhubInstallDeliveryRequest,
@@ -8634,6 +8640,123 @@ async fn run_artifact_selects_one_owned_run_and_queries_only_its_scoped_logs() {
         Some(run_id.to_string().as_str())
     );
     assert_eq!(requests[0].limit, Some(500));
+
+    // The diagnostic store was never populated for this run: the export must
+    // still succeed, say so honestly, and keep the durable timestamp floor.
+    assert!(!artifact.timings.available);
+    assert_eq!(
+        artifact.timings.unavailable_reason.as_deref(),
+        Some("run_not_resident")
+    );
+    assert!(artifact.timings.iterations.is_empty());
+    assert!(
+        artifact
+            .messages
+            .iter()
+            .any(|message| message.created_at.is_some()),
+        "durable message timestamps must survive an absent diagnostic store"
+    );
+    assert_eq!(artifact.schema, RUN_ARTIFACT_SCHEMA);
+}
+
+/// A diagnostic store whose every method fails, standing in for a backend
+/// outage. The single guarantee under test: a user filing a bug report must
+/// always get a file, so a diagnostic-store failure must never fail the
+/// artifact export.
+#[derive(Default)]
+struct FailingDiagnosticStore;
+
+impl DiagnosticStorePort for FailingDiagnosticStore {
+    fn record_activity(
+        &self,
+        _scope: DiagnosticScope,
+        _event: DiagnosticActivityEvent,
+    ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
+        Err(DiagnosticStoreError::StateUnavailable)
+    }
+
+    fn snapshot(
+        &self,
+        _scope: &DiagnosticScope,
+    ) -> Result<Option<DiagnosticSnapshot>, DiagnosticStoreError> {
+        Err(DiagnosticStoreError::StateUnavailable)
+    }
+
+    fn prompt(
+        &self,
+        _scope: &DiagnosticScope,
+    ) -> Result<Option<PromptDiagnostic>, DiagnosticStoreError> {
+        Err(DiagnosticStoreError::StateUnavailable)
+    }
+
+    fn tool_execution(
+        &self,
+        _scope: &DiagnosticScope,
+        _activity_id: CapabilityActivityId,
+    ) -> Result<Option<ToolExecutionDiagnostic>, DiagnosticStoreError> {
+        Err(DiagnosticStoreError::StateUnavailable)
+    }
+
+    fn updates_after(
+        &self,
+        _scope: &DiagnosticScope,
+        _after: Option<DiagnosticCursor>,
+    ) -> Result<DiagnosticUpdateBatch, DiagnosticStoreError> {
+        Err(DiagnosticStoreError::StateUnavailable)
+    }
+}
+
+#[tokio::test]
+async fn run_artifact_reports_diagnostic_store_failure_without_failing_the_export() {
+    let owner = caller();
+    let thread_scope = thread_scope_for(&owner);
+    let thread_id = ThreadId::new("thread-artifact-store-failure").expect("thread id");
+    let run_id = TurnRunId::parse(&run_id_string()).expect("run id");
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: owner.user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+    seed_submitted_message(
+        &thread_service,
+        &thread_scope,
+        &thread_id,
+        &run_id,
+        "diagnostic store is down",
+    )
+    .await;
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_diagnostic_store(Arc::new(FailingDiagnosticStore));
+
+    let page = services
+        .query(
+            owner,
+            RebornViewQuery {
+                view_id: RUN_ARTIFACT_VIEW.id.to_string(),
+                params: serde_json::to_value(RebornRunArtifactRequest {
+                    thread_id: thread_id.to_string(),
+                    run_id: run_id.to_string(),
+                })
+                .expect("artifact params"),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("artifact export must succeed even when the diagnostic store errors");
+    let artifact: RebornRunArtifact =
+        serde_json::from_value(page.payload).expect("artifact payload");
+
+    assert!(!artifact.timings.available);
+    assert_eq!(
+        artifact.timings.unavailable_reason.as_deref(),
+        Some("diagnostic_store_unavailable")
+    );
 }
 
 #[tokio::test]
