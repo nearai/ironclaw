@@ -5,6 +5,7 @@ import json
 from emulate_provider import google_json
 from provider_fault_proxy import ProviderFaultProfile
 from provider_operation_types import (
+    OutcomeAssertion,
     ProviderOperationCase,
     exact_output,
     exact_text_output,
@@ -260,7 +261,9 @@ def _setup_table_drift_after_header(proxy) -> None:
         _arm_json_response(proxy, profile, method, path, payload)
 
 
-def _table_drift_outcome(expected_stage: str, expected_revision: str, failure: str):
+def _table_drift_outcome(
+    expected_stage: str, expected_revision: str, failure: str
+) -> OutcomeAssertion:
     async def assert_outcome(emulate_url: str, preview: dict) -> None:
         output = _output(preview)
         assert output["verified"] is False, output

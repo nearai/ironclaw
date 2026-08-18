@@ -8,7 +8,6 @@
     "document_id": { "type": "string", "minLength": 1, "maxLength": 256, "description": "The document ID." },
     "expected_text": {
       "type": "array",
-      "default": [],
       "minItems": 1,
       "maxItems": 100,
       "items": { "type": "string", "minLength": 1, "maxLength": 10000 },
@@ -16,7 +15,6 @@
     },
     "expected_tables": {
       "type": "array",
-      "default": [],
       "minItems": 1,
       "maxItems": 20,
       "items": {

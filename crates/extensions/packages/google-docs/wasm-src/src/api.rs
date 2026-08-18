@@ -95,6 +95,20 @@ fn batch_update_body(
     body
 }
 
+fn required_revision<'a>(
+    document: &'a serde_json::Value,
+    operation: &str,
+) -> Result<&'a str, String> {
+    document["revisionId"]
+        .as_str()
+        .filter(|revision_id| !revision_id.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "{operation} requires a document revision; the read response did not include revisionId"
+            )
+        })
+}
+
 /// Extract revision ID from a batchUpdate response.
 fn extract_revision_id(parsed: &serde_json::Value) -> String {
     parsed["writeControl"]["requiredRevisionId"]
@@ -302,11 +316,11 @@ pub fn apply_text_edits(
     }
 
     let before = fetch_document(document_id)?;
+    let before_revision = required_revision(&before, "apply_text_edits")?;
     let before_text = document_text(&before);
     let (requests, expected_text) =
         build_anchored_edit_requests(&before_text, first_tab_id(&before), edits)?;
-    let updated =
-        batch_update_raw_with_revision(document_id, requests, before["revisionId"].as_str())?;
+    let updated = batch_update_raw_with_revision(document_id, requests, Some(before_revision))?;
     let occurrences_changed = updated["replies"]
         .as_array()
         .map(|replies| {
@@ -763,6 +777,7 @@ pub fn create_table_with_data(
         .filter(|cell| !cell.is_empty())
         .count();
     let before = fetch_document(document_id)?;
+    let before_revision = required_revision(&before, "create_table_with_data")?;
     let insert_response = batch_update_raw_with_revision(
         document_id,
         vec![serde_json::json!({
@@ -772,7 +787,7 @@ pub fn create_table_with_data(
                 "location": { "index": index },
             }
         })],
-        before["revisionId"].as_str(),
+        Some(before_revision),
     )?;
 
     let insert_revision = extract_revision_id(&insert_response);

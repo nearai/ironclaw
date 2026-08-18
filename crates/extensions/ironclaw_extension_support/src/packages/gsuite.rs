@@ -421,12 +421,12 @@ mod tests {
         ] {
             let schema_path = format!("schemas/google-docs/{operation}.input.v1.json");
             assert!(
-                paths.iter().any(|path| *path == schema_path.as_str()),
+                paths.contains(&schema_path.as_str()),
                 "missing schema asset for {operation}"
             );
             let prompt_path = format!("prompts/google-docs/{operation}.md");
             assert!(
-                paths.iter().any(|path| *path == prompt_path.as_str()),
+                paths.contains(&prompt_path.as_str()),
                 "missing prompt asset for {operation}"
             );
         }
