@@ -89,6 +89,7 @@ fn auth_error_mapping_run_state(request: &GetRunStateRequest) -> TurnRunState {
         accepted_message_ref: AcceptedMessageRef::new("message-auth-error").unwrap(), // safety: fixed test binding literal is valid.
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
+        output_contract: ironclaw_host_api::output::OutputContract::AssistantMessage,
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
@@ -192,6 +193,7 @@ async fn standalone_oauth_turn_gate_callback_resumes_default_turn_coordinator() 
     let submit = turn_coordinator
         .submit_turn(SubmitTurnRequest {
             requested_model: None,
+            output_contract: None,
             scope: scope.clone(),
             actor: actor.clone(),
             accepted_message_ref: AcceptedMessageRef::new("message-auth-callback").unwrap(),
@@ -823,6 +825,7 @@ async fn submit_and_block_provider_auth_run(
     let submit = turn_coordinator
         .submit_turn(SubmitTurnRequest {
             requested_model: None,
+            output_contract: None,
             scope: scope.clone(),
             actor,
             accepted_message_ref: AcceptedMessageRef::new(format!("message-fanout-{suffix}"))
@@ -966,6 +969,7 @@ async fn submit_and_block_auth_run(
     let submit = turn_coordinator
         .submit_turn(SubmitTurnRequest {
             requested_model: None,
+            output_contract: None,
             scope: scope.clone(),
             actor,
             accepted_message_ref: AcceptedMessageRef::new("message-auth-callback-2").unwrap(),

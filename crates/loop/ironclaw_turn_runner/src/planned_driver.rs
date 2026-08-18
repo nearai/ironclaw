@@ -1273,6 +1273,19 @@ mod tests {
         fn run_context(&self) -> &LoopRunContext {
             self.inner.run_context()
         }
+
+        fn finalize_terminal_output<'a>(
+            &'a self,
+            exit: &'a LoopExit,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), AgentLoopHostError>> + Send + 'a>,
+        > {
+            self.inner.finalize_terminal_output(exit)
+        }
+
+        fn supplemental_model_usage(&self) -> Option<ironclaw_loop_contracts::LoopModelUsage> {
+            self.inner.supplemental_model_usage()
+        }
     }
 
     #[async_trait::async_trait]

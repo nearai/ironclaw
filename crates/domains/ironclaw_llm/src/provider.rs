@@ -328,6 +328,10 @@ pub struct CompletionRequest {
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub stop_sequences: Option<Vec<String>>,
+    /// Provider-native structured response constraint. Providers must either
+    /// encode this on the wire or return an explicit unsupported-request
+    /// error; silently degrading to prompt-only JSON is not permitted.
+    pub response_format: Option<CompletionResponseFormat>,
     /// Opaque metadata passed through to the provider (e.g. thread_id for chaining).
     pub metadata: std::collections::HashMap<String, String>,
 }
@@ -341,6 +345,7 @@ impl CompletionRequest {
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
+            response_format: None,
             metadata: std::collections::HashMap::new(),
         }
     }
@@ -383,6 +388,114 @@ impl CompletionRequest {
     pub fn take_model_override(&mut self) -> Option<String> {
         let model = self.model.take();
         normalized_model_override(model.as_deref()).map(str::to_string)
+    }
+}
+
+/// Provider-neutral request for a response that strictly conforms to a JSON
+/// Schema. Concrete providers translate this into their native structured
+/// output vocabulary (`response_format`, `output_config`, and equivalents).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JsonSchemaResponseFormat {
+    pub name: String,
+    pub schema: serde_json::Value,
+    /// Native adapters always receive a strict request. Keep the wire policy
+    /// inside this crate so external callers cannot silently downgrade a
+    /// structured-output request after the host has selected it.
+    #[serde(skip_deserializing, default = "strict_response_format")]
+    pub(crate) strict: bool,
+}
+
+/// Provider-neutral structured response modes.
+///
+/// JSON-object mode is intentionally separate from JSON Schema mode. A native
+/// provider `json_object` request is not equivalent to a strict schema with an
+/// unconstrained object root, and adapters must preserve that distinction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CompletionResponseFormat {
+    JsonSchema(JsonSchemaResponseFormat),
+    JsonObject,
+}
+
+/// Encode the provider-neutral response-format contract in the OpenAI Chat
+/// Completions wire shape shared by compatible provider adapters.
+pub(crate) fn openai_json_schema_response_format(
+    format: CompletionResponseFormat,
+) -> serde_json::Value {
+    match format {
+        CompletionResponseFormat::JsonSchema(format) => serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": format.name,
+                "strict": format.strict,
+                "schema": format.schema,
+            }
+        }),
+        CompletionResponseFormat::JsonObject => serde_json::json!({"type": "json_object"}),
+    }
+}
+
+/// Encode the provider-neutral contract in the OpenAI Responses API
+/// `text.format` shape shared by both Responses adapters.
+pub(crate) fn openai_responses_json_schema_format(
+    format: Option<&CompletionResponseFormat>,
+) -> Option<serde_json::Value> {
+    match format {
+        Some(CompletionResponseFormat::JsonSchema(format)) => Some(serde_json::json!({
+            "type": "json_schema",
+            "name": format.name,
+            "schema": format.schema,
+            "strict": format.strict,
+        })),
+        Some(CompletionResponseFormat::JsonObject) | None => None,
+    }
+}
+
+pub(crate) fn ensure_openai_responses_response_format_supported(
+    format: Option<&CompletionResponseFormat>,
+    provider: &str,
+) -> Result<(), LlmError> {
+    if matches!(format, Some(CompletionResponseFormat::JsonObject)) {
+        return Err(LlmError::InvalidRequest {
+            provider: provider.to_string(),
+            reason: "native JSON-object response mode is not supported by the Responses API"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+const fn strict_response_format() -> bool {
+    true
+}
+
+impl JsonSchemaResponseFormat {
+    pub fn strict(name: impl Into<String>, schema: serde_json::Value) -> Self {
+        Self {
+            name: name.into(),
+            schema,
+            strict: true,
+        }
+    }
+
+    pub fn is_strict(&self) -> bool {
+        self.strict
+    }
+}
+
+#[cfg(test)]
+mod response_format_tests {
+    use super::JsonSchemaResponseFormat;
+
+    #[test]
+    fn deserialization_cannot_downgrade_strict_output() {
+        let format: JsonSchemaResponseFormat = serde_json::from_value(serde_json::json!({
+            "name": "answer.v1",
+            "schema": {"type": "object"},
+            "strict": false
+        }))
+        .expect("response format");
+        assert!(format.is_strict());
     }
 }
 
@@ -576,6 +689,8 @@ pub struct ToolCompletionRequest {
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub stop_sequences: Option<Vec<String>>,
+    /// Provider-native structured response constraint.
+    pub response_format: Option<CompletionResponseFormat>,
     /// How to handle tool use: `"auto"`, `"required"`, `"none"`, or the name
     /// of one declared tool the model MUST call. Providers encode a named
     /// tool in their own forcing vocabulary (OpenAI object form, Bedrock
@@ -596,6 +711,7 @@ impl ToolCompletionRequest {
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
+            response_format: None,
             tool_choice: None,
             metadata: std::collections::HashMap::new(),
         }
@@ -609,6 +725,7 @@ impl ToolCompletionRequest {
             max_tokens,
             temperature,
             stop_sequences,
+            response_format,
             metadata,
         } = request;
         Self {
@@ -618,6 +735,7 @@ impl ToolCompletionRequest {
             max_tokens,
             temperature,
             stop_sequences,
+            response_format,
             tool_choice: None,
             metadata,
         }

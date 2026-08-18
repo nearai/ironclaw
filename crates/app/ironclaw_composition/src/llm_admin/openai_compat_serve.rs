@@ -104,7 +104,6 @@ pub async fn build_openai_compat_route_mount(
         service: Arc::new(UnboundTurnService::new(
             runtime.product_thread_service(),
             runtime.product_turn_coordinator(),
-            tenant_id.clone(),
             _default_agent_id.clone(),
             _default_project_id.clone(),
         )),
@@ -238,7 +237,7 @@ impl OpenAiCompatPreparedTurnGateway {
             .service
             .wait_for_completion(
                 request.public_id.as_str(),
-                request.actor_scope.user_id(),
+                &product_surface_caller_from_openai_scope(&request.actor_scope),
                 *submitted_run_id,
                 poll_interval,
             )
@@ -292,7 +291,7 @@ impl ironclaw_openai_compat::OpenAiCompatPreparedTurnPort for OpenAiCompatPrepar
         let idempotency_key = format!("openai-chat:{}", request.public_id);
         self.service
             .accept_and_submit(UnboundTurnSubmission {
-                actor_user_id: request.scope.user_id().clone(),
+                caller: product_surface_caller_from_openai_scope(&request.scope),
                 public_id: request.public_id,
                 system_prompt: request.system_prompt,
                 messages: request.messages,

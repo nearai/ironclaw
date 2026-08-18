@@ -304,6 +304,77 @@ async fn completed_exit_persists_model_usage_in_process_projection_metadata() {
 }
 
 #[tokio::test]
+async fn blocked_exit_adds_supplemental_usage_to_claimed_cumulative_usage() {
+    let claimed_usage = LoopModelUsage {
+        input_tokens: 100,
+        output_tokens: 40,
+        cache_read_input_tokens: 10,
+        cache_creation_input_tokens: 2,
+    };
+    let supplemental_usage = LoopModelUsage {
+        input_tokens: 13,
+        output_tokens: 5,
+        cache_read_input_tokens: 2,
+        cache_creation_input_tokens: 1,
+    };
+    let expected = LoopModelUsage {
+        input_tokens: 113,
+        output_tokens: 45,
+        cache_read_input_tokens: 12,
+        cache_creation_input_tokens: 3,
+    };
+    let mut claimed = claimed_run();
+    claimed.state.model_usage = Some(claimed_usage);
+    let transition = Arc::new(RecordingTransitionPort::new());
+    let applier = LoopExitApplier::new(
+        transition,
+        Arc::new(InMemoryLoopExitEvidencePort::all_verified()),
+    );
+
+    let state = applier
+        .apply_with_supplemental_model_usage(
+            &claimed,
+            blocked_exit(LoopBlockedKind::Approval),
+            Some(supplemental_usage),
+        )
+        .await
+        .expect("blocked exit should apply");
+
+    assert_eq!(state.status, TurnStatus::BlockedApproval);
+    assert_eq!(state.model_usage, Some(expected));
+}
+
+#[tokio::test]
+async fn cancelled_exit_adds_supplemental_usage_to_claimed_cumulative_usage() {
+    let supplemental_usage = LoopModelUsage {
+        input_tokens: 13,
+        output_tokens: 5,
+        cache_read_input_tokens: 2,
+        cache_creation_input_tokens: 1,
+    };
+    let claimed = claimed_run();
+    let transition = Arc::new(RecordingTransitionPort::new());
+    let applier = LoopExitApplier::new(
+        transition,
+        Arc::new(InMemoryLoopExitEvidencePort::all_verified()),
+    );
+    let exit = LoopExit::Cancelled(ironclaw_loop_contracts::LoopCancelled {
+        reason_kind: ironclaw_loop_contracts::LoopCancelledReasonKind::HostCancellation,
+        checkpoint_id: None,
+        interrupted_message_refs: vec![],
+        exit_id: test_exit_id(),
+    });
+
+    let state = applier
+        .apply_with_supplemental_model_usage(&claimed, exit, Some(supplemental_usage))
+        .await
+        .expect("cancelled exit should apply");
+
+    assert_eq!(state.status, TurnStatus::Cancelled);
+    assert_eq!(state.model_usage, Some(supplemental_usage));
+}
+
+#[tokio::test]
 async fn production_completed_exit_requires_final_checkpoint() {
     let mut claimed = claimed_run();
     claimed

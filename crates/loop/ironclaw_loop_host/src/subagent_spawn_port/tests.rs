@@ -706,6 +706,29 @@ impl TurnSpawnTreePort for RecordingChildRuns {
 
 #[async_trait]
 impl SessionThreadService for FailingAcceptThreadService {
+    async fn read_structured_finalization(
+        &self,
+        request: ironclaw_threads::ReadStructuredFinalizationRequest,
+    ) -> Result<Option<ironclaw_threads::StructuredFinalizationRecord>, SessionThreadError> {
+        self.inner.read_structured_finalization(request).await
+    }
+
+    async fn put_structured_finalization(
+        &self,
+        request: ironclaw_threads::PutStructuredFinalizationRequest,
+    ) -> Result<ironclaw_threads::StructuredFinalizationRecord, SessionThreadError> {
+        self.inner.put_structured_finalization(request).await
+    }
+
+    async fn publish_structured_finalization_message(
+        &self,
+        request: ironclaw_threads::PublishStructuredFinalizationMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.inner
+            .publish_structured_finalization_message(request)
+            .await
+    }
+
     async fn ensure_thread(
         &self,
         request: EnsureThreadRequest,
@@ -1125,6 +1148,7 @@ fn turn_record(run_context: &LoopRunContext, subagent_depth: u32) -> TurnRunReco
         accepted_message_ref: AcceptedMessageRef::new("msg:parent").unwrap(),
         status: TurnStatus::Queued,
         profile: TurnRunProfile::from_resolved(run_context.resolved_run_profile.clone()),
+        output_contract: run_context.output_contract.clone(),
         resolved_model_route: None,
         model_usage: None,
         execution_outcome: None,

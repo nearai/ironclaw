@@ -282,7 +282,35 @@ fn request_with_messages(messages: Vec<AnthropicMessage>) -> AnthropicRequest {
         thinking: None,
         tools: None,
         tool_choice: None,
+        output_config: None,
     }
+}
+
+#[test]
+fn native_json_schema_output_config_serializes() {
+    let schema = crate::provider::JsonSchemaResponseFormat::strict(
+        "answer",
+        serde_json::json!({
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+            "additionalProperties": false
+        }),
+    );
+    let format = crate::provider::CompletionResponseFormat::JsonSchema(schema.clone());
+    let request = AnthropicRequest {
+        output_config: anthropic_output_config(Some(&format)).expect("schema output config"),
+        ..request_with_messages(vec![AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContent::Text("answer".to_string()),
+        }])
+    };
+
+    let value = serde_json::to_value(request).expect("serialize request");
+    assert_eq!(value["output_config"]["format"]["type"], "json_schema");
+    assert_eq!(value["output_config"]["format"]["schema"], schema.schema);
+    assert!(value["output_config"]["format"]["name"].is_null());
+    assert!(value["output_config"]["format"]["strict"].is_null());
 }
 
 /// Branch coverage for `apply_cache_breakpoints`: a tool_use-tailed

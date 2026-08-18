@@ -476,6 +476,7 @@ impl LlmProvider for AnthropicOAuthProvider {
             .take_model_override()
             .unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_completion_params(&mut req);
+        let output_config = anthropic_output_config(req.response_format.as_ref())?;
         let (system, messages) = convert_messages(req.messages);
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
@@ -489,6 +490,7 @@ impl LlmProvider for AnthropicOAuthProvider {
             temperature: req.temperature,
             tools: None,
             tool_choice: None,
+            output_config,
         };
 
         apply_cache_breakpoints(&mut request, self.cache_retention);
@@ -523,6 +525,7 @@ impl LlmProvider for AnthropicOAuthProvider {
             .take_model_override()
             .unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_completion_params(&mut req);
+        let output_config = anthropic_output_config(req.response_format.as_ref())?;
         let (system, messages) = convert_messages(req.messages);
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
         let request = AnthropicRequest {
@@ -535,6 +538,7 @@ impl LlmProvider for AnthropicOAuthProvider {
             temperature: req.temperature,
             tools: None,
             tool_choice: None,
+            output_config,
         };
         let response = self.send_streaming_request(&request, sink).await?;
         Ok(CompletionResponse {
@@ -556,6 +560,7 @@ impl LlmProvider for AnthropicOAuthProvider {
             .take_model_override()
             .unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_tool_params(&mut req);
+        let output_config = anthropic_output_config(req.response_format.as_ref())?;
         let (system, messages) = convert_messages(req.messages);
 
         let tools = convert_anthropic_tools(req.tools);
@@ -583,6 +588,7 @@ impl LlmProvider for AnthropicOAuthProvider {
             temperature: req.temperature,
             tools: opt_tools,
             tool_choice,
+            output_config,
         };
 
         apply_cache_breakpoints(&mut request, self.cache_retention);
@@ -625,6 +631,7 @@ impl LlmProvider for AnthropicOAuthProvider {
             .take_model_override()
             .unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_tool_params(&mut req);
+        let output_config = anthropic_output_config(req.response_format.as_ref())?;
         let (system, messages) = convert_messages(req.messages);
         let tools = convert_anthropic_tools(req.tools);
         let tool_choice = convert_anthropic_tool_choice(req.tool_choice);
@@ -644,6 +651,7 @@ impl LlmProvider for AnthropicOAuthProvider {
             temperature: req.temperature,
             tools: has_tools.then_some(tools),
             tool_choice,
+            output_config,
         };
         let response = self.send_streaming_request(&request, sink).await?;
         let has_tool_calls = !response.tool_calls.is_empty();
@@ -710,6 +718,43 @@ struct AnthropicRequest {
     tools: Option<Vec<AnthropicTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<AnthropicToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<AnthropicOutputConfig>,
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicOutputConfig {
+    format: AnthropicOutputFormat,
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicOutputFormat {
+    #[serde(rename = "type")]
+    format_type: &'static str,
+    schema: serde_json::Value,
+}
+
+fn anthropic_output_config(
+    response_format: Option<&crate::provider::CompletionResponseFormat>,
+) -> Result<Option<AnthropicOutputConfig>, LlmError> {
+    match response_format {
+        None => Ok(None),
+        Some(crate::provider::CompletionResponseFormat::JsonSchema(response_format)) => {
+            Ok(Some(AnthropicOutputConfig {
+                format: AnthropicOutputFormat {
+                    format_type: "json_schema",
+                    schema: response_format.schema.clone(),
+                },
+            }))
+        }
+        Some(crate::provider::CompletionResponseFormat::JsonObject) => {
+            Err(LlmError::InvalidRequest {
+                provider: "anthropic_oauth".to_string(),
+                reason: "native JSON-object response mode is not supported by Anthropic OAuth"
+                    .to_string(),
+            })
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]

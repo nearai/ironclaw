@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use ironclaw_common::AttachmentRef;
 use ironclaw_host_api::ids::{AgentId, MissionId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::turn::TurnRunId;
 use serde::{Deserialize, Serialize};
 
 use crate::capability_display_preview::CapabilityDisplayPreviewEnvelope;
@@ -434,6 +435,24 @@ pub struct AppendFinalizedAssistantMessageRequest {
     pub thread_id: ThreadId,
     pub turn_run_id: String,
     pub content: MessageContent,
+}
+
+/// Publish the already-durable structured-finalization output into the exact
+/// finalized assistant row produced by the run.
+///
+/// The service resolves the immutable finalization record by `turn_run_id`
+/// and verifies it against the current message before changing anything. The
+/// message id is deliberately carried by the caller: a run may have more
+/// than one assistant reply after steering, so selecting "the latest" row is
+/// not safe for terminal publication. `replacement` must be that record's
+/// raw JSON representation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishStructuredFinalizationMessageRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub message_id: ThreadMessageId,
+    pub turn_run_id: TurnRunId,
+    pub replacement: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

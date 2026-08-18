@@ -163,6 +163,7 @@ fn test_run_state(status: TurnStatus) -> TurnRunState {
         resolved_run_profile_version: RunProfileVersion::new(1),
         allow_steering: true,
         resolved_model_route: None,
+        output_contract: Default::default(),
         model_usage: None,
         execution_outcome: None,
         received_at: Utc::now(),

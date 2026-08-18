@@ -6,6 +6,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::ids::ThreadId;
+use ironclaw_host_api::turn::TurnRunId;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -26,13 +27,15 @@ use crate::{
     CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
     InboundMessageReplayMetadata, LatestThreadMessageRequest, ListThreadsForScopeRequest,
     ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, MessageKind, MessageStatus, PutToolResultRecordRequest,
-    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact,
-    SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
-    ToolResultRecordChunk, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
-    UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
+    MessageContent, MessageKind, MessageStatus, PublishStructuredFinalizationMessageRequest,
+    PutStructuredFinalizationRequest, PutToolResultRecordRequest,
+    ReadStructuredFinalizationRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    SessionThreadService, StructuredFinalizationRecord, SummaryArtifact, SummaryModelContextPolicy,
+    ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange,
+    ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, ToolResultRecordChunk,
+    ToolResultReferenceEnvelope, UpdateAssistantDraftRequest, UpdateToolResultRecordRequest,
+    UpdateToolResultReferenceRequest,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -45,11 +48,16 @@ struct InMemoryState {
     threads: HashMap<ThreadId, StoredThread>,
     inbound_idempotency: HashMap<InboundIdempotencyKey, InboundIdempotencyRecord>,
     prepared_contexts: HashMap<ThreadId, crate::PreparedContextRecord>,
+    structured_finalizations: HashMap<StructuredFinalizationKey, StructuredFinalizationRecord>,
 }
 
 #[derive(Debug, Clone)]
 struct StoredThread {
     record: SessionThreadRecord,
+    /// Backend-owned identity for this lifetime of an explicit thread id.
+    /// Finalization evidence uses it as its archive partition so deleting and
+    /// recreating an id can never replay the predecessor's output.
+    incarnation_id: Uuid,
     messages: Vec<ThreadMessageRecord>,
     summary_artifacts: Vec<SummaryArtifact>,
     tool_result_records: HashMap<String, Vec<u8>>,
@@ -68,6 +76,34 @@ struct InboundIdempotencyRecord {
     thread_id: ThreadId,
     message_id: ThreadMessageId,
     replay_metadata: InboundMessageReplayMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct StructuredFinalizationKey {
+    scope: ThreadScope,
+    thread_id: ThreadId,
+    incarnation_id: Uuid,
+    turn_run_id: TurnRunId,
+}
+
+impl StructuredFinalizationKey {
+    fn from_read(request: &ReadStructuredFinalizationRequest, incarnation_id: Uuid) -> Self {
+        Self {
+            scope: request.scope.clone(),
+            thread_id: request.thread_id.clone(),
+            incarnation_id,
+            turn_run_id: request.turn_run_id,
+        }
+    }
+
+    fn from_record(record: &StructuredFinalizationRecord, incarnation_id: Uuid) -> Self {
+        Self {
+            scope: record.scope.clone(),
+            thread_id: record.thread_id.clone(),
+            incarnation_id,
+            turn_run_id: record.turn_run_id,
+        }
+    }
 }
 
 impl InboundIdempotencyKey {
@@ -107,6 +143,7 @@ fn mint_thread_locked<'a>(
                 created_at: Some(now),
                 updated_at: Some(now),
             },
+            incarnation_id: Uuid::new_v4(),
             messages: Vec::new(),
             summary_artifacts: Vec::new(),
             tool_result_records: HashMap::new(),
@@ -350,6 +387,163 @@ impl SessionThreadService for InMemorySessionThreadService {
             });
         }
         Ok(state.prepared_contexts.get(thread_id).cloned())
+    }
+
+    async fn read_structured_finalization(
+        &self,
+        request: ReadStructuredFinalizationRequest,
+    ) -> Result<Option<StructuredFinalizationRecord>, SessionThreadError> {
+        let state = self.state.lock().await;
+        let stored = state.threads.get(&request.thread_id).ok_or_else(|| {
+            SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            }
+        })?;
+        if stored.record.scope != request.scope {
+            return Err(SessionThreadError::UnknownThread {
+                thread_id: request.thread_id,
+            });
+        }
+        Ok(state
+            .structured_finalizations
+            .get(&StructuredFinalizationKey::from_read(
+                &request,
+                stored.incarnation_id,
+            ))
+            .cloned())
+    }
+
+    async fn put_structured_finalization(
+        &self,
+        request: PutStructuredFinalizationRequest,
+    ) -> Result<StructuredFinalizationRecord, SessionThreadError> {
+        request
+            .record
+            .validate()
+            .map_err(|reason| SessionThreadError::InvalidStructuredFinalization { reason })?;
+        let mut state = self.state.lock().await;
+        let thread = state
+            .threads
+            .get(&request.record.thread_id)
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.record.thread_id.clone(),
+            })?;
+        if thread.record.scope != request.record.scope {
+            return Err(SessionThreadError::UnknownThread {
+                thread_id: request.record.thread_id,
+            });
+        }
+        let key = StructuredFinalizationKey::from_record(&request.record, thread.incarnation_id);
+        if let Some(existing) = state.structured_finalizations.get(&key) {
+            if existing.same_immutable_content(&request.record) {
+                return Ok(existing.clone());
+            }
+            return Err(SessionThreadError::StructuredFinalizationConflict {
+                turn_run_id: request.record.turn_run_id,
+            });
+        }
+        state
+            .structured_finalizations
+            .insert(key, request.record.clone());
+        Ok(request.record)
+    }
+
+    async fn publish_structured_finalization_message(
+        &self,
+        request: PublishStructuredFinalizationMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let mut state = self.state.lock().await;
+        let thread = state.threads.get(&request.thread_id).ok_or_else(|| {
+            SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            }
+        })?;
+        if thread.record.scope != request.scope {
+            return Err(SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            });
+        }
+        let run_id = request.turn_run_id;
+        let key = StructuredFinalizationKey {
+            scope: request.scope.clone(),
+            thread_id: request.thread_id.clone(),
+            incarnation_id: thread.incarnation_id,
+            turn_run_id: run_id,
+        };
+        let record = state
+            .structured_finalizations
+            .get(&key)
+            .ok_or(SessionThreadError::StructuredFinalizationPublishMismatch {
+                message_id: request.message_id,
+                reason: "durable finalization record is missing",
+            })?
+            .clone();
+        if record.scope != request.scope
+            || record.thread_id != request.thread_id
+            || record.turn_run_id != run_id
+        {
+            return Err(SessionThreadError::StructuredFinalizationPublishMismatch {
+                message_id: request.message_id,
+                reason: "durable finalization record identity does not match request",
+            });
+        }
+        if record.raw_json != request.replacement {
+            return Err(SessionThreadError::StructuredFinalizationPublishMismatch {
+                message_id: request.message_id,
+                reason: "replacement does not match durable finalization output",
+            });
+        }
+        let turn_run_id = request.turn_run_id.to_string();
+
+        let thread = state.threads.get_mut(&request.thread_id).ok_or_else(|| {
+            SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            }
+        })?;
+        let message = thread
+            .messages
+            .iter_mut()
+            .find(|message| message.message_id == request.message_id)
+            .ok_or(SessionThreadError::UnknownMessage {
+                message_id: request.message_id,
+            })?;
+        if message.kind != MessageKind::Assistant || message.status != MessageStatus::Finalized {
+            return Err(SessionThreadError::StructuredFinalizationPublishMismatch {
+                message_id: request.message_id,
+                reason: "message is not a finalized assistant",
+            });
+        }
+        if message.thread_id != request.thread_id {
+            return Err(SessionThreadError::StructuredFinalizationPublishMismatch {
+                message_id: request.message_id,
+                reason: "message belongs to a different thread",
+            });
+        }
+        if message.turn_run_id.as_deref() != Some(turn_run_id.as_str()) {
+            return Err(SessionThreadError::StructuredFinalizationPublishMismatch {
+                message_id: request.message_id,
+                reason: "message belongs to a different turn run",
+            });
+        }
+        let current_content = message.content.as_deref().ok_or(
+            SessionThreadError::StructuredFinalizationPublishMismatch {
+                message_id: request.message_id,
+                reason: "message content is missing",
+            },
+        )?;
+        if current_content != record.candidate && current_content != request.replacement {
+            return Err(SessionThreadError::StructuredFinalizationPublishMismatch {
+                message_id: request.message_id,
+                reason: "message content does not match durable candidate",
+            });
+        }
+        if current_content == record.candidate {
+            let now = Utc::now();
+            message.content = Some(request.replacement);
+            message.updated_at = Some(now);
+            thread.record.updated_at = Some(now);
+        }
+        Ok(message.clone())
     }
 
     async fn replay_accepted_inbound_message(
@@ -1243,6 +1437,10 @@ impl SessionThreadService for InMemorySessionThreadService {
         // backend stores it under the thread root, so its delete removes it
         // implicitly); an orphaned record here would replay a deleted thread.
         state.prepared_contexts.remove(thread_id);
+        // Structured-finalization evidence is an append-only LLM audit record.
+        // It is deliberately retained after transcript deletion; the
+        // incarnation in its key prevents a recreated explicit id from
+        // reading the predecessor's terminal output.
         Ok(())
     }
 

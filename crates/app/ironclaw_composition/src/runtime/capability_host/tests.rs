@@ -18,7 +18,7 @@ mod tests {
     };
     use ironclaw_host_api::{
         action::NetworkPolicy,
-        capability::EffectKind,
+        capability::{EXTENSION_SEARCH_CAPABILITY_ID, EffectKind},
         dispatch::DispatchInputIssueCode,
         ids::{
             AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId,
@@ -67,7 +67,7 @@ mod tests {
     use ironclaw_assistant::RebornOutboundPreferencesService;
     use ironclaw_extension_manager::extension_lifecycle_capabilities::{
         EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
-        EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
+        EXTENSION_REMOVE_CAPABILITY_ID,
     };
 
     #[derive(Default)]

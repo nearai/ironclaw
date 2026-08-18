@@ -223,6 +223,7 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
             resolved_model_route: None,
             model_usage: None,
             execution_outcome: scripted.execution_outcome,
+            output_contract: ironclaw_host_api::output::OutputContract::AssistantMessage,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: scripted.gate_ref,

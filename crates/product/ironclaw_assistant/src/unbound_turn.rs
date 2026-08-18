@@ -10,22 +10,17 @@
 //! Composition wires the service; route crates own only their wire DTOs and
 //! map them onto the seed vocabulary re-exported by `ironclaw_threads`.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_host_api::prepared_context::{
-    OutputContract, PreparedTurnDeclarations, STRUCTURED_RESULT_CAPABILITY_ID,
-};
+use ironclaw_host_api::ids::{AgentId, ProjectId, ThreadId};
 use ironclaw_host_api::turn::{TurnActor, TurnRunId, TurnScope, TurnStatus};
-use ironclaw_product_contracts::inbound::ProductInboundAck;
+use ironclaw_host_api::{output::OutputContract, prepared_context::PreparedTurnDeclarations};
+use ironclaw_product_contracts::{inbound::ProductInboundAck, surface::ProductSurfaceCaller};
 use ironclaw_threads::{
-    FinalizedAssistantMessageByRunRequest, LoadContextMessagesRequest, MessageKind,
-    PreparedContextRequest, ProviderToolCallReferenceEnvelope, ReadToolResultRecordRequest,
-    SessionThreadError, SessionThreadService, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRecord, ThreadScope, agent_message::AgentMessage,
-    effective_tool_result_read_max_bytes,
+    FinalizedAssistantMessageByRunRequest, PreparedContextRequest,
+    ReadStructuredFinalizationRequest, SessionThreadError, SessionThreadService, ThreadScope,
+    agent_message::AgentMessage,
 };
 use ironclaw_turns::{
     GetRunStateRequest, IdempotencyKey, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator,
@@ -56,14 +51,6 @@ pub enum UnboundTurnError {
     Internal { reason: String },
 }
 
-/// Multiplier applied to the effective per-chunk `read_tool_result_record`
-/// cap ([`effective_tool_result_read_max_bytes`]) to bound the TOTAL bytes
-/// the structured-result paging loop will accumulate. Chosen as a few
-/// chunks' worth of headroom for a model-produced JSON result — generous for
-/// legitimate payloads, small enough that a misbehaving backend (or a
-/// pagination bug) cannot grow the buffer without limit.
-const STRUCTURED_RESULT_TOTAL_BYTES_FACTOR: u64 = 8;
-
 impl UnboundTurnError {
     fn internal(reason: impl Into<String>) -> Self {
         Self::Internal {
@@ -87,14 +74,14 @@ pub struct UnboundTurnOutcome {
 /// One prepared-turn submission in the engine vocabulary.
 #[derive(Debug, Clone)]
 pub struct UnboundTurnSubmission {
-    pub actor_user_id: UserId,
+    pub caller: ProductSurfaceCaller,
     /// Public id doubling as the unbound thread id, exactly as the caller's
     /// retrieval path will use it.
     pub public_id: String,
     pub system_prompt: String,
     pub messages: Vec<AgentMessage>,
-    /// Visible-surface selection journaled with the declarations. Empty
-    /// means "no tools".
+    /// Optional visible-surface selection journaled with the declarations.
+    /// Empty means no caller-selected tools.
     pub tools: Vec<ironclaw_host_api::ids::CapabilityId>,
     pub output: OutputContract,
     pub requested_model: Option<String>,
@@ -114,45 +101,53 @@ pub struct UnboundTurnSubmission {
 pub struct UnboundTurnService {
     thread_service: Arc<dyn SessionThreadService>,
     coordinator: Arc<dyn TurnCoordinator>,
-    tenant_id: TenantId,
-    agent_id: AgentId,
-    project_id: Option<ProjectId>,
+    default_agent_id: AgentId,
+    default_project_id: Option<ProjectId>,
 }
 
 impl UnboundTurnService {
     pub fn new(
         thread_service: Arc<dyn SessionThreadService>,
         coordinator: Arc<dyn TurnCoordinator>,
-        tenant_id: TenantId,
-        agent_id: AgentId,
-        project_id: Option<ProjectId>,
+        default_agent_id: AgentId,
+        default_project_id: Option<ProjectId>,
     ) -> Self {
         Self {
             thread_service,
             coordinator,
-            tenant_id,
-            agent_id,
-            project_id,
+            default_agent_id,
+            default_project_id,
         }
     }
 
-    fn thread_scope(&self, owner: &UserId) -> ThreadScope {
+    fn resolved_thread_scope(&self, caller: &ProductSurfaceCaller) -> ThreadScope {
         ThreadScope {
-            tenant_id: self.tenant_id.clone(),
-            agent_id: self.agent_id.clone(),
-            project_id: self.project_id.clone(),
-            owner_user_id: Some(owner.clone()),
+            tenant_id: caller.tenant_id.clone(),
+            agent_id: caller
+                .agent_id
+                .clone()
+                .unwrap_or_else(|| self.default_agent_id.clone()),
+            project_id: caller
+                .project_id
+                .clone()
+                .or_else(|| self.default_project_id.clone()),
+            owner_user_id: Some(caller.user_id.clone()),
             mission_id: None,
         }
     }
 
-    fn turn_scope(&self, thread_id: &ThreadId, owner: &UserId) -> TurnScope {
+    fn resolved_turn_scope(
+        &self,
+        thread_id: &ThreadId,
+        caller: &ProductSurfaceCaller,
+    ) -> TurnScope {
+        let thread_scope = self.resolved_thread_scope(caller);
         TurnScope::new_with_owner(
-            self.tenant_id.clone(),
-            Some(self.agent_id.clone()),
-            self.project_id.clone(),
+            thread_scope.tenant_id,
+            Some(thread_scope.agent_id),
+            thread_scope.project_id,
             thread_id.clone(),
-            Some(owner.clone()),
+            Some(caller.user_id.clone()),
         )
     }
 
@@ -167,11 +162,12 @@ impl UnboundTurnService {
     ) -> Result<ProductInboundAck, UnboundTurnError> {
         let thread_id = ThreadId::new(submission.public_id.clone())
             .map_err(|error| UnboundTurnError::internal(format!("invalid thread id: {error}")))?;
+        let output_contract = submission.output.clone();
         let accepted = self
             .thread_service
             .accept_prepared_context(PreparedContextRequest {
-                scope: self.thread_scope(&submission.actor_user_id),
-                actor_id: submission.actor_user_id.as_str().to_string(),
+                scope: self.resolved_thread_scope(&submission.caller),
+                actor_id: submission.caller.user_id.as_str().to_string(),
                 system_prompt: submission.system_prompt,
                 messages: submission.messages,
                 declarations: PreparedTurnDeclarations {
@@ -197,10 +193,11 @@ impl UnboundTurnService {
         let response = self
             .coordinator
             .submit_turn(SubmitTurnRequest {
-                scope: self.turn_scope(&thread_id, &submission.actor_user_id),
-                actor: TurnActor::new(submission.actor_user_id),
+                scope: self.resolved_turn_scope(&thread_id, &submission.caller),
+                actor: TurnActor::new(submission.caller.user_id),
                 accepted_message_ref: accepted.accepted_message_ref,
                 requested_run_profile: None,
+                output_contract: Some(output_contract),
                 requested_model: submission.requested_model,
                 idempotency_key: IdempotencyKey::new(format!(
                     "{}:submit",
@@ -244,14 +241,14 @@ impl UnboundTurnService {
     pub async fn wait_for_completion(
         &self,
         public_id: &str,
-        actor_user_id: &UserId,
+        caller: &ProductSurfaceCaller,
         run_id: TurnRunId,
         poll_interval: Duration,
     ) -> Result<UnboundTurnOutcome, UnboundTurnError> {
         let thread_id = ThreadId::new(public_id.to_string())
             .map_err(|error| UnboundTurnError::internal(format!("invalid thread id: {error}")))?;
-        let turn_scope = self.turn_scope(&thread_id, actor_user_id);
-        let thread_scope = self.thread_scope(actor_user_id);
+        let turn_scope = self.resolved_turn_scope(&thread_id, caller);
+        let thread_scope = self.resolved_thread_scope(caller);
         loop {
             let state = self
                 .coordinator
@@ -295,153 +292,52 @@ impl UnboundTurnService {
         thread_id: &ThreadId,
         run_id: TurnRunId,
     ) -> Result<String, UnboundTurnError> {
-        let structured = matches!(
-            self.thread_service
-                .read_prepared_context(thread_scope, thread_id)
-                .await
-                .map_err(map_thread_read_error)?
-                .map(|record| record.declarations.output),
-            Some(OutputContract::JsonSchema { .. })
-        );
-        if structured {
-            return self
-                .structured_result_payload(thread_scope, thread_id, run_id)
-                .await;
-        }
-        let message = self
+        let output_contract = self
             .thread_service
-            .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
-                scope: thread_scope.clone(),
-                thread_id: thread_id.clone(),
-                turn_run_id: run_id.to_string(),
-            })
+            .read_prepared_context(thread_scope, thread_id)
             .await
             .map_err(map_thread_read_error)?
-            .ok_or_else(|| UnboundTurnError::internal("expected row is missing"))?;
-        Ok(message.content.unwrap_or_default())
-    }
-
-    /// The validated structured result: the run's own
-    /// `builtin.structured_result` tool row, paged out of the durable
-    /// tool-result record store in full.
-    ///
-    /// This locates the row by scanning the (bounded) unbound thread's
-    /// history — acceptable for the polling read-back, and deliberately NOT
-    /// generalized: the phase-2 run-observation façade's terminal event
-    /// should carry the result ref and retire this scan. Do not add a second
-    /// consumer.
-    async fn structured_result_payload(
-        &self,
-        thread_scope: &ThreadScope,
-        thread_id: &ThreadId,
-        run_id: TurnRunId,
-    ) -> Result<String, UnboundTurnError> {
-        let history = self
-            .thread_service
-            .list_thread_history(ThreadHistoryRequest {
-                scope: thread_scope.clone(),
-                thread_id: thread_id.clone(),
-            })
-            .await
-            .map_err(map_thread_read_error)?;
-        let run_ref = run_id.to_string();
-        let candidates: Vec<&ThreadMessageRecord> = history
-            .messages
-            .iter()
-            .filter(|message| {
-                message.kind == MessageKind::ToolResultReference
-                    && message.turn_run_id.as_deref() == Some(run_ref.as_str())
-                    && message.tool_result_ref.is_some()
-            })
-            .collect();
-        let provider_calls = self
-            .load_provider_calls_for(
-                thread_scope,
-                thread_id,
-                candidates
-                    .iter()
-                    .map(|message| message.message_id)
-                    .collect(),
-            )
-            .await?;
-        let result_ref = candidates
-            .iter()
-            .find(|message| {
-                provider_calls.get(&message.message_id).is_some_and(|call| {
-                    call.capability_id.as_str() == STRUCTURED_RESULT_CAPABILITY_ID
-                })
-            })
-            .and_then(|message| message.tool_result_ref.clone())
-            .ok_or_else(|| UnboundTurnError::internal("expected row is missing"))?;
-
-        let per_chunk_bytes = effective_tool_result_read_max_bytes();
-        // Bound the accumulated structured-result payload to a small multiple
-        // of the effective per-chunk read cap. A structured result is a
-        // model-produced JSON payload, not an arbitrary large blob, so a few
-        // chunks' worth of headroom is generous while still preventing an
-        // unbounded backend (or an offset that never advances) from growing
-        // this buffer forever.
-        let max_total_bytes =
-            (per_chunk_bytes as u64).saturating_mul(STRUCTURED_RESULT_TOTAL_BYTES_FACTOR);
-        let mut payload = Vec::new();
-        let mut offset = 0u64;
-        loop {
-            let chunk = self
-                .thread_service
-                .read_tool_result_record(ReadToolResultRecordRequest {
-                    scope: thread_scope.clone(),
-                    thread_id: thread_id.clone(),
-                    result_ref: result_ref.clone(),
-                    offset,
-                    max_bytes: per_chunk_bytes,
-                })
-                .await
-                .map_err(map_thread_read_error)?
-                .ok_or_else(|| UnboundTurnError::internal("expected row is missing"))?;
-            payload.extend_from_slice(&chunk.content);
-            if payload.len() as u64 > max_total_bytes {
-                return Err(UnboundTurnError::internal(format!(
-                    "structured result payload exceeded the {max_total_bytes}-byte total cap"
-                )));
+            .map(|record| record.declarations.output);
+        match output_contract {
+            Some(contract) if contract.is_structured_output() => {
+                let record = self
+                    .thread_service
+                    .read_structured_finalization(ReadStructuredFinalizationRequest {
+                        scope: thread_scope.clone(),
+                        thread_id: thread_id.clone(),
+                        turn_run_id: run_id,
+                    })
+                    .await
+                    .map_err(map_thread_read_error)?
+                    .ok_or_else(|| {
+                        UnboundTurnError::internal(
+                            "durable structured finalization record is missing",
+                        )
+                    })?;
+                Ok(record.raw_json)
             }
-            match chunk.next_offset {
-                Some(next) if next > offset => offset = next,
-                Some(next) => {
-                    return Err(UnboundTurnError::internal(format!(
-                        "tool result record pagination did not advance: offset={offset}, next_offset={next}"
-                    )));
-                }
-                None => break,
+            Some(OutputContract::AssistantMessage) => {
+                let message = self
+                    .thread_service
+                    .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+                        scope: thread_scope.clone(),
+                        thread_id: thread_id.clone(),
+                        turn_run_id: run_id.to_string(),
+                    })
+                    .await
+                    .map_err(map_thread_read_error)?
+                    .ok_or_else(|| UnboundTurnError::internal("expected row is missing"))?;
+                message.content.ok_or_else(|| {
+                    UnboundTurnError::internal("finalized assistant message has no content")
+                })
             }
+            None => Err(UnboundTurnError::internal(
+                "prepared context record is missing for completed unbound run",
+            )),
+            Some(_) => Err(UnboundTurnError::internal(
+                "completed unbound run has an unsupported output contract",
+            )),
         }
-        String::from_utf8(payload).map_err(|error| {
-            UnboundTurnError::internal(format!("stored result is not utf-8: {error}"))
-        })
-    }
-
-    async fn load_provider_calls_for(
-        &self,
-        scope: &ThreadScope,
-        thread_id: &ThreadId,
-        message_ids: Vec<ThreadMessageId>,
-    ) -> Result<HashMap<ThreadMessageId, ProviderToolCallReferenceEnvelope>, UnboundTurnError> {
-        if message_ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-        let context = self
-            .thread_service
-            .load_context_messages(LoadContextMessagesRequest {
-                scope: scope.clone(),
-                thread_id: thread_id.clone(),
-                message_ids,
-            })
-            .await
-            .map_err(map_thread_read_error)?;
-        Ok(context
-            .messages
-            .into_iter()
-            .filter_map(|message| Some((message.message_id?, message.tool_result_provider_call?)))
-            .collect())
     }
 }
 
@@ -459,271 +355,239 @@ fn map_thread_read_error(error: SessionThreadError) -> UnboundTurnError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use ironclaw_host_api::ids::CapabilityId;
-    use ironclaw_host_api::turn::{TurnRunId, TurnScope};
+    use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::turn::{TurnId, TurnRunId, TurnScope};
+    use ironclaw_host_api::{output::OutputContract, prepared_context::PreparedTurnDeclarations};
     use ironclaw_threads::{
-        AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-        AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-        AppendToolResultReferenceRequest, ContextMessage, ContextMessages, ContextWindow,
-        CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextWindowRequest,
-        MessageContent, MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-        SessionThreadRecord, ThreadHistory, ToolResultRecordChunk, UpdateAssistantDraftRequest,
-        UpdateToolResultReferenceRequest,
+        AppendAssistantDraftRequest, InMemorySessionThreadService, MessageContent,
+        PreparedContextRequest, PutStructuredFinalizationRequest, StructuredFinalizationAccounting,
+        StructuredFinalizationRecord,
     };
 
     use super::*;
 
-    fn tenant_id() -> TenantId {
-        TenantId::from_trusted("tenant-1".to_string())
+    fn scope() -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
+            TenantId::from_trusted("tenant-native".to_string()),
+            UserId::from_trusted("user-native".to_string()),
+            Some(AgentId::from_trusted("agent-native".to_string())),
+            None,
+        )
     }
 
-    fn agent_id() -> AgentId {
-        AgentId::from_trusted("agent-1".to_string())
-    }
-
-    fn owner_id() -> UserId {
-        UserId::from_trusted("user-1".to_string())
-    }
-
-    fn thread_id() -> ThreadId {
-        ThreadId::from_trusted("thread-1".to_string())
-    }
-
-    fn thread_scope() -> ThreadScope {
+    fn thread_scope(scope: &ProductSurfaceCaller) -> ThreadScope {
         ThreadScope {
-            tenant_id: tenant_id(),
-            agent_id: agent_id(),
+            tenant_id: scope.tenant_id.clone(),
+            agent_id: scope.agent_id.clone().expect("test agent"),
             project_id: None,
-            owner_user_id: Some(owner_id()),
+            owner_user_id: Some(scope.user_id.clone()),
             mission_id: None,
         }
     }
 
-    fn structured_result_message() -> ThreadMessageRecord {
-        ThreadMessageRecord {
-            message_id: ThreadMessageId::new(),
-            thread_id: thread_id(),
-            sequence: 1,
-            kind: MessageKind::ToolResultReference,
-            status: MessageStatus::Finalized,
-            created_at: None,
-            updated_at: None,
-            actor_id: None,
-            source_binding_id: None,
-            reply_target_binding_id: None,
-            turn_id: None,
-            turn_run_id: Some(RUN_REF.to_string()),
-            tool_result_ref: Some("result-ref-1".to_string()),
-            tool_result_provider_call: None,
-            content: None,
-            attachments: Vec::new(),
-            redaction_ref: None,
-        }
-    }
-
-    const RUN_REF: &str = "11111111-1111-1111-1111-111111111111";
-
     fn run_id() -> TurnRunId {
-        TurnRunId::parse(RUN_REF).expect("valid run id")
+        TurnRunId::parse("11111111-1111-1111-1111-111111111111").expect("test run id")
     }
 
-    /// Minimal `SessionThreadService` double that only implements the reads
-    /// `structured_result_payload` exercises (`list_thread_history`,
-    /// `load_context_messages`, `read_tool_result_record`); every other
-    /// method panics because the paging-loop tests below never reach it.
-    struct PagingStubThreadService {
-        message: ThreadMessageRecord,
-        /// Queue of `read_tool_result_record` outcomes, consumed in order.
-        chunks: Mutex<Vec<Result<Option<ToolResultRecordChunk>, SessionThreadError>>>,
+    fn schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "value": { "type": "integer" } },
+            "required": ["value"],
+            "additionalProperties": false
+        })
     }
 
-    #[async_trait]
-    impl SessionThreadService for PagingStubThreadService {
-        async fn ensure_thread(
-            &self,
-            _request: EnsureThreadRequest,
-        ) -> Result<SessionThreadRecord, SessionThreadError> {
-            unimplemented!("not exercised by structured-result paging tests")
-        }
+    #[test]
+    fn unbound_scope_uses_caller_axes_and_only_defaults_missing_axes() {
+        let service = UnboundTurnService::new(
+            Arc::new(InMemorySessionThreadService::default()),
+            Arc::new(StubTurnCoordinator::default()),
+            AgentId::from_trusted("agent-default".to_string()),
+            Some(ironclaw_host_api::ids::ProjectId::from_trusted(
+                "project-default".to_string(),
+            )),
+        );
+        let caller = ProductSurfaceCaller::new(
+            TenantId::from_trusted("tenant-caller".to_string()),
+            UserId::from_trusted("user-caller".to_string()),
+            Some(AgentId::from_trusted("agent-caller".to_string())),
+            Some(ironclaw_host_api::ids::ProjectId::from_trusted(
+                "project-caller".to_string(),
+            )),
+        );
+        let resolved = service.resolved_thread_scope(&caller);
+        assert_eq!(resolved.tenant_id.as_str(), "tenant-caller");
+        assert_eq!(resolved.agent_id.as_str(), "agent-caller");
+        assert_eq!(
+            resolved.project_id.as_ref().map(|id| id.as_str()),
+            Some("project-caller")
+        );
+        assert_eq!(
+            resolved.owner_user_id.as_ref().map(|id| id.as_str()),
+            Some("user-caller")
+        );
 
-        async fn accept_inbound_message(
-            &self,
-            _request: AcceptInboundMessageRequest,
-        ) -> Result<AcceptedInboundMessage, SessionThreadError> {
-            unimplemented!("not exercised by structured-result paging tests")
-        }
+        let missing_axes = ProductSurfaceCaller::new(caller.tenant_id, caller.user_id, None, None);
+        let resolved_defaults = service.resolved_thread_scope(&missing_axes);
+        assert_eq!(resolved_defaults.agent_id.as_str(), "agent-default");
+        assert_eq!(
+            resolved_defaults.project_id.as_ref().map(|id| id.as_str()),
+            Some("project-default")
+        );
+    }
 
-        async fn replay_accepted_inbound_message(
-            &self,
-            _request: ReplayAcceptedInboundMessageRequest,
-        ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
-            unimplemented!("not exercised by structured-result paging tests")
-        }
-
-        async fn mark_message_submitted(
-            &self,
-            _scope: &ThreadScope,
-            _thread_id: &ThreadId,
-            _message_id: ThreadMessageId,
-            _turn_id: String,
-            _turn_run_id: String,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("not exercised by structured-result paging tests")
-        }
-
-        async fn mark_message_rejected_busy(
-            &self,
-            _scope: &ThreadScope,
-            _thread_id: &ThreadId,
-            _message_id: ThreadMessageId,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("not exercised by structured-result paging tests")
-        }
-
-        async fn append_assistant_draft(
-            &self,
-            _request: AppendAssistantDraftRequest,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("not exercised by structured-result paging tests")
-        }
-
-        async fn append_tool_result_reference(
-            &self,
-            _request: AppendToolResultReferenceRequest,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("not exercised by structured-result paging tests")
-        }
-
-        async fn append_capability_display_preview(
-            &self,
-            _request: AppendCapabilityDisplayPreviewRequest,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("not exercised by structured-result paging tests")
-        }
-
-        async fn update_tool_result_reference(
-            &self,
-            _request: UpdateToolResultReferenceRequest,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("not exercised by structured-result paging tests")
-        }
-
-        async fn update_assistant_draft(
-            &self,
-            _request: UpdateAssistantDraftRequest,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("not exercised by structured-result paging tests")
-        }
-
-        async fn finalize_assistant_message(
-            &self,
-            _scope: &ThreadScope,
-            _thread_id: &ThreadId,
-            _message_id: ThreadMessageId,
-            _content: MessageContent,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("not exercised by structured-result paging tests")
-        }
-
-        async fn redact_message(
-            &self,
-            _request: RedactMessageRequest,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("not exercised by structured-result paging tests")
-        }
-
-        async fn load_context_window(
-            &self,
-            _request: LoadContextWindowRequest,
-        ) -> Result<ContextWindow, SessionThreadError> {
-            unimplemented!("not exercised by structured-result paging tests")
-        }
-
-        async fn load_context_messages(
-            &self,
-            request: LoadContextMessagesRequest,
-        ) -> Result<ContextMessages, SessionThreadError> {
-            let capability_id =
-                CapabilityId::new(STRUCTURED_RESULT_CAPABILITY_ID).expect("valid capability id");
-            Ok(ContextMessages {
-                thread_id: request.thread_id,
-                messages: request
-                    .message_ids
-                    .into_iter()
-                    .map(|message_id| ContextMessage {
-                        message_id: Some(message_id),
-                        summary_id: None,
-                        sequence: 1,
-                        kind: MessageKind::ToolResultReference,
-                        tool_result_provider_call: Some(ProviderToolCallReferenceEnvelope {
-                            provider_id: "test-provider".to_string(),
-                            provider_model_id: "test-model".to_string(),
-                            provider_turn_id: "turn-1".to_string(),
-                            provider_call_id: "call-1".to_string(),
-                            provider_tool_name: ironclaw_host_api::ids::ProviderToolName::new(
-                                "structured_result",
-                            )
-                            .expect("valid provider tool name"),
-                            capability_id: capability_id.clone(),
-                            arguments: serde_json::Value::Null,
-                            response_reasoning: None,
-                            reasoning: None,
-                            signature: None,
-                        }),
-                        content: String::new(),
-                        image_attachments: Vec::new(),
-                    })
-                    .collect(),
-            })
-        }
-
-        async fn list_thread_history(
-            &self,
-            request: ThreadHistoryRequest,
-        ) -> Result<ThreadHistory, SessionThreadError> {
-            Ok(ThreadHistory {
-                thread: SessionThreadRecord {
-                    scope: request.scope,
-                    thread_id: request.thread_id,
-                    created_by_actor_id: "actor-1".to_string(),
-                    title: None,
-                    metadata_json: None,
-                    goal: None,
-                    created_at: None,
-                    updated_at: None,
+    async fn readback_service(
+        content: &str,
+        output: OutputContract,
+    ) -> (
+        UnboundTurnService,
+        ProductSurfaceCaller,
+        ThreadId,
+        TurnRunId,
+    ) {
+        let caller_scope = scope();
+        let stored_scope = thread_scope(&caller_scope);
+        let thread_id = ThreadId::from_trusted("native-readback-thread".to_string());
+        let run_id = run_id();
+        let threads = Arc::new(InMemorySessionThreadService::default());
+        let structured_output = output.is_structured_output();
+        threads
+            .accept_prepared_context(PreparedContextRequest {
+                scope: stored_scope.clone(),
+                actor_id: caller_scope.user_id.as_str().to_string(),
+                system_prompt: "Return structured output.".to_string(),
+                messages: vec![AgentMessage {
+                    role: ironclaw_threads::agent_message::AgentMessageRole::User,
+                    content: vec![ironclaw_threads::agent_message::ContentPart::text(
+                        "Produce a value.",
+                    )],
+                }],
+                declarations: PreparedTurnDeclarations {
+                    tools: Vec::new(),
+                    output,
+                    limits: Default::default(),
                 },
-                messages: vec![self.message.clone()],
-                summary_artifacts: Vec::new(),
+                idempotency_key: "native-readback-accept".to_string(),
+                thread_id: thread_id.clone(),
+                title: None,
+                metadata_json: None,
             })
+            .await
+            .expect("prepared context accepted");
+        let draft = threads
+            .append_assistant_draft(AppendAssistantDraftRequest {
+                scope: stored_scope.clone(),
+                thread_id: thread_id.clone(),
+                turn_run_id: run_id.to_string(),
+                content: MessageContent::text(content),
+            })
+            .await
+            .expect("assistant draft appended");
+        threads
+            .finalize_assistant_message(
+                &stored_scope,
+                &thread_id,
+                draft.message_id,
+                MessageContent::text(content),
+            )
+            .await
+            .expect("assistant message finalized");
+        if structured_output && serde_json::from_str::<serde_json::Value>(content).is_ok() {
+            threads
+                .put_structured_finalization(PutStructuredFinalizationRequest {
+                    record: StructuredFinalizationRecord {
+                        scope: stored_scope.clone(),
+                        thread_id: thread_id.clone(),
+                        turn_id: TurnId::new(),
+                        turn_run_id: run_id,
+                        contract_name: "test_output".to_string(),
+                        schema_digest: "test-schema-digest".to_string(),
+                        candidate: "test candidate".to_string(),
+                        raw_json: content.to_string(),
+                        accounting: StructuredFinalizationAccounting::default(),
+                        owner_fence: "test-owner-fence".to_string(),
+                        created_at: chrono::Utc::now(),
+                        updated_at: chrono::Utc::now(),
+                    },
+                })
+                .await
+                .expect("structured record persisted");
         }
-
-        async fn read_tool_result_record(
-            &self,
-            _request: ReadToolResultRecordRequest,
-        ) -> Result<Option<ToolResultRecordChunk>, SessionThreadError> {
-            let mut chunks = self.chunks.lock().expect("chunk queue lock");
-            if chunks.is_empty() {
-                panic!(
-                    "read_tool_result_record called more times than the test staged \
-                     responses for — the paging loop must terminate on the guard \
-                     conditions instead of looping forever"
-                );
-            }
-            chunks.remove(0)
-        }
-
-        async fn create_summary_artifact(
-            &self,
-            _request: CreateSummaryArtifactRequest,
-        ) -> Result<ironclaw_threads::SummaryArtifact, SessionThreadError> {
-            unimplemented!("not exercised by structured-result paging tests")
-        }
+        let service = UnboundTurnService::new(
+            threads,
+            Arc::new(StubTurnCoordinator::default()),
+            AgentId::from_trusted("agent-default".to_string()),
+            None,
+        );
+        (service, caller_scope, thread_id, run_id)
     }
 
-    struct StubTurnCoordinator;
+    #[tokio::test]
+    async fn native_structured_readback_preserves_provider_native_json() {
+        let (service, caller_scope, thread_id, run_id) =
+            readback_service(" { \"value\": 7 } ", OutputContract::json_schema(schema())).await;
+        let result = service
+            .resolve_completed_output(&thread_scope(&caller_scope), &thread_id, run_id)
+            .await
+            .expect("valid native output reads back");
+        assert_eq!(result, " { \"value\": 7 } ");
+    }
+
+    #[tokio::test]
+    async fn native_structured_readback_does_not_fall_back_to_transcript_scraping() {
+        let (service, caller_scope, thread_id, run_id) =
+            readback_service("not json", OutputContract::json_schema(schema())).await;
+        let error = service
+            .resolve_completed_output(&thread_scope(&caller_scope), &thread_id, run_id)
+            .await
+            .expect_err("a transcript row is not structured-output evidence");
+        assert!(
+            matches!(error, UnboundTurnError::Internal { reason } if reason.contains("record is missing"))
+        );
+    }
+
+    #[tokio::test]
+    async fn native_structured_readback_does_not_retry_or_revalidate_schema() {
+        let (service, caller_scope, thread_id, run_id) = readback_service(
+            r#"{"value":7}"#,
+            OutputContract::json_schema(serde_json::json!({ "type": "not-a-json-schema-type" })),
+        )
+        .await;
+        let result = service
+            .resolve_completed_output(&thread_scope(&caller_scope), &thread_id, run_id)
+            .await
+            .expect("provider-native output is already schema-enforced");
+        assert_eq!(result, r#"{"value":7}"#);
+    }
+
+    #[tokio::test]
+    async fn assistant_readback_preserves_finalized_text() {
+        let (service, caller_scope, thread_id, run_id) =
+            readback_service("plain assistant reply", OutputContract::AssistantMessage).await;
+        let result = service
+            .resolve_completed_output(&thread_scope(&caller_scope), &thread_id, run_id)
+            .await
+            .expect("assistant output reads back");
+        assert_eq!(result, "plain assistant reply");
+    }
+
+    #[derive(Default)]
+    struct StubTurnCoordinator {
+        submitted: Arc<Mutex<Option<SubmitTurnRequest>>>,
+    }
+
+    impl StubTurnCoordinator {
+        fn captured_submission(&self) -> Option<SubmitTurnRequest> {
+            self.submitted
+                .lock()
+                .expect("submission capture lock")
+                .clone()
+        }
+    }
 
     #[async_trait]
     impl TurnCoordinator for StubTurnCoordinator {
@@ -731,130 +595,89 @@ mod tests {
             &self,
             _scope: TurnScope,
         ) -> Result<TurnRunId, ironclaw_turns::TurnError> {
-            unimplemented!("not exercised by structured-result paging tests")
+            unimplemented!("not exercised by native readback tests")
         }
 
         async fn submit_turn(
             &self,
-            _request: SubmitTurnRequest,
+            request: SubmitTurnRequest,
         ) -> Result<SubmitTurnResponse, ironclaw_turns::TurnError> {
-            unimplemented!("not exercised by structured-result paging tests")
+            let accepted_message_ref = request.accepted_message_ref.clone();
+            *self.submitted.lock().expect("submission capture lock") = Some(request);
+            Ok(SubmitTurnResponse::Accepted {
+                turn_id: TurnId::new(),
+                run_id: run_id(),
+                status: TurnStatus::Queued,
+                resolved_run_profile_id: ironclaw_turns::RunProfileId::unbound_default(),
+                resolved_run_profile_version: ironclaw_turns::RunProfileVersion::new(1),
+                event_cursor: ironclaw_turns::EventCursor(0),
+                accepted_message_ref,
+            })
         }
 
         async fn resume_turn(
             &self,
             _request: ironclaw_turns::ResumeTurnRequest,
         ) -> Result<ironclaw_turns::ResumeTurnResponse, ironclaw_turns::TurnError> {
-            unimplemented!("not exercised by structured-result paging tests")
+            unimplemented!("not exercised by native readback tests")
         }
 
         async fn retry_turn(
             &self,
             _request: ironclaw_turns::RetryTurnRequest,
         ) -> Result<ironclaw_turns::RetryTurnResponse, ironclaw_turns::TurnError> {
-            unimplemented!("not exercised by structured-result paging tests")
+            unimplemented!("not exercised by native readback tests")
         }
 
         async fn cancel_run(
             &self,
             _request: ironclaw_turns::CancelRunRequest,
         ) -> Result<ironclaw_turns::CancelRunResponse, ironclaw_turns::TurnError> {
-            unimplemented!("not exercised by structured-result paging tests")
+            unimplemented!("not exercised by native readback tests")
         }
 
         async fn get_run_state(
             &self,
             _request: GetRunStateRequest,
         ) -> Result<ironclaw_turns::TurnRunState, ironclaw_turns::TurnError> {
-            unimplemented!("not exercised by structured-result paging tests")
+            unimplemented!("not exercised by native readback tests")
         }
     }
 
-    fn service_with_chunks(
-        chunks: Vec<Result<Option<ToolResultRecordChunk>, SessionThreadError>>,
-    ) -> UnboundTurnService {
-        UnboundTurnService::new(
-            Arc::new(PagingStubThreadService {
-                message: structured_result_message(),
-                chunks: Mutex::new(chunks),
-            }),
-            Arc::new(StubTurnCoordinator),
-            tenant_id(),
-            agent_id(),
+    #[tokio::test]
+    async fn accept_and_submit_forwards_declared_output_contract() {
+        let caller_scope = scope();
+        let threads = Arc::new(InMemorySessionThreadService::default());
+        let coordinator = Arc::new(StubTurnCoordinator::default());
+        let service = UnboundTurnService::new(
+            threads,
+            Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+            AgentId::from_trusted("agent-default".to_string()),
             None,
-        )
-    }
-
-    fn chunk(content: &[u8], next_offset: Option<u64>) -> ToolResultRecordChunk {
-        ToolResultRecordChunk {
-            content: content.to_vec(),
-            total_bytes: content.len() as u64,
-            next_offset,
-        }
-    }
-
-    #[tokio::test]
-    async fn structured_result_paging_rejects_non_advancing_offset() {
-        // The first chunk reports `next_offset` equal to the offset it was
-        // read at — a backend bug that would otherwise spin the loop
-        // forever re-reading the same page.
-        let service = service_with_chunks(vec![Ok(Some(chunk(b"{}", Some(0))))]);
-
-        let error = service
-            .structured_result_payload(&thread_scope(), &thread_id(), run_id())
+        );
+        let output = OutputContract::try_json_schema("forwarded_output", schema()).expect("schema");
+        service
+            .accept_and_submit(UnboundTurnSubmission {
+                caller: caller_scope,
+                public_id: "forwarded-output-contract".to_string(),
+                system_prompt: "Return one structured value.".to_string(),
+                messages: vec![AgentMessage {
+                    role: ironclaw_threads::agent_message::AgentMessageRole::User,
+                    content: vec![ironclaw_threads::agent_message::ContentPart::text(
+                        "produce a value",
+                    )],
+                }],
+                tools: Vec::new(),
+                output: output.clone(),
+                requested_model: None,
+                idempotency_key: "forwarded-output-contract-key".to_string(),
+            })
             .await
-            .expect_err("a non-advancing offset must be rejected");
+            .expect("unbound submission");
 
-        match error {
-            UnboundTurnError::Internal { reason } => {
-                assert!(
-                    reason.contains("did not advance"),
-                    "unexpected reason: {reason}"
-                );
-            }
-            other => panic!("expected Internal error, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn structured_result_paging_rejects_oversized_total() {
-        // Each chunk individually advances the offset and stays within the
-        // per-chunk cap, but enough of them together exceed the total-bytes
-        // bound the loop enforces.
-        let per_chunk = effective_tool_result_read_max_bytes();
-        let max_total = (per_chunk as u64) * STRUCTURED_RESULT_TOTAL_BYTES_FACTOR;
-        let oversized_chunk_len = (max_total + 1) as usize;
-        let content = vec![b'a'; oversized_chunk_len];
-
-        let service = service_with_chunks(vec![Ok(Some(chunk(&content, Some(1))))]);
-
-        let error = service
-            .structured_result_payload(&thread_scope(), &thread_id(), run_id())
-            .await
-            .expect_err("an oversized total payload must be rejected");
-
-        match error {
-            UnboundTurnError::Internal { reason } => {
-                assert!(reason.contains("total cap"), "unexpected reason: {reason}");
-            }
-            other => panic!("expected Internal error, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn structured_result_paging_accumulates_across_pages() {
-        // Sanity check that well-behaved, strictly-advancing pagination still
-        // works and terminates on `next_offset: None`.
-        let service = service_with_chunks(vec![
-            Ok(Some(chunk(b"ab", Some(2)))),
-            Ok(Some(chunk(b"cd", None))),
-        ]);
-
-        let payload = service
-            .structured_result_payload(&thread_scope(), &thread_id(), run_id())
-            .await
-            .expect("well-behaved pagination succeeds");
-
-        assert_eq!(payload, "abcd");
+        let captured = coordinator
+            .captured_submission()
+            .expect("coordinator captured submit");
+        assert_eq!(captured.output_contract, Some(output));
     }
 }

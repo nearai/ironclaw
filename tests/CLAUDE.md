@@ -53,16 +53,16 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Triggers / automations / routines | 11 | 2 | ✓ | ✓ |
 | Memory & workspace | 8 | 2 | — | ✓ |
 | Skills | 1 | 1 | — | ✓ |
-| Multi-user / scope isolation | 5 | 2 | 9 | ✓ |
+| Multi-user / scope isolation | 5 | 3 | 9 | ✓ |
 | Tools & tool dispatch | — | 11 | ✓ | ✓ |
 | Turn lifecycle (cancel/steer/retry/restart) | — | 8 | ✓ | ✓ |
 | WebUI surfaces & APIs | 2 | 2 | — | ✓ (largest) |
-| Durability & restart | 4 | 5 | ✓ | ✓ |
+| Durability & restart | 4 | 6 | ✓ | ✓ |
 | Security & redaction | — | 3 | ✓ | ✓ |
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **59** group scenarios · **59** flat integration bins (52 in
+Totals: **59** group scenarios · **60** flat integration bins (53 in
 `tests/integration/`, 7 in `tests/integration/auth/`) · **39** top-level Rust bins ·
 **102** Python scenario files (**869** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
@@ -181,7 +181,7 @@ ones speak MTProto over a raw socket with no injectable seam.
 
 ---
 
-## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (59)
+## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (60)
 
 One thread, whole real turn. Grouped by what the user experiences.
 
@@ -199,6 +199,16 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Spend accounting fires on a real turn | `budget.rs` |
 | Sub-agents spawn and awaiting them behaves at the edges | `subagent_await_edge.rs` |
 | A caller hands the engine a prepared prompt and gets its outcome back: a schema-validated JSON result (invalid attempts are retried and the corrected payload is durably recorded) or a plain answer; seeded tool history is honored by the run; resubmitting the same request is replay-safe; the private work thread belongs to the calling user (stored under their owner scope, foreign-owner run-state reads rejected) yet never appears in conversation listings | `unbound_turns.rs` |
+
+**Suggestions**
+| Behavior | Evidence |
+|---|---|
+| Generate suggestion cards and replay the same client action without starting another generation | `suggestions.rs::generate_suggestions_returns_cards_and_cached_replay` |
+| Replace the visible suggestion cards with a new generation while preserving existing start reservations | `suggestions.rs::replacement_generation_preserves_reservations_and_replaces_cards` |
+| Start a suggestion card and create one canonical thread containing its suggested prompt | `suggestions.rs::starting_a_replacement_suggestion_creates_one_thread` |
+| Keep suggestion cards and their start/dismiss actions isolated to the authenticated tenant and user scope | `suggestions.rs::suggestions_are_isolated_by_authenticated_scope` |
+| Dismiss a started suggestion across restart without deleting its thread or timeline | `suggestions.rs::dismissing_a_started_suggestion_persists_across_restart` |
+| Settle failed or contract-invalid suggestion generation as failed with no visible cards | `suggestions.rs::failed_suggestion_run_settles_failed_and_retryable_via_list_view`, `suggestions.rs::semantically_invalid_completed_suggestion_output_settles_failed`, `suggestions.rs::unknown_field_in_completed_suggestion_output_settles_failed` |
 
 **Tools**
 | Behavior | Evidence |
@@ -256,6 +266,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Secrets survive a genuine on-disk reopen | `secrets.rs` |
 | Outbound preferences survive a process-level reopen | `outbound_store_durability.rs` |
 | Restart sequences over a gated run recover correctly | `generated_restart_sequences.rs` |
+| A suggestions generation survives a backend restart: GET/list alone shows it generating and then ready after durable recovery | `suggestions.rs::generation_in_progress_survives_runtime_restart_and_recovers_via_list_view` |
 | Odd gate sequences (double-resolve, cancel-after-finish, approve-a-done-run) behave | `generated_gate_sequences.rs` |
 
 **Platform / wiring**
@@ -271,7 +282,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Identity resolution runs on the coverage lane | `identity_resolution_smoke.rs` |
 | A canonical 10-tool-call agent turn's database write volume is measured and reported (for tracking, not gated) on both libSQL and Postgres, and custom-actor group threads are rejected from canonical durable milestones | `db_write_canonical.rs` |
 
-One of the 59 registered bins, `delivery_user_journeys.rs`, holds the explicit
+One of the 60 registered bins, `delivery_user_journeys.rs`, holds the explicit
 channel-delivery journeys (two-lane model):
 
 | A user can… | Scenario |

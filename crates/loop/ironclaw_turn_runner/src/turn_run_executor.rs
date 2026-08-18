@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use ironclaw_approvals::GateRecordStorePort;
 use ironclaw_host_api::{gate_record::GateRecord, ids::GateRef, resource::ResourceScope};
 use ironclaw_loop_contracts::{
-    AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopBlocked,
-    LoopBlockedKind, LoopExit,
+    AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest,
+    AgentLoopHostError, LoopBlocked, LoopBlockedKind, LoopExit, LoopModelUsage,
 };
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_processes::ProcessTransitionPort;
@@ -35,7 +35,7 @@ use crate::{
     driver_registry::{DriverRegistry, LoopDriverRegistryKey},
     failure_categories::host_stage_unavailable_category,
     turn_runner::{HostFactory, sanitized_driver_failure, sanitized_failure},
-    turn_scheduler::{TurnRunExecutor, TurnRunExecutorError},
+    turn_scheduler::{TurnRunExecutor, TurnRunExecutorError, TurnRunFailureMetadata},
 };
 
 /// Upper bound on the best-effort after-turn memory recording that the scheduler
@@ -105,9 +105,25 @@ fn unknown_failure_error() -> &'static TurnRunExecutorError {
 /// Structurally mirrors the `DriverInvocationError` in `turn_runner.rs` but
 /// stripped of the heartbeat/cancel variants that are now owned by the scheduler.
 enum DriverInvocationError {
-    DriverNotFound { reason: String },
-    HostCreationFailed { reason: String },
-    DriverError(AgentLoopDriverError),
+    DriverNotFound {
+        reason: String,
+    },
+    HostCreationFailed {
+        reason: String,
+    },
+    HostFinalizationFailed {
+        error: AgentLoopHostError,
+        cumulative_usage: Option<LoopModelUsage>,
+    },
+    DriverError {
+        error: AgentLoopDriverError,
+        supplemental_usage: Option<LoopModelUsage>,
+    },
+}
+
+struct DriverInvocationSuccess {
+    exit: LoopExit,
+    supplemental_model_usage: Option<LoopModelUsage>,
 }
 
 impl std::fmt::Display for DriverInvocationError {
@@ -115,7 +131,14 @@ impl std::fmt::Display for DriverInvocationError {
         match self {
             Self::DriverNotFound { reason } => write!(f, "driver not found: {reason}"),
             Self::HostCreationFailed { reason } => write!(f, "host creation failed: {reason}"),
-            Self::DriverError(err) => write!(f, "driver error: {err}"),
+            Self::HostFinalizationFailed { error, .. } => {
+                write!(
+                    f,
+                    "host terminal finalization failed: {}",
+                    error.safe_summary
+                )
+            }
+            Self::DriverError { error, .. } => write!(f, "driver error: {error}"),
         }
     }
 }
@@ -182,15 +205,22 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
     ) -> Result<(), TurnRunExecutorError> {
         let started_at = live_latency_started_at();
         match self.invoke_driver(&claimed).await {
-            Ok(exit) => {
-                let result = self.apply_exit(&claimed, exit).await;
+            Ok(DriverInvocationSuccess {
+                exit,
+                supplemental_model_usage,
+            }) => {
+                let result = self
+                    .apply_exit(&claimed, exit, supplemental_model_usage)
+                    .await;
                 match result {
                     Ok(()) => {
                         trace_executor_latency_ok("execute_claimed_run", &claimed, started_at);
                         Ok(())
                     }
-                    Err(()) => {
-                        let error = unknown_failure_error().clone();
+                    Err(metadata) => {
+                        let error = unknown_failure_error()
+                            .clone()
+                            .with_failure_metadata(metadata);
                         trace_executor_latency_error(
                             "execute_claimed_run",
                             &claimed,
@@ -203,22 +233,31 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
             }
             Err(err) => {
                 let sanitized = match &err {
-                    DriverInvocationError::DriverError(AgentLoopDriverError::Failed {
-                        reason_kind,
-                        detail,
-                    }) => sanitized_driver_failure(reason_kind, detail.as_deref()),
+                    DriverInvocationError::DriverError {
+                        error:
+                            AgentLoopDriverError::Failed {
+                                reason_kind,
+                                detail,
+                            },
+                        ..
+                    } => sanitized_driver_failure(reason_kind, detail.as_deref()),
                     DriverInvocationError::DriverNotFound { .. } => {
                         sanitized_failure("driver_not_found")
                     }
                     DriverInvocationError::HostCreationFailed { .. } => {
                         sanitized_failure("host_creation_failed")
                     }
-                    DriverInvocationError::DriverError(AgentLoopDriverError::InvalidRequest {
+                    DriverInvocationError::HostFinalizationFailed { .. } => {
+                        sanitized_failure("structured_finalization_failed")
+                    }
+                    DriverInvocationError::DriverError {
+                        error: AgentLoopDriverError::InvalidRequest { .. },
                         ..
-                    }) => sanitized_failure("driver_invalid_request"),
-                    DriverInvocationError::DriverError(AgentLoopDriverError::Unavailable {
-                        reason,
-                    }) => sanitized_failure(host_stage_unavailable_category(reason)),
+                    } => sanitized_failure("driver_invalid_request"),
+                    DriverInvocationError::DriverError {
+                        error: AgentLoopDriverError::Unavailable { reason },
+                        ..
+                    } => sanitized_failure(host_stage_unavailable_category(reason)),
                 };
                 // `sanitized` is always Some — sanitized_failure /
                 // sanitized_driver_failure fall back to "unknown_failure" before
@@ -231,7 +270,23 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
                 // scheduler records `executor_error.failure()`, so this is what
                 // carries the real driver-failure cause into
                 // `TurnLifecycleEvent.detail` and the failure explainer.
-                let error = TurnRunExecutorError::from_failure(failure);
+                let error = match err {
+                    DriverInvocationError::HostFinalizationFailed {
+                        cumulative_usage: Some(usage),
+                        ..
+                    } => TurnRunExecutorError::from_failure(failure).with_failure_metadata(
+                        TurnRunFailureMetadata::from_optional_model_usage(Some(usage)),
+                    ),
+                    DriverInvocationError::DriverError {
+                        supplemental_usage: Some(usage),
+                        ..
+                    } => TurnRunExecutorError::from_failure(failure).with_failure_metadata(
+                        TurnRunFailureMetadata::from_optional_model_usage(
+                            LoopModelUsage::merge_optional(claimed.state.model_usage, Some(usage)),
+                        ),
+                    ),
+                    _ => TurnRunExecutorError::from_failure(failure),
+                };
                 trace_executor_latency_error("execute_claimed_run", &claimed, started_at, &error);
                 Err(error)
             }
@@ -243,7 +298,7 @@ impl RebornTurnRunExecutor {
     async fn invoke_driver(
         &self,
         claimed: &ClaimedTurnRun,
-    ) -> Result<LoopExit, DriverInvocationError> {
+    ) -> Result<DriverInvocationSuccess, DriverInvocationError> {
         let descriptor = &claimed.resolved_run_profile.loop_driver;
         let registry_key =
             LoopDriverRegistryKey::from_descriptor(descriptor).map_err(|reason| {
@@ -306,7 +361,10 @@ impl RebornTurnRunExecutor {
                     host.as_ref(),
                 )
                 .await
-                .map_err(DriverInvocationError::DriverError),
+                .map_err(|error| DriverInvocationError::DriverError {
+                    error,
+                    supplemental_usage: None,
+                }),
             (TurnStatus::Queued, _) => driver
                 .run(
                     AgentLoopDriverRunRequest {
@@ -317,7 +375,10 @@ impl RebornTurnRunExecutor {
                     host.as_ref(),
                 )
                 .await
-                .map_err(DriverInvocationError::DriverError),
+                .map_err(|error| DriverInvocationError::DriverError {
+                    error,
+                    supplemental_usage: None,
+                }),
             // Fallback: treat as new run.
             _ => driver
                 .run(
@@ -329,7 +390,10 @@ impl RebornTurnRunExecutor {
                     host.as_ref(),
                 )
                 .await
-                .map_err(DriverInvocationError::DriverError),
+                .map_err(|error| DriverInvocationError::DriverError {
+                    error,
+                    supplemental_usage: None,
+                }),
         };
         match &driver_result {
             Ok(_) => trace_executor_latency_ok(driver_operation, claimed, driver_started_at),
@@ -337,7 +401,52 @@ impl RebornTurnRunExecutor {
                 trace_executor_latency_error(driver_operation, claimed, driver_started_at, error)
             }
         }
-        driver_result
+        let driver_result = match driver_result {
+            Ok(exit) => match host.finalize_terminal_output(&exit).await {
+                Ok(()) => Ok(exit),
+                Err(error) => Err(DriverInvocationError::HostFinalizationFailed {
+                    error,
+                    cumulative_usage: loop_exit_model_usage(&exit).or(claimed.state.model_usage),
+                }),
+            },
+            Err(error) => Err(error),
+        };
+        // Host-owned terminal finalization is deliberately accounted outside
+        // the core loop. Snapshot it while the per-run host is still alive,
+        // then attach it to either the returned exit or the typed driver
+        // failure metadata before the host is dropped.
+        let supplemental_usage = host.supplemental_model_usage();
+        drop(host);
+        match (driver_result, supplemental_usage) {
+            (Ok(exit), supplemental_model_usage) => Ok(DriverInvocationSuccess {
+                exit,
+                supplemental_model_usage,
+            }),
+            (Err(error), Some(usage)) => {
+                let error = match error {
+                    DriverInvocationError::HostFinalizationFailed {
+                        error,
+                        cumulative_usage,
+                    } => DriverInvocationError::HostFinalizationFailed {
+                        error,
+                        cumulative_usage: LoopModelUsage::merge_optional(
+                            cumulative_usage,
+                            Some(usage),
+                        ),
+                    },
+                    DriverInvocationError::DriverError {
+                        error,
+                        supplemental_usage: _,
+                    } => DriverInvocationError::DriverError {
+                        error,
+                        supplemental_usage: Some(usage),
+                    },
+                    other => other,
+                };
+                Err(error)
+            }
+            (Err(error), None) => Err(error),
+        }
     }
 
     /// Apply a `LoopExit` through the trusted applier.
@@ -345,14 +454,24 @@ impl RebornTurnRunExecutor {
     /// Returns:
     /// - `Ok(())` if the run reached a terminal state (either via successful
     ///   exit application or via a successful fallback `record_runner_failure`).
-    /// - `Err(())` only when BOTH the exit applier AND the fallback
+    /// - `Err(metadata)` only when BOTH the exit applier AND the fallback
     ///   `record_runner_failure` fail — a double-failure that leaves the run in
     ///   an unknown state. The caller (`execute_claimed_run`) converts this to a
-    ///   `TurnRunExecutorError` so the scheduler can record a terminal failure.
-    async fn apply_exit(&self, claimed: &ClaimedTurnRun, mut exit: LoopExit) -> Result<(), ()> {
+    ///   `TurnRunExecutorError` so the scheduler can record a terminal failure
+    ///   without dropping usage already claimed by the exit.
+    async fn apply_exit(
+        &self,
+        claimed: &ClaimedTurnRun,
+        mut exit: LoopExit,
+        supplemental_model_usage: Option<LoopModelUsage>,
+    ) -> Result<(), TurnRunFailureMetadata> {
         let started_at = live_latency_started_at();
         let run_id = claimed.state.run_id;
         let runner_id = claimed.runner_id;
+        let exit_model_usage = LoopModelUsage::merge_optional(
+            loop_exit_model_usage(&exit).or(claimed.state.model_usage),
+            supplemental_model_usage,
+        );
 
         // §5.2.9 render-from-record: an auth block arrives with empty
         // `credential_requirements` (the flip moved them off the loop channel
@@ -370,10 +489,16 @@ impl RebornTurnRunExecutor {
             // unsubmittable (provider-null) auth gate. Record a terminal failure
             // instead — the scheduler surfaces it and the run is failed rather
             // than silently stranded.
-            return self.record_exit_failure(claimed, failure_tag).await;
+            return self
+                .record_exit_failure(claimed, failure_tag, exit_model_usage)
+                .await;
         }
 
-        match self.loop_exit_applier.apply(claimed, exit).await {
+        match self
+            .loop_exit_applier
+            .apply_with_supplemental_model_usage(claimed, exit, supplemental_model_usage)
+            .await
+        {
             Ok(state) => {
                 trace_executor_latency_ok("apply_loop_exit", claimed, started_at);
                 debug!(
@@ -422,9 +547,9 @@ impl RebornTurnRunExecutor {
                 // Exit application failed: record a terminal failure through the
                 // transitions port so the run is not stranded. Falls back to
                 // "unknown_failure" so the run always reaches a terminal state if
-                // the port cooperates; `Err(())` (double-failure) signals the
-                // caller so the scheduler can attempt its own recording.
-                self.record_exit_failure(claimed, "exit_application_failed")
+                // the port cooperates; the typed error (double-failure) signals
+                // the caller so the scheduler can attempt its own recording.
+                self.record_exit_failure(claimed, "exit_application_failed", exit_model_usage)
                     .await
             }
         }
@@ -526,20 +651,22 @@ impl RebornTurnRunExecutor {
     /// requirements could not be re-sourced from the durable record (applying it
     /// would strand the run on an unsubmittable auth gate). Mirrors the applier's
     /// own fallback so both routes leave the run terminal, never stranded.
-    /// Returns `Err(())` only on the double-failure where the transition port
-    /// itself fails, which the caller escalates to the scheduler.
+    /// Returns typed usage metadata only on the double-failure where the
+    /// transition port itself fails, which the caller escalates to the
+    /// scheduler.
     async fn record_exit_failure(
         &self,
         claimed: &ClaimedTurnRun,
         failure_tag: &'static str,
-    ) -> Result<(), ()> {
+        model_usage: Option<LoopModelUsage>,
+    ) -> Result<(), TurnRunFailureMetadata> {
         let run_id = claimed.state.run_id;
         let runner_id = claimed.runner_id;
         let failure = sanitized_failure(failure_tag)
             .unwrap_or_else(|| unknown_failure_error().failure().clone());
         match self
             .loop_exit_applier
-            .record_runner_failure(claimed, failure)
+            .record_runner_failure_with_model_usage(claimed, failure, model_usage)
             .await
         {
             Ok(_) => Ok(()),
@@ -550,9 +677,19 @@ impl RebornTurnRunExecutor {
                     error = %record_err,
                     "failed to record terminal failure"
                 );
-                Err(())
+                Err(TurnRunFailureMetadata::from_optional_model_usage(
+                    model_usage.or(claimed.state.model_usage),
+                ))
             }
         }
+    }
+}
+
+fn loop_exit_model_usage(exit: &LoopExit) -> Option<LoopModelUsage> {
+    match exit {
+        LoopExit::Completed(completed) => completed.model_usage,
+        LoopExit::Failed(failed) => failed.model_usage,
+        LoopExit::Blocked(_) | LoopExit::Cancelled(_) => None,
     }
 }
 
@@ -579,4 +716,46 @@ fn auth_gate_record_read_scope(claimed: &ClaimedTurnRun) -> ResourceScope {
         scope.user_id = user_id.clone();
     }
     scope
+}
+
+#[cfg(test)]
+mod tests {
+    use super::loop_exit_model_usage;
+    use ironclaw_host_api::turn::LoopExitId;
+    use ironclaw_loop_contracts::{LoopExit, LoopFailed, LoopFailureKind, LoopModelUsage};
+
+    #[test]
+    fn apply_exit_failure_preserves_cumulative_usage_already_on_exit() {
+        let claimed = LoopModelUsage {
+            input_tokens: 100,
+            output_tokens: 40,
+            cache_read_input_tokens: 10,
+            cache_creation_input_tokens: 2,
+        };
+        let finalizer = LoopModelUsage {
+            input_tokens: 13,
+            output_tokens: 5,
+            cache_read_input_tokens: 2,
+            cache_creation_input_tokens: 1,
+        };
+        let expected = LoopModelUsage {
+            input_tokens: 113,
+            output_tokens: 45,
+            cache_read_input_tokens: 12,
+            cache_creation_input_tokens: 3,
+        };
+        let exit = LoopExit::Failed(LoopFailed {
+            reason_kind: LoopFailureKind::ModelError,
+            checkpoint_id: None,
+            model_usage: LoopModelUsage::merge_optional(Some(claimed), Some(finalizer)),
+            exit_id: LoopExitId::new("exit:apply-failure").expect("valid exit id"),
+            explanation_message_refs: Vec::new(),
+            safe_summary: None,
+        });
+
+        // The exit already owns the cumulative total. Fallback and
+        // double-failure paths carry this snapshot through without trying to
+        // reconstruct or stringify the consumed LoopExit.
+        assert_eq!(loop_exit_model_usage(&exit), Some(expected));
+    }
 }

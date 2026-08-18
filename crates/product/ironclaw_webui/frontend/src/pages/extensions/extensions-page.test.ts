@@ -11,7 +11,7 @@ function extensionsPageSourceForTest() {
     if (line.startsWith("import ")) continue;
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { ExtensionsPage, CatalogErrorBanner };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { ExtensionsPage, CatalogErrorBanner, ActionNotice };`;
 }
 
 function visit(node, fn) {
@@ -45,9 +45,11 @@ function renderExtensionsPage(tab, extensionState = {}) {
   const hookValues = [];
   let hookCursor = 0;
   const removeCalls = [];
+  const timers = [];
   function ConfirmDialog() {}
   function ConfigureModal() {}
   function CustomMcpRegistrationModal() {}
+  function InlineNotice() {}
   function RegistryTab() {}
   const translations = {
     "ext.catalog.loadErrorTitle": "Extension catalog unavailable",
@@ -59,7 +61,6 @@ function renderExtensionsPage(tab, extensionState = {}) {
     "ext.catalog.retrying": "Retrying…",
   };
   const context = {
-    ActionToast() {},
     ChannelsTab() {},
     ConfirmDialog,
     ConfigureModal,
@@ -68,10 +69,21 @@ function renderExtensionsPage(tab, extensionState = {}) {
       activeElement: null,
       querySelectorAll: () => [],
     },
+    clearTimeout: (timerId) => {
+      const timer = timers.find((candidate) => candidate.id === timerId);
+      if (timer) timer.cleared = true;
+    },
+    setTimeout: (callback, delay) => {
+      const timer = { id: timers.length + 1, callback, delay, cleared: false };
+      timers.push(timer);
+      return timer.id;
+    },
+    InlineNotice,
     ToolsTab() {},
     Navigate() {},
     React: {
       useCallback: (fn) => fn,
+      useEffect: (effect) => effect(),
       useRef: (initial) => {
         const index = hookCursor;
         hookCursor += 1;
@@ -133,10 +145,13 @@ function renderExtensionsPage(tab, extensionState = {}) {
   return {
     ...context,
     removeCalls,
+    timers,
     render,
+    ActionNotice: context.globalThis.__testExports.ActionNotice,
     CatalogErrorBanner: context.globalThis.__testExports.CatalogErrorBanner,
     ConfigureModal,
     CustomMcpRegistrationModal,
+    InlineNotice,
     rendered: render(),
   };
 }
@@ -388,6 +403,8 @@ test("ExtensionsPage replaces a failed registry with a retryable error banner", 
   assert.match(text, /Extension catalog unavailable/);
   assert.match(text, /The extension catalog could not be loaded\./);
   assert.match(text, /Retry/);
+  assert.match(text, /tone="danger"/);
+  assert.match(text, /role="alert"/);
   assert.doesNotMatch(text, /Registry is empty/);
 });
 
@@ -412,7 +429,7 @@ test("ExtensionsPage keeps installed channels visible when only the registry fai
     CatalogErrorBanner({ isCatalogError: true, isRefetching: false, onRetry: refetch }),
   );
   assert.match(text, /Extension catalog unavailable/);
-  assert.match(text, /--v2-danger-text/);
+  assert.match(text, /tone="danger"/);
   assert.doesNotMatch(text, /Some extension data is unavailable/);
 });
 
@@ -437,8 +454,32 @@ test("ExtensionsPage keeps the registry visible when installed-extension enrichm
   assert.equal(bannerProps.isCatalogError, false);
   assert.match(text, /Some extension data is unavailable/);
   assert.match(text, /The available extension data is shown/);
-  assert.match(text, /--v2-warning-text/);
+  assert.match(text, /tone="warning"/);
   assert.doesNotMatch(text, /Extension catalog unavailable/);
+});
+
+test("ExtensionsPage keeps action feedback dismissal and automatic timeout in the caller", () => {
+  let dismissals = 0;
+  const harness = renderExtensionsPage("registry");
+  const notice = harness.ActionNotice({
+    result: { type: "error", message: "Install failed" },
+    onDismiss: () => {
+      dismissals += 1;
+    },
+  });
+  const text = templateText(notice);
+  const [noticeProps] = componentProps(notice, harness.InlineNotice);
+
+  assert.match(text, /tone="danger"/);
+  assert.match(text, /role="alert"/);
+  assert.match(text, /Install failed/);
+  assert.equal(typeof noticeProps.onDismiss, "function");
+  noticeProps.onDismiss();
+  assert.equal(dismissals, 1);
+  assert.equal(harness.timers.length, 1);
+  assert.equal(harness.timers[0].delay, 4000);
+  harness.timers[0].callback();
+  assert.equal(dismissals, 2);
 });
 
 test("ExtensionsPage blocks installed tabs when the installed-extension query fails", () => {
