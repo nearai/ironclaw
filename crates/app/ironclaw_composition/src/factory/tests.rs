@@ -1599,6 +1599,97 @@ async fn process_journal_filesystem_is_a_separate_handle_over_the_same_tenant_ro
     }
 }
 
+/// A backend whose index declaration fails, so the process journal's startup
+/// migration fails the way a broken or restrictive database makes it fail.
+struct IndexRefusingBackend;
+
+const REFUSED_INDEX_REASON: &str = "index declaration refused by the test backend";
+
+#[async_trait::async_trait]
+impl RootFilesystem for IndexRefusingBackend {
+    async fn ensure_index(
+        &self,
+        path: &ironclaw_host_api::path::VirtualPath,
+        _spec: &ironclaw_filesystem::IndexSpec,
+    ) -> Result<(), FilesystemError> {
+        Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: ironclaw_filesystem::FilesystemOperation::EnsureIndex,
+            reason: REFUSED_INDEX_REASON.to_string(),
+        })
+    }
+
+    async fn list_dir(
+        &self,
+        _path: &ironclaw_host_api::path::VirtualPath,
+    ) -> Result<Vec<ironclaw_filesystem::DirEntry>, FilesystemError> {
+        Ok(Vec::new())
+    }
+
+    async fn stat(
+        &self,
+        path: &ironclaw_host_api::path::VirtualPath,
+    ) -> Result<ironclaw_filesystem::FileStat, FilesystemError> {
+        Err(FilesystemError::NotFound {
+            path: path.clone(),
+            operation: ironclaw_filesystem::FilesystemOperation::Stat,
+        })
+    }
+}
+
+/// Startup migration failure must keep its cause reachable.
+///
+/// Both production substrate paths migrate the process journal and let `?`
+/// convert the failure, so this drives the real migration against a refusing
+/// backend and applies the same conversion. Flattening the store error into a
+/// `reason` string (as both call sites once did) leaves an operator holding
+/// "process journal startup migration failed" with no way to tell an
+/// unreachable database from a rejected index. Both boundaries are checked:
+/// composition's error and the build error it converts into.
+#[tokio::test]
+async fn process_journal_startup_migration_failure_keeps_its_cause() {
+    let store = ProcessJournalStore::new(crate::wrap_process_journal_scoped(Arc::new(
+        IndexRefusingBackend,
+    )));
+
+    let store_error = store
+        .migrate_legacy_journal()
+        .await
+        .expect_err("an index-refusing backend must fail the startup migration");
+    let error = crate::RebornCompositionError::from(store_error);
+
+    assert!(
+        matches!(
+            error,
+            crate::RebornCompositionError::ProcessJournalMigration(..)
+        ),
+        "startup migration failure must be its own variant, not a flattened config error: {error}"
+    );
+    assert!(
+        error_chain(&error).contains(REFUSED_INDEX_REASON),
+        "the backend cause must survive the composition boundary: {}",
+        error_chain(&error)
+    );
+
+    let build_error = RebornBuildError::from(error);
+    assert!(
+        error_chain(&build_error).contains(REFUSED_INDEX_REASON),
+        "the cause must also survive conversion into the build error: {}",
+        error_chain(&build_error)
+    );
+}
+
+/// Render an error and every source under it, for cause-chain assertions.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut rendered = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        rendered.push_str(&format!(" <- {cause}"));
+        source = cause.source();
+    }
+    rendered
+}
+
 /// The libSQL leg of the same split (nearai/ironclaw#7714). libSQL admits one
 /// writer process-wide, so the governor's delta journal and the process journal
 /// used to queue behind every event and message write and time out on a healthy

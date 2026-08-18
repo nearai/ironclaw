@@ -677,6 +677,11 @@ pub enum RebornCompositionError {
         "production runtime policy uses {process_backend:?} but a user sandbox process binding was supplied"
     )]
     UnexpectedUserSandboxProcessPort { process_backend: ProcessBackendKind },
+    /// Carries the store's filesystem cause; flattening it into a message
+    /// would leave an operator unable to tell a broken database from a
+    /// rejected index.
+    #[error("process journal startup migration failed")]
+    ProcessJournalMigration(#[from] ironclaw_processes::ProcessJournalStoreError),
     #[error("reborn production wiring failed: {report:?}")]
     ProductionWiring {
         report: ironclaw_host_runtime::ProductionWiringReport,
