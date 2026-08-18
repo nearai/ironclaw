@@ -135,6 +135,10 @@ where
         }
 
         let system_prompt = finalization_system_prompt(&contract)?;
+        let max_input_tokens = finalization_max_input_tokens(
+            self.prompt_context_budget.context_limit_tokens,
+            &system_prompt,
+        );
         let context_messages = ironclaw_loop_host::load_canonical_system_inference_context(
             self.thread_service.as_ref(),
             &self.thread_scope,
@@ -161,7 +165,7 @@ where
                 },
                 input_text: String::new(),
                 context_messages,
-                max_input_tokens: self.prompt_context_budget.context_limit_tokens,
+                max_input_tokens,
                 deadline_ms: FINALIZATION_DEADLINE_MS,
                 output_contract: Some(contract.clone()),
             })
@@ -283,6 +287,11 @@ where
         // not add it a second time to the exit snapshot.
         *snapshot = Some(to_loop_usage(usage));
     }
+}
+
+fn finalization_max_input_tokens(context_limit_tokens: u64, system_prompt: &str) -> u64 {
+    context_limit_tokens
+        .saturating_add(ironclaw_loop_host::estimate_tokens_from_chars(system_prompt).as_u64())
 }
 
 #[async_trait]

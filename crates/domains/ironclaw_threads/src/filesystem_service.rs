@@ -488,9 +488,9 @@ where
         else {
             return Ok(None);
         };
-        Ok(Some(deserialize::<crate::PreparedContextRecord>(
-            &versioned.entry.body,
-        )?))
+        let record = deserialize::<crate::PreparedContextRecord>(&versioned.entry.body)?;
+        crate::validate_output_contract(&record.declarations.output)?;
+        Ok(Some(record))
     }
 
     async fn read_structured_finalization_record(
@@ -2259,11 +2259,11 @@ where
         let replacement = request.replacement.clone();
         let turn_run_id = request.turn_run_id.to_string();
         let message_id = request.message_id;
-        self.apply_message_update(
-            &request.scope,
-            &request.thread_id,
-            message_id,
-            move |message| {
+        let now = Utc::now();
+        let mut did_replace = false;
+        let published = self
+            .apply_message_update(&request.scope, &request.thread_id, message_id, |message| {
+                did_replace = false;
                 if message.kind != MessageKind::Assistant
                     || message.status != MessageStatus::Finalized
                 {
@@ -2292,11 +2292,17 @@ where
                 }
                 if current_content == candidate {
                     message.content = Some(replacement.clone());
+                    message.updated_at = Some(now);
+                    did_replace = true;
                 }
                 Ok(())
-            },
-        )
-        .await
+            })
+            .await?;
+        if did_replace {
+            self.touch_thread_updated_at_best_effort_at(&request.scope, &request.thread_id, now)
+                .await;
+        }
+        Ok(published)
     }
 
     async fn replay_accepted_inbound_message(

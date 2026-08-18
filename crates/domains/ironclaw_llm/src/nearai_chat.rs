@@ -26,6 +26,7 @@ use crate::error::LlmError;
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason,
     LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    openai_json_schema_response_format,
 };
 use crate::tool_args::parse_tool_call_args_allow_trailing_lossy;
 
@@ -1487,24 +1488,6 @@ fn build_chat_completion_request(
 struct ChatCompletionOutputOptions {
     response_format: Option<crate::provider::CompletionResponseFormat>,
     tool_choice: Option<String>,
-}
-
-fn openai_json_schema_response_format(
-    format: crate::provider::CompletionResponseFormat,
-) -> serde_json::Value {
-    match format {
-        crate::provider::CompletionResponseFormat::JsonSchema(format) => serde_json::json!({
-            "type": "json_schema",
-            "json_schema": {
-                "name": format.name,
-                "strict": format.strict,
-                "schema": format.schema,
-            }
-        }),
-        crate::provider::CompletionResponseFormat::JsonObject => {
-            serde_json::json!({"type": "json_object"})
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]

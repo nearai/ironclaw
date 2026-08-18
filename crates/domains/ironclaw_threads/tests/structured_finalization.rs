@@ -132,6 +132,7 @@ async fn assert_structured_finalization_message_publish(
         })
         .await
         .expect("durable finalization record");
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
     let published = service
         .publish_structured_finalization_message(PublishStructuredFinalizationMessageRequest {
@@ -149,6 +150,10 @@ async fn assert_structured_finalization_message_publish(
         Some(finalization.raw_json.as_str())
     );
     assert_eq!(published.status, ironclaw_threads::MessageStatus::Finalized);
+    assert!(
+        published.updated_at > message.updated_at,
+        "publishing replacement content must advance message activity"
+    );
 
     let replay = service
         .publish_structured_finalization_message(PublishStructuredFinalizationMessageRequest {

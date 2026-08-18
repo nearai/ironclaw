@@ -538,7 +538,10 @@ impl SessionThreadService for InMemorySessionThreadService {
             });
         }
         if current_content == record.candidate {
+            let now = Utc::now();
             message.content = Some(request.replacement);
+            message.updated_at = Some(now);
+            thread.record.updated_at = Some(now);
         }
         Ok(message.clone())
     }

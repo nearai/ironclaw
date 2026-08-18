@@ -3060,7 +3060,7 @@ async fn thread_ports_reject_thread_scope_mismatch_before_thread_access() {
 
 #[tokio::test]
 async fn structured_finalization_rejects_scope_mismatch_before_context_read() {
-    let fixture = ThreadFixture::new().await;
+    let fixture = GatedThreadFixture::new().await;
     let mut wrong_scope = fixture.thread_scope.clone();
     wrong_scope.tenant_id = TenantId::new("different-tenant").unwrap();
 
@@ -3075,6 +3075,7 @@ async fn structured_finalization_rejects_scope_mismatch_before_context_read() {
     .unwrap_err();
 
     assert_eq!(error.kind, AgentLoopHostErrorKind::ScopeMismatch);
+    assert_eq!(fixture.thread_service.context_window_loads(), 0);
 }
 
 #[tokio::test]

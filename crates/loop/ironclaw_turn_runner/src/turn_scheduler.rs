@@ -440,6 +440,124 @@ impl TurnRunSchedulerHandle {
 mod tests {
     use super::*;
 
+    struct MetadataFailureExecutor {
+        usage: LoopModelUsage,
+    }
+
+    #[async_trait]
+    impl TurnRunExecutor for MetadataFailureExecutor {
+        async fn execute_claimed_run(
+            &self,
+            claimed: ClaimedTurnRun,
+            _process_transitions: Arc<
+                dyn ironclaw_processes::ProcessTransitionPort<Error = TurnError>,
+            >,
+        ) -> Result<(), TurnRunExecutorError> {
+            assert!(matches!(
+                claimed.state.output_contract,
+                ironclaw_host_api::output::OutputContract::JsonSchema { .. }
+            ));
+            Err(TurnRunExecutorError::from_failure(
+                SanitizedFailure::new("structured_finalization_failed")
+                    .expect("valid failure category"),
+            )
+            .with_failure_metadata(TurnRunFailureMetadata::from_model_usage(self.usage)))
+        }
+    }
+
+    #[tokio::test]
+    async fn process_executor_failure_projects_complete_agent_turn_metadata() {
+        use ironclaw_host_api::{
+            ids::{AgentId, ProjectId, TenantId, ThreadId},
+            output::OutputContract,
+            turn::{TurnId, TurnRunId, TurnScope, TurnStatus},
+        };
+        use ironclaw_loop_contracts::{
+            InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver,
+        };
+        use ironclaw_processes::JournalProcessExecutor;
+        use ironclaw_turns::{
+            AcceptedMessageRef, EventCursor, TurnLeaseToken, TurnRunState, TurnRunnerId,
+            test_support::in_memory_agent_turn_process_system,
+        };
+
+        let resolved = InMemoryRunProfileResolver::default()
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("profile");
+        let output_contract = OutputContract::try_json_schema(
+            "failure_output",
+            serde_json::json!({"type": "object"}),
+        )
+        .expect("output contract");
+        let scope = TurnScope::new(
+            TenantId::new("tenant-scheduler-metadata").expect("tenant"),
+            Some(AgentId::new("agent-scheduler-metadata").expect("agent")),
+            Some(ProjectId::new("project-scheduler-metadata").expect("project")),
+            ThreadId::new("thread-scheduler-metadata").expect("thread"),
+        );
+        let claimed = ClaimedTurnRun {
+            state: TurnRunState {
+                scope,
+                actor: None,
+                turn_id: TurnId::new(),
+                run_id: TurnRunId::new(),
+                status: TurnStatus::Running,
+                accepted_message_ref: AcceptedMessageRef::new("accepted-scheduler-metadata")
+                    .expect("accepted message"),
+                resolved_run_profile_id: resolved.profile_id.clone(),
+                resolved_run_profile_version: resolved.profile_version,
+                output_contract: output_contract.clone(),
+                allow_steering: false,
+                resolved_model_route: None,
+                model_usage: None,
+                execution_outcome: None,
+                received_at: chrono::Utc::now(),
+                checkpoint_id: None,
+                gate_ref: None,
+                blocked_activity_id: None,
+                credential_requirements: Vec::new(),
+                failure: None,
+                event_cursor: EventCursor(1),
+                product_context: None,
+                resume_disposition: None,
+            },
+            resolved_run_profile: resolved,
+            subagent_depth: 0,
+            spawn_tree_descendant_cap: None,
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+        };
+        let usage = LoopModelUsage {
+            input_tokens: 13,
+            output_tokens: 5,
+            cache_read_input_tokens: 2,
+            cache_creation_input_tokens: 1,
+        };
+        let process_system = in_memory_agent_turn_process_system();
+        let executor = TurnProcessExecutor {
+            executor: Arc::new(MetadataFailureExecutor { usage }),
+            transitions: process_system.transitions(),
+        };
+
+        let error = executor
+            .execute_claimed_process(ClaimedProcess::from(&claimed))
+            .await
+            .expect_err("executor must surface structured finalization failure");
+        let metadata: ironclaw_turns::process_projection::AgentTurnProcessMetadata =
+            serde_json::from_value(
+                error
+                    .metadata()
+                    .expect("agent-turn failure metadata")
+                    .get("agent_turn")
+                    .expect("agent_turn envelope")
+                    .clone(),
+            )
+            .expect("typed agent-turn metadata");
+        assert_eq!(metadata.output_contract, output_contract);
+        assert_eq!(metadata.model_usage, Some(usage));
+    }
+
     #[test]
     fn executor_failure_keeps_supplemental_usage_as_typed_metadata() {
         let usage = LoopModelUsage {

@@ -1245,9 +1245,13 @@ fn set_output_schema(
             // validation semantics; overwriting a stale title is required so
             // the durable response-format name remains authoritative.
             let mut schema = format.schema;
-            if let Some(object) = schema.as_object_mut() {
-                object.insert("title".to_string(), serde_json::Value::String(format.name));
-            }
+            let object = schema
+                .as_object_mut()
+                .ok_or_else(|| LlmError::InvalidRequest {
+                    provider: provider_id.to_string(),
+                    reason: "JSON Schema response format must be an object".to_string(),
+                })?;
+            object.insert("title".to_string(), serde_json::Value::String(format.name));
             rig_req.output_schema =
                 Some(
                     serde_json::from_value(schema).map_err(|error| LlmError::InvalidRequest {
@@ -1747,6 +1751,38 @@ mod tests {
     fn with_native_streaming<M: CompletionModel>(mut adapter: RigAdapter<M>) -> RigAdapter<M> {
         adapter.native_streaming = true;
         adapter
+    }
+
+    #[test]
+    fn output_schema_rejects_non_object_root_before_dispatch() {
+        let mut request = build_rig_request(
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            CacheRetention::None,
+        )
+        .expect("empty rig request");
+        let error = set_output_schema(
+            &mut request,
+            Some(CompletionResponseFormat::JsonSchema(
+                crate::provider::JsonSchemaResponseFormat::strict(
+                    "suggestions",
+                    serde_json::json!(["not", "an", "object"]),
+                ),
+            )),
+            "test-provider",
+            true,
+        )
+        .expect_err("a JSON Schema response format must have an object root");
+
+        assert!(matches!(
+            error,
+            LlmError::InvalidRequest { provider, reason }
+                if provider == "test-provider" && reason.contains("must be an object")
+        ));
     }
 
     async fn capture_one_http_request() -> (String, oneshot::Receiver<String>) {

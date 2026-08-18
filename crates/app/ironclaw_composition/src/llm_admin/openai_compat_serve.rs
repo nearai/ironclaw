@@ -237,12 +237,7 @@ impl OpenAiCompatPreparedTurnGateway {
             .service
             .wait_for_completion(
                 request.public_id.as_str(),
-                &ironclaw_product_contracts::surface::ProductSurfaceCaller::new(
-                    request.actor_scope.tenant_id().clone(),
-                    request.actor_scope.user_id().clone(),
-                    request.actor_scope.agent_id().cloned(),
-                    request.actor_scope.project_id().cloned(),
-                ),
+                &product_surface_caller_from_openai_scope(&request.actor_scope),
                 *submitted_run_id,
                 poll_interval,
             )
@@ -296,12 +291,7 @@ impl ironclaw_openai_compat::OpenAiCompatPreparedTurnPort for OpenAiCompatPrepar
         let idempotency_key = format!("openai-chat:{}", request.public_id);
         self.service
             .accept_and_submit(UnboundTurnSubmission {
-                caller: ironclaw_product_contracts::surface::ProductSurfaceCaller::new(
-                    request.scope.tenant_id().clone(),
-                    request.scope.user_id().clone(),
-                    request.scope.agent_id().cloned(),
-                    request.scope.project_id().cloned(),
-                ),
+                caller: product_surface_caller_from_openai_scope(&request.scope),
                 public_id: request.public_id,
                 system_prompt: request.system_prompt,
                 messages: request.messages,

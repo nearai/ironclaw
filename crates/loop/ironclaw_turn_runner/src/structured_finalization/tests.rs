@@ -34,7 +34,8 @@ use ironclaw_turns::{
 
 use super::{
     FINALIZATION_DEADLINE_MS, StructuredFinalizationContextLimits,
-    StructuredFinalizationCoordinator, StructuredFinalizationPort, record_matches_replay,
+    StructuredFinalizationCoordinator, StructuredFinalizationPort, finalization_max_input_tokens,
+    record_matches_replay,
 };
 
 #[test]
@@ -43,6 +44,18 @@ fn finalization_deadline_stays_below_the_process_lease() {
         .expect("default process lease fits in u64 milliseconds");
 
     assert!(FINALIZATION_DEADLINE_MS < lease_ms);
+}
+
+#[test]
+fn finalization_input_ceiling_reserves_room_for_the_host_prompt() {
+    let context_budget = 1_024;
+    let system_prompt = "return the requested structured output";
+    let prompt_tokens = ironclaw_loop_host::estimate_tokens_from_chars(system_prompt).as_u64();
+
+    assert_eq!(
+        finalization_max_input_tokens(context_budget, system_prompt),
+        context_budget + prompt_tokens
+    );
 }
 
 #[test]
@@ -774,7 +787,7 @@ async fn terminal_reply_finalization_reads_exact_row_and_publishes_idempotently(
     let run_context = LoopRunContext::new(turn_scope.clone(), turn_id, run_id, resolved.clone())
         .with_output_contract(
             OutputContract::try_json_schema(
-                "terminal.output",
+                "terminal_output",
                 serde_json::json!({"type": "object", "properties": {"items": {"type": "array"}}}),
             )
             .expect("schema"),

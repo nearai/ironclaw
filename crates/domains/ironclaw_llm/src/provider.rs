@@ -417,6 +417,24 @@ pub enum CompletionResponseFormat {
     JsonObject,
 }
 
+/// Encode the provider-neutral response-format contract in the OpenAI Chat
+/// Completions wire shape shared by compatible provider adapters.
+pub(crate) fn openai_json_schema_response_format(
+    format: CompletionResponseFormat,
+) -> serde_json::Value {
+    match format {
+        CompletionResponseFormat::JsonSchema(format) => serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": format.name,
+                "strict": format.strict,
+                "schema": format.schema,
+            }
+        }),
+        CompletionResponseFormat::JsonObject => serde_json::json!({"type": "json_object"}),
+    }
+}
+
 const fn strict_response_format() -> bool {
     true
 }

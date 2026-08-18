@@ -24,7 +24,8 @@ use crate::github_copilot_auth::CopilotTokenManager;
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmProvider,
     Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
-    strip_unsupported_completion_params, strip_unsupported_tool_params,
+    openai_json_schema_response_format, strip_unsupported_completion_params,
+    strip_unsupported_tool_params,
 };
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 use ironclaw_common::llm_costs as costs;
@@ -420,24 +421,6 @@ struct OpenAiRequest {
     tools: Option<Vec<OpenAiTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<serde_json::Value>,
-}
-
-fn openai_json_schema_response_format(
-    format: crate::provider::CompletionResponseFormat,
-) -> serde_json::Value {
-    match format {
-        crate::provider::CompletionResponseFormat::JsonSchema(format) => serde_json::json!({
-            "type": "json_schema",
-            "json_schema": {
-                "name": format.name,
-                "strict": format.strict,
-                "schema": format.schema,
-            }
-        }),
-        crate::provider::CompletionResponseFormat::JsonObject => {
-            serde_json::json!({"type": "json_object"})
-        }
-    }
 }
 
 #[derive(Debug, Serialize)]

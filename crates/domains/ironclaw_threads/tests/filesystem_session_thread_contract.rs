@@ -7836,6 +7836,57 @@ async fn filesystem_accept_prepared_context_mints_seeds_and_journals() {
     assert_eq!(window.messages.len(), 2);
 }
 
+#[tokio::test]
+async fn filesystem_read_prepared_context_rejects_a_corrupt_durable_output_contract() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let request = filesystem_prepared_request("unbound-fs-corrupt", "unbound-fs-key-corrupt");
+    let accepted = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("prepared-context accept succeeds");
+    let project_id = request.scope.project_id.as_ref().expect("project scope");
+    let path = ScopedPath::new(format!(
+        "/threads/agents/{}/projects/{}/threads/{}/prepared_context.json",
+        request.scope.agent_id, project_id, accepted.thread_id
+    ))
+    .expect("prepared-context path");
+    let mut stored: serde_json::Value = serde_json::from_slice(
+        &scoped
+            .get(&request.scope.to_resource_scope(), &path)
+            .await
+            .expect("prepared-context read")
+            .expect("prepared-context entry")
+            .entry
+            .body,
+    )
+    .expect("prepared-context JSON");
+    let mut overly_deep_schema = serde_json::json!({"type": "object"});
+    for _ in 0..40 {
+        overly_deep_schema = serde_json::json!({"properties": {"nested": overly_deep_schema}});
+    }
+    stored["declarations"]["output"]["schema"] = overly_deep_schema;
+    scoped
+        .put(
+            &request.scope.to_resource_scope(),
+            &path,
+            Entry::bytes(serde_json::to_vec_pretty(&stored).expect("serialize corruption")),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("write corrupt prepared context");
+
+    let error = service
+        .read_prepared_context(&request.scope, &accepted.thread_id)
+        .await
+        .expect_err("durable output contracts are revalidated on read");
+    assert!(matches!(
+        error,
+        SessionThreadError::InvalidPreparedContext { .. }
+    ));
+}
+
 /// Replay discipline on the durable backend: same request → same thread and
 /// pin, no duplicate rows; cross-scope reads stay non-enumerating.
 #[tokio::test]
