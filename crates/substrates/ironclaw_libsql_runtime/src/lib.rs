@@ -7,7 +7,10 @@
 use std::{
     fmt,
     ops::Deref,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -110,6 +113,8 @@ pub enum LibSqlRuntimeError {
     },
     #[error("libSQL writer acquisition is not reentrant")]
     ReentrantWriter,
+    #[error("libSQL journal lane was already split from this runtime")]
+    JournalLaneAlreadySplit,
 }
 
 /// Checkout from a connection pool configured with `PRAGMA query_only = ON`.
@@ -181,6 +186,7 @@ pub struct LibSqlRuntime {
     read_pool: LibSqlPool,
     write_pool: LibSqlPool,
     writer_holder: Arc<Mutex<Option<tokio::task::Id>>>,
+    journal_lane_split: Arc<AtomicBool>,
     /// Exact connection target used when this runtime opened its own database.
     /// Caller-supplied handles intentionally carry no target provenance.
     opened_target: Option<Arc<str>>,
@@ -241,13 +247,19 @@ impl LibSqlRuntime {
         db: Arc<libsql::Database>,
         opened_target: Option<Arc<str>>,
     ) -> Result<Self, LibSqlRuntimeError> {
-        Self::with_read_pool_size(db, opened_target, LIBSQL_READ_POOL_MAX_CONNECTIONS)
+        Self::with_read_pool_size(
+            db,
+            opened_target,
+            LIBSQL_READ_POOL_MAX_CONNECTIONS,
+            Arc::new(AtomicBool::new(false)),
+        )
     }
 
     fn with_read_pool_size(
         db: Arc<libsql::Database>,
         opened_target: Option<Arc<str>>,
         read_pool_max_connections: usize,
+        journal_lane_split: Arc<AtomicBool>,
     ) -> Result<Self, LibSqlRuntimeError> {
         Ok(Self {
             read_pool: build_pool(Arc::clone(&db), read_pool_max_connections, LibSqlLane::Read)?,
@@ -258,6 +270,7 @@ impl LibSqlRuntime {
             )?,
             db,
             writer_holder: Arc::new(Mutex::new(None)),
+            journal_lane_split,
             opened_target,
         })
     }
@@ -301,11 +314,19 @@ impl LibSqlRuntime {
     /// self-deadlock that `ReentrantWriter` catches within a lane goes
     /// undetected across lanes and stalls for the full `busy_timeout` instead.
     pub fn split_journal_lane(&self) -> Result<Self, LibSqlRuntimeError> {
-        Self::with_read_pool_size(
+        self.journal_lane_split
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| LibSqlRuntimeError::JournalLaneAlreadySplit)?;
+        let lane = Self::with_read_pool_size(
             Arc::clone(&self.db),
             self.opened_target.clone(),
             LIBSQL_JOURNAL_LANE_READ_POOL_MAX_CONNECTIONS,
-        )
+            Arc::clone(&self.journal_lane_split),
+        );
+        if lane.is_err() {
+            self.journal_lane_split.store(false, Ordering::Release);
+        }
+        lane
     }
 
     pub async fn read(&self) -> Result<LibSqlReadConnectionLease, LibSqlRuntimeError> {
@@ -606,6 +627,27 @@ mod tests {
             value, "heartbeat",
             "the journal lane must address the same database the data plane reads"
         );
+    }
+
+    #[tokio::test]
+    async fn only_one_journal_lane_can_be_split_from_a_runtime() {
+        let database = Arc::new(
+            libsql::Builder::new_local(":memory:")
+                .build()
+                .await
+                .expect("database"),
+        );
+        let data_plane = LibSqlRuntime::new(database).expect("data-plane runtime");
+
+        let journal_lane = data_plane.split_journal_lane().expect("journal lane");
+        assert!(matches!(
+            journal_lane.split_journal_lane(),
+            Err(LibSqlRuntimeError::JournalLaneAlreadySplit)
+        ));
+        assert!(matches!(
+            data_plane.split_journal_lane(),
+            Err(LibSqlRuntimeError::JournalLaneAlreadySplit)
+        ));
     }
 
     #[tokio::test]

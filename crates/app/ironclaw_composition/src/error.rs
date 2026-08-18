@@ -81,6 +81,7 @@ impl From<crate::RebornCompositionError> for RebornBuildError {
             crate::RebornCompositionError::MissingSecretMasterKey => Self::MissingSecretMasterKey,
             crate::RebornCompositionError::Mount(error) => Self::Mount(error),
             crate::RebornCompositionError::Filesystem(error) => Self::Filesystem(error),
+            crate::RebornCompositionError::LibSqlRuntime(error) => Self::LibSqlRuntime(error),
             crate::RebornCompositionError::Resource(error) => Self::Resource(error),
             crate::RebornCompositionError::ApprovalStore(error) => Self::ApprovalStore(error),
             crate::RebornCompositionError::CapabilityLease(error) => Self::CapabilityLease(error),

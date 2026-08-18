@@ -320,17 +320,8 @@ async fn build_local_storage_production_shaped(
     )
     .await?;
     let secret_credentials = SecretCredentialStores::new(scoped_filesystem, crypto);
-    // On libSQL the whole process shares one write connection, so the
-    // latency-sensitive journals get a lane of their own (#7714). On Postgres
-    // the data plane is already a multi-connection pool that does not serialize
-    // writers, so only the process journal takes the dedicated pool (#7471) and
-    // the governor stays on the data plane, unchanged.
-    //
-    // One lane serves both journals on purpose: #7714 was queue depth (every
-    // bulk writer ahead of a journal append, each holding the slot for a whole
-    // lease), and two journal producers put at most one short append ahead of
-    // each other. A lane each would add a third process-wide contender for
-    // SQLite's write lock — see `LibSqlRuntime::split_journal_lane`.
+    // libSQL journals share one bounded lane (#7714); Postgres keeps its
+    // existing process-journal pool and data-plane governor (#7471).
     let libsql_journal_lane = match &filesystem_bundle.durable_backend {
         DurableBackend::LibSql { runtime, .. } => Some(
             crate::filesystem_assembly::libsql_journal_lane_filesystem(runtime, |backend| {

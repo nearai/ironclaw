@@ -16,9 +16,13 @@ where
         });
     }
     ensure_libsql_resource_governor_authority(config.process_local_resource_governor_singleton)?;
-    let filesystem = Arc::new(LibSqlRootFilesystem::from_runtime(config.runtime));
+    let journal_runtime = Arc::new(config.runtime.split_journal_lane()?);
+    let filesystem = Arc::new(LibSqlRootFilesystem::from_runtime(Arc::clone(
+        &config.runtime,
+    )));
     filesystem.run_migrations().await?;
-    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
+    let process_journal_filesystem = Arc::new(LibSqlRootFilesystem::from_runtime(journal_runtime));
+    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&process_journal_filesystem));
     let resource_governor = FilesystemResourceGovernor::new(scoped_filesystem);
     let event_store = ironclaw_event_store::RebornEventStoreConfig::LibsqlFilesystem {
         filesystem: Arc::clone(&filesystem),
@@ -27,6 +31,7 @@ where
     build_filesystem_production_host_runtime_services(
         FilesystemProductionHostRuntimeServicesInput {
             filesystem,
+            process_journal_filesystem,
             resource_governor,
             event_store: ProductionEventStoresInput::Config(event_store),
             secret_master_key: config.secret_master_key,
@@ -82,6 +87,7 @@ where
     )?;
     build_filesystem_production_host_runtime_services(
         FilesystemProductionHostRuntimeServicesInput {
+            process_journal_filesystem: Arc::clone(&filesystem),
             filesystem,
             resource_governor,
             event_store: ProductionEventStoresInput::Prebuilt(event_store),
@@ -122,6 +128,7 @@ where
     F: RootFilesystem + 'static,
 {
     filesystem: Arc<F>,
+    process_journal_filesystem: Arc<F>,
     resource_governor: FilesystemResourceGovernor<F>,
     event_store: ProductionEventStoresInput,
     secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
@@ -190,6 +197,7 @@ where
 {
     let FilesystemProductionHostRuntimeServicesInput {
         filesystem,
+        process_journal_filesystem,
         resource_governor,
         event_store,
         secret_master_key,
@@ -200,7 +208,7 @@ where
     } = input;
     let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
     let process_journal_store = Arc::new(ProcessJournalStore::new(
-        crate::wrap_process_journal_scoped(Arc::clone(&filesystem)),
+        crate::wrap_process_journal_scoped(process_journal_filesystem),
     ));
     process_journal_store
         .migrate_legacy_journal()
@@ -208,9 +216,13 @@ where
         .map_err(|error| crate::RebornCompositionError::InvalidConfig {
             reason: format!("process journal startup migration failed: {error}"),
         })?;
-    let processes = ProcessRuntimeSystem::from_process_journal_store(process_journal_store);
+    let processes =
+        ProcessRuntimeSystem::from_process_journal_store(Arc::clone(&process_journal_store));
     let turn_state = Arc::new(processes.agent_turn_runtime());
-    let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
+    let process_services = ProcessServices::new(
+        process_journal_store,
+        Arc::new(ProcessResultStore::from_arc(Arc::clone(&scoped_filesystem))),
+    );
     let secret_credentials = build_filesystem_secret_credential_stores(
         Arc::clone(&scoped_filesystem),
         secret_master_key,
@@ -1517,14 +1529,8 @@ impl ironclaw_auth::DeliveryRegistrationPaths for DeploymentRegistrationPaths {
     }
 }
 
-/// Dedicated write lanes for the latency-sensitive journals, when the backend
-/// has them. A `None` field keeps that journal on the data-plane filesystem.
-///
-/// Postgres populates only `process_journal` (its data plane is already a
-/// multi-connection pool, so the governor has no starvation to escape, #7471).
-/// libSQL populates both: one write connection serves the whole process there,
-/// so both journals otherwise queue behind bulk event and message writes and
-/// time out on a healthy database (#7714).
+/// Optional backend-specific lanes for latency-sensitive journals. `None`
+/// keeps that journal on the data-plane filesystem.
 #[derive(Default)]
 pub(super) struct DurableJournalLanes {
     process_journal: Option<Arc<CompositeRootFilesystem>>,
@@ -1588,19 +1594,8 @@ pub(super) async fn build_libsql_production(
         filesystem: database_filesystem,
         path_or_url,
     };
-    // libSQL admits one writer process-wide, so the governor's delta journal and
-    // the process journal queue behind every event and message write and time
-    // out on a healthy database (#7714). They get a second write lane over the
-    // same rows; see `libsql_journal_lane_filesystem`.
-    //
-    // Both journals deliberately share that one lane rather than taking a lane
-    // each. What made #7714 a timeout was queue *depth*: an unbounded number of
-    // bulk writers ahead of a journal append, each holding the slot for a whole
-    // lease. Two journal producers put at most one short append ahead of the
-    // other, which is well inside the checkout timeout. A third process-wide
-    // writer would instead add another contender for SQLite's single write
-    // lock, which is the contention the one-slot pool exists to prevent (see
-    // `LibSqlRuntime::split_journal_lane`).
+    // Both libSQL journals share one bounded lane; `split_journal_lane`
+    // documents the writer-contention invariant behind #7714.
     let journal_lane = crate::filesystem_assembly::libsql_journal_lane_filesystem(
         lane_runtime.as_ref(),
         |backend| {
@@ -1674,8 +1669,7 @@ pub(super) async fn build_postgres_production(
         filesystem,
         DurableJournalLanes {
             process_journal: process_journal_filesystem,
-            // Postgres writers do not share one connection, so the governor has
-            // no starvation to escape and stays on the data plane.
+            // Postgres governor writes already use the pooled data plane.
             resource_governor: None,
         },
         trigger_repository,
