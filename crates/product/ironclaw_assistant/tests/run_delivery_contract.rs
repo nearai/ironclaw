@@ -3827,10 +3827,14 @@ async fn triggered_run_crossing_terminal_during_timeout_grace_delivers_cancellat
 #[tokio::test]
 async fn triggered_empty_notification_set_delivers_nothing() {
     let harness = build_triggered_harness(
-        vec![scripted_state(
-            TurnStatus::BlockedApproval,
-            Some("gate:approval-00000000000000000000000000000010"),
-        )],
+        vec![
+            scripted_state(
+                TurnStatus::BlockedApproval,
+                Some("gate:approval-00000000000000000000000000000010"),
+            ),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Completed, None),
+        ],
         None,
         vec![DM_TARGET, SHARED_TARGET],
     );
@@ -3860,6 +3864,10 @@ async fn triggered_empty_notification_set_delivers_nothing() {
     assert_eq!(
         inbox.notifications[0].kind,
         NotificationKind::ApprovalRequired
+    );
+    assert!(
+        inbox.notifications[0].resolved_at.is_some(),
+        "the WebUI-only watcher resolves the gate notification after the run resumes"
     );
 }
 

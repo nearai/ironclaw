@@ -642,7 +642,11 @@ async fn notify_background_run(
                     %run_id,
                     "background run parked awaiting user after notifying; recording Delivered"
                 );
-                let outcome = TriggeredRunDeliveryOutcomeKind::Delivered;
+                let outcome = if web_inbox_only {
+                    TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+                } else {
+                    TriggeredRunDeliveryOutcomeKind::Delivered
+                };
                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
                 return outcome;
             }
@@ -832,6 +836,13 @@ async fn notify_background_run(
             return outcome;
         }
         if web_inbox_only {
+            if let Some(marker) = blocked_actionable_marker(&state) {
+                // The Inbox is itself a destination. Keep observing a WebUI-only
+                // gate so the stable item can be resolved when that gate is
+                // cleared or replaced, without attempting external delivery.
+                delivered_blocked_marker = Some(marker);
+                continue;
+            }
             let outcome = TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured;
             record_triggered_run_outcome(delivery_store, run_id, outcome).await;
             return outcome;
