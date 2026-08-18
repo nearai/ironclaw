@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tomllib
 from collections import defaultdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -28,7 +28,11 @@ ROOT = Path(__file__).resolve().parents[2]
 # nothing else covers that lane. See
 # docs/internal/reborn/target-architecture/CHECKLIST.md WS10.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from crate_tree import CrateTreeError, crate_directory  # noqa: E402
+
+# Owns the publication fence (.mintignore parsing and matching).
+import docs_publication_boundary  # noqa: E402
 
 
 @functools.lru_cache(maxsize=None)
@@ -58,9 +62,58 @@ def _sandbox_docker_prefixes() -> tuple[str, ...]:
 
 MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
+# Doc-fact contract tests (#7378) read `docs/` pages from inside owning
+# crates, so a published-page edit can fail a cargo test. Route those edits
+# to exactly the doc-fact test binaries (no reverse-dependency widening —
+# prose can only change the assertions that read it); otherwise docs-only
+# PRs merge green and the failure lands on an unrelated change later.
+DOC_FACT_PAGE_TESTS = {
+    "docs/using/cli.mdx": ("ironclaw", "docs_cli_reference"),
+    "docs/api/responses.mdx": ("ironclaw_openai_compat", "docs_responses_contract"),
+}
+DOC_FACT_PUBLISHED_SWEEP = (
+    "ironclaw_extension_registry",
+    "docs_manifest_schema_version",
+)
+DOCS_PREFIX = "docs/"
+DOCS_MINTIGNORE = "docs/.mintignore"
+
+
+@functools.cache
+def _publication_fence() -> list[str]:
+    """The `.mintignore` patterns, parsed from the authoritative file so a
+    removed fence entry widens the routing with the sweep it selects. A
+    missing file means no fence (everything published), matching
+    docs_publication_boundary.find_violations()."""
+    path = Path(__file__).resolve().parents[2] / DOCS_MINTIGNORE
+    if not path.exists():
+        return []
+    return docs_publication_boundary.parse_mintignore(path.read_text(encoding="utf-8"))
+
+
+def _doc_fact_selections(path: str) -> list[tuple[str, str]]:
+    """(package, test target) pairs whose doc-fact tests read this path."""
+    if not path.startswith(DOCS_PREFIX):
+        return []
+    if path == DOCS_MINTIGNORE:
+        # A fence edit changes the sweep's scope; run it.
+        return [DOC_FACT_PUBLISHED_SWEEP]
+    selections = []
+    page = DOC_FACT_PAGE_TESTS.get(path)
+    if page is not None:
+        selections.append(page)
+    if Path(path).suffix in {".md", ".mdx"} and not docs_publication_boundary.is_ignored(
+        PurePosixPath(path[len(DOCS_PREFIX) :]), _publication_fence()
+    ):
+        selections.append(DOC_FACT_PUBLISHED_SWEEP)
+    return selections
+
+
 # Path classes with no Rust or E2E surface any Reborn lane can exercise.
 # `.claude/` is agent guidance (skills, commands, rules) — prose in the same
-# class as `docs/`. It was unclassified until 2026-08-03, which meant the
+# class as `docs/` (whose published Markdown is escalated by the doc-fact arm
+# above before this class applies; only fenced trees and non-page files reach
+# it). It was unclassified until 2026-08-03, which meant the
 # planner's fail-closed arm rejected every PR that touched agent guidance:
 # the only satisfiable behaviour for that class was "never edit it", which is
 # not a policy anyone chose. Classifying it is the fix; loosening the
@@ -315,6 +368,11 @@ PR_STATIC_CONTROL_PATHS = {
     ".cargo/config.toml",
     "tests/integration/coverage-exemptions.toml",
     "tests/integration/coverage-floor.toml",
+    # Release-smoke Python coverage is executed by Code Style's dedicated
+    # `Release smoke script tests` step. It drives the real
+    # `scripts/ci/smoke-release-binary.py`; no Tests (Reborn) Rust lane owns
+    # this unittest module.
+    "tests/test_smoke_release_binary.py",
     # Repo-root `scripts/` is deliberately NOT prefix-classified — the
     # `unmapped test or CI path` arm below exists to force a per-file decision.
     # These are decided:
@@ -486,6 +544,17 @@ DOCKER_RUNTIME_CONFIG_OWNERS = {
     "docker/reborn/config.production.toml": "crates/app/ironclaw_cli/tests/smoke.rs",
     "docker/reborn/config.hosted-single-tenant.toml": "tests/dockerfile_runtime_home.rs",
     "docker/reborn/config.hosted-single-tenant-volume.toml": "tests/dockerfile_runtime_home.rs",
+}
+# Repository configuration that a Reborn crate test reads as an asserted input.
+# These paths are not static CI control: changing one must schedule the test that
+# defines its product/security contract. The linked-device supply-chain test
+# parses Dependabot's Cargo ignore rules so the exact grammers pin cannot be
+# silently reopened by an automated dependency update.
+REPO_CONFIG_TEST_OWNERS = {
+    ".github/dependabot.yml": (
+        "crates/app/ironclaw_architecture_tests/tests/"
+        "reborn_linked_device_supply_chain_pin.rs"
+    ),
 }
 # `.githooks/` is developer-local git hook plumbing: no Reborn lane executes a
 # hook, while Code Style both triggers on the tree and lints its contents
@@ -823,6 +892,24 @@ def build_plan(
             # fail-closed until their consumers are mapped deliberately.
             shared_reborn_action_changed = True
             continue
+        if path in REPO_CONFIG_TEST_OWNERS:
+            owner = REPO_CONFIG_TEST_OWNERS[path]
+            package = next(
+                (
+                    name
+                    for directory, name in package_directories.items()
+                    if owner.startswith(f"{directory}/")
+                ),
+                None,
+            )
+            if package is None:
+                raise ValueError(
+                    f"repository config owner is in no workspace package: {owner}"
+                )
+            direct_test_packages.add(package)
+            exact_test_targets[package].add(("test", Path(owner).stem))
+            reasons.append(f"repository config parsed by {owner}: {path}")
+            continue
         if path in PR_STATIC_CONTROL_PATHS or path.startswith(
             PR_STATIC_CONTROL_PREFIXES
         ):
@@ -865,6 +952,13 @@ def build_plan(
             continue
         if path == CHANGED_COVERAGE_MANIFEST:
             reasons.append("changed-coverage policy is statically validated")
+            continue
+        doc_fact = _doc_fact_selections(path)
+        if doc_fact:
+            for package, target in doc_fact:
+                direct_test_packages.add(package)
+                exact_test_targets[package].add(("test", target))
+            reasons.append(f"doc-fact contract tests read: {path}")
             continue
         if (
             path in IGNORED_GUIDANCE_PATHS

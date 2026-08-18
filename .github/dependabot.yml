@@ -5,6 +5,23 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    # Supply-chain control for the linked-device MTProto stack, required to ship
+    # with the dependency rather than in a later hardening pass
+    # (docs/internal/design/telegram-linked-device/ADR-device-link-auth-hook.md
+    # and PROPOSAL.md §11.1). These crates run in-process with full process
+    # authority, and `=0.10.0` is a security pin: that release parses Telegram's
+    # server-pushed datacenter list and discards it, which is the only reason
+    # the package's DC-address validation covers 100% of dials.
+    #
+    # The `everything-else` group below matches `*`, so without this entry a bot
+    # would routinely propose bumping them. Ignored so a bump can only arrive as
+    # a deliberate human edit — which stays red until the same change also edits
+    # crates/app/ironclaw_architecture_tests/tests/reborn_linked_device_supply_chain_pin.rs,
+    # where the version, checksum, and resolved feature set are pinned and the
+    # bump checklist is written. That gate asserts this entry still exists;
+    # removing one without the other is a lie about who reviewed the diff.
+    ignore:
+      - dependency-name: "grammers-*"
     groups:
       tokio-ecosystem:
         patterns:

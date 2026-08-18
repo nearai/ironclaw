@@ -16,9 +16,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputIssue,
-    CapabilityProgress, ConcurrencyHint, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
-    ModelVisibleArtifact, ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail,
-    ToolObservationStatus, resolution, sanitize_model_visible_text,
+    CapabilityProgress, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
+    ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail, ToolObservationStatus,
+    resolution, sanitize_model_visible_text,
 };
 use ironclaw_threads::{
     MessageKind, MessageStatus, ReadToolResultRecordRequest, SessionThreadError,
@@ -142,7 +142,6 @@ pub fn result_read_capability(
             RESULT_READ_CAPABILITY_ID,
             RESULT_READ_PROVIDER_TOOL_NAME,
             "Read a bounded continuation of a previously completed tool result by result reference.",
-            ConcurrencyHint::SafeForParallel,
             result_read_input_schema(),
         )?,
         Arc::new(ResultReadHandler {

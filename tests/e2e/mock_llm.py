@@ -306,6 +306,7 @@ TOOL_CALL_PATTERNS = [
                 "success_criteria": ["Complete the requested task"],
                 "output_instructions": "Return a concise result",
                 "no_result_text": "No result",
+                "policy": {"result_delivery": "deliver"},
             },
             "schedule": {
                 "kind": "once",

@@ -39,11 +39,10 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::SurfaceKind;
 use ironclaw_loop_contracts::{
     AgentLoopHostError, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
-    CapabilitySurfaceVersion, ConcurrencyHint, InMemoryLoopHostMilestoneSink,
-    InstructionSafetyContext, LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken,
-    LoopInputCursorToken, LoopRequest, LoopRequestBatch, LoopRunContext, NoOpBudgetAccountant,
-    NoOpPolicyGuard, ParentLoopOutput, PromptMode, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, resolution,
+    CapabilitySurfaceVersion, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
+    LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken, LoopRequest,
+    LoopRequestBatch, LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, ParentLoopOutput,
+    PromptMode, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
 };
 use ironclaw_loop_host::{
     CapabilityResolveError, CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort,
@@ -949,7 +948,6 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
                 safe_description: "harness capability".to_string(),
                 description_trust: Default::default(),
                 parameters_schema: serde_json::json!({ "type": "object" }),
-                concurrency_hint: ConcurrencyHint::Exclusive,
             }],
         })
     }

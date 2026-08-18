@@ -52,6 +52,11 @@ async fn harness_full(bindings: ExtensionBindings, fail_load: bool) -> Harness {
         reserved_capability_ids: Default::default(),
         reserved_ingress_routes: Default::default(),
         hook_deadline: Duration::from_secs(5),
+        linked_sessions: ironclaw_extension_host::LinkedSessionStore::unavailable(),
+        linked_accounts: std::sync::Arc::new(
+            ironclaw_extension_host::UnavailableLinkedAccountResolution,
+        ),
+        admin_secrets: None,
     };
     let host = ExtensionHost::new(deps).await;
     Harness {
@@ -88,6 +93,7 @@ fn tool_and_channel_bindings(channel: Arc<FakeChannelAdapter>) -> ExtensionBindi
             .with_ingress(channel.clone())
             .with_reply(channel.clone())
             .with_delivery(channel),
+        device_link: None,
     }
 }
 
@@ -99,6 +105,7 @@ fn channel_only_bindings(channel: Arc<FakeChannelAdapter>) -> ExtensionBindings 
             .with_ingress(channel.clone())
             .with_reply(channel.clone())
             .with_delivery(channel),
+        device_link: None,
     }
 }
 
@@ -120,6 +127,11 @@ async fn harness_with_egress(
         reserved_capability_ids: Default::default(),
         reserved_ingress_routes: Default::default(),
         hook_deadline: Duration::from_secs(5),
+        linked_sessions: ironclaw_extension_host::LinkedSessionStore::unavailable(),
+        linked_accounts: std::sync::Arc::new(
+            ironclaw_extension_host::UnavailableLinkedAccountResolution,
+        ),
+        admin_secrets: None,
     };
     Harness {
         host: ExtensionHost::new(deps).await,
@@ -172,6 +184,7 @@ async fn hosted_mcp_connection_template_alone_fails_activation() {
                 ironclaw_extension_host::test_support::FakeToolAdapter,
             )),
             channel: Default::default(),
+            device_link: None,
         },
         channel,
     )
@@ -599,6 +612,7 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
         ExtensionBindings {
             tools: Some(Arc::new(AuthGatingAdapter)),
             channel: channel_only_bindings(Arc::clone(&channel)).channel,
+            device_link: None,
         },
         channel,
     )
@@ -670,6 +684,11 @@ async fn extension_capabilities_colliding_with_host_bridges_fail_activation() {
         reserved_capability_ids: reserved_capability_ids.clone(),
         reserved_ingress_routes: Default::default(),
         hook_deadline: Duration::from_secs(5),
+        linked_sessions: ironclaw_extension_host::LinkedSessionStore::unavailable(),
+        linked_accounts: std::sync::Arc::new(
+            ironclaw_extension_host::UnavailableLinkedAccountResolution,
+        ),
+        admin_secrets: None,
     };
     let host = ExtensionHost::new(deps).await;
 

@@ -1,6 +1,7 @@
 import { NavLink } from "react-router";
 import React from "react";
 import { Icon } from "../design-system/icons";
+import { SearchField } from "../design-system/search-field";
 import { ConfirmDialog } from "../design-system/confirm-dialog";
 import { MarqueeText } from "./marquee-text";
 import { useT } from "../lib/i18n";
@@ -313,16 +314,14 @@ export function SidebarThreads({
       (
         <>
         {threads.length > 0 &&
-        (<div className="relative mb-1 mt-1 px-1">
-          <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--v2-text-faint)]">
-            <Icon name="search" className="h-3.5 w-3.5" />
-          </span>
-          <input
-            type="text"
+        (<div className="mb-1 mt-1 px-1">
+          <SearchField
             value={query}
-            onInput={(event) => setQuery(event.currentTarget.value)}
+            onChange={setQuery}
+            onClear={() => setQuery("")}
             placeholder={t("common.searchChats")}
-            className="h-8 w-full rounded-[8px] border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] pl-8 pr-2 text-[12px] text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
+            aria-label={t("common.searchChats")}
+            clearLabel={t("settings.clearSearch")}
           />
         </div>)}
         {rebornProjectsEnabled &&

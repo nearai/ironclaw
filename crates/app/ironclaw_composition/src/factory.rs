@@ -79,7 +79,8 @@ use ironclaw_capabilities::{
 };
 use ironclaw_conversations::RebornFilesystemConversationServices;
 use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ConversationActorPairingService};
-use ironclaw_event_log::{DurableAuditLog, DurableEventLog};
+use ironclaw_event_log::{DurableAuditLog, DurableEventLog, EventSink, NonBlockingEventSink};
+use ironclaw_event_store::{CoalescingEventSink, EventBatchConfig};
 use ironclaw_extension_contracts::external::ExternalActorRef;
 use ironclaw_extension_contracts::recipe::RecipeClientCredentials;
 use ironclaw_extension_host::channel_pairing::ChannelPairingRegistry;
@@ -190,7 +191,6 @@ use ironclaw_triggers::{
 };
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use ironclaw_turn_runner::runtime::ProcessRuntimeSystem;
-use ironclaw_turns::AgentTurnRuntimePort;
 use ironclaw_turns::{ExternalToolCatalog, InMemoryExternalToolCatalog};
 use secrecy::SecretString;
 
@@ -203,11 +203,9 @@ use auth_engine_assembly::{
 };
 mod trigger_creation_assembly;
 use trigger_creation_assembly::TriggerCreatorPairingHook;
+pub(crate) use trigger_creation_assembly::TriggerExecutionPolicyPreflight;
 #[cfg(test)]
 use trigger_creation_assembly::pair_trigger_creator;
-pub(crate) use trigger_creation_assembly::{
-    LateBoundAgentTurnRuntime, TriggerExecutionPolicyPreflight,
-};
 pub(crate) mod production_backend_assembly;
 mod production_build_assembly;
 mod runtime_lane_assembly;
@@ -308,14 +306,6 @@ pub(crate) struct RebornRuntimeStores {
             >,
         >,
     >,
-    /// Sibling read-only reply-target projection; repointed with the lifecycle
-    /// source by test-support harnesses.
-    #[cfg(any(test, feature = "test-support"))]
-    #[allow(
-        dead_code,
-        reason = "held for test-support rebinding after runtime construction"
-    )]
-    pub(crate) trigger_source_turn_state: Arc<std::sync::RwLock<Arc<dyn AgentTurnRuntimePort>>>,
     pub(crate) extension_management: Arc<RebornLocalExtensionManagementPort>,
     pub(crate) admin_configuration: Arc<ComposedAdminConfigurationService>,
     pub(crate) admin_configuration_uses: Arc<Vec<AdminConfigurationCatalogUse>>,
@@ -365,6 +355,9 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) budget_gate_store: Arc<dyn BudgetGateStorePort>,
     pub(crate) broadcast_budget_event_sink: Arc<BroadcastBudgetEventSink>,
     pub(crate) event_log: Arc<dyn DurableEventLog>,
+    /// One composition-owned write-behind sink shared by every runtime-event
+    /// producer over `event_log`.
+    pub(crate) runtime_event_sink: Arc<dyn NonBlockingEventSink>,
     pub(crate) audit_log: Arc<dyn DurableAuditLog>,
     pub(crate) admin_secret_provisioner: Arc<dyn ironclaw_assistant::AdminSecretProvisioner>,
     pub(crate) project_service: Arc<dyn ProjectService>,
@@ -1040,23 +1033,35 @@ fn write_standalone_secret_master_key(path: &Path, key: &str) -> Result<(), Rebo
                 reason: "standalone secrets master key could not be restricted: USERNAME is unset"
                     .to_string(),
             })?;
-        let status = std::process::Command::new("icacls")
+        // `icacls` writes a success banner to stdout. Capture it so commands
+        // such as `ironclaw extension search --json` keep stdout machine-clean.
+        let output = std::process::Command::new("icacls")
             .arg(path)
             .arg("/inheritance:r")
             .arg("/grant:r")
             .arg(format!("{account}:F"))
-            .status()
+            .output()
             .map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!(
                     "standalone secrets master key permissions could not be set: {error}"
                 ),
             })?;
-        if !status.success() {
+        if !output.status.success() {
             let _ = std::fs::remove_file(path);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
             return Err(RebornBuildError::InvalidConfig {
-                reason: format!(
-                    "standalone secrets master key permissions could not be set: icacls exited with {status}"
-                ),
+                reason: if stderr.is_empty() {
+                    format!(
+                        "standalone secrets master key permissions could not be set: icacls exited with {}",
+                        output.status
+                    )
+                } else {
+                    format!(
+                        "standalone secrets master key permissions could not be set: icacls exited with {}: {stderr}",
+                        output.status
+                    )
+                },
             });
         }
         file.write_all(key.as_bytes())
@@ -1230,23 +1235,29 @@ fn manifest_channel_account_setup_descriptors(
         .filter_map(|manifest| {
             let channel = manifest.channel.as_ref()?;
             let connection = channel.connection.as_ref()?;
-            if connection.strategy
-                != ironclaw_extension_contracts::channel::ChannelConnectionStrategy::WebGeneratedCode
-            {
-                return None;
-            }
+            let (account_setup, connect_strategy) = match connection.strategy {
+                ironclaw_extension_contracts::channel::ChannelConnectionStrategy::WebGeneratedCode => (
+                    ironclaw_host_api::capability::RuntimeCredentialAccountSetup::Pairing,
+                    ironclaw_assistant::RebornChannelConnectStrategy::WebGeneratedCode,
+                ),
+                ironclaw_extension_contracts::channel::ChannelConnectionStrategy::DeviceLink => (
+                    ironclaw_host_api::capability::RuntimeCredentialAccountSetup::DeviceLink,
+                    ironclaw_assistant::RebornChannelConnectStrategy::DeviceLink,
+                ),
+                _ => return None,
+            };
             Some(ExtensionAccountSetupDescriptor {
                 extension_id: manifest.id.clone(),
                 auth_requirement: ironclaw_host_api::decision::RuntimeCredentialAuthRequirement {
                     provider: connection.provider.clone(),
-                    setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::Pairing,
+                    setup: account_setup,
                     requester_extension: manifest.id.clone(),
                     provider_scopes: Vec::new(),
                 },
                 connection_requirement: ChannelConnectionRequirement {
                     channel: manifest.id.as_str().to_string(),
                     display_name: manifest.name.clone(),
-                    strategy: ironclaw_assistant::RebornChannelConnectStrategy::WebGeneratedCode,
+                    strategy: connect_strategy,
                     instructions: connection.instructions.clone(),
                     input_placeholder: connection.input_placeholder.clone(),
                     submit_label: connection.submit_label.clone(),

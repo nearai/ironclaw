@@ -177,12 +177,15 @@ fn extension_install_auto_advances_and_remove_uses_persisted_installation_state(
 }
 
 fn run_extension_json(reborn_home: &Path, args: &[&str]) -> serde_json::Value {
-    let output = Command::new(reborn_bin())
+    let mut command = Command::new(reborn_bin());
+    command
         .arg("extension")
         .args(args)
         .env_clear()
         .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
-        .env("IRONCLAW_REBORN_HOME", reborn_home)
+        .env("IRONCLAW_REBORN_HOME", reborn_home);
+    preserve_windows_runtime_environment(&mut command);
+    let output = command
         .output()
         .expect("ironclaw-reborn extension command should run");
 
@@ -193,6 +196,17 @@ fn run_extension_json(reborn_home: &Path, args: &[&str]) -> serde_json::Value {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(stdout.trim()).expect("valid JSON")
+}
+
+fn preserve_windows_runtime_environment(command: &mut Command) {
+    #[cfg(windows)]
+    for key in ["PATH", "SystemRoot", "WINDIR", "USERNAME", "USERDOMAIN"] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = command;
 }
 
 fn standalone_runtime_root(reborn_home: &Path) -> std::path::PathBuf {

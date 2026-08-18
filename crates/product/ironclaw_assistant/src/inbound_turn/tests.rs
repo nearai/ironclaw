@@ -59,7 +59,6 @@ impl TurnCoordinator for CapturingTurnCoordinator {
     ) -> Result<SubmitTurnResponse, TurnError> {
         let run_id = TurnRunId::new();
         let message_ref = request.accepted_message_ref.clone();
-        let reply_ref = request.reply_target_binding_ref.clone();
         self.submissions.lock().unwrap().push(request);
         Ok(SubmitTurnResponse::Accepted {
             turn_id: TurnId::new(),
@@ -69,7 +68,6 @@ impl TurnCoordinator for CapturingTurnCoordinator {
             resolved_run_profile_version: RunProfileVersion::new(1),
             event_cursor: EventCursor(0),
             accepted_message_ref: message_ref,
-            reply_target_binding_ref: reply_ref,
         })
     }
 

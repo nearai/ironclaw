@@ -1417,6 +1417,12 @@ pub enum RebornExtensionCredentialSetup {
     /// Channel pairing: the setup card routes to the channel's pairing panel
     /// (host-issued code + deep link), never a token-submit form.
     Pairing,
+    /// Device link: the setup card routes to the multi-step device-link panel,
+    /// never a token-submit form. There is no secret for the user to paste —
+    /// the vendor issues the payload and the host takes custody of the
+    /// resulting session — so a card that fell back to the manual-token form
+    /// here would ask for a value that does not exist.
+    DeviceLink,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

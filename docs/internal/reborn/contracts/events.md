@@ -36,6 +36,7 @@ pub struct RuntimeEvent {
     pub runtime: Option<RuntimeKind>,
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
+    pub duration_ms: Option<u64>,
     pub error_kind: Option<String>,
     pub error_summary: Option<String>,
     pub hook_id: Option<String>,
@@ -79,7 +80,7 @@ pub enum RuntimeEventKind {
 }
 ```
 
-Model/reply milestone events are metadata-only loop milestones. `ModelFailed` is attempt-level progress and does not by itself mean the loop/run is terminally failed; trusted terminal status comes from validated `LoopCompleted` / `LoopFailed` milestones or a later trusted turn-run transition source. These events carry scope, capability id, and sanitized failure kind when applicable; they do not carry raw prompts, assistant content, provider errors, host paths, secrets, or message payloads.
+Live loop progress retains `ModelStarted` and terminal model milestones. New durable runtime streams omit `ModelStarted` and write one `ModelCompleted` or `ModelFailed` event with bounded `duration_ms`; historical `ModelStarted` rows and terminal rows without duration remain readable and fold to the same final run projection. `ModelFailed` is attempt-level progress and does not by itself mean the loop/run is terminally failed; trusted terminal status comes from validated `LoopCompleted` / `LoopFailed` milestones or a later trusted turn-run transition source. These events carry scope, capability id, bounded duration, and sanitized failure kind when applicable; they do not carry raw prompts, assistant content, provider errors, host paths, secrets, or message payloads. This compatibility is pinned by `ironclaw_event_log::runtime_event` serde tests and `ironclaw_event_projections/tests/replay_projection_contract.rs::terminal_only_model_stream_reaches_the_same_final_run_projection`.
 
 `FailureRecovered` is a durable, non-terminal numerator event emitted when the
 canonical loop applies a non-terminal recovery outcome. Its closed-vocabulary
@@ -214,6 +215,14 @@ cargo test -p ironclaw_composition --lib projection::tests::nested_dispatch_stre
 ```
 
 Runtime dispatcher event emission is best-effort observability. If the configured `EventSink` fails, the dispatcher ignores that sink error and still returns the original dispatch success or original dispatch failure.
+
+Loop milestones and accepted loop-cancellation events use
+`EventSink::try_emit`: a full bounded coalescing channel records a dropped event
+without applying backpressure or changing the agent-loop outcome.
+`RebornRuntime::shutdown` still flushes the same composition-owned sink, waiting
+for accepted events to drain and returning an error if a durable append failed.
+The process journal, turn state, and checkpoints remain the authoritative
+lifecycle records; runtime events are best-effort projections.
 
 ---
 

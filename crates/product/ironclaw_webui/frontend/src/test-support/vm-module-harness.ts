@@ -1,12 +1,23 @@
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 const STATIC_IMPORT_RE =
   /(^|\n)[ \t]*import(?:\s+[\s\S]*?\s+from\s*)?\s*["'][^"'\n]+["'](?:\s+(?:assert|with)\s*\{[\s\S]*?\})?\s*;?[ \t]*(?=\n|$)/g;
 const NAMED_EXPORT_DECLARATION_RE =
-  /^(\s*)export\s+(?=(?:async\s+)?function\b|class\b|(?:const|let|var)\b)/gm;
+  /^(\s*)export\s+(?=(?:async\s+)?function\b|class\b|interface\b|type\b|(?:const|let|var)\b)/gm;
 const NAMED_EXPORT_LIST_RE = /^(\s*)export\s*\{([\s\S]*?)\}\s*;?[ \t]*$/gm;
+
+function stripTypeScript(source: string): string {
+  return ts.transpileModule(source, {
+    compilerOptions: {
+      jsx: ts.JsxEmit.Preserve,
+      module: ts.ModuleKind.None,
+      target: ts.ScriptTarget.ES2022,
+    },
+  }).outputText;
+}
 
 export function sourceForVmTest(path, exportNames, metaUrl) {
   return sourceTextForVmTest(
@@ -29,13 +40,14 @@ export function sourceTextForVmTest(source, exportNames) {
       return "";
     })
     .replace(NAMED_EXPORT_DECLARATION_RE, "$1");
+  const executableSource = stripTypeScript(transformed);
   const testExports = exportNames
     .map((name) => {
       const localName = exportAliases.get(name) || name;
       return localName === name ? name : `${JSON.stringify(name)}: ${localName}`;
     })
     .join(", ");
-  return `${transformed.trimEnd()}\nglobalThis.__testExports = { ${testExports} };\n`;
+  return `${executableSource.trimEnd()}\nglobalThis.__testExports = { ${testExports} };\n`;
 }
 
 export function runVmModuleForTest(path, exportNames, context, metaUrl) {

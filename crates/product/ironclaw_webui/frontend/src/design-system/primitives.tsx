@@ -7,9 +7,11 @@
  * Re-exports: StatusPill (→ Badge), Panel (→ Card)
  * New exports: StatCard, FlowList, EmptyPanel, SectionHeader, SubLabel
  */
+import type { CSSProperties, ReactNode } from "react";
+
 import { cn } from "../utils/cn";
-import { Card } from "./card";
-import { Badge } from "./badge";
+import { Badge, type BadgeProps } from "./badge";
+import { Card, type CardProps } from "./card";
 
 /* ── Re-exports ────────────────────────────────────────────────────── */
 
@@ -20,13 +22,15 @@ export { Badge, Badge as StatusPill };
  * Panel — thin wrapper over Card so existing `import { Panel }` still works.
  * Usage: <${Panel} className="p-5"> … <//>
  */
-export function Panel({ children, className = "", ...rest }) {
+export function Panel({ children, className = "", ...rest }: CardProps) {
   return (<Card className={className} {...rest}>{children}</Card>);
 }
 
 /* ── cx helper (kept for any file that imports it from primitives) ── */
 
-export function cx(...classes) {
+type ClassValue = string | number | false | null | undefined | ClassValue[];
+
+export function cx(...classes: ClassValue[]): string {
   return classes.flat().filter(Boolean).join(" ");
 }
 
@@ -49,6 +53,17 @@ export function cx(...classes) {
  *     concatenates (no tailwind-merge), so this REPLACES the size classes
  *     rather than appending to them.
  */
+export type StatCardProps = {
+  badgeLabel?: ReactNode;
+  className?: string;
+  detail?: ReactNode;
+  label: ReactNode;
+  showDivider?: boolean;
+  tone?: BadgeProps["tone"];
+  value: ReactNode;
+  valueClassName?: string;
+};
+
 export function StatCard({
   label,
   value,
@@ -58,7 +73,7 @@ export function StatCard({
   showDivider = true,
   className = "",
   valueClassName = "text-[1.75rem] md:text-[2rem]",
-}) {
+}: StatCardProps) {
   return (
     <div
       className={cn(
@@ -97,7 +112,18 @@ export function StatCard({
 /**
  * Numbered list of { title, description } items.
  */
-export function FlowList({ items }) {
+export type FlowListItem = {
+  description: ReactNode;
+  title: string;
+};
+
+export type FlowListProps = {
+  items: readonly FlowListItem[];
+};
+
+type IndexedStyle = CSSProperties & { "--index": number };
+
+export function FlowList({ items }: FlowListProps) {
   return (
     <div className="grid gap-3">
       {items.map(
@@ -105,7 +131,7 @@ export function FlowList({ items }) {
           <div
             key={item.title}
             className="grid grid-cols-[2.75rem_minmax(0,1fr)] gap-4 border-t border-[var(--v2-panel-border)] py-4"
-            style={{ "--index": index } as any}
+            style={{ "--index": index } as IndexedStyle}
           >
             <div className="font-mono text-xs text-[var(--v2-accent-text)]">
               {String(index + 1).padStart(2, "0")}
@@ -135,7 +161,19 @@ export function FlowList({ items }) {
  *   children    optional CTA (usually a Button)
  *   boxed       boolean (wrap in Card)
  */
-export function EmptyPanel({ title, description, children = null, boxed = true }) {
+export type EmptyPanelProps = {
+  boxed?: boolean;
+  children?: ReactNode;
+  description: ReactNode;
+  title: ReactNode;
+};
+
+export function EmptyPanel({
+  title,
+  description,
+  children = null,
+  boxed = true,
+}: EmptyPanelProps) {
   const body = (
     <div className="max-w-xl">
       <h2
@@ -162,7 +200,12 @@ export function EmptyPanel({ title, description, children = null, boxed = true }
  * Top heading card (hidden on mobile, visible md+) matching reference:
  *   h1 text-[1.9rem] md:text-[2.2rem] font-medium tracking-[-0.04em]
  */
-export function SectionHeader({ title, subtitle }) {
+export type SectionHeaderProps = {
+  subtitle?: ReactNode;
+  title: ReactNode;
+};
+
+export function SectionHeader({ title, subtitle }: SectionHeaderProps) {
   return (
     <Card padding="lg" className="hidden md:block">
       <h1
@@ -182,7 +225,12 @@ export function SectionHeader({ title, subtitle }) {
 /**
  * Section divider label: text-[1.35rem] font-medium text/82
  */
-export function SubLabel({ children, className = "" }) {
+export type SubLabelProps = {
+  children?: ReactNode;
+  className?: string;
+};
+
+export function SubLabel({ children, className = "" }: SubLabelProps) {
   return (
     <div
       className={cn(

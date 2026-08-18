@@ -38,6 +38,17 @@ impl HostManagedCredentialFallbackRule {
         &self,
         request: &RuntimeCredentialAccountSelectionRequest,
     ) -> Option<RuntimeCredentialAccountSelectionRequest> {
+        // A linked device is never eligible for this fallback (PROPOSAL §4.5).
+        // `scope_matches` below omits `user_id` from its predicate on purpose —
+        // a host-managed key is bootstrapped once per tenant/agent and shared —
+        // and a linked device is the exact opposite: one person's own vendor
+        // account, held under their own scope. Serving it through this rule
+        // would hand every user in the tenant a working session as that one
+        // user. Refused on the request's declared setup so the wrong account is
+        // never even looked up.
+        if matches!(request.setup, RuntimeCredentialAccountSetup::DeviceLink) {
+            return None;
+        }
         let requester_extension = request.lookup.requester_extension.as_ref()?;
         if request.lookup.provider != self.provider
             || requester_extension != &self.requester_extension
@@ -108,9 +119,29 @@ impl RuntimeCredentialAccountSelectionService for HostManagedRuntimeCredentialAc
                 let Some(host_request) = self.fallback.host_request_for(&request) else {
                     return Err(AuthProductError::CredentialMissing);
                 };
-                self.inner
+                match self
+                    .inner
                     .select_unique_configured_runtime_account(host_request)
                     .await
+                {
+                    // Second half of the linked-device exclusion, on the
+                    // resolved account rather than the declared setup. The
+                    // setup check above is what a well-formed device-link
+                    // request trips; this one holds even if some other setup
+                    // resolves — through a rule whose scope predicate omits
+                    // `user_id` — onto an account that carries a live device
+                    // authorization belonging to one specific person. Reported
+                    // as missing, which is the honest answer: this requester
+                    // has no credential of its own.
+                    Ok(account) if account.is_linked_device() => {
+                        tracing::debug!(
+                            provider = %account.provider,
+                            "host-managed credential fallback refused a linked-device account"
+                        );
+                        Err(AuthProductError::CredentialMissing)
+                    }
+                    result => result,
+                }
             }
             result => result,
         }

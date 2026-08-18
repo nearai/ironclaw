@@ -389,5 +389,114 @@ class ReleaseTagTests(unittest.TestCase):
                 release._manifest_version(candidate_root)
 
 
+class StableChangelogGateTests(unittest.TestCase):
+    """A stable cut requires the candidate's docs/changelog.mdx entry; rc
+    cuts stay exempt so the freeze/blocker flow is unimpeded."""
+
+    STABLE = "1.2.0"
+
+    def write_changelog(self, root: Path, body: str) -> None:
+        changelog = root / "docs" / "changelog.mdx"
+        changelog.parent.mkdir(parents=True, exist_ok=True)
+        changelog.write_text(body, encoding="utf-8")
+
+    def test_stable_cut_without_changelog_entry_refuses(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_changelog(root, '<Update description="v1.1.0">old</Update>\n')
+            with self.assertRaisesRegex(
+                release.ReleaseTagError, "no entry for v1.2.0"
+            ):
+                release.ensure_stable_changelog_entry(root, self.STABLE)
+
+    def test_stable_cut_without_changelog_file_refuses(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                release.ReleaseTagError, "cannot be read"
+            ):
+                release.ensure_stable_changelog_entry(Path(directory), self.STABLE)
+
+    def test_stable_cut_with_entry_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_changelog(
+                root, '<Update label="2026-08-10" description="v1.2.0">…</Update>\n'
+            )
+            release.ensure_stable_changelog_entry(root, self.STABLE)
+
+    def test_rc_labeled_entry_does_not_satisfy_the_stable_gate(self) -> None:
+        """`description="v1.2.0-rc.1"` contains `v1.2.0` as a substring; the
+        exact-attribute probe must still refuse the stable cut."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_changelog(
+                root,
+                '<Update label="2026-08-10" description="v1.2.0-rc.1">…</Update>\n',
+            )
+            with self.assertRaisesRegex(
+                release.ReleaseTagError, "no entry for v1.2.0"
+            ):
+                release.ensure_stable_changelog_entry(root, self.STABLE)
+
+    def test_prose_mention_does_not_satisfy_the_stable_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_changelog(
+                root, "The v1.2.0 release notes are coming soon.\n"
+            )
+            with self.assertRaisesRegex(
+                release.ReleaseTagError, "no entry for v1.2.0"
+            ):
+                release.ensure_stable_changelog_entry(root, self.STABLE)
+
+    def test_lookalike_attribute_does_not_satisfy_the_stable_gate(self) -> None:
+        """Only a real `<Update>` tag counts — not `data-description=` or the
+        same attribute on another element."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_changelog(
+                root,
+                '<Update data-description="v1.2.0">…</Update>\n'
+                '<Card description="v1.2.0">…</Card>\n',
+            )
+            with self.assertRaisesRegex(
+                release.ReleaseTagError, "no entry for v1.2.0"
+            ):
+                release.ensure_stable_changelog_entry(root, self.STABLE)
+
+    def test_main_gates_the_cut_before_any_tag_operation(self) -> None:
+        """The gate must run inside main(), against the candidate root, before
+        GitHubTags is even constructed — not only as a callable helper."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_changelog(root, '<Update description="v1.1.0">…</Update>\n')
+            argv = [
+                "cut_ironclaw_release.py",
+                "--version", self.STABLE,
+                "--commit-sha", "0" * 40,
+                "--candidate-root", str(root),
+                "--repository", "nearai/ironclaw",
+            ]
+            with mock.patch("sys.argv", argv), mock.patch.object(
+                release, "GitHubTags"
+            ) as tags:
+                with self.assertRaisesRegex(
+                    release.ReleaseTagError, "no entry for v1.2.0"
+                ):
+                    release.main()
+            tags.assert_not_called()
+
+    def test_prerelease_cut_is_exempt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            # No docs/ tree at all: an rc cut must not require one.
+            release.ensure_stable_changelog_entry(Path(directory), "1.2.0-rc.1")
+
+    def test_malformed_version_is_left_to_the_canonical_validator(self) -> None:
+        """`ensure_release_tag` owns the invalid-version message; the
+        changelog gate must not preempt it with a confusing changelog error."""
+        with tempfile.TemporaryDirectory() as directory:
+            release.ensure_stable_changelog_entry(Path(directory), "not-a-version")
+
+
 if __name__ == "__main__":
     unittest.main()

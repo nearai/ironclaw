@@ -1022,6 +1022,77 @@ async fn replay_projection_preserves_safe_capability_error_detail() {
 }
 
 #[tokio::test]
+async fn terminal_only_model_stream_reaches_the_same_final_run_projection() {
+    let historical_log = Arc::new(InMemoryDurableEventLog::new());
+    let terminal_only_log = Arc::new(InMemoryDurableEventLog::new());
+    let historical_service = ReplayEventProjectionService::new(Arc::clone(&historical_log));
+    let terminal_only_service = ReplayEventProjectionService::new(Arc::clone(&terminal_only_log));
+    let scope = scope_for_thread(ThreadId::new("thread-model-stream-parity").unwrap());
+    let model_capability = CapabilityId::new("loop.model").unwrap();
+    let reply_capability = CapabilityId::new("loop.assistant_reply").unwrap();
+
+    historical_log
+        .append(RuntimeEvent::model_started(
+            scope.clone(),
+            model_capability.clone(),
+        ))
+        .await
+        .unwrap();
+    historical_log
+        .append(RuntimeEvent::model_completed(
+            scope.clone(),
+            model_capability.clone(),
+        ))
+        .await
+        .unwrap();
+    terminal_only_log
+        .append(RuntimeEvent::model_completed_with_duration(
+            scope.clone(),
+            model_capability,
+            17,
+        ))
+        .await
+        .unwrap();
+    for log in [
+        historical_log.as_ref() as &dyn DurableEventLog,
+        terminal_only_log.as_ref() as &dyn DurableEventLog,
+    ] {
+        log.append(RuntimeEvent::assistant_reply_finalized(
+            scope.clone(),
+            reply_capability.clone(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    let request = ProjectionRequest {
+        scope: ProjectionScope::from_resource_scope(&scope),
+        after: None,
+        limit: 16,
+    };
+    let historical = historical_service.snapshot(request.clone()).await.unwrap();
+    let terminal_only = terminal_only_service.snapshot(request).await.unwrap();
+    assert_eq!(historical.runs.len(), 1);
+    assert_eq!(terminal_only.runs.len(), 1);
+    let historical_run = &historical.runs[0];
+    let terminal_only_run = &terminal_only.runs[0];
+    assert_eq!(
+        historical_run.invocation_id,
+        terminal_only_run.invocation_id
+    );
+    assert_eq!(
+        historical_run.capability_id,
+        terminal_only_run.capability_id
+    );
+    assert_eq!(historical_run.thread_id, terminal_only_run.thread_id);
+    assert_eq!(historical_run.status, terminal_only_run.status);
+    assert_eq!(historical_run.provider, terminal_only_run.provider);
+    assert_eq!(historical_run.runtime, terminal_only_run.runtime);
+    assert_eq!(historical_run.process_id, terminal_only_run.process_id);
+    assert_eq!(historical_run.error_kind, terminal_only_run.error_kind);
+}
+
+#[tokio::test]
 async fn replay_projection_keeps_model_completed_running_until_reply_finalized() {
     let log = Arc::new(InMemoryDurableEventLog::new());
     let service = ReplayEventProjectionService::new(Arc::clone(&log));
@@ -1683,6 +1754,7 @@ async fn replay_projection_re_sanitizes_unsanitized_runtime_events_from_custom_b
         runtime: Some(RuntimeKind::Script),
         process_id: Some(ProcessId::new()),
         output_bytes: None,
+        duration_ms: None,
         error_kind: Some(raw.to_string()),
         error_summary: None,
         hook_id: None,
@@ -2396,6 +2468,7 @@ async fn replay_projection_re_sanitizes_recovery_labels_from_custom_backend() {
         runtime: None,
         process_id: None,
         output_bytes: None,
+        duration_ms: None,
         error_kind: None,
         error_summary: None,
         hook_id: None,
@@ -2460,6 +2533,7 @@ async fn hook_runtime_events_project_with_sanitized_hook_metadata() {
         runtime: None,
         process_id: None,
         output_bytes: None,
+        duration_ms: None,
         error_kind: None,
         error_summary: None,
         hook_id: Some("0123456789abcdef".repeat(4)), // 64-char blake3 hex
@@ -2483,6 +2557,7 @@ async fn hook_runtime_events_project_with_sanitized_hook_metadata() {
         runtime: None,
         process_id: None,
         output_bytes: None,
+        duration_ms: None,
         error_kind: None,
         error_summary: None,
         hook_id: Some("0123456789abcdef".repeat(4)),
@@ -2506,6 +2581,7 @@ async fn hook_runtime_events_project_with_sanitized_hook_metadata() {
         runtime: None,
         process_id: None,
         output_bytes: None,
+        duration_ms: None,
         error_kind: None,
         error_summary: None,
         hook_id: Some("fedcba9876543210".repeat(4)),
@@ -2588,6 +2664,7 @@ async fn non_hook_runtime_events_project_with_no_hook_metadata() {
         runtime: Some(RuntimeKind::Script),
         process_id: Some(ProcessId::new()),
         output_bytes: Some(42),
+        duration_ms: None,
         error_kind: None,
         error_summary: None,
         hook_id: None,
@@ -2658,6 +2735,7 @@ async fn hook_runtime_events_do_not_alter_run_status_projection() {
         runtime: None,
         process_id: None,
         output_bytes: None,
+        duration_ms: None,
         error_kind: None,
         error_summary: None,
         hook_id: None,
@@ -2684,6 +2762,7 @@ async fn hook_runtime_events_do_not_alter_run_status_projection() {
         runtime: None,
         process_id: None,
         output_bytes: None,
+        duration_ms: None,
         error_kind: None,
         error_summary: None,
         hook_id: Some("0123456789abcdef".repeat(4)),
@@ -2707,6 +2786,7 @@ async fn hook_runtime_events_do_not_alter_run_status_projection() {
         runtime: None,
         process_id: None,
         output_bytes: None,
+        duration_ms: None,
         error_kind: None,
         error_summary: None,
         hook_id: Some("0123456789abcdef".repeat(4)),
@@ -2773,6 +2853,7 @@ async fn hook_only_runtime_events_default_run_status_to_running() {
         runtime: None,
         process_id: None,
         output_bytes: None,
+        duration_ms: None,
         error_kind: None,
         error_summary: None,
         hook_id: Some("0123456789abcdef".repeat(4)),

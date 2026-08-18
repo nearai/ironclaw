@@ -103,8 +103,7 @@ use ironclaw_trust::{
     HostTrustPolicy, TrustDecision, TrustProvenance,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileRequest, SourceBindingRef,
-    SubmitTurnRequest, TurnActor, TurnScope,
+    AcceptedMessageRef, IdempotencyKey, RunProfileRequest, SubmitTurnRequest, TurnActor, TurnScope,
 };
 use ironclaw_turns::{TurnRunWake, TurnRunWakeNotifier};
 use ironclaw_wasm::{
@@ -2267,8 +2266,6 @@ pub(crate) fn submit_turn_request(thread: &str, idempotency_key: &str) -> Submit
         ),
         actor: TurnActor::new(UserId::new("user1").unwrap()),
         accepted_message_ref: AcceptedMessageRef::new(format!("message-{thread}")).unwrap(),
-        source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
         requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
         idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
         received_at: Utc::now(),

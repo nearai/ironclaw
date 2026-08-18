@@ -782,12 +782,13 @@ struct AcmeFixtureFactory {
     fallback_egress: Arc<ScriptedVendorServer>,
 }
 
+#[async_trait::async_trait]
 impl ironclaw_extension_host::NativeExtensionFactory for AcmeFixtureFactory {
     fn service(&self) -> &str {
         ACME_FIXTURE_SERVICE
     }
 
-    fn load(
+    async fn load(
         &self,
         _ctx: &ironclaw_extension_host::LoadContext,
     ) -> Result<
@@ -807,7 +808,7 @@ struct AcmeFixtureEntrypoint {
 impl ironclaw_extension_host::ExtensionEntrypoint for AcmeFixtureEntrypoint {
     fn bind(
         &self,
-        _ctx: ironclaw_extension_host::BindContext,
+        ctx: ironclaw_extension_host::BindContext,
     ) -> Result<ironclaw_extension_host::ExtensionBindings, ironclaw_extension_host::BindError>
     {
         Ok(ironclaw_extension_host::ExtensionBindings {
@@ -821,6 +822,18 @@ impl ironclaw_extension_host::ExtensionEntrypoint for AcmeFixtureEntrypoint {
                     .with_reply(adapter.clone())
                     .with_delivery(adapter)
             },
+            // Bound only when the installed manifest declares a device_link
+            // recipe: `check_binding` proves agreement per axis, and the
+            // stock acme-messenger manifest declares oauth2_code only — an
+            // unconditional adapter fails every acme bind with
+            // `UndeclaredDeviceLinkAdapter`, so activation never completes
+            // and install turns record no capability results.
+            device_link: ironclaw_extension_host::declared_device_link_recipe(&ctx.resolved)
+                .is_some()
+                .then(|| {
+                    Arc::new(super::device_link::ScriptedDeviceLinkAdapter::new())
+                        as Arc<dyn ironclaw_extension_contracts::device_link::DeviceLinkAdapter>
+                }),
         })
     }
 }
@@ -1758,12 +1771,20 @@ pub(crate) const TELEGRAM_FIXTURE_SERVICE: &str = "telegram.extension/v1";
 /// and cannot depend on the CLI crate).
 struct TelegramFixtureFactory;
 
+/// Hermetic native factory for WebUI/lifecycle tests that install the bundled
+/// Telegram package outside the full capability-harness profile.
+pub(crate) fn telegram_fixture_factory() -> Arc<dyn ironclaw_extension_host::NativeExtensionFactory>
+{
+    Arc::new(TelegramFixtureFactory)
+}
+
+#[async_trait::async_trait]
 impl ironclaw_extension_host::NativeExtensionFactory for TelegramFixtureFactory {
     fn service(&self) -> &str {
         TELEGRAM_FIXTURE_SERVICE
     }
 
-    fn load(
+    async fn load(
         &self,
         _ctx: &ironclaw_extension_host::LoadContext,
     ) -> Result<
@@ -1779,11 +1800,13 @@ struct TelegramFixtureEntrypoint;
 impl ironclaw_extension_host::ExtensionEntrypoint for TelegramFixtureEntrypoint {
     fn bind(
         &self,
-        _ctx: ironclaw_extension_host::BindContext,
+        ctx: ironclaw_extension_host::BindContext,
     ) -> Result<ironclaw_extension_host::ExtensionBindings, ironclaw_extension_host::BindError>
     {
+        let tools = Arc::new(super::device_link::LinkedAccountFixtureToolAdapter::new());
+        tools.attach_resolver(Arc::clone(&ctx.linked_accounts));
         Ok(ironclaw_extension_host::ExtensionBindings {
-            tools: None,
+            tools: Some(tools as Arc<dyn ironclaw_extension_contracts::tool_adapter::ToolAdapter>),
             channel: {
                 let adapter =
                     Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default());
@@ -1792,6 +1815,10 @@ impl ironclaw_extension_host::ExtensionEntrypoint for TelegramFixtureEntrypoint 
                     .with_reply(adapter.clone())
                     .with_delivery(adapter)
             },
+            device_link: Some(
+                Arc::new(super::device_link::ScriptedDeviceLinkAdapter::new())
+                    as Arc<dyn ironclaw_extension_contracts::device_link::DeviceLinkAdapter>,
+            ),
         })
     }
 }

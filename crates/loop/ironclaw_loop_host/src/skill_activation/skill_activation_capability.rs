@@ -9,8 +9,7 @@ use crate::{
 use async_trait::async_trait;
 use ironclaw_host_api::{ids::InvocationId, resolution::Resolution, result_meta::FailureKind};
 use ironclaw_loop_contracts::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, ConcurrencyHint,
-    resolution,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, resolution,
 };
 
 use super::{
@@ -32,7 +31,6 @@ where
             SKILL_ACTIVATE_CAPABILITY_ID,
             SKILL_ACTIVATE_PROVIDER_TOOL_NAME,
             SKILL_ACTIVATE_DESCRIPTION,
-            ConcurrencyHint::Exclusive,
             skill_activate_input_schema(),
         )?,
         Arc::new(SkillActivationHandler {

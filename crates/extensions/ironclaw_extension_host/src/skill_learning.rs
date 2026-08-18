@@ -1154,6 +1154,7 @@ mod learning {
             ) {
                 service
                     .append_tool_result_reference(AppendToolResultReferenceRequest {
+                        intrinsic_outcome: None,
                         scope: scope.clone(),
                         thread_id: thread_id.clone(),
                         turn_run_id: run_id.to_string(),

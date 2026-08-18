@@ -317,6 +317,11 @@ class RebornQaSlackReportTests(unittest.TestCase):
                                     "metrics": {
                                         "model_call_count": 2,
                                         "tool_call_count": 3,
+                                        "tool_call_batch_count": 2,
+                                        "multi_tool_call_batch_count": 1,
+                                        "tool_calls_in_multi_batches": 2,
+                                        "max_tool_call_batch_width": 2,
+                                        "tool_call_batch_width_counts": {"1": 1, "2": 1},
                                         "input_tokens": 1000,
                                         "output_tokens": 200,
                                         "cache_read_tokens": 400,
@@ -387,6 +392,14 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertEqual(report.reborn_qa_cases[0].message, "")
         self.assertEqual(report.reborn_qa_cases[0].model_call_count, 2)
         self.assertEqual(report.reborn_qa_cases[0].tool_call_count, 3)
+        self.assertEqual(report.reborn_qa_cases[0].tool_call_batch_count, 2)
+        self.assertEqual(report.reborn_qa_cases[0].multi_tool_call_batch_count, 1)
+        self.assertEqual(report.reborn_qa_cases[0].tool_calls_in_multi_batches, 2)
+        self.assertEqual(report.reborn_qa_cases[0].max_tool_call_batch_width, 2)
+        self.assertEqual(
+            report.reborn_qa_cases[0].tool_call_batch_width_counts,
+            {1: 1, 2: 1},
+        )
         self.assertEqual(report.reborn_qa_cases[0].input_tokens, 1000)
         self.assertEqual(report.reborn_qa_cases[0].output_tokens, 200)
         self.assertEqual(report.reborn_qa_cases[0].cache_read_tokens, 400)
@@ -857,6 +870,11 @@ class RebornQaSlackReportTests(unittest.TestCase):
                     latency_ms=1200,
                     model_call_count=2,
                     tool_call_count=3,
+                    tool_call_batch_count=2,
+                    multi_tool_call_batch_count=1,
+                    tool_calls_in_multi_batches=2,
+                    max_tool_call_batch_width=2,
+                    tool_call_batch_width_counts={1: 1, 2: 1},
                     input_tokens=1000,
                     output_tokens=200,
                     cache_read_tokens=400,
@@ -906,9 +924,16 @@ class RebornQaSlackReportTests(unittest.TestCase):
             "$0.0123 (1/2 cases)",
             body,
         )
+        self.assertIn(
+            "*Model-emitted tool batches:* 2 total · 1 multi-call · "
+            "2 calls in multi-call batches · max width 2 · widths 1×1, 2×1 "
+            "(1/2 cases)",
+            body,
+        )
         self.assertIn(":white_check_mark: `2A` Gmail connection flow", body)
         self.assertIn(
-            "2 model calls · 3 tool calls · 1,000 input tokens · "
+            "2 model calls · 3 tool calls · 1 multi-call batch · "
+            "max batch width 2 · 1,000 input tokens · "
             "400 cache-read · 600 uncached input · 200 output tokens · $0.0123",
             body,
         )
@@ -925,6 +950,11 @@ class RebornQaSlackReportTests(unittest.TestCase):
                 success=True,
                 model_call_count=2,
                 tool_call_count=3,
+                tool_call_batch_count=2,
+                multi_tool_call_batch_count=1,
+                tool_calls_in_multi_batches=2,
+                max_tool_call_batch_width=2,
+                tool_call_batch_width_counts={1: 1, 2: 1},
                 input_tokens=1000,
                 output_tokens=200,
                 cache_read_tokens=400,
@@ -938,6 +968,11 @@ class RebornQaSlackReportTests(unittest.TestCase):
                 success=True,
                 model_call_count=1,
                 tool_call_count=0,
+                tool_call_batch_count=0,
+                multi_tool_call_batch_count=0,
+                tool_calls_in_multi_batches=0,
+                max_tool_call_batch_width=0,
+                tool_call_batch_width_counts={},
                 input_tokens=500,
                 output_tokens=100,
                 cache_read_tokens=None,
@@ -948,14 +983,37 @@ class RebornQaSlackReportTests(unittest.TestCase):
 
         summary = notify._format_reborn_metric_summary(cases)
 
-        self.assertEqual(len(summary), 1)
+        self.assertEqual(len(summary), 2)
         self.assertIn("3 model calls", summary[0])
         self.assertIn("3 tool calls", summary[0])
         self.assertIn("1,500 input tokens", summary[0])
         self.assertIn("300 output tokens", summary[0])
         self.assertIn("400 cache-read (1/2 cases)", summary[0])
         self.assertIn("600 uncached input (1/2 cases)", summary[0])
+        self.assertEqual(
+            summary[1],
+            "*Model-emitted tool batches:* 2 total · 1 multi-call · "
+            "2 calls in multi-call batches · max width 2 · widths 1×1, 2×1",
+        )
         self.assertIn("$0.0123 (1/2 cases)", summary[0])
+
+    def test_reborn_metric_summary_bounds_batch_width_distribution(self):
+        case = notify.RebornQaCaseReport(
+            rows=("2A",),
+            case="a",
+            feature="a",
+            success=True,
+            tool_call_batch_width_counts={width: 1 for width in range(1, 11)},
+        )
+
+        summary = notify._format_reborn_metric_summary([case])
+
+        self.assertEqual(len(summary), 1)
+        self.assertIn(
+            "widths 1×1, 2×1, 3×1, 4×1, 5×1, 6×1, 7×1, 8×1, +2 widths",
+            summary[0],
+        )
+        self.assertNotIn("9×1", summary[0])
 
     def test_github_comment_body_includes_junit_fallback_for_failed_lane(self):
         report = notify.LaneReport(

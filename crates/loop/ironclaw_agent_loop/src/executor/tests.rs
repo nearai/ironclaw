@@ -14,13 +14,14 @@ use ironclaw_host_api::{
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
     CapabilityCallCandidate, CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRef,
-    CapabilityInputRepair, CapabilityResumeToken, ConcurrencyHint, LoopCancelReasonKind,
-    LoopCancellationSignal, LoopCancelledReasonKind, LoopCheckpointKind, LoopCompactionError,
-    LoopCompactionMode, LoopCompactionOutcome, LoopCompactionResponse, LoopCompletionKind,
-    LoopContextCompactionKind, LoopContextWindowTruncation, LoopExit, LoopFailureKind, LoopInput,
-    LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopModelCapabilityView,
-    LoopProcessRef, LoopProgressEvent, LoopRecoveryClass, LoopRecoveryDisposition,
-    LoopRecoveryStage, LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
+    CapabilityInputRepair, CapabilityResultIntrinsicOutcome, CapabilityResultMessage,
+    CapabilityResumeToken, LoopCancelReasonKind, LoopCancellationSignal, LoopCancelledReasonKind,
+    LoopCheckpointKind, LoopCompactionError, LoopCompactionMode, LoopCompactionOutcome,
+    LoopCompactionResponse, LoopCompletionKind, LoopContextCompactionKind,
+    LoopContextWindowTruncation, LoopExit, LoopFailureKind, LoopInput, LoopInputAckToken,
+    LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopModelCapabilityView, LoopProcessRef,
+    LoopProgressEvent, LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage,
+    LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
     MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation, ObservationTrust,
     ParentLoopOutput, PromptMode, ProviderToolCallReplay, ToolObservationDetail,
     ToolObservationStatus, VisibleCapabilityRequest, resolution,
@@ -30,13 +31,12 @@ use crate::state::{
     CapabilityCallSignature, CheckpointKind, DeferredCompactionWatermark, IndexedMessageKind,
     LoopExecutionState, MessageIndexEntry, ModelErrorObservationClass,
     ModelErrorRecoveryObservation, PendingApprovalResume, PendingAuthResume,
-    PendingModelRetryDirective, RepeatedCallWarningPhase, RepeatedCallWarningState,
-    TerminalWarningObservation,
+    PendingExternalToolResume, PendingModelRetryDirective, RepeatedCallWarningPhase,
+    RepeatedCallWarningState, TerminalWarningObservation,
 };
 use crate::strategies::{
-    BoundedParallelBatchPolicyStrategy, CapabilityBatchTurnSummary, CapabilityFilter,
-    DefaultCompactionStrategy, GateKind, GateOutcome, StopKind, TurnSummary,
-    capability_error_to_failure_kind,
+    CapabilityBatchTurnSummary, CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome,
+    StopKind, TurnSummary, capability_error_to_failure_kind,
 };
 use crate::test_support::compaction::{
     active_task_preserving_compaction_index, compaction_metadata,
@@ -54,8 +54,9 @@ use super::{
     AgentLoopExecutor, AgentLoopExecutorError, AssistantReplyInput, AssistantReplyStage, BatchStep,
     BudgetInput, BudgetStage, BudgetStep, CanonicalAgentLoopExecutor, CapabilityInput,
     CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, GateInput, GateStage,
-    HostStage, InputStage, InputStep, ModelInput, ModelStage, PromptInput, PromptStage, PromptStep,
-    StageContext, TurnCompletedStep, UserFacingInputDrainMode, consume_drainable_inputs,
+    HostStage, InputStage, InputStep, ModelInput, ModelStage, ModelStep, PromptInput, PromptStage,
+    PromptStep, StageContext, TurnCompletedStep, UserFacingInputDrainMode,
+    append_capability_result_ref, completed_exit, consume_drainable_inputs,
     sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
 };
 
@@ -373,6 +374,565 @@ async fn budget_stage_exits_at_iteration_limit() {
 
     assert!(matches!(step, BudgetStep::Exit(LoopExit::Failed(_))));
     assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+}
+
+fn family_with_budget_strategy(
+    strategy: crate::strategies::DefaultBudgetStrategy,
+) -> crate::family::LoopFamily {
+    use crate::family::{ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId};
+    let planner = crate::default_planner::DefaultPlanner::compose_default()
+        .with_budget(std::sync::Arc::new(strategy));
+    let id = LoopFamilyId::new("executor-budget-test").expect("valid test family id");
+    let version = ComponentIdentity::from_static("executor-budget-test", ComponentDigest([6; 32]));
+    LoopFamily::new(id, version, std::sync::Arc::new(planner))
+}
+
+/// A FAILED result-tool attempt must not complete a structured run: the
+/// error path records no completed signature, so the stop strategy keeps
+/// the run alive for the repair retry, counts the all-failed batch, and
+/// aborts as invalid model output only after the threshold. (Recording
+/// errored calls into `observed_signatures` completed structured runs off
+/// a failed validation attempt with NO durable result.)
+#[tokio::test]
+async fn structured_stop_ignores_failed_result_attempts_and_counts_all_failed_batches() {
+    use crate::state::CapabilityCallSignature;
+    use crate::strategies::{
+        CapabilityBatchTurnSummary, StopConditionStrategy as _, StopKind, StopOutcome,
+        StructuredResultStopStrategy, TurnEndKind, TurnSummary,
+    };
+    use ironclaw_host_api::ids::CapabilityId;
+
+    let host = MockHost::new(Vec::new());
+    let strategy = StructuredResultStopStrategy::new(
+        CapabilityId::new("builtin.structured_result").expect("valid"),
+    );
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    // The only invocation in the batch FAILED: no completed signature.
+    let failed_batch = TurnSummary {
+        kind: TurnEndKind::AfterCapabilityBatch,
+        assistant_message_ref: None,
+        batch_result_refs: Vec::new(),
+        capability_batch: CapabilityBatchTurnSummary {
+            invocation_count: 1,
+            terminate_hint_count: 0,
+            observed_signatures: Vec::new(),
+        },
+    };
+    let observed = strategy.observe_completed_turn(&state, &failed_batch).await;
+    assert_eq!(
+        observed.trailing_all_failed_batches, 1,
+        "an all-failed batch must count toward the abort threshold"
+    );
+    assert!(
+        matches!(
+            strategy
+                .should_stop_after_observed_turn(&state, &failed_batch)
+                .await,
+            StopOutcome::Continue {}
+        ),
+        "a failed result attempt must keep the run alive for the repair retry"
+    );
+
+    let mut exhausted = state.clone();
+    exhausted.stop_state.trailing_all_failed_batches = 3;
+    assert!(matches!(
+        strategy
+            .should_stop_after_observed_turn(&exhausted, &failed_batch)
+            .await,
+        StopOutcome::Stop {
+            kind: StopKind::Aborted(ironclaw_loop_contracts::LoopFailureKind::InvalidModelOutput)
+        }
+    ));
+
+    // A COMPLETED result-tool call stops the run gracefully.
+    let completed_batch = TurnSummary {
+        capability_batch: CapabilityBatchTurnSummary {
+            invocation_count: 1,
+            terminate_hint_count: 1,
+            observed_signatures: vec![
+                CapabilityCallSignature::from_call(
+                    CapabilityId::new("builtin.structured_result").expect("valid"),
+                    &serde_json::json!({"sentiment": "positive"}),
+                )
+                .expect("signature"),
+            ],
+        },
+        ..failed_batch.clone()
+    };
+    assert!(matches!(
+        strategy
+            .should_stop_after_observed_turn(&state, &completed_batch)
+            .await,
+        StopOutcome::Stop {
+            kind: StopKind::GracefulStop
+        }
+    ));
+}
+
+#[tokio::test]
+async fn budget_stage_hard_stops_on_wall_clock_limit_without_a_warning_turn() {
+    let host = MockHost::new(Vec::new());
+    let family = family_with_budget_strategy(crate::strategies::DefaultBudgetStrategy {
+        wall_clock_limit: Some(std::time::Duration::from_secs(60)),
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state
+        .budget_ledger
+        .set_run_started_at_for_test(Some(chrono::Utc::now() - chrono::Duration::seconds(120)));
+
+    let step = BudgetStage
+        .process(ctx, BudgetInput { state })
+        .await
+        .expect("budget stage");
+
+    match step {
+        BudgetStep::Exit(LoopExit::Failed(failed)) => {
+            assert_eq!(
+                failed.reason_kind,
+                ironclaw_loop_contracts::LoopFailureKind::WallClockLimit
+            );
+        }
+        other => panic!("an exhausted wall clock must hard-stop the run, got {other:?}"),
+    }
+    // Hard stop: final checkpoint only, no model-visible warning iteration.
+    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+}
+
+#[tokio::test]
+async fn budget_stage_rearms_wall_clock_accounting_on_checkpoints_without_a_start() {
+    let host = MockHost::new(Vec::new());
+    let family = family_with_budget_strategy(crate::strategies::DefaultBudgetStrategy {
+        wall_clock_limit: Some(std::time::Duration::from_secs(3600)),
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    // An older checkpoint predating wall-clock accounting deserializes with
+    // no start; the stage re-arms from resume time instead of failing.
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.budget_ledger.set_run_started_at_for_test(None);
+
+    let step = BudgetStage
+        .process(ctx, BudgetInput { state })
+        .await
+        .expect("budget stage");
+
+    match step {
+        BudgetStep::Continue { state } => {
+            assert!(
+                state.budget_ledger.run_started_at().is_some(),
+                "the stage must re-arm the start so the limit binds from resume"
+            );
+        }
+        other => panic!("a re-armed run must continue, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn budget_stage_hard_stops_when_call_budgets_are_exhausted() {
+    let host = MockHost::new(Vec::new());
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy::default());
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let policy = host
+        .run_context()
+        .resolved_run_profile
+        .resource_budget_policy
+        .clone();
+
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state
+        .budget_ledger
+        .set_model_calls_made_for_test(policy.max_model_calls);
+    match BudgetStage
+        .process(ctx, BudgetInput { state })
+        .await
+        .expect("budget stage")
+    {
+        BudgetStep::Exit(LoopExit::Failed(failed)) => {
+            assert_eq!(
+                failed.reason_kind,
+                ironclaw_loop_contracts::LoopFailureKind::ModelCallLimit
+            );
+        }
+        other => panic!("an exhausted model-call budget must hard-stop, got {other:?}"),
+    }
+
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state
+        .budget_ledger
+        .set_capability_invocations_made_for_test(policy.max_capability_invocations);
+    match BudgetStage
+        .process(ctx, BudgetInput { state })
+        .await
+        .expect("budget stage")
+    {
+        BudgetStep::Exit(LoopExit::Failed(failed)) => {
+            assert_eq!(
+                failed.reason_kind,
+                ironclaw_loop_contracts::LoopFailureKind::CapabilityInvocationLimit
+            );
+        }
+        other => panic!("an exhausted capability budget must hard-stop, got {other:?}"),
+    }
+}
+
+/// A single model turn must not dispatch more calls than the remaining
+/// per-run capability-invocation budget allows. Before the fix,
+/// `CapabilityStage` admitted and dispatched the whole `visible_calls` batch
+/// and charged the full length in one shot, so a 4-call batch with only 2
+/// invocations remaining would dispatch (and charge) all 4 — silently
+/// exceeding `ResourceBudgetPolicy.max_capability_invocations`, which
+/// `BudgetStage` only checks between outer-loop iterations. This pins: the
+/// batch is trimmed to the remaining allowance at admission, the trimmed
+/// tail is never dispatched but still gets a paired model-visible blocked
+/// result, the counter lands exactly at the cap, and the next `BudgetStage`
+/// iteration hard-stops the run through the existing
+/// `CapabilityInvocationLimit` exit.
+#[tokio::test]
+async fn capability_stage_trims_batch_to_remaining_capability_budget() {
+    let first_ref = LoopResultRef::new("result:budget-trim-first").expect("valid");
+    let second_ref = LoopResultRef::new("result:budget-trim-second").expect("valid");
+    let make_call = |index: u32| CapabilityCallCandidate {
+        activity_id: CapabilityActivityId::new(),
+        surface_version: surface_version(),
+        capability_id: capability_id(),
+        input_ref: CapabilityInputRef::new(format!("input:budget-trim-{index}")).expect("valid"),
+        effective_capability_ids: vec![capability_id()],
+        provider_replay: Some(ProviderToolCallReplay {
+            provider_id: "test-provider".to_string(),
+            provider_model_id: "test-model".to_string(),
+            provider_turn_id: "turn_budget".to_string(),
+            provider_call_id: format!("call_{index}"),
+            provider_tool_name: ProviderToolName::new("demo__echo").expect("provider tool name"),
+            arguments: serde_json::json!({ "message": format!("call-{index}") }),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        }),
+    };
+    let calls = vec![make_call(1), make_call(2), make_call(3), make_call(4)];
+
+    let host = MockHost::new(Vec::new()).with_single_outcomes(vec![
+        resolution::completed(
+            first_ref.clone(),
+            "first".to_string(),
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        ),
+        resolution::completed(
+            second_ref.clone(),
+            "second".to_string(),
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        ),
+    ]);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let policy = host
+        .run_context()
+        .resolved_run_profile
+        .resource_budget_policy
+        .clone();
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    // Only 2 invocations remain before the run hits its cap.
+    state
+        .budget_ledger
+        .set_capability_invocations_made_for_test(policy.max_capability_invocations - 2);
+
+    let surface = ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
+        &host,
+        VisibleCapabilityRequest,
+    )
+    .await
+    .expect("visible surface");
+
+    let step = CapabilityStage
+        .process(
+            ctx,
+            CapabilityInput {
+                state,
+                surface,
+                calls,
+            },
+        )
+        .await
+        .expect("capability stage");
+
+    // Exactly 2 host dispatches: the over-budget tail was never sent to the
+    // host, whatever its outcome would have been.
+    assert_eq!(host.single_invocations().len(), 2);
+    assert!(host.batch_invocations().is_empty());
+
+    match step {
+        TurnCompletedStep::Continue { state, .. } => {
+            // Charged only for the 2 dispatched calls, landing exactly at
+            // the cap (not beyond it).
+            assert_eq!(
+                state.budget_ledger.capability_invocations_made(),
+                policy.max_capability_invocations
+            );
+
+            // 4 tool results total: 2 real completions plus 2 blocked
+            // results naming the exhausted budget — tool_use/tool_result
+            // pairing holds for the whole model-emitted batch.
+            let appended = host.appended_result_refs();
+            assert_eq!(appended.len(), 4);
+            let blocked_count = appended
+                .iter()
+                .filter(|request| {
+                    request
+                        .safe_summary
+                        .contains("capability-invocation budget")
+                })
+                .count();
+            assert_eq!(blocked_count, 2);
+
+            // The next BudgetStage iteration hard-stops the run through the
+            // existing capability-invocation-limit exit — no new exit path
+            // was introduced.
+            match BudgetStage
+                .process(ctx, BudgetInput { state: *state })
+                .await
+                .expect("budget stage")
+            {
+                BudgetStep::Exit(LoopExit::Failed(failed)) => {
+                    assert_eq!(
+                        failed.reason_kind,
+                        LoopFailureKind::CapabilityInvocationLimit
+                    );
+                }
+                other => panic!("an exhausted capability budget must hard-stop, got {other:?}"),
+            }
+        }
+        TurnCompletedStep::Exit(exit) => panic!("expected continue, got {exit:?}"),
+    }
+}
+
+#[tokio::test]
+async fn stale_surface_batch_releases_unlaunched_invocation_budget() {
+    let result = |suffix: &str| {
+        resolution::completed(
+            LoopResultRef::new(format!("result:stale-budget-{suffix}")).expect("valid"),
+            format!("{suffix} completed"),
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        )
+    };
+    let host = MockHost::new(Vec::new())
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
+            resolutions: vec![result("first"), result("second")],
+            stopped_on_suspension: false,
+        }])
+        .fail_batch_with(AgentLoopHostErrorKind::StaleSurface);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let policy = host
+        .run_context()
+        .resolved_run_profile
+        .resource_budget_policy
+        .clone();
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state
+        .budget_ledger
+        .set_capability_invocations_made_for_test(policy.max_capability_invocations - 2);
+    let surface = ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
+        &host,
+        VisibleCapabilityRequest,
+    )
+    .await
+    .expect("visible surface");
+    let calls = || match two_calls_response().output {
+        ParentLoopOutput::CapabilityCalls(calls) => calls,
+        ParentLoopOutput::AssistantReply(_) => panic!("expected capability calls"),
+    };
+
+    let first = CapabilityStage
+        .process(
+            ctx,
+            CapabilityInput {
+                state,
+                surface: surface.clone(),
+                calls: calls(),
+            },
+        )
+        .await
+        .expect("stale batch remains model-visible");
+    let TurnCompletedStep::Continue { state, .. } = first else {
+        panic!("stale batch must continue");
+    };
+    assert_eq!(
+        state.budget_ledger.capability_invocations_made(),
+        policy.max_capability_invocations - 2,
+        "a stale surface launches no calls and must release the full reservation"
+    );
+
+    host.clear_batch_failure();
+    let second = CapabilityStage
+        .process(
+            ctx,
+            CapabilityInput {
+                state: *state,
+                surface,
+                calls: calls(),
+            },
+        )
+        .await
+        .expect("the next batch retains the remaining budget");
+    let TurnCompletedStep::Continue { state, .. } = second else {
+        panic!("successful batch must continue");
+    };
+    assert_eq!(
+        state.budget_ledger.capability_invocations_made(),
+        policy.max_capability_invocations
+    );
+    assert_eq!(host.batch_invocations().len(), 2);
+}
+
+/// Behavior tightening absorbed by the `BudgetLedger` refactor: a capability
+/// retry dispatch now charges the invocation budget through the same
+/// chokepoint the initial batch dispatch uses, BEFORE re-dispatching. Before
+/// this fix, the retry dispatch (`executor/capabilities.rs`, the
+/// `RecoveryOutcome::Retry` arm inside `handle_capability_error`) counted
+/// unconditionally with no enforcement, so a retry could re-dispatch to the
+/// host even when the run's capability-invocation budget was already
+/// exhausted. This pins: when the budget has no remaining allowance at the
+/// moment of the retry, the retry is never dispatched — it falls through to
+/// the same model-visible blocked-result path `ToolErrorResult` uses, the
+/// counter is not double-charged, and no new exit path is introduced (the
+/// next `BudgetStage` iteration still hard-stops through the existing
+/// `CapabilityInvocationLimit` exit).
+#[tokio::test]
+async fn capability_retry_does_not_dispatch_when_invocation_budget_is_exhausted() {
+    let call = CapabilityCallCandidate {
+        activity_id: CapabilityActivityId::new(),
+        surface_version: surface_version(),
+        capability_id: capability_id(),
+        input_ref: CapabilityInputRef::new("input:retry-budget-exhausted").expect("valid"),
+        effective_capability_ids: vec![capability_id()],
+        provider_replay: Some(ProviderToolCallReplay {
+            provider_id: "test-provider".to_string(),
+            provider_model_id: "test-model".to_string(),
+            provider_turn_id: "turn_retry_budget".to_string(),
+            provider_call_id: "call_retry_budget".to_string(),
+            provider_tool_name: ProviderToolName::new("demo__echo").expect("provider tool name"),
+            arguments: serde_json::json!({ "message": "retry-budget-exhausted" }),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        }),
+    };
+
+    let host = MockHost::new(Vec::new()).with_batch_outcomes(vec![
+        ironclaw_host_api::resolution::ResolutionBatch {
+            resolutions: vec![resolution::failed(
+                FailureKind::Transient,
+                "temporary failure".to_string(),
+                diagnostic_failure_detail("temporary failure"),
+            )],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let policy = host
+        .run_context()
+        .resolved_run_profile
+        .resource_budget_policy
+        .clone();
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    // Exactly one invocation remains: the initial dispatch charges it and
+    // lands the counter at the cap, leaving nothing for the retry.
+    state
+        .budget_ledger
+        .set_capability_invocations_made_for_test(policy.max_capability_invocations - 1);
+
+    let surface = ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
+        &host,
+        VisibleCapabilityRequest,
+    )
+    .await
+    .expect("visible surface");
+
+    let step = CapabilityStage
+        .process(
+            ctx,
+            CapabilityInput {
+                state,
+                surface,
+                calls: vec![call],
+            },
+        )
+        .await
+        .expect("capability stage");
+
+    // No retry dispatch reached the host at all — batch dispatch used the
+    // batch channel (asserted via batch_invocations below), and the retry
+    // never issued a single-call dispatch.
+    assert!(host.single_invocations().is_empty());
+    assert_eq!(host.batch_invocations().len(), 1);
+
+    match step {
+        TurnCompletedStep::Continue { state, .. } => {
+            // Charged only once (the initial dispatch); the exhausted retry
+            // charged nothing, so the counter stays exactly at the cap
+            // rather than going one further as it would have before this
+            // fix (which would have silently exceeded the budget).
+            assert_eq!(
+                state.budget_ledger.capability_invocations_made(),
+                policy.max_capability_invocations
+            );
+
+            let appended = host.appended_result_refs();
+            assert_eq!(appended.len(), 1);
+
+            // The next BudgetStage iteration hard-stops the run through the
+            // existing capability-invocation-limit exit — no new exit path
+            // was introduced.
+            match BudgetStage
+                .process(ctx, BudgetInput { state: *state })
+                .await
+                .expect("budget stage")
+            {
+                BudgetStep::Exit(LoopExit::Failed(failed)) => {
+                    assert_eq!(
+                        failed.reason_kind,
+                        LoopFailureKind::CapabilityInvocationLimit
+                    );
+                }
+                other => panic!("an exhausted capability budget must hard-stop, got {other:?}"),
+            }
+        }
+        TurnCompletedStep::Exit(exit) => panic!("expected continue, got {exit:?}"),
+    }
 }
 
 #[tokio::test]
@@ -3088,6 +3648,186 @@ async fn stopped_on_suspension_completed_outcome_still_appends_result() {
 }
 
 #[tokio::test]
+async fn typed_structured_result_terminalizes_suppressed_schedule_without_reply_refs() {
+    let host = MockHost::new(Vec::new()).with_suppressed_scheduled_context();
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.stop_state.structured_result_recorded = true;
+    state
+        .result_refs
+        .push(LoopResultRef::new("result:prior-tool").expect("result ref"));
+    state
+        .result_refs
+        .push(LoopResultRef::new("result:nothing-to-report").expect("result ref"));
+    state
+        .assistant_refs
+        .push(message_ref("msg:intermediate-progress"));
+
+    let exit = completed_exit(&host, state, None).expect("completed exit");
+
+    let LoopExit::Completed(completed) = exit else {
+        panic!("expected completed exit");
+    };
+    assert_eq!(
+        completed.completion_kind,
+        LoopCompletionKind::NothingToReport
+    );
+    assert!(completed.reply_message_refs.is_empty());
+    assert!(completed.result_refs.is_empty());
+    assert!(host.finalized_assistant_messages().is_empty());
+}
+
+#[tokio::test]
+async fn successful_suppression_result_appends_host_authored_outcome_without_provider_replay() {
+    let host = MockHost::new(Vec::new()).with_suppressed_scheduled_context();
+    let call = CapabilityCallCandidate {
+        activity_id: CapabilityActivityId::new(),
+        surface_version: surface_version(),
+        capability_id: ironclaw_host_api::ids::CapabilityId::new(
+            ironclaw_host_api::prepared_context::STRUCTURED_RESULT_CAPABILITY_ID,
+        )
+        .expect("capability id"),
+        input_ref: CapabilityInputRef::new("input:structured-result").expect("input ref"),
+        effective_capability_ids: Vec::new(),
+        provider_replay: None,
+    };
+    let result = CapabilityResultMessage {
+        result_ref: LoopResultRef::new("result:typed-nothing-to-report").expect("result ref"),
+        safe_summary: "structured result recorded".to_string(),
+        progress: ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+        terminate_hint: true,
+        byte_len: 31,
+        output_digest: None,
+        model_observation: None,
+    };
+
+    append_capability_result_ref(&host, &call, &result)
+        .await
+        .expect("append result evidence");
+
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 1);
+    assert_eq!(appended[0].provider_call, None);
+    assert_eq!(
+        appended[0].intrinsic_outcome,
+        Some(CapabilityResultIntrinsicOutcome::NothingToReport)
+    );
+}
+
+#[tokio::test]
+async fn typed_nothing_to_report_honors_cancellation_after_final_checkpoint() {
+    let host = MockHost::new(Vec::new())
+        .with_suppressed_scheduled_context()
+        .cancel_after_checkpoint(LoopCheckpointKind::Final);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.stop_state.structured_result_recorded = true;
+    state
+        .result_refs
+        .push(LoopResultRef::new("result:nothing-to-report-cancelled").expect("result ref"));
+
+    let exit = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::GracefulStop,
+            },
+        )
+        .await
+        .expect("exit stage");
+
+    assert!(matches!(exit, LoopExit::Cancelled(_)));
+    assert!(host.finalized_assistant_messages().is_empty());
+}
+
+#[tokio::test]
+async fn silent_text_has_no_special_meaning_outside_typed_completion() {
+    let host = MockHost::new(vec![reply_response_with_text("[SILENT]")]);
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(
+        exit,
+        LoopExit::Completed(ref completed)
+            if completed.completion_kind == LoopCompletionKind::FinalReply
+    ));
+    assert_eq!(host.finalized_assistant_messages(), vec!["[SILENT]"]);
+    assert!(host.single_invocations().is_empty());
+    assert!(host.batch_invocations().is_empty());
+}
+
+#[tokio::test]
+async fn reply_that_mentions_silent_is_delivered_normally() {
+    let reply = "The literal marker [SILENT] is documented here.";
+    let host =
+        MockHost::new(vec![reply_response_with_text(reply)]).with_suppressed_scheduled_context();
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(
+        exit,
+        LoopExit::Completed(ref completed)
+            if completed.completion_kind == LoopCompletionKind::FinalReply
+    ));
+    assert_eq!(host.finalized_assistant_messages(), vec![reply]);
+    assert!(host.single_invocations().is_empty());
+    assert!(host.batch_invocations().is_empty());
+}
+
+#[tokio::test]
+async fn silent_text_is_visible_with_a_pending_external_tool_resume() {
+    let host = MockHost::new(Vec::new()).with_suppressed_scheduled_context();
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.pending_external_tool_resume = Some(PendingExternalToolResume {
+        gate_ref: LoopGateRef::new("gate:pending-external-tool").expect("gate ref"),
+        capability_id: capability_id(),
+        activity_id: CapabilityActivityId::new(),
+        surface_version: surface_version(),
+        input_ref: CapabilityInputRef::new("input:pending-external-tool").expect("input ref"),
+        effective_capability_ids: Vec::new(),
+        provider_replay: None,
+        disposition: None,
+    });
+    let step = AssistantReplyStage
+        .process(
+            ctx,
+            AssistantReplyInput {
+                state,
+                reply: ironclaw_loop_contracts::AssistantReply {
+                    content: "[SILENT]".to_string(),
+                },
+            },
+        )
+        .await
+        .expect("assistant reply stage");
+
+    let TurnCompletedStep::Continue { state, .. } = step else {
+        panic!("pending resume must prevent a nothing-to-report exit");
+    };
+    assert!(state.pending_external_tool_resume.is_some());
+    assert_eq!(host.finalized_assistant_messages(), vec!["[SILENT]"]);
+    assert!(host.single_invocations().is_empty());
+    assert!(host.batch_invocations().is_empty());
+}
+
+#[tokio::test]
 async fn terminate_hint_after_batch_completes_without_extra_model_call() {
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
         ironclaw_host_api::resolution::ResolutionBatch {
@@ -3474,7 +4214,7 @@ async fn gate_stage_aborts_returns_failed_exit() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn enabled_parallel_batch_overlaps_calls_and_preserves_input_order() {
+async fn model_emitted_batch_overlaps_calls_by_default_and_preserves_input_order() {
     let first_ref = LoopResultRef::new("result:parallel-first").expect("valid");
     let second_ref = LoopResultRef::new("result:parallel-second").expect("valid");
     let host = MockHost::new(vec![two_calls_response(), reply_response()])
@@ -3506,11 +4246,7 @@ async fn enabled_parallel_batch_overlaps_calls_and_preserves_input_order() {
     let run_host = host.clone();
     let executor = tokio::spawn(async move {
         CanonicalAgentLoopExecutor
-            .execute_family(
-                &support::family_with_parallel_batch_execution(),
-                &run_host,
-                state,
-            )
+            .execute_family(&crate::families::default(), &run_host, state)
             .await
     });
 
@@ -4464,7 +5200,6 @@ async fn parallel_batch_merges_exiting_sibling_state_into_gate_checkpoint() {
     // with a recovery strategy that aborts capability errors (so the sibling
     // outcome exits).
     let planner = DefaultPlanner::compose_default()
-        .with_batch(Arc::new(BoundedParallelBatchPolicyStrategy))
         .with_recovery(Arc::new(support::ShrinkContextCallScopeRecoveryStrategy));
     let family = LoopFamily::new(
         LoopFamilyId::new("executor-exit-sibling-merge-test").expect("valid test family id"),
@@ -4654,7 +5389,6 @@ async fn parallel_batch_rebuilds_pre_gate_terminal_exit_against_merged_checkpoin
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
     let planner = DefaultPlanner::compose_default()
-        .with_batch(Arc::new(BoundedParallelBatchPolicyStrategy))
         .with_recovery(Arc::new(support::ShrinkContextCallScopeRecoveryStrategy));
     let family = LoopFamily::new(
         LoopFamilyId::new("executor-rebuilt-exit-test").expect("valid test family id"),
@@ -4793,7 +5527,6 @@ async fn coalesced_dependent_gate_precedes_later_terminal_sibling() {
             ),
         ]);
     let planner = DefaultPlanner::compose_default()
-        .with_batch(Arc::new(BoundedParallelBatchPolicyStrategy))
         .with_recovery(Arc::new(support::ShrinkContextCallScopeRecoveryStrategy));
     let family = LoopFamily::new(
         LoopFamilyId::new("coalesced-gate-terminal-order-test").expect("valid test family id"),
@@ -5012,10 +5745,9 @@ async fn parallel_batch_cancelled_sibling_ends_run_with_checked_state() {
 }
 
 #[tokio::test]
-async fn exclusive_batch_keeps_host_batch_early_break_when_parallel_mode_is_enabled() {
-    let host = MockHost::new(vec![calls_response_with_count(2)])
-        .with_default_concurrency_hint(ConcurrencyHint::Exclusive)
-        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
+async fn ordered_middleware_preserves_the_complete_model_batch_contract() {
+    let host = MockHost::new(vec![calls_response_with_count(2)]).with_batch_outcomes(vec![
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::approval_required(
                     LoopGateRef::new("gate:exclusive-early-break").expect("valid"),
@@ -5025,7 +5757,8 @@ async fn exclusive_batch_keeps_host_batch_early_break_when_parallel_mode_is_enab
                 .resolution,
             ],
             stopped_on_suspension: true,
-        }]);
+        },
+    ]);
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
     let exit = CanonicalAgentLoopExecutor
@@ -5042,6 +5775,13 @@ async fn exclusive_batch_keeps_host_batch_early_break_when_parallel_mode_is_enab
     let batch_invocations = host.batch_invocations();
     assert_eq!(batch_invocations.len(), 1);
     assert!(batch_invocations[0].stop_on_first_suspension);
+    assert_eq!(
+        final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock)
+            .budget_ledger
+            .capability_invocations_made(),
+        1,
+        "only the first call reached the ordered host before suspension"
+    );
 }
 
 #[tokio::test]
@@ -5300,6 +6040,100 @@ async fn model_retry_success_clears_recovery_state() {
         ]
     );
     assert_eq!(final_state.compaction_prompt.observed_prompt_tokens, 50);
+}
+
+/// Behavior tightening absorbed by the `BudgetLedger` refactor: a model-call
+/// retry now charges the model-call budget through the same chokepoint the
+/// first dispatch of an iteration uses, BEFORE re-dispatching. Before this
+/// fix (`executor/model.rs`, the per-attempt dispatch inside `ModelStage`)
+/// the counter incremented unconditionally with no enforcement, so a
+/// call-scope retry (e.g. `Unavailable`) could keep dispatching to the
+/// provider even once the run's model-call budget was exhausted; only the
+/// NEXT outer-loop `BudgetStage` pass would have noticed. This pins: when
+/// the budget has no remaining allowance at the moment of a retry attempt,
+/// the attempt is converted to `ModelStep::RetryIteration` instead of
+/// dispatching — re-entering the outer loop, where `BudgetStage` then
+/// hard-stops the run through its existing `ModelCallLimit` exit. No new
+/// exit path is introduced.
+#[tokio::test]
+async fn model_retry_returns_to_outer_loop_when_call_budget_is_exhausted() {
+    let host = MockHost::new(Vec::new()).with_model_errors(vec![AgentLoopHostError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        "model unavailable",
+    )]);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let policy = host
+        .run_context()
+        .resolved_run_profile
+        .resource_budget_policy
+        .clone();
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    // Exactly one model call remains: the first dispatch attempt charges it
+    // and lands the counter at the cap, leaving nothing for the call-scope
+    // retry `Unavailable` would otherwise trigger.
+    state
+        .budget_ledger
+        .set_model_calls_made_for_test(policy.max_model_calls - 1);
+
+    let step = ModelStage
+        .process(
+            ctx,
+            ModelInput {
+                state,
+                messages: Vec::new(),
+                inline_messages: Vec::new(),
+                surface_version: surface_version(),
+                capability_view: LoopModelCapabilityView {
+                    visible_capability_ids: Vec::new(),
+                },
+            },
+        )
+        .await
+        .expect("model stage");
+
+    let retried_state = match step {
+        ModelStep::RetryIteration(state) => state,
+        other => panic!(
+            "an exhausted model-call budget mid-retry must re-enter the outer loop, got {}",
+            match other {
+                ModelStep::Response(..) => "Response",
+                ModelStep::RetryIteration(_) => unreachable!(),
+                ModelStep::Exit(_) => "Exit",
+            }
+        ),
+    };
+    // Exactly one dispatch reached the host — the exhausted retry attempt
+    // was never sent to the provider.
+    assert_eq!(host.model_requests().len(), 1);
+    // Charged only once (the first attempt); the exhausted retry charged
+    // nothing, so the counter stays exactly at the cap rather than going one
+    // further as it would have before this fix.
+    assert_eq!(
+        retried_state.budget_ledger.model_calls_made(),
+        policy.max_model_calls
+    );
+
+    // The next BudgetStage iteration hard-stops the run through the
+    // existing model-call-limit exit — no new exit path was introduced.
+    match BudgetStage
+        .process(
+            ctx,
+            BudgetInput {
+                state: *retried_state,
+            },
+        )
+        .await
+        .expect("budget stage")
+    {
+        BudgetStep::Exit(LoopExit::Failed(failed)) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::ModelCallLimit);
+        }
+        other => panic!("an exhausted model-call budget must hard-stop, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -6714,7 +7548,18 @@ async fn retry_uses_single_call_invocation() {
             .expect("execute");
 
         assert!(matches!(exit, LoopExit::Completed(_)));
-        assert_eq!(final_staged_state(&host).recovery_state, Default::default());
+        let final_state = final_staged_state(&host);
+        assert_eq!(final_state.recovery_state, Default::default());
+        // Accounting invariant (executor/capabilities.rs): "every invocation
+        // that reaches dispatch counts, whatever its outcome." The initial
+        // batch dispatch (1 call) plus the one same-call retry dispatch must
+        // both count toward the budget, or a caller retrying failed calls
+        // silently escapes the invocation budget.
+        assert_eq!(
+            final_state.budget_ledger.capability_invocations_made(),
+            2,
+            "initial dispatch (1) + one retry dispatch (1) must both count"
+        );
     }
 }
 
@@ -10939,7 +11784,6 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
                 safe_name: "demo_list".to_string(),
                 safe_description: "demo list capability".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
         ])
@@ -11342,7 +12186,6 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
                 safe_name: "demo_list".to_string(),
                 safe_description: "demo list capability".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
             // Z: demo.write
@@ -11353,7 +12196,6 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
                 safe_name: "demo_write".to_string(),
                 safe_description: "demo write capability".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
         ])
@@ -11613,7 +12455,6 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
                 safe_name: "demo_list".to_string(),
                 safe_description: "demo list capability".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
         ])
@@ -11829,7 +12670,6 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
                 safe_name: "demo_list".to_string(),
                 safe_description: "demo list capability".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
         ])

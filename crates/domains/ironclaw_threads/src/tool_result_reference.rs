@@ -135,6 +135,14 @@ pub struct ToolResultReferenceEnvelope {
     pub safe_summary: ToolResultSafeSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_observation: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intrinsic_outcome: Option<ToolResultIntrinsicOutcome>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResultIntrinsicOutcome {
+    NothingToReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,6 +211,7 @@ impl ToolResultReferenceEnvelope {
             result_ref,
             safe_summary,
             model_observation: None,
+            intrinsic_outcome: None,
         })
     }
 
@@ -346,6 +355,20 @@ impl ToolResultReferenceEnvelope {
             return Ok(None);
         }
         serde_json::to_string(&merged)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn merge_intrinsic_outcome_content_if_absent(
+        content: &str,
+        intrinsic_outcome: ToolResultIntrinsicOutcome,
+    ) -> Result<Option<String>, String> {
+        let mut envelope = Self::from_json_str(content)?;
+        if envelope.intrinsic_outcome.is_some() {
+            return Ok(None);
+        }
+        envelope.intrinsic_outcome = Some(intrinsic_outcome);
+        serde_json::to_string(&envelope)
             .map(Some)
             .map_err(|error| error.to_string())
     }

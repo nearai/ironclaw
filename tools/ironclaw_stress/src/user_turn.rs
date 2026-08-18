@@ -10,10 +10,7 @@ use std::{
 
 use chrono::Utc;
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::turn::{
-    AcceptedMessageRef, BlockedReason, IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef,
-    TurnActor,
-};
+use ironclaw_host_api::turn::{AcceptedMessageRef, BlockedReason, IdempotencyKey, TurnActor};
 use ironclaw_host_api::{
     error::HostApiError,
     ids::{CapabilityId, InvocationId, ProcessId, ResourceReservationId, ThreadId},
@@ -874,10 +871,6 @@ where
                 actor: TurnActor::new(context.user_id.clone()),
                 accepted_message_ref: AcceptedMessageRef::new(accepted.message_id.to_string())
                     .map_err(|error| OperationFailure::invalid_request("prefill_submit", error))?,
-                source_binding_ref: SourceBindingRef::new(source_binding)
-                    .map_err(|error| OperationFailure::invalid_request("prefill_submit", error))?,
-                reply_target_binding_ref: ReplyTargetBindingRef::new(reply_target)
-                    .map_err(|error| OperationFailure::invalid_request("prefill_submit", error))?,
                 requested_run_profile: None,
                 requested_model: None,
                 idempotency_key: IdempotencyKey::new(format!(
@@ -1072,10 +1065,6 @@ where
                         "message:{operation_ref}"
                     ))
                     .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
-                    source_binding_ref: SourceBindingRef::new(source_binding)
-                        .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
-                    reply_target_binding_ref: ReplyTargetBindingRef::new(reply_target)
-                        .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
                     requested_run_profile: None,
                     requested_model: None,
                     idempotency_key: IdempotencyKey::new(format!(
@@ -1175,10 +1164,6 @@ where
                     scope: context.turn_scope.clone(),
                     actor: TurnActor::new(context.user_id.clone()),
                     accepted_message_ref: AcceptedMessageRef::new(accepted.message_id.to_string())
-                        .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
-                    source_binding_ref: SourceBindingRef::new(source_binding)
-                        .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
-                    reply_target_binding_ref: ReplyTargetBindingRef::new(reply_target)
                         .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
                     requested_run_profile: None,
                     requested_model: None,
@@ -1590,6 +1575,7 @@ where
                 &mut stages.append_tool_result,
                 self.thread_service.append_tool_result_reference(
                     AppendToolResultReferenceRequest {
+                        intrinsic_outcome: None,
                         scope: context.thread_scope.clone(),
                         thread_id: thread_id.clone(),
                         turn_run_id: claimed.state.run_id.to_string(),
@@ -1736,12 +1722,6 @@ where
                 actor: TurnActor::new(context.user_id.clone()),
                 run_id,
                 gate_resolution_ref: gate_ref,
-                source_binding_ref: SourceBindingRef::new(format!("stress-src:{run_id}"))
-                    .map_err(|error| OperationFailure::invalid_request("resume_turn", error))?,
-                reply_target_binding_ref: ReplyTargetBindingRef::new(format!(
-                    "stress-reply:{run_id}"
-                ))
-                .map_err(|error| OperationFailure::invalid_request("resume_turn", error))?,
                 idempotency_key: IdempotencyKey::new(format!("stress-resume:{run_id}"))
                     .map_err(|error| OperationFailure::invalid_request("resume_turn", error))?,
                 precondition,
@@ -2481,6 +2461,8 @@ fn thread_failure(stage: impl Into<String>, error: SessionThreadError) -> Operat
             "thread_serialization"
         }
         SessionThreadError::InvalidMessageTimestamp { .. } => "thread_timestamp_invalid",
+        SessionThreadError::InvalidPreparedContext { .. }
+        | SessionThreadError::PreparedContextKeyMismatch { .. } => "thread_invalid_request",
         SessionThreadError::Backend(_) => "thread_backend",
     };
     OperationFailure::new(bucket, stage, error)

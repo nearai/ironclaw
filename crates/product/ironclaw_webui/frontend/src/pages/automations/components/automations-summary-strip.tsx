@@ -1,10 +1,21 @@
-import { useT } from "../../../lib/i18n";
+import type { BadgeTone } from "../../../design-system/badge";
 import { Panel, StatCard } from "../../../design-system/primitives";
+import { useT } from "../../../lib/i18n";
 import { cn } from "../../../utils/cn";
+
+type SummaryCard = {
+  detail: string;
+  filter?: string | null;
+  key: string;
+  label: string;
+  tone: BadgeTone;
+  value: number | string;
+  valueClassName?: string;
+};
 
 export function AutomationsSummaryStrip({ summary, activeFilter, onSelectFilter }) {
   const t = useT();
-  const cards = [
+  const cards: SummaryCard[] = [
     {
       key: "scheduled",
       label: t("automations.summary.scheduled"),

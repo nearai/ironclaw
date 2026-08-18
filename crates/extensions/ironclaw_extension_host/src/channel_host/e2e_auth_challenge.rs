@@ -88,6 +88,7 @@ impl AuthChallengeProvider for FakeAuthChallengeProvider {
             ),
             expires_at: None,
             pairing: None,
+            device_link: None,
         }))
     }
 }
