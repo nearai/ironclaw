@@ -109,6 +109,10 @@ pub fn unavailable(reason: &str) -> RunArtifactTimings {
     }
 }
 
+// The diagnostic-store caller lands in a later task (`timings_source.rs`
+// calls this directly via `super::run_artifact::timings::project_timings`);
+// until then this pure projection has no production caller.
+#[allow(dead_code)]
 pub fn project_timings(
     snapshot: DiagnosticSnapshot,
     wall_clock_ms: Option<u64>,
