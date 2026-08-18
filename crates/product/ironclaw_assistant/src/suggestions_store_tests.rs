@@ -55,6 +55,24 @@ fn scope() -> ResourceScope {
     .expect("valid test scope")
 }
 
+#[test]
+fn document_path_is_stable_for_tenant_and_user_scope() {
+    let scope = ResourceScope {
+        tenant_id: TenantId::new("tenant-store").expect("valid tenant"),
+        user_id: UserId::new("user-store").expect("valid user"),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+    };
+
+    assert_eq!(
+        document_path(&scope).expect("valid document path").as_str(),
+        "/suggestions/contexts/935ee36455821846b6581f37b908afd5d19507c558cdc817cf403efe8f594c69/doc.json"
+    );
+}
+
 fn context_scope(agent_id: &str, project_id: &str) -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new("suggestions-test-tenant").expect("valid tenant"),

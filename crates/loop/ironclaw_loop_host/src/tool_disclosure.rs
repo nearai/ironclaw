@@ -80,13 +80,6 @@ pub(crate) const TOOL_SEARCH_NAME: &str = "tool_search";
 pub(crate) const TOOL_DESCRIBE_NAME: &str = "tool_describe";
 pub(crate) const TOOL_CALL_NAME: &str = "tool_call";
 
-/// Stable capability identities for the model-facing discovery bridges.
-/// Prepared contexts may allow search and schema inspection while excluding
-/// `TOOL_CALL_CAPABILITY_ID`, which would grant dispatch rather than discovery.
-pub const TOOL_SEARCH_CAPABILITY_ID: &str = "ironclaw.tool_search";
-pub const TOOL_DESCRIBE_CAPABILITY_ID: &str = "ironclaw.tool_describe";
-pub const TOOL_CALL_CAPABILITY_ID: &str = "ironclaw.tool_call";
-
 const MEMORY_CORE_TOOL_ALIASES: &[(&str, &str)] = &[
     (
         ironclaw_host_runtime::MEMORY_SEARCH_CAPABILITY_ID,

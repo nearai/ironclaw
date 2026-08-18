@@ -45,7 +45,7 @@ impl SuggestionsProcessCommitObserver {
 #[async_trait]
 impl ProcessJournalCommitObserver for SuggestionsProcessCommitObserver {
     fn process_observer_id(&self) -> &'static str {
-        "suggestions-generation-commit-observer-v1"
+        "suggestions-generation-commit-observer"
     }
 
     async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
@@ -83,12 +83,17 @@ impl ProcessJournalCommitObserver for SuggestionsProcessCommitObserver {
                     .await
                     .map_err(|error| format!("read suggestion finalization failed: {error}"))?;
                 let Some(finalization) = finalization else {
-                    return Err(
-                        "completed suggestion run has no structured finalization".to_string()
+                    tracing::debug!(
+                        %run_id,
+                        %public_id,
+                        "completed suggestion run has no structured finalization"
                     );
+                    self.fail_matching(&scope, &public_id, run_id, SAFE_INVALID_OUTPUT_REASON)
+                        .await?;
+                    return Ok(());
                 };
                 let generated =
-                    match serde_json::from_value::<GeneratedSuggestions>(finalization.parsed) {
+                    match serde_json::from_str::<GeneratedSuggestions>(&finalization.raw_json) {
                         Ok(generated) => generated,
                         Err(_) => {
                             self.fail_matching(
@@ -202,4 +207,169 @@ fn thread_scope_for_snapshot(snapshot: &JournaledProcessSnapshot) -> Option<Thre
         owner_user_id: Some(snapshot.scope.user_id.clone()),
         mission_id: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{
+        ids::{AgentId, ProcessId, ProjectId, TenantId, ThreadId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+        resource::ResourceScope,
+    };
+    use ironclaw_processes::{
+        JournaledProcessSnapshot, ProcessJournalCommit, ProcessJournalCommitObserver,
+        ProcessJournalCursor, ProcessJournalKind, ProcessKind, ProcessLifecycleStatus,
+    };
+    use ironclaw_threads::{
+        EnsureThreadRequest, InMemorySessionThreadService, SessionThreadService, ThreadScope,
+    };
+    use serde_json::json;
+
+    use super::*;
+    use crate::suggestions_store::{
+        BeginGenerationRequest, FilesystemSuggestionsStore, GenerationId, SuggestionsStore,
+    };
+
+    fn resource_scope(thread_id: Option<ThreadId>) -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new("observer-test-tenant").expect("valid tenant"),
+            user_id: UserId::new("observer-test-user").expect("valid user"),
+            agent_id: Some(AgentId::new("observer-test-agent").expect("valid agent")),
+            project_id: Some(ProjectId::new("observer-test-project").expect("valid project")),
+            mission_id: None,
+            thread_id,
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+        }
+    }
+
+    fn thread_scope() -> ThreadScope {
+        ThreadScope {
+            tenant_id: TenantId::new("observer-test-tenant").expect("valid tenant"),
+            agent_id: AgentId::new("observer-test-agent").expect("valid agent"),
+            project_id: Some(ProjectId::new("observer-test-project").expect("valid project")),
+            owner_user_id: Some(UserId::new("observer-test-user").expect("valid user")),
+            mission_id: None,
+        }
+    }
+
+    fn store() -> FilesystemSuggestionsStore<InMemoryBackend> {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/suggestions").expect("valid mount alias"),
+            VirtualPath::new("/tenants/test/users/test/suggestions").expect("valid mount root"),
+            MountPermissions::read_write(),
+        )])
+        .expect("valid mount view");
+        FilesystemSuggestionsStore::new(Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::new()),
+            mounts,
+        )))
+    }
+
+    /// A completed process without finalization evidence is a terminal
+    /// invalid-output outcome, not a retryable observer error. Returning `Ok`
+    /// is what lets the durable observer cursor advance past the commit.
+    #[tokio::test]
+    async fn completed_without_finalization_settles_matching_generation_failed() {
+        let store = Arc::new(store());
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let store_scope = resource_scope(None);
+        let public_id = "suggestions-generation-without-finalization";
+        let thread_id = ThreadId::new(public_id).expect("valid thread id");
+        let process_scope = resource_scope(Some(thread_id.clone()));
+        let thread_scope = thread_scope();
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope,
+                thread_id: Some(thread_id.clone()),
+                created_by_actor_id: "observer-test".to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("thread exists for finalization lookup");
+
+        let generation_id =
+            GenerationId::new("generation-without-finalization").expect("valid generation id");
+        let run_id = ironclaw_host_api::turn::TurnRunId::new();
+        let lease_owner = "observer-test-lease";
+        let now = Utc::now();
+        store
+            .begin_generation(
+                &store_scope,
+                BeginGenerationRequest {
+                    generation_id,
+                    public_id: public_id.to_string(),
+                    accept_key: public_id.to_string(),
+                    client_action_id: Some("observer-test-action".to_string()),
+                    prompt_schema_version: 1,
+                    lease_owner: lease_owner.to_string(),
+                    lease_expires_at: now + chrono::Duration::minutes(1),
+                    now,
+                },
+            )
+            .await
+            .expect("generation is claimed");
+        store
+            .bind_generation_run(
+                &store_scope,
+                &GenerationId::new("generation-without-finalization").expect("valid generation id"),
+                lease_owner,
+                run_id,
+                now,
+            )
+            .await
+            .expect("generation is bound to the process run");
+
+        let snapshot = JournaledProcessSnapshot {
+            process_id: ProcessId::from_uuid(run_id.as_uuid()),
+            process_kind: ProcessKind::AgentTurn,
+            scope: process_scope,
+            status: ProcessLifecycleStatus::Completed,
+            suspension: None,
+            checkpoint_ref: None,
+            checkpoint_kind: None,
+            input_ref: None,
+            failure: None,
+            journal_cursor: ProcessJournalCursor(1),
+            lease: None,
+            crash_reclaim_count: 0,
+            created_at: now,
+            owner_user_id: None,
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            metadata: json!({
+                "agent_turn": {
+                    "output_contract": {"name": SUGGESTIONS_OUTPUT_NAME}
+                }
+            }),
+        };
+        SuggestionsProcessCommitObserver::new(store.clone(), thread_service)
+            .observe_process_commit(ProcessJournalCommit {
+                state: snapshot,
+                kind: ProcessJournalKind::Completed,
+                sanitized_reason: None,
+            })
+            .await
+            .expect("missing finalization is settled, allowing cursor advancement");
+
+        let document = store
+            .read(&store_scope)
+            .await
+            .expect("suggestion document reads")
+            .expect("suggestion document exists");
+        assert!(matches!(
+            document.generation,
+            crate::suggestions_store::GenerationState::Failed {
+                reason,
+                ..
+            } if reason == "suggestion generation returned invalid output"
+        ));
+        assert!(document.suggestions.is_empty());
+    }
 }

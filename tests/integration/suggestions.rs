@@ -611,22 +611,22 @@ async fn generate_suggestions_returns_cards_and_cached_replay() -> HarnessResult
         }
         None => return Err("suggestion finalization must request a JSON schema".into()),
     };
-    assert_eq!(native_schema.name, "suggestions_v1");
+    assert_eq!(native_schema.name, "suggestions");
     assert!(native_schema.is_strict());
     assert_eq!(
-        native_schema["properties"]["suggestions"]["minItems"],
+        native_schema.schema["properties"]["suggestions"]["minItems"],
         json!(1)
     );
     assert_eq!(
-        native_schema["properties"]["suggestions"]["maxItems"],
+        native_schema.schema["properties"]["suggestions"]["maxItems"],
         json!(5)
     );
     assert_eq!(
-        native_schema["properties"]["suggestions"]["items"]["additionalProperties"],
+        native_schema.schema["properties"]["suggestions"]["items"]["additionalProperties"],
         json!(false)
     );
     assert_eq!(
-        native_schema["properties"]["suggestions"]["items"]["required"],
+        native_schema.schema["properties"]["suggestions"]["items"]["required"],
         json!([
             "title",
             "description",

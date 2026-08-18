@@ -39,13 +39,13 @@ use crate::{
         SuggestionDocument, SuggestionId, SuggestionRecord, SuggestionStartClaim,
         SuggestionStartReservation, SuggestionsStore, SuggestionsStoreError,
     },
-    unbound_turn::{UnboundTurnError, UnboundTurnScope, UnboundTurnSubmission},
+    unbound_turn::{UnboundTurnError, UnboundTurnSubmission},
 };
 
 const PROMPT_SCHEMA_VERSION: u32 = 1;
 const GENERATION_LEASE_DURATION_SECONDS: i64 = 30;
 const GENERATION_RETRY_AFTER_SECONDS: u32 = 1;
-pub(crate) const SUGGESTIONS_OUTPUT_NAME: &str = "suggestions_v1";
+pub(crate) const SUGGESTIONS_OUTPUT_NAME: &str = "suggestions";
 const MIN_SUGGESTIONS: usize = 1;
 const MAX_SUGGESTIONS: usize = 5;
 const MIN_GENERATED_FIELD_LENGTH: usize = 1;
@@ -58,7 +58,7 @@ const MAX_SOURCES: usize = 5;
 const MAX_SOURCE_LENGTH: usize = 128;
 const SAFE_PRE_SUBMIT_FAILURE_REASON: &str = "suggestion generation submission failed";
 const SUGGESTION_SYSTEM_PROMPT: &str = include_str!("../prompts/suggestion_generation.md");
-const SUGGESTIONS_OUTPUT_SCHEMA: &str = include_str!("../schemas/suggestions.output.v1.json");
+const SUGGESTIONS_OUTPUT_SCHEMA: &str = include_str!("../schemas/suggestions.output.json");
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -342,12 +342,7 @@ async fn submit_suggestion_generation(
         output,
     } = submission_context;
     let submission = UnboundTurnSubmission {
-        scope: UnboundTurnScope {
-            tenant_id: caller.tenant_id.clone(),
-            user_id: caller.user_id.clone(),
-            agent_id: caller.agent_id.clone(),
-            project_id: caller.project_id.clone(),
-        },
+        caller: caller.clone(),
         public_id: public_id.to_string(),
         system_prompt: SUGGESTION_SYSTEM_PROMPT.to_string(),
         messages: vec![AgentMessage {

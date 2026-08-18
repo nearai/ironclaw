@@ -272,7 +272,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Identity resolution runs on the coverage lane | `identity_resolution_smoke.rs` |
 | A canonical 10-tool-call agent turn's database write volume is measured and reported (for tracking, not gated) on both libSQL and Postgres, and custom-actor group threads are rejected from canonical durable milestones | `db_write_canonical.rs` |
 
-One of the 59 registered bins, `delivery_user_journeys.rs`, holds the explicit
+One of the 60 registered bins, `delivery_user_journeys.rs`, holds the explicit
 channel-delivery journeys (two-lane model):
 
 | A user can… | Scenario |

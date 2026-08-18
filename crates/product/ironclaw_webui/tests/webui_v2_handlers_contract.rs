@@ -137,7 +137,10 @@ use ironclaw_product_contracts::product_wire::{
     RebornSuggestionDismissResponse, RebornSuggestionGenerationStatus,
     RebornSuggestionStartResponse, RebornSuggestionsResponse,
 };
-use ironclaw_product_contracts::suggestions::SUGGESTIONS_LIST_VIEW;
+use ironclaw_product_contracts::suggestions::{
+    SUGGESTION_DISMISS_COMMAND_ID, SUGGESTION_START_COMMAND_ID, SUGGESTIONS_GENERATE_COMMAND_ID,
+    SUGGESTIONS_LIST_VIEW,
+};
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
     ProductSurfaceErrorKind, ProductSurfaceEventSubscription, ProductSurfaceStreamResponse,
@@ -222,9 +225,9 @@ impl ProductSurfaceCallId {
             Self::AutomationRename => "automation.rename",
             Self::AutomationDelete => "automation.delete",
             Self::NotificationChannelsSet => NOTIFICATION_CHANNELS_SET_COMMAND_ID,
-            Self::SuggestionsGenerate => "suggestions.generate",
-            Self::SuggestionStart => "suggestion.start",
-            Self::SuggestionDismiss => "suggestion.dismiss",
+            Self::SuggestionsGenerate => SUGGESTIONS_GENERATE_COMMAND_ID,
+            Self::SuggestionStart => SUGGESTION_START_COMMAND_ID,
+            Self::SuggestionDismiss => SUGGESTION_DISMISS_COMMAND_ID,
         }
     }
 
@@ -256,9 +259,9 @@ impl ProductSurfaceCallId {
             "automation.rename" => Some(Self::AutomationRename),
             "automation.delete" => Some(Self::AutomationDelete),
             NOTIFICATION_CHANNELS_SET_COMMAND_ID => Some(Self::NotificationChannelsSet),
-            "suggestions.generate" => Some(Self::SuggestionsGenerate),
-            "suggestion.start" => Some(Self::SuggestionStart),
-            "suggestion.dismiss" => Some(Self::SuggestionDismiss),
+            SUGGESTIONS_GENERATE_COMMAND_ID => Some(Self::SuggestionsGenerate),
+            SUGGESTION_START_COMMAND_ID => Some(Self::SuggestionStart),
+            SUGGESTION_DISMISS_COMMAND_ID => Some(Self::SuggestionDismiss),
             _ => None,
         }
     }

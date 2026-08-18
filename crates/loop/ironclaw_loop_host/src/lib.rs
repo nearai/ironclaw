@@ -115,6 +115,9 @@ pub use input_queue::{
     HostInputQueue, HostInputQueueError, HostInputQueueReconcile, InMemoryHostInputQueue,
     MAX_QUEUED_INPUTS_PER_RUN, RejectingInputEnqueue,
 };
+pub use ironclaw_host_api::capability::{
+    TOOL_CALL_CAPABILITY_ID, TOOL_DESCRIBE_CAPABILITY_ID, TOOL_SEARCH_CAPABILITY_ID,
+};
 pub use ironclaw_loop_contracts::PromptContextTokenBudget;
 pub use model_gateway::{
     LlmModelProfilePolicy, LlmProviderModelGateway, ModelRouteProviderPool,
@@ -186,10 +189,7 @@ pub use thread_resolving_model_gateway::{
 };
 pub use thread_scope::ThreadScopeResolver;
 pub use tool_diagnostics::{HostManagedToolDiagnosticEmitter, PreparedToolDiagnosticResult};
-pub use tool_disclosure::{
-    TOOL_CALL_CAPABILITY_ID, TOOL_DESCRIBE_CAPABILITY_ID, TOOL_SEARCH_CAPABILITY_ID,
-    bridge_capability_ids,
-};
+pub use tool_disclosure::bridge_capability_ids;
 pub use tool_disclosure_mode::{REBORN_TOOL_DISCLOSURE_ENV, ToolDisclosureMode};
 pub use tool_disclosure_port::ToolDisclosureCapabilityDecorator;
 pub use user_profile_context::{EmptyUserProfileSource, HostUserProfileSource};

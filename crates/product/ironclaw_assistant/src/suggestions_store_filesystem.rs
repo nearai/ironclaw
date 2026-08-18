@@ -3,7 +3,6 @@ use super::*;
 use ironclaw_common::hashing::sha256_hex;
 use ironclaw_filesystem::{CasUpdateError, Entry, RecordKind, cas_update};
 use ironclaw_host_api::path::ScopedPath;
-use sha2::{Digest, Sha256};
 
 impl<F: RootFilesystem + ?Sized> FilesystemSuggestionsStore<F> {
     pub(super) async fn update<T, A, Fut>(
@@ -33,10 +32,10 @@ impl<F: RootFilesystem + ?Sized> FilesystemSuggestionsStore<F> {
 }
 
 pub(super) fn document_path(scope: &ResourceScope) -> Result<ScopedPath, SuggestionsStoreError> {
-    let mut digest = Sha256::new();
-    update_digest_part(&mut digest, scope.tenant_id.to_string().as_bytes());
-    update_digest_part(&mut digest, scope.user_id.to_string().as_bytes());
-    let context_key = sha256_hex(&digest.finalize());
+    let mut framed = Vec::new();
+    push_framed_part(&mut framed, scope.tenant_id.to_string().as_bytes());
+    push_framed_part(&mut framed, scope.user_id.to_string().as_bytes());
+    let context_key = sha256_hex(&framed);
     ScopedPath::new(format!("{SUGGESTION_DOCUMENT_ROOT}/{context_key}/doc.json")).map_err(|error| {
         SuggestionsStoreError::Filesystem {
             operation: "construct suggestion document path",
@@ -45,9 +44,9 @@ pub(super) fn document_path(scope: &ResourceScope) -> Result<ScopedPath, Suggest
     })
 }
 
-fn update_digest_part(digest: &mut Sha256, value: &[u8]) {
-    digest.update((value.len() as u64).to_be_bytes());
-    digest.update(value);
+fn push_framed_part(framed: &mut Vec<u8>, value: &[u8]) {
+    framed.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    framed.extend_from_slice(value);
 }
 
 pub(super) fn decode_document(bytes: &[u8]) -> Result<SuggestionDocument, SuggestionsStoreError> {
