@@ -655,6 +655,8 @@ pub enum RebornCompositionError {
     Mount(#[from] ironclaw_host_api::error::HostApiError),
     #[error("reborn filesystem substrate failed: {0}")]
     Filesystem(#[from] ironclaw_filesystem::FilesystemError),
+    #[error("reborn libSQL runtime substrate failed: {0}")]
+    LibSqlRuntime(#[from] ironclaw_libsql_runtime::LibSqlRuntimeError),
     #[error("reborn resource governor substrate failed: {0}")]
     Resource(#[from] ResourceError),
     #[error("reborn approval store substrate failed: {0}")]
@@ -675,6 +677,11 @@ pub enum RebornCompositionError {
         "production runtime policy uses {process_backend:?} but a user sandbox process binding was supplied"
     )]
     UnexpectedUserSandboxProcessPort { process_backend: ProcessBackendKind },
+    /// Carries the store's filesystem cause; flattening it into a message
+    /// would leave an operator unable to tell a broken database from a
+    /// rejected index.
+    #[error("process journal startup migration failed")]
+    ProcessJournalMigration(#[from] ironclaw_processes::ProcessJournalStoreError),
     #[error("reborn production wiring failed: {report:?}")]
     ProductionWiring {
         report: ironclaw_host_runtime::ProductionWiringReport,

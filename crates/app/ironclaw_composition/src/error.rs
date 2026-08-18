@@ -42,6 +42,8 @@ pub enum RebornBuildError {
     Turn(#[from] ironclaw_turns::TurnError),
     #[error("reborn mount view construction failed")]
     Mount(#[from] ironclaw_host_api::error::HostApiError),
+    #[error("process journal startup migration failed")]
+    ProcessJournalMigration(#[from] ironclaw_processes::ProcessJournalStoreError),
 }
 
 impl From<ironclaw_extension_host::RebornExtensionHostBuildError> for RebornBuildError {
@@ -81,6 +83,7 @@ impl From<crate::RebornCompositionError> for RebornBuildError {
             crate::RebornCompositionError::MissingSecretMasterKey => Self::MissingSecretMasterKey,
             crate::RebornCompositionError::Mount(error) => Self::Mount(error),
             crate::RebornCompositionError::Filesystem(error) => Self::Filesystem(error),
+            crate::RebornCompositionError::LibSqlRuntime(error) => Self::LibSqlRuntime(error),
             crate::RebornCompositionError::Resource(error) => Self::Resource(error),
             crate::RebornCompositionError::ApprovalStore(error) => Self::ApprovalStore(error),
             crate::RebornCompositionError::CapabilityLease(error) => Self::CapabilityLease(error),
@@ -92,6 +95,10 @@ impl From<crate::RebornCompositionError> for RebornBuildError {
             },
             crate::RebornCompositionError::ProductionWiring { report } => {
                 Self::ProductionWiring { report }
+            }
+            // Carried, not flattened: the store error holds the filesystem cause.
+            crate::RebornCompositionError::ProcessJournalMigration(source) => {
+                Self::ProcessJournalMigration(source)
             }
             error @ crate::RebornCompositionError::MissingUserSandboxProcessPort
             | error @ crate::RebornCompositionError::UnexpectedUserSandboxProcessPort { .. } => {

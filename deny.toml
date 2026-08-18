@@ -14,9 +14,11 @@ ignore = [
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
-    # Owner: dependency maintenance. Remove when upgrading libsql eliminates
-    # its tonic 0.11 -> hyper 0.14 -> h2 0.3.27 chain; no patched 0.3 exists.
-    { id = "RUSTSEC-2026-0258", reason = "h2 >= 0.4.16 is patched; libsql 0.9.30 still pins unpatched h2 0.3.27" },
+    # h2 unbounded empty DATA frames — h2 0.4 is patched in Cargo.lock, but
+    # libsql 0.9.30 still pins tonic/hyper to h2 0.3.27. The advisory provides
+    # no patched 0.3.x release, so keep the legacy line ignored until libsql's
+    # transport stack can move to h2 >=0.4.16.
+    "RUSTSEC-2026-0258",
     # rsa Marvin timing side-channel — test-only dependency used to mint
     # throwaway local OIDC JWT fixtures; no production network-observable
     # private-key operation is exposed by this dependency.

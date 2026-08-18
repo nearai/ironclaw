@@ -1599,6 +1599,184 @@ async fn process_journal_filesystem_is_a_separate_handle_over_the_same_tenant_ro
     }
 }
 
+/// A backend whose index declaration fails, so the process journal's startup
+/// migration fails the way a broken or restrictive database makes it fail.
+struct IndexRefusingBackend;
+
+const REFUSED_INDEX_REASON: &str = "index declaration refused by the test backend";
+
+#[async_trait::async_trait]
+impl RootFilesystem for IndexRefusingBackend {
+    async fn ensure_index(
+        &self,
+        path: &ironclaw_host_api::path::VirtualPath,
+        _spec: &ironclaw_filesystem::IndexSpec,
+    ) -> Result<(), FilesystemError> {
+        Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: ironclaw_filesystem::FilesystemOperation::EnsureIndex,
+            reason: REFUSED_INDEX_REASON.to_string(),
+        })
+    }
+
+    async fn list_dir(
+        &self,
+        _path: &ironclaw_host_api::path::VirtualPath,
+    ) -> Result<Vec<ironclaw_filesystem::DirEntry>, FilesystemError> {
+        Ok(Vec::new())
+    }
+
+    async fn stat(
+        &self,
+        path: &ironclaw_host_api::path::VirtualPath,
+    ) -> Result<ironclaw_filesystem::FileStat, FilesystemError> {
+        Err(FilesystemError::NotFound {
+            path: path.clone(),
+            operation: ironclaw_filesystem::FilesystemOperation::Stat,
+        })
+    }
+}
+
+/// Startup migration failure must keep its cause reachable.
+///
+/// Both production substrate paths migrate the process journal and let `?`
+/// convert the failure, so this drives the real migration against a refusing
+/// backend and applies the same conversion. Flattening the store error into a
+/// `reason` string (as both call sites once did) leaves an operator holding
+/// "process journal startup migration failed" with no way to tell an
+/// unreachable database from a rejected index. Both boundaries are checked:
+/// composition's error and the build error it converts into.
+#[tokio::test]
+async fn process_journal_startup_migration_failure_keeps_its_cause() {
+    let store = ProcessJournalStore::new(crate::wrap_process_journal_scoped(Arc::new(
+        IndexRefusingBackend,
+    )));
+
+    let store_error = store
+        .migrate_legacy_journal()
+        .await
+        .expect_err("an index-refusing backend must fail the startup migration");
+    let error = crate::RebornCompositionError::from(store_error);
+
+    assert!(
+        matches!(
+            error,
+            crate::RebornCompositionError::ProcessJournalMigration(..)
+        ),
+        "startup migration failure must be its own variant, not a flattened config error: {error}"
+    );
+    assert!(
+        error_chain(&error).contains(REFUSED_INDEX_REASON),
+        "the backend cause must survive the composition boundary: {}",
+        error_chain(&error)
+    );
+
+    let build_error = RebornBuildError::from(error);
+    assert!(
+        error_chain(&build_error).contains(REFUSED_INDEX_REASON),
+        "the cause must also survive conversion into the build error: {}",
+        error_chain(&build_error)
+    );
+}
+
+/// Render an error and every source under it, for cause-chain assertions.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut rendered = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        rendered.push_str(&format!(" <- {cause}"));
+        source = cause.source();
+    }
+    rendered
+}
+
+/// The libSQL leg of the same split (nearai/ironclaw#7714). libSQL admits one
+/// writer process-wide, so the governor's delta journal and the process journal
+/// used to queue behind every event and message write and time out on a healthy
+/// database. Their lane must therefore (a) resolve the same virtual roots to the
+/// same rows as the data plane, and (b) be admitted while the data-plane writer
+/// slot is held — the timing-free way to state "not the same write lane".
+#[tokio::test]
+async fn libsql_journal_lane_is_a_separate_write_lane_over_the_same_rows() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = Arc::new(
+        libsql::Builder::new_local(directory.path().join("journal-lane.db"))
+            .build()
+            .await
+            .expect("database"),
+    );
+    let runtime = Arc::new(
+        ironclaw_libsql_runtime::LibSqlRuntime::new(Arc::clone(&database)).expect("runtime"),
+    );
+    let data_plane_backend = Arc::new(ironclaw_filesystem::LibSqlRootFilesystem::from_runtime(
+        Arc::clone(&runtime),
+    ));
+    data_plane_backend
+        .run_migrations()
+        .await
+        .expect("libsql migrations");
+    let data_plane = crate::filesystem_assembly::process_journal_root_filesystem(Arc::clone(
+        &data_plane_backend,
+    ))
+    .expect("data-plane composite");
+    let journal_lane = crate::filesystem_assembly::libsql_journal_lane_filesystem(
+        runtime.as_ref(),
+        crate::filesystem_assembly::process_journal_root_filesystem,
+    )
+    .expect("journal lane composite");
+
+    let mount_roots = |filesystem: &Arc<ironclaw_filesystem::CompositeRootFilesystem>| {
+        let filesystem = Arc::clone(filesystem);
+        async move {
+            filesystem
+                .mounts()
+                .await
+                .expect("mounts")
+                .into_iter()
+                .map(|descriptor| descriptor.virtual_root.as_str().to_owned())
+                .collect::<Vec<_>>()
+        }
+    };
+    let lane_roots = mount_roots(&journal_lane).await;
+    assert_eq!(
+        lane_roots,
+        mount_roots(&data_plane).await,
+        "the journal lane must resolve the same virtual roots, or its rows move"
+    );
+    assert!(
+        lane_roots.iter().any(|root| root == "/tenants"),
+        "governor and process rows live under /tenants; got {lane_roots:?}"
+    );
+
+    // Bulk data-plane traffic occupies the sole data-plane writer for the whole
+    // journal write, the way a per-turn write burst does in production.
+    let data_plane_writer = runtime.write().await.expect("data-plane writer");
+    let path = VirtualPath::new("/tenants/probe/users/probe/resources").expect("probe path");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        journal_lane.put(
+            &path,
+            ironclaw_filesystem::Entry::bytes(b"delta".to_vec()),
+            ironclaw_filesystem::CasExpectation::Any,
+        ),
+    )
+    .await
+    .expect("journal lane must not queue behind the data-plane writer")
+    .expect("journal write");
+    drop(data_plane_writer);
+
+    let entry = data_plane
+        .get(&path)
+        .await
+        .expect("data-plane read")
+        .expect("journal row must be visible to the data plane");
+    assert_eq!(
+        entry.entry.body.as_slice(),
+        b"delta".as_slice(),
+        "the lane must address the same rows the data plane reads"
+    );
+}
+
 /// The caller-level Postgres leg of the pool split (Docker/testcontainers;
 /// skipped when unavailable, like the other Postgres composition tests). The
 /// two InMemory-backend handles above cannot prove that two pool-backed

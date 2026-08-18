@@ -42,6 +42,12 @@ const MAX_IDEMPOTENCY_RECORDS: usize = 4096;
 /// Maximum number of crash-recovery claims allowed before a checkpointless
 /// process is failed terminally.
 pub const MAX_CRASH_RECOVERY_RECLAIMS: u64 = 3;
+/// Sanitized failure category recovery writes when a checkpointed process
+/// cannot be requeued after its lease expired.
+pub const LEASE_EXPIRED_FAILURE_CATEGORY: &str = "lease_expired";
+/// Sanitized failure category recovery writes when a checkpointless process
+/// has been reclaimed [`MAX_CRASH_RECOVERY_RECLAIMS`] times.
+pub const CRASH_RETRY_EXHAUSTED_FAILURE_CATEGORY: &str = "crash_retry_exhausted";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct ProcessJournalMaterializedState {
@@ -758,9 +764,9 @@ impl ProcessJournalMaterializedState {
                     )
                 } else {
                     let category = if snapshot.checkpoint_ref.is_some() {
-                        "lease_expired"
+                        LEASE_EXPIRED_FAILURE_CATEGORY
                     } else {
-                        "crash_retry_exhausted"
+                        CRASH_RETRY_EXHAUSTED_FAILURE_CATEGORY
                     };
                     (
                         ProcessLifecycleStatus::Failed,
