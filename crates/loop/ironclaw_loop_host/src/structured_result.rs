@@ -1,22 +1,8 @@
-//! The synthetic, host-owned result tool for unbound structured-output runs.
+//! Synthetic terminal result used by suppression-enabled scheduled runs.
 //!
-//! A `unbound_structured` run's terminal output is the validated arguments
-//! of one call to this tool (unbound-turn design §4.5): the request's JSON
-//! schema is presented as the tool's parameters — riding the one schema path
-//! every provider already supports — and this handler enforces the contract
-//! strictly. Like `capability_info` and `result_read`, this is NOT a
-//! capability in the authorization/dispatch sense: the synthetic port
-//! resolves calls host-side, and nothing here ever crosses the capability
-//! host, approvals, or a runtime lane.
-//!
-//! Outcomes:
-//! - Valid arguments → the canonical JSON is written as a durable capability
-//!   result (the run's structured output, read back by the product tier) and
-//!   the resolution carries the terminate hint, so the loop completes.
-//! - Invalid arguments → a model-visible `input_encode` failure listing a
-//!   bounded set of schema violations; the model corrects and retries.
-//!   Exhausted retries fail the run as `invalid_model_output` through the
-//!   unbound stop conditions.
+//! Native structured output is finalized outside the core loop and does not
+//! use this capability. This module remains solely for the pre-existing typed
+//! `nothing_to_report` automation outcome.
 
 use std::sync::Arc;
 
@@ -40,26 +26,13 @@ use crate::{
     SyntheticCapabilityHandler, SyntheticCapabilityInvocation,
 };
 
-/// Model-facing description of the result tool (prompt asset, not code).
-const STRUCTURED_RESULT_TOOL_DESCRIPTION: &str =
-    include_str!("../prompts/structured_result_tool.md");
 const NOTHING_TO_REPORT_TOOL_DESCRIPTION: &str =
     include_str!("../prompts/nothing_to_report_tool.md");
 
 /// Bounded number of schema violations surfaced per rejected call.
 const MAX_REPORTED_SCHEMA_VIOLATIONS: usize = 3;
 
-/// Build the synthetic result tool for one run from the run's journaled
-/// output schema. The schema must compile — an uncompilable schema is a
-/// caller bug surfaced at host build, before any model call.
-pub fn structured_result_capability(
-    schema: serde_json::Value,
-) -> Result<SyntheticCapability, AgentLoopHostError> {
-    structured_result_capability_with_description(schema, STRUCTURED_RESULT_TOOL_DESCRIPTION)
-}
-
-/// Build the same generic structured-result terminal capability with the
-/// narrow schema and instructions used by suppression-enabled scheduled runs.
+/// Build the narrow terminal capability used by suppression-enabled scheduled runs.
 /// Ordinary scheduled results remain assistant replies; this terminal output
 /// exists only for the typed no-result outcome.
 pub fn nothing_to_report_result_capability() -> Result<SyntheticCapability, AgentLoopHostError> {
@@ -200,26 +173,5 @@ impl SyntheticCapabilityHandler for StructuredResultHandler {
             write.output_digest,
             write.model_observation,
         ))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn uncompilable_schemas_fail_at_construction() {
-        let bad = serde_json::json!({ "type": "definitely-not-a-type" });
-        assert!(structured_result_capability(bad).is_err());
-    }
-
-    #[test]
-    fn compilable_schemas_build_the_synthetic_tool() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": { "cards": { "type": "array" } },
-            "required": ["cards"],
-        });
-        structured_result_capability(schema).expect("builds");
     }
 }

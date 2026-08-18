@@ -4622,6 +4622,7 @@ fn model_request(model_profile_id: ModelProfileId) -> HostManagedModelRequest {
         run_id: TurnRunId::new(),
         turn_id: TurnId::new(),
         tool_choice: None,
+        response_format: None,
     }
 }
 

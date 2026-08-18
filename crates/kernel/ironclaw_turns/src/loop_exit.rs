@@ -130,11 +130,28 @@ impl LoopExitApplier {
         claimed: &ClaimedTurnRun,
         exit: LoopExit,
     ) -> Result<TurnRunState, TurnError> {
+        self.apply_with_supplemental_model_usage(claimed, exit, None)
+            .await
+    }
+
+    /// Apply a validated loop exit while accounting for host-owned model work
+    /// that is not part of the loop exit claim (for example, a structured
+    /// finalizer). The supplemental usage is merged with the exit's cumulative
+    /// snapshot exactly once before the process transition is sent.
+    pub async fn apply_with_supplemental_model_usage(
+        &self,
+        claimed: &ClaimedTurnRun,
+        exit: LoopExit,
+        supplemental_model_usage: Option<LoopModelUsage>,
+    ) -> Result<TurnRunState, TurnError> {
         let policy = self.derive_policy(claimed, &exit).await?;
         // Capture the loop's reported usage before `validate` consumes the exit
         // and collapses it to a coarse outcome; carry it so the terminal
         // transition can persist it on the run record.
-        let model_usage = reported_model_usage(&exit);
+        let model_usage = LoopModelUsage::merge_optional(
+            reported_model_usage(&exit).or(claimed.state.model_usage),
+            supplemental_model_usage,
+        );
         let execution_outcome = self.execution_outcome(claimed, &exit).await?;
         let decision = validate_loop_exit(exit, policy);
         let snapshot = apply_validated_process_loop_exit(
@@ -179,6 +196,16 @@ impl LoopExitApplier {
         claimed: &ClaimedTurnRun,
         failure: SanitizedFailure,
     ) -> Result<TurnRunState, TurnError> {
+        self.record_runner_failure_with_model_usage(claimed, failure, None)
+            .await
+    }
+
+    pub async fn record_runner_failure_with_model_usage(
+        &self,
+        claimed: &ClaimedTurnRun,
+        failure: SanitizedFailure,
+        model_usage: Option<LoopModelUsage>,
+    ) -> Result<TurnRunState, TurnError> {
         let snapshot = self
             .transition_port
             .fail_process(FailProcessRequest {
@@ -194,7 +221,7 @@ impl LoopExitApplier {
                 }),
                 metadata: Some(crate::process_projection::agent_turn_metadata_from_claimed(
                     claimed,
-                    claimed.state.model_usage,
+                    model_usage,
                     None,
                 )),
             })

@@ -368,6 +368,11 @@ PR_STATIC_CONTROL_PATHS = {
     ".cargo/config.toml",
     "tests/integration/coverage-exemptions.toml",
     "tests/integration/coverage-floor.toml",
+    # Release-smoke Python coverage is executed by Code Style's dedicated
+    # `Release smoke script tests` step. It drives the real
+    # `scripts/ci/smoke-release-binary.py`; no Tests (Reborn) Rust lane owns
+    # this unittest module.
+    "tests/test_smoke_release_binary.py",
     # Repo-root `scripts/` is deliberately NOT prefix-classified — the
     # `unmapped test or CI path` arm below exists to force a per-file decision.
     # These are decided:

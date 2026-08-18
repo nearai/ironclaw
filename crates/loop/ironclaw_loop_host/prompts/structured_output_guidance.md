@@ -1,0 +1,1 @@
+This is the work phase for a structured response. Use the available tools and gather the information needed for the final response. You may discuss progress internally, but do not treat a prose assistant reply as the final output. When the work is complete, provide a concise candidate for the host finalization step.

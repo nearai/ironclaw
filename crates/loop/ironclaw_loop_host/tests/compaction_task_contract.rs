@@ -2182,6 +2182,7 @@ impl SystemInferencePort for CapturingInference {
             task_id: request.task_id,
             output_text: self.output.clone(),
             elapsed_ms: 1,
+            usage: None,
         })
     }
 }

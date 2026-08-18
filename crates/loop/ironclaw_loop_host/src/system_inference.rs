@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use ironclaw_loop_contracts::{
     AgentLoopHostErrorKind, LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelPolicyGuard,
     LoopRunContext, LoopSafeSummary, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput,
-    SystemInferenceError, SystemInferencePort, SystemInferenceRequest, SystemInferenceResponse,
+    SystemInferenceContextRole, SystemInferenceError, SystemInferencePort, SystemInferenceRequest,
+    SystemInferenceResponse,
 };
 
 use crate::{
@@ -13,6 +14,8 @@ use crate::{
     HostManagedModelMessageRole, HostManagedModelRequest,
     token_estimator::estimate_tokens_from_chars,
 };
+use ironclaw_host_api::output::OutputContract;
+use ironclaw_llm::{CompletionResponseFormat, JsonSchemaResponseFormat};
 
 #[derive(Clone)]
 pub struct ModelGatewayBackedSystemInferencePort<G>
@@ -119,43 +122,113 @@ where
         &self,
         request: SystemInferenceRequest,
     ) -> Result<SystemInferenceResponse, SystemInferenceError> {
-        if estimate_tokens_from_chars(&request.input_text).as_u64() > request.max_input_tokens {
+        let context_tokens = request
+            .context_messages
+            .iter()
+            .map(|message| estimate_tokens_from_chars(&message.content).as_u64())
+            .sum::<u64>();
+        let input_tokens = context_tokens
+            .saturating_add(estimate_tokens_from_chars(&request.identity.system_prompt).as_u64())
+            .saturating_add(estimate_tokens_from_chars(&request.input_text).as_u64());
+        if input_tokens > request.max_input_tokens {
             return Err(SystemInferenceError::InputTooLarge);
         }
 
         let started = Instant::now();
+        let response_format = match (request.identity.task_kind, request.output_contract.as_ref()) {
+            (
+                ironclaw_loop_contracts::SystemTaskKind::StructuredOutputFinalization,
+                Some(OutputContract::JsonSchema { name, schema }),
+            ) => Some(CompletionResponseFormat::JsonSchema(
+                JsonSchemaResponseFormat::strict(name.clone(), schema.clone()),
+            )),
+            (
+                ironclaw_loop_contracts::SystemTaskKind::StructuredOutputFinalization,
+                Some(OutputContract::JsonObject),
+            ) => Some(CompletionResponseFormat::JsonObject),
+            (
+                ironclaw_loop_contracts::SystemTaskKind::StructuredOutputFinalization,
+                Some(OutputContract::AssistantMessage) | None,
+            ) => {
+                return Err(SystemInferenceError::Failed {
+                    safe_summary: safe("structured finalization requires a structured output"),
+                });
+            }
+            (_, None) => None,
+            (_, Some(_)) => {
+                return Err(SystemInferenceError::Failed {
+                    safe_summary: safe("output contract is only valid for structured finalization"),
+                });
+            }
+        };
         let system_ref = system_inference_ref(request.task_id.as_uuid(), "system-prompt")?;
         let input_ref = system_inference_ref(request.task_id.as_uuid(), "input")?;
+        let mut messages = vec![HostManagedModelMessage {
+            role: HostManagedModelMessageRole::System,
+            content: request.identity.system_prompt.clone(),
+            content_ref: system_ref,
+            tool_result_provider_call: None,
+            tool_result_content: None,
+            image_parts: Vec::new(),
+        }];
+        for (index, message) in request.context_messages.iter().enumerate() {
+            let (role, content) = match message.role {
+                SystemInferenceContextRole::System => {
+                    (HostManagedModelMessageRole::System, message.content.clone())
+                }
+                SystemInferenceContextRole::User => {
+                    (HostManagedModelMessageRole::User, message.content.clone())
+                }
+                SystemInferenceContextRole::Assistant => (
+                    HostManagedModelMessageRole::Assistant,
+                    message.content.clone(),
+                ),
+                // A system inference deliberately has no provider tool-call
+                // round to pair this historical result with. Keep the
+                // canonical tool observation as untrusted, role-labelled
+                // user context instead of emitting an invalid provider
+                // ToolResult message without a call id.
+                SystemInferenceContextRole::Tool => (
+                    HostManagedModelMessageRole::User,
+                    format!("[Untrusted tool result context]\n{}", message.content),
+                ),
+            };
+            messages.push(HostManagedModelMessage {
+                role,
+                content,
+                content_ref: system_inference_ref(
+                    request.task_id.as_uuid(),
+                    &format!("context-{index}"),
+                )?,
+                tool_result_provider_call: None,
+                tool_result_content: None,
+                image_parts: Vec::new(),
+            });
+        }
+        if !request.input_text.is_empty() {
+            messages.push(HostManagedModelMessage {
+                role: HostManagedModelMessageRole::User,
+                content: request.input_text.clone(),
+                content_ref: input_ref,
+                tool_result_provider_call: None,
+                tool_result_content: None,
+                image_parts: Vec::new(),
+            });
+        }
         let model_request = HostManagedModelRequest {
             model_profile_id: self
                 .run_context
                 .resolved_run_profile
                 .model_profile_id
                 .clone(),
-            messages: vec![
-                HostManagedModelMessage {
-                    role: HostManagedModelMessageRole::System,
-                    content: request.identity.system_prompt.clone(),
-                    content_ref: system_ref,
-                    tool_result_provider_call: None,
-                    tool_result_content: None,
-                    image_parts: Vec::new(),
-                },
-                HostManagedModelMessage {
-                    role: HostManagedModelMessageRole::User,
-                    content: request.input_text.clone(),
-                    content_ref: input_ref,
-                    tool_result_provider_call: None,
-                    tool_result_content: None,
-                    image_parts: Vec::new(),
-                },
-            ],
+            messages,
             surface_version: None,
             fallback_index: 0,
             resolved_model_route: self.run_context.resolved_model_route.clone(),
             run_id: self.run_context.run_id,
             turn_id: self.run_context.turn_id,
             tool_choice: None,
+            response_format,
         };
         let requested_fallback_index = model_request.fallback_index;
 
@@ -173,6 +246,7 @@ where
             });
         }
 
+        let usage = response.usage;
         let output_text = match response.output {
             ParentLoopOutput::AssistantReply(reply) => reply.content,
             ParentLoopOutput::CapabilityCalls(_) => {
@@ -186,6 +260,7 @@ where
             task_id: request.task_id,
             output_text,
             elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            usage,
         })
     }
 }
@@ -251,7 +326,7 @@ fn safe(value: &'static str) -> LoopSafeSummary {
 
 fn system_inference_ref(
     task_id: uuid::Uuid,
-    label: &'static str,
+    label: &str,
 ) -> Result<ironclaw_turns::LoopMessageRef, SystemInferenceError> {
     ironclaw_turns::LoopMessageRef::new(format!("msg:system-inference.{label}.{task_id}")).map_err(
         |_| SystemInferenceError::Failed {
@@ -264,11 +339,13 @@ fn system_inference_ref(
 mod tests {
     use super::*;
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::output::OutputContract;
     use ironclaw_loop_contracts::{
         AgentLoopHostErrorKind, InMemoryRunProfileResolver, LoopModelBudgetAccountant,
         LoopModelGatewayError, LoopModelPolicyGuard, ModelWorkOutcome, ModelWorkRequest,
         NoOpBudgetAccountant, NoOpPolicyGuard, RunProfileResolutionRequest, RunProfileResolver,
-        SystemInferenceIdentity, SystemInferenceTaskId, SystemPromptSource, SystemTaskKind,
+        SystemInferenceContextMessage, SystemInferenceContextRole, SystemInferenceIdentity,
+        SystemInferenceTaskId, SystemPromptSource, SystemTaskKind,
     };
     use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
     use std::sync::Mutex;
@@ -459,8 +536,10 @@ mod tests {
                 system_prompt: "summarize".to_string(),
             },
             input_text: input_text.to_string(),
+            context_messages: Vec::new(),
             max_input_tokens: 100,
             deadline_ms: 100,
+            output_contract: None,
         }
     }
 
@@ -484,8 +563,10 @@ mod tests {
                     system_prompt: "summarize".to_string(),
                 },
                 input_text: "transcript".to_string(),
+                context_messages: Vec::new(),
                 max_input_tokens: 100,
                 deadline_ms: 100,
+                output_contract: None,
             })
             .await
             .expect("system inference succeeds");
@@ -520,6 +601,104 @@ mod tests {
                 .as_str()
                 .starts_with("msg:system-inference.input.")
         );
+    }
+
+    #[tokio::test]
+    async fn structured_finalization_uses_native_schema_without_tools() {
+        let context = test_run_context("system-inference-structured").await;
+        let usage = ironclaw_loop_contracts::LoopModelUsage {
+            input_tokens: 12,
+            output_tokens: 4,
+            ..Default::default()
+        };
+        let gateway = Arc::new(RecordingGateway::new(
+            crate::HostManagedModelResponse::assistant_reply(r#"{"items":[]}"#).with_usage(usage),
+        ));
+        let port = ModelGatewayBackedSystemInferencePort::new(gateway.clone(), context);
+        let tool_context = serde_json::to_string(
+            &ironclaw_threads::ToolResultReferenceEnvelope::new(
+                "result:structured-finalization-test",
+                ironclaw_threads::ToolResultSafeSummary::new("tool result").unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let response = port
+            .call_system_inference(SystemInferenceRequest {
+                task_id: SystemInferenceTaskId::new(),
+                identity: SystemInferenceIdentity {
+                    task_kind: SystemTaskKind::StructuredOutputFinalization,
+                    prompt_source: SystemPromptSource::Static {
+                        prompt_id: "test".to_string().try_into().unwrap(),
+                    },
+                    system_prompt: "format the candidate".to_string(),
+                },
+                input_text: String::new(),
+                context_messages: vec![
+                    SystemInferenceContextMessage {
+                        role: SystemInferenceContextRole::User,
+                        content: "prior user".to_string(),
+                    },
+                    SystemInferenceContextMessage {
+                        role: SystemInferenceContextRole::Tool,
+                        content: tool_context,
+                    },
+                    SystemInferenceContextMessage {
+                        role: SystemInferenceContextRole::Assistant,
+                        content: "prior assistant".to_string(),
+                    },
+                    SystemInferenceContextMessage {
+                        role: SystemInferenceContextRole::Assistant,
+                        content: "candidate".to_string(),
+                    },
+                ],
+                max_input_tokens: 100,
+                deadline_ms: 100,
+                output_contract: Some(OutputContract::JsonSchema {
+                    name: "response_schema".to_string(),
+                    schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {"items": {"type": "array"}},
+                        "required": ["items"]
+                    }),
+                }),
+            })
+            .await
+            .expect("structured finalization succeeds");
+
+        assert_eq!(response.output_text, r#"{"items":[]}"#);
+        assert_eq!(response.usage, Some(usage));
+        let request = gateway.request();
+        assert_eq!(request.tool_choice, None);
+        assert_eq!(request.messages.len(), 5);
+        assert_eq!(request.messages[1].role, HostManagedModelMessageRole::User);
+        assert_eq!(request.messages[1].content, "prior user");
+        assert_eq!(request.messages[2].role, HostManagedModelMessageRole::User);
+        assert!(
+            request.messages[2]
+                .content
+                .contains("Untrusted tool result context")
+        );
+        assert!(request.messages[2].content.contains("tool result"));
+        assert_eq!(
+            request.messages[3].role,
+            HostManagedModelMessageRole::Assistant
+        );
+        assert_eq!(request.messages[3].content, "prior assistant");
+        assert_eq!(
+            request.messages[4].role,
+            HostManagedModelMessageRole::Assistant
+        );
+        assert_eq!(request.messages[4].content, "candidate");
+        let format = request.response_format.expect("native response format");
+        match format {
+            CompletionResponseFormat::JsonSchema(format) => {
+                assert_eq!(format.name, "response_schema");
+                assert!(format.is_strict());
+                assert_eq!(format.schema["required"], serde_json::json!(["items"]));
+            }
+            CompletionResponseFormat::JsonObject => panic!("expected schema format"),
+        }
     }
 
     #[tokio::test]
@@ -677,8 +856,10 @@ mod tests {
                     system_prompt: "summarize".to_string(),
                 },
                 input_text: "transcript".to_string(),
+                context_messages: Vec::new(),
                 max_input_tokens: 100,
                 deadline_ms: 100,
+                output_contract: None,
             })
             .await
             .expect_err("capability calls are invalid for system inference");
@@ -702,8 +883,10 @@ mod tests {
                     system_prompt: "summarize".to_string(),
                 },
                 input_text: "abcde".to_string(),
+                context_messages: Vec::new(),
                 max_input_tokens: 1,
                 deadline_ms: 100,
+                output_contract: None,
             })
             .await
             .expect_err("input should exceed token preflight");
@@ -732,8 +915,10 @@ mod tests {
                     system_prompt: "summarize".to_string(),
                 },
                 input_text: "transcript".to_string(),
+                context_messages: Vec::new(),
                 max_input_tokens: 100,
                 deadline_ms: 1,
+                output_contract: None,
             })
             .await
             .expect_err("slow gateway should hit system inference timeout");
@@ -763,8 +948,10 @@ mod tests {
                     system_prompt: "summarize".to_string(),
                 },
                 input_text: "transcript".to_string(),
+                context_messages: Vec::new(),
                 max_input_tokens: 100,
                 deadline_ms: 100,
+                output_contract: None,
             })
             .await
             .expect_err("cancelled gateway error should be preserved");

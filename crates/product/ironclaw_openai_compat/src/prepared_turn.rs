@@ -13,7 +13,7 @@
 //! service and coordinator.
 
 use async_trait::async_trait;
-use ironclaw_host_api::prepared_context::OutputContract;
+use ironclaw_host_api::output::{DEFAULT_JSON_SCHEMA_OUTPUT_NAME, OutputContract};
 use ironclaw_product_contracts::inbound::ProductInboundAck;
 use ironclaw_threads::agent_message::{
     AgentMessage, AgentMessageRole, ContentPart, ToolCallContent, ToolResultContent,
@@ -54,7 +54,7 @@ pub trait OpenAiCompatPreparedTurnPort: Send + Sync {
 ///
 /// - absent / `{"type":"text"}` → `None` (assistant-message contract)
 /// - `{"type":"json_schema","json_schema":{"schema":…}}` → strict schema
-/// - `{"type":"json_object"}` → the permissive object schema
+/// - `{"type":"json_object"}` → the native JSON-object contract
 /// - anything else → typed invalid-request (never silently dropped)
 pub(crate) fn parse_response_format(
     response_format: Option<&serde_json::Value>,
@@ -65,9 +65,7 @@ pub(crate) fn parse_response_format(
     let kind = value.get("type").and_then(serde_json::Value::as_str);
     match kind {
         Some("text") => Ok(None),
-        Some("json_object") => Ok(Some(OutputContract::JsonSchema {
-            schema: serde_json::json!({"type": "object"}),
-        })),
+        Some("json_object") => Ok(Some(OutputContract::JsonObject)),
         Some("json_schema") => {
             let schema = value
                 .get("json_schema")
@@ -78,6 +76,11 @@ pub(crate) fn parse_response_format(
                         "response_format.json_schema.schema".to_string(),
                     ))
                 })?;
+            let name = value
+                .get("json_schema")
+                .and_then(|body| body.get("name"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(DEFAULT_JSON_SCHEMA_OUTPUT_NAME);
             // Same in-process-call pattern as `prepared_seed_from_chat` below:
             // call the accept door's own schema validator directly, BEFORE
             // the idempotency reservation, so an oversized or pathologically
@@ -90,7 +93,9 @@ pub(crate) fn parse_response_format(
                     other => other.to_string(),
                 }))
             })?;
-            Ok(Some(OutputContract::JsonSchema { schema }))
+            OutputContract::try_json_schema(name, schema)
+                .map(Some)
+                .map_err(|error| OpenAiCompatHttpError::invalid_request(Some(error.to_string())))
         }
         _ => Err(OpenAiCompatHttpError::invalid_request(Some(
             "response_format.type".to_string(),
@@ -413,7 +418,7 @@ mod tests {
             "json_schema": {"name": "s", "schema": {"type": "object"}}
         }));
         match prepared_lane_output(&request).expect("lane") {
-            Some(OutputContract::JsonSchema { schema }) => {
+            Some(OutputContract::JsonSchema { schema, .. }) => {
                 assert_eq!(schema, json!({"type": "object"}));
             }
             other => panic!("expected a json schema contract, got {other:?}"),
@@ -421,13 +426,13 @@ mod tests {
     }
 
     #[test]
-    fn json_object_maps_to_the_permissive_object_schema() {
+    fn json_object_preserves_the_native_object_contract() {
         let mut request = base_request(vec![user_message("classify")]);
         request.response_format = Some(json!({"type": "json_object"}));
-        assert!(matches!(
+        assert_eq!(
             prepared_lane_output(&request).expect("lane"),
-            Some(OutputContract::JsonSchema { .. })
-        ));
+            Some(OutputContract::JsonObject)
+        );
     }
 
     #[test]

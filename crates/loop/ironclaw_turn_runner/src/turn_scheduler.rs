@@ -3,6 +3,7 @@
 use std::{error::Error, fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use ironclaw_loop_contracts::LoopModelUsage;
 use ironclaw_processes::{
     ClaimedProcess, JournalProcessExecutor, ProcessExecutorFailure, ProcessFailureRecovery,
     ProcessKind, ProcessRuntimePort, ProcessSupervisor, ProcessSupervisorConfig,
@@ -198,15 +199,53 @@ impl TurnRunSchedulerConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnRunExecutorError {
     failure: SanitizedFailure,
+    failure_metadata: Option<TurnRunFailureMetadata>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnRunFailureMetadata {
+    /// The cumulative usage snapshot to preserve when the scheduler has to
+    /// terminalize a failed process.  Callers must merge any supplemental
+    /// model work into the claimed snapshot before constructing this value.
+    model_usage: Option<LoopModelUsage>,
+}
+
+impl TurnRunFailureMetadata {
+    pub fn from_model_usage(model_usage: LoopModelUsage) -> Self {
+        Self::from_optional_model_usage(Some(model_usage))
+    }
+
+    pub fn from_optional_model_usage(model_usage: Option<LoopModelUsage>) -> Self {
+        Self { model_usage }
+    }
+
+    pub fn model_usage(&self) -> Option<LoopModelUsage> {
+        self.model_usage
+    }
 }
 
 impl TurnRunExecutorError {
     pub fn new(failure_category: impl Into<String>) -> Result<Self, String> {
-        SanitizedFailure::new(failure_category).map(|failure| Self { failure })
+        SanitizedFailure::new(failure_category).map(|failure| Self {
+            failure,
+            failure_metadata: None,
+        })
     }
 
     pub fn from_failure(failure: SanitizedFailure) -> Self {
-        Self { failure }
+        Self {
+            failure,
+            failure_metadata: None,
+        }
+    }
+
+    pub fn with_failure_metadata(mut self, metadata: TurnRunFailureMetadata) -> Self {
+        self.failure_metadata = Some(metadata);
+        self
+    }
+
+    pub fn failure_metadata(&self) -> Option<&TurnRunFailureMetadata> {
+        self.failure_metadata.as_ref()
     }
 
     pub fn failure(&self) -> &SanitizedFailure {
@@ -252,6 +291,7 @@ impl JournalProcessExecutor for TurnProcessExecutor {
     ) -> Result<(), ProcessExecutorFailure> {
         let claimed = claimed_turn_run_from_process_claim(claimed)
             .map_err(|_| ProcessExecutorFailure::new("process_claim_invalid"))?;
+        let claimed_for_failure_metadata = claimed.clone();
         self.executor
             .execute_claimed_run(claimed, Arc::clone(&self.transitions))
             .await
@@ -264,8 +304,19 @@ impl JournalProcessExecutor for TurnProcessExecutor {
                     }
                     _ => ProcessFailureRecovery::Terminal,
                 };
-                ProcessExecutorFailure::from_failure(error.failure().clone())
-                    .with_recovery(recovery)
+                let mut process_failure =
+                    ProcessExecutorFailure::from_failure(error.failure().clone())
+                        .with_recovery(recovery);
+                if let Some(metadata) = error.failure_metadata() {
+                    process_failure = process_failure.with_metadata(
+                        ironclaw_turns::process_projection::agent_turn_metadata_from_claimed(
+                            &claimed_for_failure_metadata,
+                            metadata.model_usage(),
+                            None,
+                        ),
+                    );
+                }
+                process_failure
             })
     }
 
@@ -388,6 +439,179 @@ impl TurnRunSchedulerHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct MetadataFailureExecutor {
+        usage: LoopModelUsage,
+    }
+
+    #[async_trait]
+    impl TurnRunExecutor for MetadataFailureExecutor {
+        async fn execute_claimed_run(
+            &self,
+            claimed: ClaimedTurnRun,
+            _process_transitions: Arc<
+                dyn ironclaw_processes::ProcessTransitionPort<Error = TurnError>,
+            >,
+        ) -> Result<(), TurnRunExecutorError> {
+            assert!(matches!(
+                claimed.state.output_contract,
+                ironclaw_host_api::output::OutputContract::JsonSchema { .. }
+            ));
+            Err(TurnRunExecutorError::from_failure(
+                SanitizedFailure::new("structured_finalization_failed")
+                    .expect("valid failure category"),
+            )
+            .with_failure_metadata(TurnRunFailureMetadata::from_model_usage(self.usage)))
+        }
+    }
+
+    #[tokio::test]
+    async fn process_executor_failure_projects_complete_agent_turn_metadata() {
+        use ironclaw_host_api::{
+            ids::{AgentId, ProjectId, TenantId, ThreadId},
+            output::OutputContract,
+            turn::{TurnId, TurnRunId, TurnScope, TurnStatus},
+        };
+        use ironclaw_loop_contracts::{
+            InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver,
+        };
+        use ironclaw_processes::JournalProcessExecutor;
+        use ironclaw_turns::{
+            AcceptedMessageRef, EventCursor, TurnLeaseToken, TurnRunState, TurnRunnerId,
+            test_support::in_memory_agent_turn_process_system,
+        };
+
+        let resolved = InMemoryRunProfileResolver::default()
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("profile");
+        let output_contract = OutputContract::try_json_schema(
+            "failure_output",
+            serde_json::json!({"type": "object"}),
+        )
+        .expect("output contract");
+        let scope = TurnScope::new(
+            TenantId::new("tenant-scheduler-metadata").expect("tenant"),
+            Some(AgentId::new("agent-scheduler-metadata").expect("agent")),
+            Some(ProjectId::new("project-scheduler-metadata").expect("project")),
+            ThreadId::new("thread-scheduler-metadata").expect("thread"),
+        );
+        let claimed = ClaimedTurnRun {
+            state: TurnRunState {
+                scope,
+                actor: None,
+                turn_id: TurnId::new(),
+                run_id: TurnRunId::new(),
+                status: TurnStatus::Running,
+                accepted_message_ref: AcceptedMessageRef::new("accepted-scheduler-metadata")
+                    .expect("accepted message"),
+                resolved_run_profile_id: resolved.profile_id.clone(),
+                resolved_run_profile_version: resolved.profile_version,
+                output_contract: output_contract.clone(),
+                allow_steering: false,
+                resolved_model_route: None,
+                model_usage: None,
+                execution_outcome: None,
+                received_at: chrono::Utc::now(),
+                checkpoint_id: None,
+                gate_ref: None,
+                blocked_activity_id: None,
+                credential_requirements: Vec::new(),
+                failure: None,
+                event_cursor: EventCursor(1),
+                product_context: None,
+                resume_disposition: None,
+            },
+            resolved_run_profile: resolved,
+            subagent_depth: 0,
+            spawn_tree_descendant_cap: None,
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+        };
+        let usage = LoopModelUsage {
+            input_tokens: 13,
+            output_tokens: 5,
+            cache_read_input_tokens: 2,
+            cache_creation_input_tokens: 1,
+        };
+        let process_system = in_memory_agent_turn_process_system();
+        let executor = TurnProcessExecutor {
+            executor: Arc::new(MetadataFailureExecutor { usage }),
+            transitions: process_system.transitions(),
+        };
+
+        let error = executor
+            .execute_claimed_process(ClaimedProcess::from(&claimed))
+            .await
+            .expect_err("executor must surface structured finalization failure");
+        let metadata: ironclaw_turns::process_projection::AgentTurnProcessMetadata =
+            serde_json::from_value(
+                error
+                    .metadata()
+                    .expect("agent-turn failure metadata")
+                    .get("agent_turn")
+                    .expect("agent_turn envelope")
+                    .clone(),
+            )
+            .expect("typed agent-turn metadata");
+        assert_eq!(metadata.output_contract, output_contract);
+        assert_eq!(metadata.model_usage, Some(usage));
+    }
+
+    #[test]
+    fn executor_failure_keeps_supplemental_usage_as_typed_metadata() {
+        let usage = LoopModelUsage {
+            input_tokens: 13,
+            output_tokens: 5,
+            cache_read_input_tokens: 2,
+            cache_creation_input_tokens: 1,
+        };
+        let failure = TurnRunExecutorError::from_failure(
+            SanitizedFailure::new("transcript_write_failed").expect("valid category"),
+        )
+        .with_failure_metadata(TurnRunFailureMetadata::from_model_usage(usage));
+
+        assert_eq!(
+            failure
+                .failure_metadata()
+                .and_then(TurnRunFailureMetadata::model_usage),
+            Some(usage)
+        );
+    }
+
+    #[test]
+    fn resumed_prior_usage_and_finalizer_failure_are_added_once() {
+        let prior = LoopModelUsage {
+            input_tokens: 100,
+            output_tokens: 40,
+            cache_read_input_tokens: 10,
+            cache_creation_input_tokens: 2,
+        };
+        let finalizer = LoopModelUsage {
+            input_tokens: 13,
+            output_tokens: 5,
+            cache_read_input_tokens: 2,
+            cache_creation_input_tokens: 1,
+        };
+        let expected = LoopModelUsage {
+            input_tokens: 113,
+            output_tokens: 45,
+            cache_read_input_tokens: 12,
+            cache_creation_input_tokens: 3,
+        };
+
+        let failure_usage = LoopModelUsage::merge_optional(Some(prior), Some(finalizer));
+        assert_eq!(failure_usage, Some(expected));
+        let failure_metadata = TurnRunFailureMetadata::from_optional_model_usage(failure_usage);
+        assert_eq!(failure_metadata.model_usage(), Some(expected));
+
+        // A replay with no new supplemental call restores the already
+        // aggregated snapshot rather than adding it again.
+        assert_eq!(
+            LoopModelUsage::merge_optional(failure_metadata.model_usage(), None),
+            Some(expected)
+        );
+    }
 
     /// The failure budget exists to survive a slow store, but a worker that
     /// keeps retrying past its lease TTL is worse than one that gives up: the

@@ -1181,6 +1181,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         shape as the `.claude/` gap the CHECKLIST row already records.
         """
         for path in (
+            "tests/test_smoke_release_binary.py",
             "scripts/no_panics_reborn_baseline.txt",
             "scripts/reborn-e2e-rust.sh",
             "scripts/check-version-bumps.sh",

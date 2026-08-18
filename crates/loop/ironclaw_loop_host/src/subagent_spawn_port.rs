@@ -1075,6 +1075,7 @@ impl SubagentSpawnCapabilityPort {
                 actor: actor.clone(),
                 accepted_message_ref: accepted.accepted_message_ref,
                 requested_run_profile: Some(definition.requested_run_profile),
+                output_contract: None,
                 idempotency_key,
                 received_at: Utc::now(),
                 requested_run_id: Some(child_run_id),

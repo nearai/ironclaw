@@ -429,6 +429,17 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         );
     }
 
+    let rust_cache_step = compile_workflow
+        .split("      - name: Restore Rust cache\n")
+        .nth(1)
+        .and_then(|tail| tail.split("      - id: build\n").next())
+        .expect("release compile workflow must contain the Rust cache step before the build step");
+    assert!(
+        rust_cache_step.contains("uses: Swatinem/rust-cache@")
+            && rust_cache_step.contains("cache-on-failure: true"),
+        "the release Rust cache step must preserve failed build caches"
+    );
+
     assert!(
         compile_workflow.contains("fail-fast: false")
             && compile_workflow.contains("cargo build --locked --profile dist")

@@ -146,6 +146,7 @@ pub struct ProcessExecutorFailure {
     failure: Option<SanitizedFailure>,
     fallback_category: String,
     recovery: ProcessFailureRecovery,
+    metadata: Option<serde_json::Value>,
 }
 
 impl ProcessExecutorFailure {
@@ -156,6 +157,7 @@ impl ProcessExecutorFailure {
             failure,
             fallback_category,
             recovery: ProcessFailureRecovery::Terminal,
+            metadata: None,
         }
     }
 
@@ -165,12 +167,26 @@ impl ProcessExecutorFailure {
             failure: Some(failure),
             fallback_category,
             recovery: ProcessFailureRecovery::Terminal,
+            metadata: None,
         }
     }
 
     pub fn with_recovery(mut self, recovery: ProcessFailureRecovery) -> Self {
         self.recovery = recovery;
         self
+    }
+
+    /// Attach typed-at-the-caller process metadata to the terminal transition.
+    /// The generic supervisor carries it as JSON because process kinds own the
+    /// shape of their durable metadata; it is never flattened into an error
+    /// string.
+    pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
+    pub fn metadata(&self) -> Option<&serde_json::Value> {
+        self.metadata.as_ref()
     }
 
     pub fn failure(&self) -> Option<&SanitizedFailure> {
@@ -737,7 +753,7 @@ async fn record_failure(
                 failure: failure.clone(),
                 recovery: executor_failure.recovery(),
                 checkpoint_ref: None,
-                metadata: None,
+                metadata: executor_failure.metadata().cloned(),
             })
             .await
         {
@@ -828,7 +844,10 @@ fn schedule_retry(command_tx: mpsc::Sender<SupervisorCommand>, delay: Duration) 
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
 
     use super::*;
     use crate::{
@@ -861,6 +880,7 @@ mod tests {
         recover_errors_remaining: AtomicUsize,
         fail_errors_remaining: AtomicUsize,
         fail_attempts: AtomicUsize,
+        fail_requests: Mutex<Vec<FailProcessRequest>>,
         relinquishes: AtomicUsize,
         slow_heartbeats_remaining: AtomicUsize,
         heartbeat_delay: Duration,
@@ -879,6 +899,7 @@ mod tests {
                 recover_errors_remaining: AtomicUsize::new(0),
                 fail_errors_remaining: AtomicUsize::new(fail_errors),
                 fail_attempts: AtomicUsize::new(0),
+                fail_requests: Mutex::new(Vec::new()),
                 relinquishes: AtomicUsize::new(0),
                 slow_heartbeats_remaining: AtomicUsize::new(0),
                 heartbeat_delay: Duration::ZERO,
@@ -996,6 +1017,10 @@ mod tests {
             request: FailProcessRequest,
         ) -> Result<JournaledProcessSnapshot, Self::Error> {
             self.fail_attempts.fetch_add(1, Ordering::SeqCst);
+            self.fail_requests
+                .lock()
+                .expect("fault runtime request log lock")
+                .push(request.clone());
             if self
                 .fail_errors_remaining
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
@@ -1069,7 +1094,21 @@ mod tests {
         }
     }
 
-    struct FailingExecutor;
+    struct FailingExecutor {
+        metadata: Option<serde_json::Value>,
+    }
+
+    impl FailingExecutor {
+        fn new() -> Self {
+            Self { metadata: None }
+        }
+
+        fn with_metadata(metadata: serde_json::Value) -> Self {
+            Self {
+                metadata: Some(metadata),
+            }
+        }
+    }
 
     #[async_trait]
     impl JournalProcessExecutor for FailingExecutor {
@@ -1077,7 +1116,11 @@ mod tests {
             &self,
             _claimed: ClaimedProcess,
         ) -> Result<(), ProcessExecutorFailure> {
-            Err(ProcessExecutorFailure::new("executor_rejected"))
+            let failure = ProcessExecutorFailure::new("executor_rejected");
+            Err(match &self.metadata {
+                Some(metadata) => failure.with_metadata(metadata.clone()),
+                None => failure,
+            })
         }
     }
 
@@ -1190,11 +1233,21 @@ mod tests {
             in_memory_backed_processes_filesystem(),
         ));
         let process_id = submit(&store, ProcessKind::Internal).await;
+        let faults = Arc::new(FaultRuntime::new(
+            Arc::clone(&store),
+            HeartbeatFault::None,
+            0,
+        ));
         let runtime: Arc<dyn ProcessTransitionPort<Error = ProcessJournalStoreError>> =
-            store.clone();
+            faults.clone();
+        let metadata = serde_json::json!({
+            "agent_turn": {
+                "model_usage": {"input_tokens": 13, "output_tokens": 5}
+            }
+        });
         let handle = ProcessSupervisor::new(
             runtime,
-            Arc::new(FailingExecutor),
+            Arc::new(FailingExecutor::with_metadata(metadata.clone())),
             ProcessKind::Internal,
             fast_config(),
         )
@@ -1206,6 +1259,14 @@ mod tests {
             snapshot.failure.as_ref().map(SanitizedFailure::category),
             Some("executor_rejected")
         );
+        {
+            let requests = faults
+                .fail_requests
+                .lock()
+                .expect("fault runtime request log lock");
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].metadata, Some(metadata));
+        }
         handle.shutdown().await;
     }
 
@@ -1644,7 +1705,7 @@ mod tests {
             faults.clone();
         let handle = ProcessSupervisor::new(
             runtime,
-            Arc::new(FailingExecutor),
+            Arc::new(FailingExecutor::new()),
             ProcessKind::Internal,
             fast_config()
                 .with_terminal_failure_record_attempts(3)
@@ -1673,7 +1734,7 @@ mod tests {
             faults.clone();
         let handle = ProcessSupervisor::new(
             runtime,
-            Arc::new(FailingExecutor),
+            Arc::new(FailingExecutor::new()),
             ProcessKind::Internal,
             fast_config()
                 .with_terminal_failure_record_attempts(2)
@@ -1719,9 +1780,16 @@ mod tests {
 
         let sanitized =
             SanitizedFailure::new("explicit_failure").expect("valid sanitized failure category");
-        let failure = ProcessExecutorFailure::from_failure(sanitized);
+        let metadata = serde_json::json!({
+            "agent_turn": {
+                "model_usage": {"input_tokens": 13, "output_tokens": 5}
+            }
+        });
+        let failure =
+            ProcessExecutorFailure::from_failure(sanitized).with_metadata(metadata.clone());
         assert_eq!(failure.failure_category(), "explicit_failure");
         assert!(failure.failure().is_some());
+        assert_eq!(failure.metadata(), Some(&metadata));
         assert_eq!(
             failure.to_string(),
             "process executor failed: explicit_failure"
@@ -1854,7 +1922,7 @@ mod tests {
         let context = DrainContext {
             command_tx,
             runtime: Arc::clone(&runtime),
-            executor: Arc::new(FailingExecutor),
+            executor: Arc::new(FailingExecutor::new()),
             process_kind: ProcessKind::Internal,
             config: fast_config(),
             worker_id: ProcessWorkerId::from_trusted("recovery-worker"),

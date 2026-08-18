@@ -49,7 +49,7 @@ use ironclaw_loop_host::{
     SkillBundleContextSource, SkillBundleDescriptor, SkillBundleId, SkillBundleSource,
     SkillBundleSourceError, SkillFilePath, SkillSourceKind, ThreadBackedLoopContextPort,
     ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort, ThreadContextWindowCache,
-    build_skill_run_snapshot, identity_message_ref,
+    build_skill_run_snapshot, identity_message_ref, load_canonical_system_inference_context,
 };
 use ironclaw_outbound::{
     OutboundError, OutboundStateStore, ReplyAttachmentHandle, ReplyAttachmentIntent,
@@ -3056,6 +3056,26 @@ async fn thread_ports_reject_thread_scope_mismatch_before_thread_access() {
         .unwrap_err();
 
     assert_eq!(error.kind, AgentLoopHostErrorKind::ScopeMismatch);
+}
+
+#[tokio::test]
+async fn structured_finalization_rejects_scope_mismatch_before_context_read() {
+    let fixture = GatedThreadFixture::new().await;
+    let mut wrong_scope = fixture.thread_scope.clone();
+    wrong_scope.tenant_id = TenantId::new("different-tenant").unwrap();
+
+    let error = load_canonical_system_inference_context(
+        fixture.thread_service.as_ref(),
+        &wrong_scope,
+        &fixture.run_context,
+        16,
+        PromptContextTokenBudget::default(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::ScopeMismatch);
+    assert_eq!(fixture.thread_service.context_window_loads(), 0);
 }
 
 #[tokio::test]
@@ -6225,6 +6245,29 @@ impl SessionThreadService for ScriptedTranscriptWriteThreadService {
     ) -> Result<SummaryArtifact, SessionThreadError> {
         panic!("scripted transcript service does not create summaries")
     }
+
+    async fn read_structured_finalization(
+        &self,
+        request: ironclaw_threads::ReadStructuredFinalizationRequest,
+    ) -> Result<Option<ironclaw_threads::StructuredFinalizationRecord>, SessionThreadError> {
+        self.inner.read_structured_finalization(request).await
+    }
+
+    async fn put_structured_finalization(
+        &self,
+        request: ironclaw_threads::PutStructuredFinalizationRequest,
+    ) -> Result<ironclaw_threads::StructuredFinalizationRecord, SessionThreadError> {
+        self.inner.put_structured_finalization(request).await
+    }
+
+    async fn publish_structured_finalization_message(
+        &self,
+        request: ironclaw_threads::PublishStructuredFinalizationMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.inner
+            .publish_structured_finalization_message(request)
+            .await
+    }
 }
 
 struct GatedFinalizeThreadService {
@@ -6371,6 +6414,29 @@ impl SessionThreadService for GatedFinalizeThreadService {
         request: CreateSummaryArtifactRequest,
     ) -> Result<SummaryArtifact, SessionThreadError> {
         self.inner.create_summary_artifact(request).await
+    }
+
+    async fn read_structured_finalization(
+        &self,
+        request: ironclaw_threads::ReadStructuredFinalizationRequest,
+    ) -> Result<Option<ironclaw_threads::StructuredFinalizationRecord>, SessionThreadError> {
+        self.inner.read_structured_finalization(request).await
+    }
+
+    async fn put_structured_finalization(
+        &self,
+        request: ironclaw_threads::PutStructuredFinalizationRequest,
+    ) -> Result<ironclaw_threads::StructuredFinalizationRecord, SessionThreadError> {
+        self.inner.put_structured_finalization(request).await
+    }
+
+    async fn publish_structured_finalization_message(
+        &self,
+        request: ironclaw_threads::PublishStructuredFinalizationMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.inner
+            .publish_structured_finalization_message(request)
+            .await
     }
 }
 

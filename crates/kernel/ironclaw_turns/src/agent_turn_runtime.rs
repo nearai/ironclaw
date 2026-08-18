@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use ironclaw_host_api::decision::RuntimeCredentialAuthRequirement;
+use ironclaw_host_api::{decision::RuntimeCredentialAuthRequirement, output::OutputContract};
 
 use crate::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, CapabilityActivityId, EventCursor,
@@ -149,6 +149,11 @@ pub struct TurnRunRecord {
     pub accepted_message_ref: AcceptedMessageRef,
     pub status: TurnStatus,
     pub profile: TurnRunProfile,
+    /// Immutable terminal output contract admitted for this run. Legacy
+    /// records without the field deserialize as the assistant-message
+    /// contract.
+    #[serde(default, skip_serializing_if = "OutputContract::is_assistant_message")]
+    pub output_contract: OutputContract,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_model_route: Option<LoopModelRouteSnapshot>,
     /// Cumulative provider-reported token usage for this run's model calls,
@@ -235,6 +240,7 @@ mod tests {
             accepted_message_ref: AcceptedMessageRef::new("accepted-store-test").unwrap(),
             status: TurnStatus::Completed,
             profile,
+            output_contract: Default::default(),
             resolved_model_route: None,
             model_usage: None,
             execution_outcome: None,
@@ -321,5 +327,19 @@ mod tests {
             serde_json::from_value(json).expect("deserialize legacy turn run record");
 
         assert_eq!(decoded.execution_outcome, None);
+    }
+
+    #[test]
+    fn legacy_turn_run_record_without_output_contract_defaults_to_assistant_message() {
+        let record = minimal_turn_run_record();
+        let mut wire = serde_json::to_value(record).expect("serialize run record");
+        wire.as_object_mut()
+            .expect("run record wire object")
+            .remove("output_contract");
+        let restored: TurnRunRecord = serde_json::from_value(wire).expect("restore run record");
+        assert_eq!(
+            restored.output_contract,
+            ironclaw_host_api::output::OutputContract::AssistantMessage
+        );
     }
 }

@@ -8,8 +8,8 @@ use ironclaw_threads::{
     ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextMessagesRequest,
     LoadContextWindowRequest, MessageContent, PreparedContextRecord, PreparedContextRequest,
     RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
+    SessionThreadRecord, SessionThreadService, StructuredFinalizationRecord, SummaryArtifact,
+    ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
     UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 
@@ -46,6 +46,29 @@ impl FailingTranscriptWriteThreadService {
 
 #[async_trait::async_trait]
 impl SessionThreadService for FailingTranscriptWriteThreadService {
+    async fn read_structured_finalization(
+        &self,
+        request: ironclaw_threads::ReadStructuredFinalizationRequest,
+    ) -> Result<Option<StructuredFinalizationRecord>, SessionThreadError> {
+        self.inner.read_structured_finalization(request).await
+    }
+
+    async fn put_structured_finalization(
+        &self,
+        request: ironclaw_threads::PutStructuredFinalizationRequest,
+    ) -> Result<StructuredFinalizationRecord, SessionThreadError> {
+        self.inner.put_structured_finalization(request).await
+    }
+
+    async fn publish_structured_finalization_message(
+        &self,
+        request: ironclaw_threads::PublishStructuredFinalizationMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.inner
+            .publish_structured_finalization_message(request)
+            .await
+    }
+
     async fn ensure_thread(
         &self,
         request: EnsureThreadRequest,

@@ -18,8 +18,8 @@
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::ids::ThreadId;
-use ironclaw_host_api::prepared_context::{OutputContract, PreparedTurnDeclarations};
 use ironclaw_host_api::turn::AcceptedMessageRef;
+use ironclaw_host_api::{output::OutputContract, prepared_context::PreparedTurnDeclarations};
 use ironclaw_llm::agent_message::{
     AGENT_MESSAGE_TEXT_PART_MAX_BYTES, AgentMessage, AgentMessageRole, ContentPart,
     validate_agent_messages,
@@ -66,8 +66,12 @@ pub const PREPARED_CONTEXT_RECORD_SCHEMA_VERSION: u32 = 1;
 /// (`ironclaw_loop_host::structured_result::validator_for`) — an unbounded
 /// caller-supplied schema is request-triggered CPU/memory amplification, so
 /// it gets the same budget as the other untrusted-content parts rather than
-/// riding the raw 14 MiB chat-body cap.
-pub const PREPARED_OUTPUT_SCHEMA_MAX_BYTES: usize = AGENT_MESSAGE_TEXT_PART_MAX_BYTES;
+/// riding the raw 14 MiB chat-body cap. Reserve space for the host-owned
+/// structured-output guidance that wraps this schema in a loop inline message;
+/// that message has the same 64 KiB content bound.
+const OUTPUT_GUIDANCE_RESERVE_BYTES: usize = 1024;
+pub const PREPARED_OUTPUT_SCHEMA_MAX_BYTES: usize =
+    AGENT_MESSAGE_TEXT_PART_MAX_BYTES - OUTPUT_GUIDANCE_RESERVE_BYTES;
 
 /// Nesting-depth cap for a declared `response_format` JSON Schema output
 /// contract, mirroring [`ironclaw_safety`]'s existing tool-argument depth
@@ -242,9 +246,12 @@ pub(crate) fn validate_prepared_context_request(
 /// `validate_prepared_seed_content` already uses — so there is no mirrored
 /// bound to drift.
 pub fn validate_output_contract(output: &OutputContract) -> Result<(), SessionThreadError> {
+    output
+        .validate()
+        .map_err(|reason| invalid(format!("invalid output contract: {reason}")))?;
     match output {
-        OutputContract::AssistantMessage => Ok(()),
-        OutputContract::JsonSchema { schema } => validate_output_schema(schema),
+        OutputContract::AssistantMessage | OutputContract::JsonObject => Ok(()),
+        OutputContract::JsonSchema { schema, .. } => validate_output_schema(schema),
     }
 }
 
@@ -1118,7 +1125,7 @@ mod tests {
 
         // Wired through the full request-level door too.
         let mut req = request();
-        req.declarations.output = OutputContract::JsonSchema { schema };
+        req.declarations.output = OutputContract::json_schema(schema);
         validate_prepared_context_request(&req).expect("request-level door accepts it");
     }
 
@@ -1136,6 +1143,7 @@ mod tests {
             .collect();
         let mut req = request();
         req.declarations.output = OutputContract::JsonSchema {
+            name: "oversized_v1".to_string(),
             schema: serde_json::json!({"type": "string", "enum": big_enum}),
         };
         assert!(matches!(

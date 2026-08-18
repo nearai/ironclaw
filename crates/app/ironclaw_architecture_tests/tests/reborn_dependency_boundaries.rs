@@ -859,7 +859,9 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // vocabulary only.
         // Union re-measured on the merged tree (2026-08-14); count read from
         // this test's own failure message.
-        ("ironclaw_host_api", 19_966),
+        // Reviewed growth: immutable, provider-neutral output-contract DTOs
+        // belong beside the turn contract consumed across loop families.
+        ("ironclaw_host_api", 20_156),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
@@ -1002,7 +1004,10 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // transparent to serde so no wire shape moved. Declarations only — the
         // device-link flow lives in ironclaw_auth and the telegram package.
         // Count read from this test's own failure message.
-        ("ironclaw_product_contracts", 16_192),
+        // Suggestions add a product-surface-neutral generate/list/start/dismiss
+        // contract shared by WebUI and future channel adapters. The DTOs and
+        // ProductSurface vocabulary belong here; no orchestration moved in.
+        ("ironclaw_product_contracts", 16_418),
         // 832 -> 432 (2026-08-12, #7373 refresh merge, main): re-pinned to the
         // measured count — this row still carried the +400 seed pad the
         // 2026-08-07 re-pin removed from its siblings.

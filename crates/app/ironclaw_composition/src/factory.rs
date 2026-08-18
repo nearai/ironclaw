@@ -1033,23 +1033,35 @@ fn write_standalone_secret_master_key(path: &Path, key: &str) -> Result<(), Rebo
                 reason: "standalone secrets master key could not be restricted: USERNAME is unset"
                     .to_string(),
             })?;
-        let status = std::process::Command::new("icacls")
+        // `icacls` writes a success banner to stdout. Capture it so commands
+        // such as `ironclaw extension search --json` keep stdout machine-clean.
+        let output = std::process::Command::new("icacls")
             .arg(path)
             .arg("/inheritance:r")
             .arg("/grant:r")
             .arg(format!("{account}:F"))
-            .status()
+            .output()
             .map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!(
                     "standalone secrets master key permissions could not be set: {error}"
                 ),
             })?;
-        if !status.success() {
+        if !output.status.success() {
             let _ = std::fs::remove_file(path);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
             return Err(RebornBuildError::InvalidConfig {
-                reason: format!(
-                    "standalone secrets master key permissions could not be set: icacls exited with {status}"
-                ),
+                reason: if stderr.is_empty() {
+                    format!(
+                        "standalone secrets master key permissions could not be set: icacls exited with {}",
+                        output.status
+                    )
+                } else {
+                    format!(
+                        "standalone secrets master key permissions could not be set: icacls exited with {}: {stderr}",
+                        output.status
+                    )
+                },
             });
         }
         file.write_all(key.as_bytes())

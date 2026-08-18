@@ -224,6 +224,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
                 .expect("accepted message ref"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
+            output_contract: ironclaw_host_api::output::OutputContract::AssistantMessage,
             allow_steering: true,
             resolved_model_route: None,
             received_at: Utc::now(),

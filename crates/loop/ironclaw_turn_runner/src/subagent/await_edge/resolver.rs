@@ -929,6 +929,7 @@ mod tests {
                 .unwrap(),
             status: TurnStatus::Completed,
             profile: ironclaw_turns::TurnRunProfile::from_resolved(resolved_run_profile),
+            output_contract: Default::default(),
             resolved_model_route: None,
             model_usage: None,
             execution_outcome: None,
