@@ -513,6 +513,10 @@ pub struct ProcessJournalEntry {
 pub struct ProcessJournalCommit {
     pub state: JournaledProcessSnapshot,
     pub kind: ProcessJournalKind,
+    /// Timestamp of the journal transition that produced this committed
+    /// state. Observers use it for replay-stable materialized records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurred_at: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sanitized_reason: Option<String>,
 }

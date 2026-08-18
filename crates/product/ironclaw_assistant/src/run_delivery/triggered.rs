@@ -1353,6 +1353,15 @@ async fn fan_out_plan(
             }
         }
     }
+    if !targets.is_empty() && !out.any_delivered {
+        services
+            .publish_delivery_failure_notification(
+                &notification_context.actor.user_id,
+                notification_context.scope,
+                notification_context.run_id,
+            )
+            .await;
+    }
     out
 }
 

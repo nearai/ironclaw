@@ -266,6 +266,7 @@ where
                     commits.push(ProcessJournalCommit {
                         state: state.clone(),
                         kind: entry.kind,
+                        occurred_at: entry.occurred_at,
                         sanitized_reason: entry.sanitized_reason.clone(),
                     });
                 }

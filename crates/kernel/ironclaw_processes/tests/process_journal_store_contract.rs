@@ -1813,6 +1813,10 @@ async fn process_observer_receives_commits_once_not_idempotency_replays() {
         commits[0].kind,
         ironclaw_processes::ProcessJournalKind::Submitted
     );
+    assert!(
+        commits[0].occurred_at.is_some(),
+        "live observer delivery carries the durable journal timestamp"
+    );
 }
 
 #[tokio::test]
@@ -1897,6 +1901,15 @@ async fn observer_registration_replays_commits_durably_after_restart() {
     })
     .await
     .expect("durable observer replay");
+    let commits = observer.commits.lock().expect("observer commits");
+    assert!(
+        commits
+            .iter()
+            .find(|commit| commit.state.process_id == process_id)
+            .and_then(|commit| commit.occurred_at)
+            .is_some(),
+        "replayed observer delivery preserves the journal timestamp"
+    );
 }
 
 /// Two store instances can share one observer id across a rolling restart, and
