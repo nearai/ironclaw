@@ -561,8 +561,8 @@ async fn executor_proactive_byte_cap_drives_full_compaction_cycle() {
     // (We verify via progress events rather than inspecting internal state,
     // since MockAgentLoopDriverHost does not expose staged checkpoint payloads.
     // The initiator-emission / flag-clearing verification is also covered by the
-    // F12 unit-level test in src/executor/tests.rs which inspects checkpoint state
-    // directly.)
+    // F12 unit-level test in src/executor/tests/compaction.rs which inspects
+    // checkpoint state directly.)
     let compaction_completed = progress_events
         .iter()
         .any(|event| matches!(event, LoopProgressEvent::CompactionCompleted { .. }));
