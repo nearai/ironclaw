@@ -84,6 +84,16 @@ export function dismissSuggestion(suggestionId: string) {
   });
 }
 
+/** Human-readable provenance for a card's `sources` — "Gmail",
+ *  "Gmail & Slack", "Gmail, Slack & Telegram". Sources are already
+ *  human-readable names from the backend, so this only joins them. */
+export function formatSources(sources: string[] | null | undefined): string {
+  const list = (sources || []).filter((s) => typeof s === "string" && s.trim());
+  if (list.length === 0) return "";
+  if (list.length === 1) return list[0];
+  return `${list.slice(0, -1).join(", ")} & ${list[list.length - 1]}`;
+}
+
 /** Poll delay for a `generating` response. The backend's own
  *  `retry_after_seconds` hint wins; the floor keeps a missing/0 hint from
  *  becoming a hot loop, and the ceiling keeps a hostile value from stalling

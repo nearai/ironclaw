@@ -89,7 +89,7 @@ export function EmptyState({
         </React.Suspense>
       )}
 
-      <div className="mt-9 w-full max-w-5xl">
+      <div className={`${oobeSuggestionsEnabled ? "mt-3" : "mt-9"} w-full max-w-5xl`}>
         <ChatInput
           onSend={onSend}
           commands={commands}

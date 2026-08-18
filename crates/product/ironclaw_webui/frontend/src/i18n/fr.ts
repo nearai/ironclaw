@@ -91,6 +91,8 @@ registerPack("fr", {
   "chat.suggestion3Desc": "Verifier la configuration, l'authentification, l'appairage et les capacites disponibles.",
   // Chat — OOBE suggestion cards (English placeholder; localized in a later slice)
   "chat.oobe.heading": "Suggested for you",
+  "chat.oobe.subtitle": "Approve to run, or tweak first",
+  "chat.oobe.from": "From {sources}",
   "chat.oobe.dismiss": "Dismiss suggestion",
   "chat.oobe.action.approve": "Approve",
   "chat.oobe.action.openThread": "View in thread",

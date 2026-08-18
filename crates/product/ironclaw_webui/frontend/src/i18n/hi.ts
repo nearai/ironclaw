@@ -91,6 +91,8 @@ registerPack("hi", {
   "chat.suggestion3Desc": "सेटअप, ऑथ, पेयरिंग और उपलब्ध क्षमताओं की पुष्टि करें.",
   // Chat — OOBE suggestion cards (English placeholder; localized in a later slice)
   "chat.oobe.heading": "Suggested for you",
+  "chat.oobe.subtitle": "Approve to run, or tweak first",
+  "chat.oobe.from": "From {sources}",
   "chat.oobe.dismiss": "Dismiss suggestion",
   "chat.oobe.action.approve": "Approve",
   "chat.oobe.action.openThread": "View in thread",

@@ -1,6 +1,19 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { pollDelayMs } from "./suggestions-api";
+import { formatSources, pollDelayMs } from "./suggestions-api";
+
+test("formatSources joins human-readable tool names for the card provenance", () => {
+  assert.equal(formatSources(["Gmail"]), "Gmail");
+  assert.equal(formatSources(["Gmail", "Slack"]), "Gmail & Slack");
+  assert.equal(formatSources(["Gmail", "Slack", "Telegram"]), "Gmail, Slack & Telegram");
+});
+
+test("formatSources returns empty string for missing/empty/blank sources", () => {
+  assert.equal(formatSources([]), "");
+  assert.equal(formatSources(null), "");
+  assert.equal(formatSources(undefined), "");
+  assert.equal(formatSources(["", "  "]), "");
+});
 
 // `pollDelayMs` is the only logic in the client worth pinning: the request
 // builders are thin `apiFetch` wrappers, but this one turns an untrusted

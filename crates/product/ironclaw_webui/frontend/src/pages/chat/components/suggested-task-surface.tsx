@@ -57,57 +57,92 @@ export function SuggestedTaskSurface({
   // moment between the click and the 202 landing.
   const generating = isGenerating || status === "generating";
 
+  // The docked drawer frame (V4) appears once there is something to show — a
+  // card set or an in-flight generation. The empty/failed CTA states stay
+  // frameless so a lone button isn't wrapped in a big panel.
+  const showFrame = hasCards || generating;
+
   return (
     <section
       aria-label={t("chat.oobe.heading")}
       className="mt-8 w-full max-w-5xl text-left"
     >
-      <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-[var(--v2-text-faint)]">
-        {t("chat.oobe.heading")}
-      </div>
-      {renderBody()}
+      {showFrame ? (
+        <div className="rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-3 shadow-[var(--v2-card-shadow)]">
+          <div className="mb-2.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 px-0.5">
+            <span className="text-[12px] font-semibold text-[var(--v2-text-strong)]">
+              {t("chat.oobe.heading")}
+            </span>
+            <span className="text-[11px] text-[var(--v2-text-faint)]">
+              {t("chat.oobe.subtitle")}
+            </span>
+          </div>
+          {hasCards ? renderCards() : renderSkeleton()}
+        </div>
+      ) : (
+        <div>
+          <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-[var(--v2-text-faint)]">
+            {t("chat.oobe.heading")}
+          </div>
+          {renderCta()}
+        </div>
+      )}
     </section>
   );
 
-  function renderBody() {
-    // Cards win over any transient status: once a set exists, replacing it
-    // with a spinner on regeneration would blank the surface the user is using.
-    if (hasCards) {
-      return (
-        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-          {suggestions.map((suggestion) => (
-            <SuggestedTaskCard
-              key={suggestion.id}
-              suggestion={suggestion}
-              starting={startingId === suggestion.id}
-              renderRunningIndicator={renderRunningIndicator}
-              onApprove={() => {
-                start(suggestion.id, {
-                  onSuccess: (response) => {
-                    if (response?.thread_id) onOpenThread?.(response.thread_id);
-                  },
-                });
-              }}
-              onOpenThread={() => {
-                if (suggestion.thread_id) onOpenThread?.(suggestion.thread_id);
-              }}
-              onDismiss={() => dismiss(suggestion.id)}
-            />
+  function renderCards() {
+    return (
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        {suggestions.map((suggestion) => (
+          <SuggestedTaskCard
+            key={suggestion.id}
+            suggestion={suggestion}
+            starting={startingId === suggestion.id}
+            renderRunningIndicator={renderRunningIndicator}
+            onApprove={() => {
+              start(suggestion.id, {
+                onSuccess: (response) => {
+                  if (response?.thread_id) onOpenThread?.(response.thread_id);
+                },
+              });
+            }}
+            onOpenThread={() => {
+              if (suggestion.thread_id) onOpenThread?.(suggestion.thread_id);
+            }}
+            onDismiss={() => dismiss(suggestion.id)}
+          />
+        ))}
+      </div>
+    );
+  }
+
+  // Anticipatory beat (V3): the branded working indicator over skeleton tiles,
+  // so a generating surface reads as "on it" rather than empty. Tiles use the
+  // static `.v2-skeleton` (no shimmer) to respect the motion policy; the NEAR
+  // indicator carries the only motion, and it's already a sanctioned exception.
+  function renderSkeleton() {
+    return (
+      <div>
+        {renderRunningIndicator
+          ? renderRunningIndicator(t("chat.oobe.status.generating"))
+          : null}
+        <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3" aria-hidden="true">
+          {[0, 1, 2].map((i) => (
+            <div
+              key={i}
+              className="flex flex-col gap-2 rounded-[13px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] p-3"
+            >
+              <div className="v2-skeleton h-4 w-4/5" />
+              <div className="v2-skeleton h-3 w-full" />
+              <div className="v2-skeleton mt-2 h-7 w-24" />
+            </div>
           ))}
         </div>
-      );
-    }
+      </div>
+    );
+  }
 
-    if (generating) {
-      return (
-        <div className="py-1">
-          {renderRunningIndicator
-            ? renderRunningIndicator(t("chat.oobe.status.generating"))
-            : null}
-        </div>
-      );
-    }
-
+  function renderCta() {
     if (status === "failed") {
       return (
         <div className="flex flex-wrap items-center gap-2">
@@ -122,7 +157,6 @@ export function SuggestedTaskSurface({
         </div>
       );
     }
-
     // `empty`, or a `ready` set the user has dismissed down to nothing.
     return (
       <Button variant="secondary" size="sm" onClick={() => generate()}>

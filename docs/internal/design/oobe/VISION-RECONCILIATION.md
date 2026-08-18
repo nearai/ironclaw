@@ -181,20 +181,44 @@ Consequences:
 
 ### 5.1 Slice plan
 
-1. **Suggestions API client + types** — four typed calls over `lib/api.ts` conventions
+1. ✅ **Suggestions API client + types** — four typed calls over `lib/api.ts` conventions
    (`apiFetch`, `clientActionId()`), DTOs mirroring `RebornSuggestion`.
-2. **Surface consumes real data** — `list` on mount; `empty` → generate CTA; `generating`
+2. ✅ **Surface consumes real data** — `list` on mount; `empty` → generate CTA; `generating`
    → poll on `retry_after_seconds`; `ready` → render cards; `failed` → retry affordance.
-3. **Start + dismiss** — Approve calls `start` and navigates to the returned `thread_id`;
+3. ✅ **Start + dismiss** — Approve calls `start` and navigates to the returned `thread_id`;
    dismiss calls `DELETE`.
-4. **Strip the connect model** — remove the `unconnected` state, resolver, and i18n key.
-5. **V3 anticipatory states** — real empty/generating/failed presentation.
-6. **V2 reveal** — ai-spark conjure on `generating → ready`, `prefers-reduced-motion` honored.
-7. **Live card status** (formerly the retired 2b) — subscribe to the bound run.
-8. **V1 connect panel** — catalog-driven, batched OAuth, reusing the `ConfigureModal` pattern.
-9. **V4 docked drawer frame** — composer-docked container.
+4. ✅ **Strip the connect model** — removed the `unconnected` state, resolver, and i18n key.
+5. ✅ **V3 anticipatory states** — empty CTA / generating skeleton / failed retry; the
+   generating state renders the branded NEAR indicator over static `.v2-skeleton` tiles.
+6. ✅ **V2 reveal** — restrained card entrance via `.oobe-card-reveal` (reuses the sanctioned
+   `v2-page-in` keyframe, `prefers-reduced-motion`-suppressed). *Note:* this is the
+   governance-clean version, **not** the mockup's ad-hoc conic-gradient ai-spark border
+   sweep, which would bypass the static-motion policy in `app.css`.
+7. ⏳ **Live card status** (formerly the retired 2b) — subscribe to the bound `run_id` and
+   reflect running/completed/failed on a returning user's card. *Not built.*
+8. ⏳ **V1 connect panel** — catalog-driven cold-start "Connect your tools" surface (batched
+   OAuth), reusing the `ConfigureModal` pattern. *Not built* (connect stays decoupled, §3.1).
+9. ✅ **V4 docked drawer frame** — the surface renders as a bordered drawer with a
+   "Suggested for you · approve to run, or tweak first" header, docked close to the composer.
+   *Refinement not done:* true border-merge flush with the composer (kept as a rounded frame
+   with a tight gap to avoid touching the shipped `ChatInput`).
 
-Slices 1–4 are the mechanical refactor of what #6994 already has; 5–9 are the Vision build.
+Slices 1–6 and 9 are **built** on #6994. The remaining Vision follow-ups (not built), tracked
+here for the design review:
+
+- **Live card status (slice 7)** — needs the bound-run event subscription.
+- **V1 connect panel (slice 8)** — the cold-start batched-OAuth surface.
+- **Agent-mode selector** — Suggest / Plan / Auto / Bypass in the composer (net-new; a durable
+  home + typed gate wiring, see PROPOSAL §7). Not part of the suggestions contract.
+- **Pills-collapse on typing** — the drawer condensing to a scrollable pill row (+ dismiss /
+  in-composer restore) when the user starts typing.
+- **Named greeting + client username call-out in the header (V5)** — the mockup's
+  "Welcome to IronClaw, &lt;name&gt;" hero and the account name in the top bar. Deferred: needs
+  a deterministic username source (§10 open decision). *Explicitly tracked as a Vision
+  follow-up per review.*
+- **ai-spark reveal** — the mockup's richer first-card border-sweep, if an approved
+  animation approach is adopted that doesn't bypass the motion policy (slice 6 shipped the
+  restrained entrance instead).
 
 ### 5.2 Sequencing — resolved
 

@@ -38,12 +38,18 @@ function renderCard({ suggestion = SUGGESTION, ...props } = {}) {
   const context = {
     ...components,
     globalThis: {},
-    useT: () => (key) => key,
+    // Echo the key, and append interpolation values so provenance assertions
+    // can see the substituted `sources` (real i18n substitutes {sources}).
+    useT: () => (key, vars) =>
+      vars && Object.keys(vars).length ? `${key}:${Object.values(vars).join(",")}` : key,
     // The card resolves a brand icon from the suggestion's required `icon`
     // enum; the resolution logic is covered in brand-icons.test.ts, so here we
     // just echo `icon` (or 'generic') to observe what the card forwards to
     // BrandIcon.
     resolveIconId: (s) => (s && s.icon) || "generic",
+    // Provenance formatting is covered in suggestions-api.test.ts; echo a join
+    // so we can assert the card renders a "From …" line from `sources`.
+    formatSources: (list) => (list || []).join(", "),
   };
   vm.runInNewContext(cardSourceForTest(), context);
   const tree = context.globalThis.__testExports.SuggestedTaskCard({
@@ -114,6 +120,21 @@ test("the card renders the suggestion's own title and description", () => {
   const serialized = JSON.stringify(tree);
   assert.ok(serialized.includes(SUGGESTION.title));
   assert.ok(serialized.includes(SUGGESTION.description));
+});
+
+test("the card shows a 'From <sources>' provenance line when sources are present", () => {
+  const { tree } = renderCard({
+    suggestion: { ...SUGGESTION, icon: "gmail", sources: ["Gmail", "Slack"] },
+  });
+  const serialized = JSON.stringify(tree);
+  // i18n key + the formatted sources both appear (t() echoes the key here).
+  assert.ok(serialized.includes("chat.oobe.from"), "renders the provenance i18n key");
+  assert.ok(serialized.includes("Gmail, Slack"), "includes the formatted sources");
+});
+
+test("the card omits the provenance line when there are no sources", () => {
+  const { tree } = renderCard({ suggestion: { ...SUGGESTION, sources: [] } });
+  assert.ok(!JSON.stringify(tree).includes("chat.oobe.from"), "no provenance line without sources");
 });
 
 test("the card renders a BrandIcon for the suggestion's resolved tool", () => {

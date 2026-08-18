@@ -91,6 +91,8 @@ registerPack("uk", {
   "chat.suggestion3Desc": "Перевірити налаштування, автентифікацію, спарювання та доступні можливості.",
   // Chat — OOBE suggestion cards (English placeholder; localized in a later slice)
   "chat.oobe.heading": "Suggested for you",
+  "chat.oobe.subtitle": "Approve to run, or tweak first",
+  "chat.oobe.from": "From {sources}",
   "chat.oobe.dismiss": "Dismiss suggestion",
   "chat.oobe.action.approve": "Approve",
   "chat.oobe.action.openThread": "View in thread",

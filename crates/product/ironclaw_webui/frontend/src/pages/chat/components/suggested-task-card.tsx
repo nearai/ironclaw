@@ -8,10 +8,9 @@
  *   started      → View in thread (onOpenThread) — the card keeps its durable
  *                  `thread_id` binding, so a returning user can rejoin the run
  *
- * Cards carry no tool/extension identity: the backend's card schema is
- * `{id, title, description, suggested_prompt, thread_id?, run_id?}` and its
- * generator is explicitly instructed not to assume a capability is available.
- * Connect is therefore a separate landing surface, not a card state — see
+ * The card shows the suggestion's brand `icon` and a "From <sources>"
+ * provenance line (both from the backend card schema). Connect is still a
+ * separate landing surface, not a card state — see
  * docs/internal/design/oobe/VISION-RECONCILIATION.md §3.1.
  *
  * Live run status (running/completed/failed derived from the bound `run_id`)
@@ -23,7 +22,7 @@ import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
 import { useT } from "../../../lib/i18n";
 import { BrandIcon, resolveIconId } from "../lib/brand-icons";
-import type { Suggestion } from "../lib/suggestions-api";
+import { formatSources, type Suggestion } from "../lib/suggestions-api";
 
 export function SuggestedTaskCard({
   suggestion,
@@ -43,12 +42,13 @@ export function SuggestedTaskCard({
   const t = useT();
   const started = Boolean(suggestion.thread_id);
   const iconId = resolveIconId(suggestion);
+  const provenance = formatSources(suggestion.sources);
 
   return (
     <div
       role="group"
       aria-label={suggestion.title}
-      className="flex flex-col rounded-[13px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] p-3 text-left transition-colors hover:border-[color-mix(in_srgb,var(--v2-accent)_32%,var(--v2-panel-border))]"
+      className="oobe-card-reveal flex flex-col rounded-[13px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] p-3 text-left transition-colors hover:border-[color-mix(in_srgb,var(--v2-accent)_32%,var(--v2-panel-border))]"
     >
       {/* Brand icon + dismiss */}
       <div className="mb-1.5 flex items-center gap-1.5">
@@ -74,6 +74,13 @@ export function SuggestedTaskCard({
       <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-[var(--v2-text-muted)]">
         {suggestion.description}
       </p>
+
+      {/* Provenance — the tool(s) this suggestion draws on (backend `sources`) */}
+      {provenance && (
+        <div className="mt-1.5 text-[10.5px] text-[var(--v2-text-faint)]">
+          {t("chat.oobe.from", { sources: provenance })}
+        </div>
+      )}
 
       {/* One action row */}
       <div className="mt-2.5">{renderActions()}</div>
