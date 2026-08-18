@@ -3,6 +3,7 @@
 import json
 
 from emulate_provider import google_json
+from provider_fault_proxy import ProviderFaultProfile
 from provider_operation_types import (
     ProviderOperationCase,
     exact_output,
@@ -109,6 +110,47 @@ async def _semantic_table_partial_outcome(emulate_url: str, preview: dict) -> No
     assert output["populated_cells"] == 0, output
     document = await _document(emulate_url)
     assert TABLE_DATA not in _document_tables(document), document
+
+
+async def _semantic_table_revision_drift_outcome(
+    emulate_url: str, preview: dict
+) -> None:
+    output = _output(preview)
+    assert output["verified"] is False, output
+    assert output["stage"] == "table_inserted", output
+    assert output["revision_id"] == "3", output
+    assert output["failure"] == (
+        "document revision changed after table insertion: expected 2, found 3"
+    ), output
+    document = await _document(emulate_url)
+    assert document["revisionId"] == "2", document
+    assert TABLE_DATA not in _document_tables(document), document
+
+
+def _setup_table_revision_drift(proxy) -> None:
+    path = f"/v1/documents/{DOCUMENT_ID}"
+    proxy.arm(
+        ProviderFaultProfile(name="revision_drift", action="forward"),
+        method="GET",
+        path=path,
+    )
+    proxy.arm(
+        ProviderFaultProfile(
+            name="revision_drift",
+            action="respond",
+            status=200,
+            body=json.dumps(
+                {
+                    "documentId": DOCUMENT_ID,
+                    "revisionId": "3",
+                    "body": {"content": []},
+                },
+                separators=(",", ":"),
+            ),
+        ),
+        method="GET",
+        path=path,
+    )
 
 
 def _output(preview: dict) -> dict:
@@ -340,6 +382,24 @@ GOOGLE_DOCS_PROVIDER_OPERATION_CASES = (
         assert_baseline=_baseline,
         assert_outcome=_semantic_table_partial_outcome,
         expected_request_count=3,
+    ),
+    ProviderOperationCase(
+        case_id="google_docs_create_table_with_data_revision_drift",
+        provider_service="google",
+        capability_id="google-docs.create_table_with_data",
+        arguments={
+            "document_id": DOCUMENT_ID,
+            "index": 1,
+            "table_data": TABLE_DATA,
+            "bold_header": True,
+        },
+        assert_baseline=_baseline,
+        assert_outcome=_semantic_table_revision_drift_outcome,
+        expected_request_count=3,
+        setup_provider_proxy=_setup_table_revision_drift,
+        expected_proxy_profile="revision_drift",
+        expected_forwarded_request_count=2,
+        expected_profile_request_count=2,
     ),
     ProviderOperationCase(
         case_id="google_docs_insert_text",

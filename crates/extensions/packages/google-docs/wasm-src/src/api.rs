@@ -775,7 +775,8 @@ pub fn create_table_with_data(
         before["revisionId"].as_str(),
     )?;
 
-    let mut latest_revision = extract_revision_id(&insert_response);
+    let insert_revision = extract_revision_id(&insert_response);
+    let mut latest_revision = insert_revision.clone();
     let result_document_id = before["documentId"]
         .as_str()
         .unwrap_or(document_id)
@@ -796,6 +797,17 @@ pub fn create_table_with_data(
     };
     if let Some(revision_id) = inserted["revisionId"].as_str() {
         latest_revision = revision_id.to_string();
+    }
+    if let Err(reason) = validate_post_insert_revision(&insert_revision, &inserted) {
+        return Ok(partial_table_result(
+            &result_document_id,
+            &latest_revision,
+            rows,
+            columns,
+            0,
+            CreateTableStage::TableInserted,
+            reason,
+        ));
     }
     let table_index = preferred_table_index;
     let population_requests =
@@ -931,6 +943,24 @@ fn preferred_inserted_table_index(requested_index: i64) -> Result<i64, String> {
     requested_index
         .checked_add(1)
         .ok_or_else(|| "table insertion index is too large".to_string())
+}
+
+fn validate_post_insert_revision(
+    expected_revision: &str,
+    document: &serde_json::Value,
+) -> Result<(), String> {
+    if expected_revision.is_empty() {
+        return Err("insertTable response did not include a revision ID".to_string());
+    }
+    let actual_revision = document["revisionId"]
+        .as_str()
+        .ok_or_else(|| "post-insert document did not include a revision ID".to_string())?;
+    if actual_revision != expected_revision {
+        return Err(format!(
+            "document revision changed after table insertion: expected {expected_revision}, found {actual_revision}"
+        ));
+    }
+    Ok(())
 }
 
 fn partial_table_result(
@@ -1394,6 +1424,26 @@ mod tests {
     fn inserted_table_uses_provider_index_after_leading_newline() {
         assert_eq!(preferred_inserted_table_index(5).unwrap(), 6);
         assert!(preferred_inserted_table_index(i64::MAX).is_err());
+    }
+
+    #[test]
+    fn table_population_rejects_revision_drift_after_insertion() {
+        let concurrent_document = serde_json::json!({ "revisionId": "3" });
+
+        let error = validate_post_insert_revision("2", &concurrent_document).unwrap_err();
+
+        assert_eq!(
+            error,
+            "document revision changed after table insertion: expected 2, found 3"
+        );
+    }
+
+    #[test]
+    fn create_table_stage_round_trips_its_snake_case_wire_value() {
+        let stage: CreateTableStage = serde_json::from_str("\"header_styled\"").unwrap();
+
+        assert_eq!(stage, CreateTableStage::HeaderStyled);
+        assert_eq!(serde_json::to_string(&stage).unwrap(), "\"header_styled\"");
     }
 
     #[test]
