@@ -86,8 +86,13 @@ pub struct RunArtifactTimingTotals {
     /// Summed provider latency. `unavailable_samples` counts calls that
     /// reported no duration, so a reader can tell "fast" from "unmeasured".
     pub inference_ms: DiagnosticMetricTotal,
+    /// Sum of durations for tool executions still retained by the bounded
+    /// diagnostic store. This is never presented as a complete run total.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_ms: Option<u64>,
+    pub retained_tool_ms: Option<u64>,
+    /// False when the store's cumulative tool count exceeds its retained
+    /// execution records, so `retained_tool_ms` is known to be partial.
+    pub retained_tool_ms_complete: bool,
     /// run.received_at → the newest message `updated_at`. Approximate: it
     /// includes queue and persistence latency around the run, and it is the
     /// only end-to-end number available without widening into turn state.
@@ -122,8 +127,8 @@ pub fn project_timings(
         .map(|call| call.call_id)
         .collect();
 
-    let mut tool_ms_known = 0_u64;
-    let mut tool_ms_seen = false;
+    let mut retained_tool_ms = 0_u64;
+    let mut retained_tool_ms_seen = false;
     for execution in &snapshot.tool_executions {
         let timing = RunArtifactToolTiming {
             capability_name: execution.capability_name.content().to_string(),
@@ -131,8 +136,8 @@ pub fn project_timings(
             status: execution.status,
         };
         if let Some(duration) = execution.duration_ms {
-            tool_ms_known = tool_ms_known.saturating_add(duration);
-            tool_ms_seen = true;
+            retained_tool_ms = retained_tool_ms.saturating_add(duration);
+            retained_tool_ms_seen = true;
         }
         match execution
             .model_call_id
@@ -183,7 +188,10 @@ pub fn project_timings(
             tool_calls: snapshot.stats.total_tool_calls,
             failed_tool_calls: snapshot.stats.failed_tool_calls,
             inference_ms: snapshot.stats.total_latency_ms,
-            tool_ms: tool_ms_seen.then_some(tool_ms_known),
+            retained_tool_ms: retained_tool_ms_seen.then_some(retained_tool_ms),
+            retained_tool_ms_complete: u64::try_from(snapshot.tool_executions.len())
+                .unwrap_or(u64::MAX)
+                >= snapshot.stats.total_tool_calls,
             wall_clock_ms,
         },
     }
@@ -256,8 +264,14 @@ mod tests {
         stats: SessionDiagnosticStats,
     ) -> DiagnosticTimingSnapshot {
         DiagnosticTimingSnapshot {
-            model_calls,
-            tool_executions,
+            model_calls: model_calls
+                .iter()
+                .map(crate::inspector_store::DiagnosticTimingModelCall::from)
+                .collect(),
+            tool_executions: tool_executions
+                .iter()
+                .map(crate::inspector_store::DiagnosticTimingToolExecution::from)
+                .collect(),
             stats,
         }
     }
@@ -333,7 +347,7 @@ mod tests {
         assert_eq!(projected.unattributed_tools.len(), 1);
         assert_eq!(projected.unattributed_tools[0].capability_name, "shell");
         assert_eq!(projected.iterations[0].tool_calls, 1);
-        assert_eq!(projected.totals.tool_ms, Some(705));
+        assert_eq!(projected.totals.retained_tool_ms, Some(705));
     }
 
     #[test]
@@ -362,7 +376,8 @@ mod tests {
         assert_eq!(projected.totals.failed_tool_calls, 2);
         assert_eq!(projected.totals.inference_ms.known_total, 50);
         assert_eq!(projected.totals.inference_ms.unavailable_samples, 1);
-        assert_eq!(projected.totals.tool_ms, Some(7));
+        assert_eq!(projected.totals.retained_tool_ms, Some(7));
+        assert!(!projected.totals.retained_tool_ms_complete);
     }
 
     #[test]
@@ -386,7 +401,7 @@ mod tests {
         );
 
         assert_eq!(projected.iterations[0].tool_ms_total, Some(u64::MAX));
-        assert_eq!(projected.totals.tool_ms, Some(u64::MAX));
+        assert_eq!(projected.totals.retained_tool_ms, Some(u64::MAX));
     }
 
     #[test]

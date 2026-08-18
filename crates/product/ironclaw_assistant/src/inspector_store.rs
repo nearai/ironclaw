@@ -350,17 +350,71 @@ pub struct InMemoryDiagnosticStore {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticTimingModelCall {
+    pub call_id: DiagnosticModelCallId,
+    pub iteration: u32,
+    pub requested_model: BoundedDiagnosticText,
+    pub effective_model: Option<BoundedDiagnosticText>,
+    pub started_at: chrono::DateTime<Utc>,
+    pub completed_at: Option<chrono::DateTime<Utc>>,
+    pub duration_ms: Option<u64>,
+    pub status: InspectorModelCallStatus,
+}
+
+impl From<&ModelCallDiagnostic> for DiagnosticTimingModelCall {
+    fn from(call: &ModelCallDiagnostic) -> Self {
+        Self {
+            call_id: call.call_id,
+            iteration: call.iteration,
+            requested_model: call.requested_model.clone(),
+            effective_model: call.effective_model.clone(),
+            started_at: call.started_at,
+            completed_at: call.completed_at,
+            duration_ms: call.duration_ms,
+            status: call.status,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticTimingToolExecution {
+    pub model_call_id: Option<DiagnosticModelCallId>,
+    pub capability_name: BoundedDiagnosticText,
+    pub status: ToolExecutionStatus,
+    pub duration_ms: Option<u64>,
+}
+
+impl From<&ToolExecutionDiagnostic> for DiagnosticTimingToolExecution {
+    fn from(tool: &ToolExecutionDiagnostic) -> Self {
+        Self {
+            model_call_id: tool.model_call_id,
+            capability_name: tool.capability_name.clone(),
+            status: tool.status,
+            duration_ms: tool.duration_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnosticTimingSnapshot {
-    pub model_calls: Vec<ModelCallDiagnostic>,
-    pub tool_executions: Vec<ToolExecutionDiagnostic>,
+    pub model_calls: Vec<DiagnosticTimingModelCall>,
+    pub tool_executions: Vec<DiagnosticTimingToolExecution>,
     pub stats: SessionDiagnosticStats,
 }
 
 impl From<DiagnosticSnapshot> for DiagnosticTimingSnapshot {
     fn from(snapshot: DiagnosticSnapshot) -> Self {
         Self {
-            model_calls: snapshot.model_calls,
-            tool_executions: snapshot.tool_executions,
+            model_calls: snapshot
+                .model_calls
+                .iter()
+                .map(DiagnosticTimingModelCall::from)
+                .collect(),
+            tool_executions: snapshot
+                .tool_executions
+                .iter()
+                .map(DiagnosticTimingToolExecution::from)
+                .collect(),
             stats: snapshot.stats,
         }
     }
@@ -632,8 +686,16 @@ impl InMemoryDiagnosticStore {
             return Ok(None);
         };
         Ok(Some(DiagnosticTimingSnapshot {
-            model_calls: run.model_calls.iter().cloned().collect(),
-            tool_executions: run.tool_executions.iter().cloned().collect(),
+            model_calls: run
+                .model_calls
+                .iter()
+                .map(DiagnosticTimingModelCall::from)
+                .collect(),
+            tool_executions: run
+                .tool_executions
+                .iter()
+                .map(DiagnosticTimingToolExecution::from)
+                .collect(),
             stats: run.stats.clone(),
         }))
     }

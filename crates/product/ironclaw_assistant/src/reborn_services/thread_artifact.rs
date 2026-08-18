@@ -101,16 +101,8 @@ where
         let (runs_in_order, messages_by_run) = group_messages_by_run(&messages);
 
         let mut timings_by_run = Vec::new();
-        for run_id_text in &runs_in_order {
-            let run_messages = &messages_by_run[run_id_text];
-            // silent-ok: `run_id_text` came from a durably persisted
-            // `turn_run_id` that was validated as a `TurnRunId` at write
-            // time; a parse failure here would mean corrupted storage, and
-            // skipping just this run's timings keeps the export best-effort
-            // (see module docs: never fail the whole artifact for one run).
-            let Ok(run_id) = TurnRunId::parse(run_id_text) else {
-                continue;
-            };
+        for run_id in &runs_in_order {
+            let run_messages = &messages_by_run[run_id];
             // No per-run `received_at` here; the earliest message creation in
             // the run is the closest durable origin available.
             // silent-ok: no message in the run carries `created_at` (only
@@ -129,7 +121,7 @@ where
             );
             if timings.available {
                 timings_by_run.push(RunArtifactRunTimings {
-                    run_id: run_id_text.clone(),
+                    run_id: run_id.to_string(),
                     timings,
                 });
             }
@@ -168,8 +160,8 @@ fn thread_artifact_too_large() -> ProductSurfaceError {
 fn group_messages_by_run(
     messages: &[RunArtifactMessage],
 ) -> (
-    Vec<String>,
-    std::collections::HashMap<String, Vec<&RunArtifactMessage>>,
+    Vec<TurnRunId>,
+    std::collections::HashMap<TurnRunId, Vec<&RunArtifactMessage>>,
 ) {
     let mut runs_in_order = Vec::new();
     let mut messages_by_run = std::collections::HashMap::new();
@@ -179,10 +171,13 @@ fn group_messages_by_run(
         let Some(run_id_text) = message.run_id.as_deref() else {
             continue;
         };
+        let Ok(run_id) = TurnRunId::parse(run_id_text) else {
+            continue;
+        };
         messages_by_run
-            .entry(run_id_text.to_string())
+            .entry(run_id)
             .or_insert_with(|| {
-                runs_in_order.push(run_id_text.to_string());
+                runs_in_order.push(run_id);
                 Vec::new()
             })
             .push(message);
@@ -217,19 +212,21 @@ mod tests {
     #[test]
     fn per_run_message_groups_keep_exact_wall_clock_inputs_without_cloning() {
         let origin = Utc::now();
+        let run_a = TurnRunId::new();
+        let run_b = TurnRunId::new();
         let messages = vec![
-            message("run-a", origin, origin + Duration::milliseconds(12)),
+            message(&run_a.to_string(), origin, origin + Duration::milliseconds(12)),
             message(
-                "run-b",
+                &run_b.to_string(),
                 origin + Duration::seconds(2),
                 origin + Duration::seconds(2) + Duration::milliseconds(34),
             ),
         ];
 
         let (runs, messages_by_run) = group_messages_by_run(&messages);
-        assert_eq!(runs, vec!["run-a", "run-b"]);
-        assert_eq!(messages_by_run["run-a"].len(), 1);
-        assert_eq!(messages_by_run["run-b"].len(), 1);
+        assert_eq!(runs, vec![run_a, run_b]);
+        assert_eq!(messages_by_run[&run_a].len(), 1);
+        assert_eq!(messages_by_run[&run_b].len(), 1);
         assert_eq!(
             crate::reborn_services::timings_source::derive_wall_clock_ms(
                 origin,

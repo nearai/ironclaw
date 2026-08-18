@@ -27,6 +27,7 @@ mod reborn_support;
 mod support;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use ironclaw_assistant::{RebornRunArtifact, RebornServices};
@@ -64,6 +65,7 @@ async fn exported_run_artifact_carries_per_iteration_timings() {
     // path — the one lane the harness's diagnostic sink actually captures.
     let h = RebornIntegrationHarness::builder("thread-timings")
         .with_builtin_http_tools()
+        .with_model_call_delay_for_test(Duration::from_millis(5))
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.http",
