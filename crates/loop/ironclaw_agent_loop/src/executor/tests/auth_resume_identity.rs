@@ -231,10 +231,9 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
     // regenerated when the approval identity is reconstructed from the gate ref,
     // so prior_approval.correlation_id is NOT byte-stable with the original (the
     // authoritative correlation is reconstituted host-side from the replay
-    // payload, §5.3 Stage 2a-ii). The dedicated correlation axis lives in
-    // `auth_resume_after_approval_carries_original_correlation_id`; here we only
-    // assert prior_approval is present and carries a correlation_id.
-    let _ = phase3_pa.correlation_id;
+    // payload, §5.3 Stage 2a-ii). The prior-approval identity axis lives in
+    // `auth_resume_after_approval_carries_prior_approval_identity`; presence of
+    // `prior_approval` is already asserted above.
 
     // Final state: pending_auth_resume cleared and result recorded.
     let final_state = final_staged_state(&host);
@@ -249,8 +248,9 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
     );
 }
 
-/// Verify that `pending_auth_resume.prior_approval` is present and carries a
-/// correlation_id throughout the approval → auth-block → auth-resume pipeline.
+/// Verify that `pending_auth_resume.prior_approval` is present and carries the
+/// byte-stable approval identity throughout the approval → auth-block →
+/// auth-resume pipeline.
 ///
 /// Post-§5.3 Stage 2 flip, correlation_id is observability-only: the approval
 /// identity is reconstructed from the `gate:approval-{id}` ref and a fresh
@@ -261,7 +261,7 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
 /// contract on prior_approval; the byte-stable fields (request id, resume token)
 /// are covered by `auth_resume_after_approval_carries_resume_token_and_approval_request_id`.
 #[tokio::test]
-async fn auth_resume_after_approval_carries_original_correlation_id() {
+async fn auth_resume_after_approval_carries_prior_approval_identity() {
     // The three-phase flow:
     //   phase 1 — model turn → approval gate (records correlation_id in approval_resume)
     //   phase 2 — approval-resume → auth gate → Blocked
@@ -1000,5 +1000,21 @@ async fn auth_resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
         host.single_invocations().is_empty(),
         "no single invoke_capability call must be made for an auth-resume-origin Backend \
          failure (retry is suppressed to avoid double-exec)"
+    );
+    assert_eq!(
+        host.progress_events()
+            .into_iter()
+            .filter(|event| matches!(
+                event,
+                LoopProgressEvent::FailureRecovered {
+                    sequence: 1,
+                    stage: LoopRecoveryStage::Capability,
+                    class: LoopRecoveryClass::Capability(FailureKind::Backend),
+                    disposition: LoopRecoveryDisposition::ModelVisible,
+                }
+            ))
+            .count(),
+        1,
+        "the redirected auth-resume-origin failure must emit one model-visible recovery event"
     );
 }

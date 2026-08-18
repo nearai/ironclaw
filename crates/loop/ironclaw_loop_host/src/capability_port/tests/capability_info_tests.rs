@@ -651,15 +651,17 @@ async fn capability_info_can_describe_itself() {
         capability_id,
         provider_id,
     )]));
+    let result_writer = Arc::new(RecordingResultWriter::default());
     let port = HostRuntimeLoopCapabilityPortFactory::new(
-        runtime,
+        runtime.clone(),
         visible_request(context),
         dummy_input_resolver(),
-        dummy_result_writer(),
+        result_writer.clone(),
         dummy_milestone_sink(),
     )
     .port_for_run_context(run_context);
-    port.visible_capabilities(VisibleCapabilityRequest {})
+    let surface = port
+        .visible_capabilities(VisibleCapabilityRequest {})
         .await
         .expect("visible capabilities load");
 
@@ -667,18 +669,65 @@ async fn capability_info_can_describe_itself() {
     let mut call = provider_tool_call();
     call.name = capability_info::provider_tool_name().expect("provider tool name");
     call.arguments = serde_json::json!({ "name": capability_info::TOOL_NAME });
-    port.register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
+    let by_tool_name = port
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
         .await
         .expect("capability_info should be able to describe itself by tool name");
+    let by_tool_name_outcome = port
+        .invoke_capability(LoopRequest {
+            activity_id: by_tool_name.activity_id,
+            surface_version: surface.version.clone(),
+            capability_id: by_tool_name.capability_id,
+            input_ref: by_tool_name.input_ref,
+            approval_resume: None,
+            auth_resume: None,
+        })
+        .await
+        .expect("capability_info self-description by tool name succeeds");
 
     // Query by canonical capability id
     let mut call2 = provider_tool_call();
     call2.id = "call_2".to_string();
     call2.name = capability_info::provider_tool_name().expect("provider tool name");
     call2.arguments = serde_json::json!({ "name": capability_info::CAPABILITY_ID });
-    port.register_provider_tool_call(RegisterProviderToolCallRequest::new(call2))
+    let by_capability_id = port
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(call2))
         .await
         .expect("capability_info should be able to describe itself by capability id");
+    let by_capability_id_outcome = port
+        .invoke_capability(LoopRequest {
+            activity_id: by_capability_id.activity_id,
+            surface_version: surface.version,
+            capability_id: by_capability_id.capability_id,
+            input_ref: by_capability_id.input_ref,
+            approval_resume: None,
+            auth_resume: None,
+        })
+        .await
+        .expect("capability_info self-description by capability id succeeds");
+
+    assert!(matches!(&by_tool_name_outcome, Resolution::Done(o) if o.verdict.is_success()));
+    assert!(matches!(&by_capability_id_outcome, Resolution::Done(o) if o.verdict.is_success()));
+
+    let records = result_writer.records();
+    assert_eq!(records.len(), 2);
+    for (capability_id, output) in &records {
+        assert_eq!(capability_id.as_str(), capability_info::CAPABILITY_ID);
+        assert_eq!(output["name"], capability_info::TOOL_NAME);
+        assert_eq!(output["capability_id"], capability_info::CAPABILITY_ID);
+        assert_eq!(
+            output["parameters"],
+            serde_json::json!(["capability_id", "detail", "include_schema", "name"])
+        );
+        assert!(
+            output.get("summary").is_none(),
+            "default detail level returns parameter names only"
+        );
+    }
+    assert!(
+        runtime.take_requests().is_empty(),
+        "capability_info must be served by the loop port without dispatching to the host runtime"
+    );
 }
 
 #[tokio::test]

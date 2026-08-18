@@ -495,7 +495,7 @@ fn provider_argument_preparation_rejects_excessive_schema_ref_scan_depth() {
     }
 
     let mut deep_annotation = serde_json::json!({ "type": "null" });
-    for _ in 0..40 {
+    for _ in 0..=provider_input::MAX_PROVIDER_NORMALIZATION_DEPTH {
         deep_annotation = wrap_unknown_keyword(deep_annotation);
     }
     let schema = serde_json::json!({
@@ -605,7 +605,7 @@ fn provider_argument_normalization_rejects_excessive_schema_depth() {
 
     let mut schema = serde_json::json!({ "type": "integer" });
     let mut value = serde_json::json!("1");
-    for depth in (0..40).rev() {
+    for depth in (0..=provider_input::MAX_PROVIDER_NORMALIZATION_DEPTH).rev() {
         let property = format!("level_{depth}");
         schema = wrap_object_property(property.clone(), schema);
         value = wrap_object_value(property, value);
@@ -632,7 +632,7 @@ fn provider_argument_normalization_rejects_excessive_array_items_schema_depth() 
 
     let mut schema = serde_json::json!({ "type": "integer" });
     let mut value = serde_json::json!("1");
-    for _ in 0..40 {
+    for _ in 0..=provider_input::MAX_PROVIDER_NORMALIZATION_DEPTH {
         schema = wrap_array_schema(schema);
         value = wrap_array_value(value);
     }

@@ -671,7 +671,11 @@ async fn prompt_stage_compaction_cancelled_returns_cancelled_exit() {
     assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
 }
 
-#[tokio::test]
+// `start_paused` makes the ordering deterministic: both the cancellation delay
+// below and `with_compaction_delay` sleep on Tokio's clock, so the runtime
+// auto-advances to the 5 ms timer before the 50 ms compaction timer instead of
+// racing them against wall-clock scheduling on a loaded runner.
+#[tokio::test(start_paused = true)]
 async fn prompt_stage_cancellation_during_compaction_aborts_prompt_planning() {
     let host = MockHost::new(Vec::new())
         .with_prompt_compaction_index(vec![compaction_metadata(
