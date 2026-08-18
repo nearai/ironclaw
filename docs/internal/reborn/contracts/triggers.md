@@ -264,8 +264,9 @@ use additive manual domain labels: `route_thread_id` uses `manual-route-thread`
 and `external_event_id` uses `manual-external-event`. The scheduled identity
 labels, version label, and digest input ordering remain frozen for replay
 compatibility. Two manual claims in
-the same timestamp resolution cannot both mint an identity because the atomic
-active-fire claim rejects the second call.
+the same timestamp resolution cannot both mint an identity while they overlap:
+the atomic active-fire claim rejects the competing call. Run history remains
+observational and is not a permanent idempotency ledger after settlement.
 
 Run-history persistence includes the fire source in its identity:
 `(tenant_id, trigger_id, fire_slot, source)`. A manual fire and a scheduled fire

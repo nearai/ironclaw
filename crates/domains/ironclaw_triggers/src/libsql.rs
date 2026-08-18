@@ -1543,7 +1543,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                  WHERE tenant_id = ?1 AND trigger_id IN (SELECT value FROM json_each(?2))
              )
              WHERE row_rank <= ?3
-             ORDER BY trigger_id, fire_slot DESC"
+             ORDER BY trigger_id, fire_slot DESC, source"
         );
         let conn = self.read_connection().await?;
         let mut rows = conn

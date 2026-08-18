@@ -4139,7 +4139,7 @@ mod fire_claim_contract {
         .await
         .expect("claim same-slot scheduled fire at retention boundary");
         let same_slot_history = repo
-            .list_trigger_run_history(tenant_id, trigger_id, 501)
+            .list_trigger_run_history(tenant_id.clone(), trigger_id, 501)
             .await
             .expect("list same-slot retention history");
         assert_eq!(same_slot_history.len(), 500);
@@ -4155,6 +4155,17 @@ mod fire_claim_contract {
                     && run.status == TriggerRunHistoryStatus::Running
             }),
             "retention must not evict the active same-slot scheduled row"
+        );
+        let same_slot_batch_history = repo
+            .list_trigger_run_history_batch(tenant_id, &[trigger_id], 500)
+            .await
+            .expect("list same-slot retention history in batch");
+        assert_eq!(
+            same_slot_batch_history
+                .get(&trigger_id)
+                .expect("batched retention history exists"),
+            &same_slot_history,
+            "batched history must preserve the single-trigger source tie-break"
         );
     }
 
