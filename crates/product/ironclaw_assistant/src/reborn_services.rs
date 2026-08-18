@@ -153,6 +153,7 @@ mod projects;
 // module's own contents stay unexported except through that re-export.
 pub(crate) mod run_artifact;
 mod thread_artifact;
+mod timings_source;
 mod trace_credits;
 mod types;
 mod views;
