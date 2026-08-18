@@ -253,6 +253,31 @@ fn binder_preserves_provider_rejection_across_the_tool_abi() {
     assert!(!format!("{diagnostic:?}").contains("Bad credentials"));
 }
 
+#[test]
+fn binder_preserves_non_rejected_failure_kind_across_the_tool_abi() {
+    use ironclaw_host_api::dispatch::DispatchFailureKind;
+
+    let error = crate::services::extension_tool_binder::tool_error_from_dispatch(
+        DispatchError::UnknownCapability {
+            capability: CapabilityId::new("missing.tool").unwrap(),
+        },
+    );
+
+    let ToolError::Rejected {
+        runtime,
+        kind,
+        diagnostic,
+        detail,
+    } = error
+    else {
+        panic!("non-Rejected routing failures must remain typed Rejected errors");
+    };
+    assert_eq!(runtime, None);
+    assert_eq!(kind, DispatchFailureKind::UnknownCapability);
+    assert!(diagnostic.is_none());
+    assert!(detail.is_none());
+}
+
 #[tokio::test]
 async fn binder_fails_typed_for_an_unconfigured_lane() {
     // No MCP runtime configured: binding an MCP-runtime package fails with

@@ -210,10 +210,11 @@ pub(super) fn tool_error_from_dispatch(error: DispatchError) -> ToolError {
             diagnostic,
             detail,
         },
-        other => ToolError::Failed {
-            kind: ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::Client,
-            safe_summary: Some(other.event_kind().replace('_', " ")),
-            model_visible_cause: None,
+        other => ToolError::Rejected {
+            runtime: None,
+            kind: other.failure_kind(),
+            diagnostic: None,
+            detail: None,
         },
     }
 }

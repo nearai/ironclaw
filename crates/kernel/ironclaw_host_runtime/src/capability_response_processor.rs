@@ -137,13 +137,15 @@ fn failed_response(
 
 /// Single choke point for every path that turns a successful capability
 /// dispatch into a `Completed` outcome. [`process_capability_response`] above
-/// has exactly three callers — `invoke_capability` (Fresh), `resume_capability`
-/// (ApprovalResume), and `auth_resume_capability` (AuthResume), the only
-/// resume paths that can complete a capability rather than suspend or fail it
-/// — and all three route their successful-dispatch case through this function
-/// instead of constructing `Completed` themselves, so the standard-op output
-/// check cannot be skipped on one entry path while covered on another (see
-/// `.claude/rules/review-discipline.md`).
+/// has four call sites: `invoke_capability` (Fresh), the error arm of
+/// `spawn_capability` (Fresh), `resume_capability` (ApprovalResume), and
+/// `auth_resume_capability` (AuthResume). Only the first, third, and fourth can
+/// pass a successful dispatch to this function; `spawn_capability` retains its
+/// `SpawnedProcess` success handling and uses this seam only for canonical
+/// error mapping. The three successful-dispatch paths route through this
+/// function instead of constructing `Completed` themselves, so the standard-op
+/// output check cannot be skipped on one entry path while covered on another
+/// (see `.claude/rules/review-discipline.md`).
 ///
 /// A capability bound to a standard messaging op (`descriptor.standard_op`)
 /// has its dispatch output checked against that op's canonical output schema

@@ -184,12 +184,14 @@ fn tool_error_to_dispatch_error(
             model_visible_cause: model_visible_cause.map(Box::new),
         },
         ToolError::Rejected {
-            runtime,
             kind,
             diagnostic,
             detail,
+            ..
         } => DispatchError::Rejected {
-            runtime,
+            // Runtime provenance belongs to the trusted registry binding, not
+            // to the extension-supplied error payload.
+            runtime: Some(runtime),
             kind,
             diagnostic,
             detail,
@@ -420,7 +422,7 @@ mod tests {
             _ports: &ToolPorts<'_>,
         ) -> Result<ToolResult, ToolError> {
             Err(ToolError::Rejected {
-                runtime: Some(RuntimeKind::FirstParty),
+                runtime: Some(RuntimeKind::Wasm),
                 kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied),
                 diagnostic: Some(ProviderDiagnostic {
                     code: Some(ProviderErrorCode::new("channel_not_found")),
@@ -477,8 +479,12 @@ mod tests {
 
         match error {
             DispatchError::Rejected {
-                kind, diagnostic, ..
+                runtime,
+                kind,
+                diagnostic,
+                ..
             } => {
+                assert_eq!(runtime, Some(RuntimeKind::FirstParty));
                 assert_eq!(
                     kind,
                     DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied)
@@ -500,61 +506,101 @@ mod tests {
         }
     }
 
-    /// Trace pin: a `ToolError::Failed` carrying both a host-authored
-    /// `safe_summary` and a vendor `model_visible_cause` — the
-    /// `extension_tool_binder`/FirstParty shape — must keep both channels
-    /// distinct through `runtime_dispatch_error`: the vendor cause rides
-    /// `diagnostic` (untrusted), the host summary rides `detail` as
-    /// `DispatchFailureDetail::HostSummary` so it survives as the public
-    /// `safe_summary` downstream, never merged into one `.or()`-picked
-    /// string.
-    #[test]
-    fn runtime_dispatch_error_keeps_host_summary_separate_from_vendor_cause() {
-        let error = runtime_dispatch_error(
-            RuntimeKind::FirstParty,
-            RuntimeDispatchErrorKind::Backend,
-            Some("the tool's backend failed".to_string()),
-            Some("vendor 503 at /internal/route".to_string()),
-        );
+    #[tokio::test]
+    async fn tool_adapter_failed_error_keeps_host_summary_separate_from_vendor_cause() {
+        struct FailedToolAdapter;
 
+        #[async_trait]
+        impl ToolAdapter for FailedToolAdapter {
+            async fn invoke(
+                &self,
+                _call: ToolCall,
+                _ports: &ToolPorts<'_>,
+            ) -> Result<ToolResult, ToolError> {
+                Err(ToolError::Failed {
+                    kind: RuntimeDispatchErrorKind::Backend,
+                    safe_summary: Some("the tool's backend failed".to_string()),
+                    model_visible_cause: Some("vendor backend returned 503".to_string()),
+                })
+            }
+        }
+
+        let mut registry = CapabilityDispatchRegistry::new();
+        registry
+            .register_extension(extension(
+                "provider-a",
+                Some(Arc::new(FailedToolAdapter)),
+            ))
+            .expect("extension registration");
+        let resolved = registry
+            .resolve(&CapabilityId::new("provider-a.echo").expect("capability id"))
+            .expect("resolved");
+
+        let error = resolved
+            .adapter
+            .dispatch_json(sample_dispatch_request("provider-a.echo"))
+            .await
+            .expect_err("failure propagated");
         let DispatchError::Rejected {
             diagnostic, detail, ..
-        } = &error
+        } = error
         else {
-            panic!("expected Rejected variant");
+            panic!("expected Rejected dispatch error");
         };
         assert_eq!(
             diagnostic
                 .as_ref()
                 .and_then(|diagnostic| diagnostic.message.as_ref())
                 .map(|message| message.as_str()),
-            Some("vendor 503 at /internal/route")
+            Some("vendor backend returned 503")
         );
-        assert_eq!(
+        assert!(matches!(
             detail,
-            &Some(DispatchFailureDetail::HostSummary {
-                text: "the tool's backend failed".to_string()
-            })
-        );
+            Some(DispatchFailureDetail::HostSummary { text })
+                if text == "the tool's backend failed"
+        ));
     }
 
-    /// When no host summary is supplied, only the vendor cause rides the
-    /// diagnostic channel and `detail` stays empty — no default label is
-    /// synthesized from provider text.
-    #[test]
-    fn runtime_dispatch_error_without_host_summary_carries_only_vendor_cause() {
-        let error = runtime_dispatch_error(
-            RuntimeKind::Wasm,
-            RuntimeDispatchErrorKind::Guest,
-            None,
-            Some("guest trapped".to_string()),
-        );
+    #[tokio::test]
+    async fn tool_adapter_failed_error_without_host_summary_carries_only_vendor_cause() {
+        struct FailedToolAdapter;
 
+        #[async_trait]
+        impl ToolAdapter for FailedToolAdapter {
+            async fn invoke(
+                &self,
+                _call: ToolCall,
+                _ports: &ToolPorts<'_>,
+            ) -> Result<ToolResult, ToolError> {
+                Err(ToolError::Failed {
+                    kind: RuntimeDispatchErrorKind::Guest,
+                    safe_summary: None,
+                    model_visible_cause: Some("guest trapped".to_string()),
+                })
+            }
+        }
+
+        let mut registry = CapabilityDispatchRegistry::new();
+        registry
+            .register_extension(extension(
+                "provider-a",
+                Some(Arc::new(FailedToolAdapter)),
+            ))
+            .expect("extension registration");
+        let resolved = registry
+            .resolve(&CapabilityId::new("provider-a.echo").expect("capability id"))
+            .expect("resolved");
+
+        let error = resolved
+            .adapter
+            .dispatch_json(sample_dispatch_request("provider-a.echo"))
+            .await
+            .expect_err("failure propagated");
         let DispatchError::Rejected {
             diagnostic, detail, ..
-        } = &error
+        } = error
         else {
-            panic!("expected Rejected variant");
+            panic!("expected Rejected dispatch error");
         };
         assert_eq!(
             diagnostic
@@ -563,6 +609,7 @@ mod tests {
                 .map(|message| message.as_str()),
             Some("guest trapped")
         );
-        assert_eq!(detail, &None);
+        assert_eq!(detail, None);
     }
+
 }

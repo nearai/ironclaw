@@ -148,12 +148,14 @@ fn dispatch_error_for_tool_error(
             model_visible_cause: model_visible_cause.map(Box::new),
         },
         ToolError::Rejected {
-            runtime,
             kind,
             diagnostic,
             detail,
+            ..
         } => DispatchError::Rejected {
-            runtime,
+            // Runtime provenance belongs to the trusted resolved binding, not
+            // to the extension-supplied error payload.
+            runtime: Some(runtime),
             kind,
             diagnostic,
             detail,
@@ -172,13 +174,18 @@ fn dispatch_error_for_kind(
     safe_summary: Option<String>,
     model_visible_cause: Option<String>,
 ) -> DispatchError {
-    // The cause rides the typed diagnostic channel (#5965): raw-or-better
-    // cause text, scrubbed downstream at the model-visible Diagnostic seam.
-    // When an adapter supplied only a fixed host-authored summary, that text
-    // is trivially cause-safe, so it rides the same channel rather than being
-    // dropped.
-    let cause = model_visible_cause.or(safe_summary);
-    DispatchError::provider_rejected(Some(runtime), DispatchFailureKind::Runtime(kind), cause)
+    // Keep the caller's host-authored summary distinct from the provider cause:
+    // the former is the public label, while the latter remains on the typed
+    // diagnostic channel for downstream scrubbing.
+    let error = DispatchError::provider_rejected(
+        Some(runtime),
+        DispatchFailureKind::Runtime(kind),
+        model_visible_cause,
+    );
+    match safe_summary {
+        Some(text) => error.with_host_summary(text),
+        None => error,
+    }
 }
 
 #[cfg(test)]
@@ -224,11 +231,10 @@ mod tests {
     }
 
     /// When the adapter supplied only a fixed host-authored `safe_summary`
-    /// (no raw cause), the lane arms still surface it on the cause channel so
-    /// the failure keeps an actionable label instead of collapsing to the
-    /// kind's generic sentence.
+    /// (no raw cause), the lane arms preserve it on the host-summary channel
+    /// instead of collapsing to the kind's generic sentence.
     #[test]
-    fn lane_summary_rides_the_cause_channel_when_no_raw_cause() {
+    fn lane_summary_stays_on_the_host_summary_channel_when_no_raw_cause() {
         let cap = CapabilityId::new("acme.cap").unwrap();
         let error = ToolError::Failed {
             kind: RuntimeDispatchErrorKind::Backend,
@@ -236,6 +242,74 @@ mod tests {
             model_visible_cause: None,
         };
         let dispatch = dispatch_error_for_tool_error(&cap, RuntimeKind::Wasm, error);
-        assert_eq!(cause_of(&dispatch), Some("vendor unavailable"));
+        let DispatchError::Rejected {
+            diagnostic, detail, ..
+        } = dispatch
+        else {
+            panic!("expected Rejected dispatch error");
+        };
+        assert!(diagnostic.is_none());
+        assert!(matches!(
+            detail,
+            Some(ironclaw_host_api::dispatch::DispatchFailureDetail::HostSummary { text })
+                if text == "vendor unavailable"
+        ));
+    }
+
+    #[test]
+    fn failed_tool_error_keeps_host_summary_separate_from_vendor_cause() {
+        let cap = CapabilityId::new("acme.cap").unwrap();
+        let dispatch = dispatch_error_for_tool_error(
+            &cap,
+            RuntimeKind::FirstParty,
+            ToolError::Failed {
+                kind: RuntimeDispatchErrorKind::Backend,
+                safe_summary: Some("the tool's backend failed".to_string()),
+                model_visible_cause: Some("vendor backend returned 503".to_string()),
+            },
+        );
+
+        let DispatchError::Rejected {
+            runtime,
+            diagnostic,
+            detail,
+            ..
+        } = dispatch
+        else {
+            panic!("expected Rejected dispatch error");
+        };
+        assert_eq!(runtime, Some(RuntimeKind::FirstParty));
+        assert_eq!(
+            diagnostic
+                .as_ref()
+                .and_then(|diagnostic| diagnostic.message.as_ref())
+                .map(|message| message.as_str()),
+            Some("vendor backend returned 503")
+        );
+        assert!(matches!(
+            detail,
+            Some(ironclaw_host_api::dispatch::DispatchFailureDetail::HostSummary { text })
+                if text == "the tool's backend failed"
+        ));
+    }
+
+    #[test]
+    fn rejected_tool_error_runtime_comes_from_the_outer_binding() {
+        let cap = CapabilityId::new("acme.cap").unwrap();
+        let dispatch = dispatch_error_for_tool_error(
+            &cap,
+            RuntimeKind::FirstParty,
+            ToolError::Rejected {
+                runtime: Some(RuntimeKind::Wasm),
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+                diagnostic: None,
+                detail: None,
+            },
+        );
+
+        let DispatchError::Rejected { runtime, .. } = dispatch else {
+            panic!("expected Rejected dispatch error");
+        };
+        assert_eq!(runtime, Some(RuntimeKind::FirstParty));
     }
 }
