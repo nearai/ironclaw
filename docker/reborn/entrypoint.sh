@@ -33,6 +33,22 @@ else
   IRONCLAW_REBORN_HOME="/data/ironclaw-reborn"
 fi
 export IRONCLAW_REBORN_HOME
+
+ssh_public_key="${IRONCLAW_REBORN_SSH_PUBLIC_KEY:-}"
+if [ "$(id -u)" = "0" ]; then
+  mkdir -p "$IRONCLAW_REBORN_HOME" /workspace
+  chown ironclaw:ironclaw "$IRONCLAW_REBORN_HOME" /workspace
+  if [ -n "$ssh_public_key" ]; then
+    ironclaw-reborn-start-sshd
+  fi
+  unset IRONCLAW_REBORN_SSH_PUBLIC_KEY
+  exec gosu ironclaw "$0" "$@"
+fi
+if [ -n "$ssh_public_key" ]; then
+  echo "direct SSH requires the container entrypoint to start as root" >&2
+  exit 1
+fi
+
 if [ -n "${IRONCLAW_REBORN_DEFAULT_CONFIG:-}" ]; then
   default_config="$IRONCLAW_REBORN_DEFAULT_CONFIG"
 else

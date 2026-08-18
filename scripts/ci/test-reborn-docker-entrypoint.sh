@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Self-test for docker/reborn/entrypoint.sh's legacy-Slack field migration.
+# Self-test for docker/reborn/entrypoint.sh's startup contracts.
 #
 # #7115: the migration was gated on `IRONCLAW_REBORN_SLACK_ENABLED` not being
 # truthy. That variable lost its last Rust reader in #6116, while the operator
@@ -34,6 +34,56 @@ exit 0
 STUB
 chmod +x "${WORK}/bin/ironclaw"
 
+# Root startup is exercised without requiring the test process itself to run as
+# root. The entrypoint resolves these commands through PATH, so the stubs model
+# the one root pass followed by gosu's non-root re-exec while recording ordering
+# and environment consumption.
+mkdir -p "${WORK}/root-bin"
+cat > "${WORK}/root-bin/id" <<'STUB'
+#!/bin/sh
+test "${1:-}" = "-u"
+printf '%s\n' "${IRONCLAW_STUB_UID:-1000}"
+STUB
+cat > "${WORK}/root-bin/ironclaw-reborn-start-sshd" <<'STUB'
+#!/bin/sh
+test -d "${IRONCLAW_REBORN_HOME}"
+printf '%s\n' "${IRONCLAW_REBORN_SSH_PUBLIC_KEY:-}" > "${IRONCLAW_STUB_SSH_PATH}"
+STUB
+cat > "${WORK}/root-bin/chown" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" > "${IRONCLAW_STUB_CHOWN_PATH}"
+STUB
+cat > "${WORK}/root-bin/mkdir" <<'STUB'
+#!/bin/sh
+for path in "$@"; do
+  case "$path" in
+    -*) ;;
+    /workspace) ;;
+    *) /bin/mkdir -p "$path" ;;
+  esac
+done
+STUB
+cat > "${WORK}/root-bin/gosu" <<'STUB'
+#!/bin/sh
+if [ "${1:-}" != "ironclaw" ]; then
+  echo "unexpected gosu user: ${1:-}" >&2
+  exit 1
+fi
+if [ -n "${IRONCLAW_REBORN_SSH_PUBLIC_KEY:-}" ]; then
+  echo "SSH public key survived the privilege drop" >&2
+  exit 1
+fi
+printf '%s\n' "$*" > "${IRONCLAW_STUB_GOSU_PATH}"
+shift
+export IRONCLAW_STUB_UID=1000
+exec "$@"
+STUB
+chmod +x "${WORK}/root-bin/id" \
+  "${WORK}/root-bin/ironclaw-reborn-start-sshd" \
+  "${WORK}/root-bin/chown" \
+  "${WORK}/root-bin/mkdir" \
+  "${WORK}/root-bin/gosu"
+
 failures=0
 
 # Runs the entrypoint over a seeded config and echoes the resulting file.
@@ -59,11 +109,12 @@ run_entrypoint() {
     for assignment in "$@"; do
       export "${assignment?}"
     done
-    sh "$ENTRYPOINT" >/dev/null 2>&1
+    sh "$ENTRYPOINT" >/dev/null 2>"${home}/entrypoint.err"
   )
 
   if [ ! -f "${home}/argv" ]; then
     echo "FAIL[${name}]: entrypoint never reached the ironclaw exec" >&2
+    cat "${home}/entrypoint.err" >&2
     # Every caller invokes this function inside a command substitution, so the
     # body runs in a subshell and a `failures=$((failures + 1))` here would
     # mutate a copy the parent never sees (the run stayed green with this
@@ -129,7 +180,55 @@ out="$(run_entrypoint enabled_true "$LEGACY_ENABLED")"
 expect_present enabled_true 'signing_secret_env' "$out"
 expect_present enabled_true 'bot_token_env' "$out"
 
-# 4. The dead variable has no reader left anywhere in the tree.
+# 4. Keyed SSH starts during the root pass, consumes the public key, then
+#    re-executes the same entrypoint as the unprivileged application user.
+ssh_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestOnlyKey entrypoint-test'
+ssh_record="${WORK}/ssh-started"
+gosu_record="${WORK}/gosu-argv"
+chown_record="${WORK}/chown-argv"
+out="$(run_entrypoint ssh_root "$LEGACY_DISABLED" \
+  "PATH=${WORK}/root-bin:${WORK}/bin:${PATH}" \
+  "IRONCLAW_STUB_UID=0" \
+  "IRONCLAW_STUB_SSH_PATH=${ssh_record}" \
+  "IRONCLAW_STUB_GOSU_PATH=${gosu_record}" \
+  "IRONCLAW_STUB_CHOWN_PATH=${chown_record}" \
+  "IRONCLAW_REBORN_SSH_PUBLIC_KEY=${ssh_key}")"
+expect_absent ssh_root 'signing_secret_env' "$out"
+if [ "$(cat "$ssh_record")" != "$ssh_key" ]; then
+  echo "FAIL[ssh_root]: SSH did not start with the configured public key" >&2
+  failures=$((failures + 1))
+fi
+if ! grep -q '^ironclaw .*docker/reborn/entrypoint.sh' "$gosu_record"; then
+  echo "FAIL[ssh_root]: entrypoint did not re-exec through gosu: $(cat "$gosu_record")" >&2
+  failures=$((failures + 1))
+fi
+if [ "$(cat "$chown_record")" != "ironclaw:ironclaw ${WORK}/ssh_root /workspace" ]; then
+  echo "FAIL[ssh_root]: root pass did not hand runtime paths to ironclaw: $(cat "$chown_record")" >&2
+  failures=$((failures + 1))
+fi
+
+# 5. A keyed non-root launch cannot silently advertise SSH without starting
+#    the daemon. This is also the guard for an operator overriding USER.
+nonroot_home="${WORK}/ssh-nonroot"
+mkdir -p "$nonroot_home"
+if (
+  export PATH="${WORK}/root-bin:${WORK}/bin:${PATH}"
+  export IRONCLAW_STUB_UID=1000
+  export IRONCLAW_REBORN_HOME="$nonroot_home"
+  export IRONCLAW_REBORN_SSH_PUBLIC_KEY="$ssh_key"
+  sh "$ENTRYPOINT" >"${WORK}/ssh-nonroot.out" 2>"${WORK}/ssh-nonroot.err"
+); then
+  echo "FAIL[ssh_nonroot]: keyed SSH launch unexpectedly succeeded without root" >&2
+  failures=$((failures + 1))
+elif ! grep -q 'direct SSH requires the container entrypoint to start as root' \
+  "${WORK}/ssh-nonroot.err"
+then
+  echo "FAIL[ssh_nonroot]: expected fail-closed diagnostic" >&2
+  cat "${WORK}/ssh-nonroot.err" >&2
+  failures=$((failures + 1))
+fi
+
+# 6. The dead variable has no reader left anywhere in the tree.
 if grep -rn 'IRONCLAW_REBORN_SLACK_ENABLED' \
   --include='*.rs' --include='*.sh' --include='*.toml' \
   "${ROOT}/crates" "${ROOT}/docker" "${ROOT}/scripts" 2>/dev/null \

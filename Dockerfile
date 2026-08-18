@@ -117,6 +117,8 @@ RUN apt-get -o Acquire::Retries=3 update \
     && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
         ca-certificates \
         curl \
+        gosu \
+        openssh-server \
         postgresql-client \
         sqlite3 \
     && rm -rf /var/lib/apt/lists/*
@@ -128,20 +130,23 @@ COPY docker/reborn/config.hosted-single-tenant.toml /opt/ironclaw/reborn/config.
 COPY docker/reborn/config.hosted-single-tenant-volume.toml /opt/ironclaw/reborn/config.hosted-single-tenant-volume.toml
 COPY docker/reborn/config.production.toml /opt/ironclaw/reborn/config.production.toml
 COPY docker/reborn/entrypoint.sh /usr/local/bin/ironclaw-reborn-entrypoint
+COPY docker/reborn/start-sshd.sh /usr/local/bin/ironclaw-reborn-start-sshd
 
 ENV HOME=/home/ironclaw \
     IRONCLAW_REBORN_LOG=info \
     IRONCLAW_REBORN_SERVE_HOST=127.0.0.1
 
 RUN useradd -m -d /home/ironclaw -u 1000 ironclaw \
+    && useradd --non-unique --uid 1000 --gid ironclaw --home-dir /workspace --shell /bin/bash agent \
+    && passwd -d agent \
     && mkdir -p /data/ironclaw-reborn /workspace \
     && chown -R ironclaw:ironclaw /home/ironclaw /data/ironclaw-reborn /workspace \
-    && chmod +x /usr/local/bin/ironclaw-reborn-entrypoint
+    && chmod +x /usr/local/bin/ironclaw-reborn-entrypoint /usr/local/bin/ironclaw-reborn-start-sshd
 
 WORKDIR /workspace
 
-EXPOSE 3000
+EXPOSE 3000 2222
 
-USER ironclaw
+USER root
 
 ENTRYPOINT ["ironclaw-reborn-entrypoint"]
