@@ -46,8 +46,8 @@ use authority::ResourceAuthority;
 #[cfg(test)]
 use journal::JournalRestartHook;
 use journal::{
-    DeltaJournalFailure, PendingResourceDelta, ResourceDeltaJournal, ResourceGovernorDelta,
-    compact_resource_governor_snapshot, replay_journal,
+    DeltaEnqueueError, DeltaJournalFailure, PendingResourceDelta, ResourceDeltaJournal,
+    ResourceGovernorDelta, compact_resource_governor_snapshot, replay_journal,
 };
 
 const DEFAULT_COMPACTION_INTERVAL: usize = 1024;
@@ -203,7 +203,7 @@ where
         authority.check_available()?;
         match self.delta_journal.enqueue(delta, generation) {
             Ok(pending) => Ok(pending),
-            Err(error) => {
+            Err(DeltaEnqueueError::GenerationDiverged(error)) => {
                 // The journal retired this generation, so the in-memory
                 // authority has diverged from the log. Drop it here — while we
                 // still hold the lock — so no further delta can be built on it,
@@ -211,6 +211,16 @@ where
                 // already vacated and skips the journal replacement that turned
                 // congestion into a cascade in issue #7714.
                 *guard = AuthorityLifecycle::Vacant;
+                Err(error)
+            }
+            Err(DeltaEnqueueError::Journal(error)) => {
+                // The delta never reached the queue and the generation still
+                // matches, so this authority is still consistent with the log
+                // and must stay installed. Vacating here would hide a broken
+                // journal: `invalidate_authority` would find a non-current
+                // slot and skip the restart, which is the only path that
+                // replaces a dead writer — a process-wide, restart-only
+                // governor outage (review finding on #7717).
                 Err(error)
             }
         }
@@ -1497,6 +1507,96 @@ mod tests {
             restarted.reserved_for(&account).expect("replayed").usd,
             dec!(0),
             "replaying the log must not resurrect a swept hold"
+        );
+    }
+
+    #[test]
+    fn journal_side_enqueue_failure_does_not_vacate_the_authority() {
+        // Review finding on #7717: `enqueue_delta` vacated the authority slot
+        // for EVERY enqueue error, not just generation divergence. A journal
+        // machinery failure does not mean the in-memory authority diverged —
+        // the delta never reached the queue — and vacating makes the caller's
+        // `invalidate_authority` find a non-current slot, so it skips the
+        // journal replacement that is the only way to recover a dead writer.
+        // The result is a process-wide, restart-only governor outage.
+        let governor = FilesystemResourceGovernor::new(scoped_resources_fs());
+        let authority = governor.authority().expect("authority");
+        governor.delta_journal.poison_sender_lock();
+
+        let result = governor.enqueue_delta(
+            &authority,
+            ResourceGovernorDelta::AccountSnapshot {
+                account: ResourceAccount::tenant(sample_scope().tenant_id),
+                at: chrono::Utc::now(),
+            },
+        );
+
+        assert!(
+            matches!(result, Err(ResourceError::Storage { .. })),
+            "a journal-side enqueue failure must still fail the caller's write"
+        );
+        let guard = governor.authority.lock().expect("authority lock");
+        assert!(
+            matches!(&*guard, AuthorityLifecycle::Ready(current, _) if Arc::ptr_eq(current, &authority)),
+            "the authority has not diverged from the log, so the slot must stay installed"
+        );
+    }
+
+    #[test]
+    fn journal_side_enqueue_failure_still_reaches_journal_replacement() {
+        // The harm the assertion above prevents, pinned at the caller: with
+        // the slot vacated, `invalidate_authority` never attempts the restart,
+        // so a dead journal is never replaced.
+        let restarts = Arc::new(AtomicUsize::new(0));
+        let restart_counter = Arc::clone(&restarts);
+        let governor = FilesystemResourceGovernor::new(scoped_resources_fs())
+            .with_journal_restart_hook(Arc::new(move || {
+                restart_counter.fetch_add(1, Ordering::SeqCst);
+            }));
+        governor.warm_authority().expect("warm authority");
+        governor.delta_journal.poison_sender_lock();
+
+        let failed = governor.reserve_with_outcome(sample_scope(), sample_estimate());
+
+        assert!(
+            matches!(failed, Err(ResourceError::Storage { .. })),
+            "the write must fail closed"
+        );
+        assert_eq!(
+            restarts.load(Ordering::SeqCst),
+            1,
+            "a broken journal must still be offered for replacement"
+        );
+    }
+
+    #[test]
+    fn diverged_generation_enqueue_failure_still_vacates_the_authority() {
+        // The case the vacating was written for: the journal retired this
+        // generation because a durable append failed, so the in-memory
+        // authority really has diverged and nothing may be built on it.
+        let governor = FilesystemResourceGovernor::new(scoped_resources_fs());
+        let authority = governor.authority().expect("authority");
+        governor
+            .delta_journal
+            .restart()
+            .expect("restart retires the generation");
+
+        let result = governor.enqueue_delta(
+            &authority,
+            ResourceGovernorDelta::AccountSnapshot {
+                account: ResourceAccount::tenant(sample_scope().tenant_id),
+                at: chrono::Utc::now(),
+            },
+        );
+
+        assert!(
+            matches!(result, Err(ResourceError::Storage { .. })),
+            "a diverged generation must fail the caller's write"
+        );
+        let guard = governor.authority.lock().expect("authority lock");
+        assert!(
+            matches!(&*guard, AuthorityLifecycle::Vacant),
+            "a diverged authority must be dropped so no further delta is built on it"
         );
     }
 }

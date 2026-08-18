@@ -178,6 +178,24 @@ pub(super) struct DeltaJournalFailure {
     pub(super) transient: bool,
 }
 
+/// Why a delta could not be queued.
+///
+/// The two kinds demand opposite recoveries and are indistinguishable once
+/// flattened to a `ResourceError::Storage` string, which is how every enqueue
+/// failure came to vacate the authority (review finding on #7717).
+#[derive(Debug, Clone)]
+pub(super) enum DeltaEnqueueError {
+    /// The journal retired the caller's generation: a durable append already
+    /// failed, so the in-memory authority has diverged from the log and no
+    /// further delta may be built on it.
+    GenerationDiverged(ResourceError),
+    /// The journal machinery failed before the delta was queued. The delta
+    /// never entered the log's queue and the generation still matches, so the
+    /// authority is still consistent with the log — the journal is what needs
+    /// replacing, not the authority.
+    Journal(ResourceError),
+}
+
 impl DeltaJournalFailure {
     pub(super) fn fatal(error: ResourceError) -> Self {
         Self {
@@ -290,22 +308,28 @@ where
         &self,
         delta: ResourceGovernorDelta,
         generation: u64,
-    ) -> Result<PendingResourceDelta, ResourceError> {
+    ) -> Result<PendingResourceDelta, DeltaEnqueueError> {
         if generation != self.generation() {
-            return Err(storage_error(
+            return Err(DeltaEnqueueError::GenerationDiverged(storage_error(
                 "resource governor authority generation diverged from the delta journal",
-            ));
+            )));
         }
         let (ack, receiver) = mpsc::channel();
         self.sender
             .lock()
-            .map_err(|_| storage_error("resource governor delta journal sender lock poisoned"))?
+            .map_err(|_| {
+                DeltaEnqueueError::Journal(storage_error(
+                    "resource governor delta journal sender lock poisoned",
+                ))
+            })?
             .send(DeltaJournalRequest {
                 delta,
                 generation,
                 ack,
             })
-            .map_err(|_| storage_error("resource governor delta journal stopped"))?;
+            .map_err(|_| {
+                DeltaEnqueueError::Journal(storage_error("resource governor delta journal stopped"))
+            })?;
         Ok(PendingResourceDelta { ack: receiver })
     }
 
@@ -351,7 +375,7 @@ where
     pub(super) fn enqueue_current(
         &self,
         delta: ResourceGovernorDelta,
-    ) -> Result<PendingResourceDelta, ResourceError> {
+    ) -> Result<PendingResourceDelta, DeltaEnqueueError> {
         self.enqueue(delta, self.generation())
     }
 
