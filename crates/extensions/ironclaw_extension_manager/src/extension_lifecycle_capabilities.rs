@@ -38,7 +38,6 @@ use ironclaw_extension_host::extension_activation_credentials::RuntimeExtensionA
 use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use ironclaw_product_contracts::package_lifecycle::public_lifecycle_response_json;
 
-pub const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
 pub const EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID: &str =
     "builtin.extension_register_hosted_mcp";
 pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
