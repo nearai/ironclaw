@@ -2351,3 +2351,106 @@ async fn v2_rows_carrying_activation_state_load_and_preserve_it() {
         "a rewrite must carry the 1.2 activation state forward: {body}"
     );
 }
+
+/// The removal path rebuilds the installation record from scratch rather than
+/// mutating it in place, so it is the one other place a 1.2-written
+/// `activation_state` can be dropped. Removing an extension must not quietly
+/// reset the operator's setting: the tombstone is retained for reactivation,
+/// so it has to retain the field too.
+///
+/// `persist_removal_tombstone` keys the row by extension id, so this fixture
+/// installs under an installation id equal to the extension id to make the
+/// removal path land on the seeded row.
+#[tokio::test]
+async fn removal_tombstone_carries_the_1_2_activation_state_forward() {
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+    let root =
+        VirtualPath::new("/system/extensions/.installations/activation-state-tombstone").unwrap();
+    let store = ExtensionInstallationStore::load_at(
+        Arc::clone(&filesystem),
+        root.clone(),
+        HostPortCatalog::empty(),
+        contracts(),
+    )
+    .await
+    .unwrap();
+    let installed = ExtensionInstallation::new(
+        installation_id("acme-tools"),
+        extension_id("acme-tools"),
+        ExtensionManifestRef::new(
+            extension_id("acme-tools"),
+            Some(manifest_hash("sha256:abc")),
+        ),
+        vec![],
+        Utc::now(),
+        InstallationOwner::Tenant,
+    )
+    .unwrap();
+    store
+        .upsert_manifest_and_installation(manifest("sha256:abc"), installed.clone())
+        .await
+        .unwrap();
+
+    let installations = VirtualPath::new(format!("{}/v2/installations", root.as_str())).unwrap();
+    let rows = filesystem
+        .query(&installations, &Filter::All, Page::first(10))
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    let mut body: serde_json::Value = rows[0].entry.parse_json().unwrap();
+    body.as_object_mut().unwrap().insert(
+        "activation_state".to_string(),
+        serde_json::json!("disabled"),
+    );
+    let mut entry = rows[0].entry.clone();
+    entry.body = serde_json::to_vec(&body).unwrap();
+    filesystem
+        .put(
+            &rows[0].path,
+            entry,
+            CasExpectation::Version(rows[0].version),
+        )
+        .await
+        .unwrap();
+
+    // Soft removal mutates the record in place, so it preserves the field for
+    // free; assert it anyway, because it is the state the rebuild path below
+    // reads from.
+    store
+        .delete_installation(installed.installation_id())
+        .await
+        .unwrap();
+    let rows = filesystem
+        .query(&installations, &Filter::All, Page::first(10))
+        .await
+        .unwrap();
+    let body: serde_json::Value = rows[0].entry.parse_json().unwrap();
+    assert_eq!(
+        body["activation_state"],
+        serde_json::json!("disabled"),
+        "soft removal must not reset the 1.2 setting: {body}"
+    );
+
+    // `persist_removal_tombstone` rebuilds the record from scratch -- this is
+    // the site the boot-path test cannot reach.
+    store
+        .persist_removal_tombstone(manifest("sha256:abc"))
+        .await
+        .unwrap();
+
+    let rows = filesystem
+        .query(&installations, &Filter::All, Page::first(10))
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "removal retains the row as a tombstone");
+    let body: serde_json::Value = rows[0].entry.parse_json().unwrap();
+    assert!(
+        body["removed_at"].is_string(),
+        "the row must actually be tombstoned, or this proves nothing: {body}"
+    );
+    assert_eq!(
+        body["activation_state"],
+        serde_json::json!("disabled"),
+        "removal must not reset a 1.2 operator setting: {body}"
+    );
+}
