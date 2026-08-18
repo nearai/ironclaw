@@ -13,7 +13,15 @@ use ironclaw_host_api::runtime_policy::{
     AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode, ProcessBackendKind,
     RuntimeProfile, SecretMode, {ApprovalPolicy, EffectiveRuntimePolicy},
 };
+use ironclaw_host_api::{
+    capability::CapabilitySet,
+    ids::{CapabilityId, ExtensionId, InvocationId, ProcessId, UserId},
+    mount::MountView,
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::RuntimeKind,
+};
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, ProductionWiringConfig};
+use ironclaw_processes::ProcessStart;
 use ironclaw_turns::{TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError};
 use secrecy::SecretString;
 use support::production_readiness::{
@@ -74,6 +82,47 @@ async fn libsql_substrate_builder_wires_production_components_without_local_only
         .services
         .validate_production_wiring(&production_config)
         .expect("substrate-only production wiring should not use fake seams");
+}
+
+#[tokio::test]
+async fn libsql_process_journal_writes_while_the_data_plane_writer_is_held() {
+    let fixture = build_libsql_test_services().await;
+    let data_plane_writer = fixture.runtime.write().await.expect("data-plane writer");
+    let invocation_id = InvocationId::new();
+    let scope = ResourceScope::local_default(
+        UserId::new("journal-lane-user").expect("user id"),
+        invocation_id,
+    )
+    .expect("resource scope");
+    let process_runtime = fixture.services.process_runtime_for_test();
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        ironclaw_processes::submit_capability_process(
+            process_runtime.as_ref(),
+            ProcessStart {
+                process_id: ProcessId::new(),
+                parent_process_id: None,
+                invocation_id,
+                scope,
+                authenticated_actor_user_id: None,
+                extension_id: ExtensionId::new("journal-lane-test").expect("extension id"),
+                capability_id: CapabilityId::new("journal-lane-test.write").expect("capability id"),
+                runtime: RuntimeKind::Wasm,
+                grants: CapabilitySet::default(),
+                mounts: MountView::new(Vec::new()).expect("empty mount view"),
+                estimated_resources: ResourceEstimate::default(),
+                resource_reservation_id: None,
+                authorized_continuation: None,
+                input: serde_json::json!({}),
+            },
+        ),
+    )
+    .await
+    .expect("process journal must not queue behind the data-plane writer")
+    .expect("submit process through the production journal");
+
+    drop(data_plane_writer);
 }
 
 #[tokio::test]

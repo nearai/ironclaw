@@ -21,9 +21,8 @@ where
         &config.runtime,
     )));
     filesystem.run_migrations().await?;
-    let scoped_filesystem = crate::wrap_scoped(Arc::new(LibSqlRootFilesystem::from_runtime(
-        journal_runtime,
-    )));
+    let process_journal_filesystem = Arc::new(LibSqlRootFilesystem::from_runtime(journal_runtime));
+    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&process_journal_filesystem));
     let resource_governor = FilesystemResourceGovernor::new(scoped_filesystem);
     let event_store = ironclaw_event_store::RebornEventStoreConfig::LibsqlFilesystem {
         filesystem: Arc::clone(&filesystem),
@@ -32,6 +31,7 @@ where
     build_filesystem_production_host_runtime_services(
         FilesystemProductionHostRuntimeServicesInput {
             filesystem,
+            process_journal_filesystem,
             resource_governor,
             event_store: ProductionEventStoresInput::Config(event_store),
             secret_master_key: config.secret_master_key,
@@ -87,6 +87,7 @@ where
     )?;
     build_filesystem_production_host_runtime_services(
         FilesystemProductionHostRuntimeServicesInput {
+            process_journal_filesystem: Arc::clone(&filesystem),
             filesystem,
             resource_governor,
             event_store: ProductionEventStoresInput::Prebuilt(event_store),
@@ -127,6 +128,7 @@ where
     F: RootFilesystem + 'static,
 {
     filesystem: Arc<F>,
+    process_journal_filesystem: Arc<F>,
     resource_governor: FilesystemResourceGovernor<F>,
     event_store: ProductionEventStoresInput,
     secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
@@ -195,6 +197,7 @@ where
 {
     let FilesystemProductionHostRuntimeServicesInput {
         filesystem,
+        process_journal_filesystem,
         resource_governor,
         event_store,
         secret_master_key,
@@ -205,7 +208,7 @@ where
     } = input;
     let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
     let process_journal_store = Arc::new(ProcessJournalStore::new(
-        crate::wrap_process_journal_scoped(Arc::clone(&filesystem)),
+        crate::wrap_process_journal_scoped(process_journal_filesystem),
     ));
     process_journal_store
         .migrate_legacy_journal()
@@ -213,9 +216,13 @@ where
         .map_err(|error| crate::RebornCompositionError::InvalidConfig {
             reason: format!("process journal startup migration failed: {error}"),
         })?;
-    let processes = ProcessRuntimeSystem::from_process_journal_store(process_journal_store);
+    let processes =
+        ProcessRuntimeSystem::from_process_journal_store(Arc::clone(&process_journal_store));
     let turn_state = Arc::new(processes.agent_turn_runtime());
-    let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
+    let process_services = ProcessServices::new(
+        process_journal_store,
+        Arc::new(ProcessResultStore::from_arc(Arc::clone(&scoped_filesystem))),
+    );
     let secret_credentials = build_filesystem_secret_credential_stores(
         Arc::clone(&scoped_filesystem),
         secret_master_key,

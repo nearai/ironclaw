@@ -704,6 +704,11 @@ where
         self.build_host_runtime()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn process_runtime_for_test(&self) -> Arc<dyn ironclaw_processes::ProcessRuntimePort> {
+        self.process_services.process_runtime()
+    }
+
     /// Builds the upper service with the same dispatcher, process services,
     /// stores, cancellation registry, result store, and runtime health graph.
     fn build_host_runtime(&self) -> DefaultHostRuntime {
