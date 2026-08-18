@@ -1383,7 +1383,6 @@ mod tests {
         );
         assert_eq!(snapshot.ledger.spent.input_tokens, 7);
         assert_eq!(snapshot.ledger.spent.output_tokens, 3);
-        assert_eq!(snapshot.ledger.spent.wall_clock_ms, 25);
     }
 
     #[tokio::test]
@@ -1491,6 +1490,7 @@ mod tests {
         );
         assert_eq!(snapshot.ledger.spent.input_tokens, 7);
         assert_eq!(snapshot.ledger.spent.output_tokens, 3);
+        assert_eq!(snapshot.ledger.spent.wall_clock_ms, 25);
     }
 
     #[tokio::test]
