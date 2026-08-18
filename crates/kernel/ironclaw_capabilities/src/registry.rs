@@ -527,10 +527,7 @@ mod tests {
 
         let mut registry = CapabilityDispatchRegistry::new();
         registry
-            .register_extension(extension(
-                "provider-a",
-                Some(Arc::new(FailedToolAdapter)),
-            ))
+            .register_extension(extension("provider-a", Some(Arc::new(FailedToolAdapter))))
             .expect("extension registration");
         let resolved = registry
             .resolve(&CapabilityId::new("provider-a.echo").expect("capability id"))
@@ -582,10 +579,7 @@ mod tests {
 
         let mut registry = CapabilityDispatchRegistry::new();
         registry
-            .register_extension(extension(
-                "provider-a",
-                Some(Arc::new(FailedToolAdapter)),
-            ))
+            .register_extension(extension("provider-a", Some(Arc::new(FailedToolAdapter))))
             .expect("extension registration");
         let resolved = registry
             .resolve(&CapabilityId::new("provider-a.echo").expect("capability id"))
@@ -611,5 +605,4 @@ mod tests {
         );
         assert_eq!(detail, None);
     }
-
 }
