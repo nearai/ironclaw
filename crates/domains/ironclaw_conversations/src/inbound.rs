@@ -1386,6 +1386,7 @@ mod tests {
             actor: submission.actor,
             accepted_message_ref: submission.accepted_message_ref,
             requested_run_profile: submission.requested_run_profile,
+            output_contract: None,
             idempotency_key: submission.idempotency_key,
             received_at: submission.received_at,
             requested_run_id: None,

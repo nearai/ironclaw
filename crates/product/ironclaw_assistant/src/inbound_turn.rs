@@ -1541,6 +1541,7 @@ impl AcceptedProductInboundTurn {
             actor,
             accepted_message_ref: accepted_message_ref.clone(),
             requested_run_profile: None,
+            output_contract: None,
             requested_model,
             idempotency_key,
             received_at,

@@ -926,10 +926,12 @@ fn failure_explanation_request(input: &FailureExplanationInput) -> Option<System
             system_prompt: failure_explanation_system_prompt().to_string(),
         },
         input_text: failure_explanation_user_prompt(input),
+        context_messages: Vec::new(),
         max_input_tokens: FAILURE_EXPLANATION_MAX_INPUT_TOKENS,
         deadline_ms: FAILURE_EXPLANATION_TIMEOUT
             .as_millis()
             .min(u128::from(u64::MAX)) as u64,
+        output_contract: None,
     })
 }
 

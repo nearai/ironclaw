@@ -1,8 +1,13 @@
 //! Run-scoped loop context: the resolved model route snapshot, the neutral
 //! [`LoopRunContext`] carried across every port, and the run-info port.
 
-use ironclaw_host_api::ids::{ThreadId, UserId};
+use std::{future::Future, pin::Pin};
+
 use ironclaw_host_api::resource::ResourceScope;
+use ironclaw_host_api::{
+    ids::{ThreadId, UserId},
+    output::OutputContract,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::refs::{CheckpointSchemaId, LoopDriverId};
@@ -244,6 +249,11 @@ pub struct LoopRunContext {
     pub loop_driver_version: RunProfileVersion,
     pub checkpoint_schema_id: CheckpointSchemaId,
     pub checkpoint_schema_version: RunProfileVersion,
+    /// Immutable terminal output contract for this run. It is independent of
+    /// the resolved profile and loop-family descriptor; older serialized
+    /// contexts default to an ordinary assistant message.
+    #[serde(default, skip_serializing_if = "OutputContract::is_assistant_message")]
+    pub output_contract: OutputContract,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product_context: Option<ProductTurnContext>,
 }
@@ -273,8 +283,17 @@ impl LoopRunContext {
             loop_driver_version,
             checkpoint_schema_id,
             checkpoint_schema_version,
+            output_contract: OutputContract::default(),
             product_context: None,
         }
+    }
+
+    /// Attach the already-admitted terminal output contract while constructing
+    /// the immutable run context. Admission/resume owns the value; this
+    /// builder only snapshots it and never derives it from the profile.
+    pub fn with_output_contract(mut self, output_contract: OutputContract) -> Self {
+        self.output_contract = output_contract;
+        self
     }
 
     pub fn with_actor(mut self, actor: TurnActor) -> Self {
@@ -336,6 +355,25 @@ impl LoopRunContext {
 
 pub trait LoopRunInfoPort: Send + Sync {
     fn run_context(&self) -> &LoopRunContext;
+
+    /// Run host-owned terminal work after the driver has returned its exit
+    /// claim and before the runner snapshots host usage. The default is a
+    /// no-op so hosts without terminal post-processing remain compatible;
+    /// concrete hosts may use the typed exit for durable finalization.
+    fn finalize_terminal_output<'a>(
+        &'a self,
+        _exit: &'a crate::LoopExit,
+    ) -> Pin<Box<dyn Future<Output = Result<(), crate::AgentLoopHostError>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Provider usage from host-owned model work that occurs at the terminal
+    /// boundary after the loop's own accounting snapshot.  The default keeps
+    /// existing loop hosts and test doubles source-compatible; concrete hosts
+    /// override it when they perform supplemental finalization work.
+    fn supplemental_model_usage(&self) -> Option<crate::LoopModelUsage> {
+        None
+    }
 }
 
 #[cfg(test)]

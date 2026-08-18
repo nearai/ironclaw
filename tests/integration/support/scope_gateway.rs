@@ -160,6 +160,7 @@ mod tests {
             run_id: ironclaw_turns::TurnRunId::new(),
             turn_id: ironclaw_turns::TurnId::new(),
             tool_choice: None,
+            response_format: None,
         }
     }
 

@@ -1,5 +1,6 @@
 //! Durable agent-turn metadata carried by neutral process snapshots.
 
+use ironclaw_host_api::output::OutputContract;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -16,6 +17,10 @@ pub struct AgentTurnProcessMetadata {
     pub accepted_message_ref: AcceptedMessageRef,
     pub resolved_run_profile_id: RunProfileId,
     pub resolved_run_profile_version: RunProfileVersion,
+    /// Immutable terminal output contract. Omitted legacy metadata defaults
+    /// to an ordinary assistant message.
+    #[serde(default, skip_serializing_if = "OutputContract::is_assistant_message")]
+    pub output_contract: OutputContract,
     /// Snapshot of the resolved profile's `SteeringPolicy::allow_steering`,
     /// persisted so busy-submit admission can consult it without re-resolving
     /// the profile. Legacy rows predate the field and default to allowed.
@@ -52,6 +57,7 @@ impl AgentTurnProcessMetadata {
             accepted_message_ref: record.accepted_message_ref.clone(),
             resolved_run_profile_id: record.profile.id.clone(),
             resolved_run_profile_version: record.profile.version,
+            output_contract: record.output_contract.clone(),
             allow_steering: record.profile.allow_steering,
             resolved_model_route: record.resolved_model_route.clone(),
             model_usage: record.model_usage,
@@ -73,6 +79,10 @@ pub struct AgentTurnProcessStateMetadata {
     pub accepted_message_ref: AcceptedMessageRef,
     pub resolved_run_profile_id: RunProfileId,
     pub resolved_run_profile_version: RunProfileVersion,
+    /// Immutable terminal output contract. Omitted legacy metadata defaults
+    /// to an ordinary assistant message.
+    #[serde(default, skip_serializing_if = "OutputContract::is_assistant_message")]
+    pub output_contract: OutputContract,
     /// Snapshot of the resolved profile's `SteeringPolicy::allow_steering`.
     /// Persisted explicitly (not derived from `resolved_run_profile`, which
     /// state-derived rewrites drop) so busy-submit admission can consult it
@@ -115,6 +125,7 @@ impl AgentTurnProcessStateMetadata {
             accepted_message_ref: state.accepted_message_ref.clone(),
             resolved_run_profile_id: state.resolved_run_profile_id.clone(),
             resolved_run_profile_version: state.resolved_run_profile_version,
+            output_contract: state.output_contract.clone(),
             allow_steering: state.allow_steering,
             resolved_run_profile: None,
             resolved_model_route: state.resolved_model_route.clone(),
@@ -139,7 +150,12 @@ impl AgentTurnProcessStateMetadata {
     }
 }
 
-pub(crate) fn agent_turn_metadata_from_claimed(
+/// Build the complete agent-turn metadata envelope for a process transition.
+///
+/// Runner-owned failure paths use this same typed projection as normal loop
+/// exits so supplemental model usage survives terminalization without being
+/// encoded in diagnostic text or replacing unrelated run metadata.
+pub fn agent_turn_metadata_from_claimed(
     claimed: &ClaimedTurnRun,
     model_usage: Option<LoopModelUsage>,
     execution_outcome: Option<TurnExecutionOutcome>,

@@ -70,6 +70,10 @@ use ironclaw_host_api::{
 use ironclaw_loop_host::{HostInputEnqueuePort, RejectingInputEnqueue};
 use ironclaw_product_contracts::outbound::ProjectionCursor;
 use ironclaw_product_contracts::projection::ProjectionSubscriptionRequest;
+use ironclaw_product_contracts::suggestions::{
+    SUGGESTION_DISMISS_COMMAND_ID, SUGGESTION_START_COMMAND_ID, SUGGESTIONS_GENERATE_COMMAND_ID,
+    SUGGESTIONS_LIST_VIEW,
+};
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     ProductSurfaceValidationCode,
@@ -2379,7 +2383,17 @@ pub struct RebornServices<
     active_model_reader: Option<Arc<dyn ActiveModelReader>>,
     operator_approval_config: Option<RebornOperatorApprovalConfig>,
     diagnostic_store: Arc<dyn crate::inspector_store::DiagnosticStorePort>,
+    pub(crate) suggestions: Option<SuggestionsServices>,
     thread_operation_locks: Arc<ThreadOperationLocks>,
+}
+
+/// The suggestion surface needs both durable state and the canonical unbound
+/// submission path. Keep them as one optional capability so a partially wired
+/// surface cannot be represented by the composition root.
+#[derive(Clone)]
+pub(crate) struct SuggestionsServices {
+    pub(crate) store: Arc<dyn crate::suggestions_store::SuggestionsStore>,
+    pub(crate) unbound: Arc<crate::unbound_turn::UnboundTurnService>,
 }
 
 impl RebornServices<UnavailableProductCapabilityInvoker, UnavailableRebornViewProvider> {
@@ -2467,6 +2481,7 @@ where
             active_model_reader: None,
             operator_approval_config: None,
             diagnostic_store: Arc::new(crate::inspector_store::InMemoryDiagnosticStore::default()),
+            suggestions: None,
             thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
@@ -2483,6 +2498,15 @@ where
 
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
         self.event_stream = Some(event_stream);
+        self
+    }
+
+    pub fn with_suggestions(
+        mut self,
+        store: Arc<dyn crate::suggestions_store::SuggestionsStore>,
+        unbound: Arc<crate::unbound_turn::UnboundTurnService>,
+    ) -> Self {
+        self.suggestions = Some(SuggestionsServices { store, unbound });
         self
     }
 
@@ -4294,6 +4318,11 @@ where
                     .map_err(ProductSurfaceError::internal_from)?;
                 request.cursor = query.cursor.or(request.cursor);
                 let response = self.get_timeline(caller, request).await?;
+                views::view_page(response)
+            }
+            id if id == SUGGESTIONS_LIST_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.list_suggestions(caller).await?;
                 views::view_page(response)
             }
             id if id == PROJECT_FS_LIST_VIEW.id => {
@@ -7054,6 +7083,8 @@ fn map_thread_error(error: SessionThreadError) -> ProductSurfaceError {
         }
         SessionThreadError::ThreadScopeMismatch { .. }
         | SessionThreadError::IdempotentReplayActorMismatch { .. }
+        | SessionThreadError::StructuredFinalizationConflict { .. }
+        | SessionThreadError::StructuredFinalizationPublishMismatch { .. }
         | SessionThreadError::InvalidMessageTransition { .. }
         | SessionThreadError::MessageNotDraft { .. }
         | SessionThreadError::InvalidSummaryRange { .. }
@@ -7073,6 +7104,7 @@ fn map_thread_error(error: SessionThreadError) -> ProductSurfaceError {
         SessionThreadError::GeneratedThreadId(_)
         | SessionThreadError::Serialization(_)
         | SessionThreadError::Deserialization(_)
+        | SessionThreadError::InvalidStructuredFinalization { .. }
         | SessionThreadError::InvalidMessageTimestamp { .. }
         | SessionThreadError::Backend(_) => ProductSurfaceError::service_unavailable(true),
     }
@@ -7502,5 +7534,22 @@ mod tests {
             !unavailable.retryable,
             "false-arg sentinel is non-retryable"
         );
+    }
+
+    #[test]
+    fn structured_finalization_errors_map_to_stable_product_statuses() {
+        let conflict = map_thread_error(SessionThreadError::StructuredFinalizationConflict {
+            turn_run_id: TurnRunId::new(),
+        });
+        assert_eq!(conflict.code, ProductSurfaceErrorCode::Conflict);
+        assert_eq!(conflict.status_code, 409);
+        assert!(!conflict.retryable);
+
+        let invalid = map_thread_error(SessionThreadError::InvalidStructuredFinalization {
+            reason: "malformed JSON".to_string(),
+        });
+        assert_eq!(invalid.code, ProductSurfaceErrorCode::Unavailable);
+        assert_eq!(invalid.status_code, 503);
+        assert!(invalid.retryable);
     }
 }

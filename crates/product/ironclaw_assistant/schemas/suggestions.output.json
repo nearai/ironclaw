@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "suggestions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string", "minLength": 1, "maxLength": 48 },
+          "description": { "type": "string", "minLength": 1, "maxLength": 240 },
+          "suggested_prompt": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "icon": {
+            "type": "string",
+            "enum": [
+              "gmail",
+              "google_calendar",
+              "google_docs",
+              "google_drive",
+              "google_sheets",
+              "google_slides",
+              "github",
+              "slack",
+              "notion",
+              "telegram",
+              "web",
+              "memory",
+              "generic"
+            ]
+          },
+          "sources": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "uniqueItems": true
+          }
+        },
+        "required": ["title", "description", "suggested_prompt", "icon", "sources"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["suggestions"],
+  "additionalProperties": false
+}

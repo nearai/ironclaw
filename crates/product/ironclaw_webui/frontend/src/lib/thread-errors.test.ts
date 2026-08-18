@@ -21,7 +21,10 @@ test("deleteThreadErrorMessage surfaces a clear line for a running thread (#4823
   assert.equal(deleteThreadErrorMessage(error, t), "chat.deleteBusy");
 });
 
-test("deleteThreadErrorMessage falls back to the API message, then a generic line", () => {
-  assert.equal(deleteThreadErrorMessage({ message: "Not found" }, t), "Not found");
+test("deleteThreadErrorMessage sanitizes non-busy failures to a localized line", () => {
+  assert.equal(
+    deleteThreadErrorMessage({ message: "database password leaked" }, t),
+    "chat.deleteFailed",
+  );
   assert.equal(deleteThreadErrorMessage({}, t), "chat.deleteFailed");
 });

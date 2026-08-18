@@ -22,7 +22,8 @@ use ironclaw_openai_compat::{
 use ironclaw_product_contracts::outbound::{ProductOutboundTarget, ProjectionCursor};
 use ironclaw_threads::{
     AppendAssistantDraftRequest, AppendToolResultReferenceRequest, EnsureThreadRequest,
-    InMemorySessionThreadService, MessageContent, ToolResultSafeSummary,
+    InMemorySessionThreadService, MessageContent, PutStructuredFinalizationRequest,
+    StructuredFinalizationAccounting, StructuredFinalizationRecord, ToolResultSafeSummary,
 };
 use ironclaw_turns::{
     ExternalToolCatalog, InMemoryExternalToolCatalog, PendingExternalCall, ResumeTurnResponse,
@@ -889,6 +890,7 @@ fn turn_run_state(
             .expect("accepted ref"),
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
+        output_contract: ironclaw_host_api::output::OutputContract::AssistantMessage,
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
@@ -1342,7 +1344,6 @@ fn prepared_gateway(
         service: Arc::new(ironclaw_assistant::UnboundTurnService::new(
             threads,
             coordinator,
-            TenantId::new(format!("tenant-{suffix}")).expect("tenant"),
             AgentId::new(format!("agent-{suffix}")).expect("agent"),
             None,
         )),
@@ -1490,9 +1491,9 @@ async fn prepared_gateway_seeds_the_full_history_and_submits_unboundly() {
             public_id: "chatcmpl-prep-1".to_string(),
             system_prompt: "you are a classifier".to_string(),
             messages: prepared_seed_messages(),
-            output: ironclaw_host_api::prepared_context::OutputContract::JsonSchema {
-                schema: serde_json::json!({"type": "object"}),
-            },
+            output: ironclaw_host_api::output::OutputContract::json_schema(
+                serde_json::json!({"type": "object"}),
+            ),
             requested_model: Some("gpt-reborn".to_string()),
         })
         .await
@@ -1550,12 +1551,12 @@ async fn prepared_gateway_seeds_the_full_history_and_submits_unboundly() {
         .expect("prepared record");
     assert!(matches!(
         declarations.declarations.output,
-        ironclaw_host_api::prepared_context::OutputContract::JsonSchema { .. }
+        ironclaw_host_api::output::OutputContract::JsonSchema { .. }
     ));
 }
 
 #[tokio::test]
-async fn prepared_gateway_resolves_the_structured_result_payload() {
+async fn prepared_gateway_resolves_native_structured_assistant_output() {
     use ironclaw_openai_compat::OpenAiCompatPreparedTurnPort as _;
     let threads = Arc::new(InMemorySessionThreadService::default());
     let staging = Arc::new(RecordingSubmitCoordinator {
@@ -1564,9 +1565,8 @@ async fn prepared_gateway_resolves_the_structured_result_payload() {
     let gateway = prepared_gateway(threads.clone(), staging.clone(), "sres");
     let thread_id = ThreadId::new("chatcmpl-sres-1").expect("thread");
 
-    // Accept a structured context, then simulate the run writing its
-    // validated result: a builtin.structured_result tool row + the full
-    // payload in the durable record store.
+    // Accept a structured context, then simulate the run finalizing its
+    // native JSON output as the ordinary assistant message.
     gateway
         .accept_and_submit(ironclaw_openai_compat::OpenAiCompatPreparedTurnRequest {
             scope: OpenAiCompatActorScope::new(
@@ -1583,9 +1583,9 @@ async fn prepared_gateway_resolves_the_structured_result_payload() {
                     "classify",
                 )],
             }],
-            output: ironclaw_host_api::prepared_context::OutputContract::JsonSchema {
-                schema: serde_json::json!({"type": "object"}),
-            },
+            output: ironclaw_host_api::output::OutputContract::json_schema(
+                serde_json::json!({"type": "object"}),
+            ),
             requested_model: None,
         })
         .await
@@ -1594,44 +1594,43 @@ async fn prepared_gateway_resolves_the_structured_result_payload() {
     let run_id = TurnRunId::new();
     let scope = test_unbound_thread_scope("sres");
     let payload = "{\"sentiment\":\"positive\"}";
-    threads
-        .put_tool_result_record(ironclaw_threads::PutToolResultRecordRequest {
-            scope: scope.clone(),
-            thread_id: thread_id.clone(),
-            result_ref: "result:structured-1".to_string(),
-            content: payload.as_bytes().to_vec(),
-        })
-        .await
-        .expect("record");
-    threads
-        .append_tool_result_reference(ironclaw_threads::AppendToolResultReferenceRequest {
-            intrinsic_outcome: None,
+    let draft = threads
+        .append_assistant_draft(AppendAssistantDraftRequest {
             scope: scope.clone(),
             thread_id: thread_id.clone(),
             turn_run_id: run_id.to_string(),
-            result_ref: "result:structured-1".to_string(),
-            safe_summary: ToolResultSafeSummary::new("structured result recorded")
-                .expect("summary"),
-            provider_call: Some(ProviderToolCallReferenceEnvelope {
-                provider_id: "test-provider".to_string(),
-                provider_model_id: "test-model".to_string(),
-                provider_turn_id: "turn.1".to_string(),
-                provider_call_id: "call.structured".to_string(),
-                provider_tool_name: ProviderToolName::new("builtin__structured_result")
-                    .expect("tool name"),
-                capability_id: CapabilityId::new(
-                    ironclaw_host_api::prepared_context::STRUCTURED_RESULT_CAPABILITY_ID,
-                )
-                .expect("capability"),
-                arguments: serde_json::json!({"sentiment": "positive"}),
-                response_reasoning: None,
-                reasoning: None,
-                signature: None,
-            }),
-            model_observation: None,
+            content: MessageContent::text(payload),
         })
         .await
-        .expect("tool row");
+        .expect("assistant draft");
+    threads
+        .finalize_assistant_message(
+            &scope,
+            &thread_id,
+            draft.message_id,
+            MessageContent::text(payload),
+        )
+        .await
+        .expect("assistant finalization");
+    threads
+        .put_structured_finalization(PutStructuredFinalizationRequest {
+            record: StructuredFinalizationRecord {
+                scope: scope.clone(),
+                thread_id: thread_id.clone(),
+                turn_id: ironclaw_host_api::turn::TurnId::new(),
+                turn_run_id: run_id,
+                contract_name: "test_output".to_string(),
+                schema_digest: "test-schema-digest".to_string(),
+                candidate: payload.to_string(),
+                raw_json: payload.to_string(),
+                accounting: StructuredFinalizationAccounting::default(),
+                owner_fence: "test-owner-fence".to_string(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+        })
+        .await
+        .expect("structured finalization");
 
     let state = TurnRunState {
         scope: test_unbound_turn_scope("sres", &thread_id),
@@ -1643,6 +1642,9 @@ async fn prepared_gateway_resolves_the_structured_result_payload() {
             .expect("ref"),
         resolved_run_profile_id: ironclaw_host_api::turn::RunProfileId::unbound_structured(),
         resolved_run_profile_version: ironclaw_host_api::turn::RunProfileVersion::new(1),
+        output_contract: ironclaw_host_api::output::OutputContract::json_schema(
+            serde_json::json!({"type": "object"}),
+        ),
         allow_steering: false,
         resolved_model_route: None,
         model_usage: None,
@@ -1662,7 +1664,6 @@ async fn prepared_gateway_resolves_the_structured_result_payload() {
         service: Arc::new(ironclaw_assistant::UnboundTurnService::new(
             threads,
             coordinator,
-            TenantId::new("tenant-sres").expect("tenant"),
             AgentId::new("agent-sres").expect("agent"),
             None,
         )),
