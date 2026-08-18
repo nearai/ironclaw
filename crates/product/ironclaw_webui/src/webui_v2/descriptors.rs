@@ -46,6 +46,10 @@ pub const WEBUI_V2_ROUTE_PAUSE_AUTOMATION: &str = "webui.v2.pause_automation";
 pub const WEBUI_V2_ROUTE_RESUME_AUTOMATION: &str = "webui.v2.resume_automation";
 pub const WEBUI_V2_ROUTE_RENAME_AUTOMATION: &str = "webui.v2.rename_automation";
 pub const WEBUI_V2_ROUTE_DELETE_AUTOMATION: &str = "webui.v2.delete_automation";
+pub const WEBUI_V2_ROUTE_SUGGESTIONS_LIST: &str = "webui.v2.suggestions.list";
+pub const WEBUI_V2_ROUTE_SUGGESTIONS_GENERATE: &str = "webui.v2.suggestions.generate";
+pub const WEBUI_V2_ROUTE_SUGGESTION_START: &str = "webui.v2.suggestions.start";
+pub const WEBUI_V2_ROUTE_SUGGESTION_DISMISS: &str = "webui.v2.suggestions.dismiss";
 pub const WEBUI_V2_ROUTE_TRACE_CREDITS: &str = "webui.v2.trace_credits";
 pub const WEBUI_V2_ROUTE_TRACE_ACCOUNT_TRACES: &str = "webui.v2.trace_account_traces";
 pub const WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE: &str = "webui.v2.authorize_trace_hold";
@@ -172,6 +176,11 @@ pub const WEBUI_V2_PATTERN_RESUME_AUTOMATION: &str =
 // Intentional dual-method resource path: POST renames an automation and DELETE
 // removes it. Keep the route ids separate so host policy/audit stays action-specific.
 pub const WEBUI_V2_PATTERN_AUTOMATION_DETAIL: &str = "/api/webchat/v2/automations/{automation_id}";
+pub const WEBUI_V2_PATTERN_SUGGESTIONS_LIST: &str = "/api/webchat/v2/suggestions";
+pub const WEBUI_V2_PATTERN_SUGGESTIONS_GENERATE: &str = "/api/webchat/v2/suggestions/generate";
+pub const WEBUI_V2_PATTERN_SUGGESTION_DETAIL: &str = "/api/webchat/v2/suggestions/{suggestion_id}";
+pub const WEBUI_V2_PATTERN_SUGGESTION_START: &str =
+    "/api/webchat/v2/suggestions/{suggestion_id}/start";
 pub const WEBUI_V2_PATTERN_TRACE_CREDITS: &str = "/api/webchat/v2/traces/credit";
 pub const WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES: &str = "/api/webchat/v2/traces/account";
 pub const WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE: &str =
@@ -328,6 +337,10 @@ pub fn webui_v2_routes_with_artifact_flags(
         resume_automation_descriptor(),
         rename_automation_descriptor(),
         delete_automation_descriptor(),
+        suggestions_list_descriptor(),
+        suggestions_generate_descriptor(),
+        suggestion_start_descriptor(),
+        suggestion_dismiss_descriptor(),
         trace_credits_descriptor(),
         trace_account_traces_descriptor(),
         trace_account_login_link_descriptor(),
@@ -1122,6 +1135,63 @@ fn delete_automation_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_DELETE_AUTOMATION,
         NetworkMethod::Delete,
         WEBUI_V2_PATTERN_AUTOMATION_DETAIL,
+        mutation_policy(
+            BodyLimitPolicy::NoBody,
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
+fn suggestions_list_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SUGGESTIONS_LIST,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_SUGGESTIONS_LIST,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn suggestions_generate_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SUGGESTIONS_GENERATE,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SUGGESTIONS_GENERATE,
+        mutation_policy(
+            body_limit_kib(4),
+            // Each accepted request can launch a provider-backed agent run.
+            rate_limit_per_caller(10, 60),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
+fn suggestion_start_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SUGGESTION_START,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SUGGESTION_START,
+        mutation_policy(
+            BodyLimitPolicy::NoBody,
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
+fn suggestion_dismiss_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SUGGESTION_DISMISS,
+        NetworkMethod::Delete,
+        WEBUI_V2_PATTERN_SUGGESTION_DETAIL,
         mutation_policy(
             BodyLimitPolicy::NoBody,
             mutation_rate_limit(),

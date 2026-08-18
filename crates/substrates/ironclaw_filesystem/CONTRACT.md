@@ -5,7 +5,7 @@ There is one trait (`RootFilesystem`), one entry type (`Entry`), one mount
 table (`CompositeRootFilesystem`). Every persistence concern in the workspace
 (secrets, leases, processes, memory documents, project files, event logs,
 engine state, settings, …) lives behind a single set of ops: `put` / `get` /
-`delete` / `list_dir` / `query` / `ensure_index` / `stat` / `begin` /
+`delete` / `list_dir` / `list_dir_page` / `query` / `ensure_index` / `stat` / `begin` /
 `append` / `tail`.
 
 This supersedes the earlier "bytes mount; structured records stay typed"
@@ -187,7 +187,7 @@ boundary. The current rule is codified in
 
 ## Legacy bytes plane (transitional)
 
-`read_file` / `write_file` / `append_file` / `list_dir` / `stat` /
+`read_file` / `write_file` / `append_file` / `list_dir` / `list_dir_page` / `stat` /
 `delete` / `create_dir_all` remain on `RootFilesystem` during the
 migration window. Default impls route reads/writes through `put`/`get` so
 existing backends (and existing consumer code) continue to work without
@@ -195,6 +195,11 @@ changes. These methods will be removed entirely once
 `src/db.rs` is dissolved (task #17 of the storage rework). Do not add new
 consumers of the legacy methods — new code should call `put`/`get`/
 `query`/etc. directly.
+
+Explicit migration work that must discover entries whose indexed projection
+may be absent uses `list_dir_page` with its stable child-name continuation.
+Production backends implement that traversal with memory bounded by the page
+limit; request paths continue to use declared indexed projections.
 
 ## When you're editing this crate
 

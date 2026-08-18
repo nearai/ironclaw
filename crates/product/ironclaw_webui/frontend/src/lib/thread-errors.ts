@@ -4,7 +4,9 @@
 // `busy` kind ({"error":"conflict","kind":"busy"}). The generic humanized API
 // message for that body is just "Busy", which reads as no error at all (#4823),
 // so callers must translate it into a clear, actionable line. Everything else
-// falls back to the API-provided message, then a generic failure string.
+// falls back to a localized generic failure string. Do not surface arbitrary
+// error messages here: proxy and transport failures are not guaranteed to be
+// safe user-facing text.
 //
 // Match on `kind === "busy"` specifically rather than any 409: the backend
 // also maps generic conflicts to 409, and showing "stop it first" for a
@@ -15,5 +17,5 @@ export function isThreadBusyError(error) {
 
 export function deleteThreadErrorMessage(error, t) {
   if (isThreadBusyError(error)) return t("chat.deleteBusy");
-  return error?.message || t("chat.deleteFailed");
+  return t("chat.deleteFailed");
 }

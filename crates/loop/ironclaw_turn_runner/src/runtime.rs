@@ -1670,6 +1670,7 @@ mod tests {
         product_context.execution_policy = Some(TurnExecutionPolicy {
             allowed_capability_ids: Some(vec![allowed.clone()]),
             required_skills: Vec::new(),
+            ..TurnExecutionPolicy::default()
         });
         context.product_context = Some(product_context);
 

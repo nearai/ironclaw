@@ -74,6 +74,7 @@ fn validation_policy_named_constructors_keep_terminal_default_and_host_verified_
 fn loop_exit_validation_policy_deserialization_cannot_mint_host_verified_evidence() {
     for trusted_field in [
         "allow_no_reply_completion",
+        "allow_nothing_to_report_completion",
         "final_checkpoint_verified",
         "host_cancellation_observed",
         "completion_refs_verified",
@@ -83,6 +84,7 @@ fn loop_exit_validation_policy_deserialization_cannot_mint_host_verified_evidenc
         let mut forged = json!({
             "require_final_checkpoint": false,
             "allow_no_reply_completion": false,
+            "allow_nothing_to_report_completion": false,
             "final_checkpoint_verified": false,
             "host_cancellation_observed": false,
             "completion_refs_verified": false,
@@ -100,6 +102,7 @@ fn loop_exit_validation_policy_deserialization_cannot_mint_host_verified_evidenc
         let forged_terminal = json!({
             "require_final_checkpoint": false,
             "allow_no_reply_completion": false,
+            "allow_nothing_to_report_completion": false,
             "final_checkpoint_verified": false,
             "host_cancellation_observed": false,
             "invalid_handling": invalid_handling,
@@ -142,6 +145,7 @@ fn completed_ask_user_exit_maps_to_trusted_completed_outcome_without_final_check
     .validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
         allow_no_reply_completion: false,
+        allow_nothing_to_report_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
         completion_refs_verified: true,
@@ -168,6 +172,7 @@ fn completed_exit_without_durable_refs_maps_to_protocol_failure_or_recovery() {
     let safe_decision = exit.clone().validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
         allow_no_reply_completion: false,
+        allow_nothing_to_report_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
         completion_refs_verified: true,
@@ -191,6 +196,7 @@ fn completed_exit_without_durable_refs_maps_to_protocol_failure_or_recovery() {
     let uncertain_decision = exit.validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
         allow_no_reply_completion: false,
+        allow_nothing_to_report_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
         completion_refs_verified: true,
@@ -220,6 +226,7 @@ fn completed_exit_requires_host_verified_completion_refs_before_trusted_mapping(
     let decision = exit.validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
         allow_no_reply_completion: false,
+        allow_nothing_to_report_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
         completion_refs_verified: false,
@@ -264,6 +271,7 @@ fn final_checkpoint_policy_rejects_terminal_exit_without_checkpoint() {
         let decision = exit.validate(LoopExitValidationPolicy {
             require_final_checkpoint: true,
             allow_no_reply_completion: false,
+            allow_nothing_to_report_completion: false,
             final_checkpoint_verified: false,
             host_cancellation_observed: true,
             completion_refs_verified: true,
@@ -321,6 +329,7 @@ fn validation_policy_requires_final_checkpoint_only_when_configured() {
         .validate(LoopExitValidationPolicy {
             require_final_checkpoint,
             allow_no_reply_completion: false,
+            allow_nothing_to_report_completion: false,
             final_checkpoint_verified: false,
             host_cancellation_observed: false,
             completion_refs_verified: true,
@@ -358,6 +367,7 @@ fn blocked_exit_maps_to_block_run_outcome_with_verified_checkpoint_and_gate_ref(
     .validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
         allow_no_reply_completion: false,
+        allow_nothing_to_report_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
         completion_refs_verified: false,
@@ -392,6 +402,7 @@ fn blocked_exit_requires_host_verified_gate_and_checkpoint_before_trusted_mappin
     .validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
         allow_no_reply_completion: false,
+        allow_nothing_to_report_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
         completion_refs_verified: false,
@@ -416,6 +427,7 @@ fn cancelled_exit_requires_observed_host_cancellation() {
     let rejected = exit.clone().validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
         allow_no_reply_completion: false,
+        allow_nothing_to_report_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
         completion_refs_verified: false,
@@ -439,6 +451,7 @@ fn cancelled_exit_requires_observed_host_cancellation() {
     let accepted = exit.validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
         allow_no_reply_completion: false,
+        allow_nothing_to_report_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: true,
         completion_refs_verified: false,
@@ -752,6 +765,7 @@ fn no_reply_with_empty_refs_requires_explicit_policy_permission() {
     let decision = exit.validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
         allow_no_reply_completion: false,
+        allow_nothing_to_report_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
         completion_refs_verified: true,
@@ -787,6 +801,7 @@ fn no_reply_with_empty_refs_maps_to_completed_when_policy_allows_it() {
     .validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
         allow_no_reply_completion: true,
+        allow_nothing_to_report_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
         completion_refs_verified: false,
@@ -796,6 +811,38 @@ fn no_reply_with_empty_refs_maps_to_completed_when_policy_allows_it() {
 
     assert_eq!(decision.violation, None);
     assert_eq!(decision.mapping, TurnRunnerOutcome::Completed.into());
+}
+
+#[test]
+fn nothing_to_report_with_empty_refs_requires_host_verified_transcript_evidence() {
+    let exit = LoopExit::Completed(LoopCompleted {
+        completion_kind: LoopCompletionKind::NothingToReport,
+        reply_message_refs: vec![],
+        result_refs: vec![],
+        final_checkpoint_id: None,
+        model_usage: None,
+        exit_id: exit_id("exit:nothing-to-report-empty"),
+    });
+    let policy = LoopExitValidationPolicy {
+        allow_nothing_to_report_completion: true,
+        ..LoopExitValidationPolicy::default()
+    };
+
+    let rejected = exit.clone().validate(policy);
+    assert_eq!(
+        rejected
+            .violation
+            .as_ref()
+            .map(|violation| violation.kind()),
+        Some(LoopExitViolationKind::MissingCompletionReference)
+    );
+
+    let accepted = exit.validate(LoopExitValidationPolicy {
+        completion_refs_verified: true,
+        ..policy
+    });
+    assert_eq!(accepted.violation, None);
+    assert_eq!(accepted.mapping, TurnRunnerOutcome::Completed.into());
 }
 
 #[test]
@@ -811,6 +858,7 @@ fn delegated_result_with_result_refs_maps_to_trusted_completed() {
     .validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
         allow_no_reply_completion: false,
+        allow_nothing_to_report_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
         completion_refs_verified: true,
@@ -835,6 +883,7 @@ fn result_only_with_result_refs_maps_to_trusted_completed() {
     .validate(LoopExitValidationPolicy {
         require_final_checkpoint: false,
         allow_no_reply_completion: false,
+        allow_nothing_to_report_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
         completion_refs_verified: true,
@@ -851,6 +900,7 @@ fn completion_kind_must_match_durable_reference_shape() {
     let policy = LoopExitValidationPolicy {
         require_final_checkpoint: false,
         allow_no_reply_completion: true,
+        allow_nothing_to_report_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
         completion_refs_verified: true,
@@ -1153,7 +1203,7 @@ fn terminal_statuses_release_lock_and_non_terminal_keep_it() {
 /// `interrupted_unexpectedly`) stays the wire-stable user-facing signal, and
 /// the specific `LoopExitViolationKind` rides the sanitized failure `detail`
 /// (durable on the run record + `TurnLifecycleEvent.detail`, and visible to the
-/// failure explainer). Exhaustive over all eight kinds so a new violation kind
+/// failure explainer). Exhaustive over all kinds so a new violation kind
 /// cannot ship without a durable detail.
 #[test]
 fn invalid_exit_decisions_persist_specific_violation_kind_on_failure_detail() {
@@ -1166,6 +1216,7 @@ fn invalid_exit_decisions_persist_specific_violation_kind_on_failure_detail() {
         LoopExitViolationKind::UnverifiedFailureEvidence,
         LoopExitViolationKind::CancellationNotObserved,
         LoopExitViolationKind::NoReplyNotAllowed,
+        LoopExitViolationKind::NothingToReportNotAllowed,
     ];
     // Exhaustiveness guard: adding a LoopExitViolationKind variant breaks this
     // match (same-crate), forcing the new variant into the table above.
@@ -1177,7 +1228,8 @@ fn invalid_exit_decisions_persist_specific_violation_kind_on_failure_detail() {
         | LoopExitViolationKind::UnverifiedBlockedEvidence
         | LoopExitViolationKind::UnverifiedFailureEvidence
         | LoopExitViolationKind::CancellationNotObserved
-        | LoopExitViolationKind::NoReplyNotAllowed => (),
+        | LoopExitViolationKind::NoReplyNotAllowed
+        | LoopExitViolationKind::NothingToReportNotAllowed => (),
     };
 
     for kind in kinds {

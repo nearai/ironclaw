@@ -146,6 +146,7 @@ where
 {
     thread_service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: thread_scope,
             thread_id,
             turn_run_id: run_id.to_string(),
@@ -173,11 +174,13 @@ pub(super) fn running_run_state(
         run_id,
         status: TurnStatus::Running,
         accepted_message_ref: AcceptedMessageRef::new("msg:accepted").expect("valid"),
+        output_contract: ironclaw_host_api::output::OutputContract::AssistantMessage,
         resolved_run_profile_id: ironclaw_turns::RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref: None,
@@ -416,11 +419,13 @@ pub(super) fn claimed_run() -> ClaimedTurnRun {
             run_id: TurnRunId::new(),
             status: TurnStatus::Running,
             accepted_message_ref: AcceptedMessageRef::new("msg:accepted").expect("valid"),
+            output_contract: ironclaw_host_api::output::OutputContract::AssistantMessage,
             resolved_run_profile_id: ironclaw_turns::RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             allow_steering: true,
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: None,
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
@@ -553,13 +558,17 @@ impl ProcessTransitionPort for RecordingTransitionPort {
         request: SuspendProcessRequest,
     ) -> Result<JournaledProcessSnapshot, TurnError> {
         *self.apply_calls.lock().expect("lock") += 1;
-        Ok(process_state_for_mapping(
+        let mut snapshot = process_state_for_mapping(
             ProcessLifecycleStatus::Suspended,
             request.process_id,
             None,
             Some(request.suspension),
             Some(request.checkpoint_ref),
-        ))
+        );
+        if let Some(metadata) = request.metadata {
+            snapshot.metadata = metadata;
+        }
+        Ok(snapshot)
     }
 
     async fn complete_process(
@@ -607,13 +616,17 @@ impl ProcessTransitionPort for RecordingTransitionPort {
             .lock()
             .expect("lock")
             .push(request.failure.category().to_string());
-        Ok(process_state_for_mapping(
+        let mut snapshot = process_state_for_mapping(
             ProcessLifecycleStatus::Failed,
             request.process_id,
             Some(request.failure),
             None,
             request.checkpoint_ref,
-        ))
+        );
+        if let Some(metadata) = request.metadata {
+            snapshot.metadata = metadata;
+        }
+        Ok(snapshot)
     }
 
     async fn relinquish_process(

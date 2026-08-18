@@ -1098,6 +1098,7 @@ async fn model_failure_explainer_returns_bounded_assistant_reply() {
             output_text: "The request used an unsupported driver operation, so the run stopped."
                 .to_string(),
             elapsed_ms: 1,
+            usage: None,
         })),
         requests: Mutex::new(Vec::new()),
     });

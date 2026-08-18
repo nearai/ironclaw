@@ -12,12 +12,13 @@ use crate::{
     FinalizedAssistantMessageByRunRequest, InboundMessageReplayMetadata,
     LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent,
-    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
-    ThreadGoal, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange,
-    ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, ToolResultRecordChunk,
-    UpdateAssistantDraftRequest, UpdateThreadGoalRequest, UpdateToolResultRecordRequest,
-    UpdateToolResultReferenceRequest,
+    PublishStructuredFinalizationMessageRequest, PutStructuredFinalizationRequest,
+    PutToolResultRecordRequest, ReadStructuredFinalizationRequest, ReadToolResultRecordRequest,
+    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, StructuredFinalizationRecord, SummaryArtifact, ThreadGoal, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
+    ThreadMessageRecord, ThreadScope, ToolResultRecordChunk, UpdateAssistantDraftRequest,
+    UpdateThreadGoalRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 
 /// Canonical Reborn session thread and transcript boundary.
@@ -88,6 +89,46 @@ pub trait SessionThreadService: Send + Sync {
         let _ = (scope, thread_id);
         Err(SessionThreadError::Backend(
             "read_prepared_context is not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
+
+    /// Read immutable structured-finalization evidence for one exact run.
+    /// Missing is the normal pre-finalization state; ownership is checked by
+    /// the run host's lease fence, not inferred by this storage read.
+    async fn read_structured_finalization(
+        &self,
+        _request: ReadStructuredFinalizationRequest,
+    ) -> Result<Option<StructuredFinalizationRecord>, SessionThreadError> {
+        Err(SessionThreadError::Backend(
+            "structured finalization records are not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
+
+    /// Persist immutable structured-finalization evidence using an absent-write
+    /// CAS. Identical retries return the existing record; conflicting content
+    /// fails closed. Owner fences are checked before content comparison.
+    async fn put_structured_finalization(
+        &self,
+        _request: PutStructuredFinalizationRequest,
+    ) -> Result<StructuredFinalizationRecord, SessionThreadError> {
+        Err(SessionThreadError::Backend(
+            "structured finalization records are not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
+
+    /// Publish an already-durable structured-finalization result into one
+    /// exact finalized assistant message. Implementations validate the
+    /// supplied scope, message identity, run ownership, message status, and
+    /// immutable record before changing only `content` through CAS.
+    async fn publish_structured_finalization_message(
+        &self,
+        _request: PublishStructuredFinalizationMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        Err(SessionThreadError::Backend(
+            "structured finalization message publication is not implemented by this SessionThreadService backend"
                 .to_string(),
         ))
     }
@@ -474,6 +515,29 @@ where
         thread_id: &ThreadId,
     ) -> Result<Option<crate::PreparedContextRecord>, SessionThreadError> {
         self.as_ref().read_prepared_context(scope, thread_id).await
+    }
+
+    async fn read_structured_finalization(
+        &self,
+        request: ReadStructuredFinalizationRequest,
+    ) -> Result<Option<StructuredFinalizationRecord>, SessionThreadError> {
+        self.as_ref().read_structured_finalization(request).await
+    }
+
+    async fn put_structured_finalization(
+        &self,
+        request: PutStructuredFinalizationRequest,
+    ) -> Result<StructuredFinalizationRecord, SessionThreadError> {
+        self.as_ref().put_structured_finalization(request).await
+    }
+
+    async fn publish_structured_finalization_message(
+        &self,
+        request: PublishStructuredFinalizationMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.as_ref()
+            .publish_structured_finalization_message(request)
+            .await
     }
 
     async fn replay_accepted_inbound_message(

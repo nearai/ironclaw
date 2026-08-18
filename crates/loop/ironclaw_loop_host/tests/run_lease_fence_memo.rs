@@ -233,6 +233,8 @@ impl Fixture {
             profile: TurnRunProfile::from_resolved(self.run_context.resolved_run_profile.clone()),
             resolved_model_route: None,
             model_usage: None,
+            output_contract: Default::default(),
+            execution_outcome: None,
             checkpoint_id: None,
             gate_ref: None,
             blocked_activity_id: None,
@@ -346,6 +348,47 @@ async fn a_zombie_worker_is_refused_once_its_observed_lease_expiry_passes() {
         journal.reads(),
         2,
         "the memo must expire with the lease and force a fresh ownership read"
+    );
+}
+
+/// Stop and Kill clear a still-live lease immediately. The memo intentionally
+/// accepts that terminal control is observed only after its bounded window:
+/// no replacement worker can claim a terminal run, and the cancellation port
+/// remains the prompt path for stopping the loop itself.
+#[tokio::test]
+async fn a_terminal_control_action_is_observed_once_the_memo_lapses() {
+    let fixture = Fixture::new("memo-terminal-control").await;
+    let lease_token = TurnLeaseToken::new();
+    let expires_at = Utc::now() + chrono::Duration::milliseconds(5_300);
+    let journal = Arc::new(ScriptedJournal::new(Some(
+        fixture.record(Some(lease_token), Some(expires_at)),
+    )));
+    let port = fixture.port(Arc::clone(&journal), lease_token);
+
+    finalize(&port, "before cancellation").await.unwrap();
+
+    let mut cancelled = fixture.record(None, None);
+    cancelled.status = TurnStatus::Cancelled;
+    journal.set_record(Some(cancelled));
+
+    finalize(&port, "inside the accepted memo window")
+        .await
+        .expect("the cached affirmative answer remains usable until its deadline");
+    assert_eq!(journal.reads(), 1);
+
+    tokio::time::sleep(Duration::from_millis(700)).await;
+
+    let error = finalize(&port, "after the memo window")
+        .await
+        .expect_err("terminal control must be observed once the memo lapses");
+    assert_eq!(
+        error.kind,
+        ironclaw_loop_contracts::AgentLoopHostErrorKind::TranscriptWriteFailed
+    );
+    assert_eq!(
+        journal.reads(),
+        2,
+        "the first write after the deadline must re-read terminal journal state"
     );
 }
 

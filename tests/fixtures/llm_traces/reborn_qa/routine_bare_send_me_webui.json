@@ -53,7 +53,7 @@
             "name": "builtin__trigger_create",
             "arguments": {
               "name": "Morning workspace status",
-              "execution_contract": {"version": 1, "goal": "Check the workspace at /workspace — list all files and directories, check memory documents, and note anything noteworthy (new files, changed files, open tasks). Summarize everything as a single-line status message. Do not deliver externally.", "success_criteria": ["Complete the requested task"], "output_instructions": "Return a concise result", "no_result_text": "No result"},
+              "execution_contract": {"version": 1, "goal": "Check the workspace at /workspace — list all files and directories, check memory documents, and note anything noteworthy (new files, changed files, open tasks). Summarize everything as a single-line status message. Do not deliver externally.", "success_criteria": ["Complete the requested task"], "output_instructions": "Return a concise result", "no_result_text": "No result", "policy": {"result_delivery": "deliver"}},
               "schedule": {
                 "expression": "0 9 * * *",
                 "kind": "cron",

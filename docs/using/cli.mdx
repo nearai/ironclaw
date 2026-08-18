@@ -89,8 +89,11 @@ See [Inference Providers](/capabilities/llm-providers) for the full catalog.
 | --- | --- |
 | `ironclaw extension search <query>` | Search available extension packages |
 | `ironclaw extension install <name>` | Install an extension package |
-| `ironclaw extension activate <name>` | Activate an installed extension |
 | `ironclaw extension remove <name>` | Remove an installed extension |
+| `ironclaw ironhub search [query]` | Search the signed IronHub catalog (aliases: `iron-hub`, `hub`) |
+| `ironclaw ironhub list` | List available IronHub tools or skills |
+| `ironclaw ironhub info <name>` | Show one IronHub catalog entry |
+| `ironclaw ironhub install <name>` | Install an IronHub tool or skill |
 | `ironclaw skills list` | List configured skills |
 | `ironclaw hooks list` | *Not implemented yet* — reports that and exits |
 | `ironclaw channels list` | *Not implemented yet* — reports that and exits |
@@ -134,16 +137,16 @@ until you explicitly opt in.
 
 | Command | What it does |
 | --- | --- |
-| `traces status` | Show your current contribution policy |
-| `traces opt-in` / `traces opt-out` | Turn contribution on or off |
-| `traces preview <file>` | Preview a redacted contribution envelope |
-| `traces submit` / `traces enqueue` / `traces flush-queue` | Submit contributions |
-| `traces queue-status` | Show local queue diagnostics |
-| `traces credit` | Show credit totals and explanations |
-| `traces list-submissions` / `traces revoke` | Review or withdraw past contributions |
-| `traces enroll-instance` | Enroll an entire instance with an operator invite link |
-| `traces profile set` / `withdraw` / `token` | Manage the optional public community profile |
-| `traces ingest-health` | Check an ingestion service health endpoint |
+| `ironclaw traces status` | Show your current contribution policy |
+| `ironclaw traces opt-in` / `opt-out` | Turn contribution on or off |
+| `ironclaw traces preview <file>` | Preview a redacted contribution envelope |
+| `ironclaw traces submit` / `enqueue` / `flush-queue` | Submit contributions |
+| `ironclaw traces queue-status` | Show local queue diagnostics |
+| `ironclaw traces credit` | Show credit totals and explanations |
+| `ironclaw traces list-submissions` / `revoke` | Review or withdraw past contributions |
+| `ironclaw traces enroll-instance` | Enroll an entire instance with an operator invite link |
+| `ironclaw traces profile set` / `withdraw` / `token` | Manage the optional public community profile |
+| `ironclaw traces ingest-health` | Check an ingestion service health endpoint |
 
 See [Trace Commons](/capabilities/traces).
 
@@ -151,8 +154,10 @@ See [Trace Commons](/capabilities/traces).
 
 ## Shell Completion
 
-```bash
-ironclaw completion zsh > "${fpath[1]}/_ironclaw"
-```
+| Command | What it does |
+| --- | --- |
+| `ironclaw completion --shell <shell>` | Print a completion script for `bash`, `zsh`, `fish`, `elvish`, or `powershell` |
 
-Bash, fish, and PowerShell are also supported.
+```bash
+ironclaw completion --shell zsh > "${fpath[1]}/_ironclaw"
+```

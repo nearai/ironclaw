@@ -1730,7 +1730,7 @@ async fn json_schema_chat_routes_through_the_prepared_door() {
     assert_eq!(requests.len(), 1, "the prepared door takes the submit");
     assert!(matches!(
         requests[0].output,
-        ironclaw_host_api::prepared_context::OutputContract::JsonSchema { .. }
+        ironclaw_host_api::output::OutputContract::JsonSchema { .. }
     ));
     assert_eq!(
         surface.accepted_count(),
@@ -1771,7 +1771,7 @@ async fn tool_history_chat_routes_through_the_prepared_door() {
     assert_eq!(requests.len(), 1);
     assert!(matches!(
         requests[0].output,
-        ironclaw_host_api::prepared_context::OutputContract::AssistantMessage
+        ironclaw_host_api::output::OutputContract::AssistantMessage
     ));
     assert_eq!(
         requests[0].messages.len(),
@@ -1813,7 +1813,7 @@ async fn plain_chat_takes_the_prepared_door() {
     );
     assert!(matches!(
         port.requests()[0].output,
-        ironclaw_host_api::prepared_context::OutputContract::AssistantMessage
+        ironclaw_host_api::output::OutputContract::AssistantMessage
     ));
     assert_eq!(
         surface.accepted_count(),

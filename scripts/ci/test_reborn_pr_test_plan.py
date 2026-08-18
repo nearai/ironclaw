@@ -157,7 +157,9 @@ def metadata() -> dict:
 
 
 def real_owner_metadata() -> dict:
-    """A workspace named after the crates `EMBEDDED_ASSET_OWNERS` routes to.
+    """A workspace named after the crates real routing tables point at:
+    `EMBEDDED_ASSET_OWNERS` and the doc-fact tables
+    (`DOC_FACT_PAGE_TESTS` / `DOC_FACT_PUBLISHED_SWEEP`).
 
     The rest of this file uses `metadata()`'s `alpha`/`beta`/`gamma`, which
     cannot carry the real table: the planner rejects a changed package outside
@@ -205,6 +207,14 @@ def real_owner_metadata() -> dict:
         # paths, so that table is exercised against a real package directory
         # too.
         package("ironclaw", "crates/app/ironclaw_cli/Cargo.toml"),
+        package(
+            "ironclaw_extension_registry",
+            "crates/extensions/ironclaw_extension_registry/Cargo.toml",
+        ),
+        package(
+            "ironclaw_openai_compat",
+            "crates/product/ironclaw_openai_compat/Cargo.toml",
+        ),
     ]
     return {
         "workspace_members": [entry["id"] for entry in packages],
@@ -1171,6 +1181,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         shape as the `.claude/` gap the CHECKLIST row already records.
         """
         for path in (
+            "tests/test_smoke_release_binary.py",
             "scripts/no_panics_reborn_baseline.txt",
             "scripts/reborn-e2e-rust.sh",
             "scripts/check-version-bumps.sh",
@@ -1642,6 +1653,115 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )
         self.assertEqual(plan["mode"], "selected")
         self.assertNotEqual(plan["crate_buckets"], [])
+
+    def test_published_docs_page_runs_the_registry_docs_sweep(self) -> None:
+        """A published `docs/` page selects the doc-fact sweep instead of
+        planning `mode=none` (#7378: docs-only PRs merged green while cargo
+        tests read their pages)."""
+        plan = self.plan_real_owners(["docs/extensions/building-a-tool.md"])
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["ironclaw_extension_registry"])
+        self.assertEqual(plan["affected_packages"], ["ironclaw_extension_registry"])
+        self.assertEqual(
+            plan["crate_buckets"],
+            [
+                {
+                    "name": "selected",
+                    "packages": ["ironclaw_extension_registry"],
+                    "exact_targets": [
+                        {
+                            "package": "ironclaw_extension_registry",
+                            "kind": "test",
+                            "name": "docs_manifest_schema_version",
+                        }
+                    ],
+                }
+            ],
+        )
+
+    def test_doc_fact_pinned_pages_add_their_owning_crate(self) -> None:
+        """The two pinned pages also select their owning crate's doc-fact
+        test, with no reverse-dependency widening."""
+        cli = self.plan_real_owners(["docs/using/cli.mdx"])
+        self.assertEqual(
+            cli["changed_packages"], ["ironclaw", "ironclaw_extension_registry"]
+        )
+        self.assertEqual(
+            cli["affected_packages"], ["ironclaw", "ironclaw_extension_registry"]
+        )
+        self.assertEqual(
+            cli["crate_buckets"][0]["exact_targets"],
+            [
+                {"package": "ironclaw", "kind": "test", "name": "docs_cli_reference"},
+                {
+                    "package": "ironclaw_extension_registry",
+                    "kind": "test",
+                    "name": "docs_manifest_schema_version",
+                },
+            ],
+        )
+        responses = self.plan_real_owners(["docs/api/responses.mdx"])
+        self.assertEqual(
+            responses["changed_packages"],
+            ["ironclaw_extension_registry", "ironclaw_openai_compat"],
+        )
+        self.assertEqual(
+            responses["crate_buckets"][0]["exact_targets"],
+            [
+                {
+                    "package": "ironclaw_extension_registry",
+                    "kind": "test",
+                    "name": "docs_manifest_schema_version",
+                },
+                {
+                    "package": "ironclaw_openai_compat",
+                    "kind": "test",
+                    "name": "docs_responses_contract",
+                },
+            ],
+        )
+
+    def test_mintignore_edit_runs_the_published_sweep(self) -> None:
+        """A fence edit changes the sweep's scope, so it must run the sweep."""
+        plan = self.plan_real_owners(["docs/.mintignore"])
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["ironclaw_extension_registry"])
+        self.assertEqual(
+            plan["crate_buckets"][0]["exact_targets"],
+            [
+                {
+                    "package": "ironclaw_extension_registry",
+                    "kind": "test",
+                    "name": "docs_manifest_schema_version",
+                }
+            ],
+        )
+
+    def test_absent_mintignore_means_no_fence_not_a_crash(self) -> None:
+        """Deleting docs/.mintignore must widen routing to every page (the
+        boundary script's missing-file semantics), not crash the planner."""
+        planner._publication_fence.cache_clear()
+        self.addCleanup(planner._publication_fence.cache_clear)
+        with mock.patch.object(planner, "DOCS_MINTIGNORE", "docs/.mintignore-gone"):
+            plan = self.plan_real_owners(["docs/internal/plans/whatever.md"])
+        self.assertEqual(plan["changed_packages"], ["ironclaw_extension_registry"])
+
+    def test_fenced_and_non_page_docs_stay_prose(self) -> None:
+        """Fenced trees (unpublished, read by no cargo test) and non-Markdown
+        docs files keep the prose classification."""
+        for path in (
+            "docs/internal/plans/2026-08-07-doc-truth-pipeline.md",
+            "docs/internal/reborn/README.md",
+            "docs/internal/reborn/contracts/extensions.md",
+            "docs/drafts/upcoming.mdx",
+            "docs/using/preview.draft.mdx",
+            "docs/docs.json",
+            "docs/images/logo.png",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none")
+                self.assertEqual(plan["crate_buckets"], [])
 
     def test_agent_guidance_paths_are_prose_and_select_nothing(self) -> None:
         """`.claude/**` is guidance, like `docs/**`.

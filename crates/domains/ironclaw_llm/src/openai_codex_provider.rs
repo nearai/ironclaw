@@ -132,6 +132,7 @@ impl OpenAiCodexProvider {
         messages: &[ChatMessage],
         tools: Option<&[ToolDefinition]>,
         tool_choice: Option<&str>,
+        response_format: Option<&crate::provider::CompletionResponseFormat>,
     ) -> serde_json::Value {
         // Separate system messages into `instructions`
         let instructions: String = messages
@@ -156,6 +157,11 @@ impl OpenAiCodexProvider {
             "input": input,
             "text": { "verbosity": "medium" },
         });
+
+        if let Some(format) = crate::provider::openai_responses_json_schema_format(response_format)
+        {
+            body["text"]["format"] = format;
+        }
 
         if crate::reasoning_models::supports_openai_reasoning(&self.model) {
             body["reasoning"] = crate::responses_reasoning::summary_request();
@@ -275,9 +281,13 @@ impl OpenAiCodexProvider {
         request: CompletionRequest,
         sink: Option<Arc<dyn CompletionStreamSink>>,
     ) -> Result<CompletionResponse, LlmError> {
+        crate::provider::ensure_openai_responses_response_format_supported(
+            request.response_format.as_ref(),
+            "openai_codex",
+        )?;
         let mut messages = request.messages;
         crate::provider::sanitize_tool_messages(&mut messages);
-        let body = self.build_request_body(&messages, None, None);
+        let body = self.build_request_body(&messages, None, None, request.response_format.as_ref());
         let parsed = self.send_request_with_sink(body, sink).await?;
 
         Ok(CompletionResponse {
@@ -296,6 +306,10 @@ impl OpenAiCodexProvider {
         request: ToolCompletionRequest,
         sink: Option<Arc<dyn CompletionStreamSink>>,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        crate::provider::ensure_openai_responses_response_format_supported(
+            request.response_format.as_ref(),
+            "openai_codex",
+        )?;
         let mut messages = request.messages;
         crate::provider::sanitize_tool_messages(&mut messages);
         let name_map: std::collections::HashMap<String, String> = request
@@ -310,6 +324,7 @@ impl OpenAiCodexProvider {
             &messages,
             Some(&request.tools),
             request.tool_choice.as_deref(),
+            request.response_format.as_ref(),
         );
         let mut parsed = self.send_request_with_sink(body, sink).await?;
 
@@ -1535,7 +1550,7 @@ data: {"type":"response.output_item.done","item":{"type":"function_call","id":"f
             ChatMessage::user("Hello"),
         ];
 
-        let body = provider.build_request_body(&messages, None, None);
+        let body = provider.build_request_body(&messages, None, None, None);
 
         assert_eq!(body["model"], "gpt-5.3-codex");
         assert_eq!(body["store"], false);
@@ -1567,7 +1582,7 @@ data: {"type":"response.output_item.done","item":{"type":"function_call","id":"f
             parameters: serde_json::json!({"type": "object"}),
         }];
 
-        let body = provider.build_request_body(&messages, Some(&tools), None);
+        let body = provider.build_request_body(&messages, Some(&tools), None, None);
 
         assert!(body.get("tools").is_some());
         let tools_arr = body["tools"].as_array().unwrap();
@@ -1575,6 +1590,40 @@ data: {"type":"response.output_item.done","item":{"type":"function_call","id":"f
         assert_eq!(tools_arr[0]["type"], "function");
         assert_eq!(body["tool_choice"], "auto");
         assert_eq!(body["parallel_tool_calls"], true);
+    }
+
+    #[test]
+    fn test_build_request_body_encodes_native_response_schema() {
+        let jwt = make_test_jwt("acct_test");
+        let provider = OpenAiCodexProvider::new(
+            "gpt-5.3-codex",
+            "https://chatgpt.com/backend-api/codex",
+            &jwt,
+            300,
+        )
+        .unwrap();
+        let schema = crate::provider::JsonSchemaResponseFormat::strict(
+            "suggestions",
+            serde_json::json!({"type": "object", "properties": {"items": {"type": "array"}}}),
+        );
+        let format = crate::provider::CompletionResponseFormat::JsonSchema(schema.clone());
+
+        let body = provider.build_request_body(
+            &[ChatMessage::user("Return suggestions")],
+            None,
+            None,
+            Some(&format),
+        );
+
+        assert_eq!(
+            body["text"]["format"],
+            serde_json::json!({
+                "type": "json_schema",
+                "name": "suggestions",
+                "schema": schema.schema,
+                "strict": true,
+            })
+        );
     }
 
     #[test]
@@ -1740,7 +1789,7 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
         )
         .unwrap();
 
-        let body = provider.build_request_body(&messages, None, None);
+        let body = provider.build_request_body(&messages, None, None, None);
         let input = body["input"].as_array().unwrap();
 
         // Should have 3 non-system items: user, assistant, rewritten-user

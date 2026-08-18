@@ -201,6 +201,7 @@ fn tool_result_request(
         safe_summary: ToolResultSafeSummary::new("tool result").expect("valid summary"),
         provider_call,
         model_observation: None,
+        intrinsic_outcome: None,
     }
 }
 

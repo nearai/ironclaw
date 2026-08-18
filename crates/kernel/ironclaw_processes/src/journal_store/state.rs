@@ -14,8 +14,9 @@ use crate::{
     ClaimedProcess, JournaledProcessSnapshot, ProcessCheckpointId, ProcessCheckpointKind,
     ProcessCheckpointRecord, ProcessCheckpointRef, ProcessControlResult, ProcessFailureRecovery,
     ProcessInputRecord, ProcessJournalCursor, ProcessJournalEntry, ProcessJournalKind, ProcessKind,
-    ProcessLeaseSnapshot, ProcessLeaseToken, ProcessLifecycleStatus, ProcessTreeReservation,
-    RecoverExpiredProcessLeasesResponse, types::same_scope_owner,
+    ProcessLeaseSnapshot, ProcessLeaseToken, ProcessLifecycleStatus, ProcessSubmissionEdge,
+    ProcessTreeReservation, RecoverExpiredProcessLeasesResponse, SubmitProcessAtEdgeRequest,
+    SubmitProcessRequest, types::same_scope_owner,
 };
 
 /// Point a process at a new resume checkpoint.
@@ -55,6 +56,18 @@ pub(super) struct ProcessJournalMaterializedState {
     pub(super) submission_idempotency: HashMap<String, JournaledProcessSnapshot>,
     #[serde(default)]
     pub(super) submission_idempotency_order: VecDeque<String>,
+    /// op-id → process-id binding for edge submissions, kept in memory only.
+    ///
+    /// Edge submissions deliberately do not persist full-snapshot idempotency
+    /// records (see [`Self::apply_submit_at_edge`]); replay validation is
+    /// answered from the durable process row instead. This compact binding
+    /// retains the same-operation-different-process rejection for the life of
+    /// the store without re-serializing a full snapshot per record on every
+    /// journal command.
+    #[serde(default)]
+    pub(super) edge_submission_bindings: HashMap<String, ProcessId>,
+    #[serde(default)]
+    pub(super) edge_submission_bindings_order: VecDeque<String>,
     #[serde(default)]
     pub(super) tree_reservations: HashMap<ProcessId, ProcessTreeReservation>,
     #[serde(default)]
@@ -77,6 +90,8 @@ impl Default for ProcessJournalMaterializedState {
             control_idempotency_order: VecDeque::new(),
             submission_idempotency: HashMap::new(),
             submission_idempotency_order: VecDeque::new(),
+            edge_submission_bindings: HashMap::new(),
+            edge_submission_bindings_order: VecDeque::new(),
             tree_reservations: HashMap::new(),
             dependencies: HashMap::new(),
             checkpoints: HashMap::new(),
@@ -198,6 +213,7 @@ impl ProcessJournalMaterializedState {
                 Ok(StoredCommandOutcome::Imported)
             }
             StoredProcessCommand::Submit(request) => self.apply_submit(*request),
+            StoredProcessCommand::SubmitAtEdge(request) => self.apply_submit_at_edge(*request),
             StoredProcessCommand::SubmitWithCheckpoint {
                 request,
                 checkpoint,
@@ -426,6 +442,177 @@ impl ProcessJournalMaterializedState {
             );
         }
         self.remember_submission_result(replay_key, snapshot.clone());
+        Ok(StoredCommandOutcome::Submitted(snapshot, true))
+    }
+
+    fn edge_replay_matches(
+        submission: &SubmitProcessRequest,
+        edge: &ProcessSubmissionEdge,
+        snapshot: &JournaledProcessSnapshot,
+    ) -> bool {
+        let edge_matches = match edge {
+            ProcessSubmissionEdge::Suspended { suspension } => {
+                snapshot.status == ProcessLifecycleStatus::Suspended
+                    && snapshot.suspension.as_ref() == Some(suspension)
+                    && snapshot.failure.is_none()
+            }
+            ProcessSubmissionEdge::Completed => {
+                snapshot.status == ProcessLifecycleStatus::Completed
+                    && snapshot.suspension.is_none()
+                    && snapshot.failure.is_none()
+            }
+            ProcessSubmissionEdge::Failed { failure } => {
+                snapshot.status == ProcessLifecycleStatus::Failed
+                    && snapshot.suspension.is_none()
+                    && snapshot.failure.as_ref() == Some(failure)
+            }
+        };
+        edge_matches
+            && snapshot.process_id == submission.process_id
+            && snapshot.process_kind == submission.process_kind
+            && snapshot.scope == submission.scope
+            && snapshot.checkpoint_ref == submission.checkpoint_ref
+            && snapshot.owner_user_id == submission.owner_user_id
+            && snapshot.concurrency_class == submission.concurrency_class
+            && snapshot.metadata == submission.metadata
+    }
+
+    fn apply_submit_at_edge(
+        &mut self,
+        request: SubmitProcessAtEdgeRequest,
+    ) -> Result<StoredCommandOutcome, ProcessJournalStoreError> {
+        let submission = request.submission;
+        if submission.process_kind != ProcessKind::CapabilityInvocationState
+            || submission.exclusive_within_scope
+            || submission.parent_process_id.is_some()
+            || submission.root_process_id.is_some()
+            || submission.spawn_tree_descendant_cap.is_some()
+            || submission.dependency.is_some()
+            || submission.input.is_some()
+        {
+            return Err(ProcessJournalStoreError::InvalidRequest(
+                "edge submission only supports standalone bookkeeping processes".to_string(),
+            ));
+        }
+        let replay_key = super::command::submission_replay_key(&submission)?;
+        if let Some(snapshot) = replay_key
+            .as_ref()
+            .and_then(|key| self.submission_idempotency.get(key))
+        {
+            if !Self::edge_replay_matches(&submission, &request.edge, snapshot) {
+                return Err(ProcessJournalStoreError::InvalidRequest(
+                    "edge submission replay does not match the original request".to_string(),
+                ));
+            }
+            return Ok(StoredCommandOutcome::Submitted(snapshot.clone(), false));
+        }
+        // Edge submissions keep only a compact in-memory binding, so the
+        // durable process row is the replay authority: a retry of the same
+        // operation after a restart must return the committed terminal state
+        // rather than failing, and a same-operation submission with a
+        // different process id must still be rejected.
+        if let Some(bound_process_id) = replay_key
+            .as_ref()
+            .and_then(|key| self.edge_submission_bindings.get(key))
+        {
+            if *bound_process_id != submission.process_id {
+                return Err(ProcessJournalStoreError::InvalidRequest(
+                    "edge submission replay does not match the original request".to_string(),
+                ));
+            }
+            let existing = self.processes.get(&submission.process_id).ok_or(
+                ProcessJournalStoreError::ProcessAlreadyExists {
+                    process_id: submission.process_id,
+                },
+            )?;
+            if !Self::edge_replay_matches(&submission, &request.edge, existing) {
+                return Err(ProcessJournalStoreError::InvalidRequest(
+                    "edge submission replay does not match the original request".to_string(),
+                ));
+            }
+            return Ok(StoredCommandOutcome::Submitted(existing.clone(), false));
+        }
+        if let Some(existing) = self.processes.get(&submission.process_id) {
+            // No binding survived (restart), but the process row is durable:
+            // accept an identical replay, reject anything else.
+            if Self::edge_replay_matches(&submission, &request.edge, existing) {
+                return Ok(StoredCommandOutcome::Submitted(existing.clone(), false));
+            }
+            return Err(ProcessJournalStoreError::ProcessAlreadyExists {
+                process_id: submission.process_id,
+            });
+        }
+
+        let (status, kind, suspension, failure) = match request.edge {
+            ProcessSubmissionEdge::Suspended { suspension } => {
+                if submission.checkpoint_ref.is_none() {
+                    return Err(ProcessJournalStoreError::InvalidRequest(
+                        "suspended edge submission requires a checkpoint reference".to_string(),
+                    ));
+                }
+                (
+                    ProcessLifecycleStatus::Suspended,
+                    ProcessJournalKind::Suspended,
+                    Some(suspension),
+                    None,
+                )
+            }
+            ProcessSubmissionEdge::Completed => {
+                if submission.checkpoint_ref.is_some() {
+                    return Err(ProcessJournalStoreError::InvalidRequest(
+                        "terminal edge submission cannot carry a checkpoint reference".to_string(),
+                    ));
+                }
+                (
+                    ProcessLifecycleStatus::Completed,
+                    ProcessJournalKind::Completed,
+                    None,
+                    None,
+                )
+            }
+            ProcessSubmissionEdge::Failed { failure } => {
+                if submission.checkpoint_ref.is_some() {
+                    return Err(ProcessJournalStoreError::InvalidRequest(
+                        "terminal edge submission cannot carry a checkpoint reference".to_string(),
+                    ));
+                }
+                (
+                    ProcessLifecycleStatus::Failed,
+                    ProcessJournalKind::Failed,
+                    None,
+                    Some(failure),
+                )
+            }
+        };
+        let cursor = self.next_cursor();
+        // `checkpoint_kind` remains unknown intentionally. If a later lease
+        // expires, recovery must fail closed rather than redispatching work
+        // whose side effect may already have been attempted.
+        let snapshot = JournaledProcessSnapshot {
+            process_id: submission.process_id,
+            process_kind: submission.process_kind,
+            scope: submission.scope,
+            status,
+            suspension,
+            checkpoint_ref: submission.checkpoint_ref,
+            checkpoint_kind: None,
+            input_ref: None,
+            failure,
+            journal_cursor: cursor,
+            lease: None,
+            crash_reclaim_count: 0,
+            created_at: submission.created_at,
+            owner_user_id: submission.owner_user_id,
+            concurrency_class: submission.concurrency_class,
+            parent_process_id: None,
+            root_process_id: None,
+            metadata: submission.metadata,
+        };
+        self.push_entry(ProcessJournalEntry::from_snapshot(&snapshot, cursor, kind));
+        self.processes.insert(snapshot.process_id, snapshot.clone());
+        if let Some(key) = replay_key {
+            self.remember_edge_submission(key, snapshot.process_id);
+        }
         Ok(StoredCommandOutcome::Submitted(snapshot, true))
     }
 
@@ -1121,6 +1308,29 @@ impl ProcessJournalMaterializedState {
         }
         self.submission_idempotency_order.push_back(key.clone());
         self.submission_idempotency.insert(key, snapshot);
+    }
+
+    /// Remembers which process an edge submission's operation id was applied
+    /// to, in memory only.
+    ///
+    /// Edge submissions do not persist full-snapshot idempotency records: the
+    /// durable process row is the replay authority (see
+    /// [`Self::apply_submit_at_edge`]). This compact op-id → process-id binding
+    /// keeps rejecting same-operation replays with a different process id
+    /// without re-serializing a full snapshot per record on every journal
+    /// command. It is bounded like the persisted idempotency maps; losing it
+    /// across a restart only weakens the cross-process rejection, never replay
+    /// safety (the process row still answers identical replays).
+    pub(super) fn remember_edge_submission(&mut self, key: String, process_id: ProcessId) {
+        while self.edge_submission_bindings_order.len() >= MAX_IDEMPOTENCY_RECORDS {
+            let Some(oldest) = self.edge_submission_bindings_order.pop_front() else {
+                self.edge_submission_bindings.clear();
+                break;
+            };
+            self.edge_submission_bindings.remove(&oldest);
+        }
+        self.edge_submission_bindings_order.push_back(key.clone());
+        self.edge_submission_bindings.insert(key, process_id);
     }
 
     pub(super) fn process_mut(

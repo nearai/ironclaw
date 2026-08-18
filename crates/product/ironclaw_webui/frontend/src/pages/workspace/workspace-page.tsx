@@ -1,9 +1,9 @@
 import { useNavigate, useOutletContext, useParams } from "react-router";
 import { Button } from "../../design-system/button";
+import { InlineNotice } from "../../design-system/inline-notice";
 import { StatusPill } from "../../design-system/primitives";
 import React from "react";
 import { useT } from "../../lib/i18n";
-import { FeedbackBanner } from "../projects/components/feedback-banner";
 import { WorkspaceDirectory } from "./components/workspace-directory";
 import { WorkspaceSidebar } from "./components/workspace-sidebar";
 import { WorkspaceViewer } from "./components/workspace-viewer";
@@ -68,17 +68,20 @@ export function WorkspacePage() {
 
           {workspace.error &&
           (
-            <div
-              role="alert"
-              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-            >
+            <InlineNotice tone="danger" role="alert">
               {workspace.error.message}
-            </div>
+            </InlineNotice>
           )}
-          <FeedbackBanner
-            result={workspace.result}
-            onDismiss={workspace.clearResult}
-          />
+          {workspace.result && (
+            <InlineNotice
+              tone={workspace.result.type === "success" ? "success" : workspace.result.type === "error" ? "danger" : "info"}
+              role={workspace.result.type === "error" ? "alert" : "status"}
+              onDismiss={workspace.clearResult}
+              dismissLabel={t("projects.feedback.dismiss")}
+            >
+              {workspace.result.message}
+            </InlineNotice>
+          )}
 
           <div
             className="grid min-h-0 flex-1 gap-5 xl:grid-cols-[340px_minmax(0,1fr)]"

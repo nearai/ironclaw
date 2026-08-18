@@ -97,6 +97,9 @@ pub enum LoopCompletionKind {
     DelegatedResult,
     /// One or more durable result refs are the completion artifact.
     ResultOnly,
+    /// A scheduled run explicitly reported that its task found no result.
+    /// Valid only when host policy opted into no-result suppression.
+    NothingToReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

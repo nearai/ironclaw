@@ -1103,6 +1103,7 @@ where
             )?,
             provider_call: None,
             model_observation: None,
+            intrinsic_outcome: None,
         })
         .await
         .map_err(|source| WorkloadFailure::source("append bare tool result message", source))?;
@@ -1118,6 +1119,7 @@ where
             )?,
             provider_call: None,
             model_observation: None,
+            intrinsic_outcome: None,
         })
         .await
         .map_err(|source| WorkloadFailure::source("read bare tool result lookup", source))?;
@@ -1141,6 +1143,7 @@ where
                 .map_err(|source| WorkloadFailure::message("build tool result summary", source))?,
             provider_call: Some(provider_call.clone()),
             model_observation: None,
+            intrinsic_outcome: None,
         })
         .await
         .map_err(|source| WorkloadFailure::source("append tool result message", source))?;
@@ -1156,6 +1159,7 @@ where
             })?,
             provider_call: Some(provider_call),
             model_observation: None,
+            intrinsic_outcome: None,
         })
         .await
         .map_err(|source| WorkloadFailure::source("read provider-call lookup", source))?;

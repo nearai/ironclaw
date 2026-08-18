@@ -23,9 +23,18 @@ use super::{fs_error, storage_error};
 
 const DELTA_LOG_PATH: &str = "/resources/deltas/log";
 const DELTA_JOURNAL_MAX_BATCH: usize = 256;
+// The window must cover at least one FULL backend append attempt, or a single
+// transient `BackendBusy` exhausts it with zero retries. A local libSQL
+// backend attempt can block for the writer-pool checkout timeout (10s) plus
+// the connection's `busy_timeout` (5s) before returning `BackendBusy` — 15s
+// worst case, already triple the legacy 5s window. 60s keeps the journal
+// retrying through a multi-attempt burst (run-start write storms on slow
+// runners have measured 20-30s+ of continuous writer contention in Reborn
+// E2E); a persistent hold beyond the window still fails closed (no budget
+// guarantee is weakened).
 const DEFAULT_BUSY_RETRY_POLICY: BusyRetryPolicy = BusyRetryPolicy {
     max_retries: 3,
-    max_elapsed: Duration::from_secs(5),
+    max_elapsed: Duration::from_secs(60),
     backoff_base: Duration::from_millis(25),
     backoff_max: Duration::from_millis(250),
     jitter: true,
@@ -36,7 +45,10 @@ struct BusyRetryPolicy {
     max_retries: usize,
     /// Bounds how long the journal will continue starting additional database
     /// attempts. An individual backend operation remains bounded by the
-    /// backend's own lock wait (for local libSQL, `busy_timeout`).
+    /// backend's own worst case — for local libSQL that is the writer-pool
+    /// checkout timeout (10s) plus the connection's `busy_timeout` (5s), so
+    /// the window must exceed that single-attempt bound or the first
+    /// `BackendBusy` consumes the whole window with no retry left.
     max_elapsed: Duration,
     backoff_base: Duration,
     backoff_max: Duration,
@@ -500,6 +512,14 @@ mod tests {
         delay: Duration,
     }
 
+    /// First append sleeps `delay` then returns `BackendBusy` (mimicking a
+    /// libSQL writer checkout that blocks before failing); every later append
+    /// succeeds. Pins the retry-window-vs-single-attempt contract.
+    struct SlowBusyOnceAppendFilesystem {
+        append_attempts: AtomicUsize,
+        delay: Duration,
+    }
+
     impl BusyOnceAppendFilesystem {
         fn new() -> Self {
             Self {
@@ -533,6 +553,41 @@ mod tests {
                 path: path.clone(),
                 operation: FilesystemOperation::Append,
             })
+        }
+    }
+
+    impl SlowBusyOnceAppendFilesystem {
+        fn new(delay: Duration) -> Self {
+            Self {
+                append_attempts: AtomicUsize::new(0),
+                delay,
+            }
+        }
+
+        async fn wait_then_busy_then_succeed(
+            &self,
+            path: &VirtualPath,
+        ) -> Result<SeqNo, FilesystemError> {
+            let attempt = self.append_attempts.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            if attempt == 0 {
+                return Err(FilesystemError::BackendBusy {
+                    path: path.clone(),
+                    operation: FilesystemOperation::Append,
+                });
+            }
+            Ok(SeqNo::from_backend(1))
+        }
+
+        async fn wait_then_busy_then_succeed_batch(
+            &self,
+            path: &VirtualPath,
+            payloads: &[Vec<u8>],
+        ) -> Result<Vec<SeqNo>, FilesystemError> {
+            self.wait_then_busy_then_succeed(path).await?;
+            Ok((1..=payloads.len() as u64)
+                .map(SeqNo::from_backend)
+                .collect())
         }
     }
 
@@ -696,6 +751,38 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl RootFilesystem for SlowBusyOnceAppendFilesystem {
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities::sql_typical().with(Capability::Events)
+        }
+
+        async fn append(
+            &self,
+            path: &VirtualPath,
+            _payload: Vec<u8>,
+        ) -> Result<SeqNo, FilesystemError> {
+            self.wait_then_busy_then_succeed(path).await
+        }
+
+        async fn append_batch(
+            &self,
+            path: &VirtualPath,
+            payloads: Vec<Vec<u8>>,
+        ) -> Result<Vec<SeqNo>, FilesystemError> {
+            self.wait_then_busy_then_succeed_batch(path, &payloads)
+                .await
+        }
+
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            Err(unsupported(path, FilesystemOperation::ListDir))
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            Err(unsupported(path, FilesystemOperation::Stat))
+        }
+    }
+
     impl GatedAppendFilesystem {
         async fn wait_for_release(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
             let release = self
@@ -753,6 +840,18 @@ mod tests {
     fn scoped_slow_busy_filesystem(
         backend: Arc<SlowBusyAppendFilesystem>,
     ) -> Arc<ScopedFilesystem<SlowBusyAppendFilesystem>> {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/resources").expect("alias"),
+            VirtualPath::new("/resources").expect("target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view");
+        Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
+    }
+
+    fn scoped_slow_busy_once_filesystem(
+        backend: Arc<SlowBusyOnceAppendFilesystem>,
+    ) -> Arc<ScopedFilesystem<SlowBusyOnceAppendFilesystem>> {
         let mounts = MountView::new(vec![MountGrant::new(
             MountAlias::new("/resources").expect("alias"),
             VirtualPath::new("/resources").expect("target"),
@@ -852,6 +951,97 @@ mod tests {
             backend.append_attempts.load(Ordering::SeqCst),
             2,
             "the journal must not start a third database attempt after the retry window is exhausted"
+        );
+    }
+
+    #[test]
+    fn default_busy_retry_window_covers_a_single_backend_attempt() {
+        // The libSQL root filesystem serializes writers through a one-connection
+        // pool: a checkout can block up to the 10s pool timeout and the
+        // connection then waits up to its 5s `busy_timeout` before the append
+        // returns `BackendBusy` — one attempt can take ~15s. The legacy 5s
+        // window was exhausted by that single attempt (`attempts=1`,
+        // `elapsed_ms=10003` in the provider-contracts E2E flake), so the
+        // retry machinery never ran and a transient writer hold failed the
+        // in-flight resource reservation. The window must exceed the backend's
+        // worst-case single attempt or `max_retries` is meaningless.
+        assert!(
+            DEFAULT_BUSY_RETRY_POLICY.max_elapsed
+                >= Duration::from_secs(10) + Duration::from_secs(5),
+            "retry window must cover one full libSQL writer attempt"
+        );
+    }
+
+    #[test]
+    fn busy_retry_window_shorter_than_one_attempt_gets_no_retries() {
+        // Bug shape from the E2E flake: when a single `BackendBusy` attempt
+        // outlasts the retry window, the journal gives up after that one
+        // attempt (`append_attempts == 1`) instead of retrying — so a
+        // transient writer hold fails the flush.
+        let backend = Arc::new(SlowBusyOnceAppendFilesystem::new(Duration::from_millis(
+            200,
+        )));
+        let journal = ResourceDeltaJournal::new_with_retry_policy(
+            scoped_slow_busy_once_filesystem(Arc::clone(&backend)),
+            BusyRetryPolicy {
+                max_retries: 10,
+                max_elapsed: Duration::from_millis(150),
+                backoff_base: Duration::from_millis(10),
+                backoff_max: Duration::from_millis(10),
+                jitter: false,
+            },
+        );
+        let pending = journal
+            .enqueue(ResourceGovernorDelta::AccountSnapshot {
+                account: ResourceAccount::tenant(TenantId::new("tenant1").expect("tenant id")),
+                at: Utc::now(),
+            })
+            .expect("enqueue delta");
+
+        assert!(
+            pending.wait().is_err(),
+            "a window shorter than one backend attempt must fail closed"
+        );
+        assert_eq!(
+            backend.append_attempts.load(Ordering::SeqCst),
+            1,
+            "the first attempt exhausted the window; no retry may start"
+        );
+    }
+
+    #[test]
+    fn busy_retry_window_longer_than_one_attempt_recovers() {
+        // The fixed contract: with the window covering one full attempt, a
+        // transient busy that outlasts the legacy window still retries and
+        // the flush succeeds instead of invalidating the governor.
+        let backend = Arc::new(SlowBusyOnceAppendFilesystem::new(Duration::from_millis(
+            200,
+        )));
+        let journal = ResourceDeltaJournal::new_with_retry_policy(
+            scoped_slow_busy_once_filesystem(Arc::clone(&backend)),
+            BusyRetryPolicy {
+                max_retries: 10,
+                max_elapsed: Duration::from_millis(500),
+                backoff_base: Duration::from_millis(10),
+                backoff_max: Duration::from_millis(10),
+                jitter: false,
+            },
+        );
+        let pending = journal
+            .enqueue(ResourceGovernorDelta::AccountSnapshot {
+                account: ResourceAccount::tenant(TenantId::new("tenant1").expect("tenant id")),
+                at: Utc::now(),
+            })
+            .expect("enqueue delta");
+
+        assert_eq!(
+            pending.wait().expect("busy append must recover"),
+            SeqNo::from_backend(1)
+        );
+        assert_eq!(
+            backend.append_attempts.load(Ordering::SeqCst),
+            2,
+            "first attempt timed out as busy; the second must succeed"
         );
     }
 

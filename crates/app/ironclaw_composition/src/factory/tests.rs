@@ -1863,6 +1863,7 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
     );
     let submit = ironclaw_turns::SubmitTurnRequest {
         requested_model: None,
+        output_contract: None,
         scope,
         actor: ironclaw_turns::TurnActor::new(owner),
         accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("configured-message-ref")
@@ -1951,6 +1952,7 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
     );
     let submit = ironclaw_turns::SubmitTurnRequest {
         requested_model: None,
+        output_contract: None,
         scope,
         actor: ironclaw_turns::TurnActor::new(owner),
         accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("default-message-ref")

@@ -900,6 +900,67 @@ impl RootFilesystem for PostgresRootFilesystem {
         children
     }
 
+    async fn list_dir_page(
+        &self,
+        path: &VirtualPath,
+        after: Option<&str>,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        if max_entries == 0 {
+            return Ok(Vec::new());
+        }
+        let client = self.client().await?;
+        let exact_entry = self.exact_entry_with_client(&client, path).await?;
+        if matches!(exact_entry, Some((_, FileType::File, _))) {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ListDir,
+                reason: "not a directory".to_string(),
+            });
+        }
+        let (prefix_lower, prefix_upper) = descendant_path_range(path);
+        let after = after.unwrap_or_default();
+        let limit = i64::try_from(max_entries.min(Page::MAX_LIMIT as usize))
+            .unwrap_or(i64::from(Page::MAX_LIMIT));
+        let rows = cached_query(
+            &client,
+            "WITH direct_children AS ( \
+                 SELECT split_part(substring(path FROM char_length($1) + 1), '/', 1) AS name, \
+                        bool_or(is_dir OR position('/' IN substring(path FROM char_length($1) + 1)) > 0) AS is_dir \
+                 FROM root_filesystem_entries \
+                 WHERE path >= $1 AND path < $2 \
+                 GROUP BY 1 \
+             ) \
+             SELECT name, is_dir FROM direct_children \
+             WHERE name > $3 ORDER BY name LIMIT $4",
+            &[&prefix_lower, &prefix_upper, &after, &limit],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::ListDir, error))?;
+        if rows.is_empty() && after.is_empty() && exact_entry.is_none() {
+            return Err(not_found(path.clone(), FilesystemOperation::ListDir));
+        }
+        rows.into_iter()
+            .map(|row| {
+                let name: String = row.get("name");
+                let is_dir: bool = row.get("is_dir");
+                Ok(DirEntry {
+                    path: VirtualPath::new(format!(
+                        "{}/{}",
+                        path.as_str().trim_end_matches('/'),
+                        name
+                    ))?,
+                    name,
+                    file_type: if is_dir {
+                        FileType::Directory
+                    } else {
+                        FileType::File
+                    },
+                })
+            })
+            .collect()
+    }
+
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         let client = self.client().await?;
         postgres_stat_with_client(&client, path).await

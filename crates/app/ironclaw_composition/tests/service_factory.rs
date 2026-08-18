@@ -1434,7 +1434,8 @@ async fn standalone_services_dispatch_trigger_management_through_composed_runtim
                 "goal": "Summarize production state",
                 "success_criteria": ["Complete the requested task"],
                 "output_instructions": "Return a concise result",
-                "no_result_text": "No result"
+                "no_result_text": "No result",
+                "policy": { "result_delivery": "deliver" }
             },
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
@@ -1584,6 +1585,7 @@ async fn production_postgres_process_journal_pool_writes_rows_the_data_plane_rea
         services.turn_coordinator_for_test().as_ref(),
         ironclaw_turns::SubmitTurnRequest {
             requested_model: None,
+            output_contract: None,
             scope,
             actor: ironclaw_turns::TurnActor::new(owner),
             accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("journal-pool-message")

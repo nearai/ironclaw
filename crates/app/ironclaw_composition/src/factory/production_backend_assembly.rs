@@ -247,19 +247,22 @@ where
         ),
     )
     .with_turn_run_wake_notifier(turn_run_wake_notifier);
-    let services = match event_store {
+    let event_stores = match event_store {
         ProductionEventStoresInput::Config(config) => {
-            services
-                .with_reborn_event_store_config(
-                    ironclaw_event_store::RebornProfile::Production,
-                    config,
-                )
-                .await?
+            ironclaw_event_store::build_reborn_event_stores(
+                ironclaw_event_store::RebornProfile::Production,
+                config,
+            )
+            .await?
         }
-        ProductionEventStoresInput::Prebuilt(stores) => {
-            services.with_production_reborn_event_stores(stores)
-        }
+        ProductionEventStoresInput::Prebuilt(stores) => stores,
     };
+    let runtime_event_sink: Arc<dyn NonBlockingEventSink> = Arc::new(CoalescingEventSink::new(
+        Arc::clone(&event_stores.events),
+        EventBatchConfig::default(),
+    ));
+    let services =
+        services.with_production_reborn_event_stores_and_sink(event_stores, runtime_event_sink);
     let services = apply_production_runtime_process_binding(services, process_binding);
     let services = match PostEditCheckConfig::from_env() {
         Ok(Some(config)) => services.with_post_edit_check(config),
@@ -544,6 +547,10 @@ pub(super) async fn build_backend_production(
     .await?;
     let event_log = Arc::clone(&event_stores.events);
     let audit_log = Arc::clone(&event_stores.audit);
+    let runtime_event_sink: Arc<dyn NonBlockingEventSink> = Arc::new(CoalescingEventSink::new(
+        Arc::clone(&event_log),
+        EventBatchConfig::default(),
+    ));
     let admin_secret_provisioner: Arc<dyn ironclaw_assistant::AdminSecretProvisioner> =
         Arc::new(crate::admin_secrets::FilesystemAdminSecretProvisioner::new(
             Arc::clone(&stores.filesystem),
@@ -610,6 +617,7 @@ pub(super) async fn build_backend_production(
         );
     }
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
+    let host_runtime_event_sink: Arc<dyn EventSink> = runtime_event_sink.clone();
     let services = with_shared_host_runtime_wiring!(
         HostRuntimeServices::new(
             Arc::clone(&extension_registry),
@@ -632,7 +640,7 @@ pub(super) async fn build_backend_production(
     )
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_resource_governor(Arc::clone(&resource_governor))
-    .with_production_reborn_event_stores(event_stores)
+    .with_production_reborn_event_stores_and_sink(event_stores, host_runtime_event_sink)
     .with_turn_run_wake_notifier_dyn(production_wiring.turn_run_wake_notifier);
     #[cfg(any(test, feature = "test-support"))]
     let network_http_egress = match network_http_egress_for_test {
@@ -1436,6 +1444,7 @@ pub(super) async fn build_backend_production(
         budget_gate_store,
         broadcast_budget_event_sink,
         event_log,
+        runtime_event_sink,
         audit_log,
         admin_secret_provisioner,
         project_service,
