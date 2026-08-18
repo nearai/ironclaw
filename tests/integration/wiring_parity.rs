@@ -218,6 +218,28 @@ async fn test_default_planned_runtime_parts_shape_matches_production() {
     );
 }
 
+/// Task 5 (run-artifact-timings): the harness must hand out the SAME
+/// `InMemoryDiagnosticStore` instance the loop's diagnostic sinks write into,
+/// mirroring production's one-store shape (`runtime.rs:3455`,
+/// `product_surface.rs:98`). Before this test, `group.rs` built a throwaway
+/// store inline and kept no handle, so nothing could read what a run actually
+/// recorded.
+#[tokio::test]
+async fn harness_shares_one_diagnostic_store_with_the_loop() {
+    let harness = RebornIntegrationHarness::test_default()
+        .build()
+        .await
+        .expect("harness");
+
+    let first = harness.diagnostic_store();
+    let second = harness.diagnostic_store();
+
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &second),
+        "the harness must hand out one shared store, mirroring production wiring"
+    );
+}
+
 #[tokio::test]
 async fn builtin_tools_planned_runtime_parts_shape_matches_production() {
     let group = RebornIntegrationGroup::builtin_tools()

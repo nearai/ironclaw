@@ -1131,6 +1131,16 @@ impl RebornIntegrationHarness {
         std::sync::Arc::clone(&self.workflow)
     }
 
+    /// The SAME `InMemoryDiagnosticStore` the loop's diagnostic sinks write
+    /// into. Hand this to `RebornServices::with_diagnostic_store` so a test
+    /// reads what the run actually recorded, exactly as production connects
+    /// the two in `product_surface.rs:98`.
+    pub(crate) fn diagnostic_store(
+        &self,
+    ) -> std::sync::Arc<ironclaw_assistant::inspector_store::InMemoryDiagnosticStore> {
+        std::sync::Arc::clone(&self._shared.diagnostic_store)
+    }
+
     /// A fresh binding-service instance over the GROUP-shared product
     /// harness storage — the SAME durable binding ledger the workflow above
     /// resolves through at admission. Delivery proofs hand this to the
