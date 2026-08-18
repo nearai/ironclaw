@@ -23,7 +23,9 @@ use ironclaw_approvals::{
     ToolPermissionOverrideKey,
 };
 use ironclaw_assistant::EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID;
-use ironclaw_assistant::inspector_store::{DiagnosticStoreError, DiagnosticStorePort};
+use ironclaw_assistant::inspector_store::{
+    DiagnosticStoreError, DiagnosticStoreLimits, DiagnosticStorePort, InMemoryDiagnosticStore,
+};
 use ironclaw_assistant::{
     ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW, ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW,
     ADMIN_THREAD_SCRAPE_THREADS_VIEW, ADMIN_USER_DELETE_CAPABILITY_ID,
@@ -156,8 +158,9 @@ use ironclaw_product_contracts::inbound_requests::{
     ProductRetryRunRequest, ProductSetupExtensionRequest, ProductSubmitTurnRequest,
 };
 use ironclaw_product_contracts::inspector::{
-    DiagnosticActivityEvent, DiagnosticCursor, DiagnosticScope, DiagnosticSnapshot,
-    DiagnosticUpdateBatch, PromptDiagnostic, ToolExecutionDiagnostic,
+    BoundedDiagnosticText, DiagnosticActivityEvent, DiagnosticCursor, DiagnosticModelCallId,
+    DiagnosticScope, DiagnosticSnapshot, DiagnosticUpdateBatch, InspectorModelCallStatus,
+    ModelCallDiagnostic, PromptDiagnostic, ToolExecutionDiagnostic,
 };
 use ironclaw_product_contracts::ironhub::{
     IRONHUB_DELIVER_INSTALL_COMMAND_ID, IronhubInstallDeliveryRequest,
@@ -8883,6 +8886,120 @@ async fn thread_artifact_includes_all_owned_runs_and_queries_thread_scoped_logs(
     );
     assert_eq!(requests[0].run_id, None);
     assert_eq!(requests[0].limit, Some(500));
+}
+
+fn diagnostic_model_call(status: InspectorModelCallStatus) -> ModelCallDiagnostic {
+    ModelCallDiagnostic {
+        call_id: DiagnosticModelCallId::new(),
+        iteration: 1,
+        requested_model: BoundedDiagnosticText::label("test-model"),
+        effective_model: None,
+        started_at: Utc::now(),
+        completed_at: Some(Utc::now()),
+        duration_ms: Some(1),
+        status,
+        usage: None,
+        failure_summary: None,
+    }
+}
+
+/// A thread with two runs whose activity is clearly time-separated. Each
+/// run's `timings_by_run` entry must report `wall_clock_ms` measured against
+/// its OWN messages, never against a later (or earlier) run's activity in the
+/// same thread — the defect this regresses reused the whole thread's message
+/// list per run, so an earlier run's duration was inflated by however long
+/// until the next run started.
+#[tokio::test]
+async fn thread_artifact_per_run_timings_do_not_reach_into_another_runs_activity() {
+    let owner = caller();
+    let thread_scope = thread_scope_for(&owner);
+    let thread_id = ThreadId::new("thread-multi-run-timings").expect("thread id");
+    let run_a = TurnRunId::parse(&run_id_string()).expect("run id");
+    let run_b = TurnRunId::new();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: owner.user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+
+    seed_submitted_message(&thread_service, &thread_scope, &thread_id, &run_a, "run a").await;
+    // Real wall-clock separation between the two runs' activity. Post-fix,
+    // run A's own messages land within a few milliseconds of each other, so
+    // its `wall_clock_ms` stays near zero regardless of this gap. Pre-fix,
+    // `derive_wall_clock_ms` scanned the WHOLE thread's messages, so run A's
+    // reported span reached all the way to run B's later `updated_at` and
+    // was inflated by (approximately) this sleep.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    seed_submitted_message(&thread_service, &thread_scope, &thread_id, &run_b, "run b").await;
+
+    let diagnostic_store =
+        InMemoryDiagnosticStore::new(DiagnosticStoreLimits::default()).expect("diagnostic store");
+    diagnostic_store
+        .record_model_call(
+            DiagnosticScope::new(
+                owner.tenant_id.clone(),
+                owner.user_id.clone(),
+                thread_id.clone(),
+                run_a,
+            ),
+            diagnostic_model_call(InspectorModelCallStatus::Succeeded),
+        )
+        .expect("run a model call recorded");
+    diagnostic_store
+        .record_model_call(
+            DiagnosticScope::new(
+                owner.tenant_id.clone(),
+                owner.user_id.clone(),
+                thread_id.clone(),
+                run_b,
+            ),
+            diagnostic_model_call(InspectorModelCallStatus::Succeeded),
+        )
+        .expect("run b model call recorded");
+
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_diagnostic_store(Arc::new(diagnostic_store));
+
+    let page = services
+        .query(
+            owner,
+            RebornViewQuery {
+                view_id: THREAD_ARTIFACT_VIEW.id.to_string(),
+                params: serde_json::to_value(RebornThreadArtifactRequest {
+                    thread_id: thread_id.to_string(),
+                })
+                .expect("artifact params"),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("thread artifact");
+    let artifact: RebornThreadArtifact =
+        serde_json::from_value(page.payload).expect("artifact payload");
+
+    assert_eq!(artifact.timings_by_run.len(), 2);
+    let run_a_timing = artifact
+        .timings_by_run
+        .iter()
+        .find(|entry| entry.run_id == run_a.to_string())
+        .expect("run a timing entry");
+    assert!(run_a_timing.timings.available);
+    let run_a_wall_clock_ms = run_a_timing
+        .timings
+        .totals
+        .wall_clock_ms
+        .expect("run a wall clock");
+    assert!(
+        run_a_wall_clock_ms < 100,
+        "run a's wall_clock_ms ({run_a_wall_clock_ms}ms) must be measured against its own \
+         messages, not inflated by the ~150ms gap to run b's later activity"
+    );
 }
 
 #[tokio::test]

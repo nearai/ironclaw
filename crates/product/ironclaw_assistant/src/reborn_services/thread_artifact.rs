@@ -91,18 +91,34 @@ where
         let (messages, message_redaction_applied) =
             artifact_messages(snapshot.history.messages, &context_by_id, &redactor);
 
-        // Compute per-run timings before `artifact_logs` takes `caller` by value.
-        let mut timings_by_run = Vec::new();
-        let mut seen_runs = std::collections::HashSet::new();
+        // Compute per-run timings before `artifact_logs` takes `caller` by
+        // value. Single pass: bucket messages by run first, so each run's
+        // timing computation (`derive_wall_clock_ms`'s `updated_at` scan in
+        // particular) sees only its own messages instead of the whole
+        // thread's — passing the full `messages` list per run would let one
+        // run's wall-clock span reach into a later run's activity, and would
+        // also re-scan the whole list once per distinct run.
+        let mut runs_in_order: Vec<String> = Vec::new();
+        let mut messages_by_run: std::collections::HashMap<String, Vec<RunArtifactMessage>> =
+            std::collections::HashMap::new();
         for message in &messages {
             // silent-ok: a message with no run_id (pre-turn history, or a
             // non-run message kind) simply contributes no timings entry.
             let Some(run_id_text) = message.run_id.as_deref() else {
                 continue;
             };
-            if !seen_runs.insert(run_id_text.to_string()) {
-                continue;
-            }
+            messages_by_run
+                .entry(run_id_text.to_string())
+                .or_insert_with(|| {
+                    runs_in_order.push(run_id_text.to_string());
+                    Vec::new()
+                })
+                .push(message.clone());
+        }
+
+        let mut timings_by_run = Vec::new();
+        for run_id_text in &runs_in_order {
+            let run_messages = &messages_by_run[run_id_text];
             // silent-ok: `run_id_text` came from a durably persisted
             // `turn_run_id` that was validated as a `TurnRunId` at write
             // time; a parse failure here would mean corrupted storage, and
@@ -117,18 +133,13 @@ where
             // possible for pre-timestamp records); wall-clock timing has no
             // origin to measure from, so this run is left out rather than
             // reported with a fabricated span.
-            let Some(origin) = messages
-                .iter()
-                .filter(|candidate| candidate.run_id.as_deref() == Some(run_id_text))
-                .filter_map(|candidate| candidate.created_at)
-                .min()
-            else {
+            let Some(origin) = run_messages.iter().filter_map(|m| m.created_at).min() else {
                 continue;
             };
-            let timings = self.artifact_timings(&caller, &thread_id, &run_id, origin, &messages);
+            let timings = self.artifact_timings(&caller, &thread_id, &run_id, origin, run_messages);
             if timings.available {
                 timings_by_run.push(RunArtifactRunTimings {
-                    run_id: run_id_text.to_string(),
+                    run_id: run_id_text.clone(),
                     timings,
                 });
             }
