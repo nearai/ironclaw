@@ -24,7 +24,7 @@ The abandoned JSON pointer/length ABI (`alloc`, `invoke_json`, `output_ptr`, `ou
 `near:agent@0.4.0` replaced the untyped JSON-string `execute` return value with
 a typed `wit-result`-shaped `variant response`:
 
-- `success(string)` — the JSON-encoded output, unchanged from 0.3.0.
+- `success(string)` — the JSON-encoded tool output.
 - `failure(guest-failure)` — a structured failure record instead of an
   ad-hoc error string, with:
   - `kind: error-kind` — a closed enum (`auth-required`, `input`,
@@ -42,11 +42,9 @@ secret-shaped values at the sandbox-exit chokepoint before either is visible
 outside the guest, and `message` is additionally bounded and re-validated
 downstream before it reaches the model.
 
-The runtime also accepts components compiled against the frozen legacy
-`invoke-json`-returning world (`near:agent@0.3.0`,
-`wit/legacy/tool_v0_3_0.wit`) through a binding-level fallback in
-`WitToolRuntime::prepare`; that fallback is removed in PR 4, after which
-`near:agent@0.4.0` typed responses are the only supported shape.
+`near:agent@0.4.0` typed responses are the sole supported tool contract.
+Components targeting another WIT contract version fail closed during
+instantiation with an unsupported-contract error.
 
 ## Runtime invariants
 
