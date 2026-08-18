@@ -445,7 +445,7 @@ entries.
 | Use the Missions tab instead of the removed Routines tab and activity strip | `test_v2_activity_shell.py` (2; pending legacy migration #6369) |
 | See routines created in one surface from another (owner scope) | `test_owner_scope.py` (3) |
 | Browse projects, create one, open a scoped chat, list and download workspace files | `test_reborn_webui_v2_legacy_projects.py` (6), `test_project_detail.py` (3), `test_reborn_v2_file_download.py` (4) |
-| Read generic server-backed notifications, mark one or all as read, and open the source thread | `test_reborn_webui_v2_notifications.py` (5) |
+| Read generic server-backed notifications, mark one or all as read, wait for a matching final reply before acknowledging completion, and open the source thread | `test_reborn_webui_v2_notifications.py` (6) |
 
 ### 6.7 Settings, skills & admin
 | The user can… | Evidence |

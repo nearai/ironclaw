@@ -8,6 +8,7 @@ from playwright.async_api import expect
 
 from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
 from reborn_webui_harness import (
+    install_fake_v2_event_stream,
     reborn_v2_browser,  # noqa: F401 - imported fixture
     reborn_v2_server,  # noqa: F401 - imported fixture
 )
@@ -15,6 +16,8 @@ from reborn_webui_harness import (
 
 THREAD_ID = "thread-e2e-notification"
 NOTIFICATION_ID = "notification-e2e-auth"
+COMPLETION_NOTIFICATION_ID = "notification-e2e-completed"
+RUN_ID = "run-e2e-notification"
 
 
 def _notification_threads_payload():
@@ -32,15 +35,22 @@ def _notification_threads_payload():
     }
 
 
-def _notification_payload(read_at=None):
+def _notification_payload(
+    read_at=None,
+    *,
+    notification_id=NOTIFICATION_ID,
+    kind="authentication_required",
+    turn_run_id=None,
+):
     return {
         "notifications": [
             {
-                "id": NOTIFICATION_ID,
-                "kind": "authentication_required",
+                "id": notification_id,
+                "kind": kind,
                 "severity": "warning",
                 "action": {"kind": "open_thread", "thread_id": THREAD_ID},
                 "thread_id": THREAD_ID,
+                "turn_run_id": turn_run_id,
                 "created_at": "2026-06-30T08:10:01Z",
                 "updated_at": read_at or "2026-06-30T08:10:01Z",
                 "read_at": read_at,
@@ -52,7 +62,13 @@ def _notification_payload(read_at=None):
     }
 
 
-async def _route_notification_inbox(page):
+async def _route_notification_inbox(
+    page,
+    *,
+    notification_id=NOTIFICATION_ID,
+    kind="authentication_required",
+    turn_run_id=None,
+):
     state = {
         "read_at": None,
     }
@@ -74,11 +90,18 @@ async def _route_notification_inbox(page):
             await route.fulfill(
                 status=200,
                 content_type="application/json",
-                body=json.dumps(_notification_payload(state["read_at"])),
+                body=json.dumps(
+                    _notification_payload(
+                        state["read_at"],
+                        notification_id=notification_id,
+                        kind=kind,
+                        turn_run_id=turn_run_id,
+                    )
+                ),
             )
             return
         if route.request.method == "POST" and parsed.path in {
-            f"/api/webchat/v2/notifications/{NOTIFICATION_ID}/read",
+            f"/api/webchat/v2/notifications/{notification_id}/read",
             "/api/webchat/v2/notifications/read-all",
         }:
             state["read_at"] = "2026-06-30T08:11:00Z"
@@ -181,6 +204,72 @@ async def test_reborn_v2_notification_open_persists_read_without_hiding_message(
         await expect(panel).to_be_visible(timeout=5000)
         await expect(panel).to_contain_text("Authentication required")
         await expect(panel.locator(SEL_V2["notification_row"])).to_have_count(1)
+    finally:
+        await context.close()
+
+
+async def test_reborn_v2_completion_waits_for_matching_final_reply_render(
+    reborn_v2_server,
+    reborn_v2_browser,
+):
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    try:
+        await install_fake_v2_event_stream(page)
+        state = await _route_notification_inbox(
+            page,
+            notification_id=COMPLETION_NOTIFICATION_ID,
+            kind="run_completed",
+            turn_run_id=RUN_ID,
+        )
+
+        async def timeline_handler(route):
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"messages": [], "next_cursor": None}),
+            )
+
+        await page.route(
+            f"**/api/webchat/v2/threads/{THREAD_ID}/timeline**",
+            timeline_handler,
+        )
+        await _open_v2(page, reborn_v2_server)
+
+        await page.locator(SEL_V2["notification_bell"]).click()
+        await page.locator(SEL_V2["notification_row"]).first.click()
+        await expect(page).to_have_url(
+            re.compile(rf".*/chat/{THREAD_ID}(?:\?.*)?$"),
+            timeout=5000,
+        )
+        await page.wait_for_function("() => window.__v2SseHasOpenStream?.() === true")
+        await expect(page.locator(SEL_V2["msg_assistant"])).to_have_count(0)
+        assert state["read_at"] is None
+
+        async with page.expect_response(
+            lambda response: response.request.method == "POST"
+            and urlparse(response.url).path
+            == f"/api/webchat/v2/notifications/{COMPLETION_NOTIFICATION_ID}/read"
+            and response.status == 200
+        ):
+            await page.evaluate(
+                """
+                ([runId, text]) => window.__emitV2Sse("final_reply", {
+                  reply: {
+                    turn_run_id: runId,
+                    text,
+                    generated_at: "2026-06-30T08:11:00Z"
+                  }
+                }, "cursor-notification-final")
+                """,
+                [RUN_ID, "The scheduled report is ready."],
+            )
+
+        await expect(page.locator(SEL_V2["msg_assistant"])).to_contain_text(
+            "The scheduled report is ready.",
+            timeout=5000,
+        )
+        assert state["read_at"] is not None
     finally:
         await context.close()
 
