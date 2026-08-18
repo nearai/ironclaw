@@ -78,7 +78,10 @@ pub(super) fn derive_wall_clock_ms<'a>(
     run_received_at: DateTime<Utc>,
     messages: impl IntoIterator<Item = &'a RunArtifactMessage>,
 ) -> Option<u64> {
-    let newest = messages.into_iter().filter_map(|message| message.updated_at).max()?;
+    let newest = messages
+        .into_iter()
+        .filter_map(|message| message.updated_at)
+        .max()?;
     u64::try_from((newest - run_received_at).num_milliseconds()).ok()
 }
 
