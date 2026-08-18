@@ -2261,3 +2261,90 @@ impl RootFilesystem for QueryCountingBackend {
         self.inner.reserve_sequence(path).await
     }
 }
+
+/// A 1.2.x build persists an `activation_state` field into the
+/// `extension_state.v2` installation row without bumping the schema string, so
+/// the row still declares `extension_state.v2` and is routed to the current
+/// typed reader. `V2InstallationRecord` denies unknown fields, so a release
+/// that does not model the field aborts composition with `extension
+/// installation state could not be loaded` and the process crash-loops with
+/// every installed extension unreachable.
+///
+/// The field is accepted, and — unlike the diagnostic `health` field, which is
+/// regenerable and therefore discarded — it is preserved verbatim across
+/// writes, because it records operator intent that a rollback to 1.2 would
+/// otherwise silently reset to enabled.
+#[tokio::test]
+async fn v2_rows_carrying_activation_state_load_and_preserve_it() {
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+    let root =
+        VirtualPath::new("/system/extensions/.installations/activation-state-compat").unwrap();
+    let store = ExtensionInstallationStore::load_at(
+        Arc::clone(&filesystem),
+        root.clone(),
+        HostPortCatalog::empty(),
+        contracts(),
+    )
+    .await
+    .unwrap();
+    let installed = normalized_installation("sha256:abc");
+    store
+        .upsert_manifest_and_installation(manifest("sha256:abc"), installed.clone())
+        .await
+        .unwrap();
+
+    // Rewrite the persisted row into the shape a 1.2.x build leaves behind.
+    // Mutating the stored entry in place keeps its real `kind` and `indexed`
+    // map, neither of which is constructible from this crate.
+    let installations = VirtualPath::new(format!("{}/v2/installations", root.as_str())).unwrap();
+    let rows = filesystem
+        .query(&installations, &Filter::All, Page::first(10))
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    let mut body: serde_json::Value = rows[0].entry.parse_json().unwrap();
+    body.as_object_mut()
+        .unwrap()
+        .insert("activation_state".to_string(), serde_json::json!("enabled"));
+    let mut entry = rows[0].entry.clone();
+    entry.body = serde_json::to_vec(&body).unwrap();
+    filesystem
+        .put(
+            &rows[0].path,
+            entry,
+            CasExpectation::Version(rows[0].version),
+        )
+        .await
+        .unwrap();
+
+    // Reopening the root is what `serve` does on every boot.
+    let reopened = ExtensionInstallationStore::load_at(
+        Arc::clone(&filesystem),
+        root.clone(),
+        HostPortCatalog::empty(),
+        contracts(),
+    )
+    .await
+    .expect("a 1.2-written installation row must not fail composition");
+    assert_eq!(
+        reopened
+            .get_installation(installed.installation_id())
+            .await
+            .unwrap(),
+        Some(installed.clone()),
+        "the installation must survive the upgrade, not just the boot"
+    );
+
+    // A later write must not silently drop the operator's setting.
+    reopened.upsert_installation(installed.clone()).await.unwrap();
+    let rows = filesystem
+        .query(&installations, &Filter::All, Page::first(10))
+        .await
+        .unwrap();
+    let body: serde_json::Value = rows[0].entry.parse_json().unwrap();
+    assert_eq!(
+        body["activation_state"],
+        serde_json::json!("enabled"),
+        "a rewrite must carry the 1.2 activation state forward: {body}"
+    );
+}
