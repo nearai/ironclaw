@@ -375,6 +375,30 @@ def test_provider_trace_compilation_preserves_provider_call_inventory():
     assert actual == _EXPECTED_COMPILED_PROVIDER_CALLS
 
 
+def test_provider_trace_compilation_excludes_unrelated_extension_discovery():
+    """Provider replay must not depend on the external extension registry."""
+    case = next(
+        case
+        for case in PROVIDER_JOURNEY_CASES
+        if case.case_id == "qa_6c_gmail_to_sheet_live_chat"
+    )
+    trace_path = ROOT / case.trace
+    compiled = compile_provider_journey_trace(
+        load_recorded_trace(trace_path),
+        source=trace_path.name,
+        facts=case.replay,
+        provider_tools=EMULATE_SUPPORTED_TOOLS,
+        slack_state=_SEEDED_SLACK_STATE,
+    )
+    compiled_tool_names = {
+        call["name"]
+        for step in compiled.trace["steps"]
+        for call in step["response"].get("tool_calls", [])
+    }
+
+    assert compiled_tool_names <= EMULATE_SUPPORTED_TOOLS
+
+
 def test_provider_trace_compilation_uses_declared_google_seed():
     case = next(
         case

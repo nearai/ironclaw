@@ -1,11 +1,14 @@
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use crate::{
     ClaimProcessesRequest, FailProcessRequest, GetProcessSnapshotRequest, JournaledProcessSnapshot,
     ProcessCheckpointRef, ProcessJournalStoreError, ProcessKind, ProcessLeaseRequest,
-    ProcessLifecycleStatus, ProcessRuntimePort, ProcessStateTransitionRequest, ProcessSuspension,
-    ProcessSuspensionKind, ProcessWorkerId, ResumeProcessRequest, SubmitProcessRequest,
-    SuspendProcessRequest,
+    ProcessLifecycleStatus, ProcessOperationId, ProcessRuntimePort, ProcessStateTransitionRequest,
+    ProcessSubmissionEdge, ProcessSuspension, ProcessSuspensionKind, ProcessWorkerId,
+    ResumeProcessRequest, SubmitProcessAtEdgeRequest, SubmitProcessRequest, SuspendProcessRequest,
 };
 use async_trait::async_trait;
 use ironclaw_event_log::sanitize_error_kind;
@@ -55,6 +58,19 @@ pub struct ProcessInvocationStart {
 pub enum ProcessInvocationError {
     #[error("unknown invocation {invocation_id}")]
     UnknownInvocation { invocation_id: InvocationId },
+    /// The invocation's process record exists, but this worker no longer holds
+    /// it: the lease expired and recovery either failed it (`lease_expired` /
+    /// `crash_retry_exhausted`) or requeued it and another claimer took it.
+    ///
+    /// Distinct from [`Self::UnknownInvocation`] on purpose — a lost lease is a
+    /// recoverable ownership loss, and reporting it as "not found" hides the
+    /// write-pressure/lease-expiry cause behind a missing-record message
+    /// (issue #7714).
+    #[error("lease lost for invocation {invocation_id}: {reason}")]
+    LeaseLost {
+        invocation_id: InvocationId,
+        reason: String,
+    },
     #[error("invocation {invocation_id} already exists")]
     InvocationAlreadyExists { invocation_id: InvocationId },
     #[error("process invocation serialization failed: {0}")]
@@ -98,6 +114,16 @@ pub trait ProcessInvocationStatePort: Send + Sync {
         invocation_id: InvocationId,
         error_kind: String,
     ) -> Result<ProcessInvocationRecord, ProcessInvocationError>;
+    /// Removes worker-local state when a fresh invocation exits without a
+    /// durable gate or terminal edge. Stores without local pending state may
+    /// keep the default no-op.
+    async fn discard_pending(
+        &self,
+        _scope: &ResourceScope,
+        _invocation_id: InvocationId,
+    ) -> Result<(), ProcessInvocationError> {
+        Ok(())
+    }
 
     async fn get(
         &self,
@@ -123,11 +149,15 @@ struct CapabilityRunMetadata {
 
 pub struct ProcessInvocationStore {
     processes: Arc<dyn ProcessRuntimePort>,
+    pending: Mutex<HashMap<InvocationId, ProcessInvocationStart>>,
 }
 
 impl ProcessInvocationStore {
     pub fn new(processes: Arc<dyn ProcessRuntimePort>) -> Self {
-        Self { processes }
+        Self {
+            processes,
+            pending: Mutex::new(HashMap::new()),
+        }
     }
 
     fn process_id(invocation_id: InvocationId) -> ProcessId {
@@ -209,6 +239,122 @@ impl ProcessInvocationStore {
         }))
     }
 
+    fn pending_record(start: &ProcessInvocationStart) -> ProcessInvocationRecord {
+        ProcessInvocationRecord {
+            invocation_id: start.invocation_id,
+            capability_id: start.capability_id.clone(),
+            scope: start.scope.clone(),
+            authenticated_actor_user_id: start.authenticated_actor_user_id.clone(),
+            status: ProcessInvocationStatus::Running,
+            approval_request_id: None,
+            error_kind: None,
+        }
+    }
+
+    fn pending_start(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<Option<ProcessInvocationStart>, ProcessInvocationError> {
+        let pending = self
+            .pending
+            .lock()
+            .map_err(|error| ProcessInvocationError::Backend(error.to_string()))?;
+        Ok(pending
+            .get(&invocation_id)
+            .filter(|start| start.scope == *scope)
+            .cloned())
+    }
+
+    fn remove_pending(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<(), ProcessInvocationError> {
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|error| ProcessInvocationError::Backend(error.to_string()))?;
+        if pending
+            .get(&invocation_id)
+            .is_some_and(|start| start.scope == *scope)
+        {
+            pending.remove(&invocation_id);
+        }
+        Ok(())
+    }
+
+    fn edge_submission(
+        start: &ProcessInvocationStart,
+        checkpoint_ref: Option<ProcessCheckpointRef>,
+        metadata: CapabilityRunMetadata,
+    ) -> Result<SubmitProcessRequest, ProcessInvocationError> {
+        Ok(SubmitProcessRequest {
+            process_id: Self::process_id(start.invocation_id),
+            process_kind: ProcessKind::CapabilityInvocationState,
+            scope: start.scope.clone(),
+            exclusive_within_scope: false,
+            operation_id: Some(ProcessOperationId::from_trusted(format!(
+                "capability-invocation-{}",
+                start.invocation_id
+            ))),
+            owner_user_id: start.authenticated_actor_user_id.clone(),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref,
+            input: None,
+            created_at: chrono::Utc::now(),
+            metadata: Self::encode_metadata(&metadata)?,
+        })
+    }
+
+    async fn submit_pending_edge(
+        &self,
+        start: ProcessInvocationStart,
+        metadata: CapabilityRunMetadata,
+        checkpoint_ref: Option<ProcessCheckpointRef>,
+        edge: ProcessSubmissionEdge,
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
+        let invocation_id = start.invocation_id;
+        let snapshot = self
+            .processes
+            .submit_process_at_edge(SubmitProcessAtEdgeRequest {
+                submission: Self::edge_submission(&start, checkpoint_ref, metadata)?,
+                edge,
+            })
+            .await
+            .map_err(|error| map_process_error(error, invocation_id))?;
+        self.remove_pending(&start.scope, invocation_id)?;
+        Self::record(snapshot)?.ok_or(ProcessInvocationError::UnknownInvocation { invocation_id })
+    }
+    async fn try_pending_edge(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        approval_request_id: Option<ApprovalRequestId>,
+        error_kind: Option<String>,
+        checkpoint_ref: Option<ProcessCheckpointRef>,
+        edge: ProcessSubmissionEdge,
+    ) -> Result<Option<ProcessInvocationRecord>, ProcessInvocationError> {
+        let Some(start) = self.pending_start(scope, invocation_id)? else {
+            return Ok(None);
+        };
+        let mut metadata = Self::metadata(start.clone());
+        metadata.approval_request_id = approval_request_id;
+        metadata.error_kind = error_kind;
+        self.submit_pending_edge(start, metadata, checkpoint_ref, edge)
+            .await
+            .map(Some)
+    }
+
+    fn sanitized_failure(error_kind: &str) -> SanitizedFailure {
+        SanitizedFailure::new(sanitize_error_kind(error_kind.to_string()))
+            .unwrap_or_else(|_| SanitizedFailure::from_trusted_static("unknown_failure"))
+    }
+
     async fn snapshot(
         &self,
         scope: &ResourceScope,
@@ -257,7 +403,26 @@ impl ProcessInvocationStore {
             .into_iter()
             .next()
             .map(|claim| claim.state)
-            .ok_or(ProcessInvocationError::UnknownInvocation { invocation_id })
+            // Every caller reached here through `running_snapshot`, which read
+            // the process record first — so the record exists and an empty
+            // claim means someone else holds it (a racing claimer after
+            // requeue, or a concurrency limit), not a missing invocation.
+            .ok_or_else(|| ProcessInvocationError::LeaseLost {
+                invocation_id,
+                reason: "process is no longer claimable by this worker".to_string(),
+            })
+    }
+
+    /// The sanitized failure category when a terminal process was failed by
+    /// lease recovery, rather than by its own capability outcome.
+    fn lease_expiry_category(snapshot: &JournaledProcessSnapshot) -> Option<&'static str> {
+        let category = snapshot.failure.as_ref()?.category();
+        [
+            crate::journal_store::LEASE_EXPIRED_FAILURE_CATEGORY,
+            crate::journal_store::CRASH_RETRY_EXHAUSTED_FAILURE_CATEGORY,
+        ]
+        .into_iter()
+        .find(|known| *known == category)
     }
 
     async fn running_snapshot(
@@ -283,9 +448,18 @@ impl ProcessInvocationStore {
                     .map_err(|error| map_process_error(error, invocation_id))?;
                 self.claim(scope.clone(), invocation_id).await
             }
-            _ => Err(ProcessInvocationError::Backend(format!(
-                "capability process {invocation_id} is terminal"
-            ))),
+            // A process recovery failed because its lease expired is a lost
+            // lease, not an opaque terminal state — keep the cause legible all
+            // the way to the host-runtime boundary.
+            _ => match Self::lease_expiry_category(&snapshot) {
+                Some(category) => Err(ProcessInvocationError::LeaseLost {
+                    invocation_id,
+                    reason: category.to_string(),
+                }),
+                None => Err(ProcessInvocationError::Backend(format!(
+                    "capability process {invocation_id} is terminal"
+                ))),
+            },
         }
     }
 
@@ -321,31 +495,26 @@ impl ProcessInvocationStatePort for ProcessInvocationStore {
         start: ProcessInvocationStart,
     ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         let invocation_id = start.invocation_id;
-        let scope = start.scope.clone();
-        let owner_user_id = start.authenticated_actor_user_id.clone();
-        let metadata = Self::encode_metadata(&Self::metadata(start))?;
-        self.processes
-            .submit_process(SubmitProcessRequest {
-                process_id: Self::process_id(invocation_id),
-                process_kind: ProcessKind::CapabilityInvocationState,
-                scope: scope.clone(),
-                exclusive_within_scope: false,
-                operation_id: None,
-                owner_user_id,
-                concurrency_class: None,
-                parent_process_id: None,
-                root_process_id: None,
-                spawn_tree_descendant_cap: None,
-                dependency: None,
-                checkpoint_ref: None,
-                input: None,
-                created_at: chrono::Utc::now(),
-                metadata,
-            })
-            .await
-            .map_err(|error| map_process_error(error, invocation_id))?;
-        let snapshot = self.claim(scope, invocation_id).await?;
-        Self::record(snapshot)?.ok_or(ProcessInvocationError::UnknownInvocation { invocation_id })
+        if self.get(&start.scope, invocation_id).await?.is_some() {
+            return Err(ProcessInvocationError::InvocationAlreadyExists { invocation_id });
+        }
+        let record = Self::pending_record(&start);
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|error| ProcessInvocationError::Backend(error.to_string()))?;
+        if pending.contains_key(&invocation_id) {
+            return Err(ProcessInvocationError::InvocationAlreadyExists { invocation_id });
+        }
+        pending.insert(invocation_id, start);
+        Ok(record)
+    }
+    async fn discard_pending(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<(), ProcessInvocationError> {
+        self.remove_pending(scope, invocation_id)
     }
 
     async fn block_approval(
@@ -354,27 +523,38 @@ impl ProcessInvocationStatePort for ProcessInvocationStore {
         invocation_id: InvocationId,
         approval: ApprovalRequest,
     ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
+        let suspension = ProcessSuspension {
+            kind: ProcessSuspensionKind::Approval,
+            gate_ref: Some(
+                TurnGateRef::new(format!("gate:approval-{}", approval.id))
+                    .map_err(ProcessInvocationError::Backend)?,
+            ),
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        };
+        if let Some(record) = self
+            .try_pending_edge(
+                scope,
+                invocation_id,
+                Some(approval.id),
+                None,
+                Some(Self::checkpoint_ref(invocation_id)),
+                ProcessSubmissionEdge::Suspended {
+                    suspension: suspension.clone(),
+                },
+            )
+            .await?
+        {
+            return Ok(record);
+        }
         let snapshot = self.snapshot(scope, invocation_id).await?;
         let mut metadata = Self::decode_metadata(&snapshot)?
             .ok_or(ProcessInvocationError::UnknownInvocation { invocation_id })?;
         metadata.approval_request_id = Some(approval.id);
         metadata.error_kind = None;
-        self.suspend(
-            scope,
-            invocation_id,
-            metadata,
-            ProcessSuspension {
-                kind: ProcessSuspensionKind::Approval,
-                gate_ref: Some(
-                    TurnGateRef::new(format!("gate:approval-{}", approval.id))
-                        .map_err(ProcessInvocationError::Backend)?,
-                ),
-                activity_id: None,
-                credential_requirements: Vec::new(),
-                detail: None,
-            },
-        )
-        .await
+        self.suspend(scope, invocation_id, metadata, suspension)
+            .await
     }
 
     async fn block_auth(
@@ -383,24 +563,35 @@ impl ProcessInvocationStatePort for ProcessInvocationStore {
         invocation_id: InvocationId,
         error_kind: String,
     ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
+        let suspension = ProcessSuspension {
+            kind: ProcessSuspensionKind::Authorization,
+            gate_ref: None,
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        };
+        if let Some(record) = self
+            .try_pending_edge(
+                scope,
+                invocation_id,
+                None,
+                Some(error_kind.clone()),
+                Some(Self::checkpoint_ref(invocation_id)),
+                ProcessSubmissionEdge::Suspended {
+                    suspension: suspension.clone(),
+                },
+            )
+            .await?
+        {
+            return Ok(record);
+        }
         let snapshot = self.snapshot(scope, invocation_id).await?;
         let mut metadata = Self::decode_metadata(&snapshot)?
             .ok_or(ProcessInvocationError::UnknownInvocation { invocation_id })?;
         metadata.approval_request_id = None;
         metadata.error_kind = Some(error_kind);
-        self.suspend(
-            scope,
-            invocation_id,
-            metadata,
-            ProcessSuspension {
-                kind: ProcessSuspensionKind::Authorization,
-                gate_ref: None,
-                activity_id: None,
-                credential_requirements: Vec::new(),
-                detail: None,
-            },
-        )
-        .await
+        self.suspend(scope, invocation_id, metadata, suspension)
+            .await
     }
 
     async fn complete(
@@ -408,6 +599,19 @@ impl ProcessInvocationStatePort for ProcessInvocationStore {
         scope: &ResourceScope,
         invocation_id: InvocationId,
     ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
+        if let Some(record) = self
+            .try_pending_edge(
+                scope,
+                invocation_id,
+                None,
+                None,
+                None,
+                ProcessSubmissionEdge::Completed,
+            )
+            .await?
+        {
+            return Ok(record);
+        }
         let snapshot = self.running_snapshot(scope, invocation_id).await?;
         let mut metadata = Self::decode_metadata(&snapshot)?
             .ok_or(ProcessInvocationError::UnknownInvocation { invocation_id })?;
@@ -430,13 +634,27 @@ impl ProcessInvocationStatePort for ProcessInvocationStore {
         invocation_id: InvocationId,
         error_kind: String,
     ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
+        let failure = Self::sanitized_failure(&error_kind);
+        if let Some(record) = self
+            .try_pending_edge(
+                scope,
+                invocation_id,
+                None,
+                Some(error_kind.clone()),
+                None,
+                ProcessSubmissionEdge::Failed {
+                    failure: failure.clone(),
+                },
+            )
+            .await?
+        {
+            return Ok(record);
+        }
         let snapshot = self.running_snapshot(scope, invocation_id).await?;
         let mut metadata = Self::decode_metadata(&snapshot)?
             .ok_or(ProcessInvocationError::UnknownInvocation { invocation_id })?;
         metadata.approval_request_id = None;
-        metadata.error_kind = Some(error_kind.clone());
-        let failure = SanitizedFailure::new(sanitize_error_kind(error_kind))
-            .unwrap_or_else(|_| SanitizedFailure::from_trusted_static("unknown_failure"));
+        metadata.error_kind = Some(error_kind);
         let lease = Self::lease(&snapshot)?;
         let snapshot = self
             .processes
@@ -461,7 +679,9 @@ impl ProcessInvocationStatePort for ProcessInvocationStore {
     ) -> Result<Option<ProcessInvocationRecord>, ProcessInvocationError> {
         match self.snapshot(scope, invocation_id).await {
             Ok(snapshot) => Self::record(snapshot),
-            Err(ProcessInvocationError::UnknownInvocation { .. }) => Ok(None),
+            Err(ProcessInvocationError::UnknownInvocation { .. }) => self
+                .pending_start(scope, invocation_id)
+                .map(|start| start.as_ref().map(Self::pending_record)),
             Err(error) => Err(error),
         }
     }
@@ -481,6 +701,18 @@ impl ProcessInvocationStatePort for ProcessInvocationStore {
                 && let Some(record) = Self::record(snapshot)?
             {
                 records.push(record);
+            }
+        }
+        let pending = self
+            .pending
+            .lock()
+            .map_err(|error| ProcessInvocationError::Backend(error.to_string()))?;
+        for start in pending.values().filter(|start| start.scope == *scope) {
+            if !records
+                .iter()
+                .any(|record| record.invocation_id == start.invocation_id)
+            {
+                records.push(Self::pending_record(start));
             }
         }
         records.sort_by_key(|record| record.invocation_id.as_uuid());
@@ -509,9 +741,12 @@ mod tests {
     use crate::ProcessJournalSource;
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
-        ids::TenantId,
+        action::Action,
+        ids::{CorrelationId, TenantId},
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
+        resource::ResourceEstimate,
+        scope::Principal,
     };
 
     fn process_store() -> (
@@ -546,7 +781,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blocked_auth_and_completion_are_process_journal_transitions() {
+    async fn fresh_completion_writes_only_the_terminal_edge() {
         let (store, journal) = process_store();
         let invocation_id = InvocationId::new();
         let scope = scope(invocation_id);
@@ -561,40 +796,401 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(running.status, ProcessInvocationStatus::Running);
-
-        let blocked = store
-            .block_auth(&scope, invocation_id, "credential_required".to_string())
-            .await
-            .unwrap();
-        assert_eq!(blocked.status, ProcessInvocationStatus::BlockedAuth);
+        assert_eq!(
+            store.get(&scope, invocation_id).await.unwrap(),
+            Some(running)
+        );
+        assert!(
+            journal
+                .read_process_journal_after(&scope, None, None, 16)
+                .await
+                .unwrap()
+                .entries
+                .is_empty()
+        );
 
         let completed = store.complete(&scope, invocation_id).await.unwrap();
         assert_eq!(completed.status, ProcessInvocationStatus::Completed);
-
         let page = journal
             .read_process_journal_after(&scope, None, None, 16)
             .await
             .unwrap();
-        let kinds = page
-            .entries
-            .iter()
-            .map(|entry| entry.kind)
-            .collect::<Vec<_>>();
-        assert!(
-            page.entries
-                .iter()
-                .all(|entry| entry.process_kind == ProcessKind::CapabilityInvocationState)
-        );
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].kind, crate::ProcessJournalKind::Completed);
+    }
+
+    #[tokio::test]
+    async fn fresh_suspension_is_resumable_from_a_second_store() {
+        let (first_store, journal) = process_store();
+        let invocation_id = InvocationId::new();
+        let scope = scope(invocation_id);
+        first_store
+            .start(ProcessInvocationStart {
+                invocation_id,
+                capability_id: CapabilityId::new("echo.say").unwrap(),
+                scope: scope.clone(),
+                authenticated_actor_user_id: Some(scope.user_id.clone()),
+            })
+            .await
+            .unwrap();
+        first_store
+            .block_auth(&scope, invocation_id, "credential_required".to_string())
+            .await
+            .unwrap();
+
+        let runtime = Arc::clone(&journal) as Arc<dyn ProcessRuntimePort>;
+        let second_store = ProcessInvocationStore::new(runtime);
+        let blocked = second_store
+            .get(&scope, invocation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(blocked.status, ProcessInvocationStatus::BlockedAuth);
+        let completed = second_store.complete(&scope, invocation_id).await.unwrap();
+        assert_eq!(completed.status, ProcessInvocationStatus::Completed);
         assert_eq!(
-            kinds,
+            journal
+                .read_process_journal_after(&scope, None, None, 16)
+                .await
+                .unwrap()
+                .entries
+                .iter()
+                .map(|entry| entry.kind)
+                .collect::<Vec<_>>(),
             vec![
-                crate::ProcessJournalKind::Submitted,
-                crate::ProcessJournalKind::Claimed,
                 crate::ProcessJournalKind::Suspended,
                 crate::ProcessJournalKind::Resumed,
                 crate::ProcessJournalKind::Claimed,
                 crate::ProcessJournalKind::Completed,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn fresh_approval_block_is_durable_and_reloadable_from_a_second_store() {
+        let (first_store, journal) = process_store();
+        let invocation_id = InvocationId::new();
+        let scope = scope(invocation_id);
+        let capability_id = CapabilityId::new("echo.say").unwrap();
+        first_store
+            .start(ProcessInvocationStart {
+                invocation_id,
+                capability_id: capability_id.clone(),
+                scope: scope.clone(),
+                authenticated_actor_user_id: Some(scope.user_id.clone()),
+            })
+            .await
+            .unwrap();
+
+        let approval = ApprovalRequest {
+            id: ApprovalRequestId::new(),
+            correlation_id: CorrelationId::new(),
+            requested_by: Principal::User(scope.user_id.clone()),
+            action: Box::new(Action::Dispatch {
+                capability: capability_id.clone(),
+                estimated_resources: ResourceEstimate::default(),
+            }),
+            invocation_fingerprint: None,
+            reason: format!("approval for {invocation_id}"),
+            reusable_scope: None,
+        };
+        let blocked = first_store
+            .block_approval(&scope, invocation_id, approval.clone())
+            .await
+            .unwrap();
+        assert_eq!(blocked.status, ProcessInvocationStatus::BlockedApproval);
+        assert_eq!(blocked.approval_request_id.as_ref(), Some(&approval.id));
+
+        let runtime = Arc::clone(&journal) as Arc<dyn ProcessRuntimePort>;
+        let second_store = ProcessInvocationStore::new(runtime);
+        let reloaded = second_store
+            .get(&scope, invocation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.status, ProcessInvocationStatus::BlockedApproval);
+        assert_eq!(reloaded.approval_request_id.as_ref(), Some(&approval.id));
+        assert_eq!(reloaded.capability_id, capability_id);
+        assert_eq!(reloaded.scope, scope);
+        assert_eq!(reloaded.invocation_id, invocation_id);
+        assert_eq!(
+            reloaded.authenticated_actor_user_id,
+            Some(scope.user_id.clone())
+        );
+
+        let durable = journal
+            .get_process_snapshot(GetProcessSnapshotRequest {
+                scope: scope.clone(),
+                process_id: ProcessInvocationStore::process_id(invocation_id),
+            })
+            .await
+            .unwrap();
+        let durable_suspension = durable
+            .suspension
+            .expect("approval block must persist a suspension");
+        assert_eq!(
+            durable_suspension.gate_ref,
+            Some(
+                TurnGateRef::new(format!("gate:approval-{}", approval.id))
+                    .expect("approval gate ref must be valid")
+            )
+        );
+
+        let page = journal
+            .read_process_journal_after(&scope, None, None, 16)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|entry| entry.kind)
+                .collect::<Vec<_>>(),
+            vec![crate::ProcessJournalKind::Suspended]
+        );
+    }
+
+    /// Regression for issue #7714: write-pressure delays a process-journal
+    /// write, the lease expires, recovery fails the process `lease_expired`,
+    /// and the late transition attempt used to surface as
+    /// `UnknownInvocation` — which the host runtime rendered as "process
+    /// invocation not found", hiding the lease loss behind a missing-record
+    /// message.
+    #[tokio::test]
+    async fn transition_after_lease_expiry_recovery_reports_lease_lost() {
+        let (store, journal) = process_store();
+        let runtime = Arc::clone(&journal) as Arc<dyn ProcessRuntimePort>;
+        let invocation_id = InvocationId::new();
+        let scope = scope(invocation_id);
+        let process_id = ProcessInvocationStore::process_id(invocation_id);
+
+        store
+            .start(ProcessInvocationStart {
+                invocation_id,
+                capability_id: CapabilityId::new("echo.say").unwrap(),
+                scope: scope.clone(),
+                authenticated_actor_user_id: Some(scope.user_id.clone()),
+            })
+            .await
+            .unwrap();
+        // A durable suspension gives the process a checkpoint ref, so lease
+        // recovery fails it rather than requeuing it.
+        store
+            .block_auth(&scope, invocation_id, "credential_required".to_string())
+            .await
+            .unwrap();
+
+        // Take the lease the way `running_snapshot` does: resume, then claim.
+        let suspended = runtime
+            .get_process_snapshot(GetProcessSnapshotRequest {
+                scope: scope.clone(),
+                process_id,
+            })
+            .await
+            .unwrap();
+        runtime
+            .resume_process(ResumeProcessRequest {
+                scope: scope.clone(),
+                process_id,
+                operation_id: None,
+                expected_cursor: Some(suspended.journal_cursor),
+                checkpoint_ref: suspended.checkpoint_ref.clone(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        let claimed = runtime
+            .claim_next_processes(ClaimProcessesRequest {
+                worker_id: ProcessWorkerId::from_trusted(CAPABILITY_RUN_WORKER),
+                scope_filter: Some(scope.clone()),
+                process_id_filter: Some(process_id),
+                process_kind_filter: Some(ProcessKind::CapabilityInvocationState),
+                max_processes: 1,
+            })
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1, "process must be claimed before expiry");
+
+        let recovered = runtime
+            .recover_expired_process_leases(crate::RecoverExpiredProcessLeasesRequest {
+                now: chrono::Utc::now() + chrono::Duration::hours(1),
+                scope_filter: Some(scope.clone()),
+                process_kind_filter: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            recovered.recovered.len(),
+            1,
+            "expired lease must be recovered"
+        );
+
+        let error = store
+            .complete(&scope, invocation_id)
+            .await
+            .expect_err("a transition after lease recovery must fail");
+        assert!(
+            matches!(
+                &error,
+                ProcessInvocationError::LeaseLost { invocation_id: id, reason }
+                    if *id == invocation_id
+                        && reason == crate::journal_store::LEASE_EXPIRED_FAILURE_CATEGORY
+            ),
+            "lost lease must not be reported as a missing invocation, got {error:?}"
+        );
+    }
+
+    /// The other recovery category, driven through the same caller. Without
+    /// this, a regression that stopped classifying `crash_retry_exhausted`
+    /// would surface as a generic `Backend` error and no test would notice.
+    ///
+    /// The process is submitted straight to the journal rather than through
+    /// `ProcessInvocationStore::start`: `start` is worker-local, and every
+    /// durable record it goes on to create carries a checkpoint ref, which is
+    /// the `lease_expired` shape. A checkpointless record is what recovery
+    /// requeues until the reclaim budget runs out.
+    #[tokio::test]
+    async fn transition_after_crash_retry_exhaustion_reports_lease_lost() {
+        let (store, journal) = process_store();
+        let runtime = Arc::clone(&journal) as Arc<dyn ProcessRuntimePort>;
+        let invocation_id = InvocationId::new();
+        let scope = scope(invocation_id);
+        let process_id = ProcessInvocationStore::process_id(invocation_id);
+
+        runtime
+            .submit_process(crate::SubmitProcessRequest {
+                process_id,
+                process_kind: ProcessKind::CapabilityInvocationState,
+                scope: scope.clone(),
+                exclusive_within_scope: false,
+                operation_id: None,
+                owner_user_id: Some(scope.user_id.clone()),
+                concurrency_class: None,
+                parent_process_id: None,
+                root_process_id: None,
+                spawn_tree_descendant_cap: None,
+                dependency: None,
+                checkpoint_ref: None,
+                input: None,
+                created_at: chrono::Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .unwrap();
+
+        for attempt in 0..crate::MAX_CRASH_RECOVERY_RECLAIMS {
+            let claimed = runtime
+                .claim_next_processes(ClaimProcessesRequest {
+                    worker_id: ProcessWorkerId::from_trusted(CAPABILITY_RUN_WORKER),
+                    scope_filter: Some(scope.clone()),
+                    process_id_filter: Some(process_id),
+                    process_kind_filter: Some(ProcessKind::CapabilityInvocationState),
+                    max_processes: 1,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                claimed.len(),
+                1,
+                "process must be claimable on attempt {attempt}"
+            );
+            // Each round has to clear the previous requeue's grace window, so
+            // the clock moves forward rather than repeating one offset.
+            let recovered = runtime
+                .recover_expired_process_leases(crate::RecoverExpiredProcessLeasesRequest {
+                    now: chrono::Utc::now() + chrono::Duration::hours(1 + attempt as i64),
+                    scope_filter: Some(scope.clone()),
+                    process_kind_filter: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                recovered.recovered.len(),
+                1,
+                "expired lease must be recovered on attempt {attempt}"
+            );
+        }
+
+        let error = store
+            .complete(&scope, invocation_id)
+            .await
+            .expect_err("a transition after retry exhaustion must fail");
+        assert!(
+            matches!(
+                &error,
+                ProcessInvocationError::LeaseLost { invocation_id: id, reason }
+                    if *id == invocation_id
+                        && reason == crate::journal_store::CRASH_RETRY_EXHAUSTED_FAILURE_CATEGORY
+            ),
+            "exhausted crash retries must report a lost lease, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn transition_for_an_unknown_invocation_still_reports_unknown_invocation() {
+        let (store, _journal) = process_store();
+        let invocation_id = InvocationId::new();
+        let scope = scope(invocation_id);
+
+        let error = store
+            .complete(&scope, invocation_id)
+            .await
+            .expect_err("an unknown invocation must fail");
+        assert!(
+            matches!(
+                error,
+                ProcessInvocationError::UnknownInvocation { invocation_id: id }
+                    if id == invocation_id
+            ),
+            "a genuinely unknown invocation must stay UnknownInvocation, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_failure_is_reloadable_from_a_second_store() {
+        let (first_store, journal) = process_store();
+        let invocation_id = InvocationId::new();
+        let scope = scope(invocation_id);
+        let capability_id = CapabilityId::new("echo.say").unwrap();
+
+        let running = first_store
+            .start(ProcessInvocationStart {
+                invocation_id,
+                capability_id: capability_id.clone(),
+                scope: scope.clone(),
+                authenticated_actor_user_id: Some(scope.user_id.clone()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(running.status, ProcessInvocationStatus::Running);
+
+        let failed = first_store
+            .fail(&scope, invocation_id, "capability_failed".to_string())
+            .await
+            .unwrap();
+        assert_eq!(failed.status, ProcessInvocationStatus::Failed);
+        assert_eq!(failed.error_kind.as_deref(), Some("capability_failed"));
+
+        let runtime = Arc::clone(&journal) as Arc<dyn ProcessRuntimePort>;
+        let second_store = ProcessInvocationStore::new(runtime);
+        let reloaded = second_store
+            .get(&scope, invocation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.status, ProcessInvocationStatus::Failed);
+        assert_eq!(reloaded.error_kind.as_deref(), Some("capability_failed"));
+        assert_eq!(reloaded.capability_id, capability_id);
+        assert_eq!(reloaded.scope, scope);
+        assert_eq!(
+            reloaded.authenticated_actor_user_id,
+            Some(scope.user_id.clone())
+        );
+
+        let page = journal
+            .read_process_journal_after(&scope, None, None, 16)
+            .await
+            .unwrap();
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].kind, crate::ProcessJournalKind::Failed);
     }
 }

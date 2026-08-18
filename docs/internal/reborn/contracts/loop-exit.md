@@ -69,8 +69,23 @@ The driver-facing variants are fixed for the MVP:
 
 ## 4. Evidence requirements
 
-- `Completed` requires at least one durable reply-message ref or result ref, and the host/runner must verify those refs exist before mapping to a trusted completed outcome. Raw reply text is rejected by the wire shape and by strict loop-ref grammar.
-- `Completed.completion_kind` distinguishes the completion artifact: `FinalReply` is backed by reply-message refs, `ResultOnly` is backed by result refs without a finalized assistant reply, `DelegatedResult` is backed by delegated subtask result refs, and `NoReply` remains profile-gated for exits without durable reply/result refs.
+- Ref-backed `Completed` kinds require durable evidence: `FinalReply` is backed
+  by reply-message refs, while `ResultOnly`, `DelegatedResult`, and
+  `NothingToReport` are backed by result refs without a finalized assistant
+  reply. The host/runner verifies those refs before mapping the claim to a
+  trusted completed outcome. Raw reply text is rejected by the wire shape and
+  by strict loop-ref grammar. `NoReply` is the profile-gated, reference-free
+  exception.
+- The loop may claim `NothingToReport` only when a scheduled trigger has
+  `result_delivery = suppress_when_nothing_to_report`, the model completed the
+  host-provided `builtin.structured_result` capability with the exact argument
+  `{"outcome":"nothing_to_report"}`, and the loop wrote a final checkpoint.
+  The turn kernel independently verifies the trusted run context, the same-run
+  finalized result reference, its structured-result provider-call metadata,
+  and the final checkpoint. Any mismatch is a driver protocol violation. An
+  accepted claim settles as the durable `NothingToReport` execution outcome;
+  generic result refs, assistant replies, and all outputs outside the opted-in
+  scheduled context remain ordinary result-bearing behavior.
 - `Completed` requires `final_checkpoint_id` only when the resolved run profile/checkpoint policy requires a terminal checkpoint.
 - `Blocked` requires all of: blocked kind, durable `gate_ref`, `checkpoint_id`, and opaque `state_ref`, and the host/runner must verify the gate/checkpoint evidence before mapping to a trusted blocked outcome. The blocked kind was limited to approval, auth, and resource for MVP; as of 2026-08-13 the vocabulary also carries `await_dependent_run` (subagent parents parked on child completion) and `external_tool` (client-executed tool calls), and unbound run profiles abort the approval/auth/resource/dependent-run kinds with the typed `gate_not_supported` failure instead of parking.
 - `Cancelled` is accepted only when the host cancellation/interrupt input was observed by the runner/host policy. Host-initiated cancellation may preempt the driver before a final checkpoint exists, so cancellation validation does not require a missing final checkpoint to become a protocol violation. During application, terminal cancellation is still gated by durable run state in one transition-port operation: if the run is already `CancelRequested`, it becomes `Cancelled`; if an interrupt is observed before that durable state exists, the exit maps to recovery instead of terminal cancellation.

@@ -315,6 +315,11 @@ loc_observed_date = "2026-08-14"
 # adds the production preflight seam and carries its existing multi-impl
 # capability/create-hook ports through assembly. The merged tree reports 841;
 # 826 + 15 tolerance = 841, preserving zero hidden headroom.
-arc_dyn_ceiling = 826
+# 826 -> 830 on 2026-08-14 for the shared runtime-event sink: four governed
+# carrier/assembly sites route cancellation and milestone producers through one
+# `EventSink` seam. Production uses `CoalescingEventSink`; the overload fake
+# verifies lossless cancellation behavior. The merged tree reports 845;
+# 830 + 15 tolerance = 845, preserving zero hidden headroom.
+arc_dyn_ceiling = 830
 arc_dyn_tolerance = 15
-arc_dyn_observed = 841
+arc_dyn_observed = 845

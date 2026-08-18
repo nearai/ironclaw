@@ -74,6 +74,15 @@ async fn wedged_tool_call_is_reaped_by_lease_expiry_not_left_running_forever() {
         Some("lease_expired"),
         "recovered run must be tagged with the lease_expired failure category"
     );
+    assert!(
+        state.checkpoint_id.is_some(),
+        "a lease-expired possible side effect must retain its durable BeforeSideEffect checkpoint"
+    );
+    assert_eq!(
+        gate.dispatch_count(),
+        1,
+        "lease recovery must not redispatch a possibly attempted tool call"
+    );
 }
 
 /// The other side of the same boundary: a run whose lease expires while it is

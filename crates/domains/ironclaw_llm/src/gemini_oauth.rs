@@ -938,6 +938,35 @@ pub(crate) struct GeminiOauthProvider {
     thought_signatures: std::sync::Mutex<HashMap<String, String>>,
 }
 
+/// Provider-specific request options kept together so adding a Gemini
+/// generation or history option does not grow a positional argument list.
+struct GeminiRequestOptions<'a> {
+    tools: Option<&'a [ToolDefinition]>,
+    temperature: Option<f32>,
+    max_tokens: Option<u32>,
+    stop_sequences: Option<&'a [String]>,
+    tool_choice: Option<&'a str>,
+    model: &'a str,
+    thought_sigs: &'a HashMap<String, String>,
+    response_format: Option<&'a crate::provider::JsonSchemaResponseFormat>,
+}
+
+fn gemini_schema_response_format(
+    response_format: Option<&crate::provider::CompletionResponseFormat>,
+) -> Result<Option<&crate::provider::JsonSchemaResponseFormat>, LlmError> {
+    match response_format {
+        None => Ok(None),
+        Some(crate::provider::CompletionResponseFormat::JsonSchema(format)) => Ok(Some(format)),
+        Some(crate::provider::CompletionResponseFormat::JsonObject) => {
+            Err(LlmError::InvalidRequest {
+                provider: "gemini_oauth".to_string(),
+                reason: "native JSON-object response mode is not supported by Gemini OAuth"
+                    .to_string(),
+            })
+        }
+    }
+}
+
 /// Parsed Gemini response: (completion, tool_calls, thought_signatures_by_call_id).
 type GeminiParsedResponse = (CompletionResponse, Vec<ToolCall>, HashMap<String, String>);
 
@@ -1416,17 +1445,20 @@ impl GeminiOauthProvider {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn to_gemini_request(
         messages: &[ChatMessage],
-        tools: Option<&[ToolDefinition]>,
-        temperature: Option<f32>,
-        max_tokens: Option<u32>,
-        stop_sequences: Option<&[String]>,
-        tool_choice: Option<&str>,
-        model: &str,
-        thought_sigs: &HashMap<String, String>,
+        options: GeminiRequestOptions<'_>,
     ) -> serde_json::Value {
+        let GeminiRequestOptions {
+            tools,
+            temperature,
+            max_tokens,
+            stop_sequences,
+            tool_choice,
+            model,
+            thought_sigs,
+            response_format,
+        } = options;
         let mut contents = Vec::new();
 
         for msg in messages {
@@ -1618,19 +1650,30 @@ impl GeminiOauthProvider {
         {
             gen_config.insert("frequencyPenalty".to_string(), serde_json::Value::from(fp));
         }
-        // Response schema / JSON mode
-        if let Ok(mime) = std::env::var("GEMINI_RESPONSE_MIME_TYPE")
-            && !mime.is_empty()
-        {
+        // Provider-native structured output. A request-level schema takes
+        // precedence over legacy environment defaults and always selects
+        // Gemini's JSON response mode; the schema name/strictness are
+        // provider-neutral metadata and are not part of Gemini's vocabulary.
+        if let Some(format) = response_format {
             gen_config.insert(
                 "responseMimeType".to_string(),
-                serde_json::Value::String(mime),
+                serde_json::Value::String("application/json".to_string()),
             );
-        }
-        if let Ok(schema_str) = std::env::var("GEMINI_RESPONSE_JSON_SCHEMA")
-            && let Ok(schema) = serde_json::from_str::<serde_json::Value>(&schema_str)
-        {
-            gen_config.insert("responseJsonSchema".to_string(), schema);
+            gen_config.insert("responseJsonSchema".to_string(), format.schema.clone());
+        } else {
+            if let Ok(mime) = std::env::var("GEMINI_RESPONSE_MIME_TYPE")
+                && !mime.is_empty()
+            {
+                gen_config.insert(
+                    "responseMimeType".to_string(),
+                    serde_json::Value::String(mime),
+                );
+            }
+            if let Ok(schema_str) = std::env::var("GEMINI_RESPONSE_JSON_SCHEMA")
+                && let Ok(schema) = serde_json::from_str::<serde_json::Value>(&schema_str)
+            {
+                gen_config.insert("responseJsonSchema".to_string(), schema);
+            }
         }
 
         // thinkingConfig:
@@ -2141,6 +2184,7 @@ impl LlmProvider for GeminiOauthProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let response_format = gemini_schema_response_format(request.response_format.as_ref())?;
         let sigs = self
             .thought_signatures
             .lock()
@@ -2148,13 +2192,16 @@ impl LlmProvider for GeminiOauthProvider {
             .clone();
         let req_json = Self::to_gemini_request(
             &request.messages,
-            None,
-            request.temperature,
-            request.max_tokens,
-            request.stop_sequences.as_deref(),
-            None,
-            &self.config.model,
-            &sigs,
+            GeminiRequestOptions {
+                tools: None,
+                temperature: request.temperature,
+                max_tokens: request.max_tokens,
+                stop_sequences: request.stop_sequences.as_deref(),
+                tool_choice: None,
+                model: &self.config.model,
+                thought_sigs: &sigs,
+                response_format,
+            },
         );
         let resp_json = self.send_request(&req_json).await?;
         let (response, _tool_calls, _new_sigs) = Self::from_gemini_response(resp_json)?;
@@ -2165,6 +2212,7 @@ impl LlmProvider for GeminiOauthProvider {
         &self,
         request: crate::provider::ToolCompletionRequest,
     ) -> Result<crate::provider::ToolCompletionResponse, LlmError> {
+        let response_format = gemini_schema_response_format(request.response_format.as_ref())?;
         let tool_defs = if request.tools.is_empty() {
             None
         } else {
@@ -2178,13 +2226,16 @@ impl LlmProvider for GeminiOauthProvider {
             .clone();
         let req_json = Self::to_gemini_request(
             &request.messages,
-            tool_defs,
-            request.temperature,
-            request.max_tokens,
-            request.stop_sequences.as_deref(),
-            request.tool_choice.as_deref(),
-            &self.config.model,
-            &sigs,
+            GeminiRequestOptions {
+                tools: tool_defs,
+                temperature: request.temperature,
+                max_tokens: request.max_tokens,
+                stop_sequences: request.stop_sequences.as_deref(),
+                tool_choice: request.tool_choice.as_deref(),
+                model: &self.config.model,
+                thought_sigs: &sigs,
+                response_format,
+            },
         );
         let resp_json = self.send_request(&req_json).await?;
         let (response, tool_calls, new_sigs) = Self::from_gemini_response(resp_json)?;
@@ -2442,13 +2493,16 @@ mod tests {
 
         let req = GeminiOauthProvider::to_gemini_request(
             &messages,
-            None,
-            None,
-            None,
-            None,
-            None,
-            "gemini-2.0-flash",
-            &HashMap::new(),
+            GeminiRequestOptions {
+                tools: None,
+                temperature: None,
+                max_tokens: None,
+                stop_sequences: None,
+                tool_choice: None,
+                model: "gemini-2.0-flash",
+                thought_sigs: &HashMap::new(),
+                response_format: None,
+            },
         );
 
         let parts = req["contents"][0]["parts"].as_array().expect("parts");
@@ -2474,18 +2528,52 @@ mod tests {
 
         let req = GeminiOauthProvider::to_gemini_request(
             &messages,
-            Some(&tools),
-            None,
-            None,
-            None,
-            None,
-            "gemini-2.0-flash",
-            &HashMap::new(),
+            GeminiRequestOptions {
+                tools: Some(&tools),
+                temperature: None,
+                max_tokens: None,
+                stop_sequences: None,
+                tool_choice: None,
+                model: "gemini-2.0-flash",
+                thought_sigs: &HashMap::new(),
+                response_format: None,
+            },
         );
 
         let decls = &req["tools"][0]["functionDeclarations"];
         assert_eq!(decls[0]["name"], "read_file");
         assert_eq!(decls[0]["description"], "Read a file");
+    }
+
+    #[test]
+    fn test_to_gemini_request_encodes_native_response_schema() {
+        let schema = crate::provider::JsonSchemaResponseFormat::strict(
+            "suggestions",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"items": {"type": "array"}},
+                "required": ["items"]
+            }),
+        );
+        let req = GeminiOauthProvider::to_gemini_request(
+            &[ChatMessage::user("Return suggestions")],
+            GeminiRequestOptions {
+                tools: None,
+                temperature: None,
+                max_tokens: None,
+                stop_sequences: None,
+                tool_choice: None,
+                model: "gemini-2.5-flash",
+                thought_sigs: &HashMap::new(),
+                response_format: Some(&schema),
+            },
+        );
+
+        assert_eq!(
+            req["generationConfig"]["responseMimeType"],
+            "application/json"
+        );
+        assert_eq!(req["generationConfig"]["responseJsonSchema"], schema.schema);
     }
 
     #[test]
@@ -2497,13 +2585,16 @@ mod tests {
 
         let req = GeminiOauthProvider::to_gemini_request(
             &messages,
-            None,
-            None,
-            None,
-            None,
-            None,
-            "gemini-2.0-flash",
-            &HashMap::new(),
+            GeminiRequestOptions {
+                tools: None,
+                temperature: None,
+                max_tokens: None,
+                stop_sequences: None,
+                tool_choice: None,
+                model: "gemini-2.0-flash",
+                thought_sigs: &HashMap::new(),
+                response_format: None,
+            },
         );
 
         let contents = req["contents"].as_array().unwrap();
@@ -2797,13 +2888,16 @@ mod tests {
 
         let req = GeminiOauthProvider::to_gemini_request(
             &messages,
-            None,
-            Some(0.7),
-            Some(4096),
-            None,
-            None,
-            "gemini-2.0-flash",
-            &HashMap::new(),
+            GeminiRequestOptions {
+                tools: None,
+                temperature: Some(0.7),
+                max_tokens: Some(4096),
+                stop_sequences: None,
+                tool_choice: None,
+                model: "gemini-2.0-flash",
+                thought_sigs: &HashMap::new(),
+                response_format: None,
+            },
         );
 
         let gen_cfg = &req["generationConfig"];
@@ -2818,13 +2912,16 @@ mod tests {
 
         let req = GeminiOauthProvider::to_gemini_request(
             &messages,
-            None,
-            None,
-            None,
-            None,
-            None,
-            "gemini-3-flash-preview",
-            &HashMap::new(),
+            GeminiRequestOptions {
+                tools: None,
+                temperature: None,
+                max_tokens: None,
+                stop_sequences: None,
+                tool_choice: None,
+                model: "gemini-3-flash-preview",
+                thought_sigs: &HashMap::new(),
+                response_format: None,
+            },
         );
 
         let thinking = &req["generationConfig"]["thinkingConfig"];
@@ -2839,13 +2936,16 @@ mod tests {
 
         let req = GeminiOauthProvider::to_gemini_request(
             &messages,
-            None,
-            None,
-            None,
-            None,
-            None,
-            "gemini-2.5-flash-thinking",
-            &HashMap::new(),
+            GeminiRequestOptions {
+                tools: None,
+                temperature: None,
+                max_tokens: None,
+                stop_sequences: None,
+                tool_choice: None,
+                model: "gemini-2.5-flash-thinking",
+                thought_sigs: &HashMap::new(),
+                response_format: None,
+            },
         );
 
         let thinking = &req["generationConfig"]["thinkingConfig"];
@@ -2863,13 +2963,16 @@ mod tests {
 
         let req = GeminiOauthProvider::to_gemini_request(
             &messages,
-            None,
-            None,
-            None,
-            Some(&stops),
-            None,
-            "gemini-2.5-flash",
-            &HashMap::new(),
+            GeminiRequestOptions {
+                tools: None,
+                temperature: None,
+                max_tokens: None,
+                stop_sequences: Some(&stops),
+                tool_choice: None,
+                model: "gemini-2.5-flash",
+                thought_sigs: &HashMap::new(),
+                response_format: None,
+            },
         );
 
         let gen_cfg = &req["generationConfig"];
@@ -2891,13 +2994,16 @@ mod tests {
 
         let req_auto = GeminiOauthProvider::to_gemini_request(
             &messages,
-            Some(&tools),
-            None,
-            None,
-            None,
-            Some("auto"),
-            "gemini-2.0-flash",
-            &HashMap::new(),
+            GeminiRequestOptions {
+                tools: Some(&tools),
+                temperature: None,
+                max_tokens: None,
+                stop_sequences: None,
+                tool_choice: Some("auto"),
+                model: "gemini-2.0-flash",
+                thought_sigs: &HashMap::new(),
+                response_format: None,
+            },
         );
         assert_eq!(
             req_auto["toolConfig"]["functionCallingConfig"]["mode"],
@@ -2906,13 +3012,16 @@ mod tests {
 
         let req_req = GeminiOauthProvider::to_gemini_request(
             &messages,
-            Some(&tools),
-            None,
-            None,
-            None,
-            Some("required"),
-            "gemini-2.0-flash",
-            &HashMap::new(),
+            GeminiRequestOptions {
+                tools: Some(&tools),
+                temperature: None,
+                max_tokens: None,
+                stop_sequences: None,
+                tool_choice: Some("required"),
+                model: "gemini-2.0-flash",
+                thought_sigs: &HashMap::new(),
+                response_format: None,
+            },
         );
         assert_eq!(
             req_req["toolConfig"]["functionCallingConfig"]["mode"],
@@ -2921,13 +3030,16 @@ mod tests {
 
         let req_none = GeminiOauthProvider::to_gemini_request(
             &messages,
-            Some(&tools),
-            None,
-            None,
-            None,
-            Some("none"),
-            "gemini-2.0-flash",
-            &HashMap::new(),
+            GeminiRequestOptions {
+                tools: Some(&tools),
+                temperature: None,
+                max_tokens: None,
+                stop_sequences: None,
+                tool_choice: Some("none"),
+                model: "gemini-2.0-flash",
+                thought_sigs: &HashMap::new(),
+                response_format: None,
+            },
         );
         assert_eq!(
             req_none["toolConfig"]["functionCallingConfig"]["mode"],
@@ -2991,13 +3103,16 @@ mod tests {
 
         let req = GeminiOauthProvider::to_gemini_request(
             &messages,
-            None,
-            None,
-            None,
-            None,
-            None,
-            "gemini-1.5-flash",
-            &HashMap::new(),
+            GeminiRequestOptions {
+                tools: None,
+                temperature: None,
+                max_tokens: None,
+                stop_sequences: None,
+                tool_choice: None,
+                model: "gemini-1.5-flash",
+                thought_sigs: &HashMap::new(),
+                response_format: None,
+            },
         );
 
         let system_instruction = req
@@ -3190,13 +3305,16 @@ mod tests {
 
         let req = GeminiOauthProvider::to_gemini_request(
             &messages,
-            None,
-            None,
-            None,
-            None,
-            None,
-            "gemini-3-flash-preview",
-            &sigs,
+            GeminiRequestOptions {
+                tools: None,
+                temperature: None,
+                max_tokens: None,
+                stop_sequences: None,
+                tool_choice: None,
+                model: "gemini-3-flash-preview",
+                thought_sigs: &sigs,
+                response_format: None,
+            },
         );
 
         let contents = req["contents"].as_array().unwrap();
@@ -3229,13 +3347,16 @@ mod tests {
         let empty_sigs = HashMap::new();
         let req = GeminiOauthProvider::to_gemini_request(
             &messages,
-            None,
-            None,
-            None,
-            None,
-            None,
-            "gemini-2.0-flash",
-            &empty_sigs,
+            GeminiRequestOptions {
+                tools: None,
+                temperature: None,
+                max_tokens: None,
+                stop_sequences: None,
+                tool_choice: None,
+                model: "gemini-2.0-flash",
+                thought_sigs: &empty_sigs,
+                response_format: None,
+            },
         );
 
         let contents = req["contents"].as_array().unwrap();

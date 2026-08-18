@@ -168,6 +168,30 @@ fn cache_key(model: &str, request: &CompletionRequest) -> String {
         }
     }
     hasher.update(b"|");
+    // Structured output changes the provider response even when the prompt
+    // and sampling parameters are identical. Include the complete envelope so
+    // a schema-constrained result can never be served to an unconstrained (or
+    // differently constrained) request. The explicit variant marker also
+    // makes the absent format unambiguous in the digest stream.
+    match &request.response_format {
+        Some(crate::provider::CompletionResponseFormat::JsonSchema(response_format)) => {
+            hasher.update(b"structured_output:");
+            let json = serde_json::to_string(&(
+                &response_format.name,
+                &response_format.schema,
+                response_format.strict,
+            ));
+            match json {
+                Ok(json) => hasher.update(json.as_bytes()),
+                Err(_) => hasher.update(b"structured_output_serialization_error"),
+            }
+        }
+        Some(crate::provider::CompletionResponseFormat::JsonObject) => {
+            hasher.update(b"structured_output:json_object");
+        }
+        None => hasher.update(b"ordinary_output"),
+    }
+    hasher.update(b"|");
     if let Some(fallback_index) = request.metadata.get(FALLBACK_INDEX_METADATA_KEY) {
         hasher.update(fallback_index.as_bytes());
     }
@@ -432,6 +456,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
+            response_format: None,
             metadata: Default::default(),
         }
     }
@@ -443,6 +468,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
+            response_format: None,
             metadata: Default::default(),
         }
     }
@@ -490,6 +516,47 @@ mod tests {
     }
 
     #[test]
+    fn cache_key_varies_by_response_schema() {
+        let mut req_a = simple_request();
+        req_a.response_format = Some(crate::provider::CompletionResponseFormat::JsonSchema(
+            crate::provider::JsonSchemaResponseFormat::strict(
+                "suggestions",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {"items": {"type": "array"}}
+                }),
+            ),
+        ));
+        let mut req_b = req_a.clone();
+        req_b.response_format = Some(crate::provider::CompletionResponseFormat::JsonSchema(
+            crate::provider::JsonSchemaResponseFormat::strict(
+                "suggestions",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {"items": {"type": "string"}}
+                }),
+            ),
+        ));
+        assert_ne!(cache_key("m", &req_a), cache_key("m", &req_b));
+
+        let mut req_c = req_a.clone();
+        if let Some(crate::provider::CompletionResponseFormat::JsonSchema(schema)) =
+            req_c.response_format.as_mut()
+        {
+            schema.strict = false;
+        }
+        assert_ne!(cache_key("m", &req_a), cache_key("m", &req_c));
+
+        let mut req_object = simple_request();
+        req_object.response_format = Some(crate::provider::CompletionResponseFormat::JsonObject);
+        assert_ne!(
+            cache_key("m", &req_a),
+            cache_key("m", &req_object),
+            "native JSON-object mode must not share a schema cache entry"
+        );
+    }
+
+    #[test]
     fn cache_key_varies_by_explicit_fallback_route() {
         let mut primary = simple_request();
         primary.set_fallback_index(0);
@@ -521,6 +588,59 @@ mod tests {
         assert_eq!(r2.content, "cached response");
 
         assert_eq!(cached.total_hits(), 1);
+    }
+
+    #[tokio::test]
+    async fn structured_output_cache_identity_is_isolated_from_ordinary_and_other_schemas() {
+        let stub = Arc::new(StubLlm::new("provider response"));
+        let cached = CachedProvider::new(stub.clone(), ResponseCacheConfig::default());
+        let schema_a = crate::provider::JsonSchemaResponseFormat::strict(
+            "suggestions",
+            serde_json::json!({"type": "object", "properties": {"items": {"type": "array"}}}),
+        );
+        let schema_b = crate::provider::JsonSchemaResponseFormat::strict(
+            "suggestions",
+            serde_json::json!({"type": "object", "properties": {"items": {"type": "string"}}}),
+        );
+
+        // Prime the ordinary response. It must not satisfy a schema request.
+        cached
+            .complete(simple_request())
+            .await
+            .expect("ordinary response");
+        assert_eq!(stub.calls(), 1);
+
+        let mut structured_a = simple_request();
+        structured_a.response_format = Some(crate::provider::CompletionResponseFormat::JsonSchema(
+            schema_a.clone(),
+        ));
+        cached
+            .complete(structured_a.clone())
+            .await
+            .expect("first structured response");
+        assert_eq!(
+            stub.calls(),
+            2,
+            "ordinary and structured requests are isolated"
+        );
+
+        // The exact structured request is a hit.
+        cached
+            .complete(structured_a)
+            .await
+            .expect("identical structured response");
+        assert_eq!(stub.calls(), 2, "identical structured request should hit");
+
+        // A changed schema must miss the previous structured entry.
+        let mut structured_b = simple_request();
+        structured_b.response_format = Some(crate::provider::CompletionResponseFormat::JsonSchema(
+            schema_b,
+        ));
+        cached
+            .complete(structured_b)
+            .await
+            .expect("changed-schema response");
+        assert_eq!(stub.calls(), 3, "changed schema must not reuse old output");
     }
 
     #[tokio::test]
@@ -580,6 +700,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
+            response_format: None,
             metadata: Default::default(),
         };
         cached.complete(third).await.unwrap();
@@ -599,6 +720,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
+            response_format: None,
             tool_choice: None,
             metadata: Default::default(),
         };
@@ -774,6 +896,7 @@ mod tests {
                 max_tokens: None,
                 temperature: None,
                 stop_sequences: None,
+                response_format: None,
                 metadata: Default::default(),
             };
             cached.complete(req).await.unwrap();
@@ -790,6 +913,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
+            response_format: None,
             metadata: Default::default(),
         };
         cached.complete(req).await.unwrap();
@@ -820,6 +944,7 @@ mod tests {
                 max_tokens: None,
                 temperature: None,
                 stop_sequences: None,
+                response_format: None,
                 metadata: Default::default(),
             };
             cached.complete(req).await.unwrap();
@@ -833,6 +958,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
+            response_format: None,
             metadata: Default::default(),
         };
         let result = cached.complete(req).await;

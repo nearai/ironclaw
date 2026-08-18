@@ -38,6 +38,9 @@ pub(super) enum ProductCommandHandler {
     NotificationChannelsSet,
     NotificationSetupEnable,
     NotificationSetupDisable,
+    SuggestionsGenerate,
+    SuggestionStart,
+    SuggestionDismiss,
 }
 
 impl ProductCommandHandler {
@@ -78,6 +81,9 @@ impl ProductCommandHandler {
             NOTIFICATION_CHANNELS_SET_COMMAND_ID => Some(Self::NotificationChannelsSet),
             NOTIFICATION_SETUP_ENABLE_COMMAND_ID => Some(Self::NotificationSetupEnable),
             NOTIFICATION_SETUP_DISABLE_COMMAND_ID => Some(Self::NotificationSetupDisable),
+            SUGGESTIONS_GENERATE_COMMAND_ID => Some(Self::SuggestionsGenerate),
+            SUGGESTION_START_COMMAND_ID => Some(Self::SuggestionStart),
+            SUGGESTION_DISMISS_COMMAND_ID => Some(Self::SuggestionDismiss),
             _ => None,
         }
     }
@@ -334,6 +340,21 @@ impl ProductCommandHandler {
                         .await?,
                 )
             }
+            Self::SuggestionsGenerate => command_output(
+                services
+                    .generate_suggestions(caller, product_command_input(input)?)
+                    .await?,
+            ),
+            Self::SuggestionStart => command_output(
+                services
+                    .start_suggestion(caller, product_command_input(input)?)
+                    .await?,
+            ),
+            Self::SuggestionDismiss => command_output(
+                services
+                    .dismiss_suggestion(caller, product_command_input(input)?)
+                    .await?,
+            ),
         }
     }
 }
@@ -790,6 +811,18 @@ mod tests {
             (
                 AUTOMATION_DELETE_COMMAND_ID,
                 ProductCommandHandler::AutomationDelete,
+            ),
+            (
+                SUGGESTIONS_GENERATE_COMMAND_ID,
+                ProductCommandHandler::SuggestionsGenerate,
+            ),
+            (
+                SUGGESTION_START_COMMAND_ID,
+                ProductCommandHandler::SuggestionStart,
+            ),
+            (
+                SUGGESTION_DISMISS_COMMAND_ID,
+                ProductCommandHandler::SuggestionDismiss,
             ),
         ] {
             let capability = CapabilityId::new(id).expect("valid capability id");

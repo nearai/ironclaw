@@ -25,6 +25,8 @@ use ironclaw_composition::{
 };
 use ironclaw_conversations::{AdapterInstallationId, AdapterKind};
 use ironclaw_extension_contracts::external::ExternalActorRef;
+use ironclaw_host_api::execution_policy::{ResultDeliveryPolicy, TurnExecutionPolicy};
+use ironclaw_host_api::prepared_context::STRUCTURED_RESULT_PROVIDER_TOOL_NAME;
 use ironclaw_host_api::product_adapter::AdapterInstallationId as ProductAdapterInstallationId;
 use ironclaw_host_api::{
     action::NetworkPolicy,
@@ -47,8 +49,8 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
-    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse,
+    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -59,11 +61,11 @@ use ironclaw_outbound::{
 };
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerDeliveryTargetId, TriggerId,
-    TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
-    TriggerSourceKind, TriggerState,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerDeliveryTargetId, TriggerExecutionSpec,
+    TriggerId, TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository, TriggerRunStatus,
+    TriggerSchedule, TriggerSourceKind, TriggerState,
 };
-use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
+use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId, TurnScope};
 use serde_json::{Value, json};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -78,13 +80,15 @@ fn trigger_execution_contract(goal: impl Into<String>) -> Value {
         "goal": goal.into(),
         "success_criteria": ["Complete the requested task"],
         "output_instructions": "Return a concise result",
-        "no_result_text": "No result"
+        "no_result_text": "No result",
+        "policy": { "result_delivery": "deliver" }
     })
 }
 const QA_9B_PROMPT: &str = "QA_9B scheduled health digest";
 const QA_9B_RESULT: &str = "QA_9B scheduled health digest complete";
 const QA_9D_PROMPT: &str = "QA_9D scheduled release digest";
 const QA_9D_RESULT: &str = "QA_9D scheduled release digest complete";
+const QA_SILENT_PROMPT: &str = "QA_SILENT scheduled no-change check";
 const SLACK_TEAM: &str = "T-TRIGGER-E2E";
 const SLACK_USER: &str = "U-TRIGGER-E2E";
 const SLACK_DEFAULT_DM: &str = "D-TRIGGER-DEFAULT";
@@ -202,6 +206,70 @@ impl HostManagedModelGateway for DeliveryJourneyGateway {
         };
         self.requests.lock().await.push(request);
         Ok(HostManagedModelResponse::assistant_reply(reply.to_string()))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        if !request
+            .messages
+            .iter()
+            .any(|message| message.content.contains(QA_SILENT_PROMPT))
+        {
+            return self.stream_model(request).await;
+        }
+        let request_number = {
+            let mut requests = self.requests.lock().await;
+            requests.push(request);
+            requests
+                .iter()
+                .filter(|request| {
+                    request
+                        .messages
+                        .iter()
+                        .any(|message| message.content.contains(QA_SILENT_PROMPT))
+                })
+                .count()
+        };
+        let (call_id, tool_name, arguments) = if request_number == 1 {
+            (
+                "scheduled-suppression-prior-tool",
+                "builtin__trigger_list",
+                json!({}),
+            )
+        } else {
+            (
+                "scheduled-suppression-result",
+                STRUCTURED_RESULT_PROVIDER_TOOL_NAME,
+                json!({"outcome": "nothing_to_report"}),
+            )
+        };
+        let call = ProviderToolCall {
+            provider_id: "scheduled-suppression-e2e-provider".to_string(),
+            provider_model_id: "scheduled-suppression-e2e-model".to_string(),
+            turn_id: Some("scheduled-suppression-e2e-turn".to_string()),
+            id: call_id.to_string(),
+            name: ProviderToolName::new(tool_name).expect("provider tool name"),
+            arguments,
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        };
+        let candidate = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
+            .await
+            .map_err(|error| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    error.safe_summary,
+                )
+            })?;
+        Ok(HostManagedModelResponse::capability_calls(
+            vec![candidate],
+            "",
+        ))
     }
 }
 
@@ -869,6 +937,7 @@ async fn seed_due_delivery_trigger(
     repository: &Arc<dyn TriggerRepository>,
     prompt: &str,
     delivery_target: Option<&str>,
+    execution_spec: Option<TriggerExecutionSpec>,
 ) -> TriggerId {
     let trigger_id = TriggerId::new();
     let fire_at = Utc::now() - chrono::Duration::seconds(120);
@@ -879,11 +948,11 @@ async fn seed_due_delivery_trigger(
             creator_user_id: UserId::new(USER).expect("valid user id"),
             agent_id: Some(AgentId::new(AGENT).expect("valid agent id")),
             project_id: None,
-            name: format!("{prompt} trigger"),
+            name: format!("delivery test {trigger_id}"),
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::once(fire_at, "UTC").expect("valid once schedule"),
             prompt: prompt.to_string(),
-            execution_spec: None,
+            execution_spec,
             delivery_target: delivery_target.map(|target| {
                 TriggerDeliveryTargetId::new(target).expect("valid trigger delivery target")
             }),
@@ -1445,15 +1514,42 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
     let delivery_store = runtime
         .triggered_run_delivery_store_for_test()
         .expect("local runtime exposes the production triggered-delivery store");
-    let default_target_trigger = seed_due_delivery_trigger(&repository, QA_9B_PROMPT, None).await;
+    let default_target_trigger =
+        seed_due_delivery_trigger(&repository, QA_9B_PROMPT, None, None).await;
     let explicit_target_trigger =
-        seed_due_delivery_trigger(&repository, QA_9D_PROMPT, Some(QA_9D_TARGET_ID)).await;
+        seed_due_delivery_trigger(&repository, QA_9D_PROMPT, Some(QA_9D_TARGET_ID), None).await;
+    let suppressed_spec = TriggerExecutionSpec {
+        version: 1,
+        goal: QA_SILENT_PROMPT.to_string(),
+        success_criteria: vec!["Report only when changes exist".to_string()],
+        output_instructions: "Return a concise change summary".to_string(),
+        no_result_text: "No changes".to_string(),
+        policy: TurnExecutionPolicy {
+            result_delivery: ResultDeliveryPolicy::SuppressWhenNothingToReport,
+            ..TurnExecutionPolicy::default()
+        },
+    };
+    let suppressed_prompt = suppressed_spec.render_prompt();
+    let suppressed_trigger = seed_due_delivery_trigger(
+        &repository,
+        &suppressed_prompt,
+        Some(QA_9B_TARGET_ID),
+        Some(suppressed_spec),
+    )
+    .await;
 
     wait_for_recorded_outcome(
         &repository,
         &delivery_store,
         default_target_trigger,
         TriggeredRunDeliveryOutcomeKind::Skipped,
+    )
+    .await;
+    let suppressed_run_id = wait_for_recorded_outcome(
+        &repository,
+        &delivery_store,
+        suppressed_trigger,
+        TriggeredRunDeliveryOutcomeKind::Suppressed,
     )
     .await;
     wait_for_recorded_outcome(
@@ -1463,6 +1559,37 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
         TriggeredRunDeliveryOutcomeKind::Skipped,
     )
     .await;
+
+    let suppressed_thread_id = repository
+        .list_trigger_run_history(
+            TenantId::new(TENANT).expect("valid tenant id"),
+            suppressed_trigger,
+            1,
+        )
+        .await
+        .expect("read suppressed trigger run history")
+        .into_iter()
+        .find(|run| run.run_id == Some(suppressed_run_id))
+        .and_then(|run| run.thread_id)
+        .expect("suppressed run has a canonical thread id");
+    let outbound_state = runtime
+        .outbound_delivery_stores_for_test()
+        .expect("local runtime exposes the production outbound state store")
+        .0;
+    let suppressed_attempts = outbound_state
+        .list_delivery_attempts(TurnScope::new_with_owner(
+            TenantId::new(TENANT).expect("valid tenant id"),
+            Some(AgentId::new(AGENT).expect("valid agent id")),
+            None,
+            suppressed_thread_id,
+            Some(UserId::new(USER).expect("valid user id")),
+        ))
+        .await
+        .expect("read suppressed run delivery attempts");
+    assert!(
+        suppressed_attempts.is_empty(),
+        "suppression must happen before delivery reservation: {suppressed_attempts:?}"
+    );
 
     assert!(
         slack_provider.provider_messages().is_empty(),
@@ -1483,6 +1610,13 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
         model_gateway.request_count_containing(QA_9D_PROMPT).await,
         1,
         "QA-9D must execute exactly one model run"
+    );
+    assert_eq!(
+        model_gateway
+            .request_count_containing(QA_SILENT_PROMPT)
+            .await,
+        2,
+        "the suppressible routine must perform prior tool work before its typed result"
     );
 
     tokio::time::sleep(Duration::from_millis(250)).await;
@@ -1518,6 +1652,13 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
         model_gateway.request_count_containing(QA_9D_PROMPT).await,
         1,
         "restart must not rerun QA-9D"
+    );
+    assert_eq!(
+        model_gateway
+            .request_count_containing(QA_SILENT_PROMPT)
+            .await,
+        2,
+        "restart must not rerun or dispatch the suppressed result"
     );
 }
 
@@ -2178,7 +2319,10 @@ async fn structured_trigger_empty_allowlist_reaches_the_fired_run_and_exposes_no
                 "success_criteria": ["Return a result"],
                 "output_instructions": "Return concise Markdown",
                 "no_result_text": "No result is available",
-                "policy": { "allowed_capability_ids": ["missing.capability"] }
+                "policy": {
+                    "allowed_capability_ids": ["missing.capability"],
+                    "result_delivery": "deliver"
+                }
             },
             "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
         }),
@@ -2205,7 +2349,10 @@ async fn structured_trigger_empty_allowlist_reaches_the_fired_run_and_exposes_no
                 "success_criteria": ["Return a result"],
                 "output_instructions": "Return concise Markdown",
                 "no_result_text": "No result is available",
-                "policy": { "required_skills": ["missing-trigger-skill"] }
+                "policy": {
+                    "required_skills": ["missing-trigger-skill"],
+                    "result_delivery": "deliver"
+                }
             },
             "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
         }),
@@ -2233,7 +2380,10 @@ async fn structured_trigger_empty_allowlist_reaches_the_fired_run_and_exposes_no
                 "success_criteria": ["Return a definitive status"],
                 "output_instructions": "Return concise Markdown",
                 "no_result_text": "No trigger status is available",
-                "policy": { "allowed_capability_ids": [] }
+                "policy": {
+                    "allowed_capability_ids": [],
+                    "result_delivery": "deliver"
+                }
             },
             "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
         }),

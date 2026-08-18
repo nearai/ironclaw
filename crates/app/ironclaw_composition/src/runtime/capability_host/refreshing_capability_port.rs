@@ -334,43 +334,20 @@ impl RefreshingCapabilityPort {
                 Arc::clone(&self.gate_record_store),
             )?);
         }
-        // Unbound structured runs get the synthetic result tool built from
-        // the run's journaled output schema. The run's contract is "complete
-        // by recording a validated result", so a missing record or schema is
-        // a host build failure, never a silently text-shaped run.
-        if self.run_context.resolved_run_profile.profile_id
-            == ironclaw_host_api::turn::RunProfileId::unbound_structured()
-        {
-            let declarations = ironclaw_threads::read_declarations_for_run_scope(
-                self.thread_service.as_ref(),
-                &self.run_context.scope,
-            )
-            .await
-            .map_err(|error| {
-                // debug!, not warn!: background diagnostics stay off the REPL.
-                // The stable summary carries no backend detail (redaction
-                // discipline; the cause is in the trace).
-                tracing::debug!(%error, "unbound structured declarations read failed");
-                AgentLoopHostError::new(
-                    ironclaw_loop_contracts::AgentLoopHostErrorKind::Unavailable,
-                    "unbound structured declarations read failed",
-                )
-            })?
-            .ok_or_else(|| {
-                AgentLoopHostError::new(
-                    ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
-                    "unbound structured run has no prepared-context declarations",
-                )
-            })?;
-            let ironclaw_host_api::prepared_context::OutputContract::JsonSchema { schema } =
-                declarations.output
-            else {
-                return Err(AgentLoopHostError::new(
-                    ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
-                    "unbound structured run declares no output schema",
-                ));
-            };
-            synthetic_capabilities.push(ironclaw_loop_host::structured_result_capability(schema)?);
+        let suppressed_scheduled_run = self
+            .run_context
+            .product_context
+            .as_ref()
+            .filter(|context| {
+                context.origin == ironclaw_host_api::turn::TurnOriginKind::ScheduledTrigger
+            })
+            .and_then(|context| context.execution_policy.as_ref())
+            .is_some_and(|policy| {
+                policy.result_delivery
+                    == ironclaw_host_api::execution_policy::ResultDeliveryPolicy::SuppressWhenNothingToReport
+            });
+        if suppressed_scheduled_run {
+            synthetic_capabilities.push(ironclaw_loop_host::nothing_to_report_result_capability()?);
         }
         let port = wrap_synthetic_capabilities(
             port,

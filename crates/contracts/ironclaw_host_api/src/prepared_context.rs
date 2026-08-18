@@ -12,8 +12,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::ids::CapabilityId;
 use crate::turn::{AcceptedMessageRef, TurnActor, TurnScope};
+use crate::{ids::CapabilityId, output::OutputContract};
 
 /// Capability id of the synthetic, host-owned result tool a
 /// `unbound_structured` run finishes by calling. NOT a capability in the
@@ -24,27 +24,6 @@ pub const STRUCTURED_RESULT_CAPABILITY_ID: &str = "builtin.structured_result";
 
 /// Provider-facing tool name for the synthetic result tool.
 pub const STRUCTURED_RESULT_PROVIDER_TOOL_NAME: &str = "builtin__structured_result";
-
-/// The shape the run's terminal output must take.
-///
-/// The JSON schema travels inline and is journaled with the rest of the
-/// declarations — there is no host-side schema registry, so stored results
-/// stay interpretable after the fact. Validation is strict-only.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum OutputContract {
-    /// The ordinary assistant-message terminal output.
-    #[default]
-    AssistantMessage,
-    /// The terminal output must strictly validate against this JSON schema.
-    JsonSchema { schema: serde_json::Value },
-}
-
-impl OutputContract {
-    pub fn is_json_schema(&self) -> bool {
-        matches!(self, Self::JsonSchema { .. })
-    }
-}
 
 /// Per-run limits, narrowing-only against the resolved profile's ceilings.
 ///
@@ -87,8 +66,10 @@ pub struct PreparedTurnDeclarations {
     pub limits: TurnLimits,
 }
 
-/// Read-side failure for the declarations probe. Fail-closed: admission
-/// treats `Unavailable` as a rejection, never as "no declarations".
+/// Read-side failure for the declarations probe. Unbound admission fails
+/// closed on `Unavailable`; explicit ordinary profiles and scheduled triggers
+/// may continue without declarations because the probe is optional on those
+/// trusted profile paths.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PreparedContextReadError {
     #[error("prepared-context declarations are unavailable: {reason}")]
@@ -100,8 +81,9 @@ pub enum PreparedContextReadError {
 /// Implemented over the threads-tier prepared-context record and wired in
 /// composition; the coordinator consults it when a submission carries no
 /// binding refs to derive the unbound run profile from what the accepted
-/// ref points at. `Ok(None)` means the ref is not a prepared
-/// context (which admission rejects fail-closed for ref-less submissions).
+/// ref points at. `Ok(None)` means the ref is not a prepared context. Unbound
+/// admission rejects that result fail-closed for ref-less submissions; trusted
+/// profile paths may continue with their profile's defaults.
 #[async_trait]
 pub trait PreparedContextSource: Send + Sync {
     async fn read_declarations(
@@ -125,6 +107,7 @@ mod tests {
         );
 
         let schema = OutputContract::JsonSchema {
+            name: "cards_v1".to_string(),
             schema: serde_json::json!({ "type": "object" }),
         };
         let json = serde_json::to_value(&schema).expect("serialize");
@@ -148,6 +131,7 @@ mod tests {
         let declarations = PreparedTurnDeclarations {
             tools: vec![CapabilityId::new("builtin.memory_search").expect("capability id")],
             output: OutputContract::JsonSchema {
+                name: "suggestions".to_string(),
                 schema: serde_json::json!({
                     "type": "object",
                     "properties": { "cards": { "type": "array" } },

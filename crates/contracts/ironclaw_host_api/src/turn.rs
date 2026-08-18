@@ -882,6 +882,18 @@ pub enum TurnStatus {
     RecoveryRequired,
 }
 
+/// Durable semantic outcome of a successfully completed turn execution.
+///
+/// This is deliberately separate from transport delivery status. Legacy and
+/// nonterminal rows may omit it; new trusted completion settlements persist
+/// one of these values before any result-delivery observer acts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnExecutionOutcome {
+    ResultAvailable,
+    NothingToReport,
+}
+
 impl TurnStatus {
     pub fn is_terminal(self) -> bool {
         matches!(

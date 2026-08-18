@@ -35,6 +35,14 @@ pub struct AppendCapabilityResultRef {
     pub provider_call: Option<ProviderToolCallReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_observation: Option<ModelVisibleToolObservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intrinsic_outcome: Option<CapabilityResultIntrinsicOutcome>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityResultIntrinsicOutcome {
+    NothingToReport,
 }
 
 #[async_trait]

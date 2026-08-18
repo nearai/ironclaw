@@ -16,9 +16,13 @@ where
         });
     }
     ensure_libsql_resource_governor_authority(config.process_local_resource_governor_singleton)?;
-    let filesystem = Arc::new(LibSqlRootFilesystem::from_runtime(config.runtime));
+    let journal_runtime = Arc::new(config.runtime.split_journal_lane()?);
+    let filesystem = Arc::new(LibSqlRootFilesystem::from_runtime(Arc::clone(
+        &config.runtime,
+    )));
     filesystem.run_migrations().await?;
-    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
+    let process_journal_filesystem = Arc::new(LibSqlRootFilesystem::from_runtime(journal_runtime));
+    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&process_journal_filesystem));
     let resource_governor = FilesystemResourceGovernor::new(scoped_filesystem);
     let event_store = ironclaw_event_store::RebornEventStoreConfig::LibsqlFilesystem {
         filesystem: Arc::clone(&filesystem),
@@ -27,6 +31,7 @@ where
     build_filesystem_production_host_runtime_services(
         FilesystemProductionHostRuntimeServicesInput {
             filesystem,
+            process_journal_filesystem,
             resource_governor,
             event_store: ProductionEventStoresInput::Config(event_store),
             secret_master_key: config.secret_master_key,
@@ -82,6 +87,7 @@ where
     )?;
     build_filesystem_production_host_runtime_services(
         FilesystemProductionHostRuntimeServicesInput {
+            process_journal_filesystem: Arc::clone(&filesystem),
             filesystem,
             resource_governor,
             event_store: ProductionEventStoresInput::Prebuilt(event_store),
@@ -122,6 +128,7 @@ where
     F: RootFilesystem + 'static,
 {
     filesystem: Arc<F>,
+    process_journal_filesystem: Arc<F>,
     resource_governor: FilesystemResourceGovernor<F>,
     event_store: ProductionEventStoresInput,
     secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
@@ -190,6 +197,7 @@ where
 {
     let FilesystemProductionHostRuntimeServicesInput {
         filesystem,
+        process_journal_filesystem,
         resource_governor,
         event_store,
         secret_master_key,
@@ -200,17 +208,17 @@ where
     } = input;
     let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
     let process_journal_store = Arc::new(ProcessJournalStore::new(
-        crate::wrap_process_journal_scoped(Arc::clone(&filesystem)),
+        crate::wrap_process_journal_scoped(process_journal_filesystem),
     ));
-    process_journal_store
-        .migrate_legacy_journal()
-        .await
-        .map_err(|error| crate::RebornCompositionError::InvalidConfig {
-            reason: format!("process journal startup migration failed: {error}"),
-        })?;
-    let processes = ProcessRuntimeSystem::from_process_journal_store(process_journal_store);
+    // `?` keeps the store's filesystem cause (ProcessJournalMigration).
+    process_journal_store.migrate_legacy_journal().await?;
+    let processes =
+        ProcessRuntimeSystem::from_process_journal_store(Arc::clone(&process_journal_store));
     let turn_state = Arc::new(processes.agent_turn_runtime());
-    let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
+    let process_services = ProcessServices::new(
+        process_journal_store,
+        Arc::new(ProcessResultStore::from_arc(Arc::clone(&scoped_filesystem))),
+    );
     let secret_credentials = build_filesystem_secret_credential_stores(
         Arc::clone(&scoped_filesystem),
         secret_master_key,
@@ -247,19 +255,22 @@ where
         ),
     )
     .with_turn_run_wake_notifier(turn_run_wake_notifier);
-    let services = match event_store {
+    let event_stores = match event_store {
         ProductionEventStoresInput::Config(config) => {
-            services
-                .with_reborn_event_store_config(
-                    ironclaw_event_store::RebornProfile::Production,
-                    config,
-                )
-                .await?
+            ironclaw_event_store::build_reborn_event_stores(
+                ironclaw_event_store::RebornProfile::Production,
+                config,
+            )
+            .await?
         }
-        ProductionEventStoresInput::Prebuilt(stores) => {
-            services.with_production_reborn_event_stores(stores)
-        }
+        ProductionEventStoresInput::Prebuilt(stores) => stores,
     };
+    let runtime_event_sink: Arc<dyn NonBlockingEventSink> = Arc::new(CoalescingEventSink::new(
+        Arc::clone(&event_stores.events),
+        EventBatchConfig::default(),
+    ));
+    let services =
+        services.with_production_reborn_event_stores_and_sink(event_stores, runtime_event_sink);
     let services = apply_production_runtime_process_binding(services, process_binding);
     let services = match PostEditCheckConfig::from_env() {
         Ok(Some(config)) => services.with_post_edit_check(config),
@@ -510,12 +521,8 @@ pub(super) async fn build_backend_production(
         )))
         .with_concurrency_limits(process_concurrency_limits),
     );
-    process_journal_store
-        .migrate_legacy_journal()
-        .await
-        .map_err(|error| crate::RebornCompositionError::InvalidConfig {
-            reason: format!("process journal startup migration failed: {error}"),
-        })?;
+    // `?` keeps the store's filesystem cause (ProcessJournalMigration).
+    process_journal_store.migrate_legacy_journal().await?;
     let processes =
         ProcessRuntimeSystem::from_process_journal_store(Arc::clone(&process_journal_store));
     let process_lifecycle_lookup_source = processes.lifecycle();
@@ -544,6 +551,10 @@ pub(super) async fn build_backend_production(
     .await?;
     let event_log = Arc::clone(&event_stores.events);
     let audit_log = Arc::clone(&event_stores.audit);
+    let runtime_event_sink: Arc<dyn NonBlockingEventSink> = Arc::new(CoalescingEventSink::new(
+        Arc::clone(&event_log),
+        EventBatchConfig::default(),
+    ));
     let admin_secret_provisioner: Arc<dyn ironclaw_assistant::AdminSecretProvisioner> =
         Arc::new(crate::admin_secrets::FilesystemAdminSecretProvisioner::new(
             Arc::clone(&stores.filesystem),
@@ -610,6 +621,7 @@ pub(super) async fn build_backend_production(
         );
     }
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
+    let host_runtime_event_sink: Arc<dyn EventSink> = runtime_event_sink.clone();
     let services = with_shared_host_runtime_wiring!(
         HostRuntimeServices::new(
             Arc::clone(&extension_registry),
@@ -632,7 +644,7 @@ pub(super) async fn build_backend_production(
     )
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_resource_governor(Arc::clone(&resource_governor))
-    .with_production_reborn_event_stores(event_stores)
+    .with_production_reborn_event_stores_and_sink(event_stores, host_runtime_event_sink)
     .with_turn_run_wake_notifier_dyn(production_wiring.turn_run_wake_notifier);
     #[cfg(any(test, feature = "test-support"))]
     let network_http_egress = match network_http_egress_for_test {
@@ -1436,6 +1448,7 @@ pub(super) async fn build_backend_production(
         budget_gate_store,
         broadcast_budget_event_sink,
         event_log,
+        runtime_event_sink,
         audit_log,
         admin_secret_provisioner,
         project_service,
@@ -1508,16 +1521,29 @@ impl ironclaw_auth::DeliveryRegistrationPaths for DeploymentRegistrationPaths {
     }
 }
 
+/// Optional backend-specific lanes for latency-sensitive journals. `None`
+/// keeps that journal on the data-plane filesystem.
+#[derive(Default)]
+pub(super) struct DurableJournalLanes {
+    process_journal: Option<Arc<CompositeRootFilesystem>>,
+    resource_governor: Option<Arc<CompositeRootFilesystem>>,
+}
+
 async fn finish_production_backend(
     context: RebornProductionBuildContext,
     filesystem: Arc<CompositeRootFilesystem>,
-    process_journal_filesystem: Option<Arc<CompositeRootFilesystem>>,
+    journal_lanes: DurableJournalLanes,
     trigger_repository: Arc<dyn TriggerRepository>,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     event_store_config: ironclaw_event_store::RebornEventStoreConfig,
     leader_lock: ironclaw_auth::CredentialRefreshLeaderLock,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
-    let resource_governor = filesystem_resource_governor(&filesystem);
+    let DurableJournalLanes {
+        process_journal: process_journal_filesystem,
+        resource_governor: resource_governor_filesystem,
+    } = journal_lanes;
+    let resource_governor =
+        filesystem_resource_governor(resource_governor_filesystem.as_ref().unwrap_or(&filesystem));
     let stores = ProductionStoreBundle::new(
         filesystem,
         resource_governor,
@@ -1542,6 +1568,7 @@ pub(super) async fn build_libsql_production(
     ensure_libsql_resource_governor_authority_for_build(process_local_resource_governor_singleton)?;
     let database_filesystem = Arc::new(LibSqlRootFilesystem::from_runtime(Arc::clone(&runtime)));
     database_filesystem.run_migrations().await?;
+    let lane_runtime = Arc::clone(&runtime);
     let trigger_repository = Arc::new(ironclaw_triggers::LibSqlTriggerRepository::from_runtime(
         runtime,
     ));
@@ -1559,11 +1586,21 @@ pub(super) async fn build_libsql_production(
         filesystem: database_filesystem,
         path_or_url,
     };
+    // Both libSQL journals share one bounded lane; `split_journal_lane`
+    // documents the writer-contention invariant behind #7714.
+    let journal_lane = crate::filesystem_assembly::libsql_journal_lane_filesystem(
+        lane_runtime.as_ref(),
+        |backend| {
+            production_database_root_filesystem(backend, "production-libsql-journal-lane-state")
+        },
+    )?;
     finish_production_backend(
         context,
         filesystem,
-        // libSQL is single-writer by design; a second handle buys nothing.
-        None,
+        DurableJournalLanes {
+            process_journal: Some(Arc::clone(&journal_lane)),
+            resource_governor: Some(journal_lane),
+        },
         trigger_repository,
         secret_master_key,
         event_store_config,
@@ -1622,7 +1659,11 @@ pub(super) async fn build_postgres_production(
     finish_production_backend(
         context,
         filesystem,
-        process_journal_filesystem,
+        DurableJournalLanes {
+            process_journal: process_journal_filesystem,
+            // Postgres governor writes already use the pooled data plane.
+            resource_governor: None,
+        },
         trigger_repository,
         secret_master_key,
         ironclaw_event_store::RebornEventStoreConfig::PostgresPool {

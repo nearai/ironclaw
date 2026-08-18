@@ -13,6 +13,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_extension_contracts::channel_adapter::OutboundPart;
+use ironclaw_host_api::execution_policy::ResultDeliveryPolicy;
 use ironclaw_host_api::failure::summary::reborn_failure_summary_for_category;
 use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
 use ironclaw_outbound::{
@@ -25,8 +26,8 @@ use ironclaw_outbound::{
 };
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{
-    GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnRunId, TurnRunState,
-    TurnScope, TurnStatus,
+    GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnExecutionOutcome,
+    TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -526,6 +527,7 @@ async fn notify_background_run(
         creator_user_id,
         project_scoped: _,
         prompt,
+        result_delivery,
     } = request;
     let actor = TurnActor::new(creator_user_id.clone());
     // Canonical project-filesystem authority scope for workspace-reference
@@ -591,14 +593,19 @@ async fn notify_background_run(
             record_triggered_run_outcome(delivery_store, run_id, outcome).await;
             return outcome;
         }
-        tracing::debug!(
-            target: TRACE_TARGET,
-            %run_id,
-            "background run has no notification channels; notifications stay in the web app"
-        );
-        let outcome = TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured;
-        record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-        return outcome;
+        if result_delivery != ResultDeliveryPolicy::SuppressWhenNothingToReport {
+            tracing::debug!(
+                target: TRACE_TARGET,
+                %run_id,
+                "background run has no notification channels; notifications stay in the web app"
+            );
+            let outcome = TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured;
+            record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+            return outcome;
+        }
+        // An explicitly suppressible run must settle before we can tell
+        // whether the absence of delivery was intentional or merely had no
+        // configured target. Legacy/default runs retain the early return.
     }
 
     let mut delivered_blocked_marker: Option<BlockedActionableMarker> = None;
@@ -653,6 +660,11 @@ async fn notify_background_run(
                 return outcome;
             }
             Err(RunDeliveryError::RunWaitTimedOut { .. }) => {
+                if targets.is_empty() {
+                    let outcome = TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured;
+                    record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+                    return outcome;
+                }
                 // The run never reached an actionable state before `max_wait`.
                 // A scheduled/triggered fire has no user watching the channel,
                 // so silence here is the exact gap #6896 closes: deliver the
@@ -776,6 +788,26 @@ async fn notify_background_run(
         };
 
         let trigger_label = prompts::triggered_label_from_prompt(&prompt);
+        if result_delivery == ResultDeliveryPolicy::SuppressWhenNothingToReport
+            && state.status == TurnStatus::Completed
+            && state.execution_outcome == Some(TurnExecutionOutcome::NothingToReport)
+        {
+            retract_stale_prompts(
+                services,
+                &scope,
+                run_id,
+                &mut messages_to_delete_after_final,
+            )
+            .await;
+            let outcome = TriggeredRunDeliveryOutcomeKind::Suppressed;
+            record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+            return outcome;
+        }
+        if targets.is_empty() {
+            let outcome = TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured;
+            record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+            return outcome;
+        }
         let plan = match notification_plan_for_state(
             services,
             &scope,

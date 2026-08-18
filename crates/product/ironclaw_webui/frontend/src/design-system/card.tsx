@@ -19,7 +19,14 @@
  *   <CardFooter>   — bottom section, optional top divider
  *   <CardLabel>    — mono-caps eyebrow label
  */
+import type {
+  ComponentPropsWithoutRef,
+  ElementType,
+  ReactNode,
+} from "react";
+
 import { cn } from "../utils/cn";
+import type { DataAttributes } from "./types";
 
 /* ─── Variant ─────────────────────────────────────────────────────── */
 // --v2-card-bg     : solid panel surface
@@ -54,18 +61,36 @@ const PADDINGS = {
   lg:   "p-5 md:p-7",
 };
 
+type CardOwnProps<T extends ElementType> = {
+  as?: T;
+  children?: ReactNode;
+  className?: string;
+  padding?: keyof typeof PADDINGS;
+  radius?: keyof typeof RADII;
+  variant?: keyof typeof VARIANTS;
+};
+
+export type CardProps<T extends ElementType = "div"> = CardOwnProps<T> &
+  DataAttributes &
+  Omit<ComponentPropsWithoutRef<T>, keyof CardOwnProps<T>>;
+
+export type CardSectionProps = ComponentPropsWithoutRef<"div"> & {
+  divider?: boolean;
+};
+
 /* ─── Card ────────────────────────────────────────────────────────── */
 
-export function Card({
-  children,
-  className = "",
-  variant = "default",
-  radius = "md",
-  padding = "none",
-  as: Tag = "div",
-  ...rest
-}) {
-  const Element: any = Tag;
+export function Card<T extends ElementType = "div">(props: CardProps<T>) {
+  const {
+    children,
+    className = "",
+    variant = "default",
+    radius = "md",
+    padding = "none",
+    as,
+    ...rest
+  } = props;
+  const Element: ElementType = as ?? "div";
   return (
     <Element
       className={cn(
@@ -83,9 +108,15 @@ export function Card({
 
 /* ─── CardHeader ──────────────────────────────────────────────────── */
 
-export function CardHeader({ children, className = "", divider = false }) {
+export function CardHeader({
+  children,
+  className = "",
+  divider = false,
+  ...rest
+}: CardSectionProps) {
   return (
     <div
+      {...rest}
       className={cn(
         "px-5 py-4 md:px-7 md:py-5",
         divider && "border-b border-[var(--v2-panel-border)]",
@@ -99,9 +130,13 @@ export function CardHeader({ children, className = "", divider = false }) {
 
 /* ─── CardBody ────────────────────────────────────────────────────── */
 
-export function CardBody({ children, className = "" }) {
+export function CardBody({
+  children,
+  className = "",
+  ...rest
+}: CardSectionProps) {
   return (
-    <div className={cn("px-5 py-4 md:px-7 md:py-5", className)}>
+    <div {...rest} className={cn("px-5 py-4 md:px-7 md:py-5", className)}>
       {children}
     </div>
   );
@@ -109,9 +144,15 @@ export function CardBody({ children, className = "" }) {
 
 /* ─── CardFooter ──────────────────────────────────────────────────── */
 
-export function CardFooter({ children, className = "", divider = true }) {
+export function CardFooter({
+  children,
+  className = "",
+  divider = true,
+  ...rest
+}: CardSectionProps) {
   return (
     <div
+      {...rest}
       className={cn(
         "px-5 py-4 md:px-7 md:py-5",
         divider && "border-t border-[var(--v2-panel-border)]",
@@ -126,9 +167,14 @@ export function CardFooter({ children, className = "", divider = true }) {
 /* ─── CardLabel ───────────────────────────────────────────────────── */
 
 /** Mono-caps eyebrow label — sits above section headings. */
-export function CardLabel({ children, className = "" }) {
+export function CardLabel({
+  children,
+  className = "",
+  ...rest
+}: ComponentPropsWithoutRef<"div">) {
   return (
     <div
+      {...rest}
       className={cn(
         "font-mono text-[0.6875rem] font-semibold uppercase tracking-[0.22em] text-[var(--v2-text-faint)]",
         className

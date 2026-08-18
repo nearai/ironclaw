@@ -1,3 +1,4 @@
+// arch-exempt: large_file, edge-submission denial cases belong with materialized-state transitions, plan #7598
 use std::collections::HashSet;
 
 use chrono::Utc;
@@ -10,12 +11,13 @@ use serde_json::json;
 use super::*;
 use crate::{
     ClaimProcessesRequest, CloseProcessDependencyRequest, OpenProcessDependencyRequest,
-    ProcessCheckpointPayload, ProcessDependencyState, ProcessDependencySubmission,
-    ProcessInputPayload, ProcessInputRef, ProcessInputSubmission, ProcessLeaseRequest,
-    ProcessOperationId, ProcessTerminalEvidence, ProcessWorkerId, PruneReleasedProcessRequest,
+    ProcessCheckpointPayload, ProcessConcurrencyClass, ProcessDependencyState,
+    ProcessDependencySubmission, ProcessInputPayload, ProcessInputRef, ProcessInputSubmission,
+    ProcessLeaseRequest, ProcessOperationId, ProcessSubmissionEdge, ProcessSuspension,
+    ProcessSuspensionKind, ProcessTerminalEvidence, ProcessWorkerId, PruneReleasedProcessRequest,
     RecordProcessCheckpointRequest, RecoverExpiredProcessLeasesRequest, ReleaseProcessTreeRequest,
     ReserveProcessTreeRequest, SettleProcessDependencyRequest, StateTransitionCase,
-    SubmitProcessRequest, assert_state_transition_table,
+    SubmitProcessAtEdgeRequest, SubmitProcessRequest, assert_state_transition_table,
     journal_store::{ProcessControlMutation, ProcessTransitionMutation, StoredProcessCommand},
 };
 
@@ -106,6 +108,322 @@ fn assert_error(
     assert_eq!(
         error_class(result.expect_err("transition must fail")),
         expected
+    );
+}
+
+#[test]
+fn submit_at_edge_materializes_only_the_requested_lifecycle_entry() {
+    let cases = [
+        (
+            ProcessSubmissionEdge::Completed,
+            ProcessLifecycleStatus::Completed,
+            ProcessJournalKind::Completed,
+        ),
+        (
+            ProcessSubmissionEdge::Failed {
+                failure: SanitizedFailure::from_trusted_static("capability_failed"),
+            },
+            ProcessLifecycleStatus::Failed,
+            ProcessJournalKind::Failed,
+        ),
+    ];
+
+    for (edge, expected_status, expected_kind) in cases {
+        let mut state = ProcessJournalMaterializedState::default();
+        let mut submission = submit_request(ProcessId::new(), scope("edge"));
+        submission.process_kind = ProcessKind::CapabilityInvocationState;
+        let outcome = state
+            .apply_command(StoredProcessCommand::SubmitAtEdge(Box::new(
+                SubmitProcessAtEdgeRequest { submission, edge },
+            )))
+            .expect("edge submission");
+        let StoredCommandOutcome::Submitted(snapshot, true) = outcome else {
+            panic!("expected new edge submission");
+        };
+
+        assert_eq!(snapshot.status, expected_status);
+        assert_eq!(snapshot.lease, None);
+        assert_eq!(state.journal.len(), 1);
+        assert_eq!(state.journal[0].kind, expected_kind);
+    }
+
+    let mut state = ProcessJournalMaterializedState::default();
+    let checkpoint_ref = ProcessCheckpointRef::from_trusted("invocation-edge");
+    let suspension = ProcessSuspension {
+        kind: ProcessSuspensionKind::Approval,
+        gate_ref: None,
+        activity_id: None,
+        credential_requirements: Vec::new(),
+        detail: None,
+    };
+    let mut submission = submit_request(ProcessId::new(), scope("suspended-edge"));
+    submission.process_kind = ProcessKind::CapabilityInvocationState;
+    submission.checkpoint_ref = Some(checkpoint_ref.clone());
+    let outcome = state
+        .apply_command(StoredProcessCommand::SubmitAtEdge(Box::new(
+            SubmitProcessAtEdgeRequest {
+                submission,
+                edge: ProcessSubmissionEdge::Suspended {
+                    suspension: suspension.clone(),
+                },
+            },
+        )))
+        .expect("suspended edge submission");
+    let StoredCommandOutcome::Submitted(snapshot, true) = outcome else {
+        panic!("expected new suspended edge submission");
+    };
+    assert_eq!(snapshot.status, ProcessLifecycleStatus::Suspended);
+    assert_eq!(snapshot.checkpoint_ref, Some(checkpoint_ref));
+    assert_eq!(snapshot.suspension, Some(suspension));
+    assert_eq!(state.journal.len(), 1);
+    assert_eq!(state.journal[0].kind, ProcessJournalKind::Suspended);
+
+    assert_error(
+        ProcessJournalMaterializedState::default().apply_command(
+            StoredProcessCommand::SubmitAtEdge(Box::new(SubmitProcessAtEdgeRequest {
+                submission: submit_request(ProcessId::new(), scope("invalid-edge-kind")),
+                edge: ProcessSubmissionEdge::Completed,
+            })),
+        ),
+        "request",
+    );
+}
+#[test]
+fn submit_at_edge_rejects_incompatible_submissions() {
+    let suspension = ProcessSuspension {
+        kind: ProcessSuspensionKind::Approval,
+        gate_ref: None,
+        activity_id: None,
+        credential_requirements: Vec::new(),
+        detail: None,
+    };
+    let mut missing_checkpoint = submit_request(ProcessId::new(), scope("missing-checkpoint"));
+    missing_checkpoint.process_kind = ProcessKind::CapabilityInvocationState;
+    assert_error(
+        ProcessJournalMaterializedState::default().apply_command(
+            StoredProcessCommand::SubmitAtEdge(Box::new(SubmitProcessAtEdgeRequest {
+                submission: missing_checkpoint,
+                edge: ProcessSubmissionEdge::Suspended { suspension },
+            })),
+        ),
+        "request",
+    );
+
+    for edge in [
+        ProcessSubmissionEdge::Completed,
+        ProcessSubmissionEdge::Failed {
+            failure: SanitizedFailure::from_trusted_static("edge_failed"),
+        },
+    ] {
+        let mut terminal_checkpoint =
+            submit_request(ProcessId::new(), scope("terminal-checkpoint"));
+        terminal_checkpoint.process_kind = ProcessKind::CapabilityInvocationState;
+        terminal_checkpoint.checkpoint_ref =
+            Some(ProcessCheckpointRef::from_trusted("terminal-checkpoint"));
+        assert_error(
+            ProcessJournalMaterializedState::default().apply_command(
+                StoredProcessCommand::SubmitAtEdge(Box::new(SubmitProcessAtEdgeRequest {
+                    submission: terminal_checkpoint,
+                    edge,
+                })),
+            ),
+            "request",
+        );
+    }
+
+    let incompatible_shapes = [
+        (
+            "exclusive",
+            (|submission: &mut SubmitProcessRequest| {
+                submission.exclusive_within_scope = true;
+            }) as fn(&mut SubmitProcessRequest),
+        ),
+        ("parent", |submission: &mut SubmitProcessRequest| {
+            submission.parent_process_id = Some(ProcessId::new());
+        }),
+        ("root", |submission: &mut SubmitProcessRequest| {
+            submission.root_process_id = Some(ProcessId::new());
+        }),
+        ("tree-cap", |submission: &mut SubmitProcessRequest| {
+            submission.spawn_tree_descendant_cap = Some(1);
+        }),
+        ("dependency", |submission: &mut SubmitProcessRequest| {
+            submission.dependency = Some(ProcessDependencySubmission {
+                dependent_process_id: ProcessId::new(),
+                root_process_id: ProcessId::new(),
+                group_ref: None,
+                metadata: serde_json::Value::Null,
+            });
+        }),
+        ("input", |submission: &mut SubmitProcessRequest| {
+            submission.input = Some(ProcessInputSubmission {
+                input_ref: ProcessInputRef::from_trusted("edge-input"),
+                payload: ProcessInputPayload::new(b"input".to_vec()).expect("bounded input"),
+            });
+        }),
+    ];
+    for (label, mutate) in incompatible_shapes {
+        let mut submission = submit_request(ProcessId::new(), scope(label));
+        submission.process_kind = ProcessKind::CapabilityInvocationState;
+        mutate(&mut submission);
+        assert_error(
+            ProcessJournalMaterializedState::default().apply_command(
+                StoredProcessCommand::SubmitAtEdge(Box::new(SubmitProcessAtEdgeRequest {
+                    submission,
+                    edge: ProcessSubmissionEdge::Completed,
+                })),
+            ),
+            "request",
+        );
+    }
+}
+
+#[test]
+fn edge_submissions_keep_only_compact_bindings_not_persisted_snapshots() {
+    let mut state = ProcessJournalMaterializedState::default();
+    let request_scope = scope("edge-bindings");
+    let process_id = ProcessId::new();
+    let mut submission = submit_request(process_id, request_scope);
+    submission.process_kind = ProcessKind::CapabilityInvocationState;
+    submission.operation_id = Some(ProcessOperationId::from_trusted("edge-op"));
+    let command = || {
+        StoredProcessCommand::SubmitAtEdge(Box::new(SubmitProcessAtEdgeRequest {
+            submission: submission.clone(),
+            edge: ProcessSubmissionEdge::Completed,
+        }))
+    };
+
+    let StoredCommandOutcome::Submitted(_, true) = state
+        .apply_command(command())
+        .expect("initial edge submission")
+    else {
+        panic!("expected initial edge submission");
+    };
+    // The perf contract: an edge submission must not persist a full-snapshot
+    // idempotency record that every later journal command re-serializes.
+    // Only the compact in-memory binding is retained.
+    assert!(
+        state.submission_idempotency.is_empty(),
+        "edge submissions must not grow the persisted idempotency map"
+    );
+    assert_eq!(
+        state
+            .edge_submission_bindings
+            .values()
+            .filter(|bound| **bound == process_id)
+            .count(),
+        1,
+        "compact op-id binding must be recorded"
+    );
+
+    // Replay semantics are unchanged: the identical submission resolves from
+    // the durable process row without a second journal entry, and a
+    // same-operation submission for a different process is still rejected.
+    let StoredCommandOutcome::Submitted(_, false) = state
+        .apply_command(command())
+        .expect("idempotent edge replay")
+    else {
+        panic!("expected idempotent edge replay");
+    };
+    assert_eq!(state.journal.len(), 1);
+
+    let mut different_process = submission.clone();
+    different_process.process_id = ProcessId::new();
+    assert_error(
+        state.apply_command(StoredProcessCommand::SubmitAtEdge(Box::new(
+            SubmitProcessAtEdgeRequest {
+                submission: different_process,
+                edge: ProcessSubmissionEdge::Completed,
+            },
+        ))),
+        "request",
+    );
+    assert_eq!(state.journal.len(), 1, "rejected replay must not write");
+}
+
+#[test]
+fn submit_at_edge_replay_requires_matching_submission_and_writes_once() {
+    let mut state = ProcessJournalMaterializedState::default();
+    let mut submission = submit_request(ProcessId::new(), scope("edge-replay"));
+    submission.process_kind = ProcessKind::CapabilityInvocationState;
+    submission.operation_id = Some(ProcessOperationId::from_trusted("edge-operation"));
+    let command = || {
+        StoredProcessCommand::SubmitAtEdge(Box::new(SubmitProcessAtEdgeRequest {
+            submission: submission.clone(),
+            edge: ProcessSubmissionEdge::Completed,
+        }))
+    };
+
+    let StoredCommandOutcome::Submitted(_, true) = state
+        .apply_command(command())
+        .expect("initial edge submission")
+    else {
+        panic!("expected initial edge submission");
+    };
+    let StoredCommandOutcome::Submitted(_, false) = state
+        .apply_command(command())
+        .expect("idempotent edge replay")
+    else {
+        panic!("expected idempotent edge replay");
+    };
+    assert_eq!(state.journal.len(), 1);
+
+    let mut retried = submission.clone();
+    retried.created_at += chrono::Duration::seconds(1);
+    let StoredCommandOutcome::Submitted(_, false) = state
+        .apply_command(StoredProcessCommand::SubmitAtEdge(Box::new(
+            SubmitProcessAtEdgeRequest {
+                submission: retried,
+                edge: ProcessSubmissionEdge::Completed,
+            },
+        )))
+        .expect("idempotent edge retry with a fresh attempt timestamp")
+    else {
+        panic!("expected idempotent edge retry");
+    };
+
+    let mismatched_submissions = [
+        (|request: &mut SubmitProcessRequest| {
+            request.process_id = ProcessId::new();
+        }) as fn(&mut SubmitProcessRequest),
+        |request: &mut SubmitProcessRequest| {
+            request.owner_user_id = Some(UserId::new("different-owner").expect("owner"));
+        },
+        |request: &mut SubmitProcessRequest| {
+            request.concurrency_class =
+                Some(ProcessConcurrencyClass::from_trusted("different-class"));
+        },
+        |request: &mut SubmitProcessRequest| {
+            request.checkpoint_ref =
+                Some(ProcessCheckpointRef::from_trusted("different-checkpoint"));
+        },
+        |request: &mut SubmitProcessRequest| {
+            request.metadata = json!({"record_type": "different"});
+        },
+    ];
+    for mutate in mismatched_submissions {
+        let mut mismatched = submission.clone();
+        mutate(&mut mismatched);
+        assert_error(
+            state.apply_command(StoredProcessCommand::SubmitAtEdge(Box::new(
+                SubmitProcessAtEdgeRequest {
+                    submission: mismatched,
+                    edge: ProcessSubmissionEdge::Completed,
+                },
+            ))),
+            "request",
+        );
+    }
+    assert_error(
+        state.apply_command(StoredProcessCommand::SubmitAtEdge(Box::new(
+            SubmitProcessAtEdgeRequest {
+                submission,
+                edge: ProcessSubmissionEdge::Failed {
+                    failure: SanitizedFailure::from_trusted_static("different_edge"),
+                },
+            },
+        ))),
+        "request",
     );
 }
 

@@ -138,6 +138,27 @@ impl BudgetLedger {
             }
         }
     }
+
+    /// Settles a batch reservation after the host reports how many admitted
+    /// calls it actually launched. Returns `false` when the supplied counts
+    /// contradict the reservation or cannot be represented by the ledger.
+    pub(crate) fn settle_invocation_reservation(
+        &mut self,
+        reserved: usize,
+        launched: usize,
+    ) -> bool {
+        let Some(unlaunched) = reserved.checked_sub(launched) else {
+            return false;
+        };
+        let Ok(unlaunched) = u32::try_from(unlaunched) else {
+            return false;
+        };
+        let Some(settled) = self.capability_invocations_made.checked_sub(unlaunched) else {
+            return false;
+        };
+        self.capability_invocations_made = settled;
+        true
+    }
 }
 
 /// Test seams live in a test-gated module (struct-debt ratchet: production
@@ -249,6 +270,32 @@ mod tests {
             InvocationCharge::Charged
         );
         assert_eq!(ledger.capability_invocations_made(), 0);
+    }
+
+    #[test]
+    fn settle_invocation_reservation_refunds_only_unlaunched_calls() {
+        let mut ledger = BudgetLedger::default();
+        let policy = policy(0, 10);
+        assert_eq!(
+            ledger.try_charge_invocations(4, &policy),
+            InvocationCharge::Charged
+        );
+
+        assert!(ledger.settle_invocation_reservation(4, 1));
+        assert_eq!(ledger.capability_invocations_made(), 1);
+    }
+
+    #[test]
+    fn settle_invocation_reservation_rejects_impossible_counts() {
+        let mut ledger = BudgetLedger::default();
+        let policy = policy(0, 10);
+        assert_eq!(
+            ledger.try_charge_invocations(2, &policy),
+            InvocationCharge::Charged
+        );
+
+        assert!(!ledger.settle_invocation_reservation(2, 3));
+        assert_eq!(ledger.capability_invocations_made(), 2);
     }
 
     #[test]

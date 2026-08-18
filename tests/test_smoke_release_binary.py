@@ -8,6 +8,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,7 +27,8 @@ def completed(
 
 class FakeRunner:
     def __init__(self) -> None:
-        self.calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
+        self.calls: list[tuple[tuple[str, ...], dict[str, str], Path]] = []
+        self.workspace_roots_were_directories: list[bool] = []
         self.responses = {
             ("--version",): completed("ironclaw 1.0.0\n"),
             ("--help",): completed("Commands: serve run extension profile\n"),
@@ -70,9 +72,17 @@ class FakeRunner:
         }
 
     def __call__(
-        self, _binary: Path, args: tuple[str, ...], environment: dict[str, str]
+        self,
+        _binary: Path,
+        args: tuple[str, ...],
+        environment: dict[str, str],
+        working_directory: Path,
     ) -> subprocess.CompletedProcess[str]:
-        self.calls.append((args, environment))
+        self.calls.append((args, environment, working_directory))
+        workspace_root = environment.get("IRONCLAW_REBORN_WORKSPACE_ROOT")
+        self.workspace_roots_were_directories.append(
+            workspace_root is not None and Path(workspace_root).is_dir()
+        )
         if args == ("extension", "search", "--json"):
             database = (
                 Path(environment["IRONCLAW_REBORN_HOME"])
@@ -99,7 +109,7 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
 
         self.assertEqual(evidence, SMOKE.REQUIRED_EVIDENCE)
         self.assertEqual(
-            [args for args, _ in self.runner.calls],
+            [args for args, _, _ in self.runner.calls],
             [
                 ("--version",),
                 ("--help",),
@@ -108,16 +118,48 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
                 ("run", "--dry-run"),
             ],
         )
-        environments = [environment for _, environment in self.runner.calls]
+        environments = [environment for _, environment, _ in self.runner.calls]
+        working_directories = {
+            working_directory.resolve()
+            for _, _, working_directory in self.runner.calls
+        }
         self.assertEqual(
             environments[-1]["IRONCLAW_REBORN_PROFILE"], "migration-dry-run"
         )
         self.assertTrue(
             all("IRONCLAW_REBORN_HOME" in environment for environment in environments)
         )
+        workspace_roots = {
+            environment.get("IRONCLAW_REBORN_WORKSPACE_ROOT")
+            for environment in environments
+        }
+        self.assertEqual(len(workspace_roots), 1)
+        workspace_root = workspace_roots.pop()
+        self.assertIsNotNone(workspace_root)
+        self.assertTrue(all(self.runner.workspace_roots_were_directories))
+        workspace_path = Path(workspace_root).resolve()
+        self.assertEqual(working_directories, {workspace_path})
+        repository_path = ROOT.resolve()
+        self.assertFalse(
+            workspace_path == repository_path
+            or repository_path in workspace_path.parents
+        )
         self.assertTrue(
             all("DATABASE_URL" not in environment for environment in environments)
         )
+
+    def test_isolated_environment_preserves_windows_account_for_key_acl(self) -> None:
+        root = Path(self.temp_dir.name) / "windows-smoke"
+        root.mkdir()
+        with mock.patch.dict(
+            os.environ,
+            {"USERNAME": "runneradmin", "USERDOMAIN": "RUNNER"},
+            clear=False,
+        ):
+            environment = SMOKE._isolated_environment(root)
+
+        self.assertEqual(environment["USERNAME"], "runneradmin")
+        self.assertEqual(environment["USERDOMAIN"], "RUNNER")
 
     def test_nonzero_shipping_command_fails(self) -> None:
         self.runner.responses[("extension", "search", "--json")] = completed(
@@ -126,6 +168,15 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(SMOKE.SmokeFailure, "exited 7"):
             SMOKE.smoke_release_binary(self.binary, self.runner)
+
+    def test_invalid_json_reports_the_captured_stdout_prefix(self) -> None:
+        with self.assertRaisesRegex(
+            SMOKE.SmokeFailure, "processed file: master-key"
+        ):
+            SMOKE._parse_json_object(
+                'processed file: master-key\n{"payload": {}}',
+                "extension search --json",
+            )
 
     def test_missing_profile_fails(self) -> None:
         self.runner.responses[("profile", "list", "--json")] = completed(
@@ -145,7 +196,10 @@ class ReleaseBinarySmokeTests(unittest.TestCase):
 
     def test_successful_catalog_without_local_libsql_state_fails(self) -> None:
         def runner_without_database(
-            _binary: Path, args: tuple[str, ...], _environment: dict[str, str]
+            _binary: Path,
+            args: tuple[str, ...],
+            _environment: dict[str, str],
+            _working_directory: Path,
         ) -> subprocess.CompletedProcess[str]:
             return self.runner.responses[args]
 

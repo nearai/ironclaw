@@ -501,7 +501,8 @@ mod tests {
         run_id: TurnRunId,
         accepted_message_ref: &AcceptedMessageRef,
     ) -> TurnRunState {
-        use ironclaw_turns::{EventCursor, RunProfileId, RunProfileVersion, TurnActor, TurnId};
+        use ironclaw_host_api::turn::{EventCursor, RunProfileVersion, TurnActor, TurnId};
+        use ironclaw_turns::RunProfileId;
         TurnRunState {
             scope,
             actor: Some(TurnActor::new(UserId::new("user-steer").expect("user"))),
@@ -511,9 +512,11 @@ mod tests {
             accepted_message_ref: accepted_message_ref.clone(),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
+            output_contract: Default::default(),
             allow_steering: true,
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: None,
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
