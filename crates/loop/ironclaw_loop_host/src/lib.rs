@@ -3102,14 +3102,18 @@ where
                 MessageKind::User => (SystemInferenceContextRole::User, message.content),
                 MessageKind::Assistant => (SystemInferenceContextRole::Assistant, message.content),
                 MessageKind::ToolResultReference => {
-                    ToolResultReferenceEnvelope::from_json_str(&message.content).map_err(|error| {
-                        tracing::debug!(%error, "structured finalization tool result context is invalid");
-                        AgentLoopHostError::new(
-                            AgentLoopHostErrorKind::InvalidInvocation,
-                            "tool result context is invalid for structured finalization",
-                        )
-                    })?;
-                    (SystemInferenceContextRole::Tool, message.content)
+                    let envelope = ToolResultReferenceEnvelope::from_json_str(&message.content)
+                        .map_err(|error| {
+                            tracing::debug!(%error, "structured finalization tool result context is invalid");
+                            AgentLoopHostError::new(
+                                AgentLoopHostErrorKind::InvalidInvocation,
+                                "tool result context is invalid for structured finalization",
+                            )
+                        })?;
+                    (
+                        SystemInferenceContextRole::Tool,
+                        envelope.model_visible_content_or_safe_summary(),
+                    )
                 }
                 MessageKind::System
                 | MessageKind::Summary

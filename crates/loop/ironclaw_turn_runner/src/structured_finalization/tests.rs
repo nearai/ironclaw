@@ -459,6 +459,15 @@ impl SessionThreadService for ConflictInjectingThreadService {
         }
         self.inner.put_structured_finalization(request).await
     }
+
+    async fn publish_structured_finalization_message(
+        &self,
+        request: ironclaw_threads::PublishStructuredFinalizationMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.inner
+            .publish_structured_finalization_message(request)
+            .await
+    }
 }
 
 async fn run_post_inference_conflict_case(

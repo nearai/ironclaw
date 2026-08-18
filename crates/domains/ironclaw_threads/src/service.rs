@@ -108,7 +108,7 @@ pub trait SessionThreadService: Send + Sync {
 
     /// Persist immutable structured-finalization evidence using an absent-write
     /// CAS. Identical retries return the existing record; conflicting content
-    /// or owner fences fail closed.
+    /// fails closed. Owner fences are checked before content comparison.
     async fn put_structured_finalization(
         &self,
         _request: PutStructuredFinalizationRequest,

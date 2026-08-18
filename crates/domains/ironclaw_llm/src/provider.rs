@@ -435,6 +435,36 @@ pub(crate) fn openai_json_schema_response_format(
     }
 }
 
+/// Encode the provider-neutral contract in the OpenAI Responses API
+/// `text.format` shape shared by both Responses adapters.
+pub(crate) fn openai_responses_json_schema_format(
+    format: Option<&CompletionResponseFormat>,
+) -> Option<serde_json::Value> {
+    match format {
+        Some(CompletionResponseFormat::JsonSchema(format)) => Some(serde_json::json!({
+            "type": "json_schema",
+            "name": format.name,
+            "schema": format.schema,
+            "strict": format.strict,
+        })),
+        Some(CompletionResponseFormat::JsonObject) | None => None,
+    }
+}
+
+pub(crate) fn ensure_openai_responses_response_format_supported(
+    format: Option<&CompletionResponseFormat>,
+    provider: &str,
+) -> Result<(), LlmError> {
+    if matches!(format, Some(CompletionResponseFormat::JsonObject)) {
+        return Err(LlmError::InvalidRequest {
+            provider: provider.to_string(),
+            reason: "native JSON-object response mode is not supported by the Responses API"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
 const fn strict_response_format() -> bool {
     true
 }

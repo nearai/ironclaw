@@ -394,16 +394,9 @@ impl CodexChatGptProvider {
             "store": false,
         });
 
-        if let Some(crate::provider::CompletionResponseFormat::JsonSchema(format)) = response_format
+        if let Some(format) = crate::provider::openai_responses_json_schema_format(response_format)
         {
-            body["text"] = json!({
-                "format": {
-                    "type": "json_schema",
-                    "name": format.name,
-                    "schema": format.schema,
-                    "strict": format.strict,
-                }
-            });
+            body["text"]["format"] = format;
         }
 
         // Only add `reasoning` for models that support it;
@@ -426,22 +419,6 @@ impl CodexChatGptProvider {
         }
 
         body
-    }
-
-    fn reject_json_object_response_format(
-        response_format: Option<&crate::provider::CompletionResponseFormat>,
-    ) -> Result<(), LlmError> {
-        if matches!(
-            response_format,
-            Some(crate::provider::CompletionResponseFormat::JsonObject)
-        ) {
-            return Err(LlmError::InvalidRequest {
-                provider: "codex_chatgpt".to_string(),
-                reason: "native JSON-object response mode is not supported by the Responses API"
-                    .to_string(),
-            });
-        }
-        Ok(())
     }
 
     /// Convert a single ChatMessage to one or more Responses API input items.
@@ -1196,7 +1173,10 @@ impl CodexChatGptProvider {
         request: CompletionRequest,
         sink: Option<Arc<dyn CompletionStreamSink>>,
     ) -> Result<CompletionResponse, LlmError> {
-        Self::reject_json_object_response_format(request.response_format.as_ref())?;
+        crate::provider::ensure_openai_responses_response_format_supported(
+            request.response_format.as_ref(),
+            "codex_chatgpt",
+        )?;
         let model = self.resolve_model().await;
         let mut messages = request.messages;
         crate::provider::sanitize_tool_messages(&mut messages);
@@ -1225,7 +1205,10 @@ impl CodexChatGptProvider {
         request: ToolCompletionRequest,
         sink: Option<Arc<dyn CompletionStreamSink>>,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        Self::reject_json_object_response_format(request.response_format.as_ref())?;
+        crate::provider::ensure_openai_responses_response_format_supported(
+            request.response_format.as_ref(),
+            "codex_chatgpt",
+        )?;
         let mut messages = request.messages;
         crate::provider::sanitize_tool_messages(&mut messages);
         let name_map = build_sanitized_tool_name_map(&request.tools)?;

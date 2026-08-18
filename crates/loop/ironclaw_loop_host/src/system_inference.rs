@@ -16,7 +16,6 @@ use crate::{
 };
 use ironclaw_host_api::output::OutputContract;
 use ironclaw_llm::{CompletionResponseFormat, JsonSchemaResponseFormat};
-use ironclaw_threads::ToolResultReferenceEnvelope;
 
 #[derive(Clone)]
 pub struct ModelGatewayBackedSystemInferencePort<G>
@@ -189,22 +188,10 @@ where
                 // canonical tool observation as untrusted, role-labelled
                 // user context instead of emitting an invalid provider
                 // ToolResult message without a call id.
-                SystemInferenceContextRole::Tool => {
-                    let envelope = ToolResultReferenceEnvelope::from_json_str(&message.content)
-                        .map_err(|error| {
-                            tracing::debug!(%error, "system inference tool context is invalid");
-                            SystemInferenceError::Failed {
-                                safe_summary: safe("system inference tool context is invalid"),
-                            }
-                        })?;
-                    (
-                        HostManagedModelMessageRole::User,
-                        format!(
-                            "[Untrusted tool result context]\n{}",
-                            envelope.model_visible_content_or_safe_summary()
-                        ),
-                    )
-                }
+                SystemInferenceContextRole::Tool => (
+                    HostManagedModelMessageRole::User,
+                    format!("[Untrusted tool result context]\n{}", message.content),
+                ),
             };
             messages.push(HostManagedModelMessage {
                 role,

@@ -769,13 +769,15 @@ fn usage_for_model_work(
     // cost policy as ordinary model work while retaining the conservative
     // reservation fallback for providers that do not report usage.
     if let Some(provider_usage) = usage.provider_usage {
-        return usage_for_reported_usage(
+        let mut reconciled = usage_for_reported_usage(
             provider_usage,
             usage.output_bytes,
             cost_table,
             effective_model,
             default_cost,
         );
+        reconciled.wall_clock_ms = usage.wall_clock_ms;
+        return reconciled;
     }
     ResourceUsage {
         usd: estimate.usd.unwrap_or(Decimal::ZERO),
@@ -1381,6 +1383,7 @@ mod tests {
         );
         assert_eq!(snapshot.ledger.spent.input_tokens, 7);
         assert_eq!(snapshot.ledger.spent.output_tokens, 3);
+        assert_eq!(snapshot.ledger.spent.wall_clock_ms, 25);
     }
 
     #[tokio::test]

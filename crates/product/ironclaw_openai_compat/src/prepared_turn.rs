@@ -95,7 +95,7 @@ pub(crate) fn parse_response_format(
             })?;
             OutputContract::try_json_schema(name, schema)
                 .map(Some)
-                .map_err(|reason| OpenAiCompatHttpError::invalid_request(Some(reason)))
+                .map_err(|error| OpenAiCompatHttpError::invalid_request(Some(error.to_string())))
         }
         _ => Err(OpenAiCompatHttpError::invalid_request(Some(
             "response_format.type".to_string(),

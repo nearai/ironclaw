@@ -388,8 +388,13 @@ impl<M: CompletionModel> RigAdapter<M> {
         strip_unsupported_tool_params(&self.unsupported_params, req);
     }
 
-    fn ensure_structured_output_supported(&self, requested: bool) -> Result<(), LlmError> {
-        if requested && !self.structured_output_supported {
+    fn ensure_structured_output_supported(
+        &self,
+        requested: Option<&CompletionResponseFormat>,
+    ) -> Result<(), LlmError> {
+        if matches!(requested, Some(CompletionResponseFormat::JsonSchema(_)))
+            && !self.structured_output_supported
+        {
             return Err(LlmError::InvalidRequest {
                 provider: self.provider_id.clone(),
                 reason: "structured output is not supported by this rig-core provider path"
@@ -1334,7 +1339,7 @@ where
         &self,
         mut request: CompletionRequest,
     ) -> Result<CompletionResponse, LlmError> {
-        self.ensure_structured_output_supported(request.response_format.is_some())?;
+        self.ensure_structured_output_supported(request.response_format.as_ref())?;
         let model_override = request.take_model_override();
         let response_format = request.response_format.take();
 
@@ -1402,7 +1407,7 @@ where
         mut request: CompletionRequest,
         sink: std::sync::Arc<dyn CompletionStreamSink>,
     ) -> Result<CompletionResponse, LlmError> {
-        self.ensure_structured_output_supported(request.response_format.is_some())?;
+        self.ensure_structured_output_supported(request.response_format.as_ref())?;
         if !self.native_streaming {
             return self.complete(request).await;
         }
@@ -1469,7 +1474,7 @@ where
         &self,
         mut request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        self.ensure_structured_output_supported(request.response_format.is_some())?;
+        self.ensure_structured_output_supported(request.response_format.as_ref())?;
         let model_override = request.take_model_override();
         let response_format = request.response_format.take();
 
@@ -1567,7 +1572,7 @@ where
         mut request: ToolCompletionRequest,
         sink: std::sync::Arc<dyn CompletionStreamSink>,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        self.ensure_structured_output_supported(request.response_format.is_some())?;
+        self.ensure_structured_output_supported(request.response_format.as_ref())?;
         if !self.native_streaming {
             return self.complete_with_tools(request).await;
         }
@@ -1962,7 +1967,6 @@ mod tests {
             client.completion_model("configured-model"),
             "configured-model",
         )
-        .with_structured_output_support(true)
         .with_json_object_support(true);
         let mut request = CompletionRequest::new(vec![ChatMessage::user("Return an object")]);
         request.response_format = Some(crate::provider::CompletionResponseFormat::JsonObject);

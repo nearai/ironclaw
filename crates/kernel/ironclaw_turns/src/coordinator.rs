@@ -258,7 +258,9 @@ where
         if let Some(output_contract) = &request.output_contract {
             output_contract
                 .validate()
-                .map_err(|reason| TurnError::InvalidRequest { reason })?;
+                .map_err(|error| TurnError::InvalidRequest {
+                    reason: error.to_string(),
+                })?;
         }
         if request.parent_run_id.is_some() {
             return Ok((request, None));
@@ -320,7 +322,9 @@ where
         declarations
             .output
             .validate()
-            .map_err(|reason| TurnError::InvalidRequest { reason })?;
+            .map_err(|error| TurnError::InvalidRequest {
+                reason: error.to_string(),
+            })?;
         // Output representation is a host-owned immutable contract, not a
         // profile selector. Every new unbound submission uses the ordinary
         // unbounded profile; legacy callers that explicitly name a profile

@@ -8,6 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::HostApiError;
+
 /// Stable compatibility name used when rehydrating legacy schema contracts
 /// that predate named response formats.
 pub const DEFAULT_JSON_SCHEMA_OUTPUT_NAME: &str = "ironclaw_output";
@@ -65,7 +67,7 @@ impl OutputContract {
     pub fn try_json_schema(
         name: impl Into<String>,
         schema: serde_json::Value,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, HostApiError> {
         let contract = Self::JsonSchema {
             name: name.into(),
             schema,
@@ -91,23 +93,27 @@ impl OutputContract {
     /// Validate the durable response-format identity at the host boundary.
     /// Schema semantics remain the provider-native authority; this only
     /// constrains the name used by provider request formats and cache keys.
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), HostApiError> {
         let Self::JsonSchema { name, schema } = self else {
             return Ok(());
         };
         if name.is_empty() || name.len() > MAX_JSON_SCHEMA_OUTPUT_NAME_BYTES {
-            return Err(format!(
+            return Err(HostApiError::invalid_output_contract(format!(
                 "JSON schema output name must be 1..={MAX_JSON_SCHEMA_OUTPUT_NAME_BYTES} bytes"
-            ));
+            )));
         }
         if !name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
         {
-            return Err("JSON schema output name contains an invalid character".to_string());
+            return Err(HostApiError::invalid_output_contract(
+                "JSON schema output name contains an invalid character",
+            ));
         }
         if !schema.is_object() {
-            return Err("JSON schema output must be a JSON object".to_string());
+            return Err(HostApiError::invalid_output_contract(
+                "JSON schema output must be a JSON object",
+            ));
         }
         Ok(())
     }

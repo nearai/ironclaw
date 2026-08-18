@@ -158,14 +158,9 @@ impl OpenAiCodexProvider {
             "text": { "verbosity": "medium" },
         });
 
-        if let Some(crate::provider::CompletionResponseFormat::JsonSchema(format)) = response_format
+        if let Some(format) = crate::provider::openai_responses_json_schema_format(response_format)
         {
-            body["text"]["format"] = serde_json::json!({
-                "type": "json_schema",
-                "name": format.name,
-                "schema": format.schema,
-                "strict": format.strict,
-            });
+            body["text"]["format"] = format;
         }
 
         if crate::reasoning_models::supports_openai_reasoning(&self.model) {
@@ -196,22 +191,6 @@ impl OpenAiCodexProvider {
         }
 
         body
-    }
-
-    fn reject_json_object_response_format(
-        response_format: Option<&crate::provider::CompletionResponseFormat>,
-    ) -> Result<(), LlmError> {
-        if matches!(
-            response_format,
-            Some(crate::provider::CompletionResponseFormat::JsonObject)
-        ) {
-            return Err(LlmError::InvalidRequest {
-                provider: "openai_codex".to_string(),
-                reason: "native JSON-object response mode is not supported by the Responses API"
-                    .to_string(),
-            });
-        }
-        Ok(())
     }
 
     /// Send a request and parse the SSE response stream.
@@ -302,7 +281,10 @@ impl OpenAiCodexProvider {
         request: CompletionRequest,
         sink: Option<Arc<dyn CompletionStreamSink>>,
     ) -> Result<CompletionResponse, LlmError> {
-        Self::reject_json_object_response_format(request.response_format.as_ref())?;
+        crate::provider::ensure_openai_responses_response_format_supported(
+            request.response_format.as_ref(),
+            "openai_codex",
+        )?;
         let mut messages = request.messages;
         crate::provider::sanitize_tool_messages(&mut messages);
         let body = self.build_request_body(&messages, None, None, request.response_format.as_ref());
@@ -324,7 +306,10 @@ impl OpenAiCodexProvider {
         request: ToolCompletionRequest,
         sink: Option<Arc<dyn CompletionStreamSink>>,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        Self::reject_json_object_response_format(request.response_format.as_ref())?;
+        crate::provider::ensure_openai_responses_response_format_supported(
+            request.response_format.as_ref(),
+            "openai_codex",
+        )?;
         let mut messages = request.messages;
         crate::provider::sanitize_tool_messages(&mut messages);
         let name_map: std::collections::HashMap<String, String> = request

@@ -247,7 +247,12 @@ fn completed_exit() -> LoopExit {
         reply_message_refs: Vec::new(),
         result_refs: Vec::new(),
         final_checkpoint_id: None,
-        model_usage: None,
+        model_usage: Some(LoopModelUsage {
+            input_tokens: 120,
+            output_tokens: 48,
+            cache_read_input_tokens: 11,
+            cache_creation_input_tokens: 3,
+        }),
         exit_id: LoopExitId::new("exit:finalizer-failure").expect("valid test exit id"),
     })
 }
@@ -337,10 +342,10 @@ async fn execute_claimed_run_preserves_finalizer_usage_on_host_failure() {
             .failure_metadata()
             .and_then(|metadata| metadata.model_usage()),
         Some(LoopModelUsage {
-            input_tokens: 113,
-            output_tokens: 45,
-            cache_read_input_tokens: 12,
-            cache_creation_input_tokens: 3,
+            input_tokens: 133,
+            output_tokens: 53,
+            cache_read_input_tokens: 13,
+            cache_creation_input_tokens: 4,
         })
     );
 }

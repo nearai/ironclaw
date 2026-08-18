@@ -113,7 +113,7 @@ enum DriverInvocationError {
     },
     HostFinalizationFailed {
         error: AgentLoopHostError,
-        supplemental_usage: Option<LoopModelUsage>,
+        cumulative_usage: Option<LoopModelUsage>,
     },
     DriverError {
         error: AgentLoopDriverError,
@@ -272,10 +272,12 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
                 // `TurnLifecycleEvent.detail` and the failure explainer.
                 let error = match err {
                     DriverInvocationError::HostFinalizationFailed {
-                        supplemental_usage: Some(usage),
+                        cumulative_usage: Some(usage),
                         ..
-                    }
-                    | DriverInvocationError::DriverError {
+                    } => TurnRunExecutorError::from_failure(failure).with_failure_metadata(
+                        TurnRunFailureMetadata::from_optional_model_usage(Some(usage)),
+                    ),
+                    DriverInvocationError::DriverError {
                         supplemental_usage: Some(usage),
                         ..
                     } => TurnRunExecutorError::from_failure(failure).with_failure_metadata(
@@ -404,7 +406,7 @@ impl RebornTurnRunExecutor {
                 Ok(()) => Ok(exit),
                 Err(error) => Err(DriverInvocationError::HostFinalizationFailed {
                     error,
-                    supplemental_usage: None,
+                    cumulative_usage: loop_exit_model_usage(&exit).or(claimed.state.model_usage),
                 }),
             },
             Err(error) => Err(error),
@@ -424,10 +426,13 @@ impl RebornTurnRunExecutor {
                 let error = match error {
                     DriverInvocationError::HostFinalizationFailed {
                         error,
-                        supplemental_usage: _,
+                        cumulative_usage,
                     } => DriverInvocationError::HostFinalizationFailed {
                         error,
-                        supplemental_usage: Some(usage),
+                        cumulative_usage: LoopModelUsage::merge_optional(
+                            cumulative_usage,
+                            Some(usage),
+                        ),
                     },
                     DriverInvocationError::DriverError {
                         error,

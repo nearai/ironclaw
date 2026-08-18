@@ -171,7 +171,7 @@ pub const UNGATED_LOOP_RUN_CAPABILITIES: &[&str] = &[
     "builtin.grep",
     "builtin.skill_list",
     "builtin.trigger_list",
-    "builtin.extension_search",
+    EXTENSION_SEARCH_CAPABILITY_ID,
 ];
 
 impl OriginGateMatrix {
@@ -703,12 +703,16 @@ mod process_sandbox_capability_id_tests {
 
 #[cfg(test)]
 mod tool_discovery_capability_id_tests {
-    use super::{TOOL_CALL_CAPABILITY_ID, TOOL_DESCRIBE_CAPABILITY_ID, TOOL_SEARCH_CAPABILITY_ID};
+    use super::{
+        EXTENSION_SEARCH_CAPABILITY_ID, TOOL_CALL_CAPABILITY_ID, TOOL_DESCRIBE_CAPABILITY_ID,
+        TOOL_SEARCH_CAPABILITY_ID,
+    };
     use crate::ids::CapabilityId;
 
     #[test]
     fn tool_discovery_capability_id_literals_are_valid_and_stable() {
         for (id, expected) in [
+            (EXTENSION_SEARCH_CAPABILITY_ID, "builtin.extension_search"),
             (TOOL_SEARCH_CAPABILITY_ID, "ironclaw.tool_search"),
             (TOOL_DESCRIBE_CAPABILITY_ID, "ironclaw.tool_describe"),
             (TOOL_CALL_CAPABILITY_ID, "ironclaw.tool_call"),
