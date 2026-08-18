@@ -64,6 +64,7 @@ export function NotificationCenter({ state }) {
   const hasUnread = state?.hasUnread || false;
   const unreadCount = state?.unreadCount || 0;
   const dismissMessage = state?.dismissMessage;
+  const prepareMessageOpen = state?.prepareMessageOpen;
   const markAllRead = state?.markAllRead;
   const isMarkingAllRead = state?.isMarkingAllRead || false;
   const isLoading = state?.isLoading || false;
@@ -101,11 +102,14 @@ export function NotificationCenter({ state }) {
 
   const openMessage = React.useCallback(
     (message) => {
-      if (message?.id) dismissMessage?.(message.id);
+      if (message?.id) {
+        if (prepareMessageOpen) prepareMessageOpen(message);
+        else dismissMessage?.(message.id);
+      }
       close();
       if (message?.href) navigate(message.href);
     },
-    [close, dismissMessage, navigate],
+    [close, dismissMessage, navigate, prepareMessageOpen],
   );
 
   const overlay = open

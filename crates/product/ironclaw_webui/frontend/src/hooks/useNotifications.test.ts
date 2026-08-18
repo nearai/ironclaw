@@ -139,6 +139,8 @@ function instantiate({
       id: notification.id,
       type: notification.kind,
       href: `/chat/${notification.action.thread_id}`,
+      threadId: notification.thread_id || notification.action.thread_id,
+      turnRunId: notification.turn_run_id || null,
       timestamp: notification.timestamp || 2,
       read: Boolean(notification.read_at),
     })),
@@ -185,11 +187,19 @@ function instantiate({
   };
 }
 
-function notification(id = "notification-1", threadId = "thread-1", readAt = null) {
+function notification(
+  id = "notification-1",
+  threadId = "thread-1",
+  readAt = null,
+  kind = "approval_required",
+  turnRunId = null,
+) {
   return {
     id,
-    kind: "approval_required",
+    kind,
     action: { kind: "open_thread", thread_id: threadId },
+    thread_id: threadId,
+    turn_run_id: turnRunId,
     read_at: readAt,
   };
 }
@@ -318,7 +328,51 @@ test("marks durable and compatibility notifications through their owning state",
   ]);
 });
 
-test("marks the active notification and supports mark all across both stores", async () => {
+test("does not mark a notification merely because its thread route is active", () => {
+  const harness = instantiate({
+    data: {
+      inbox: { notifications: [notification()], unread_count: 1 },
+    },
+    activeThreadId: "thread-1",
+  });
+  assert.deepEqual(harness.readCalls, []);
+});
+
+test("marks a run completion only after its matching final reply rendered", () => {
+  const harness = instantiate({
+    data: {
+      inbox: {
+        notifications: [
+          notification(
+            "notification-completed",
+            "thread-1",
+            null,
+            "run_completed",
+            "run-1",
+          ),
+        ],
+        unread_count: 1,
+      },
+    },
+    activeThreadId: "thread-1",
+  });
+  harness.hook.prepareMessageOpen(harness.hook.messages[0]);
+  const pending = harness.render();
+  assert.deepEqual(JSON.parse(JSON.stringify(pending.pendingRenderedNotification)), {
+    notificationId: "notification-completed",
+    threadId: "thread-1",
+    turnRunId: "run-1",
+  });
+  assert.deepEqual(harness.readCalls, []);
+
+  pending.acknowledgeRenderedNotification({
+    threadId: "thread-1",
+    turnRunId: "run-1",
+  });
+  assert.deepEqual(harness.readCalls, ["notification-completed"]);
+});
+
+test("supports mark all across durable and compatibility stores", async () => {
   const harness = instantiate({
     data: {
       inbox: { notifications: [notification()], unread_count: 1 },
@@ -330,9 +384,7 @@ test("marks the active notification and supports mark all across both stores", a
         read: false,
       }],
     },
-    activeThreadId: "thread-1",
   });
-  assert.deepEqual(harness.readCalls, ["notification-1"]);
   harness.hook.markAllRead();
   await flushAsyncWork();
   assert.deepEqual(harness.allReadCalls, [true]);

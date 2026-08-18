@@ -108,6 +108,8 @@ export function Chat({
   gatewayStatus,
   regressionArtifactExportEnabled = false,
   globalAutoApproveEnabled = false,
+  pendingRenderedNotification = null,
+  onNotificationRendered = null,
   onConnectionStatusChange,
 }) {
   const t = useT();
@@ -201,6 +203,27 @@ export function Chat({
     activeThreadIsProcessing ||
     activeThreadHasGate ||
     activeThreadHasOnboarding;
+  const pendingCompletionRendered = React.useMemo(() => {
+    if (
+      !pendingRenderedNotification ||
+      pendingRenderedNotification.threadId !== activeThreadId
+    ) {
+      return false;
+    }
+    return messages.some(
+      (message) =>
+        message.role === "assistant" &&
+        message.isFinalReply === true &&
+        message.turnRunId === pendingRenderedNotification.turnRunId,
+    );
+  }, [activeThreadId, messages, pendingRenderedNotification]);
+  React.useEffect(() => {
+    if (!pendingCompletionRendered || !pendingRenderedNotification) return;
+    onNotificationRendered?.({
+      threadId: pendingRenderedNotification.threadId,
+      turnRunId: pendingRenderedNotification.turnRunId,
+    });
+  }, [onNotificationRendered, pendingCompletionRendered, pendingRenderedNotification]);
   // Don't show the landing composer when history failed to load — show the
   // error banner instead so the user is not misled into thinking the thread
   // is empty.

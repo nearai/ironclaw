@@ -48,6 +48,8 @@ export function notificationMessages(notifications = [], t = (key) => key) {
           : "",
         timestamp: createdAt,
         href: notificationHref(notification),
+        threadId: notification?.thread_id || notification?.action?.thread_id || null,
+        turnRunId: notification?.turn_run_id || null,
         read: Boolean(notification?.read_at),
         resolved: Boolean(notification?.resolved_at),
       };

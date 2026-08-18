@@ -5,7 +5,8 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, test, vi } from "vitest";
 
-vi.mock("react-router", () => ({ useNavigate: () => () => {} }));
+const { navigate } = vi.hoisted(() => ({ navigate: vi.fn() }));
+vi.mock("react-router", () => ({ useNavigate: () => navigate }));
 vi.mock("../lib/i18n", () => ({ useT: () => (key) => key }));
 
 import { NotificationCenter } from "./notification-center";
@@ -55,4 +56,44 @@ test("notification center renders loading and retryable error states", async () 
       ?.click();
   });
   assert.equal(refetch.mock.calls.length, 1);
+});
+
+test("opening a row delegates acknowledgement policy before navigation", async () => {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  roots.push(root);
+  const prepareMessageOpen = vi.fn();
+  const message = {
+    id: "notification-completed",
+    title: "Completed",
+    body: "Finished",
+    href: "/chat/thread-1",
+    type: "run_completed",
+  };
+
+  await act(async () => {
+    root.render(
+      <NotificationCenter
+        state={{
+          messages: [message],
+          unreadIds: new Set([message.id]),
+          prepareMessageOpen,
+        }}
+      />,
+    );
+  });
+  await act(async () => {
+    container
+      .querySelector<HTMLButtonElement>("[data-testid='notification-bell']")
+      ?.click();
+  });
+  await act(async () => {
+    document
+      .querySelector<HTMLButtonElement>("[data-testid='notification-row']")
+      ?.click();
+  });
+
+  assert.equal(prepareMessageOpen.mock.calls[0]?.[0], message);
+  assert.deepEqual(navigate.mock.calls[0], ["/chat/thread-1"]);
 });

@@ -56,7 +56,6 @@ export function GatewayLayout({
   const notificationsState = useNotifications({
     profile,
     enabled: Boolean(token),
-    activeThreadId: activeRouteThreadId,
   });
   const sidebar = useSidebar({
     onNewChat: () => threadsState.setActiveThreadId(null),
@@ -182,6 +181,10 @@ export function GatewayLayout({
               regressionArtifactExportEnabled,
               globalAutoApproveEnabled,
               threadsState: routeThreadsState,
+              pendingRenderedNotification:
+                notificationsState.pendingRenderedNotification,
+              onNotificationRendered:
+                notificationsState.acknowledgeRenderedNotification,
               setHeaderStatus,
               theme,
               setTheme,

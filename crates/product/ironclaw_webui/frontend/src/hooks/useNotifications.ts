@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React from "react";
 import {
@@ -30,14 +29,22 @@ function normalizeThread(record) {
   };
 }
 
-export function useNotifications({
-  profile,
-  enabled = true,
-  activeThreadId = null,
-} = {}) {
+function notificationOptions(options) {
+  return options;
+}
+
+function notificationQueryData(value) {
+  return value;
+}
+
+export function useNotifications(options = {}) {
+  const { profile, enabled = true } = notificationOptions(options);
   const { t } = useI18n();
-  const queryClient = useQueryClient();
+  const queryClient = /** @type {any} */ (useQueryClient());
   const threadStates = useThreadStates();
+  const [pendingRenderedNotification, setPendingRenderedNotification] = React.useState(
+    /** @type {{ notificationId: string, threadId: string, turnRunId: string } | null} */ (null),
+  );
   const tenantId = profile?.tenant_id || null;
   const userId = profile?.user_id || null;
   const scope = tenantId && userId ? `${tenantId}:${userId}` : null;
@@ -127,19 +134,22 @@ export function useNotifications({
     mutationFn: markNotificationRead,
     onMutate: async (notificationId) => {
       await queryClient.cancelQueries({ queryKey });
-      const previous = queryClient.getQueryData(queryKey);
-      queryClient.setQueryData(queryKey, (current) => ({
-        ...current,
-        inbox: {
-          ...current?.inbox,
-          unread_count: Math.max(0, Number(current?.inbox?.unread_count || 0) - 1),
-          notifications: (current?.inbox?.notifications || []).map((notification) =>
-            notification.id === notificationId && !notification.read_at
-              ? { ...notification, read_at: new Date().toISOString() }
-              : notification,
-          ),
-        },
-      }));
+      const previous = notificationQueryData(queryClient.getQueryData(queryKey));
+      queryClient.setQueryData(queryKey, (value) => {
+        const current = notificationQueryData(value);
+        return {
+          ...current,
+          inbox: {
+            ...current?.inbox,
+            unread_count: Math.max(0, Number(current?.inbox?.unread_count || 0) - 1),
+            notifications: (current?.inbox?.notifications || []).map((notification) =>
+              notification.id === notificationId && !notification.read_at
+                ? { ...notification, read_at: new Date().toISOString() }
+                : notification,
+            ),
+          },
+        };
+      });
       return { previous };
     },
     onError: (_error, _notificationId, context) => {
@@ -163,24 +173,6 @@ export function useNotifications({
     [queryClient, queryKey, scope],
   );
 
-  React.useEffect(() => {
-    if (!activeThreadId) return;
-    for (const message of messages) {
-      if (
-        !message.read &&
-        message.href === `/chat/${encodeURIComponent(activeThreadId)}` &&
-        !markRead.isPending
-      ) {
-        if (message.durable) {
-          markRead.mutate(message.id);
-        } else if (scope) {
-          void markCompatibilitySeen([message.id]);
-        }
-        break;
-      }
-    }
-  }, [activeThreadId, markCompatibilitySeen, markRead, messages, scope]);
-
   const dismissMessage = React.useCallback(
     (messageId) => {
       if (!unreadIds.has(messageId)) return;
@@ -192,6 +184,45 @@ export function useNotifications({
       }
     },
     [markCompatibilitySeen, markRead, messages, scope, unreadIds],
+  );
+
+  const prepareMessageOpen = React.useCallback(
+    (message) => {
+      if (!message?.id) return;
+      if (
+        message.durable &&
+        message.type === "run_completed" &&
+        message.threadId &&
+        message.turnRunId
+      ) {
+        setPendingRenderedNotification({
+          notificationId: message.id,
+          threadId: message.threadId,
+          turnRunId: message.turnRunId,
+        });
+        return;
+      }
+      setPendingRenderedNotification(null);
+      dismissMessage(message.id);
+    },
+    [dismissMessage],
+  );
+
+  const acknowledgeRenderedNotification = React.useCallback(
+    ({ threadId, turnRunId }) => {
+      const pending = pendingRenderedNotification;
+      if (
+        !pending ||
+        pending.threadId !== threadId ||
+        pending.turnRunId !== turnRunId ||
+        markRead.isPending
+      ) {
+        return;
+      }
+      setPendingRenderedNotification(null);
+      markRead.mutate(pending.notificationId);
+    },
+    [markRead, pendingRenderedNotification],
   );
 
   const markAllRead = React.useCallback(() => {
@@ -223,6 +254,9 @@ export function useNotifications({
     error: query.error || markRead.error || markAllReadMutation.error || null,
     refetch: query.refetch,
     dismissMessage,
+    prepareMessageOpen,
+    pendingRenderedNotification,
+    acknowledgeRenderedNotification,
     markAllRead,
     isMarkingAllRead: markAllReadMutation.isPending,
   };

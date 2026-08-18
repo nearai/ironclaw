@@ -82,6 +82,8 @@ function renderChat({
   showChatLogsShortcut = true,
   onSelectThread = () => {},
   contextOverrides = {},
+  pendingRenderedNotification = null,
+  onNotificationRendered = () => {},
   // Positional ref slots, shared by reference across repeated renderChat()
   // calls that pass the same array -- lets a test simulate the same
   // component "instance" re-rendering (e.g. a navigation-triggered
@@ -177,9 +179,52 @@ function renderChat({
     isCreatingThread: false,
     gatewayStatus: {},
     globalAutoApproveEnabled,
+    pendingRenderedNotification,
+    onNotificationRendered,
   });
   return { tree, components };
 }
+
+test("acknowledges a completion notification only after its final reply render", () => {
+  const acknowledgements = [];
+  renderChat({
+    runEffects: true,
+    pendingRenderedNotification: {
+      notificationId: "notification-1",
+      threadId: "thread-1",
+      turnRunId: "run-1",
+    },
+    onNotificationRendered: (source) => acknowledgements.push(source),
+    hookState: {
+      messages: [{
+        id: "message-final",
+        role: "assistant",
+        isFinalReply: true,
+        turnRunId: "run-1",
+      }],
+      isProcessing: false,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: null,
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(acknowledgements)), [
+    { threadId: "thread-1", turnRunId: "run-1" },
+  ]);
+});
 
 test("Chat cancel button routes through active thread run cancellation", async () => {
   const cancelReasons = [];
