@@ -1450,6 +1450,11 @@ fn triggered_request_from_fire(
         creator_user_id: fire.creator_user_id.clone(),
         project_scoped: fire.project_id.is_some(),
         prompt: fire.prompt.clone(),
+        result_delivery: fire
+            .execution_policy
+            .as_ref()
+            .map(|policy| policy.result_delivery)
+            .unwrap_or_default(),
     }
 }
 
@@ -3605,6 +3610,7 @@ fn turn_state(
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref,

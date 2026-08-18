@@ -61,7 +61,8 @@ use ironclaw_composition::RebornTrajectoryObserver;
 use ironclaw_composition::build_default_budget_accountant;
 use ironclaw_composition::test_support::ChannelConnectionTestBundle;
 use ironclaw_config::BudgetDefaults;
-use ironclaw_event_log::DurableEventLog;
+use ironclaw_event_log::{DurableEventLog, NonBlockingEventSink};
+use ironclaw_event_store::{CoalescingEventSink, EventBatchConfig};
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_registry::ExtensionInstallationStorePort;
 use ironclaw_filesystem::CompositeRootFilesystem;
@@ -247,6 +248,9 @@ pub(crate) struct GroupSharedStorage {
     /// Production RootFilesystem-backed event log used by the durable loop
     /// milestone sink when the measured workload opts in.
     pub(crate) durable_event_log: Option<Arc<dyn DurableEventLog>>,
+    /// Production-shaped non-blocking writer for `durable_event_log`. Retained
+    /// so read-back assertions can flush accepted events before replay.
+    pub(crate) durable_event_sink: Option<Arc<dyn NonBlockingEventSink>>,
     /// W5-WIRING-PARITY: production local-dev always wires a security-audit
     /// sink; the harness mirrors that shape with a recording sink so tests can
     /// assert events emitted through real caller paths.
@@ -1013,24 +1017,27 @@ impl RebornIntegrationGroupBuilder {
         )?;
 
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
-        let durable_event_log = if self.durable_milestone_event_store {
-            Some(
-                ironclaw_event_store::build_reborn_event_stores_from_root_filesystem(Arc::clone(
-                    &base.composite,
-                ))?
-                .events,
-            )
+        let (durable_event_log, durable_event_sink) = if self.durable_milestone_event_store {
+            let event_log = ironclaw_event_store::build_reborn_event_stores_from_root_filesystem(
+                Arc::clone(&base.composite),
+            )?
+            .events;
+            let event_sink: Arc<dyn NonBlockingEventSink> = Arc::new(CoalescingEventSink::new(
+                Arc::clone(&event_log),
+                EventBatchConfig::default(),
+            ));
+            (Some(event_log), Some(event_sink))
         } else {
-            None
+            (None, None)
         };
         let runtime_milestone_sink: Arc<dyn LoopHostMilestoneSink> =
-            if let Some(event_log) = &durable_event_log {
+            if let Some(event_sink) = &durable_event_sink {
                 let durable_scope =
                     DurableLoopHostMilestoneScope::from_thread_scope(&group_thread_scope)?;
                 Arc::new(FanOutLoopHostMilestoneSink(vec![
                     milestone_sink.clone() as Arc<dyn LoopHostMilestoneSink>,
                     Arc::new(DurableLoopHostMilestoneSink::new(
-                        Arc::clone(event_log),
+                        Arc::clone(event_sink),
                         durable_scope,
                     )),
                 ]))
@@ -1397,6 +1404,7 @@ impl RebornIntegrationGroupBuilder {
                 user_profile_source: effective_user_profile_source,
                 turn_event_sink: self.turn_event_sink,
                 durable_event_log,
+                durable_event_sink,
                 security_audit_sink,
                 milestone_sink: milestone_sink_for_assertions,
                 trace_capture_scope: trace_capture.map(|(_, scope)| scope),

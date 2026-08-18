@@ -209,6 +209,7 @@ impl AgentTurnProcessRuntime {
                 .as_deref()
                 .and_then(LoopModelRouteSnapshot::advisory),
             model_usage: None,
+            execution_outcome: None,
             subagent_depth: 0,
             spawn_tree_descendant_cap: None,
             product_context: request.product_context,
@@ -311,6 +312,7 @@ impl AgentTurnProcessRuntime {
             resolved_run_profile: Some(resolved),
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: None,
             subagent_depth,
             spawn_tree_descendant_cap: Some(request.spawn_tree_descendant_cap),
             product_context: parent_metadata.product_context,
@@ -520,6 +522,7 @@ impl AgentTurnProcessRuntime {
             });
         }
         metadata.model_usage = None;
+        metadata.execution_outcome = None;
         metadata.resume_disposition = None;
         let concurrency_class = process_concurrency_class(
             metadata.product_context.as_ref(),
@@ -1100,6 +1103,7 @@ fn turn_run_record_from_process_snapshot(
         profile,
         resolved_model_route: state.resolved_model_route,
         model_usage: state.model_usage,
+        execution_outcome: state.execution_outcome,
         checkpoint_id: state.checkpoint_id,
         gate_ref: state.gate_ref,
         blocked_activity_id: state.blocked_activity_id,
@@ -1157,6 +1161,7 @@ pub fn turn_run_state_from_process_snapshot(
         allow_steering: metadata.allow_steering,
         resolved_model_route: metadata.resolved_model_route,
         model_usage: metadata.model_usage,
+        execution_outcome: metadata.execution_outcome,
         received_at: snapshot.created_at,
         checkpoint_id: snapshot
             .checkpoint_ref

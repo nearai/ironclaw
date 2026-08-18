@@ -251,7 +251,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 **Durability, storage & restart**
 | Behavior | Evidence |
 |---|---|
-| Behavior is identical on in-memory and libSQL storage | `backend_matrix.rs` |
+| Behavior is identical on in-memory, libSQL, and PostgreSQL storage; message exact lookups avoid sibling entry rows on both durable databases | `backend_matrix.rs` |
 | Installed extensions survive a fresh store reopen | `durable.rs` |
 | Secrets survive a genuine on-disk reopen | `secrets.rs` |
 | Outbound preferences survive a process-level reopen | `outbound_store_durability.rs` |

@@ -196,6 +196,11 @@ pub struct TurnRunState {
     /// Responses/Chat surfaces to report `usage` and cost.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_usage: Option<ironclaw_loop_contracts::LoopModelUsage>,
+    /// Semantic result of trusted completion settlement. Separate from
+    /// notification/transport delivery state; absent on nonterminal and
+    /// legacy persisted rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_outcome: Option<crate::TurnExecutionOutcome>,
     pub received_at: TurnTimestamp,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<TurnGateRef>,

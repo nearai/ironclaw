@@ -650,6 +650,26 @@ where
         result
     }
 
+    pub async fn list_dir_page(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+        after: Option<&str>,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        let started_at = live_latency_started_at();
+        let (virtual_path, is_mount_root) =
+            self.resolve_read_root_aware(scope, path, FilesystemOperation::ListDir)?;
+        let result = empty_when_missing_root(
+            self.root
+                .list_dir_page(&virtual_path, after, max_entries)
+                .await,
+            is_mount_root,
+        );
+        trace_fs_latency("list_dir_page", path, started_at, &result, None);
+        result
+    }
+
     pub async fn stat(
         &self,
         scope: &ResourceScope,

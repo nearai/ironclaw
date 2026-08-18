@@ -82,7 +82,7 @@ jobs:
             echo "has_clippy=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|docker/reborn/entrypoint\.sh$|scripts/reborn_webui_v2_live_qa/|scripts/live-canary/|\.github/workflows/(live-canary|reborn-e2e)\.yml$|scripts/check_no_panics\.py$|scripts/no_panics_reborn_baseline\.txt$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/(code_style|main-ci-slack-alerts)\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|docker/reborn/entrypoint\.sh$|scripts/reborn_webui_v2_live_qa/|scripts/live-canary/|\.github/workflows/(live-canary|reborn-e2e)\.yml$|scripts/check_no_panics\.py$|scripts/no_panics_reborn_baseline\.txt$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/(code_style|main-ci-slack-alerts)\.yml$|\.github/workflows/ironclaw-release\.yml$)'; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"

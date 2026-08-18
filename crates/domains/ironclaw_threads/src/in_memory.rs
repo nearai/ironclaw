@@ -657,12 +657,13 @@ impl SessionThreadService for InMemorySessionThreadService {
                 .validate()
                 .map_err(SessionThreadError::Serialization)?;
         }
-        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+        let mut envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
             request.result_ref,
             request.safe_summary,
             request.model_observation,
         )
         .map_err(SessionThreadError::Serialization)?;
+        envelope.intrinsic_outcome = request.intrinsic_outcome;
         if let Some(existing) = thread.messages.iter_mut().find(|message| {
             message.kind == MessageKind::ToolResultReference
                 && message.status == MessageStatus::Finalized
@@ -706,6 +707,23 @@ impl SessionThreadService for InMemorySessionThreadService {
                     ToolResultReferenceEnvelope::merge_model_observation_content_if_absent(
                         content,
                         model_observation.clone(),
+                    )
+                    .map_err(SessionThreadError::Serialization)?
+                {
+                    existing.content = Some(content);
+                    changed = true;
+                }
+            }
+            if let Some(intrinsic_outcome) = envelope.intrinsic_outcome {
+                let content = existing.content.as_deref().ok_or_else(|| {
+                    SessionThreadError::Serialization(
+                        "tool result reference content is missing".to_string(),
+                    )
+                })?;
+                if let Some(content) =
+                    ToolResultReferenceEnvelope::merge_intrinsic_outcome_content_if_absent(
+                        content,
+                        intrinsic_outcome,
                     )
                     .map_err(SessionThreadError::Serialization)?
                 {

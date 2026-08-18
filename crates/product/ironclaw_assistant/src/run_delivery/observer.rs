@@ -40,8 +40,8 @@ use ironclaw_threads::{
     AttachmentRef, FinalizedAssistantMessageByRunRequest, ThreadMessageRecord, ThreadScope,
 };
 use ironclaw_turns::{
-    GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnErrorCategory, TurnRunId,
-    TurnRunState, TurnScope, TurnStatus,
+    GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnErrorCategory, TurnExecutionOutcome,
+    TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 use tokio::sync::Semaphore;
 
@@ -870,6 +870,9 @@ impl RunDeliveryObserver {
         let direct_message = envelope_is_direct_chat(envelope);
         let notification = match state.status {
             TurnStatus::Completed => {
+                if state.execution_outcome == Some(TurnExecutionOutcome::NothingToReport) {
+                    return Ok(None);
+                }
                 let Some(message) = self
                     .read_latest_assistant_message(thread_scope, binding, run_id)
                     .await?

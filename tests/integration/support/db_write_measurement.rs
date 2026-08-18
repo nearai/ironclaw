@@ -274,6 +274,13 @@ impl RebornIntegrationHarness {
     }
 
     pub async fn assert_durable_event_count_at_least(&self, minimum: usize) -> HarnessResult<()> {
+        self._shared
+            .durable_event_sink
+            .as_ref()
+            .ok_or("durable milestone event sink is not wired")?
+            .flush()
+            .await
+            .map_err(|error| format!("flush durable milestone events: {error}"))?;
         let event_log = self
             ._shared
             .durable_event_log

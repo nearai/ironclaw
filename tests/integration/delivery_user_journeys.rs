@@ -1346,6 +1346,7 @@ fn notifier_request(
         // rule, pinned at the crate tier.
         project_scoped: false,
         prompt: prompt.to_string(),
+        result_delivery: ironclaw_host_api::execution_policy::ResultDeliveryPolicy::Deliver,
     }
 }
 

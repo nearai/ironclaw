@@ -138,6 +138,11 @@ struct InvokedCapabilityBatch {
     truncated_launch_window: bool,
 }
 
+struct InvokedCapabilityBatchError {
+    error: ironclaw_loop_contracts::AgentLoopHostError,
+    launched_count: usize,
+}
+
 enum SelectedParallelTerminal {
     Loop(LoopExit),
     Host(ironclaw_loop_contracts::AgentLoopHostError),
@@ -207,7 +212,7 @@ impl CapabilityStage {
         ctx: StageContext<'_>,
         policy: BatchPolicy,
         invocations: Vec<LoopRequest>,
-    ) -> Result<InvokedCapabilityBatch, ironclaw_loop_contracts::AgentLoopHostError> {
+    ) -> Result<InvokedCapabilityBatch, InvokedCapabilityBatchError> {
         let ordered = invocations.len() >= 2
             && policy == BatchPolicy::Parallel
             && ctx.host.requires_ordered_batch_invocation(&invocations);
@@ -219,7 +224,11 @@ impl CapabilityStage {
                     stop_on_first_suspension: matches!(policy, BatchPolicy::Sequential) || ordered,
                 })
                 .await
-                .map(InvokedCapabilityBatch::from_resolution_batch);
+                .map(InvokedCapabilityBatch::from_resolution_batch)
+                .map_err(|error| InvokedCapabilityBatchError {
+                    error,
+                    launched_count: 0,
+                });
         }
 
         let invocation_count = invocations.len();
@@ -273,10 +282,13 @@ impl CapabilityStage {
                     InvokedCapabilityOutcome::Resolution(recoverable_port_error_resolution(error))
                 }
                 None => {
-                    return Err(ironclaw_loop_contracts::AgentLoopHostError::new(
-                        ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
-                        "parallel capability invocation completed without an indexed outcome",
-                    ));
+                    return Err(InvokedCapabilityBatchError {
+                        error: ironclaw_loop_contracts::AgentLoopHostError::new(
+                            ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
+                            "parallel capability invocation completed without an indexed outcome",
+                        ),
+                        launched_count: launched,
+                    });
                 }
             };
             normalized.push(outcome);
@@ -302,8 +314,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         let mut state = input.state;
         let result_refs_start = state.result_refs.len();
         let mut capability_batch = CapabilityBatchTurnSummary::default();
-        let surface = &input.surface;
-        let surface_index = CapabilitySurfaceIndex::new(surface);
+        let surface_index = CapabilitySurfaceIndex::new(&input.surface);
         let calls = input.calls;
         let denied_auth_activity_id = state
             .pending_auth_resume
@@ -483,13 +494,16 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         // run between outer-loop iterations (budget.rs), so without this cap
         // one oversized batch could dispatch (and charge)
         // `visible_calls.len()` invocations even when the remaining
-        // allowance is smaller. `try_charge_invocations` computes and
+        // allowance is smaller. `try_charge_invocations` reserves and
         // commits the admitted count in the same call; every call beyond it
         // is not dispatched — it gets a model-visible blocked result via the
         // same denied-calls machinery used above, so tool_use/tool_result
-        // pairing still holds for the whole batch. Once the counter reaches
-        // the cap, the next `BudgetStage` iteration hard stops the run
-        // through the existing `hard_budget_exit`.
+        // pairing still holds for the whole batch. After dispatch, the
+        // reservation is settled against the host's authoritative launched
+        // count so a truncated launch window does not consume budget for its
+        // unlaunched suffix. Once the counter reaches the cap, the next
+        // `BudgetStage` iteration hard stops the run through the existing
+        // `hard_budget_exit`.
         let resource_budget_policy = ctx
             .host
             .run_context()
@@ -565,9 +579,8 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         let policy = BatchPolicy::Parallel;
 
         capability_batch = CapabilityBatchTurnSummary::for_invocation_count(visible_calls.len());
-        // Budget accounting: every invocation that reaches dispatch counts,
-        // whatever its outcome — already charged above via
-        // `try_charge_invocations`.
+        // Budget accounting: reserve the admitted launch window above, then
+        // settle it against the authoritative launched count below.
 
         CheckpointStage
             .emit_progress(
@@ -606,10 +619,31 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             })
             .collect();
         let batch_result = self.invoke_batch(ctx, policy, invocations).await;
+        if let Ok(batch) = &batch_result
+            && (batch.outcomes.is_empty()
+                || batch.outcomes.len() > visible_calls.len()
+                || (!batch.truncated_launch_window && batch.outcomes.len() != visible_calls.len()))
+        {
+            return Err(AgentLoopExecutorError::PlannerContract {
+                detail: "capability batch outcome count does not match invocations",
+            });
+        }
+        let launched_count = match &batch_result {
+            Ok(batch) => batch.outcomes.len(),
+            Err(failure) => failure.launched_count,
+        };
+        if !state
+            .budget_ledger
+            .settle_invocation_reservation(visible_calls.len(), launched_count)
+        {
+            return Err(AgentLoopExecutorError::PlannerContract {
+                detail: "capability batch launch count cannot settle its budget reservation",
+            });
+        }
 
         let batch = match batch_result {
             Ok(batch) => batch,
-            Err(ref error)
+            Err(InvokedCapabilityBatchError { ref error, .. })
                 if error.kind == ironclaw_loop_contracts::AgentLoopHostErrorKind::StaleSurface =>
             {
                 let stale_summary = SanitizedStrategySummary::from_trusted_static(
@@ -671,7 +705,9 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             // recovery strategy route it by `FailureKind::fate`. Only genuine
             // host faults keep the terminal `capability_host_error` path
             // below.
-            Err(error) if !capability_port_error_is_terminal(error.kind) => {
+            Err(InvokedCapabilityBatchError { error, .. })
+                if !capability_port_error_is_terminal(error.kind) =>
+            {
                 let summary = capability_port_error_summary(&error);
                 let observation = capability_port_error_observation(&error);
                 for call in visible_calls {
@@ -718,22 +754,13 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     .completed_turn(ctx, state, result_refs_start, capability_batch)
                     .await;
             }
-            Err(error) => return Err(capability_host_error(error)),
+            Err(failure) => return Err(capability_host_error(failure.error)),
         };
 
         let InvokedCapabilityBatch {
             outcomes,
             truncated_launch_window,
         } = batch;
-        if outcomes.is_empty()
-            || outcomes.len() > visible_calls.len()
-            || (!truncated_launch_window && outcomes.len() != visible_calls.len())
-        {
-            return Err(AgentLoopExecutorError::PlannerContract {
-                detail: "capability batch outcome count does not match invocations",
-            });
-        }
-
         let has_terminal_error = outcomes
             .iter()
             .any(|outcome| matches!(outcome, InvokedCapabilityOutcome::TerminalError(_)));

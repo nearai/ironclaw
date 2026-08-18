@@ -18,6 +18,33 @@ use crate::test_support::{TEST_SESSION_EXTENSION_ID, with_test_authenticated_ses
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
+use ironclaw_event_log::{
+    EventError, EventSink, NonBlockingEventSink, RuntimeEvent, RuntimeEventKind,
+};
+
+#[derive(Default)]
+struct OverloadedEventSink {
+    attempted_events: StdMutex<Vec<RuntimeEvent>>,
+}
+
+#[async_trait]
+impl EventSink for OverloadedEventSink {
+    async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
+        NonBlockingEventSink::try_emit(self, event)
+    }
+}
+
+impl NonBlockingEventSink for OverloadedEventSink {
+    fn try_emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
+        self.attempted_events
+            .lock()
+            .expect("attempted event recording mutex is not poisoned")
+            .push(event);
+        Err(EventError::Sink {
+            reason: "injected saturated observability queue".to_string(),
+        })
+    }
+}
 
 #[derive(Default)]
 struct SlackDmOpenNetworkEgress {
@@ -4197,7 +4224,7 @@ async fn hosted_mcp_activation_stays_pending_until_preparation_completes() {
 }
 
 #[tokio::test]
-async fn cancel_run_propagates_to_subagent_children() {
+async fn cancel_run_propagates_to_children_when_event_sink_is_unavailable() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway {
         reply: "unused".to_string(),
@@ -4218,7 +4245,10 @@ async fn cancel_run_propagates_to_subagent_children() {
     })
     .with_model_gateway_override(gateway);
 
-    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let mut runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let overloaded_event_sink = Arc::new(OverloadedEventSink::default());
+    let event_sink: Arc<dyn NonBlockingEventSink> = overloaded_event_sink.clone();
+    runtime.runtime_event_sink = event_sink;
     stop_turn_runner_worker_for_manual_state_test(&runtime).await;
     let conversation = runtime.new_conversation().await.expect("conversation");
     let parent_scope = runtime.turn_scope_for(&conversation.0);
@@ -4303,6 +4333,7 @@ async fn cancel_run_propagates_to_subagent_children() {
     runtime
         .thread_service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: runtime.thread_scope.clone(),
             thread_id: parent_scope.thread_id.clone(),
             turn_run_id: parent_run_id.to_string(),
@@ -4360,6 +4391,24 @@ async fn cancel_run_propagates_to_subagent_children() {
         .await
         .expect("child state");
     assert_eq!(child_state.status, TurnStatus::Cancelled);
+
+    {
+        let cancellation_events = overloaded_event_sink
+            .attempted_events
+            .lock()
+            .expect("attempted event recording mutex is not poisoned");
+        assert_eq!(
+            cancellation_events.len(),
+            2,
+            "parent and child cancellation events must both be attempted"
+        );
+        assert!(
+            cancellation_events
+                .iter()
+                .all(|event| event.kind == RuntimeEventKind::LoopCancelled),
+            "the best-effort cancellation path must emit only the expected cancellation records"
+        );
+    }
 
     runtime.shutdown().await.expect("runtime shutdown");
 }

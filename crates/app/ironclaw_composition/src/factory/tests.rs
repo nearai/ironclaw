@@ -1706,6 +1706,7 @@ async fn postgres_process_journal_writes_are_visible_over_the_data_plane_and_sur
         .expect("journal claim")
         .pop()
         .expect("claimed process");
+    let claimed_cursor = claim.state.journal_cursor;
     assert_eq!(read_back.process_id, process_id);
 
     let held_a = pools.data_plane.get().await.expect("data-plane checkout a");
@@ -1719,7 +1720,10 @@ async fn postgres_process_journal_writes_are_visible_over_the_data_plane_and_sur
         .await
         .expect("the journal heartbeat must not queue behind an exhausted data-plane pool");
     let _ = (held_a, held_b);
-    assert!(heartbeat.0 > 0, "heartbeat advances the journal cursor");
+    assert_eq!(
+        heartbeat, claimed_cursor,
+        "heartbeat preserves the claimed journal cursor"
+    );
 }
 
 /// Start a Postgres testcontainer, or skip (return `None`) when

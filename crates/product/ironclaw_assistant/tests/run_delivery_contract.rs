@@ -39,7 +39,8 @@ use ironclaw_host_api::product_adapter::{
 };
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
-    SanitizedFailure, SourceBindingRef, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
+    SanitizedFailure, SourceBindingRef, TurnExecutionOutcome, TurnGateRef, TurnId, TurnRunId,
+    TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
     attachment::WorkspaceFile,
@@ -87,6 +88,7 @@ struct ScriptedRunState {
     status: TurnStatus,
     gate_ref: Option<TurnGateRef>,
     failure: Option<SanitizedFailure>,
+    execution_outcome: Option<TurnExecutionOutcome>,
 }
 
 fn scripted_state(status: TurnStatus, gate_ref: Option<&str>) -> ScriptedRunState {
@@ -94,6 +96,16 @@ fn scripted_state(status: TurnStatus, gate_ref: Option<&str>) -> ScriptedRunStat
         status,
         gate_ref: gate_ref.map(|s| TurnGateRef::new(s).expect("gate ref")),
         failure: None,
+        execution_outcome: None,
+    }
+}
+
+fn scripted_completed_outcome(execution_outcome: TurnExecutionOutcome) -> ScriptedRunState {
+    ScriptedRunState {
+        status: TurnStatus::Completed,
+        gate_ref: None,
+        failure: None,
+        execution_outcome: Some(execution_outcome),
     }
 }
 
@@ -104,6 +116,7 @@ fn scripted_failed_state(status: TurnStatus, category: &str) -> ScriptedRunState
         status,
         gate_ref: None,
         failure: Some(SanitizedFailure::new(category.to_string()).expect("valid failure category")),
+        execution_outcome: None,
     }
 }
 
@@ -209,6 +222,7 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
             allow_steering: true,
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: scripted.execution_outcome,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: scripted.gate_ref,
@@ -1084,6 +1098,38 @@ async fn observer_delivers_final_reply_through_the_coordinator() {
     assert_eq!(
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Delivered
+    );
+}
+
+#[tokio::test]
+async fn observer_suppresses_durable_nothing_to_report_before_transport_dispatch() {
+    let harness = build_harness(
+        vec![scripted_completed_outcome(
+            TurnExecutionOutcome::NothingToReport,
+        )],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    let run_id = TurnRunId::new();
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-suppressed"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    assert!(harness.adapter.texts().is_empty());
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("attempts");
+    assert!(
+        attempts.is_empty(),
+        "suppression must precede delivery reservation"
     );
 }
 
@@ -2583,6 +2629,18 @@ fn triggered_request(run_id: TurnRunId, project_scoped: bool) -> TriggeredRunDel
         creator_user_id: user(),
         project_scoped,
         prompt: "watch the deploys".to_string(),
+        result_delivery: ironclaw_host_api::execution_policy::ResultDeliveryPolicy::Deliver,
+    }
+}
+
+fn triggered_suppressible_request(
+    run_id: TurnRunId,
+    project_scoped: bool,
+) -> TriggeredRunDeliveryRequest {
+    TriggeredRunDeliveryRequest {
+        result_delivery:
+            ironclaw_host_api::execution_policy::ResultDeliveryPolicy::SuppressWhenNothingToReport,
+        ..triggered_request(run_id, project_scoped)
     }
 }
 
@@ -3014,6 +3072,84 @@ async fn triggered_completed_run_delivers_nothing_external() {
     assert!(attempts.is_empty(), "no delivery attempt: {attempts:?}");
 }
 
+#[tokio::test]
+async fn triggered_nothing_to_report_records_suppression_without_delivery_attempt() {
+    let harness = build_triggered_harness(
+        vec![scripted_completed_outcome(
+            TurnExecutionOutcome::NothingToReport,
+        )],
+        None,
+        vec![DM_TARGET, SHARED_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET, SHARED_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_suppressible_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Suppressed);
+    assert!(harness.adapter.texts().is_empty());
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("attempts");
+    assert!(
+        attempts.is_empty(),
+        "suppression must happen before dispatch"
+    );
+}
+
+#[tokio::test]
+async fn triggered_deliver_policy_does_not_suppress_nothing_to_report_outcome() {
+    let harness = build_triggered_harness(
+        vec![scripted_completed_outcome(
+            TurnExecutionOutcome::NothingToReport,
+        )],
+        None,
+        vec![DM_TARGET, SHARED_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET, SHARED_TARGET]).await;
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "No changes").await;
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(
+        outcome,
+        TriggeredRunDeliveryOutcomeKind::Skipped,
+        "NothingToReport is suppressible only when the request explicitly opts in"
+    );
+}
+
+#[tokio::test]
+async fn triggered_suppression_is_distinct_from_missing_notification_configuration() {
+    let harness = build_triggered_harness(
+        vec![scripted_completed_outcome(
+            TurnExecutionOutcome::NothingToReport,
+        )],
+        None,
+        vec![],
+    );
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_suppressible_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Suppressed);
+    assert!(harness.adapter.texts().is_empty());
+}
+
 /// Spec §7: an approval gate raised by a background run reaches EVERY
 /// configured notification channel, one coordinated delivery each, so the
 /// creator can approve from whichever surface they see first.
@@ -3266,6 +3402,24 @@ async fn triggered_failure_notifies_all_targets() {
             .all(|text| text.contains("From a triggered event: “watch the deploys”.")),
         "the failure notice names the routine: {texts:?}"
     );
+}
+
+#[tokio::test]
+async fn triggered_failure_cannot_be_suppressed_by_a_stale_execution_outcome() {
+    let mut failed = scripted_failed_state(TurnStatus::Failed, "model_error");
+    failed.execution_outcome = Some(TurnExecutionOutcome::NothingToReport);
+    let harness = build_triggered_harness(vec![failed], None, vec![DM_TARGET]);
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_suppressible_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    assert_eq!(harness.adapter.texts().len(), 1);
 }
 
 #[tokio::test]

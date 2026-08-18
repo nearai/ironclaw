@@ -27,7 +27,9 @@
 //! 2. Run the caller's `apply` closure, which computes the next snapshot plus a
 //!    caller-defined outcome (`T`) or returns the caller's error (`E`).
 //! 3. If the snapshot is unchanged (or the caller explicitly returns a no-op),
-//!    return the outcome without writing.
+//!    return the outcome without writing. A caller that must rewrite entry
+//!    sidecars despite an unchanged decoded snapshot can explicitly request a
+//!    force write.
 //! 4. Otherwise either `put` the encoded snapshot back with the read version as
 //!    the CAS precondition (`CasExpectation::Absent` for a first write), or
 //!    conditionally delete it when the caller returns [`CasApply::delete`].
@@ -106,7 +108,7 @@ pub const FILESYSTEM_CAS_BACKOFF_MAX: Duration = Duration::from_millis(50);
 /// `snapshot` is the next snapshot to persist; `outcome` is whatever the caller
 /// wants returned from the whole `cas_update` call on success.
 ///
-/// The caller selects one of three typed mutation outcomes:
+/// The caller selects one of four typed mutation outcomes:
 ///
 /// 1. **Write** — return `CasApply::new`. When the returned snapshot equals the
 ///    existing value that `apply` received, `cas_update` skips the write as a
@@ -117,6 +119,11 @@ pub const FILESYSTEM_CAS_BACKOFF_MAX: Duration = Duration::from_millis(50);
 /// 3. **Delete** — return `CasApply::delete`. The helper conditionally deletes
 ///    the version just read, then re-runs `apply` against a fresh read to prove
 ///    the caller's postcondition across delete + recreate ABA cycles.
+/// 4. **Force write** — return `CasApply::force_write`. This bypasses only the
+///    decoded-snapshot equality fast-path, so the entry is encoded and written
+///    with the same bounded, capability-gated CAS retry behavior as a normal
+///    write. Use it when entry sidecars such as indexed projection metadata
+///    need repair even though the decoded body is already current.
 pub struct CasApply<S, T> {
     /// The new snapshot to write back. Ignored for persistence when writing is
     /// not selected (i.e., constructed via [`CasApply::no_op`] or
@@ -130,6 +137,7 @@ pub struct CasApply<S, T> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CasApplyOperation {
     Write,
+    ForceWrite,
     NoOp,
     Delete,
 }
@@ -137,15 +145,31 @@ enum CasApplyOperation {
 impl<S, T> CasApply<S, T> {
     /// Produce a [`CasApply`] that **writes** `snapshot` back to the store.
     ///
-    /// All existing callers use this constructor; its signature is unchanged.
-    /// If `snapshot` equals the value `apply` was handed (i.e. nothing
-    /// changed), `cas_update` still skips the write via the `PartialEq` fast
-    /// path — no API change needed for callers that rely on that behavior.
+    /// This is the normal write constructor. If `snapshot` equals the value
+    /// `apply` was handed (i.e. nothing changed), `cas_update` still skips the
+    /// write via the `PartialEq` fast path. Use [`CasApply::force_write`] when
+    /// an entry-sidecar repair must persist despite decoded equality.
     pub fn new(snapshot: S, outcome: T) -> Self {
         Self {
             snapshot,
             outcome,
             operation: CasApplyOperation::Write,
+        }
+    }
+
+    /// Produce a [`CasApply`] that writes `snapshot` even when it equals the
+    /// value `apply` received.
+    ///
+    /// This bypasses only `cas_update`'s decoded-snapshot equality fast-path.
+    /// The write still uses the version read by this attempt and therefore
+    /// retains the helper's bounded retries, timeout, and capability gate.
+    /// Use it for entry-sidecar repairs (for example, missing indexed
+    /// projection metadata) that are not represented in `S`.
+    pub fn force_write(snapshot: S, outcome: T) -> Self {
+        Self {
+            snapshot,
+            outcome,
+            operation: CasApplyOperation::ForceWrite,
         }
     }
 
@@ -266,6 +290,10 @@ impl<E: std::fmt::Display + std::fmt::Debug> std::error::Error for CasUpdateErro
 ///     `unchanged_snapshot` equals what `apply` was handed; `cas_update`
 ///     detects the equality via `PartialEq` and skips the write as a
 ///     convenience fast path.
+///   - Return `CasApply::force_write(snapshot, outcome)` to persist an entry
+///     despite decoded equality, such as when its indexed sidecar needs a
+///     physical rewrite. It still uses the same conditional put and retry
+///     behavior as `CasApply::new`.
 ///   - Return `CasApply::delete(snapshot, outcome)` to conditionally delete the
 ///     current version. The helper re-runs `apply` after deletion to establish
 ///     the caller-defined postcondition across delete + recreate ABA cycles.
@@ -397,7 +425,7 @@ where
         mutation_attempts += 1;
 
         match operation {
-            CasApplyOperation::Write => {
+            CasApplyOperation::Write | CasApplyOperation::ForceWrite => {
                 // Verification found that a different mutation is now needed;
                 // its outcome supersedes any earlier delete outcome.
                 drop(successful_delete_outcome.take());

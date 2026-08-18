@@ -334,6 +334,21 @@ impl RefreshingCapabilityPort {
                 Arc::clone(&self.gate_record_store),
             )?);
         }
+        let suppressed_scheduled_run = self
+            .run_context
+            .product_context
+            .as_ref()
+            .filter(|context| {
+                context.origin == ironclaw_host_api::turn::TurnOriginKind::ScheduledTrigger
+            })
+            .and_then(|context| context.execution_policy.as_ref())
+            .is_some_and(|policy| {
+                policy.result_delivery
+                    == ironclaw_host_api::execution_policy::ResultDeliveryPolicy::SuppressWhenNothingToReport
+            });
+        if suppressed_scheduled_run {
+            synthetic_capabilities.push(ironclaw_loop_host::nothing_to_report_result_capability()?);
+        }
         // Unbound structured runs get the synthetic result tool built from
         // the run's journaled output schema. The run's contract is "complete
         // by recording a validated result", so a missing record or schema is

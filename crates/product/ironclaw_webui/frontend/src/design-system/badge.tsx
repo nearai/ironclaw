@@ -11,7 +11,10 @@
  *   size     "sm" (default) | "md"
  *   className string
  */
+import type { ComponentPropsWithoutRef, ReactNode } from "react";
+
 import { cn } from "../utils/cn";
+import type { DataAttributes } from "./types";
 
 /* ── Tone maps ────────────────────────────────────────────────────────── */
 
@@ -41,10 +44,28 @@ const sizeClasses = {
   md: "h-7 gap-2 rounded-full px-2.5 text-[0.6875rem] tracking-[0.12em]",
 };
 
-export function Badge({ tone = "muted", label, dot = true, size = "md", className = "" }) {
+export type BadgeTone = keyof typeof toneClasses;
+
+export type BadgeProps = Omit<ComponentPropsWithoutRef<"span">, "children"> &
+  DataAttributes & {
+    dot?: boolean;
+    label: ReactNode;
+    size?: keyof typeof sizeClasses;
+    tone?: BadgeTone;
+  };
+
+export function Badge({
+  tone = "muted",
+  label,
+  dot = true,
+  size = "md",
+  className = "",
+  ...rest
+}: BadgeProps) {
   const isLive = tone === "success" || tone === "positive" || tone === "signal";
   return (
     <span
+      {...rest}
       className={cn(
         // `whitespace-nowrap` + `shrink-0` keep the chip on one line: CJK and
         // other space-free scripts wrap between any two characters, so a

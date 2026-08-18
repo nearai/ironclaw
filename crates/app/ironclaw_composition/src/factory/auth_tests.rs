@@ -92,6 +92,7 @@ fn auth_error_mapping_run_state(request: &GetRunStateRequest) -> TurnRunState {
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: Utc::now(),
         checkpoint_id: None,
         gate_ref: Some(TurnGateRef::new("gate:auth-error").unwrap()), // safety: fixed test gate literal is valid.

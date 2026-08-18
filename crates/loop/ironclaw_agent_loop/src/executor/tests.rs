@@ -14,9 +14,10 @@ use ironclaw_host_api::{
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
     CapabilityCallCandidate, CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRef,
-    CapabilityInputRepair, CapabilityResumeToken, LoopCancelReasonKind, LoopCancellationSignal,
-    LoopCancelledReasonKind, LoopCheckpointKind, LoopCompactionError, LoopCompactionMode,
-    LoopCompactionOutcome, LoopCompactionResponse, LoopCompletionKind, LoopContextCompactionKind,
+    CapabilityInputRepair, CapabilityResultIntrinsicOutcome, CapabilityResultMessage,
+    CapabilityResumeToken, LoopCancelReasonKind, LoopCancellationSignal, LoopCancelledReasonKind,
+    LoopCheckpointKind, LoopCompactionError, LoopCompactionMode, LoopCompactionOutcome,
+    LoopCompactionResponse, LoopCompletionKind, LoopContextCompactionKind,
     LoopContextWindowTruncation, LoopExit, LoopFailureKind, LoopInput, LoopInputAckToken,
     LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopModelCapabilityView, LoopProcessRef,
     LoopProgressEvent, LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage,
@@ -30,8 +31,8 @@ use crate::state::{
     CapabilityCallSignature, CheckpointKind, DeferredCompactionWatermark, IndexedMessageKind,
     LoopExecutionState, MessageIndexEntry, ModelErrorObservationClass,
     ModelErrorRecoveryObservation, PendingApprovalResume, PendingAuthResume,
-    PendingModelRetryDirective, RepeatedCallWarningPhase, RepeatedCallWarningState,
-    TerminalWarningObservation,
+    PendingExternalToolResume, PendingModelRetryDirective, RepeatedCallWarningPhase,
+    RepeatedCallWarningState, TerminalWarningObservation,
 };
 use crate::strategies::{
     CapabilityBatchTurnSummary, CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome,
@@ -55,7 +56,8 @@ use super::{
     CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, GateInput, GateStage,
     HostStage, InputStage, InputStep, ModelInput, ModelStage, ModelStep, PromptInput, PromptStage,
     PromptStep, StageContext, TurnCompletedStep, UserFacingInputDrainMode,
-    consume_drainable_inputs, sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
+    append_capability_result_ref, completed_exit, consume_drainable_inputs,
+    sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
 };
 
 #[allow(dead_code)]
@@ -724,6 +726,92 @@ async fn capability_stage_trims_batch_to_remaining_capability_budget() {
         }
         TurnCompletedStep::Exit(exit) => panic!("expected continue, got {exit:?}"),
     }
+}
+
+#[tokio::test]
+async fn stale_surface_batch_releases_unlaunched_invocation_budget() {
+    let result = |suffix: &str| {
+        resolution::completed(
+            LoopResultRef::new(format!("result:stale-budget-{suffix}")).expect("valid"),
+            format!("{suffix} completed"),
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        )
+    };
+    let host = MockHost::new(Vec::new())
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
+            resolutions: vec![result("first"), result("second")],
+            stopped_on_suspension: false,
+        }])
+        .fail_batch_with(AgentLoopHostErrorKind::StaleSurface);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let policy = host
+        .run_context()
+        .resolved_run_profile
+        .resource_budget_policy
+        .clone();
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state
+        .budget_ledger
+        .set_capability_invocations_made_for_test(policy.max_capability_invocations - 2);
+    let surface = ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
+        &host,
+        VisibleCapabilityRequest,
+    )
+    .await
+    .expect("visible surface");
+    let calls = || match two_calls_response().output {
+        ParentLoopOutput::CapabilityCalls(calls) => calls,
+        ParentLoopOutput::AssistantReply(_) => panic!("expected capability calls"),
+    };
+
+    let first = CapabilityStage
+        .process(
+            ctx,
+            CapabilityInput {
+                state,
+                surface: surface.clone(),
+                calls: calls(),
+            },
+        )
+        .await
+        .expect("stale batch remains model-visible");
+    let TurnCompletedStep::Continue { state, .. } = first else {
+        panic!("stale batch must continue");
+    };
+    assert_eq!(
+        state.budget_ledger.capability_invocations_made(),
+        policy.max_capability_invocations - 2,
+        "a stale surface launches no calls and must release the full reservation"
+    );
+
+    host.clear_batch_failure();
+    let second = CapabilityStage
+        .process(
+            ctx,
+            CapabilityInput {
+                state: *state,
+                surface,
+                calls: calls(),
+            },
+        )
+        .await
+        .expect("the next batch retains the remaining budget");
+    let TurnCompletedStep::Continue { state, .. } = second else {
+        panic!("successful batch must continue");
+    };
+    assert_eq!(
+        state.budget_ledger.capability_invocations_made(),
+        policy.max_capability_invocations
+    );
+    assert_eq!(host.batch_invocations().len(), 2);
 }
 
 /// Behavior tightening absorbed by the `BudgetLedger` refactor: a capability
@@ -3560,6 +3648,186 @@ async fn stopped_on_suspension_completed_outcome_still_appends_result() {
 }
 
 #[tokio::test]
+async fn typed_structured_result_terminalizes_suppressed_schedule_without_reply_refs() {
+    let host = MockHost::new(Vec::new()).with_suppressed_scheduled_context();
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.stop_state.structured_result_recorded = true;
+    state
+        .result_refs
+        .push(LoopResultRef::new("result:prior-tool").expect("result ref"));
+    state
+        .result_refs
+        .push(LoopResultRef::new("result:nothing-to-report").expect("result ref"));
+    state
+        .assistant_refs
+        .push(message_ref("msg:intermediate-progress"));
+
+    let exit = completed_exit(&host, state, None).expect("completed exit");
+
+    let LoopExit::Completed(completed) = exit else {
+        panic!("expected completed exit");
+    };
+    assert_eq!(
+        completed.completion_kind,
+        LoopCompletionKind::NothingToReport
+    );
+    assert!(completed.reply_message_refs.is_empty());
+    assert!(completed.result_refs.is_empty());
+    assert!(host.finalized_assistant_messages().is_empty());
+}
+
+#[tokio::test]
+async fn successful_suppression_result_appends_host_authored_outcome_without_provider_replay() {
+    let host = MockHost::new(Vec::new()).with_suppressed_scheduled_context();
+    let call = CapabilityCallCandidate {
+        activity_id: CapabilityActivityId::new(),
+        surface_version: surface_version(),
+        capability_id: ironclaw_host_api::ids::CapabilityId::new(
+            ironclaw_host_api::prepared_context::STRUCTURED_RESULT_CAPABILITY_ID,
+        )
+        .expect("capability id"),
+        input_ref: CapabilityInputRef::new("input:structured-result").expect("input ref"),
+        effective_capability_ids: Vec::new(),
+        provider_replay: None,
+    };
+    let result = CapabilityResultMessage {
+        result_ref: LoopResultRef::new("result:typed-nothing-to-report").expect("result ref"),
+        safe_summary: "structured result recorded".to_string(),
+        progress: ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+        terminate_hint: true,
+        byte_len: 31,
+        output_digest: None,
+        model_observation: None,
+    };
+
+    append_capability_result_ref(&host, &call, &result)
+        .await
+        .expect("append result evidence");
+
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 1);
+    assert_eq!(appended[0].provider_call, None);
+    assert_eq!(
+        appended[0].intrinsic_outcome,
+        Some(CapabilityResultIntrinsicOutcome::NothingToReport)
+    );
+}
+
+#[tokio::test]
+async fn typed_nothing_to_report_honors_cancellation_after_final_checkpoint() {
+    let host = MockHost::new(Vec::new())
+        .with_suppressed_scheduled_context()
+        .cancel_after_checkpoint(LoopCheckpointKind::Final);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.stop_state.structured_result_recorded = true;
+    state
+        .result_refs
+        .push(LoopResultRef::new("result:nothing-to-report-cancelled").expect("result ref"));
+
+    let exit = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::GracefulStop,
+            },
+        )
+        .await
+        .expect("exit stage");
+
+    assert!(matches!(exit, LoopExit::Cancelled(_)));
+    assert!(host.finalized_assistant_messages().is_empty());
+}
+
+#[tokio::test]
+async fn silent_text_has_no_special_meaning_outside_typed_completion() {
+    let host = MockHost::new(vec![reply_response_with_text("[SILENT]")]);
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(
+        exit,
+        LoopExit::Completed(ref completed)
+            if completed.completion_kind == LoopCompletionKind::FinalReply
+    ));
+    assert_eq!(host.finalized_assistant_messages(), vec!["[SILENT]"]);
+    assert!(host.single_invocations().is_empty());
+    assert!(host.batch_invocations().is_empty());
+}
+
+#[tokio::test]
+async fn reply_that_mentions_silent_is_delivered_normally() {
+    let reply = "The literal marker [SILENT] is documented here.";
+    let host =
+        MockHost::new(vec![reply_response_with_text(reply)]).with_suppressed_scheduled_context();
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(
+        exit,
+        LoopExit::Completed(ref completed)
+            if completed.completion_kind == LoopCompletionKind::FinalReply
+    ));
+    assert_eq!(host.finalized_assistant_messages(), vec![reply]);
+    assert!(host.single_invocations().is_empty());
+    assert!(host.batch_invocations().is_empty());
+}
+
+#[tokio::test]
+async fn silent_text_is_visible_with_a_pending_external_tool_resume() {
+    let host = MockHost::new(Vec::new()).with_suppressed_scheduled_context();
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.pending_external_tool_resume = Some(PendingExternalToolResume {
+        gate_ref: LoopGateRef::new("gate:pending-external-tool").expect("gate ref"),
+        capability_id: capability_id(),
+        activity_id: CapabilityActivityId::new(),
+        surface_version: surface_version(),
+        input_ref: CapabilityInputRef::new("input:pending-external-tool").expect("input ref"),
+        effective_capability_ids: Vec::new(),
+        provider_replay: None,
+        disposition: None,
+    });
+    let step = AssistantReplyStage
+        .process(
+            ctx,
+            AssistantReplyInput {
+                state,
+                reply: ironclaw_loop_contracts::AssistantReply {
+                    content: "[SILENT]".to_string(),
+                },
+            },
+        )
+        .await
+        .expect("assistant reply stage");
+
+    let TurnCompletedStep::Continue { state, .. } = step else {
+        panic!("pending resume must prevent a nothing-to-report exit");
+    };
+    assert!(state.pending_external_tool_resume.is_some());
+    assert_eq!(host.finalized_assistant_messages(), vec!["[SILENT]"]);
+    assert!(host.single_invocations().is_empty());
+    assert!(host.batch_invocations().is_empty());
+}
+
+#[tokio::test]
 async fn terminate_hint_after_batch_completes_without_extra_model_call() {
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
         ironclaw_host_api::resolution::ResolutionBatch {
@@ -5507,6 +5775,13 @@ async fn ordered_middleware_preserves_the_complete_model_batch_contract() {
     let batch_invocations = host.batch_invocations();
     assert_eq!(batch_invocations.len(), 1);
     assert!(batch_invocations[0].stop_on_first_suspension);
+    assert_eq!(
+        final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock)
+            .budget_ledger
+            .capability_invocations_made(),
+        1,
+        "only the first call reached the ordered host before suspension"
+    );
 }
 
 #[tokio::test]

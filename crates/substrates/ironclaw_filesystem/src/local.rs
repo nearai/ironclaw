@@ -546,6 +546,52 @@ impl RootFilesystem for DiskFilesystem {
         Ok(entries)
     }
 
+    async fn list_dir_page(
+        &self,
+        path: &VirtualPath,
+        after: Option<&str>,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        if max_entries == 0 {
+            return Ok(Vec::new());
+        }
+        let resolved = self
+            .resolve_existing(path, FilesystemOperation::ListDir)
+            .await?;
+        let mut read_dir = tokio::fs::read_dir(resolved)
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::ListDir, error))?;
+        let mut page = std::collections::BTreeMap::<String, DirEntry>::new();
+        while let Some(entry) = read_dir
+            .next_entry()
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::ListDir, error))?
+        {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if after.is_some_and(|cursor| name.as_str() <= cursor) {
+                continue;
+            }
+            let entry_path =
+                VirtualPath::new(format!("{}/{}", path.as_str().trim_end_matches('/'), name))?;
+            let metadata = entry
+                .metadata()
+                .await
+                .map_err(|error| io_error(entry_path.clone(), FilesystemOperation::Stat, error))?;
+            page.insert(
+                name.clone(),
+                DirEntry {
+                    name,
+                    path: entry_path,
+                    file_type: file_type_from_metadata(&metadata),
+                },
+            );
+            if page.len() > max_entries {
+                page.pop_last();
+            }
+        }
+        Ok(page.into_values().collect())
+    }
+
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         let resolved = self
             .resolve_existing(path, FilesystemOperation::Stat)
@@ -646,37 +692,7 @@ async fn atomic_write_file(
         CasExpectation::Any => tokio::fs::rename(&temp, target)
             .await
             .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error)),
-        CasExpectation::Absent => match tokio::fs::hard_link(&temp, target).await {
-            Ok(()) => tokio::fs::remove_file(&temp).await.map_err(|error| {
-                io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error)
-            }),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if let Err(cleanup_error) = tokio::fs::remove_file(&temp).await {
-                    tracing::debug!(
-                        error = ?cleanup_error,
-                        "best-effort cleanup of write temp file failed after CAS conflict"
-                    );
-                }
-                Err(FilesystemError::VersionMismatch {
-                    path: virtual_path.clone(),
-                    expected: None,
-                    found: Some(RecordVersion::from_backend(0)),
-                })
-            }
-            Err(error) => {
-                if let Err(cleanup_error) = tokio::fs::remove_file(&temp).await {
-                    tracing::debug!(
-                        error = ?cleanup_error,
-                        "best-effort cleanup of write temp file failed after hard-link error"
-                    );
-                }
-                Err(io_error(
-                    virtual_path.clone(),
-                    FilesystemOperation::WriteFile,
-                    error,
-                ))
-            }
-        },
+        CasExpectation::Absent => publish_absent_temp(virtual_path, &temp, target).await,
         CasExpectation::Version(_) => Err(FilesystemError::Unsupported {
             path: virtual_path.clone(),
             operation: FilesystemOperation::WriteFile,
@@ -685,6 +701,178 @@ async fn atomic_write_file(
 
     install_result?;
     sync_parent_dir(virtual_path, parent).await
+}
+
+#[cfg(not(windows))]
+async fn publish_absent_temp(
+    virtual_path: &VirtualPath,
+    temp: &Path,
+    target: &Path,
+) -> Result<(), FilesystemError> {
+    match tokio::fs::hard_link(temp, target).await {
+        Ok(()) => {
+            if let Err(cleanup_error) = tokio::fs::remove_file(temp).await {
+                tracing::debug!(
+                    error = ?cleanup_error,
+                    "best-effort cleanup of write temp file failed after publication"
+                );
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if let Err(cleanup_error) = tokio::fs::remove_file(&temp).await {
+                tracing::debug!(
+                    error = ?cleanup_error,
+                    "best-effort cleanup of write temp file failed after CAS conflict"
+                );
+            }
+            Err(FilesystemError::VersionMismatch {
+                path: virtual_path.clone(),
+                expected: None,
+                found: Some(RecordVersion::from_backend(0)),
+            })
+        }
+        Err(error) => {
+            if let Err(cleanup_error) = tokio::fs::remove_file(&temp).await {
+                tracing::debug!(
+                    error = ?cleanup_error,
+                    "best-effort cleanup of write temp file failed after hard-link error"
+                );
+            }
+            Err(io_error(
+                virtual_path.clone(),
+                FilesystemOperation::WriteFile,
+                error,
+            ))
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn publish_absent_temp(
+    virtual_path: &VirtualPath,
+    temp: &Path,
+    target: &Path,
+) -> Result<(), FilesystemError> {
+    let temp_path = temp.to_path_buf();
+    let target_path = target.to_path_buf();
+    let publish =
+        tokio::task::spawn_blocking(move || move_file_absent_windows(&temp_path, &target_path))
+            .await
+            .map_err(|error| FilesystemError::Backend {
+                path: virtual_path.clone(),
+                operation: FilesystemOperation::WriteFile,
+                reason: format!("Windows create-only publication task failed: {error}"),
+            })?;
+    match publish {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if let Err(cleanup_error) = tokio::fs::remove_file(temp).await {
+                tracing::debug!(
+                    error = ?cleanup_error,
+                    "best-effort cleanup of write temp file failed after rename error"
+                );
+            }
+            if windows_target_exists_error(&error) {
+                Err(FilesystemError::VersionMismatch {
+                    path: virtual_path.clone(),
+                    expected: None,
+                    found: Some(RecordVersion::from_backend(0)),
+                })
+            } else {
+                Err(io_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error,
+                ))
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_target_exists_error(error: &std::io::Error) -> bool {
+    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS};
+
+    error
+        .raw_os_error()
+        .is_some_and(|code| code == ERROR_ALREADY_EXISTS as i32 || code == ERROR_FILE_EXISTS as i32)
+}
+
+#[cfg(windows)]
+fn move_file_absent_windows(temp: &Path, target: &Path) -> std::io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+
+    let temp = path_to_nul_terminated_wide(temp)?;
+    let target = path_to_nul_terminated_wide(target)?;
+    // SAFETY: Both pointers reference live, NUL-terminated UTF-16 buffers.
+    // Omitting MOVEFILE_REPLACE_EXISTING makes an existing target a failure,
+    // preserving CasExpectation::Absent atomically on the same volume.
+    let moved = unsafe { MoveFileExW(temp.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+    if moved == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn path_to_nul_terminated_wide(path: &Path) -> std::io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let absolute = std::path::absolute(path)?;
+    let mut wide: Vec<u16> = absolute.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path contains an interior NUL byte",
+        ));
+    }
+
+    normalize_windows_path_separators(&mut wide);
+    if !has_windows_namespace_prefix(&wide) {
+        wide = verbatim_windows_path(wide);
+    }
+    wide.push(0);
+    Ok(wide)
+}
+
+#[cfg(windows)]
+fn has_windows_namespace_prefix(wide: &[u16]) -> bool {
+    wide.len() >= 4
+        && is_windows_path_separator(wide[0])
+        && is_windows_path_separator(wide[1])
+        && (wide[2] == b'?' as u16 || wide[2] == b'.' as u16)
+        && is_windows_path_separator(wide[3])
+}
+
+#[cfg(windows)]
+fn normalize_windows_path_separators(wide: &mut [u16]) {
+    for code_unit in wide {
+        if *code_unit == b'/' as u16 {
+            *code_unit = b'\\' as u16;
+        }
+    }
+}
+
+#[cfg(windows)]
+fn verbatim_windows_path(wide: Vec<u16>) -> Vec<u16> {
+    if wide.len() >= 2 && is_windows_path_separator(wide[0]) && is_windows_path_separator(wide[1]) {
+        let mut prefixed: Vec<u16> = r"\\?\UNC\".encode_utf16().collect();
+        prefixed.extend_from_slice(&wide[2..]);
+        prefixed
+    } else if wide.len() >= 3 && wide[1] == b':' as u16 && is_windows_path_separator(wide[2]) {
+        let mut prefixed: Vec<u16> = r"\\?\".encode_utf16().collect();
+        prefixed.extend_from_slice(&wide);
+        prefixed
+    } else {
+        wide
+    }
+}
+
+#[cfg(windows)]
+fn is_windows_path_separator(code_unit: u16) -> bool {
+    code_unit == b'\\' as u16 || code_unit == b'/' as u16
 }
 
 fn unique_temp_path(
@@ -824,9 +1012,21 @@ async fn sync_parent_dir_for_operation(
     parent: &Path,
     operation: FilesystemOperation,
 ) -> Result<(), FilesystemError> {
+    #[cfg(windows)]
+    {
+        // `tokio::fs::File::open` cannot open a Windows directory without
+        // `FILE_FLAG_BACKUP_SEMANTICS`. The file contents were already
+        // flushed before the atomic rename; Windows does not expose a
+        // portable parent-directory fsync equivalent through std/tokio.
+        let _ = (virtual_path, parent, operation);
+        return Ok(());
+    }
+
+    #[cfg(not(windows))]
     let dir = tokio::fs::File::open(parent)
         .await
         .map_err(|error| io_error(virtual_path.clone(), operation, error))?;
+    #[cfg(not(windows))]
     dir.sync_all()
         .await
         .map_err(|error| io_error(virtual_path.clone(), operation, error))
@@ -954,6 +1154,20 @@ fn io_reason(error: std::io::Error) -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_existing_target_errors_are_classified_without_a_follow_up_probe() {
+        use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS};
+
+        for code in [ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS] {
+            let error = std::io::Error::from_raw_os_error(code as i32);
+            assert!(windows_target_exists_error(&error));
+        }
+        assert!(!windows_target_exists_error(
+            &std::io::Error::from_raw_os_error(5)
+        ));
+    }
 
     #[tokio::test]
     #[tracing_test::traced_test]

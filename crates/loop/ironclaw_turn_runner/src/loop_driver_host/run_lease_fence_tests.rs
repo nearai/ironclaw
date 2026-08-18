@@ -170,6 +170,7 @@ fn claimed_run_matching(
             allow_steering: true,
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: None,
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,

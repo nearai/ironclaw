@@ -575,6 +575,11 @@ pub struct StopStrategyState {
     /// batches is repeated invalid result-tool output.
     #[serde(default)]
     pub trailing_all_failed_batches: u32,
+    /// A completed host-owned structured-result call was observed during this
+    /// run. Failed calls never set this bit. The terminal mapper combines it
+    /// with the scheduled suppression policy before producing NothingToReport.
+    #[serde(default)]
+    pub structured_result_recorded: bool,
     /// Pending or rendered advisory shown when the same capability call is
     /// repeated consecutively. This warning never authorizes a heuristic stop.
     #[serde(default, skip_serializing_if = "Option::is_none")]

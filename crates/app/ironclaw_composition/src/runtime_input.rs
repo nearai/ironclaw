@@ -70,7 +70,7 @@ impl Default for RebornRuntimeIdentity {
     }
 }
 
-pub(crate) const DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+pub(crate) const DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 pub(crate) const DEFAULT_TURN_RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 // The fire-time access contract lives in `ironclaw_triggers` (CHECKLIST WS6):
@@ -711,6 +711,13 @@ impl RebornRuntimeInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn turn_runner_default_uses_fifteen_second_heartbeat() {
+        assert_eq!(
+            TurnRunnerSettings::default().heartbeat_interval,
+            Duration::from_secs(15)
+        );
+    }
 
     #[test]
     fn from_build_input_preserves_configured_ironhub_manifest_url() {

@@ -5,7 +5,10 @@
 //! by `tests/integration/lease_wedge.rs` to cover lease-expiry recovery of a
 //! wedged in-flight tool call (issue #5476).
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use async_trait::async_trait;
 use ironclaw_host_runtime::{
@@ -30,6 +33,7 @@ struct ParkingState {
     parked_rx: watch::Receiver<bool>,
     release_tx: watch::Sender<bool>,
     release_rx: watch::Receiver<bool>,
+    dispatch_count: AtomicUsize,
 }
 
 impl ParkingCapabilityGate {
@@ -41,6 +45,7 @@ impl ParkingCapabilityGate {
             parked_rx,
             release_tx,
             release_rx,
+            dispatch_count: AtomicUsize::new(0),
         }))
     }
 
@@ -57,6 +62,10 @@ impl ParkingCapabilityGate {
     /// Release the parked capability dispatch so it delegates to the inner runtime.
     pub(crate) fn release(&self) {
         let _ = self.0.release_tx.send(true);
+    }
+
+    pub(crate) fn dispatch_count(&self) -> usize {
+        self.0.dispatch_count.load(Ordering::SeqCst)
     }
 
     /// Guarantees `release()` runs even if a test assertion panics first, so a
@@ -121,6 +130,7 @@ impl HostRuntime for ParkingHostRuntime {
         &self,
         request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        self.gate.0.dispatch_count.fetch_add(1, Ordering::SeqCst);
         self.gate.park().await;
         self.inner.invoke_capability(request).await
     }
@@ -129,6 +139,7 @@ impl HostRuntime for ParkingHostRuntime {
         &self,
         request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        self.gate.0.dispatch_count.fetch_add(1, Ordering::SeqCst);
         self.gate.park().await;
         self.inner.spawn_capability(request).await
     }

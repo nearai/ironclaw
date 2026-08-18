@@ -204,6 +204,29 @@ fn reborn_runtime_image_includes_sql_debug_clients() {
 }
 
 #[test]
+fn reborn_runtime_image_can_run_the_orchestrator_healthcheck() {
+    // Earlier build stages install curl for downloads, so inspect only the
+    // shipped runtime stage used by container healthchecks.
+    let dockerfile = read_repo_file("Dockerfile");
+    let runtime_stage = dockerfile
+        .rsplit_once(" AS runtime\n")
+        .map(|(_, stage)| stage)
+        .expect("Dockerfile must define a runtime stage");
+    let runtime_packages = runtime_stage
+        .split_once("install -y --no-install-recommends \\\n")
+        .and_then(|(_, packages)| packages.split_once("    && rm -rf /var/lib/apt/lists/*"))
+        .map(|(packages, _)| packages)
+        .expect("runtime stage must install its package list before apt cleanup");
+
+    assert!(
+        runtime_packages
+            .lines()
+            .any(|line| line.trim() == "curl \\"),
+        "runtime image must include an HTTP client for orchestrator healthchecks"
+    );
+}
+
+#[test]
 fn reborn_hosted_single_tenant_seed_config_contains_postgres_storage() {
     let config = read_repo_file("docker/reborn/config.hosted-single-tenant.toml");
 

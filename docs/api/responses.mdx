@@ -162,6 +162,7 @@ print(resp.output_text)
 | `model` | yes | Any well-formed model name: non-empty, no surrounding whitespace, no control characters, at most 256 bytes. Carried through as a server-side routing hint and echoed back in the create response; retrieval and cancel responses report the server placeholder `"reborn"` instead of the submitted name. Provider and model selection is configured via settings. `"default"` is the conventional placeholder. |
 | `instructions` | no | System/developer instructions. Injected ahead of `input` as an `<instructions>` block and stored as part of the persisted user message. See [Per-request instructions](#per-request-instructions) for the IronClaw-specific replay caveat. |
 | `previous_response_id` | no | The `id` from a prior response. Resumes the same thread; see [Session continuity](#session-continuity). |
+| `metadata` | no | Accepted and ignored — parsed as part of the request but not persisted or echoed back. |
 | `stream` | no | `true` for SSE; `false` (default) for a single JSON response. |
 | `temperature` | no | Sampling temperature, `0.0`–`2.0` inclusive; values outside the range are rejected with `400`. Validated and carried in the submitted turn payload; it is not currently applied as a provider sampling parameter. |
 | `tools` | no | Caller-supplied function tools. See [External tools](#external-tools). An empty `tools: []` is treated as omitted. |
@@ -185,6 +186,22 @@ custom composition that mounts the Responses routes without external-tool
 wiring instead rejects non-empty `tools` and any `tool_choice` with `400`
 naming the field.
 </Note>
+
+{/* doc-fact:responses-request-policy
+    Machine-checked contract for the table and rejection list above — parsed
+    and verified against the real router by
+    crates/product/ironclaw_openai_compat/tests/docs_responses_contract.rs.
+    The rejected_without_external_tools set describes the router without
+    external-tool wiring (the custom-composition case in the Note above);
+    standard serve deployments always wire it.
+    Edit these values only together with the prose they pin.
+request_fields = model,input,stream,temperature,instructions,previous_response_id,metadata,tools,tool_choice,x_context
+rejected_without_external_tools = tools,tool_choice
+ignored_unknown_fields = true
+temperature_min = 0.0
+temperature_max = 2.0
+model_max_bytes = 256
+*/}
 
 ---
 
