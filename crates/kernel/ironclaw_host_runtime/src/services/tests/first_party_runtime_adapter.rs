@@ -767,6 +767,7 @@ impl ReleaseFailsOnceGovernor {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn release_attempts(&self) -> Vec<ironclaw_host_api::ids::ResourceReservationId> {
         self.released.lock().expect("release log").clone()
     }

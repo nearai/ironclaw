@@ -1673,9 +1673,11 @@ pub(crate) struct ReservationRecord {
     /// snapshot containing a reservation taken after the upgrade — the whole
     /// snapshot load fails closed rather than dropping the field. Rolling the
     /// governor back therefore requires restoring a snapshot written before the
-    /// upgrade (the delta log replays unchanged from that cursor); the schema
-    /// version is deliberately not bumped, because bumping it would fail the
-    /// same load with a different message and break nothing extra.
+    /// upgrade and validating that its delta cursor matches the retained delta
+    /// log before starting the old binary (the log replays unchanged from that
+    /// cursor). The schema version is deliberately not bumped, because bumping
+    /// it would fail the same load with a different message and break nothing
+    /// extra.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reserved_at: Option<DateTime<Utc>>,
 }
