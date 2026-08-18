@@ -150,11 +150,11 @@ pub use skill_context::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextCandidatePayload,
     HostSkillContextSource, build_skill_run_snapshot,
 };
-pub use structured_result::nothing_to_report_result_capability;
 pub use structured_output::{
     STRUCTURED_OUTPUT_FINALIZATION_PROMPT, STRUCTURED_OUTPUT_GUIDANCE_PROMPT,
     StructuredOutputLoopPromptPort, add_structured_output_guidance, structured_output_guidance,
 };
+pub use structured_result::nothing_to_report_result_capability;
 pub use subagent_prompt_port::{
     DEFAULT_SUBAGENT_GOAL_MAX_BYTES, SubagentLoopPromptPort, SubagentPromptComposer,
     SubagentPromptGoal, SubagentPromptLimits, SubagentPromptMaterial, SubagentPromptMaterialSource,
@@ -218,10 +218,10 @@ use ironclaw_loop_contracts::{
     LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopModelUsage,
     LoopPromptBundleAuthority, LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort,
     LoopSafeSummary, LoopTranscriptPort, MemoryPromptContextLoad, MemoryPromptContextService,
-    ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
-    sort_instruction_snippets_for_prompt, SystemInferenceContextMessage,
-    SystemInferenceContextRole,
+    ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode, SystemInferenceContextMessage,
+    SystemInferenceContextRole, UpdateAssistantDraft, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
+    sort_instruction_snippets_for_prompt,
 };
 use ironclaw_outbound::{
     OutboundError, ReplyAttachmentHandle, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
