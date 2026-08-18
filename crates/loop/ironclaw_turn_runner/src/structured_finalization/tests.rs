@@ -1,6 +1,6 @@
 use std::sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
 use async_trait::async_trait;
@@ -35,7 +35,7 @@ use ironclaw_turns::{
 use super::{
     FINALIZATION_DEADLINE_MS, StructuredFinalizationContextLimits,
     StructuredFinalizationCoordinator, StructuredFinalizationPort, finalization_max_input_tokens,
-    record_matches_replay,
+    finalization_system_prompt, record_matches_replay,
 };
 
 #[test]
@@ -44,18 +44,6 @@ fn finalization_deadline_stays_below_the_process_lease() {
         .expect("default process lease fits in u64 milliseconds");
 
     assert!(FINALIZATION_DEADLINE_MS < lease_ms);
-}
-
-#[test]
-fn finalization_input_ceiling_reserves_room_for_the_host_prompt() {
-    let context_budget = 1_024;
-    let system_prompt = "return the requested structured output";
-    let prompt_tokens = ironclaw_loop_host::estimate_tokens_from_chars(system_prompt).as_u64();
-
-    assert_eq!(
-        finalization_max_input_tokens(context_budget, system_prompt),
-        context_budget + prompt_tokens
-    );
 }
 
 #[test]
@@ -256,6 +244,7 @@ impl AgentTurnSpawnTreeRuntimePort for LeaseRuntime {
 
 struct CountingInference {
     calls: AtomicUsize,
+    max_input_tokens: AtomicU64,
 }
 
 #[async_trait]
@@ -265,6 +254,8 @@ impl SystemInferencePort for CountingInference {
         request: SystemInferenceRequest,
     ) -> Result<SystemInferenceResponse, SystemInferenceError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.max_input_tokens
+            .store(request.max_input_tokens, Ordering::SeqCst);
         assert!(matches!(
             request.output_contract,
             Some(OutputContract::JsonSchema { .. })
@@ -537,6 +528,7 @@ async fn run_post_inference_conflict_case(
     let profile = TurnRunProfile::from_resolved(resolved);
     let inference = Arc::new(CountingInference {
         calls: AtomicUsize::new(0),
+        max_input_tokens: AtomicU64::new(0),
     });
     let lease = TurnLeaseToken::new();
     let runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort> = Arc::new(LeaseRuntime {
@@ -648,6 +640,7 @@ async fn coordinator_replays_adopts_and_rejects_conflicts_without_second_inferen
     let profile = TurnRunProfile::from_resolved(resolved);
     let inference = Arc::new(CountingInference {
         calls: AtomicUsize::new(0),
+        max_input_tokens: AtomicU64::new(0),
     });
     let first_lease = TurnLeaseToken::new();
     let first_runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort> = Arc::new(LeaseRuntime {
@@ -825,7 +818,13 @@ async fn terminal_reply_finalization_reads_exact_row_and_publishes_idempotently(
 
     let inference = Arc::new(CountingInference {
         calls: AtomicUsize::new(0),
+        max_input_tokens: AtomicU64::new(0),
     });
+    let token_budget = PromptContextTokenBudget::new(1_024, 128, 0);
+    let system_prompt = finalization_system_prompt(&run_context.output_contract)
+        .expect("structured finalization prompt");
+    let expected_max_input_tokens =
+        finalization_max_input_tokens(token_budget.context_limit_tokens, &system_prompt);
     let profile = TurnRunProfile::from_resolved(resolved);
     let lease = TurnLeaseToken::new();
     let runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort> = Arc::new(LeaseRuntime {
@@ -843,7 +842,7 @@ async fn terminal_reply_finalization_reads_exact_row_and_publishes_idempotently(
         lease,
         StructuredFinalizationContextLimits {
             max_messages: 16,
-            token_budget: PromptContextTokenBudget::default(),
+            token_budget,
         },
     );
 
@@ -852,6 +851,10 @@ async fn terminal_reply_finalization_reads_exact_row_and_publishes_idempotently(
         .await
         .expect("terminal structured finalization");
     assert_eq!(inference.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        inference.max_input_tokens.load(Ordering::SeqCst),
+        expected_max_input_tokens
+    );
     let published = thread_service
         .read_thread_message(&thread_scope, &thread_id, finalized.message_id)
         .await
