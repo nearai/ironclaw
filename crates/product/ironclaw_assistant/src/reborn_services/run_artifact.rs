@@ -31,6 +31,8 @@ use ironclaw_product_contracts::surface::{
 
 pub use ironclaw_product_contracts::product_wire::RebornRunArtifactRequest;
 
+pub mod timings;
+
 pub const RUN_ARTIFACT_SCHEMA: &str = "ironclaw.run_artifact.v1";
 pub const RUN_ARTIFACT_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "run_artifact",

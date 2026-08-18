@@ -252,6 +252,10 @@ pub use run_delivery::{
 // Adapter, projection, and event DTOs are re-exported from
 // `ironclaw_host_api::product_adapter` above so product terminals consume a
 // single product service.
+pub use reborn_services::run_artifact::timings::{
+    RunArtifactIterationTiming, RunArtifactTimingTotals, RunArtifactTimings, RunArtifactToolTiming,
+    project_timings, unavailable,
+};
 pub use reborn_services::{
     ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID,
     ADMIN_CONFIGURATION_VIEW, ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW,

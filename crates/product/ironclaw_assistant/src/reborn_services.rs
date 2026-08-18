@@ -148,7 +148,10 @@ mod product_capability_handlers;
 mod product_commands;
 mod project_fs;
 mod projects;
-mod run_artifact;
+// pub(crate): lib.rs re-exports `reborn_services::run_artifact::timings`
+// directly, which needs this segment of the path visible crate-wide; the
+// module's own contents stay unexported except through that re-export.
+pub(crate) mod run_artifact;
 mod thread_artifact;
 mod trace_credits;
 mod types;
