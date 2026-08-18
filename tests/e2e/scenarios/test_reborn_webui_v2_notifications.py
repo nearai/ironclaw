@@ -367,6 +367,10 @@ async def test_reborn_v2_error_toast_pauses_dismisses_and_stays_above_notificati
         await page.clock.fast_forward(8500)
         await expect(toast).to_be_visible()
 
+        # A failed delete intentionally leaves the confirmation dialog open so
+        # the user can retry. Close it before exercising the header behind its
+        # modal backdrop.
+        await page.locator(SEL_V2["confirm_dialog_cancel"]).click()
         await page.locator(SEL_V2["notification_bell"]).click()
         panel = page.locator(SEL_V2["notification_panel"])
         await expect(panel).to_be_visible(timeout=5000)
