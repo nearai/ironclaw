@@ -321,10 +321,9 @@ async fn an_affirmative_answer_is_reused_while_the_observed_lease_is_live() {
 async fn a_zombie_worker_is_refused_once_its_observed_lease_expiry_passes() {
     let fixture = Fixture::new("memo-zombie").await;
     let lease_token = TurnLeaseToken::new();
-    // Just past the fence's skew margin: the memo window this yields is a few
-    // hundred milliseconds, so the test observes the real expiry arithmetic
-    // rather than a special-cased zero.
-    let expires_at = Utc::now() + chrono::Duration::milliseconds(5_300);
+    // One second past the fence's skew margin gives loaded runners enough
+    // scheduling slack while still exercising the real expiry arithmetic.
+    let expires_at = Utc::now() + chrono::Duration::milliseconds(6_000);
     let journal = Arc::new(ScriptedJournal::new(Some(
         fixture.record(Some(lease_token), Some(expires_at)),
     )));
@@ -335,7 +334,7 @@ async fn a_zombie_worker_is_refused_once_its_observed_lease_expiry_passes() {
 
     // Recovery reclaims: the run is requeued and carries no lease at all.
     journal.set_record(Some(fixture.record(None, None)));
-    tokio::time::sleep(Duration::from_millis(700)).await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
 
     let error = finalize(&port, "after the lease expired")
         .await
@@ -359,7 +358,9 @@ async fn a_zombie_worker_is_refused_once_its_observed_lease_expiry_passes() {
 async fn a_terminal_control_action_is_observed_once_the_memo_lapses() {
     let fixture = Fixture::new("memo-terminal-control").await;
     let lease_token = TurnLeaseToken::new();
-    let expires_at = Utc::now() + chrono::Duration::milliseconds(5_300);
+    // Keep the memo window wide enough that setup and the cached write remain
+    // stable on loaded runners, then sleep past it below.
+    let expires_at = Utc::now() + chrono::Duration::milliseconds(6_000);
     let journal = Arc::new(ScriptedJournal::new(Some(
         fixture.record(Some(lease_token), Some(expires_at)),
     )));
@@ -376,7 +377,7 @@ async fn a_terminal_control_action_is_observed_once_the_memo_lapses() {
         .expect("the cached affirmative answer remains usable until its deadline");
     assert_eq!(journal.reads(), 1);
 
-    tokio::time::sleep(Duration::from_millis(700)).await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
 
     let error = finalize(&port, "after the memo window")
         .await

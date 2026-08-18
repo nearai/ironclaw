@@ -885,6 +885,8 @@ impl RunLeaseFence {
 fn memo_deadline_for(lease_expires_at: DateTime<Utc>) -> Option<Instant> {
     let remaining = lease_expires_at
         .signed_duration_since(Utc::now())
+        // silent-ok: conversion fails only for an already-expired lease; not
+        // memoizing that affirmative answer is the fail-closed result.
         .to_std()
         .ok()?;
     let window = remaining
