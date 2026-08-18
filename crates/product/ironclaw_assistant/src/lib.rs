@@ -373,7 +373,7 @@ pub use reborn_services::{
     RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
     RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
     RebornVendorAuthAccounts, RegistrationChannelNotificationSetupService, RunArtifactLogs,
-    RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall,
+    RunArtifactMessage, RunArtifactRedaction, RunArtifactRunTimings, RunArtifactToolCall,
     SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW,
     SKILL_INSTALL_CAPABILITY, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY,

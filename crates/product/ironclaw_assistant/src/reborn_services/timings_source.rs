@@ -12,23 +12,26 @@ use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_product_contracts::views::RebornViewProvider;
 use ironclaw_turns::TurnRunId;
 
-use super::run_artifact::RunArtifactMessage;
-use super::run_artifact::timings::{RunArtifactTimings, project_timings, unavailable};
-use super::{ProductCapabilityInvoker, RebornServices};
+use crate::reborn_services::run_artifact::RunArtifactMessage;
+use crate::reborn_services::run_artifact::timings::{RunArtifactTimings, project_timings, unavailable};
+use crate::reborn_services::{ProductCapabilityInvoker, RebornServices};
 
 impl<I, V> RebornServices<I, V>
 where
     I: ProductCapabilityInvoker + Clone + 'static,
     V: RebornViewProvider + Clone + 'static,
 {
-    pub(super) fn artifact_timings(
+    pub(super) fn artifact_timings<'a, M>(
         &self,
         caller: &ProductSurfaceCaller,
         thread_id: &ThreadId,
         run_id: &TurnRunId,
         run_received_at: DateTime<Utc>,
-        messages: &[RunArtifactMessage],
-    ) -> RunArtifactTimings {
+        messages: M,
+    ) -> RunArtifactTimings
+    where
+        M: IntoIterator<Item = &'a RunArtifactMessage>,
+    {
         // Same keying as the operator inspector (`inspector.rs::diagnostic_scope`).
         // On the admin thread-scrape route the caller was already rebound to the
         // scraped user by `thread_scrape_subject`, so this needs no branch.
@@ -39,7 +42,7 @@ where
             *run_id,
         );
         let wall_clock_ms = derive_wall_clock_ms(run_received_at, messages);
-        match self.diagnostic_store.snapshot(&scope) {
+        match self.diagnostic_store.timing_snapshot(&scope) {
             Ok(Some(snapshot)) => project_timings(snapshot, wall_clock_ms),
             Ok(None) => {
                 let mut timings = unavailable("run_not_resident");
@@ -69,12 +72,11 @@ where
 /// the run. `None` when no message carries a timestamp (pre-timestamp
 /// records) or when the span is negative, which only happens if clocks
 /// disagree — report nothing rather than a nonsense number.
-pub(super) fn derive_wall_clock_ms(
+pub(super) fn derive_wall_clock_ms<'a>(
     run_received_at: DateTime<Utc>,
-    messages: &[RunArtifactMessage],
+    messages: impl IntoIterator<Item = &'a RunArtifactMessage>,
 ) -> Option<u64> {
     let newest = messages
-        .iter()
         .filter_map(|message| message.updated_at)
         .max()?;
     u64::try_from((newest - run_received_at).num_milliseconds()).ok()
@@ -108,14 +110,14 @@ mod tests {
             message(Some(received + chrono::Duration::seconds(40))),
         ];
 
-        assert_eq!(derive_wall_clock_ms(received, &messages), Some(91_000));
+        assert_eq!(derive_wall_clock_ms(received, messages.iter()), Some(91_000));
     }
 
     #[test]
     fn wall_clock_is_absent_when_no_message_carries_a_timestamp() {
         let received = Utc::now();
         assert_eq!(
-            derive_wall_clock_ms(received, &[message(None), message(None)]),
+            derive_wall_clock_ms(received, [message(None), message(None)].iter()),
             None
         );
     }
@@ -124,6 +126,6 @@ mod tests {
     fn wall_clock_is_absent_rather_than_negative_when_clocks_disagree() {
         let received = Utc::now();
         let messages = vec![message(Some(received - chrono::Duration::seconds(5)))];
-        assert_eq!(derive_wall_clock_ms(received, &messages), None);
+        assert_eq!(derive_wall_clock_ms(received, messages.iter()), None);
     }
 }

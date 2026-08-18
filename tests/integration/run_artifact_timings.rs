@@ -99,6 +99,9 @@ async fn exported_run_artifact_carries_per_iteration_timings() {
     assert!(artifact.timings.available);
     assert!(!artifact.timings.complete);
     assert_eq!(artifact.timings.iterations.len(), 3);
+    assert_eq!(artifact.timings.totals.iterations, 3);
+    assert!(artifact.timings.totals.inference_ms.known_total > 0);
+    assert_eq!(artifact.timings.totals.inference_ms.unavailable_samples, 0);
     assert!(artifact.timings.totals.wall_clock_ms.is_some());
     assert!(
         artifact.timings.iterations[0].inference_ms.is_some(),

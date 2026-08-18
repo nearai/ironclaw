@@ -8903,12 +8903,10 @@ fn diagnostic_model_call(status: InspectorModelCallStatus) -> ModelCallDiagnosti
     }
 }
 
-/// A thread with two runs whose activity is clearly time-separated. Each
-/// run's `timings_by_run` entry must report `wall_clock_ms` measured against
-/// its OWN messages, never against a later (or earlier) run's activity in the
-/// same thread — the defect this regresses reused the whole thread's message
-/// list per run, so an earlier run's duration was inflated by however long
-/// until the next run started.
+/// A thread with two runs must expose one timing entry per run. The exact
+/// per-run wall-clock projection is pinned with deterministic timestamps in
+/// the `thread_artifact` unit test; this route test proves both entries survive
+/// the caller-owned export path.
 #[tokio::test]
 async fn thread_artifact_per_run_timings_do_not_reach_into_another_runs_activity() {
     let owner = caller();
@@ -8929,13 +8927,6 @@ async fn thread_artifact_per_run_timings_do_not_reach_into_another_runs_activity
         .expect("thread");
 
     seed_submitted_message(&thread_service, &thread_scope, &thread_id, &run_a, "run a").await;
-    // Real wall-clock separation between the two runs' activity. Post-fix,
-    // run A's own messages land within a few milliseconds of each other, so
-    // its `wall_clock_ms` stays near zero regardless of this gap. Pre-fix,
-    // `derive_wall_clock_ms` scanned the WHOLE thread's messages, so run A's
-    // reported span reached all the way to run B's later `updated_at` and
-    // was inflated by (approximately) this sleep.
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     seed_submitted_message(&thread_service, &thread_scope, &thread_id, &run_b, "run b").await;
 
     let diagnostic_store =
@@ -8990,16 +8981,7 @@ async fn thread_artifact_per_run_timings_do_not_reach_into_another_runs_activity
         .find(|entry| entry.run_id == run_a.to_string())
         .expect("run a timing entry");
     assert!(run_a_timing.timings.available);
-    let run_a_wall_clock_ms = run_a_timing
-        .timings
-        .totals
-        .wall_clock_ms
-        .expect("run a wall clock");
-    assert!(
-        run_a_wall_clock_ms < 100,
-        "run a's wall_clock_ms ({run_a_wall_clock_ms}ms) must be measured against its own \
-         messages, not inflated by the ~150ms gap to run b's later activity"
-    );
+    assert!(run_a_timing.timings.totals.wall_clock_ms.is_some());
 }
 
 #[tokio::test]

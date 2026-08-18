@@ -34,11 +34,13 @@ mod support;
 use std::collections::HashSet;
 
 use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_product_contracts::inspector::DiagnosticScope;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::harness::HarnessResult;
 use reborn_support::harness::options::ToolsProfile;
 use reborn_support::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape;
+use reborn_support::reply::RebornScriptedReply;
 
 // ---------------------------------------------------------------------------
 // Part 1: DefaultPlannedRuntimeParts Some/None shape parity
@@ -226,18 +228,27 @@ async fn test_default_planned_runtime_parts_shape_matches_production() {
 /// recorded.
 #[tokio::test]
 async fn harness_shares_one_diagnostic_store_with_the_loop() {
-    let harness = RebornIntegrationHarness::test_default()
+    let harness = RebornIntegrationHarness::builder("wiring-parity")
+        .script([RebornScriptedReply::text("diagnostic")])
         .build()
         .await
         .expect("harness");
+    let run_id = harness
+        .submit_turn("write diagnostics")
+        .await
+        .expect("scripted turn");
 
-    let first = harness.diagnostic_store();
-    let second = harness.diagnostic_store();
-
-    assert!(
-        std::sync::Arc::ptr_eq(&first, &second),
-        "the harness must hand out one shared store, mirroring production wiring"
-    );
+    let snapshot = harness
+        .diagnostic_store()
+        .snapshot(&DiagnosticScope::new(
+            harness.binding.tenant_id.clone(),
+            harness.binding.actor_user_id.clone(),
+            harness.binding.thread_id.clone(),
+            run_id,
+        ))
+        .expect("diagnostic snapshot")
+        .expect("the loop must write to the shared diagnostic store");
+    assert!(!snapshot.model_calls.is_empty());
 }
 
 #[tokio::test]

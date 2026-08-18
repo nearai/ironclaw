@@ -158,8 +158,13 @@ where
             .artifact_messages_for_records(thread_scope, &thread_id, run_records, &redactor)
             .await?;
         // Borrow `caller` here, before `artifact_logs` takes it by value below.
-        let timings =
-            self.artifact_timings(&caller, &thread_id, &run_id, run.received_at, &messages);
+        let timings = self.artifact_timings(
+            &caller,
+            &thread_id,
+            &run_id,
+            run.received_at,
+            messages.iter(),
+        );
         let (logs, log_redaction_applied) = self
             .artifact_logs(caller, &thread_id, Some(&run_id), &redactor)
             .await;

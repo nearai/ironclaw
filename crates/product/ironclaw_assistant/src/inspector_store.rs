@@ -349,6 +349,23 @@ pub struct InMemoryDiagnosticStore {
     state: RwLock<DiagnosticStoreState>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticTimingSnapshot {
+    pub model_calls: Vec<ModelCallDiagnostic>,
+    pub tool_executions: Vec<ToolExecutionDiagnostic>,
+    pub stats: SessionDiagnosticStats,
+}
+
+impl From<DiagnosticSnapshot> for DiagnosticTimingSnapshot {
+    fn from(snapshot: DiagnosticSnapshot) -> Self {
+        Self {
+            model_calls: snapshot.model_calls,
+            tool_executions: snapshot.tool_executions,
+            stats: snapshot.stats,
+        }
+    }
+}
+
 /// Operator inspection store surface exposed by product composition.
 ///
 /// Capture remains behind [`HostManagedPromptDiagnosticSink`]; consumers of
@@ -364,6 +381,17 @@ pub trait DiagnosticStorePort: Send + Sync {
         &self,
         scope: &DiagnosticScope,
     ) -> Result<Option<DiagnosticSnapshot>, DiagnosticStoreError>;
+
+    /// Read only the data needed by timing projections. Implementations with
+    /// larger snapshots should override this to avoid cloning prompt and
+    /// activity payloads under the store lock.
+    fn timing_snapshot(
+        &self,
+        scope: &DiagnosticScope,
+    ) -> Result<Option<DiagnosticTimingSnapshot>, DiagnosticStoreError> {
+        self.snapshot(scope)
+            .map(|snapshot| snapshot.map(DiagnosticTimingSnapshot::from))
+    }
 
     fn prompt(
         &self,
@@ -589,6 +617,24 @@ impl InMemoryDiagnosticStore {
             activity: run.activity.iter().cloned().collect(),
             stats: run.stats.clone(),
             latest_sequence: run.latest_sequence,
+        }))
+    }
+
+    pub fn timing_snapshot(
+        &self,
+        scope: &DiagnosticScope,
+    ) -> Result<Option<DiagnosticTimingSnapshot>, DiagnosticStoreError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
+        let Some(run) = state.run(scope) else {
+            return Ok(None);
+        };
+        Ok(Some(DiagnosticTimingSnapshot {
+            model_calls: run.model_calls.iter().cloned().collect(),
+            tool_executions: run.tool_executions.iter().cloned().collect(),
+            stats: run.stats.clone(),
         }))
     }
 
@@ -882,6 +928,13 @@ impl DiagnosticStorePort for InMemoryDiagnosticStore {
         scope: &DiagnosticScope,
     ) -> Result<Option<DiagnosticSnapshot>, DiagnosticStoreError> {
         InMemoryDiagnosticStore::snapshot(self, scope)
+    }
+
+    fn timing_snapshot(
+        &self,
+        scope: &DiagnosticScope,
+    ) -> Result<Option<DiagnosticTimingSnapshot>, DiagnosticStoreError> {
+        InMemoryDiagnosticStore::timing_snapshot(self, scope)
     }
 
     fn prompt(
@@ -2529,6 +2582,47 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn timing_snapshot_omits_prompt_and_activity_payloads() {
+        let store = InMemoryDiagnosticStore::default();
+        let scope = scope("tenant", "user", "thread", TurnRunId::new());
+        let call_id = DiagnosticModelCallId::new();
+        store
+            .record_model_call(
+                scope.clone(),
+                ModelCallDiagnostic::new(
+                    call_id,
+                    1,
+                    "requested-model",
+                    None,
+                    Utc::now(),
+                    None,
+                    None,
+                    InspectorModelCallStatus::Started,
+                    None,
+                    None,
+                ),
+            )
+            .expect("model call");
+        store
+            .record_activity(scope.clone(), activity("not part of timings"))
+            .expect("activity");
+
+        let full = store
+            .snapshot(&scope)
+            .expect("full snapshot")
+            .expect("run");
+        assert_eq!(full.activity.len(), 1);
+
+        let timings = store
+            .timing_snapshot(&scope)
+            .expect("timing snapshot")
+            .expect("run");
+        assert_eq!(timings.model_calls.len(), 1);
+        assert!(timings.tool_executions.is_empty());
+        assert_eq!(timings.stats.total_model_calls, 1);
     }
 
     #[test]

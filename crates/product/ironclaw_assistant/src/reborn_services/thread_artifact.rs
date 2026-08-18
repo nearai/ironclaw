@@ -98,23 +98,7 @@ where
         // thread's — passing the full `messages` list per run would let one
         // run's wall-clock span reach into a later run's activity, and would
         // also re-scan the whole list once per distinct run.
-        let mut runs_in_order: Vec<String> = Vec::new();
-        let mut messages_by_run: std::collections::HashMap<String, Vec<RunArtifactMessage>> =
-            std::collections::HashMap::new();
-        for message in &messages {
-            // silent-ok: a message with no run_id (pre-turn history, or a
-            // non-run message kind) simply contributes no timings entry.
-            let Some(run_id_text) = message.run_id.as_deref() else {
-                continue;
-            };
-            messages_by_run
-                .entry(run_id_text.to_string())
-                .or_insert_with(|| {
-                    runs_in_order.push(run_id_text.to_string());
-                    Vec::new()
-                })
-                .push(message.clone());
-        }
+        let (runs_in_order, messages_by_run) = group_messages_by_run(&messages);
 
         let mut timings_by_run = Vec::new();
         for run_id_text in &runs_in_order {
@@ -136,7 +120,13 @@ where
             let Some(origin) = run_messages.iter().filter_map(|m| m.created_at).min() else {
                 continue;
             };
-            let timings = self.artifact_timings(&caller, &thread_id, &run_id, origin, run_messages);
+            let timings = self.artifact_timings(
+                &caller,
+                &thread_id,
+                &run_id,
+                origin,
+                run_messages.iter().copied(),
+            );
             if timings.available {
                 timings_by_run.push(RunArtifactRunTimings {
                     run_id: run_id_text.clone(),
@@ -173,4 +163,86 @@ where
 
 fn thread_artifact_too_large() -> ProductSurfaceError {
     ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 413, false)
+}
+
+fn group_messages_by_run<'a>(
+    messages: &'a [RunArtifactMessage],
+) -> (
+    Vec<String>,
+    std::collections::HashMap<String, Vec<&'a RunArtifactMessage>>,
+) {
+    let mut runs_in_order = Vec::new();
+    let mut messages_by_run = std::collections::HashMap::new();
+    for message in messages {
+        // silent-ok: a message with no run_id (pre-turn history, or a
+        // non-run message kind) simply contributes no timings entry.
+        let Some(run_id_text) = message.run_id.as_deref() else {
+            continue;
+        };
+        messages_by_run
+            .entry(run_id_text.to_string())
+            .or_insert_with(|| {
+                runs_in_order.push(run_id_text.to_string());
+                Vec::new()
+            })
+            .push(message);
+    }
+    (runs_in_order, messages_by_run)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{DateTime, Duration, Utc};
+    use ironclaw_threads::{MessageKind, MessageStatus};
+
+    fn message(
+        run_id: &str,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+    ) -> RunArtifactMessage {
+        RunArtifactMessage {
+            message_id: format!("message-{run_id}"),
+            sequence: 1,
+            run_id: Some(run_id.to_string()),
+            created_at: Some(created_at),
+            updated_at: Some(updated_at),
+            kind: MessageKind::Assistant,
+            status: MessageStatus::Finalized,
+            content: "hello".to_string(),
+            tool_call: None,
+        }
+    }
+
+    #[test]
+    fn per_run_message_groups_keep_exact_wall_clock_inputs_without_cloning() {
+        let origin = Utc::now();
+        let messages = vec![
+            message("run-a", origin, origin + Duration::milliseconds(12)),
+            message(
+                "run-b",
+                origin + Duration::seconds(2),
+                origin + Duration::seconds(2) + Duration::milliseconds(34),
+            ),
+        ];
+
+        let (runs, messages_by_run) = group_messages_by_run(&messages);
+        assert_eq!(runs, vec!["run-a", "run-b"]);
+        assert_eq!(messages_by_run["run-a"].len(), 1);
+        assert_eq!(messages_by_run["run-b"].len(), 1);
+        assert_eq!(
+            crate::reborn_services::timings_source::derive_wall_clock_ms(
+                origin,
+                messages_by_run["run-a"].iter().copied(),
+            ),
+            Some(12),
+        );
+        assert_eq!(
+            crate::reborn_services::timings_source::derive_wall_clock_ms(
+                origin + Duration::seconds(2),
+                messages_by_run["run-b"].iter().copied(),
+            ),
+            Some(34),
+        );
+    }
 }

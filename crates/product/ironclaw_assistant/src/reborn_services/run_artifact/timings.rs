@@ -9,9 +9,9 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
+use crate::inspector_store::DiagnosticTimingSnapshot;
 use ironclaw_product_contracts::inspector::{
-    DiagnosticMetricTotal, DiagnosticModelCallId, DiagnosticSnapshot, InspectorModelCallStatus,
-    ToolExecutionStatus,
+    DiagnosticModelCallId, InspectorModelCallStatus, ToolExecutionStatus,
 };
 use serde::{Deserialize, Serialize};
 
@@ -110,7 +110,7 @@ pub fn unavailable(reason: &str) -> RunArtifactTimings {
 }
 
 pub fn project_timings(
-    snapshot: DiagnosticSnapshot,
+    snapshot: DiagnosticTimingSnapshot,
     wall_clock_ms: Option<u64>,
 ) -> RunArtifactTimings {
     let mut tools_by_call: HashMap<DiagnosticModelCallId, Vec<RunArtifactToolTiming>> =
@@ -204,21 +204,11 @@ fn sum_durations(tools: &[RunArtifactToolTiming]) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::ids::{TenantId, ThreadId, UserId};
-    use ironclaw_host_api::turn::{CapabilityActivityId, TurnRunId};
+    use ironclaw_host_api::turn::CapabilityActivityId;
     use ironclaw_product_contracts::inspector::{
-        DiagnosticScope, DiagnosticSequence, DiagnosticStreamId, InspectorModelCallStatus,
-        ModelCallDiagnostic, SessionDiagnosticStats, ToolExecutionDiagnostic, ToolExecutionStatus,
+        DiagnosticMetricTotal, InspectorModelCallStatus, ModelCallDiagnostic,
+        SessionDiagnosticStats, ToolExecutionDiagnostic, ToolExecutionStatus,
     };
-
-    fn scope() -> DiagnosticScope {
-        DiagnosticScope::new(
-            TenantId::new("tenant-a").expect("tenant"),
-            UserId::new("user-a").expect("user"),
-            ThreadId::new("thread-a").expect("thread"),
-            TurnRunId::new(),
-        )
-    }
 
     fn model_call(
         call_id: DiagnosticModelCallId,
@@ -264,16 +254,11 @@ mod tests {
         model_calls: Vec<ModelCallDiagnostic>,
         tool_executions: Vec<ToolExecutionDiagnostic>,
         stats: SessionDiagnosticStats,
-    ) -> DiagnosticSnapshot {
-        DiagnosticSnapshot {
-            scope: scope(),
-            stream_id: DiagnosticStreamId::new(),
-            prompt: None,
+    ) -> DiagnosticTimingSnapshot {
+        DiagnosticTimingSnapshot {
             model_calls,
             tool_executions,
-            activity: Vec::new(),
             stats,
-            latest_sequence: DiagnosticSequence::ZERO,
         }
     }
 
@@ -349,6 +334,54 @@ mod tests {
         assert_eq!(projected.unattributed_tools[0].capability_name, "shell");
         assert_eq!(projected.iterations[0].tool_calls, 1);
         assert_eq!(projected.totals.tool_ms, Some(705));
+    }
+
+    #[test]
+    fn aggregate_totals_preserve_counts_and_unavailable_samples() {
+        let call = DiagnosticModelCallId::new();
+        let projected = project_timings(
+            snapshot(
+                vec![model_call(call, 1, 50)],
+                vec![tool(Some(call), "shell", 7, ToolExecutionStatus::Failed)],
+                SessionDiagnosticStats {
+                    total_model_calls: 3,
+                    total_tool_calls: 4,
+                    failed_tool_calls: 2,
+                    total_latency_ms: DiagnosticMetricTotal {
+                        known_total: 50,
+                        unavailable_samples: 1,
+                    },
+                    ..SessionDiagnosticStats::default()
+                },
+            ),
+            None,
+        );
+
+        assert_eq!(projected.totals.iterations, 3);
+        assert_eq!(projected.totals.tool_calls, 4);
+        assert_eq!(projected.totals.failed_tool_calls, 2);
+        assert_eq!(projected.totals.inference_ms.known_total, 50);
+        assert_eq!(projected.totals.inference_ms.unavailable_samples, 1);
+        assert_eq!(projected.totals.tool_ms, Some(7));
+    }
+
+    #[test]
+    fn timing_sums_saturate_at_u64_max() {
+        let call = DiagnosticModelCallId::new();
+        let projected = project_timings(
+            snapshot(
+                vec![model_call(call, 1, 1)],
+                vec![
+                    tool(Some(call), "first", u64::MAX, ToolExecutionStatus::Succeeded),
+                    tool(Some(call), "second", 1, ToolExecutionStatus::Succeeded),
+                ],
+                SessionDiagnosticStats::default(),
+            ),
+            None,
+        );
+
+        assert_eq!(projected.iterations[0].tool_ms_total, Some(u64::MAX));
+        assert_eq!(projected.totals.tool_ms, Some(u64::MAX));
     }
 
     #[test]

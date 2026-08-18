@@ -308,7 +308,7 @@ pub use run_artifact::{
 };
 pub use thread_artifact::{
     RebornThreadArtifact, RebornThreadArtifactRequest, THREAD_ARTIFACT_MAX_MESSAGES,
-    THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW,
+    THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW, RunArtifactRunTimings,
 };
 pub use types::{
     RebornAuthAccount, RebornCreateThreadResponse, RebornExecuteProductCommandResponse,
