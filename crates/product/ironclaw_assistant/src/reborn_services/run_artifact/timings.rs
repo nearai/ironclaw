@@ -8,10 +8,10 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Utc};
 use crate::inspector_store::DiagnosticTimingSnapshot;
+use chrono::{DateTime, Utc};
 use ironclaw_product_contracts::inspector::{
-    DiagnosticModelCallId, InspectorModelCallStatus, ToolExecutionStatus,
+    DiagnosticMetricTotal, DiagnosticModelCallId, InspectorModelCallStatus, ToolExecutionStatus,
 };
 use serde::{Deserialize, Serialize};
 
@@ -372,7 +372,12 @@ mod tests {
             snapshot(
                 vec![model_call(call, 1, 1)],
                 vec![
-                    tool(Some(call), "first", u64::MAX, ToolExecutionStatus::Succeeded),
+                    tool(
+                        Some(call),
+                        "first",
+                        u64::MAX,
+                        ToolExecutionStatus::Succeeded,
+                    ),
                     tool(Some(call), "second", 1, ToolExecutionStatus::Succeeded),
                 ],
                 SessionDiagnosticStats::default(),

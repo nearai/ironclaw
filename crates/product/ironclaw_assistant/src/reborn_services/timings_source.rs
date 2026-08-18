@@ -13,7 +13,9 @@ use ironclaw_product_contracts::views::RebornViewProvider;
 use ironclaw_turns::TurnRunId;
 
 use crate::reborn_services::run_artifact::RunArtifactMessage;
-use crate::reborn_services::run_artifact::timings::{RunArtifactTimings, project_timings, unavailable};
+use crate::reborn_services::run_artifact::timings::{
+    RunArtifactTimings, project_timings, unavailable,
+};
 use crate::reborn_services::{ProductCapabilityInvoker, RebornServices};
 
 impl<I, V> RebornServices<I, V>
@@ -76,9 +78,7 @@ pub(super) fn derive_wall_clock_ms<'a>(
     run_received_at: DateTime<Utc>,
     messages: impl IntoIterator<Item = &'a RunArtifactMessage>,
 ) -> Option<u64> {
-    let newest = messages
-        .filter_map(|message| message.updated_at)
-        .max()?;
+    let newest = messages.into_iter().filter_map(|message| message.updated_at).max()?;
     u64::try_from((newest - run_received_at).num_milliseconds()).ok()
 }
 
@@ -110,7 +110,10 @@ mod tests {
             message(Some(received + chrono::Duration::seconds(40))),
         ];
 
-        assert_eq!(derive_wall_clock_ms(received, messages.iter()), Some(91_000));
+        assert_eq!(
+            derive_wall_clock_ms(received, messages.iter()),
+            Some(91_000)
+        );
     }
 
     #[test]

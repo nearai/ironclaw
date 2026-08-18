@@ -2610,10 +2610,7 @@ mod tests {
             .record_activity(scope.clone(), activity("not part of timings"))
             .expect("activity");
 
-        let full = store
-            .snapshot(&scope)
-            .expect("full snapshot")
-            .expect("run");
+        let full = store.snapshot(&scope).expect("full snapshot").expect("run");
         assert_eq!(full.activity.len(), 1);
 
         let timings = store
