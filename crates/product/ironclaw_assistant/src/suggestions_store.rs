@@ -693,7 +693,7 @@ where
                     | GenerationState::Failed {
                         client_action_id: existing_action,
                         ..
-                    } if existing_action == &client_action_id => {
+                    } if client_action_id.is_some() && existing_action == &client_action_id => {
                         (document.generation.clone(), false)
                     }
                     GenerationState::Ready { .. } | GenerationState::Failed { .. } => {
@@ -737,7 +737,7 @@ where
                     | GenerationState::Pending {
                         client_action_id: existing_action,
                         ..
-                    } if existing_action == &client_action_id => {
+                    } if client_action_id.is_some() && existing_action == &client_action_id => {
                         (document.generation.clone(), false)
                     }
                     GenerationState::Generating {
@@ -799,7 +799,7 @@ where
                 let Some(correlation) =
                     terminal_generation_correlation(&document.generation, &public_id, run_id)
                 else {
-                    return Ok(CasApply::new(document, None));
+                    return Ok(CasApply::no_op(document, None));
                 };
 
                 // A completed generation replaces the visible projection but
@@ -904,10 +904,10 @@ where
                     ..
                 } = &document.generation
                 else {
-                    return Ok(CasApply::new(document, None));
+                    return Ok(CasApply::no_op(document, None));
                 };
                 if current_generation_id != &generation_id || current_owner != &lease_owner {
-                    return Ok(CasApply::new(document, None));
+                    return Ok(CasApply::no_op(document, None));
                 }
                 document.generation = GenerationState::Failed {
                     generation_id: generation_id.clone(),
@@ -946,7 +946,7 @@ where
                     let Some(correlation) =
                         terminal_generation_correlation(&document.generation, &public_id, run_id)
                     else {
-                        return Ok(CasApply::new(document, None));
+                        return Ok(CasApply::no_op(document, None));
                     };
                     document.generation = GenerationState::Failed {
                         generation_id: correlation.generation_id,

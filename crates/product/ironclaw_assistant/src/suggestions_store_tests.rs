@@ -172,13 +172,13 @@ async fn replacement_archives_terminal_state_without_action_key() {
         .await
         .expect("seed ready document");
 
-    store
-        .begin_generation(
-            &scope(),
-            generation_request("generation-b", "owner-b", lease_expiry(), now()),
-        )
+    let mut replacement = generation_request("generation-b", "owner-b", lease_expiry(), now());
+    replacement.client_action_id = None;
+    let claim = store
+        .begin_generation(&scope(), replacement)
         .await
         .expect("replacement generation begins");
+    assert!(claim.is_acquired());
     let current = store
         .read(&scope())
         .await
@@ -762,6 +762,32 @@ async fn new_generation_replaces_visible_cards_replays_and_conflicts_by_action_k
 }
 
 #[tokio::test]
+async fn keyless_request_does_not_replay_an_active_keyless_generation() {
+    let store = store();
+    let mut first = generation_request("generation-a", "owner-a", lease_expiry(), now());
+    first.client_action_id = None;
+    store
+        .begin_generation(&scope(), first)
+        .await
+        .expect("first keyless generation begins");
+
+    let mut second = generation_request("generation-b", "owner-b", lease_expiry(), now());
+    second.client_action_id = None;
+    let error = store
+        .begin_generation(&scope(), second)
+        .await
+        .expect_err("a keyless caller cannot replay another keyless request");
+
+    assert!(matches!(
+        error,
+        SuggestionsStoreError::GenerationInProgress {
+            generation_id: existing_generation,
+            client_action_id: None,
+        } if existing_generation == generation_id("generation-a")
+    ));
+}
+
+#[tokio::test]
 async fn completed_action_replays_after_replacement_without_acquiring_or_hiding_current() {
     let store = store();
     ready_store(&store).await;
@@ -910,6 +936,44 @@ async fn historical_cards_are_retained_but_cannot_be_dismissed_or_started() {
     assert!(matches!(
         start_error,
         SuggestionsStoreError::SuggestionNotFound { .. }
+    ));
+}
+
+#[tokio::test]
+async fn bind_generation_run_rejects_a_conflicting_run_id() {
+    let store = store();
+    let generation = generation_id("generation-b");
+    store
+        .begin_generation(
+            &scope(),
+            BeginGenerationRequest {
+                generation_id: generation.clone(),
+                public_id: "public-generation-b".to_string(),
+                accept_key: "accept-generation-b".to_string(),
+                client_action_id: Some("new-action".to_string()),
+                prompt_schema_version: 1,
+                lease_owner: "owner-b".to_string(),
+                lease_expires_at: lease_expiry(),
+                now: now(),
+            },
+        )
+        .await
+        .expect("generation begins");
+
+    let first_run = TurnRunId::new();
+    store
+        .bind_generation_run(&scope(), &generation, "owner-b", first_run, now())
+        .await
+        .expect("first run binds");
+
+    let conflict = store
+        .bind_generation_run(&scope(), &generation, "owner-b", TurnRunId::new(), now())
+        .await
+        .expect_err("a generation cannot be claimed by a second run");
+    assert!(matches!(
+        conflict,
+        SuggestionsStoreError::GenerationNotCurrent { generation_id }
+            if generation_id == generation
     ));
 }
 

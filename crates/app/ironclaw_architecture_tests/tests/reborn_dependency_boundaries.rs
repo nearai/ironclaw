@@ -1007,7 +1007,7 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // Suggestions add a product-surface-neutral generate/list/start/dismiss
         // contract shared by WebUI and future channel adapters. The DTOs and
         // ProductSurface vocabulary belong here; no orchestration moved in.
-        ("ironclaw_product_contracts", 16_448),
+        ("ironclaw_product_contracts", 16_418),
         // 832 -> 432 (2026-08-12, #7373 refresh merge, main): re-pinned to the
         // measured count — this row still carried the +400 seed pad the
         // 2026-08-07 re-pin removed from its siblings.

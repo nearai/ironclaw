@@ -170,7 +170,8 @@ fn domain_bounds_match_the_canonical_output_schema() {
     assert!(
         item_schema["properties"]["icon"]["enum"]
             .as_array()
-            .is_some_and(|values| !values.is_empty())
+            .is_some_and(|values| values.iter().any(|value| value == "generic")),
+        "the schema owns the icon vocabulary and must keep the `generic` fallback"
     );
     assert_eq!(
         item_schema["properties"]["sources"]["minItems"],

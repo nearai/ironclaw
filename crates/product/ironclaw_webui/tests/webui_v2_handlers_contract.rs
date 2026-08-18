@@ -3841,7 +3841,7 @@ async fn suggestions_list_is_read_only_and_returns_two_hundred() {
     assert_eq!(read_json(response).await["status"], "ready");
     let queries = services.view_queries.lock().expect("lock").clone();
     assert_eq!(queries.len(), 1);
-    assert_eq!(queries[0].view_id, "suggestions.list");
+    assert_eq!(queries[0].view_id, SUGGESTIONS_LIST_VIEW.id);
     assert_eq!(queries[0].params, serde_json::json!({}));
     assert!(services.surface_calls.lock().expect("lock").is_empty());
 }

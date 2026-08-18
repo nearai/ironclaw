@@ -53,7 +53,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Triggers / automations / routines | 11 | 2 | ✓ | ✓ |
 | Memory & workspace | 8 | 2 | — | ✓ |
 | Skills | 1 | 1 | — | ✓ |
-| Multi-user / scope isolation | 5 | 2 | 9 | ✓ |
+| Multi-user / scope isolation | 5 | 3 | 9 | ✓ |
 | Tools & tool dispatch | — | 11 | ✓ | ✓ |
 | Turn lifecycle (cancel/steer/retry/restart) | — | 8 | ✓ | ✓ |
 | WebUI surfaces & APIs | 2 | 2 | — | ✓ (largest) |
@@ -199,6 +199,16 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Spend accounting fires on a real turn | `budget.rs` |
 | Sub-agents spawn and awaiting them behaves at the edges | `subagent_await_edge.rs` |
 | A caller hands the engine a prepared prompt and gets its outcome back: a schema-validated JSON result (invalid attempts are retried and the corrected payload is durably recorded) or a plain answer; seeded tool history is honored by the run; resubmitting the same request is replay-safe; the private work thread belongs to the calling user (stored under their owner scope, foreign-owner run-state reads rejected) yet never appears in conversation listings | `unbound_turns.rs` |
+
+**Suggestions**
+| Behavior | Evidence |
+|---|---|
+| Generate suggestion cards and replay the same client action without starting another generation | `suggestions.rs::generate_suggestions_returns_cards_and_cached_replay` |
+| Replace the visible suggestion cards with a new generation while preserving existing start reservations | `suggestions.rs::replacement_generation_preserves_reservations_and_replaces_cards` |
+| Start a suggestion card and create one canonical thread containing its suggested prompt | `suggestions.rs::starting_a_replacement_suggestion_creates_one_thread` |
+| Keep suggestion cards and their start/dismiss actions isolated to the authenticated tenant and user scope | `suggestions.rs::suggestions_are_isolated_by_authenticated_scope` |
+| Dismiss a started suggestion across restart without deleting its thread or timeline | `suggestions.rs::dismissing_a_started_suggestion_persists_across_restart` |
+| Settle failed or contract-invalid suggestion generation as failed with no visible cards | `suggestions.rs::failed_suggestion_run_settles_failed_and_retryable_via_list_view`, `suggestions.rs::semantically_invalid_completed_suggestion_output_settles_failed`, `suggestions.rs::unknown_field_in_completed_suggestion_output_settles_failed` |
 
 **Tools**
 | Behavior | Evidence |

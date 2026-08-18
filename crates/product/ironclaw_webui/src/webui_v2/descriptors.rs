@@ -1165,7 +1165,8 @@ fn suggestions_generate_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_PATTERN_SUGGESTIONS_GENERATE,
         mutation_policy(
             body_limit_kib(4),
-            mutation_rate_limit(),
+            // Each accepted request can launch a provider-backed agent run.
+            rate_limit_per_caller(10, 60),
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProductSurface,
         ),
