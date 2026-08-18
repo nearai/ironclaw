@@ -131,6 +131,10 @@ impl ParkingModelGate {
     /// been released. This keeps restart/replacement integration scenarios on
     /// the same provider seam without creating a second provider.
     pub fn rearm(&self) {
+        // Restart the call count with the channels. `park()` only parks the
+        // call at `park_at_call`, so leaving the counter past that index would
+        // let every later call through and the re-armed gate would never park.
+        self.0.calls.store(0, Ordering::SeqCst);
         let (parked_tx, parked_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
         *lock(&self.0.parked_tx) = Some(parked_tx);
