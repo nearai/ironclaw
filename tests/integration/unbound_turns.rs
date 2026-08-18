@@ -309,13 +309,8 @@ async fn structured_unbound_run_completes_by_recording_a_validated_result() -> H
         .await?
         .ok_or("the structured finalization record must be durable")?;
     assert_eq!(
-        record.parsed,
-        json!({"sentiment": "positive", "confidence": 0.9}),
-        "the durable parsed view must match the provider JSON"
-    );
-    assert_eq!(
         serde_json::from_str::<serde_json::Value>(&record.raw_json)?,
-        record.parsed
+        json!({"sentiment": "positive", "confidence": 0.9})
     );
 
     // Taxonomy: the ownerless thread is structurally invisible to the
@@ -359,10 +354,11 @@ async fn structured_unbound_run_completes_by_recording_a_validated_result() -> H
     Ok(())
 }
 
-/// Invalid finalizer JSON fails after the single finalization inference. The
-/// host never adds a schema-repair loop and never persists invalid evidence.
+/// Provider-native structured output is authoritative after the one terminal
+/// inference. The host neither reparses it nor adds a schema-repair loop.
 #[tokio::test(flavor = "multi_thread")]
-async fn structured_unbound_run_does_not_retry_invalid_finalizer_json() -> HarnessResult<()> {
+async fn structured_unbound_run_does_not_revalidate_or_retry_provider_output() -> HarnessResult<()>
+{
     let group = RebornIntegrationGroup::builtin_tools().await?;
     let harness = group.thread("conv-unbound-repair-anchor").build().await?;
 
@@ -374,15 +370,14 @@ async fn structured_unbound_run_does_not_retry_invalid_finalizer_json() -> Harne
         vec![
             RebornScriptedReply::text("The sentiment is negative."),
             RebornScriptedReply::text("not json"),
-            RebornScriptedReply::text(r#"{"sentiment":"negative"}"#),
         ],
     )
     .await?;
 
     assert_eq!(
         run.state.status,
-        TurnStatus::Failed,
-        "invalid finalizer JSON must fail the run"
+        TurnStatus::Completed,
+        "the native structured-response contract is authoritative"
     );
     assert_eq!(
         run.scripted_llm.captured_requests().len(),
@@ -397,9 +392,9 @@ async fn structured_unbound_run_does_not_retry_invalid_finalizer_json() -> Harne
             turn_run_id: run.state.run_id,
         })
         .await?;
-    assert!(
-        record.is_none(),
-        "invalid JSON must not enter durable storage"
+    assert_eq!(
+        record.map(|record| record.raw_json),
+        Some("not json".to_string())
     );
     Ok(())
 }
@@ -612,7 +607,8 @@ async fn unbound_accept_and_submit_replay_idempotently() -> HarnessResult<()> {
 /// stamp, not by ownerlessness).
 #[tokio::test(flavor = "multi_thread")]
 async fn unbound_service_threads_caller_as_thread_owner() -> HarnessResult<()> {
-    use ironclaw_assistant::{UnboundTurnScope, UnboundTurnService, UnboundTurnSubmission};
+    use ironclaw_assistant::{UnboundTurnService, UnboundTurnSubmission};
+    use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 
     let group = RebornIntegrationGroup::builtin_tools().await?;
     let harness = group.thread("conv-unbound-owner-anchor").build().await?;
@@ -648,12 +644,12 @@ async fn unbound_service_threads_caller_as_thread_owner() -> HarnessResult<()> {
 
     let ack = service
         .accept_and_submit(UnboundTurnSubmission {
-            scope: UnboundTurnScope {
-                tenant_id: TenantId::new(TENANT)?,
-                user_id: caller.clone(),
-                agent_id: Some(AgentId::new(AGENT)?),
-                project_id: Some(ProjectId::new(PROJECT)?),
-            },
+            caller: ProductSurfaceCaller::new(
+                TenantId::new(TENANT)?,
+                caller.clone(),
+                Some(AgentId::new(AGENT)?),
+                Some(ProjectId::new(PROJECT)?),
+            ),
             public_id: public_id.to_string(),
             system_prompt: "You are a background extraction task.".to_string(),
             messages: vec![AgentMessage {
@@ -679,12 +675,12 @@ async fn unbound_service_threads_caller_as_thread_owner() -> HarnessResult<()> {
     let outcome = service
         .wait_for_completion(
             public_id,
-            &UnboundTurnScope {
-                tenant_id: TenantId::new(TENANT)?,
-                user_id: caller.clone(),
-                agent_id: Some(AgentId::new(AGENT)?),
-                project_id: Some(ProjectId::new(PROJECT)?),
-            },
+            &ProductSurfaceCaller::new(
+                TenantId::new(TENANT)?,
+                caller.clone(),
+                Some(AgentId::new(AGENT)?),
+                Some(ProjectId::new(PROJECT)?),
+            ),
             submitted_run_id,
             Duration::from_millis(50),
         )

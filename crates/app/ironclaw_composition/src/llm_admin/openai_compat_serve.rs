@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 use ironclaw_assistant::{
-    RebornTimelineRequest, TIMELINE_VIEW, UnboundTurnError, UnboundTurnScope, UnboundTurnService,
+    RebornTimelineRequest, TIMELINE_VIEW, UnboundTurnError, UnboundTurnService,
     UnboundTurnSubmission,
 };
 use ironclaw_filesystem::RootFilesystem;
@@ -237,12 +237,12 @@ impl OpenAiCompatPreparedTurnGateway {
             .service
             .wait_for_completion(
                 request.public_id.as_str(),
-                &UnboundTurnScope {
-                    tenant_id: request.actor_scope.tenant_id().clone(),
-                    user_id: request.actor_scope.user_id().clone(),
-                    agent_id: request.actor_scope.agent_id().cloned(),
-                    project_id: request.actor_scope.project_id().cloned(),
-                },
+                &ironclaw_product_contracts::surface::ProductSurfaceCaller::new(
+                    request.actor_scope.tenant_id().clone(),
+                    request.actor_scope.user_id().clone(),
+                    request.actor_scope.agent_id().cloned(),
+                    request.actor_scope.project_id().cloned(),
+                ),
                 *submitted_run_id,
                 poll_interval,
             )
@@ -296,12 +296,12 @@ impl ironclaw_openai_compat::OpenAiCompatPreparedTurnPort for OpenAiCompatPrepar
         let idempotency_key = format!("openai-chat:{}", request.public_id);
         self.service
             .accept_and_submit(UnboundTurnSubmission {
-                scope: UnboundTurnScope {
-                    tenant_id: request.scope.tenant_id().clone(),
-                    user_id: request.scope.user_id().clone(),
-                    agent_id: request.scope.agent_id().cloned(),
-                    project_id: request.scope.project_id().cloned(),
-                },
+                caller: ironclaw_product_contracts::surface::ProductSurfaceCaller::new(
+                    request.scope.tenant_id().clone(),
+                    request.scope.user_id().clone(),
+                    request.scope.agent_id().cloned(),
+                    request.scope.project_id().cloned(),
+                ),
                 public_id: request.public_id,
                 system_prompt: request.system_prompt,
                 messages: request.messages,

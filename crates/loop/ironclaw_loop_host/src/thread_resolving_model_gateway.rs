@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use ironclaw_loop_contracts::{
     InstructionMaterializationStore, LoopCapabilityPort, LoopModelGateway, LoopModelGatewayError,
     LoopModelGatewayRequest, LoopModelPort, LoopModelProgressSink, LoopModelResponse,
-    LoopPromptBundleAuthority, PromptContextTokenBudget,
+    LoopPromptBundleAuthority,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
@@ -33,7 +33,6 @@ where
     pub thread_scope: ThreadScope,
     pub host_gateway: Arc<G>,
     pub max_messages: usize,
-    pub prompt_context_budget: PromptContextTokenBudget,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     pub identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     pub instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
@@ -61,7 +60,6 @@ where
     thread_scope: ThreadScope,
     host_gateway: Arc<G>,
     max_messages: usize,
-    prompt_context_budget: PromptContextTokenBudget,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
@@ -83,7 +81,6 @@ where
             thread_scope,
             host_gateway,
             max_messages,
-            prompt_context_budget,
             skill_context_source,
             identity_context_source,
             instruction_materialization_store,
@@ -98,7 +95,6 @@ where
             thread_scope,
             host_gateway,
             max_messages,
-            prompt_context_budget,
             skill_context_source,
             identity_context_source,
             instruction_materialization_store,
@@ -150,8 +146,7 @@ where
             Arc::clone(&self.host_gateway),
             self.max_messages,
         )
-        .with_prompt_bundle_authority(self.prompt_authority.clone())
-        .with_prompt_context_token_budget(self.prompt_context_budget);
+        .with_prompt_bundle_authority(self.prompt_authority.clone());
         if let Some(source) = self.skill_context_source.as_ref() {
             model_port = model_port.with_skill_context_source(source.clone());
         }

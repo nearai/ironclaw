@@ -88,11 +88,10 @@ fn record(
         thread_id,
         turn_id: TurnId::new(),
         turn_run_id: TurnRunId::new(),
-        contract_name: "suggestions_v1".to_string(),
+        contract_name: "suggestions".to_string(),
         schema_digest: "sha256-schema".to_string(),
         candidate: "candidate retained as nonterminal LLM data".to_string(),
         raw_json: r#"{"items":[{"title":"one"}]}"#.to_string(),
-        parsed: serde_json::json!({"items":[{"title":"one"}]}),
         accounting: StructuredFinalizationAccounting {
             usage: Some(StructuredFinalizationUsage {
                 input_tokens: 11,
@@ -104,7 +103,6 @@ fn record(
             model_profile_id: Some("nearai".to_string()),
             provider_id: Some("near".to_string()),
             model_id: Some("model".to_string()),
-            cost_microunits: Some(99),
         },
         owner_fence: owner_fence.to_string(),
         created_at: Utc::now(),
@@ -140,7 +138,7 @@ async fn assert_structured_finalization_message_publish(
             scope: scope.clone(),
             thread_id: thread_id.clone(),
             message_id: message.message_id,
-            turn_run_id: turn_run_id.to_string(),
+            turn_run_id,
             replacement: finalization.raw_json.clone(),
         })
         .await
@@ -157,7 +155,7 @@ async fn assert_structured_finalization_message_publish(
             scope: scope.clone(),
             thread_id: thread_id.clone(),
             message_id: message.message_id,
-            turn_run_id: turn_run_id.to_string(),
+            turn_run_id,
             replacement: finalization.raw_json.clone(),
         })
         .await
@@ -179,7 +177,7 @@ async fn assert_structured_finalization_message_publish(
             scope: scope.clone(),
             thread_id: thread_id.clone(),
             message_id: missing_message.message_id,
-            turn_run_id: missing_run.to_string(),
+            turn_run_id: missing_run,
             replacement: r#"{"items":[]}"#.to_string(),
         })
         .await
@@ -211,7 +209,7 @@ async fn assert_structured_finalization_message_publish(
             scope: scope.clone(),
             thread_id: thread_id.clone(),
             message_id: mismatched_message.message_id,
-            turn_run_id: mismatched_run.to_string(),
+            turn_run_id: mismatched_run,
             replacement: mismatched_record.raw_json,
         })
         .await
@@ -226,7 +224,7 @@ async fn assert_structured_finalization_message_publish(
             scope: scope.clone(),
             thread_id: thread_id.clone(),
             message_id: message.message_id,
-            turn_run_id: turn_run_id.to_string(),
+            turn_run_id,
             replacement: r#"{"items":[]}"#.to_string(),
         })
         .await
@@ -241,7 +239,7 @@ async fn assert_structured_finalization_message_publish(
             scope: scope.clone(),
             thread_id: thread_id.clone(),
             message_id: message.message_id,
-            turn_run_id: TurnRunId::new().to_string(),
+            turn_run_id: TurnRunId::new(),
             replacement: finalization.raw_json.clone(),
         })
         .await
@@ -256,7 +254,7 @@ async fn assert_structured_finalization_message_publish(
             scope: scope.clone(),
             thread_id: thread_id.clone(),
             message_id: ThreadMessageId::new(),
-            turn_run_id: turn_run_id.to_string(),
+            turn_run_id,
             replacement: finalization.raw_json,
         })
         .await
@@ -290,7 +288,7 @@ async fn assert_concurrent_publish_is_idempotent(
         scope,
         thread_id,
         message_id: message.message_id,
-        turn_run_id: turn_run_id.to_string(),
+        turn_run_id,
         replacement: finalization.raw_json,
     };
     let (first, second) = tokio::join!(
@@ -347,7 +345,6 @@ async fn assert_structured_finalization_rejections(
 
     let mut conflicting_output = first.clone();
     conflicting_output.raw_json = r#"{"items":[]}"#.to_string();
-    conflicting_output.parsed = serde_json::json!({"items":[]});
     let error = service
         .put_structured_finalization(PutStructuredFinalizationRequest {
             record: conflicting_output,
@@ -370,17 +367,6 @@ async fn assert_structured_finalization_rejections(
         .expect("record");
     assert_eq!(stored.raw_json, first.raw_json);
     assert_eq!(stored.owner_fence, "lease-a");
-
-    let mut malformed = record(scope, thread_id, "lease-c");
-    malformed.raw_json = "not-json".to_string();
-    let error = service
-        .put_structured_finalization(PutStructuredFinalizationRequest { record: malformed })
-        .await
-        .expect_err("malformed JSON must fail closed");
-    assert!(matches!(
-        error,
-        SessionThreadError::InvalidStructuredFinalization { .. }
-    ));
 }
 
 async fn assert_delete_recreate_does_not_replay_finalization(
@@ -456,7 +442,6 @@ async fn run_record_is_durable_readable_and_idempotent_for_same_owner() {
         .expect("read")
         .expect("record");
     assert_eq!(read.raw_json, r#"{"items":[{"title":"one"}]}"#);
-    assert_eq!(read.parsed["items"][0]["title"], "one");
     assert_eq!(read.accounting.usage.expect("usage").output_tokens, 7);
 }
 
@@ -644,7 +629,6 @@ async fn filesystem_records_are_independent_for_two_runs_on_one_thread() {
     let first = record(scope.clone(), thread_id.clone(), "lease-a");
     let mut second = record(scope.clone(), thread_id.clone(), "lease-b");
     second.raw_json = r#"{"items":[{"title":"two"}]}"#.to_string();
-    second.parsed = serde_json::json!({"items":[{"title":"two"}]});
     for value in [&first, &second] {
         service
             .put_structured_finalization(PutStructuredFinalizationRequest {

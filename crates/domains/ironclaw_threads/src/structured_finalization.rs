@@ -49,16 +49,13 @@ pub struct StructuredFinalizationAccounting {
     pub provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost_microunits: Option<u64>,
 }
 
 /// Durable terminal structured-output evidence for one turn run.
 ///
-/// `candidate` is retained as nonterminal LLM data.  `raw_json` is the one
-/// terminal semantic representation persisted to the assistant transcript;
-/// `parsed` is a read convenience for product services and is not a second
-/// answer.  The record is immutable after the first successful CAS write.
+/// `candidate` is retained as nonterminal LLM data. `raw_json` is the terminal
+/// semantic representation persisted to the assistant transcript. The record
+/// is immutable after the first successful CAS write.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StructuredFinalizationRecord {
     pub scope: ThreadScope,
@@ -71,7 +68,6 @@ pub struct StructuredFinalizationRecord {
     pub schema_digest: String,
     pub candidate: String,
     pub raw_json: String,
-    pub parsed: serde_json::Value,
     pub accounting: StructuredFinalizationAccounting,
     /// Opaque claimed-run lease fence.  The threads service stores and
     /// compares this value but never interprets it.
@@ -104,11 +100,6 @@ impl StructuredFinalizationRecord {
         if self.raw_json.len() > MAX_RAW_JSON_BYTES {
             return Err("structured finalization output is too large".to_string());
         }
-        let parsed = serde_json::from_str::<serde_json::Value>(&self.raw_json)
-            .map_err(|error| format!("structured finalization output is not JSON: {error}"))?;
-        if parsed != self.parsed {
-            return Err("structured finalization parsed view does not match raw JSON".to_string());
-        }
         Ok(())
     }
 
@@ -125,7 +116,6 @@ impl StructuredFinalizationRecord {
             && self.schema_digest == other.schema_digest
             && self.candidate == other.candidate
             && self.raw_json == other.raw_json
-            && self.parsed == other.parsed
             && self.accounting == other.accounting
     }
 }

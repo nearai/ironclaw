@@ -35,9 +35,7 @@ use crate::{
     driver_registry::{DriverRegistry, LoopDriverRegistryKey},
     failure_categories::host_stage_unavailable_category,
     turn_runner::{HostFactory, sanitized_driver_failure, sanitized_failure},
-    turn_scheduler::{
-        TurnRunExecutor, TurnRunExecutorError, TurnRunFailureMetadata, merge_model_usage,
-    },
+    turn_scheduler::{TurnRunExecutor, TurnRunExecutorError, TurnRunFailureMetadata},
 };
 
 /// Upper bound on the best-effort after-turn memory recording that the scheduler
@@ -281,10 +279,9 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
                         supplemental_usage: Some(usage),
                         ..
                     } => TurnRunExecutorError::from_failure(failure).with_failure_metadata(
-                        TurnRunFailureMetadata::from_optional_model_usage(merge_model_usage(
-                            claimed.state.model_usage,
-                            Some(usage),
-                        )),
+                        TurnRunFailureMetadata::from_optional_model_usage(
+                            LoopModelUsage::merge_optional(claimed.state.model_usage, Some(usage)),
+                        ),
                     ),
                     _ => TurnRunExecutorError::from_failure(failure),
                 };
@@ -466,7 +463,7 @@ impl RebornTurnRunExecutor {
         let started_at = live_latency_started_at();
         let run_id = claimed.state.run_id;
         let runner_id = claimed.runner_id;
-        let exit_model_usage = merge_model_usage(
+        let exit_model_usage = LoopModelUsage::merge_optional(
             loop_exit_model_usage(&exit).or(claimed.state.model_usage),
             supplemental_model_usage,
         );
@@ -718,7 +715,7 @@ fn auth_gate_record_read_scope(claimed: &ClaimedTurnRun) -> ResourceScope {
 
 #[cfg(test)]
 mod tests {
-    use super::{loop_exit_model_usage, merge_model_usage};
+    use super::loop_exit_model_usage;
     use ironclaw_host_api::turn::LoopExitId;
     use ironclaw_loop_contracts::{LoopExit, LoopFailed, LoopFailureKind, LoopModelUsage};
 
@@ -745,7 +742,7 @@ mod tests {
         let exit = LoopExit::Failed(LoopFailed {
             reason_kind: LoopFailureKind::ModelError,
             checkpoint_id: None,
-            model_usage: merge_model_usage(Some(claimed), Some(finalizer)),
+            model_usage: LoopModelUsage::merge_optional(Some(claimed), Some(finalizer)),
             exit_id: LoopExitId::new("exit:apply-failure").expect("valid exit id"),
             explanation_message_refs: Vec::new(),
             safe_summary: None,

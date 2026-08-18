@@ -951,9 +951,9 @@ struct GeminiRequestOptions<'a> {
     response_format: Option<&'a crate::provider::JsonSchemaResponseFormat>,
 }
 
-fn gemini_schema_response_format<'a>(
-    response_format: Option<&'a crate::provider::CompletionResponseFormat>,
-) -> Result<Option<&'a crate::provider::JsonSchemaResponseFormat>, LlmError> {
+fn gemini_schema_response_format(
+    response_format: Option<&crate::provider::CompletionResponseFormat>,
+) -> Result<Option<&crate::provider::JsonSchemaResponseFormat>, LlmError> {
     match response_format {
         None => Ok(None),
         Some(crate::provider::CompletionResponseFormat::JsonSchema(format)) => Ok(Some(format)),

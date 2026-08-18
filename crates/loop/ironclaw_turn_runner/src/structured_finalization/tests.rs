@@ -72,18 +72,16 @@ fn successor_lease_can_adopt_matching_durable_finalization() {
         thread_id: ThreadId::new("thread").expect("thread"),
         turn_id: TurnId::new(),
         turn_run_id: TurnRunId::new(),
-        contract_name: "suggestions_v1".to_string(),
+        contract_name: "suggestions".to_string(),
         schema_digest: "schema-digest".to_string(),
         candidate: "ordinary terminal candidate".to_string(),
         raw_json: r#"{"suggestions":[]}"#.to_string(),
-        parsed: serde_json::json!({"suggestions": []}),
         accounting: StructuredFinalizationAccounting {
             usage: None,
             elapsed_ms: 1,
             model_profile_id: None,
             provider_id: None,
             model_id: None,
-            cost_microunits: None,
         },
         owner_fence: "predecessor-lease".to_string(),
         created_at: Utc::now(),
@@ -93,13 +91,13 @@ fn successor_lease_can_adopt_matching_durable_finalization() {
     assert!(record_matches_replay(
         &record,
         "ordinary terminal candidate",
-        "suggestions_v1",
+        "suggestions",
         "schema-digest",
     ));
     assert!(!record_matches_replay(
         &record,
         "different candidate",
-        "suggestions_v1",
+        "suggestions",
         "schema-digest",
     ));
 }
@@ -127,6 +125,7 @@ impl LeaseRuntime {
             })),
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: None,
             checkpoint_id: None,
             gate_ref: None,
             blocked_activity_id: None,
@@ -538,7 +537,7 @@ async fn run_post_inference_conflict_case(
         },
     );
     let result = coordinator
-        .finalize(&AssistantReply {
+        .finalize_candidate(&AssistantReply {
             content: "ordinary candidate".to_string(),
         })
         .await;
@@ -652,7 +651,7 @@ async fn coordinator_replays_adopts_and_rejects_conflicts_without_second_inferen
     };
     assert_eq!(
         first
-            .finalize(&candidate)
+            .finalize_candidate(&candidate)
             .await
             .expect("first finalization"),
         r#"{"items":[]}"#
@@ -692,7 +691,7 @@ async fn coordinator_replays_adopts_and_rejects_conflicts_without_second_inferen
     );
     assert_eq!(
         adopted
-            .finalize(&candidate)
+            .finalize_candidate(&candidate)
             .await
             .expect("adopted finalization"),
         r#"{"items":[]}"#
@@ -722,7 +721,7 @@ async fn coordinator_replays_adopts_and_rejects_conflicts_without_second_inferen
         },
     );
     let error = conflicting
-        .finalize(&AssistantReply {
+        .finalize_candidate(&AssistantReply {
             content: "different candidate".to_string(),
         })
         .await

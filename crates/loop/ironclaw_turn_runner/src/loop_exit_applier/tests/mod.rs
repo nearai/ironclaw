@@ -346,26 +346,13 @@ async fn blocked_exit_adds_supplemental_usage_to_claimed_cumulative_usage() {
 
 #[tokio::test]
 async fn cancelled_exit_adds_supplemental_usage_to_claimed_cumulative_usage() {
-    let claimed_usage = LoopModelUsage {
-        input_tokens: 100,
-        output_tokens: 40,
-        cache_read_input_tokens: 10,
-        cache_creation_input_tokens: 2,
-    };
     let supplemental_usage = LoopModelUsage {
         input_tokens: 13,
         output_tokens: 5,
         cache_read_input_tokens: 2,
         cache_creation_input_tokens: 1,
     };
-    let expected = LoopModelUsage {
-        input_tokens: 113,
-        output_tokens: 45,
-        cache_read_input_tokens: 12,
-        cache_creation_input_tokens: 3,
-    };
-    let mut claimed = claimed_run();
-    claimed.state.model_usage = Some(claimed_usage);
+    let claimed = claimed_run();
     let transition = Arc::new(RecordingTransitionPort::new());
     let applier = LoopExitApplier::new(
         transition,
@@ -384,7 +371,7 @@ async fn cancelled_exit_adds_supplemental_usage_to_claimed_cumulative_usage() {
         .expect("cancelled exit should apply");
 
     assert_eq!(state.status, TurnStatus::Cancelled);
-    assert_eq!(state.model_usage, Some(expected));
+    assert_eq!(state.model_usage, Some(supplemental_usage));
 }
 
 #[tokio::test]

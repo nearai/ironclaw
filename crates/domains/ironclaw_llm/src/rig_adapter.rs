@@ -279,7 +279,7 @@ impl<M: CompletionModel> RigAdapter<M> {
             default_additional_params: None,
             default_max_tokens: None,
             native_streaming: false,
-            structured_output_supported: true,
+            structured_output_supported: false,
             json_object_supported: false,
             models_endpoint: None,
         }
@@ -1879,7 +1879,8 @@ mod tests {
         let adapter = RigAdapter::new(
             client.completion_model("configured-model"),
             "configured-model",
-        );
+        )
+        .with_structured_output_support(true);
         let mut request = CompletionRequest::new(vec![ChatMessage::user("Return suggestions")]);
         request.response_format = Some(crate::provider::CompletionResponseFormat::JsonSchema(
             crate::provider::JsonSchemaResponseFormat::strict(
@@ -1925,6 +1926,7 @@ mod tests {
             client.completion_model("configured-model"),
             "configured-model",
         )
+        .with_structured_output_support(true)
         .with_json_object_support(true);
         let mut request = CompletionRequest::new(vec![ChatMessage::user("Return an object")]);
         request.response_format = Some(crate::provider::CompletionResponseFormat::JsonObject);

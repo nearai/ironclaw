@@ -1451,13 +1451,15 @@ mod tests {
 
     #[test]
     fn test_build_output_config_encodes_json_schema() {
-        let response_format = crate::provider::JsonSchemaResponseFormat::strict(
+        let schema_format = crate::provider::JsonSchemaResponseFormat::strict(
             "suggestions",
             serde_json::json!({
                 "type": "object",
                 "properties": {"items": {"type": "array"}}
             }),
         );
+        let response_format =
+            crate::provider::CompletionResponseFormat::JsonSchema(schema_format.clone());
         let config = build_output_config(&response_format).expect("output config");
         let text_format = config.text_format().expect("text format");
         assert_eq!(text_format.r#type(), &OutputFormatType::JsonSchema);
@@ -1466,7 +1468,7 @@ mod tests {
         assert_eq!(definition.name(), Some("suggestions"));
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(definition.schema()).expect("schema JSON"),
-            response_format.schema
+            schema_format.schema
         );
     }
 

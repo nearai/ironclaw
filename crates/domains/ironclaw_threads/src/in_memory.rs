@@ -463,12 +463,7 @@ impl SessionThreadService for InMemorySessionThreadService {
                 thread_id: request.thread_id.clone(),
             });
         }
-        let run_id = TurnRunId::parse(&request.turn_run_id).map_err(|_| {
-            SessionThreadError::StructuredFinalizationPublishMismatch {
-                message_id: request.message_id,
-                reason: "turn_run_id is invalid",
-            }
-        })?;
+        let run_id = request.turn_run_id;
         let key = StructuredFinalizationKey {
             scope: request.scope.clone(),
             thread_id: request.thread_id.clone(),
@@ -498,6 +493,7 @@ impl SessionThreadService for InMemorySessionThreadService {
                 reason: "replacement does not match durable finalization output",
             });
         }
+        let turn_run_id = request.turn_run_id.to_string();
 
         let thread = state.threads.get_mut(&request.thread_id).ok_or_else(|| {
             SessionThreadError::UnknownThread {
@@ -523,7 +519,7 @@ impl SessionThreadService for InMemorySessionThreadService {
                 reason: "message belongs to a different thread",
             });
         }
-        if message.turn_run_id.as_deref() != Some(request.turn_run_id.as_str()) {
+        if message.turn_run_id.as_deref() != Some(turn_run_id.as_str()) {
             return Err(SessionThreadError::StructuredFinalizationPublishMismatch {
                 message_id: request.message_id,
                 reason: "message belongs to a different turn run",

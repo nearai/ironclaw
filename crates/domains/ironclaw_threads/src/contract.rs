@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use ironclaw_common::AttachmentRef;
 use ironclaw_host_api::ids::{AgentId, MissionId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::turn::TurnRunId;
 use serde::{Deserialize, Serialize};
 
 use crate::capability_display_preview::CapabilityDisplayPreviewEnvelope;
@@ -450,7 +451,7 @@ pub struct PublishStructuredFinalizationMessageRequest {
     pub scope: ThreadScope,
     pub thread_id: ThreadId,
     pub message_id: ThreadMessageId,
-    pub turn_run_id: String,
+    pub turn_run_id: TurnRunId,
     pub replacement: String,
 }
 

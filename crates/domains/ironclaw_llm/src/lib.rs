@@ -446,6 +446,7 @@ fn create_openai_compat_from_registry(
     };
     let adapter = RigAdapter::new(model, &config.model)
         .with_provider_id(config.provider_id.clone())
+        .with_structured_output_support(true)
         .with_json_object_support(true)
         .with_unsupported_params(config.unsupported_params.clone())
         .with_model_listing(models_endpoint);

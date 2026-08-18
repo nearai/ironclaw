@@ -13,10 +13,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::ids::{AgentId, ProjectId, ThreadId};
 use ironclaw_host_api::turn::{TurnActor, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_host_api::{output::OutputContract, prepared_context::PreparedTurnDeclarations};
-use ironclaw_product_contracts::inbound::ProductInboundAck;
+use ironclaw_product_contracts::{inbound::ProductInboundAck, surface::ProductSurfaceCaller};
 use ironclaw_threads::{
     FinalizedAssistantMessageByRunRequest, PreparedContextRequest,
     ReadStructuredFinalizationRequest, SessionThreadError, SessionThreadService, ThreadScope,
@@ -59,19 +59,6 @@ impl UnboundTurnError {
     }
 }
 
-/// The authenticated caller and product scope for one unbound turn.
-///
-/// Tenant and user are mandatory. Agent and project may be omitted by a
-/// transport and are resolved against the service's deployment defaults; the
-/// resolved values are then used consistently for both submission and readback.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnboundTurnScope {
-    pub tenant_id: TenantId,
-    pub user_id: UserId,
-    pub agent_id: Option<AgentId>,
-    pub project_id: Option<ProjectId>,
-}
-
 /// Terminal outcome of an unbound prepared turn: the output text plus the
 /// run evidence a wire surface reports (the model that actually ran and the
 /// provider-reported usage).
@@ -87,7 +74,7 @@ pub struct UnboundTurnOutcome {
 /// One prepared-turn submission in the engine vocabulary.
 #[derive(Debug, Clone)]
 pub struct UnboundTurnSubmission {
-    pub scope: UnboundTurnScope,
+    pub caller: ProductSurfaceCaller,
     /// Public id doubling as the unbound thread id, exactly as the caller's
     /// retrieval path will use it.
     pub public_id: String,
@@ -133,30 +120,34 @@ impl UnboundTurnService {
         }
     }
 
-    fn resolved_thread_scope(&self, scope: &UnboundTurnScope) -> ThreadScope {
+    fn resolved_thread_scope(&self, caller: &ProductSurfaceCaller) -> ThreadScope {
         ThreadScope {
-            tenant_id: scope.tenant_id.clone(),
-            agent_id: scope
+            tenant_id: caller.tenant_id.clone(),
+            agent_id: caller
                 .agent_id
                 .clone()
                 .unwrap_or_else(|| self.default_agent_id.clone()),
-            project_id: scope
+            project_id: caller
                 .project_id
                 .clone()
                 .or_else(|| self.default_project_id.clone()),
-            owner_user_id: Some(scope.user_id.clone()),
+            owner_user_id: Some(caller.user_id.clone()),
             mission_id: None,
         }
     }
 
-    fn resolved_turn_scope(&self, thread_id: &ThreadId, scope: &UnboundTurnScope) -> TurnScope {
-        let thread_scope = self.resolved_thread_scope(scope);
+    fn resolved_turn_scope(
+        &self,
+        thread_id: &ThreadId,
+        caller: &ProductSurfaceCaller,
+    ) -> TurnScope {
+        let thread_scope = self.resolved_thread_scope(caller);
         TurnScope::new_with_owner(
             thread_scope.tenant_id,
             Some(thread_scope.agent_id),
             thread_scope.project_id,
             thread_id.clone(),
-            Some(scope.user_id.clone()),
+            Some(caller.user_id.clone()),
         )
     }
 
@@ -175,8 +166,8 @@ impl UnboundTurnService {
         let accepted = self
             .thread_service
             .accept_prepared_context(PreparedContextRequest {
-                scope: self.resolved_thread_scope(&submission.scope),
-                actor_id: submission.scope.user_id.as_str().to_string(),
+                scope: self.resolved_thread_scope(&submission.caller),
+                actor_id: submission.caller.user_id.as_str().to_string(),
                 system_prompt: submission.system_prompt,
                 messages: submission.messages,
                 declarations: PreparedTurnDeclarations {
@@ -202,8 +193,8 @@ impl UnboundTurnService {
         let response = self
             .coordinator
             .submit_turn(SubmitTurnRequest {
-                scope: self.resolved_turn_scope(&thread_id, &submission.scope),
-                actor: TurnActor::new(submission.scope.user_id),
+                scope: self.resolved_turn_scope(&thread_id, &submission.caller),
+                actor: TurnActor::new(submission.caller.user_id),
                 accepted_message_ref: accepted.accepted_message_ref,
                 requested_run_profile: None,
                 output_contract: Some(output_contract),
@@ -250,14 +241,14 @@ impl UnboundTurnService {
     pub async fn wait_for_completion(
         &self,
         public_id: &str,
-        scope: &UnboundTurnScope,
+        caller: &ProductSurfaceCaller,
         run_id: TurnRunId,
         poll_interval: Duration,
     ) -> Result<UnboundTurnOutcome, UnboundTurnError> {
         let thread_id = ThreadId::new(public_id.to_string())
             .map_err(|error| UnboundTurnError::internal(format!("invalid thread id: {error}")))?;
-        let turn_scope = self.resolved_turn_scope(&thread_id, scope);
-        let thread_scope = self.resolved_thread_scope(scope);
+        let turn_scope = self.resolved_turn_scope(&thread_id, caller);
+        let thread_scope = self.resolved_thread_scope(caller);
         loop {
             let state = self
                 .coordinator
@@ -323,13 +314,9 @@ impl UnboundTurnService {
                             "durable structured finalization record is missing",
                         )
                     })?;
-                serde_json::to_string(&record.parsed).map_err(|error| {
-                    UnboundTurnError::internal(format!(
-                        "structured output serialization failed: {error}"
-                    ))
-                })
+                Ok(record.raw_json)
             }
-            _ => {
+            Some(OutputContract::AssistantMessage) => {
                 let message = self
                     .thread_service
                     .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
@@ -344,6 +331,12 @@ impl UnboundTurnService {
                     UnboundTurnError::internal("finalized assistant message has no content")
                 })
             }
+            None => Err(UnboundTurnError::internal(
+                "prepared context record is missing for completed unbound run",
+            )),
+            Some(_) => Err(UnboundTurnError::internal(
+                "completed unbound run has an unsupported output contract",
+            )),
         }
     }
 }
@@ -376,16 +369,16 @@ mod tests {
 
     use super::*;
 
-    fn scope() -> UnboundTurnScope {
-        UnboundTurnScope {
-            tenant_id: TenantId::from_trusted("tenant-native".to_string()),
-            user_id: UserId::from_trusted("user-native".to_string()),
-            agent_id: Some(AgentId::from_trusted("agent-native".to_string())),
-            project_id: None,
-        }
+    fn scope() -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
+            TenantId::from_trusted("tenant-native".to_string()),
+            UserId::from_trusted("user-native".to_string()),
+            Some(AgentId::from_trusted("agent-native".to_string())),
+            None,
+        )
     }
 
-    fn thread_scope(scope: &UnboundTurnScope) -> ThreadScope {
+    fn thread_scope(scope: &ProductSurfaceCaller) -> ThreadScope {
         ThreadScope {
             tenant_id: scope.tenant_id.clone(),
             agent_id: scope.agent_id.clone().expect("test agent"),
@@ -418,14 +411,14 @@ mod tests {
                 "project-default".to_string(),
             )),
         );
-        let caller = UnboundTurnScope {
-            tenant_id: TenantId::from_trusted("tenant-caller".to_string()),
-            user_id: UserId::from_trusted("user-caller".to_string()),
-            agent_id: Some(AgentId::from_trusted("agent-caller".to_string())),
-            project_id: Some(ironclaw_host_api::ids::ProjectId::from_trusted(
+        let caller = ProductSurfaceCaller::new(
+            TenantId::from_trusted("tenant-caller".to_string()),
+            UserId::from_trusted("user-caller".to_string()),
+            Some(AgentId::from_trusted("agent-caller".to_string())),
+            Some(ironclaw_host_api::ids::ProjectId::from_trusted(
                 "project-caller".to_string(),
             )),
-        };
+        );
         let resolved = service.resolved_thread_scope(&caller);
         assert_eq!(resolved.tenant_id.as_str(), "tenant-caller");
         assert_eq!(resolved.agent_id.as_str(), "agent-caller");
@@ -438,11 +431,7 @@ mod tests {
             Some("user-caller")
         );
 
-        let missing_axes = UnboundTurnScope {
-            agent_id: None,
-            project_id: None,
-            ..caller
-        };
+        let missing_axes = ProductSurfaceCaller::new(caller.tenant_id, caller.user_id, None, None);
         let resolved_defaults = service.resolved_thread_scope(&missing_axes);
         assert_eq!(resolved_defaults.agent_id.as_str(), "agent-default");
         assert_eq!(
@@ -454,7 +443,12 @@ mod tests {
     async fn readback_service(
         content: &str,
         output: OutputContract,
-    ) -> (UnboundTurnService, UnboundTurnScope, ThreadId, TurnRunId) {
+    ) -> (
+        UnboundTurnService,
+        ProductSurfaceCaller,
+        ThreadId,
+        TurnRunId,
+    ) {
         let caller_scope = scope();
         let stored_scope = thread_scope(&caller_scope);
         let thread_id = ThreadId::from_trusted("native-readback-thread".to_string());
@@ -502,8 +496,7 @@ mod tests {
             )
             .await
             .expect("assistant message finalized");
-        if structured_output && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content)
-        {
+        if structured_output && serde_json::from_str::<serde_json::Value>(content).is_ok() {
             threads
                 .put_structured_finalization(PutStructuredFinalizationRequest {
                     record: StructuredFinalizationRecord {
@@ -515,7 +508,6 @@ mod tests {
                         schema_digest: "test-schema-digest".to_string(),
                         candidate: "test candidate".to_string(),
                         raw_json: content.to_string(),
-                        parsed,
                         accounting: StructuredFinalizationAccounting::default(),
                         owner_fence: "test-owner-fence".to_string(),
                         created_at: chrono::Utc::now(),
@@ -666,7 +658,7 @@ mod tests {
         let output = OutputContract::try_json_schema("forwarded_output", schema()).expect("schema");
         service
             .accept_and_submit(UnboundTurnSubmission {
-                scope: caller_scope,
+                caller: caller_scope,
                 public_id: "forwarded-output-contract".to_string(),
                 system_prompt: "Return one structured value.".to_string(),
                 messages: vec![AgentMessage {

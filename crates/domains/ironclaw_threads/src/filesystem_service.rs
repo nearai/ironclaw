@@ -2224,13 +2224,7 @@ where
             .ok_or_else(|| SessionThreadError::UnknownThread {
                 thread_id: request.thread_id.clone(),
             })?;
-        let run_id =
-            ironclaw_host_api::turn::TurnRunId::parse(&request.turn_run_id).map_err(|_| {
-                SessionThreadError::StructuredFinalizationPublishMismatch {
-                    message_id: request.message_id,
-                    reason: "turn_run_id is invalid",
-                }
-            })?;
+        let run_id = request.turn_run_id;
         let record = self
             .read_structured_finalization_record(
                 &ReadStructuredFinalizationRequest {
@@ -2263,7 +2257,7 @@ where
 
         let candidate = record.candidate.clone();
         let replacement = request.replacement.clone();
-        let turn_run_id = request.turn_run_id.clone();
+        let turn_run_id = request.turn_run_id.to_string();
         let message_id = request.message_id;
         self.apply_message_update(
             &request.scope,

@@ -257,25 +257,6 @@ impl TurnRunExecutorError {
     }
 }
 
-/// Add one supplemental model call to a cumulative run snapshot.
-///
-/// A loop exit already reports a cumulative snapshot, so this helper is for
-/// failure paths that only have the claimed snapshot plus host-owned work (for
-/// example, a structured finalizer that failed after consuming provider
-/// tokens). Keeping the merge here makes it explicit that the aggregate is
-/// constructed once before it is carried as typed failure metadata.
-pub(crate) fn merge_model_usage(
-    cumulative: Option<LoopModelUsage>,
-    supplemental: Option<LoopModelUsage>,
-) -> Option<LoopModelUsage> {
-    let Some(supplemental) = supplemental else {
-        return cumulative;
-    };
-    let mut cumulative = cumulative.unwrap_or_default();
-    cumulative.add_assign(&supplemental);
-    Some(cumulative)
-}
-
 impl fmt::Display for TurnRunExecutorError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -331,6 +312,7 @@ impl JournalProcessExecutor for TurnProcessExecutor {
                         ironclaw_turns::process_projection::agent_turn_metadata_from_claimed(
                             &claimed_for_failure_metadata,
                             metadata.model_usage(),
+                            None,
                         ),
                     );
                 }
@@ -500,7 +482,7 @@ mod tests {
             cache_creation_input_tokens: 3,
         };
 
-        let failure_usage = merge_model_usage(Some(prior), Some(finalizer));
+        let failure_usage = LoopModelUsage::merge_optional(Some(prior), Some(finalizer));
         assert_eq!(failure_usage, Some(expected));
         let failure_metadata = TurnRunFailureMetadata::from_optional_model_usage(failure_usage);
         assert_eq!(failure_metadata.model_usage(), Some(expected));
@@ -508,7 +490,7 @@ mod tests {
         // A replay with no new supplemental call restores the already
         // aggregated snapshot rather than adding it again.
         assert_eq!(
-            merge_model_usage(failure_metadata.model_usage(), None),
+            LoopModelUsage::merge_optional(failure_metadata.model_usage(), None),
             Some(expected)
         );
     }

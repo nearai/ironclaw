@@ -33,8 +33,6 @@ const FINALIZATION_DEADLINE_MS: u64 = 75_000;
 
 #[async_trait]
 pub(crate) trait StructuredFinalizationPort: Send + Sync {
-    #[cfg(test)]
-    async fn finalize(&self, candidate: &AssistantReply) -> Result<String, AgentLoopHostError>;
     async fn finalize_terminal_reply(
         &self,
         message_ref: &LoopMessageRef,
@@ -173,15 +171,6 @@ where
         // fencing, or persistence step can fail. A failed finalization still
         // consumed this model work and must report it to the run exit.
         self.restore_usage(response.usage.map(to_storage_usage));
-        let parsed =
-            serde_json::from_str::<serde_json::Value>(&response.output_text).map_err(|error| {
-                tracing::debug!(%error, "structured finalizer returned invalid JSON");
-                host_error(
-                    AgentLoopHostErrorKind::InvalidOutput,
-                    "finalizer output is not valid JSON",
-                )
-            })?;
-
         // Do not publish a model result after ownership has been lost.  The
         // inference may finish after recovery reclaimed the lease.
         ironclaw_loop_host::ensure_run_lease_is_current(
@@ -199,7 +188,6 @@ where
             schema_digest: schema_digest.clone(),
             candidate: candidate.content.clone(),
             raw_json: response.output_text,
-            parsed,
             accounting: StructuredFinalizationAccounting {
                 usage: response.usage.map(to_storage_usage),
                 elapsed_ms: response.elapsed_ms,
@@ -220,7 +208,6 @@ where
                     .resolved_model_route
                     .as_ref()
                     .map(|route| route.model_id().to_string()),
-                cost_microunits: None,
             },
             owner_fence: self.lease_token.as_uuid().to_string(),
             created_at: Utc::now(),
@@ -303,11 +290,6 @@ impl<S> StructuredFinalizationPort for StructuredFinalizationCoordinator<S>
 where
     S: SessionThreadService + ?Sized + Send + Sync,
 {
-    #[cfg(test)]
-    async fn finalize(&self, candidate: &AssistantReply) -> Result<String, AgentLoopHostError> {
-        self.finalize_candidate(candidate).await
-    }
-
     async fn finalize_terminal_reply(
         &self,
         message_ref: &LoopMessageRef,
@@ -318,7 +300,8 @@ where
                 "terminal reply reference is not a transcript message reference",
             )
         })?;
-        let message_id = ThreadMessageId::parse(raw_message_id).map_err(|_| {
+        let message_id = ThreadMessageId::parse(raw_message_id).map_err(|error| {
+            tracing::debug!(%error, "terminal reply reference is not a valid transcript message id");
             host_error(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "terminal reply reference is not a valid transcript message id",
@@ -335,10 +318,11 @@ where
                     "terminal assistant message is missing",
                 )
             })?;
-        let run_id = self.run_context.run_id.to_string();
+        let run_id = self.run_context.run_id;
+        let run_id_text = run_id.to_string();
         if message.kind != MessageKind::Assistant
             || message.status != MessageStatus::Finalized
-            || message.turn_run_id.as_deref() != Some(run_id.as_str())
+            || message.turn_run_id.as_deref() != Some(run_id_text.as_str())
         {
             return Err(host_error(
                 AgentLoopHostErrorKind::TranscriptWriteFailed,

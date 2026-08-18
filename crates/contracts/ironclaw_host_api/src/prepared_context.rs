@@ -131,7 +131,7 @@ mod tests {
         let declarations = PreparedTurnDeclarations {
             tools: vec![CapabilityId::new("builtin.memory_search").expect("capability id")],
             output: OutputContract::JsonSchema {
-                name: "suggestions_v1".to_string(),
+                name: "suggestions".to_string(),
                 schema: serde_json::json!({
                     "type": "object",
                     "properties": { "cards": { "type": "array" } },

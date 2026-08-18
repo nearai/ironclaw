@@ -148,7 +148,7 @@ impl LoopExitApplier {
         // Capture the loop's reported usage before `validate` consumes the exit
         // and collapses it to a coarse outcome; carry it so the terminal
         // transition can persist it on the run record.
-        let model_usage = merge_model_usage(
+        let model_usage = LoopModelUsage::merge_optional(
             reported_model_usage(&exit).or(claimed.state.model_usage),
             supplemental_model_usage,
         );
@@ -503,18 +503,6 @@ fn reported_model_usage(exit: &LoopExit) -> Option<LoopModelUsage> {
         LoopExit::Failed(exit) => exit.model_usage,
         LoopExit::Blocked(_) | LoopExit::Cancelled(_) => None,
     }
-}
-
-fn merge_model_usage(
-    cumulative: Option<LoopModelUsage>,
-    supplemental: Option<LoopModelUsage>,
-) -> Option<LoopModelUsage> {
-    let Some(supplemental) = supplemental else {
-        return cumulative;
-    };
-    let mut cumulative = cumulative.unwrap_or_default();
-    cumulative.add_assign(&supplemental);
-    Some(cumulative)
 }
 
 /// Validate a driver-supplied claim against host-derived policy.

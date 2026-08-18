@@ -1650,7 +1650,6 @@ where
             run_context.clone(),
             max_messages,
         )
-        .with_prompt_context_token_budget(prompt_context_budget)
         .with_context_window_cache(Arc::clone(&context_window_cache));
         // An unbound run's prepared context is its COMPLETE input by
         // contract: no skill, identity, or memory lane is folded in, so the
@@ -1965,7 +1964,6 @@ where
                         thread_scope: effective_scope.clone(),
                         host_gateway: gw,
                         max_messages,
-                        prompt_context_budget,
                         skill_context_source: (!unbound_run)
                             .then(|| self.skill_context_source.clone())
                             .flatten(),
@@ -1989,7 +1987,6 @@ where
                         thread_scope: effective_scope.clone(),
                         host_gateway: Arc::clone(&self.model_gateway),
                         max_messages,
-                        prompt_context_budget,
                         skill_context_source: (!unbound_run)
                             .then(|| self.skill_context_source.clone())
                             .flatten(),
@@ -2226,21 +2223,6 @@ impl fmt::Debug for RebornLoopDriverHost {
     }
 }
 
-impl RebornLoopDriverHost {
-    /// Finalize only the exact terminal assistant row claimed by a completed
-    /// final-reply exit. Other completion kinds, including failure
-    /// explanations, remain ordinary transcript content.
-    async fn finalize_terminal_structured_output(
-        &self,
-        exit: &LoopExit,
-    ) -> Result<(), AgentLoopHostError> {
-        let Some(finalization) = self.structured_finalization.as_ref() else {
-            return Ok(());
-        };
-        finalize_selected_terminal_output(exit, Some(finalization.as_ref())).await
-    }
-}
-
 fn terminal_structured_reply_ref(exit: &LoopExit) -> Option<&ironclaw_turns::LoopMessageRef> {
     match exit {
         LoopExit::Completed(completed)
@@ -2282,9 +2264,9 @@ mod terminal_output_selection_tests {
     use async_trait::async_trait;
     use ironclaw_host_api::turn::{LoopExitId, LoopGateRef, LoopMessageRef, TurnCheckpointId};
     use ironclaw_loop_contracts::{
-        AgentLoopHostError, AssistantReply, LoopBlocked, LoopBlockedKind, LoopCancelled,
-        LoopCancelledReasonKind, LoopCheckpointStateRef, LoopCompleted, LoopCompletionKind,
-        LoopExit as ContractLoopExit, LoopFailed, LoopFailureKind, LoopModelUsage,
+        AgentLoopHostError, LoopBlocked, LoopBlockedKind, LoopCancelled, LoopCancelledReasonKind,
+        LoopCheckpointStateRef, LoopCompleted, LoopCompletionKind, LoopExit as ContractLoopExit,
+        LoopFailed, LoopFailureKind, LoopModelUsage,
     };
 
     fn exit_id(value: &str) -> LoopExitId {
@@ -2302,14 +2284,6 @@ mod terminal_output_selection_tests {
 
     #[async_trait]
     impl StructuredFinalizationPort for CountingFinalization {
-        #[cfg(test)]
-        async fn finalize(
-            &self,
-            _candidate: &AssistantReply,
-        ) -> Result<String, AgentLoopHostError> {
-            Ok(String::new())
-        }
-
         async fn finalize_terminal_reply(
             &self,
             message_ref: &LoopMessageRef,
@@ -2449,7 +2423,9 @@ impl LoopRunInfoPort for RebornLoopDriverHost {
         &'a self,
         exit: &'a LoopExit,
     ) -> Pin<Box<dyn Future<Output = Result<(), AgentLoopHostError>> + Send + 'a>> {
-        Box::pin(async move { self.finalize_terminal_structured_output(exit).await })
+        Box::pin(async move {
+            finalize_selected_terminal_output(exit, self.structured_finalization.as_deref()).await
+        })
     }
 
     fn supplemental_model_usage(&self) -> Option<LoopModelUsage> {

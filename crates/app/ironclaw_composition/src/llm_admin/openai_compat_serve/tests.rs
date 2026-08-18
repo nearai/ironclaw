@@ -1623,7 +1623,6 @@ async fn prepared_gateway_resolves_native_structured_assistant_output() {
                 schema_digest: "test-schema-digest".to_string(),
                 candidate: payload.to_string(),
                 raw_json: payload.to_string(),
-                parsed: serde_json::from_str(payload).expect("structured payload"),
                 accounting: StructuredFinalizationAccounting::default(),
                 owner_fence: "test-owner-fence".to_string(),
                 created_at: Utc::now(),
