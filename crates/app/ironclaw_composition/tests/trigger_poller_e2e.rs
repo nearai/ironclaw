@@ -1744,6 +1744,14 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
         "ordinary scheduled completions notify, while NothingToReport stays suppressed"
     );
 
+    // The identities themselves are what dedupe on replay; a count survives even
+    // if the observer re-mints every id under a new name.
+    let identities_before_restart = inbox
+        .notifications
+        .iter()
+        .map(|notification| notification.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+
     tokio::time::sleep(Duration::from_millis(250)).await;
     assert!(
         slack_provider.provider_messages().is_empty(),
@@ -1781,9 +1789,14 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
     )
     .expect("decode replayed Inbox");
     assert_eq!(
-        replayed.notifications.len(),
-        2,
-        "restart/replay preserves stable notification identities"
+        replayed
+            .notifications
+            .iter()
+            .map(|notification| notification.id.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        identities_before_restart,
+        "restart/replay resolves to the same notification identities, so a replayed \
+         commit is absorbed by its stable id instead of arriving twice"
     );
     restarted
         .shutdown()

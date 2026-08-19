@@ -252,6 +252,10 @@ fn eligible_background_run(snapshot: &JournaledProcessSnapshot) -> Option<Outcom
     {
         return None;
     }
+    // silent-ok: eligibility screening. Journal metadata this observer cannot
+    // read describes a process it does not own, so the absence of a notification
+    // is the correct outcome rather than a failure to report; the cause is
+    // recorded above before it is dropped.
     let envelope = serde_json::from_value::<OutcomeMetadataEnvelope>(snapshot.metadata.clone())
         .map_err(|error| {
             tracing::debug!(
@@ -419,6 +423,31 @@ mod tests {
             sanitized_reason: None,
             occurred_at: Some(now),
         }
+    }
+
+    /// A commit whose agent-turn metadata carries the exclusions the observer
+    /// screens on, so a future edit to either predicate fails a test instead of
+    /// quietly publishing for a child or ownerless run.
+    fn excluded_commit(
+        run_id: TurnRunId,
+        subagent_depth: u32,
+        ownerless_thread: bool,
+    ) -> ProcessJournalCommit {
+        let mut commit = commit(
+            run_id,
+            ProcessLifecycleStatus::Failed,
+            ProcessJournalKind::Failed,
+            "scheduled_trigger",
+        );
+        commit.state.metadata = json!({
+            "agent_turn": {
+                "product_context": { "origin": "scheduled_trigger" },
+                "execution_outcome": "result_available",
+                "subagent_depth": subagent_depth,
+                "ownerless_thread": ownerless_thread,
+            }
+        });
+        commit
     }
 
     async fn records(inbox: &dyn NotificationInboxStorePort) -> Vec<NotificationKind> {
@@ -623,6 +652,53 @@ mod tests {
         assert_eq!(
             records(inbox.as_ref()).await,
             vec![NotificationKind::RunFailed]
+        );
+    }
+    #[tokio::test]
+    async fn a_recovery_required_run_publishes_the_failure_outcome() {
+        let inbox = inbox();
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+
+        observer
+            .observe_process_commit(commit(
+                TurnRunId::new(),
+                ProcessLifecycleStatus::RecoveryRequired,
+                ProcessJournalKind::RecoveryRequired,
+                "scheduled_trigger",
+            ))
+            .await
+            .expect("recovery-required commit");
+
+        assert_eq!(
+            records(inbox.as_ref()).await,
+            vec![NotificationKind::RunFailed],
+            "a run needing recovery is reported as a failed outcome"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_child_or_ownerless_run_publishes_nothing() {
+        let inbox = inbox();
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+
+        observer
+            .observe_process_commit(excluded_commit(TurnRunId::new(), 1, false))
+            .await
+            .expect("a subagent turn is screened out, not an error");
+        observer
+            .observe_process_commit(excluded_commit(TurnRunId::new(), 0, true))
+            .await
+            .expect("an ownerless thread is screened out, not an error");
+
+        assert!(
+            records(inbox.as_ref()).await.is_empty(),
+            "neither a child run nor an ownerless thread reaches a user's inbox"
         );
     }
 }
