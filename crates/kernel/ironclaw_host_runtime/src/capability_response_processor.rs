@@ -115,8 +115,7 @@ pub(super) async fn process_capability_response(
             // Resumed invocations own an existing blocked record, so a failed
             // terminal transition must propagate as host unavailability rather
             // than leaving that record eligible for a later resume.
-            let is_dispatch_error =
-                matches!(error, CapabilityInvocationError::Dispatch { .. });
+            let is_dispatch_error = matches!(error, CapabilityInvocationError::Dispatch { .. });
             let failure = failed_response(error, context.registry, context.capability_id);
             if is_dispatch_error {
                 let transition = runtime
