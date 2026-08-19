@@ -17,7 +17,7 @@ renamed later.
 
 | Step | Action | Target |
 |---|---|---|
-| 0.1 | Decide **`DESIGN.md` location**. Recommendation: **repo-root `DESIGN.md`** — a root file is exempt from the docs publication boundary and matches the kit's project-root convention. **Do not** use `docs/design/DESIGN.md`: any `.md` under `docs/` that isn't fenced by `.mintignore`, listed in `docs.json` nav, or marked `hidden:` gets published, so a `docs/` home would have to be `docs/internal/DESIGN.md`. Add a one-line pointer from CLAUDE.md. | — |
+| 0.1 | Decide **`DESIGN.md` location**. Recommendation: **`docs/internal/design/DESIGN.md`** — under the `internal/` tree already fenced by `.mintignore`, so it versions with the code and stays out of the public docs site, consistent with IronClaw's "new internal docs live under `docs/internal/`" rule. **Do not** use `docs/design/DESIGN.md`: an unfenced `.md` under `docs/` (not in `docs.json` nav or marked `hidden:`) gets published. Alternative: repo-root `DESIGN.md` if the team treats it as a peer of `CLAUDE.md`/`AGENTS.md` (root files are boundary-exempt). Either way, add a one-line pointer from CLAUDE.md. | — |
 | 0.2 | Decide **feature-docs home** for WebUI features: recommend `docs/features/<slug>/` (distinct from the dated `docs/internal/plans/`), or the lightweight `FEATURE.md` tier. | — |
 | 0.3 | Decide **token prefix** and confirm the design-system substitutions (React, Tailwind v4 CSS-config, `ironclaw` prefix). | `src/design-system/` |
 | 0.4 | Confirm **skip list** (backend MVVM rules, kit CI/hooks, N/A modules) with reviewers. | — |
@@ -35,10 +35,10 @@ frontend edit. This is the single biggest gap and the clearest win.
 
 | Step | Action | Target |
 |---|---|---|
-| 1.1 | Seed `DESIGN.md` from `apdd-kit/templates/DESIGN.template.md`; fill §1 principles, §2 theming (map to `src/design-system/theme.ts` light/dark), §3 typography, §4 a11y governance, §6 taxonomy tiers, **§7 REJECT list**. | `DESIGN.md` (repo root; see §0.1) |
+| 1.1 | Seed `DESIGN.md` from `apdd-kit/templates/DESIGN.template.md`; fill §1 principles, §2 theming (map to `src/design-system/theme.ts` light/dark), §3 typography, §4 a11y governance, §6 taxonomy tiers, **§7 REJECT list**. | `docs/internal/design/DESIGN.md` (see §0.1) |
 | 1.2 | Write `.claude/rules/design.md` (adapted from `apdd-kit/rules/design.md`): `paths:` → `crates/product/ironclaw_webui/frontend/src/**`; content = styling/theming/a11y/taxonomy + "read DESIGN.md first" + REJECT gate. | `.claude/rules/design.md` |
 | 1.3 | Codify the **token rule**: no raw hex at call sites; every custom color ships light+dark; `ironclaw`-prefixed semantic tokens. Reconcile with the existing `theme-colors.test.ts`. | `DESIGN.md` §2 + rule |
-| 1.4 | Add a CLAUDE.md pointer: "UI work conforms to `DESIGN.md`; its REJECT list is a hard gate." | `CLAUDE.md` |
+| 1.4 | Add a CLAUDE.md pointer: "UI work conforms to `docs/internal/design/DESIGN.md`; its REJECT list is a hard gate." | `CLAUDE.md` |
 | 1.5 | Consolidate the **embedded-AI-agent invariants** into a single referenced "What NOT to do" list, mapping **every** invariant named in EVALUATION §1 to its IronClaw home so none is lost: **keys encrypted at rest** (secrets/credential-storage path), **per-agent config in the DB not env vars** (`RootFilesystem`-persisted config), **tenant/scoped context on every LLM call** (capability-dispatch + scoped-filesystem isolation), **LLM-data-never-deleted**, and **credential/extension identity** — cross-linking existing CLAUDE.md/safety rules, not duplicating them. | `CLAUDE.md` / `.claude/rules/` |
 | 1.6 | Add the **cross-functional-review trigger** (see PROPOSAL §3): (a) a *"Cross-functional review required: engineering / product / design / none"* field in the feature-spec template; (b) extend `review-discipline.md` so the rule routes to the owning partner **role** by area — **engineering** (trust / persistence / capability / runtime boundaries), **product** (user-facing behavior / a product-surface contract), **design** (UI / the design system) — and links the PR *Reborn Trust-Boundary Checklist*, reusing IronClaw's existing signals rather than the kit's generic §8 gate. (`review-discipline.md` supplies the boundary *checks*, not reviewer identity — it names no people; leave role→person mapping to `CODEOWNERS`/team process.) Adopt spec **§5 Architecture Impact** + plan **§4 Dependencies & Sequencing** verbatim in the templates while you're there. | feature-spec template + `.claude/rules/review-discipline.md` |
 
@@ -168,10 +168,10 @@ deleting only the added docs would leave stale pointers and active rules behind.
 **Added files to delete** — delete **only the exact files this rollout added**,
 never a blanket glob (each phase records the files it introduces; do not delete
 feature docs or stories authored by other work). Paths below assume the Phase 0
-defaults (§0.1 root `DESIGN.md`, §0.2 `docs/features/`); **if Phase 0
+defaults (§0.1 `docs/internal/design/DESIGN.md`, §0.2 `docs/features/`); **if Phase 0
 resolves a different location, record it in the decisions note and list that
 exact path here instead**:
-- root `DESIGN.md` *(or the §0.1-resolved location)*
+- `docs/internal/design/DESIGN.md` *(or the §0.1-resolved location)*
 - `.claude/rules/design.md` (and `design-a11y.md` if created), `.claude/rules/feature-workflow.md`, `.claude/rules/critical-flows.md`
 - `docs/qa/CRITICAL_FLOWS.md`
 - the `docs/features/_templates/` scaffold and the specific piloted `docs/features/<slug>/` folder(s) this rollout created *(or the §0.2-resolved location)* — **not** a blanket `docs/features/` delete
@@ -235,7 +235,7 @@ the backstop.
 
 ## Open questions for reviewers
 
-1. **`DESIGN.md` at repo root (recommended) or `docs/internal/`?** `docs/design/` is ruled out by the publication boundary — an unfenced `docs/` page would be published.
+1. **`DESIGN.md` at `docs/internal/design/` (recommended) or repo-root** (as a `CLAUDE.md`/`AGENTS.md` peer)? `docs/design/` is ruled out by the publication boundary — an unfenced `docs/` page would be published.
 2. **Feature-docs home** — `docs/features/<slug>/` vs. folding into `docs/internal/plans/`?
 3. **Chromatic** — is a paid visual-regression service in scope, or stay on the
    free Vitest/a11y subset?
