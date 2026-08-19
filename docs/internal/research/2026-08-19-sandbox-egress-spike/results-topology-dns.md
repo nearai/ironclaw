@@ -19,7 +19,10 @@ docker rm -f s7a-proxy s7a-client 2>/dev/null; docker network rm s7a-int s7a-egr
 
 Output: none.
 
-The CA was generated inside the pinned Alpine OpenSSL image, not with host LibreSSL:
+The CA was generated inside the Alpine OpenSSL image, not with host LibreSSL.
+The historical run used `alpine/openssl:latest`, but its immutable runtime
+digest was not recorded; the exact commands remain below without pretending
+that today's tag identifies the August 19 image:
 
 ```sh
 docker run --rm -v /tmp/spike-7732/taskA:/work -w /work alpine/openssl:latest genrsa -out ca.key 4096

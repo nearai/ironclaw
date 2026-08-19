@@ -30,7 +30,7 @@ pub(crate) fn label_user(prefix: &str) -> String {
 pub(crate) fn label_image(prefix: &str) -> String {
     format!("{prefix}.image")
 }
-#[allow(dead_code)] // also consumed by the older per-user registry helpers
+/// Creation timestamp used by both launch compatibility and attribution.
 pub(crate) fn label_created_at(prefix: &str) -> String {
     format!("{prefix}.created_at")
 }
@@ -186,6 +186,7 @@ impl SandboxActivityRegistry {
                     entry.active_execs == 0
                         && !entry.recycle_required
                         && Arc::strong_count(&entry.gate) == 1
+                        && entry.expected_labels.is_none()
                 })
                 .min_by_key(|(_, entry)| entry.last_activity)
                 .map(|(key, _)| key.clone());
@@ -720,5 +721,46 @@ mod tests {
         drop(guard);
         registry.forget_if_inactive(&key);
         assert!(registry.gate(&key).is_none());
+    }
+    #[test]
+    fn registry_capacity_evicts_only_container_free_entries() {
+        let registry = Arc::new(SandboxActivityRegistry::new());
+        for index in 0..MAX_TRACKED_USERS {
+            let key = test_key("tenant", &format!("free-{index}"));
+            drop(registry.begin(&key).unwrap());
+        }
+
+        let extra = test_key("tenant", "extra");
+        drop(
+            registry
+                .begin(&extra)
+                .expect("container-free entry is evictable"),
+        );
+        assert!(registry.gate(&extra).is_some());
+        assert_eq!(registry.lock().len(), MAX_TRACKED_USERS);
+    }
+
+    #[test]
+    fn registry_capacity_never_evicts_container_backed_entries() {
+        let registry = Arc::new(SandboxActivityRegistry::new());
+        for index in 0..MAX_TRACKED_USERS {
+            let key = test_key("tenant", &format!("container-{index}"));
+            drop(registry.begin(&key).unwrap());
+            registry.set_expected_labels(
+                &key,
+                HashMap::from([("container".to_string(), index.to_string())]),
+            );
+        }
+        let result = registry.begin(&test_key("tenant", "overflow"));
+        let Err(error) = result else {
+            panic!("container-backed entries must not be orphaned");
+        };
+        assert_eq!(
+            error,
+            RuntimeProcessError::ExecutionFailed(
+                "sandbox user activity registry is at capacity".to_string()
+            )
+        );
+        assert_eq!(registry.lock().len(), MAX_TRACKED_USERS);
     }
 }

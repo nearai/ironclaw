@@ -273,6 +273,13 @@ impl RebornScopedSandboxCommandTransport {
         Ok(Self::new(docker, config))
     }
 
+    /// Construct a transport around an existing Docker client.
+    ///
+    /// # Panics
+    ///
+    /// An active Tokio runtime is required because construction starts the
+    /// idle-container sweeper. Production callers should prefer [`Self::connect`],
+    /// which is already async and establishes that runtime precondition.
     pub fn new(docker: Docker, config: RebornSandboxConfig) -> Self {
         let activity = Arc::new(SandboxActivityRegistry::new());
         let sweeper = user_container::UserContainerSweeper::spawn(
@@ -382,6 +389,21 @@ impl RebornScopedSandboxCommandTransport {
             .collect::<Vec<_>>();
         self.config.append_broker_binds(&mut binds)?;
         binds.sort();
+        let resolved_image = self
+            .docker
+            .inspect_image(&self.config.image)
+            .await
+            .map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox worker image could not be resolved: {error}"
+                ))
+            })?
+            .id
+            .ok_or_else(|| {
+                RuntimeProcessError::ExecutionFailed(
+                    "sandbox worker image resolved without an immutable image id".to_string(),
+                )
+            })?;
         let posture = security_posture_stamp(
             &container_user,
             self.config.container_identity.workspace_mode(),
@@ -395,7 +417,7 @@ impl RebornScopedSandboxCommandTransport {
             user_container::LABEL_PREFIX,
             &request.scope.tenant_id,
             &request.scope.user_id,
-            &self.config.image,
+            &resolved_image,
             &posture,
         );
         let host_config = HostConfig {
@@ -434,12 +456,9 @@ impl RebornScopedSandboxCommandTransport {
         };
         Ok(user_container::UserContainerLaunch { config, labels })
     }
-}
 
-#[async_trait]
-impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
-    async fn run_command(
-        &self,
+    async fn run_command_owned(
+        self,
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
         reject_nul("sandbox command", &request.command)?;
@@ -463,9 +482,10 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
             .user_container_launch_config(&request, &workspace)
             .await?;
         let _user_lifecycle = gate.lock().await;
-        let container_name = user_container::ensure_user_container(self, &user_key, launch).await?;
+        let container_name =
+            user_container::ensure_user_container(&self, &user_key, launch).await?;
         let result = user_container::execute_in_user_container(
-            self,
+            &self,
             &user_key,
             &container_name,
             request.command,
@@ -475,6 +495,21 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
         .await;
         drop(activity);
         result
+    }
+}
+
+#[async_trait]
+impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
+    async fn run_command(
+        &self,
+        request: CommandExecutionRequest,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        let execution = tokio::spawn(self.clone().run_command_owned(request));
+        execution.await.map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox command execution task failed: {error}"
+            ))
+        })?
     }
 }
 

@@ -6,21 +6,19 @@ readonly MAX_TIMEOUT_SECONDS=86400
 readonly TERMINATION_GRACE_SECONDS=1
 
 usage() {
-    echo "usage: ironclaw-exec <timeout-seconds> <command>" >&2
+    echo "usage: ironclaw-exec <timeout-seconds> <outcome-nonce> <command>" >&2
     exit 64
 }
 
-[ "$#" -eq 2 ] || usage
+[ "$#" -eq 3 ] || usage
 
 timeout_seconds=$1
-command=$2
+outcome_nonce=$2
+command=$3
 
 case "$timeout_seconds" in
     ''|*[!0-9]*) usage ;;
 esac
-
-# Normalize leading zeroes before using test(1), and bound the value before any
-# numeric comparison so an oversized argv value cannot overflow test(1).
 while [ "${timeout_seconds#0}" != "$timeout_seconds" ]; do
     timeout_seconds=${timeout_seconds#0}
 done
@@ -30,27 +28,42 @@ case "$timeout_seconds" in
 esac
 [ "$timeout_seconds" -le "$MAX_TIMEOUT_SECONDS" ] || usage
 
-# Docker Exec owns stdout and stderr, so the command must inherit them. stdin is
-# closed explicitly. The exec-mechanics spike showed that a deliberately
-# detached descendant must also redirect its own stdout and stderr or Docker
-# will keep its stream open; a shell wrapper cannot identify only those
-# descendants without also losing foreground output. The watchdog below uses
-# /dev/null for all three descriptors and therefore never holds the stream.
+case "$outcome_nonce" in
+    ''|*[!0-9a-f-]*) usage ;;
+esac
+
+record_outcome() {
+    # The supervisor writes the final line only after the command group is
+    # gone. The host matches this invocation-specific trailer in an uncapped
+    # tail buffer, so an earlier command-written lookalike cannot win.
+    printf '\n__IRONCLAW_EXEC_OUTCOME_%s=%s\n' "$outcome_nonce" "$1"
+}
+
+# The container already runs as its configured non-root identity.
 setsid sh -c "$command" </dev/null &
 command_pid=$!
 
+group_is_live() {
+    kill -0 "-$command_pid" >/dev/null 2>&1
+}
+
 terminate_group() {
-    if kill -0 "-$command_pid" >/dev/null 2>&1; then
+    if group_is_live; then
         kill -TERM "-$command_pid" >/dev/null 2>&1 || :
         sleep "$TERMINATION_GRACE_SECONDS" </dev/null >/dev/null 2>&1
         kill -KILL "-$command_pid" >/dev/null 2>&1 || :
+        return 0
     fi
+    return 1
 }
 
 timeout_fired=false
 on_timeout() {
-    timeout_fired=true
-    terminate_group
+    # A late USR1 after the foreground group exited is not a timeout.
+    if group_is_live; then
+        timeout_fired=true
+        terminate_group || :
+    fi
 }
 trap on_timeout USR1
 
@@ -64,24 +77,18 @@ watchdog_pid=$!
 wait "$command_pid"
 command_status=$?
 
-# Stop and reap the watchdog. A deadline signal runs terminate_group in this
-# shell, so no command-writable file is trusted to decide timeout status.
 kill "$watchdog_pid" >/dev/null 2>&1 || :
 wait "$watchdog_pid" >/dev/null 2>&1 || :
 trap - USR1
 
 if [ "$timeout_fired" = true ]; then
     wait "$command_pid" >/dev/null 2>&1 || :
-    terminate_group
-    exit 124
+    terminate_group || :
+    record_outcome timeout
+    exit 0
 fi
 
-# A foreground shell can exit while jobs in its process group remain. Remove
-# those jobs so they cannot outlive the invocation or retain Docker Exec's
-# capture descriptors.
-terminate_group
-
-if [ "$timeout_fired" = true ]; then
-    exit 124
-fi
-exit "$command_status"
+# A foreground shell can exit while jobs in its process group remain.
+terminate_group || :
+record_outcome "exit:$command_status"
+exit 0

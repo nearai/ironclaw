@@ -10,6 +10,15 @@ Final verdicts:
 
 The echo service used `HTTP_PORT=80`, so the proxy could use the normal HTTP upstream port. The `upstream_deny_cidrs: []` override in `proxy.yaml` is test-only. It lets the proxy reach the private echo-container address and must not become a production default.
 
+Image evidence: the spike recorded immutable pull digests for
+`mendhak/http-https-echo` (`sha256:2046be25…`) and `curlimages/curl`
+(`sha256:7c12af72…`), listed beside their historical pull commands below.
+It did not record immutable identities for `alpine:3.20` or
+`alpine/openssl:latest`; those command blocks remain truthful historical
+evidence rather than being rewritten with a digest fetched later. The value
+`real-secret-value-42` is a deterministic local substitution canary, not an
+operative credential.
+
 ## Setup
 
 Cleanup ran before all other work:

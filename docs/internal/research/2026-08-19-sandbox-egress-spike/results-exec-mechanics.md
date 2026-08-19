@@ -2,6 +2,10 @@
 
 Environment: Docker on macOS with OrbStack; container image `alpine:3.20`; container PID 1 is deliberately the non-reaping command `sleep 1800`.
 
+Evidence limit: the run used the historical tag `alpine:3.20` but did not
+record its immutable runtime digest. The commands below remain the exact
+commands executed; an exact image replay cannot be claimed from this artifact.
+
 Setup:
 
 ```sh

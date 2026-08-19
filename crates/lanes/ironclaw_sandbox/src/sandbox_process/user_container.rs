@@ -158,6 +158,7 @@ pub(super) async fn execute_in_user_container(
         .as_secs()
         .saturating_add(u64::from(timeout.subsec_nanos() > 0))
         .max(1);
+    let outcome_nonce = uuid::Uuid::new_v4().to_string();
     let created = transport
         .docker
         .create_exec(
@@ -170,6 +171,7 @@ pub(super) async fn execute_in_user_container(
                 cmd: Some(vec![
                     EXEC_HELPER.to_string(),
                     helper_timeout_secs.to_string(),
+                    outcome_nonce.clone(),
                     command,
                 ]),
                 privileged: Some(false),
@@ -206,10 +208,13 @@ pub(super) async fn execute_in_user_container(
         drop(input);
 
         let mut captured = BoundedExecOutput::new(transport.config.max_output_bytes);
+        let mut outcome_tail = String::new();
         while let Some(frame) = output.next().await {
             match frame {
                 Ok(bollard::container::LogOutput::StdOut { message }) => {
-                    captured.push_stdout(&String::from_utf8_lossy(&message));
+                    let text = String::from_utf8_lossy(&message);
+                    captured.push_stdout(&text);
+                    append_tail(&mut outcome_tail, &text, 512);
                 }
                 Ok(bollard::container::LogOutput::StdErr { message }) => {
                     captured.push_stderr(&String::from_utf8_lossy(&message));
@@ -232,19 +237,31 @@ pub(super) async fn execute_in_user_container(
                     "sandbox exec inspect failed: {error}"
                 ))
             })?;
-        let exit_code = inspected.exit_code.ok_or_else(|| {
+        let helper_exit = inspected.exit_code.ok_or_else(|| {
             RuntimeProcessError::ExecutionFailed(
                 "sandbox exec completed without an exit code".to_string(),
             )
         })?;
-        map_exec_exit(exit_code, timeout)?;
-        Ok(CommandExecutionOutput {
-            output: captured.finish(),
-            saved_output: None,
-            exit_code,
-            sandboxed: true,
-            duration: started_at.elapsed(),
-        })
+        if helper_exit != 0 {
+            return Err(RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox exec supervisor failed with exit code {helper_exit}"
+            )));
+        }
+        let outcome = parse_exec_outcome_trailer(&outcome_tail, &outcome_nonce)?;
+        match outcome {
+            ExecOutcome::Timeout => Err(RuntimeProcessError::Timeout(timeout)),
+            ExecOutcome::Exit(exit_code) => {
+                strip_exec_outcome_trailer(&mut captured.stdout, &outcome_nonce);
+                let output = captured.finish();
+                Ok(CommandExecutionOutput {
+                    output,
+                    saved_output: None,
+                    exit_code,
+                    sandboxed: true,
+                    duration: started_at.elapsed(),
+                })
+            }
+        }
     };
 
     match tokio::time::timeout(timeout.saturating_add(HOST_TIMEOUT_GRACE), run).await {
@@ -330,14 +347,11 @@ fn user_container_adoption_decision(
             || state.restarting.unwrap_or(false)
             || state.dead.unwrap_or(false)
     });
-    let configured_image = inspected
-        .config
-        .as_ref()
-        .and_then(|config| config.image.as_deref());
+    let resolved_image = inspected.image.as_deref();
     let expected_image = expected_labels
         .get(&super::registry::label_image(LABEL_PREFIX))
         .map(String::as_str);
-    if unsafe_state || configured_image != expected_image {
+    if unsafe_state || resolved_image != expected_image {
         return ExistingContainerDecision::Recreate;
     }
     let labels = inspected
@@ -428,12 +442,64 @@ async fn sweep_idle_user_containers(
     }
 }
 
-fn map_exec_exit(exit_code: i64, timeout: Duration) -> Result<i64, RuntimeProcessError> {
-    if exit_code == 124 {
-        Err(RuntimeProcessError::Timeout(timeout))
-    } else {
-        Ok(exit_code)
+fn append_tail(target: &mut String, text: &str, limit: usize) {
+    target.push_str(text);
+    if target.len() <= limit {
+        return;
     }
+    let mut start = target.len() - limit;
+    while !target.is_char_boundary(start) {
+        start += 1;
+    }
+    target.drain(..start);
+}
+
+fn outcome_prefix(nonce: &str) -> String {
+    format!("__IRONCLAW_EXEC_OUTCOME_{nonce}=")
+}
+
+fn parse_exec_outcome_trailer(tail: &str, nonce: &str) -> Result<ExecOutcome, RuntimeProcessError> {
+    let prefix = outcome_prefix(nonce);
+    let Some(start) = tail.rfind(&prefix) else {
+        return Err(RuntimeProcessError::ExecutionFailed(
+            "sandbox exec outcome trailer is missing".to_string(),
+        ));
+    };
+    let value = tail[start + prefix.len()..]
+        .split_once('\n')
+        .map_or(&tail[start + prefix.len()..], |(value, _)| value);
+    parse_exec_outcome(value)
+}
+
+fn strip_exec_outcome_trailer(output: &mut String, nonce: &str) {
+    let marker = format!("\n{}", outcome_prefix(nonce));
+    if let Some(start) = output.rfind(&marker) {
+        output.truncate(start);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecOutcome {
+    Timeout,
+    Exit(i64),
+}
+
+fn parse_exec_outcome(value: &str) -> Result<ExecOutcome, RuntimeProcessError> {
+    let value = value.trim();
+    if value == "timeout" {
+        return Ok(ExecOutcome::Timeout);
+    }
+    let Some(exit) = value.strip_prefix("exit:") else {
+        return Err(RuntimeProcessError::ExecutionFailed(
+            "sandbox exec outcome marker is malformed".to_string(),
+        ));
+    };
+    let exit = exit.parse::<u8>().map_err(|_| {
+        RuntimeProcessError::ExecutionFailed(
+            "sandbox exec outcome marker has an invalid exit code".to_string(),
+        )
+    })?;
+    Ok(ExecOutcome::Exit(i64::from(exit)))
 }
 
 struct BoundedExecOutput {
@@ -503,13 +569,22 @@ mod tests {
     }
 
     #[test]
-    fn helper_timeout_exit_maps_to_requested_timeout() {
-        let timeout = Duration::from_secs(17);
-        assert!(matches!(
-            map_exec_exit(124, timeout),
-            Err(RuntimeProcessError::Timeout(value)) if value == timeout
-        ));
-        assert_eq!(map_exec_exit(23, timeout).unwrap(), 23);
+    fn outcome_marker_distinguishes_timeout_from_every_exit_code() {
+        assert_eq!(
+            parse_exec_outcome("timeout\n").unwrap(),
+            ExecOutcome::Timeout
+        );
+        assert_eq!(parse_exec_outcome("exit:0").unwrap(), ExecOutcome::Exit(0));
+        assert_eq!(
+            parse_exec_outcome("exit:124").unwrap(),
+            ExecOutcome::Exit(124)
+        );
+        assert_eq!(
+            parse_exec_outcome("exit:255").unwrap(),
+            ExecOutcome::Exit(255)
+        );
+        assert!(parse_exec_outcome("exit:256").is_err());
+        assert!(parse_exec_outcome("unknown").is_err());
     }
 
     #[test]
@@ -517,7 +592,7 @@ mod tests {
         let expected = HashMap::from([
             (
                 super::super::registry::label_image(LABEL_PREFIX),
-                "image:v1".to_string(),
+                "sha256:image-v1".to_string(),
             ),
             (
                 super::super::registry::label_security_posture(LABEL_PREFIX),
@@ -529,8 +604,9 @@ mod tests {
                 running: Some(true),
                 ..Default::default()
             }),
+            image: Some("sha256:image-v1".to_string()),
             config: Some(bollard::models::ContainerConfig {
-                image: Some("image:v1".to_string()),
+                image: Some("image:latest".to_string()),
                 labels: Some(expected.clone()),
                 ..Default::default()
             }),
@@ -542,7 +618,8 @@ mod tests {
         );
 
         let mut wrong_image = compatible.clone();
-        wrong_image.config.as_mut().unwrap().image = Some("image:v2".to_string());
+
+        wrong_image.image = Some("sha256:image-v2".to_string());
         assert_eq!(
             user_container_adoption_decision(&wrong_image, &expected),
             ExistingContainerDecision::Recreate

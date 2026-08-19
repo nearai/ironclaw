@@ -11,6 +11,11 @@ The command container had only `s7c-int` attached. `s7c-proxy` was dual-homed on
 - Proxy image: `ironsh/iron-proxy@sha256:c4628019c24f4cc8d77564a26b7c9cedb00accee6f93d06270e85fb8f9c6a7da`
 - Runtime versions: curl 8.14.1, git 2.47.3, Node v22.23.2, Python 3.12.13, pip 26.1.2.
 
+For immutable replay, the recorded runtime identity is
+`nikolaik/python-nodejs@sha256:88c41488c175453b29007809b82c3059c9a55b721f14f5a5a4ea64cb995e26e7`.
+The exact setup block below intentionally retains the tag that was actually
+executed. The Alpine OpenSSL helper's runtime digest was not recorded.
+
 Exact setup commands:
 
 ```sh

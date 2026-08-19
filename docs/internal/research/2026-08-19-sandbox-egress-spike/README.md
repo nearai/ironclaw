@@ -10,6 +10,23 @@ an `--internal` Docker network whose only route out is a dual-homed
 **Pinned proxy image:**
 `ironsh/iron-proxy@sha256:c4628019c24f4cc8d77564a26b7c9cedb00accee6f93d06270e85fb8f9c6a7da`
 
+### Recorded image identities and evidence limits
+
+| Role | Immutable identity recorded during the spike |
+|---|---|
+| iron-proxy | `ironsh/iron-proxy@sha256:c4628019c24f4cc8d77564a26b7c9cedb00accee6f93d06270e85fb8f9c6a7da` |
+| HTTP echo fixture | `mendhak/http-https-echo@sha256:2046be25f4a2c0bdda662ebfb7c2b7b60fc95c31d97987be143645a8a2194a40` |
+| curl fixture | `curlimages/curl@sha256:7c12af72ceb38b7432ab85e1a265cff6ae58e06f95539d539b654f2cfa64bb13` |
+| Python/Node runtime | `nikolaik/python-nodejs@sha256:88c41488c175453b29007809b82c3059c9a55b721f14f5a5a4ea64cb995e26e7` |
+
+Historical command blocks below remain exactly what was run. The spike did
+**not** record immutable runtime identities for `alpine:3.20` or
+`alpine/openssl:latest`; exact reproduction of those two inputs is therefore
+an evidence gap, not something to reconstruct from today's registry state.
+Future spikes must record `RepoDigests` before execution. The value
+`real-secret-value-42` is a deterministic local substitution canary, not an
+operative credential.
+
 ## Verdicts
 
 | # | Item | Verdict | Evidence |
@@ -82,7 +99,7 @@ docker run -d --name <pfx>-proxy --network <pfx>-int --ip 172.28.N.2 \
   ironsh/iron-proxy@sha256:c4628019c24f4cc8d77564a26b7c9cedb00accee6f93d06270e85fb8f9c6a7da \
   -config /etc/iron-proxy/proxy.yaml
 docker network connect <pfx>-egress <pfx>-proxy
-docker run -d --name <pfx>-client --network <pfx>-int --dns 172.28.N.2 alpine:3.20 sleep 900
+docker run -d --name <pfx>-client --network <pfx>-int --dns 172.28.N.2 alpine:3.20 sleep 900 # historical tag; immutable digest was not recorded
 ```
 
 CA generation (LibreSSL on macOS hosts misbehaves — use the container):

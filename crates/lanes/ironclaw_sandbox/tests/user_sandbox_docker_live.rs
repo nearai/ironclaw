@@ -686,6 +686,58 @@ async fn same_user_shell_commands_are_intentionally_serialized_across_threads() 
 }
 
 #[tokio::test]
+async fn aborting_caller_does_not_release_same_user_serialization() {
+    let Some(_image) = docker_worker_image("user container cancellation test") else {
+        return;
+    };
+    let primary = TestScope::unique("cancel");
+    let mut other_thread = primary.clone();
+    other_thread.thread = format!("other-thread-{}", InvocationId::new());
+    let temp = docker_visible_tempdir();
+    let mut cleanup = DockerCleanup::with_scopes([primary.clone(), other_thread.clone()]);
+    let transport = RebornScopedSandboxCommandTransport::connect(RebornSandboxConfig::new(
+        temp.path().join("sandbox-workspaces"),
+    ))
+    .await
+    .expect("Docker transport connects");
+
+    let first_transport = transport.clone();
+    let first_scope = primary.resource_scope();
+    let mut first_request = request(
+        first_scope,
+        "touch /tmp/cancel-started; sleep 3; touch /tmp/cancel-finished",
+    );
+    first_request.timeout_secs = Some(10);
+    let first = tokio::spawn(async move { first_transport.run_command(first_request).await });
+
+    let container = wait_for_user_container(&primary, Duration::from_secs(10)).await;
+    cleanup.container_ids.insert(container.id.clone());
+    wait_for_container_file(
+        &container.id,
+        "/tmp/cancel-started",
+        Duration::from_secs(10),
+    )
+    .await;
+    first.abort();
+    let _ = first.await;
+
+    let second = transport
+        .run_command(request(
+            other_thread.resource_scope(),
+            "test -e /tmp/cancel-finished && echo CANCELLED_CALLER_DID_NOT_OVERLAP",
+        ))
+        .await
+        .expect("queued same-user command runs after detached execution completes");
+    assert_eq!(
+        second.exit_code, 0,
+        "aborted caller released the lifecycle gate too early: {}",
+        second.output
+    );
+    assert!(second.output.contains("CANCELLED_CALLER_DID_NOT_OVERLAP"));
+    assert_eq!(cleanup.capture(&other_thread).id, container.id);
+}
+
+#[tokio::test]
 async fn stopped_user_container_restarts_and_image_mismatch_recycles_it() {
     let Some(_image) = docker_worker_image("user container recycle test") else {
         return;
@@ -769,6 +821,55 @@ async fn stopped_user_container_restarts_and_image_mismatch_recycles_it() {
 }
 
 #[tokio::test]
+async fn mutable_image_tag_retarget_recycles_existing_user_container() {
+    let Some(base_image) = docker_worker_image("mutable sandbox image test") else {
+        return;
+    };
+    let user = TestScope::unique("mutable-image");
+    let temp = docker_visible_tempdir();
+    let mut cleanup = DockerCleanup::with_scopes([user.clone()]);
+    let mutable_tag = format!("ironclaw-sandbox-mutable-{}:test", InvocationId::new());
+    let replacement_tag = format!(
+        "ironclaw-sandbox-mutable-replacement-{}:test",
+        InvocationId::new()
+    );
+    cleanup.track_image(mutable_tag.clone());
+    cleanup.track_image(replacement_tag.clone());
+    docker_command(&["image", "tag", &base_image, &mutable_tag]);
+
+    let config = RebornSandboxConfig::new(temp.path().join("sandbox-workspaces"))
+        .with_image(mutable_tag.clone());
+    let transport = RebornScopedSandboxCommandTransport::connect(config)
+        .await
+        .expect("Docker transport connects");
+    transport
+        .run_command(request(user.resource_scope(), "echo MUTABLE_INITIAL"))
+        .await
+        .expect("initial mutable-tag command runs");
+    let initial = cleanup.capture(&user);
+
+    docker_command(&["container", "commit", &initial.id, &replacement_tag]);
+    docker_command(&["image", "tag", &replacement_tag, &mutable_tag]);
+
+    let result = transport
+        .run_command(request(user.resource_scope(), "echo MUTABLE_RETARGETED"))
+        .await
+        .expect("same configured tag resolves its new immutable image");
+    let replacement = cleanup.capture(&user);
+    assert_eq!(result.exit_code, 0, "retargeted command: {}", result.output);
+    assert!(result.output.contains("MUTABLE_RETARGETED"));
+    assert_ne!(
+        replacement.id, initial.id,
+        "same-tag retarget must recycle the old resolved image"
+    );
+    assert_ne!(
+        replacement.labels.get(LABEL_IMAGE),
+        initial.labels.get(LABEL_IMAGE),
+        "image label stores immutable Docker image identity"
+    );
+}
+
+#[tokio::test]
 async fn timeout_kills_descendants_while_nonzero_exit_remains_output() {
     let Some(_image) = docker_worker_image("user container timeout test") else {
         return;
@@ -838,6 +939,16 @@ async fn timeout_kills_descendants_while_nonzero_exit_remains_output() {
     assert_eq!(nonzero.exit_code, 23);
     assert!(nonzero.output.contains("EXPECTED_NONZERO_STDERR"));
     assert!(nonzero.sandboxed);
+
+    let ordinary_124 = transport
+        .run_command(request(
+            thread.resource_scope(),
+            "echo ORDINARY_124_OUTPUT; exit 124",
+        ))
+        .await
+        .expect("ordinary exit 124 remains a command result");
+    assert_eq!(ordinary_124.exit_code, 124);
+    assert!(ordinary_124.output.contains("ORDINARY_124_OUTPUT"));
 }
 
 #[tokio::test]
@@ -908,12 +1019,22 @@ async fn idle_stop_respects_one_active_serialized_command_and_restarts_the_same_
     let queued_marker = Command::new("docker")
         .args(["container", "exec"])
         .arg(&running_container.id)
-        .args(["test", "!", "-e", "/tmp/idle-queued-entered"])
+        .args([
+            "sh",
+            "-c",
+            "if [ -e /tmp/idle-queued-entered ]; then printf present; else printf absent; fi",
+        ])
         .output()
         .expect("docker container exec starts");
     assert!(
         queued_marker.status.success(),
-        "a queued same-user shell command must not enter while the active command holds the gate"
+        "queued-marker inspection itself failed: {}",
+        String::from_utf8_lossy(&queued_marker.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&queued_marker.stdout).trim(),
+        "absent",
+        "a queued same-user shell command entered while the active command held the gate"
     );
     assert!(
         !queued.is_finished(),
