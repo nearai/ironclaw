@@ -54,10 +54,12 @@ stopping it until all commands finish. The sweeper stops an inactive container;
 the next command adopts and restarts it.
 
 The idle sweeper is a narrow provider-resource cleanup loop, not a second
-durable process lifecycle: it never claims runs, changes process state, or
-decides whether work may execute. `ironclaw_processes` remains the only
-lifecycle authority. This transport-local cleanup exists so abandoned Docker
-resources cannot remain active after a host restart; composition owns its
+durable process lifecycle: it never claims runs, changes
+`ironclaw_processes` run/lifecycle state, or decides whether work may execute.
+`ironclaw_processes` remains the only lifecycle authority. The sweeper may
+stop an inactive Docker container only as transport-local resource cleanup.
+This transport-local cleanup exists so abandoned Docker resources cannot
+remain active after a host restart; composition owns its
 startup/shutdown through `SandboxCommandTransport::shutdown`. If cleanup later
 needs durable policy or cross-host coordination, move the timer behind a
 kernel-owned lifecycle port rather than expanding this lane's authority.
