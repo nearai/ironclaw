@@ -10,23 +10,29 @@ fi
 # different failures:
 #
 #   * Acquire::*::Timeout turns a mirror that accepts the TCP connection and
-#     then goes silent into an apt-level *error*, which lets apt fall through
-#     to the next mirror in /etc/apt/apt-mirrors.txt. Without it apt blocks
-#     forever on "0% [Connecting to ...]" -- the failure mode behind
-#     actions/runner-images incident #5183, where azure.archive.ubuntu.com
-#     (priority:1 on the GitHub Ubuntu image) stalled mid-transfer and burned
-#     whole 30-120 minute job caps. The retry loop below never helped, because
-#     it only ever fired on a non-zero exit and a hang never returns one.
+#     then goes silent into an apt-level *error*, so the retries below can
+#     actually run. Without it apt blocks forever mid-transfer -- the failure
+#     mode behind actions/runner-images incident #5183, which burned whole
+#     30-120 minute job caps. The retry loop never helped, because it only
+#     fired on a non-zero exit and a hang never returns one.
+#
+#     Note where the stall actually lands: across 9 sampled hung jobs, the
+#     priority:1 mirror azure.archive.ubuntu.com failed FAST and cleanly (17-26
+#     `Ign:` lines in seconds) and apt had already fallen through to
+#     archive.ubuntu.com -- which is where it then wedged. So there is no
+#     further mirror to fall through to, and retrying is the only recovery.
 #   * `timeout` is the backstop for what Acquire::*::Timeout does not cover:
 #     DNS that never answers, a wedged dpkg frontend, sudo itself.
 #
 # Together they convert "hangs until the job cap" into "fails in ~90s", which
 # is what the retry loop was always written to handle.
 #
-# ponytail: this is a workaround for a fleet-side bug. actions/runner-images
-# PR #14596 demotes the azure mirror and adds these same acquire timeouts to
-# the image; once that ships, the Acquire::* options here become redundant
-# (the `timeout` backstop is still worth keeping).
+# ponytail: this is a workaround for a fleet-side bug, and it has a known
+# ceiling -- it guarantees a FAST, LOUD failure, not a green build. When the
+# mirror is wedged for longer than the retry budget the step still goes red;
+# it just costs ~5 min and a re-queue instead of ~120 min and a dequeue.
+# actions/runner-images PR #14596 is the real fix; once it ships, the
+# Acquire::* options here become redundant (keep the `timeout` backstop).
 APT_UPDATE_TIMEOUT="${APT_UPDATE_TIMEOUT:-90s}"
 APT_INSTALL_TIMEOUT="${APT_INSTALL_TIMEOUT:-150s}"
 APT_ATTEMPTS="${APT_ATTEMPTS:-3}"
@@ -42,9 +48,10 @@ APT_SOURCES_DIR="${APT_SOURCES_DIR:-/etc/apt}"
 # `env DEBIAN_FRONTEND=noninteractive` closes the other unbounded wait: a
 # conffile or service-restart prompt blocks on stdin forever.
 #
-# Acquire::Retries is deliberately low. Retries re-hit the *same* mirror, so a
-# high count just delays the fall-through to the next one; the realistic
-# failure here is a dark host, not a flaky byte.
+# Acquire::Retries covers the wedged-socket case at the apt level: the hang
+# lands on the LAST mirror, so a fresh connection is the only way out. Kept
+# low so a genuinely dark host still surfaces inside the timeout budget rather
+# than eating it -- the outer loop supplies the rest of the attempts.
 apt_get_bounded() {
   local timeout_spec="$1"
   shift
@@ -93,11 +100,10 @@ apt_get_with_retry() {
 # can install the small linker packages these jobs need. None are required here,
 # so strip every packages.microsoft.com source, not just the Azure CLI one.
 #
-# Deliberately NOT extended to azure.archive.ubuntu.com: that mirror actually
-# serves clang/mold, it is the in-region mirror these runners reach over the
-# Azure backbone, and the image already lists archive.ubuntu.com behind it in
-# /etc/apt/apt-mirrors.txt. Bounding the fetch is what makes that existing
-# fall-through reachable; removing the mirror is not needed.
+# Deliberately NOT extended to azure.archive.ubuntu.com: dropping it would not
+# help. It is not where jobs hang -- it already fails fast, and apt already
+# falls through to archive.ubuntu.com, which is the host that wedges. Removing
+# the in-region mirror would only make the healthy path slower.
 while IFS= read -r -d '' source_file; do
   if sudo grep -q "packages.microsoft.com" "${source_file}"; then
     echo "Removing unavailable Microsoft apt source: ${source_file}" >&2
