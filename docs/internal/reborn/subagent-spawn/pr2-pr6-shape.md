@@ -64,7 +64,7 @@ each.
   `SYSTEM_WAKE_STREAK_CAP = 16`, derived `LIMIT K` query over run records
   with `ParentAgent` excluded from the fetch; `Human` resets. Constant
   independently named (never merged with the descendant cap 16 or iteration
-  limit 16). §6's ParentAgent cap of 8 ships later (Slice 6) on the same
+  limit 16). §6's ParentAgent cap of 8 ships later (Slice 7) on the same
   field.
 - Tests: crate-tier windowing rows (§8.3's four assertions a–d).
 

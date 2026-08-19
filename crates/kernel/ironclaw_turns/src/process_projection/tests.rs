@@ -98,6 +98,73 @@ fn agent_turn_metadata(
     }
 }
 
+/// Regression: a terminal transition must not erase activation provenance.
+///
+/// `loop_exit.rs` writes agent-turn metadata on every terminal transition via
+/// `agent_turn_metadata_from_claimed`, which rebuilds the envelope from
+/// `from_state` and then restores the lineage fields. Provenance was not among
+/// the restored fields, so every completed run's provenance read back as
+/// `None` — and since the streak window treats a non-`System` record as a
+/// reset, the autonomous-wake cap could never fire in production.
+///
+/// Driven through the exact function the loop-exit path calls, not through a
+/// test helper that transitions the process directly: the helper never runs
+/// this rewrite, which is why the original crate tests missed this.
+#[test]
+fn terminal_metadata_rewrite_preserves_activation_provenance() {
+    let state = crate::TurnRunState {
+        scope: scope(),
+        actor: Some(TurnActor::new(
+            UserId::new("terminal-provenance-user").expect("user"),
+        )),
+        turn_id: TurnId::new(),
+        run_id: TurnRunId::new(),
+        status: TurnStatus::Running,
+        accepted_message_ref: AcceptedMessageRef::new("accepted-terminal-provenance")
+            .expect("accepted"),
+        resolved_run_profile_id: RunProfileId::default_profile(),
+        resolved_run_profile_version: RunProfileVersion::new(1),
+        output_contract: Default::default(),
+        allow_steering: true,
+        resolved_model_route: None,
+        model_usage: None,
+        execution_outcome: None,
+        received_at: Utc::now(),
+        checkpoint_id: None,
+        gate_ref: None,
+        blocked_activity_id: None,
+        credential_requirements: Vec::new(),
+        failure: None,
+        event_cursor: EventCursor(11),
+        product_context: None,
+        resume_disposition: None,
+    };
+    let claimed = ClaimedTurnRun {
+        state,
+        resolved_run_profile: profile().resolved,
+        subagent_depth: 1,
+        spawn_tree_descendant_cap: Some(16),
+        subagent_activation_provenance: Some(ActivationProvenance::System),
+        runner_id: TurnRunnerId::new(),
+        lease_token: crate::TurnLeaseToken::new(),
+    };
+
+    let envelope =
+        crate::process_projection::agent_turn_metadata_from_claimed(&claimed, None, None);
+
+    assert_eq!(
+        envelope["agent_turn"]["subagent_activation_provenance"],
+        serde_json::json!("system"),
+        "a terminal metadata rewrite must carry provenance forward, or the \
+         streak cap silently stops firing once runs complete"
+    );
+    assert_eq!(
+        envelope["agent_turn"]["subagent_depth"],
+        json!(1),
+        "the sibling lineage field must keep surviving too"
+    );
+}
+
 #[test]
 fn activation_provenance_survives_the_agent_turn_metadata_round_trip() {
     let mut metadata = agent_turn_metadata(
@@ -1253,6 +1320,7 @@ fn claimed_turn_run_projects_to_process_claim() {
         resume_disposition: None,
     };
     let claimed = ClaimedTurnRun {
+        subagent_activation_provenance: None,
         state: state.clone(),
         resolved_run_profile: profile().resolved,
         subagent_depth: 3,
@@ -1310,6 +1378,7 @@ fn claimed_process_round_trips_to_turn_executor_view() {
         resume_disposition: None,
     };
     let claimed = ClaimedTurnRun {
+        subagent_activation_provenance: None,
         state: state.clone(),
         resolved_run_profile: profile().resolved,
         subagent_depth: 4,
@@ -1366,6 +1435,7 @@ fn ownerless_scope_round_trips_through_the_process_claim() {
         resume_disposition: None,
     };
     let claimed = ClaimedTurnRun {
+        subagent_activation_provenance: None,
         state: state.clone(),
         resolved_run_profile: profile().resolved,
         subagent_depth: 0,

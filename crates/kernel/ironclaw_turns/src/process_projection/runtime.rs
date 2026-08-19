@@ -1229,6 +1229,7 @@ pub fn claimed_turn_run_from_process_claim(
         resolved_run_profile,
         subagent_depth: metadata.subagent_depth,
         spawn_tree_descendant_cap: metadata.spawn_tree_descendant_cap,
+        subagent_activation_provenance: metadata.subagent_activation_provenance,
         runner_id: turn_runner_id_from_worker(&claimed.worker_id)?,
         lease_token: turn_lease_token_from_process(&claimed.lease_token)?,
     })

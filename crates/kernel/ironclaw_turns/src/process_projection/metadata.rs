@@ -155,6 +155,7 @@ impl AgentTurnProcessStateMetadata {
             resolved_run_profile: Some(claimed.resolved_run_profile.clone()),
             subagent_depth: claimed.subagent_depth,
             spawn_tree_descendant_cap: claimed.spawn_tree_descendant_cap,
+            subagent_activation_provenance: claimed.subagent_activation_provenance,
             ..Self::from_state(&claimed.state)
         }
     }

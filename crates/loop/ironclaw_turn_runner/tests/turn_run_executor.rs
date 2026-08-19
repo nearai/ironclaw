@@ -259,6 +259,7 @@ fn completed_exit() -> LoopExit {
 
 fn claimed_run(context: &LoopRunContext) -> ClaimedTurnRun {
     ClaimedTurnRun {
+        subagent_activation_provenance: None,
         state: TurnRunState {
             scope: context.scope.clone(),
             actor: None,

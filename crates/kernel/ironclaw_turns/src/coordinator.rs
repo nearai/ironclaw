@@ -628,28 +628,42 @@ where
             // sequences it exists to bound. The window query is
             // provenance-blind, so the exclusion is done by over-fetching and
             // truncating to the cap.
-            let recent = self
+            let fetch_limit = SYSTEM_WAKE_STREAK_CAP.saturating_mul(SYSTEM_WAKE_WINDOW_OVERFETCH);
+            let raw = self
                 .store
-                .recent_runs_for_thread(
-                    &request.scope,
-                    SYSTEM_WAKE_STREAK_CAP.saturating_mul(SYSTEM_WAKE_WINDOW_OVERFETCH),
-                )
-                .await?
-                .into_iter()
+                .recent_runs_for_thread(&request.scope, fetch_limit)
+                .await?;
+            // A retry of an already-accepted activation must reach
+            // `submit_turn`'s durable idempotency replay, not be refused by
+            // the run it created on its first attempt. Excluding the caller's
+            // own accepted message keeps `activate()`'s advertised
+            // "ordinary submission idempotency" true at the cap boundary.
+            let recent = raw
+                .iter()
+                .filter(|record| record.accepted_message_ref != request.accepted_message_ref)
                 .filter(|record| {
                     record.subagent_activation_provenance != Some(ActivationProvenance::ParentAgent)
                 })
                 .take(SYSTEM_WAKE_STREAK_CAP as usize)
+                .cloned()
                 .collect::<Vec<_>>();
-            if !system_wake_admitted(&recent) {
+            // Fail closed when the window could not be established. The store
+            // returns fewer rows than asked only when history ran out, so a
+            // *full* fetch that still cannot yield a cap-sized non-ParentAgent
+            // window means the streak is unknown, not absent — admitting there
+            // is the fail-open hole the over-fetch alone left behind. A
+            // genuinely short fetch is a young thread and still admits.
+            let window_crowded_out = u32::try_from(raw.len()).unwrap_or(u32::MAX) >= fetch_limit
+                && (recent.len() as u32) < SYSTEM_WAKE_STREAK_CAP;
+            if window_crowded_out || !system_wake_admitted(&recent) {
                 debug!(
                     thread_id = %request.scope.thread_id,
                     cap = SYSTEM_WAKE_STREAK_CAP,
                     "refusing System activation: consecutive-wake streak cap reached"
                 );
-                return Err(TurnError::InvalidRequest {
-                    reason: "system activation streak cap reached for this thread".to_string(),
-                });
+                return Err(TurnError::AdmissionRejected(AdmissionRejection::new(
+                    AdmissionRejectionReason::SystemWakeStreak,
+                )));
             }
         }
 

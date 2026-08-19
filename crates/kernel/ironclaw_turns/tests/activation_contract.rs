@@ -15,11 +15,12 @@ use ironclaw_processes::{
     ProcessWorkerId,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, ActivateThreadRequest, ActivationProvenance, AgentTurnSpawnTreeRuntimePort,
+    AcceptedMessageRef, ActivateThreadRequest, ActivationProvenance, AdmissionRejection,
+    AdmissionRejectionReason, AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort,
     CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator, GetRunStateRequest,
     IdempotencyKey, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse,
-    SYSTEM_WAKE_STREAK_CAP, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
-    TurnError, TurnRunId, TurnRunState, TurnScope,
+    SYSTEM_WAKE_STREAK_CAP, SYSTEM_WAKE_WINDOW_OVERFETCH, SubmitTurnRequest, SubmitTurnResponse,
+    TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnRunState, TurnScope,
     test_support::{InMemoryAgentTurnProcessSystem, in_memory_agent_turn_process_system},
 };
 use std::sync::Arc;
@@ -74,7 +75,13 @@ fn activate_request(
     ActivateThreadRequest {
         scope,
         actor: actor(),
-        accepted_message_ref: AcceptedMessageRef::new("accepted-activation").expect("accepted"),
+        // Derived from the key so distinct activations carry distinct accepted
+        // messages (as production does — each background wake references the
+        // settled child result that triggered it), while a deliberate retry
+        // reusing the key also reuses the message, which is what makes it a
+        // retry rather than a new activation.
+        accepted_message_ref: AcceptedMessageRef::new(format!("accepted-activation-{key}"))
+            .expect("accepted"),
         provenance,
         idempotency_key: IdempotencyKey::new(key).expect("idempotency key"),
         received_at: Utc::now(),
@@ -283,8 +290,119 @@ async fn activate_refuses_a_system_wake_past_the_streak_cap() {
         .expect_err("a saturated System streak must refuse the next wake");
 
     assert!(
-        matches!(error, TurnError::InvalidRequest { .. }),
-        "expected a streak-cap refusal, got {error:?}"
+        matches!(
+            error,
+            TurnError::AdmissionRejected(AdmissionRejection {
+                reason: AdmissionRejectionReason::SystemWakeStreak,
+                ..
+            })
+        ),
+        "the cap refusal must carry its own reason, distinguishable from \
+         'activation unsupported' and 'window unreadable'; got {error:?}"
+    );
+    // The refusal must also create no run. Asserting only the error would let a
+    // regression that admits the run and *then* errors still pass.
+    let after = AgentTurnRuntimePort::recent_runs_for_thread(
+        runtime.as_ref(),
+        &scope,
+        SYSTEM_WAKE_STREAK_CAP.saturating_mul(2),
+    )
+    .await
+    .expect("window read");
+    assert_eq!(
+        after.len() as u32,
+        SYSTEM_WAKE_STREAK_CAP,
+        "a refused wake must not have created a run"
+    );
+}
+
+/// A full raw fetch that cannot yield a cap-sized non-ParentAgent window means
+/// the streak could not be established — unknown, not absent. Admitting there
+/// is the fail-open hole the over-fetch alone left; this pins the fail-closed
+/// behavior. A genuinely short fetch is a young thread and still admits.
+#[tokio::test]
+async fn a_window_crowded_out_by_parent_agent_runs_fails_closed() {
+    let system = in_memory_agent_turn_process_system();
+    let runtime = Arc::new(system.runtime());
+    let coordinator = DefaultTurnCoordinator::new(runtime.clone());
+    let scope = scope("thread-streak-crowded");
+
+    // Fill the entire raw fetch window with ParentAgent runs, so no
+    // non-ParentAgent record survives the filter.
+    let fetch_limit = SYSTEM_WAKE_STREAK_CAP.saturating_mul(SYSTEM_WAKE_WINDOW_OVERFETCH);
+    for index in 0..fetch_limit {
+        coordinator
+            .activate(activate_request(
+                scope.clone(),
+                ActivationProvenance::ParentAgent,
+                &format!("crowded-parent-{index}"),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("parent activation {index} admitted, got {error:?}"));
+        complete_active_run(&system, &scope).await;
+    }
+
+    let error = coordinator
+        .activate(activate_request(
+            scope.clone(),
+            ActivationProvenance::System,
+            "crowded-system",
+        ))
+        .await
+        .expect_err("an unestablished window must fail closed, not admit");
+
+    assert!(
+        matches!(
+            error,
+            TurnError::AdmissionRejected(AdmissionRejection {
+                reason: AdmissionRejectionReason::SystemWakeStreak,
+                ..
+            })
+        ),
+        "expected the streak refusal, got {error:?}"
+    );
+}
+
+/// `activate()` advertises ordinary submission idempotency. Retrying an
+/// already-accepted activation at the cap boundary must replay that
+/// submission, not be refused by the run its own first attempt created.
+#[tokio::test]
+async fn replaying_an_accepted_activation_at_the_cap_is_not_refused() {
+    let system = in_memory_agent_turn_process_system();
+    let runtime = Arc::new(system.runtime());
+    let coordinator = DefaultTurnCoordinator::new(runtime.clone());
+    let scope = scope("thread-streak-replay");
+
+    let mut last_run = None;
+    for index in 0..SYSTEM_WAKE_STREAK_CAP {
+        let SubmitTurnResponse::Accepted { run_id, .. } = coordinator
+            .activate(activate_request(
+                scope.clone(),
+                ActivationProvenance::System,
+                &format!("replay-key-{index}"),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("wake {index} admitted, got {error:?}"));
+        last_run = Some(run_id);
+        complete_active_run(&system, &scope).await;
+    }
+
+    // Same idempotency key AND same accepted message as the last accepted
+    // activation: this is a retry, not a 17th wake.
+    let replayed = coordinator
+        .activate(activate_request(
+            scope.clone(),
+            ActivationProvenance::System,
+            &format!("replay-key-{}", SYSTEM_WAKE_STREAK_CAP - 1),
+        ))
+        .await
+        .expect("a retry of an accepted activation must replay, not hit the cap");
+
+    let SubmitTurnResponse::Accepted { run_id, .. } = replayed;
+    assert_eq!(
+        Some(run_id),
+        last_run,
+        "the replay must return the originally accepted run"
     );
 }
 
@@ -446,7 +564,13 @@ async fn interleaved_parent_agent_runs_do_not_disable_the_system_streak_cap() {
         );
 
     assert!(
-        matches!(error, TurnError::InvalidRequest { .. }),
-        "expected a streak-cap refusal, got {error:?}"
+        matches!(
+            error,
+            TurnError::AdmissionRejected(AdmissionRejection {
+                reason: AdmissionRejectionReason::SystemWakeStreak,
+                ..
+            })
+        ),
+        "expected the streak-cap refusal, got {error:?}"
     );
 }

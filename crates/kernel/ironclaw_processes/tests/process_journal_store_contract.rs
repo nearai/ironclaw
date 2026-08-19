@@ -4299,3 +4299,92 @@ async fn recent_agent_turn_snapshots_rejects_a_system_wide_scope() {
         "expected InvalidRequest, got {error:?}"
     );
 }
+
+/// Backend parity for the bounded window read.
+///
+/// This is the first production descending keyset walk with a hand-built
+/// cursor, and it is the only one binding an I64 sort value against a Text
+/// tie-breaker across pages. The two SQL backends compare that cursor very
+/// differently — jsonb operators on PostgreSQL, untyped columns on libSQL — so
+/// `.claude/rules/database.md` "Backend parity" wants the adversarial case in a
+/// shared body rather than an in-memory-only assertion.
+async fn assert_recent_agent_turn_window_parity<F>(store: ProcessJournalStore<F>)
+where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    let scope = scope();
+
+    let mut agent_turn_ids = Vec::new();
+    for _ in 0..3 {
+        let id = ProcessId::new();
+        submit_agent_turn_process(&store, &scope, id).await;
+        agent_turn_ids.push(id);
+    }
+    // Newer than every agent-turn row and more than one page, so the walk must
+    // advance its cursor across pages to fill the window.
+    for _ in 0..12 {
+        submit_internal_process(&store, &scope, ProcessId::new()).await;
+    }
+
+    let recent = store
+        .recent_agent_turn_snapshots(&scope, 2)
+        .await
+        .expect("bounded recent read");
+
+    assert_eq!(recent.len(), 2, "limit must bound agent-turn rows");
+    assert!(
+        recent
+            .iter()
+            .all(|snapshot| snapshot.process_kind == ProcessKind::AgentTurn),
+        "non-agent-turn processes must never be returned"
+    );
+    let returned: Vec<_> = recent.iter().map(|snapshot| snapshot.process_id).collect();
+    let expected: Vec<_> = agent_turn_ids.iter().rev().take(2).copied().collect();
+    assert_eq!(
+        returned, expected,
+        "must return the newest agent-turn processes, newest first, across pages"
+    );
+}
+
+#[tokio::test]
+async fn recent_agent_turn_snapshots_hold_on_libsql() {
+    let storage = tempfile::tempdir().expect("temporary process journal database");
+    let database = Arc::new(
+        libsql::Builder::new_local(storage.path().join("recent-window.db"))
+            .build()
+            .await
+            .expect("build libsql database"),
+    );
+    let backend = Arc::new(LibSqlRootFilesystem::new(database).expect("libSQL filesystem runtime"));
+    backend
+        .run_migrations()
+        .await
+        .expect("migrate libsql filesystem");
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        backend,
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/processes").expect("mount alias"),
+            VirtualPath::new("/engine/processes").expect("virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view"),
+    ));
+    assert_recent_agent_turn_window_parity(ProcessJournalStore::new(filesystem)).await;
+}
+
+#[tokio::test]
+async fn recent_agent_turn_snapshots_hold_on_postgres() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(backend),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/processes").expect("mount alias"),
+            VirtualPath::new("/engine/processes").expect("virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view"),
+    ));
+    assert_recent_agent_turn_window_parity(ProcessJournalStore::new(filesystem)).await;
+}

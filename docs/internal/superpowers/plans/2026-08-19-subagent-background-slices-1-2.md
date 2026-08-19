@@ -886,28 +886,37 @@ In `DefaultTurnCoordinator::activate` (Task 3), before building the `SubmitTurnR
 
 ```rust
         if request.provenance == ActivationProvenance::System {
-            let recent = self
-                .spawn_tree_runtime()?
-                .recent_runs_for_thread(&request.scope, SYSTEM_WAKE_STREAK_CAP)
-                .await?
-                .into_iter()
-                // ParentAgent runs are excluded from the window entirely
-                // (design §8.3) — they neither count toward the System streak
-                // nor reset it.
+            // ParentAgent runs are excluded from the window entirely, and must
+            // be excluded from the FETCH, not filtered after it: filtering a
+            // K-sized fetch returns fewer than K records whenever ParentAgent
+            // runs are interleaved, and a short window reads as "streak not
+            // established" and admits.
+            let fetch_limit = SYSTEM_WAKE_STREAK_CAP.saturating_mul(SYSTEM_WAKE_WINDOW_OVERFETCH);
+            let raw = self
+                .store
+                .recent_runs_for_thread(&request.scope, fetch_limit)
+                .await?;
+            // A retry of an already-accepted activation must reach submit_turn's
+            // durable idempotency replay, not be refused by the run it created.
+            let recent = raw
+                .iter()
+                .filter(|record| record.accepted_message_ref != request.accepted_message_ref)
                 .filter(|record| {
-                    record.subagent_activation_provenance
-                        != Some(ActivationProvenance::ParentAgent)
+                    record.subagent_activation_provenance != Some(ActivationProvenance::ParentAgent)
                 })
+                .take(SYSTEM_WAKE_STREAK_CAP as usize)
+                .cloned()
                 .collect::<Vec<_>>();
-            if !system_wake_admitted(&recent) {
-                debug!(
-                    thread_id = %request.scope.thread_id,
-                    cap = SYSTEM_WAKE_STREAK_CAP,
-                    "refusing System activation: consecutive-wake streak cap reached"
-                );
-                return Err(TurnError::InvalidRequest {
-                    reason: "system activation streak cap reached for this thread".to_string(),
-                });
+            // Fail closed when the window could not be established: a FULL fetch
+            // that still cannot yield a cap-sized non-ParentAgent window means
+            // the streak is unknown, not absent. A short fetch is a young
+            // thread and still admits.
+            let window_crowded_out = u32::try_from(raw.len()).unwrap_or(u32::MAX) >= fetch_limit
+                && (recent.len() as u32) < SYSTEM_WAKE_STREAK_CAP;
+            if window_crowded_out || !system_wake_admitted(&recent) {
+                return Err(TurnError::AdmissionRejected(AdmissionRejection::new(
+                    AdmissionRejectionReason::SystemWakeStreak,
+                )));
             }
         }
 ```

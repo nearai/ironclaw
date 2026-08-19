@@ -140,6 +140,13 @@ pub(crate) fn turn_submission_error(error: TurnError) -> TurnSubmissionError {
                 TurnSubmissionErrorCategory::InvalidRequest,
                 TurnSubmissionRetry::Permanent,
             ),
+            // A thread that spent its autonomous-wake budget is parked pending
+            // human attention, not permanently refused: the trigger poller may
+            // retry, and a human activation restores the budget.
+            AdmissionRejectionReason::SystemWakeStreak => (
+                TurnSubmissionErrorCategory::AdmissionRejected,
+                TurnSubmissionRetry::RetryableAfterKeyRotation,
+            ),
             AdmissionRejectionReason::Policy | AdmissionRejectionReason::Unauthorized => (
                 TurnSubmissionErrorCategory::Unauthorized,
                 TurnSubmissionRetry::Permanent,
