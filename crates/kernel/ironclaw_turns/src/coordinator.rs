@@ -56,7 +56,7 @@ fn trace_coordinator_latency_error<E: ?Sized>(
 }
 
 use crate::{
-    AdmissionRejection, AdmissionRejectionReason, AgentTurnRuntimePort,
+    ActivateThreadRequest, AdmissionRejection, AdmissionRejectionReason, AgentTurnRuntimePort,
     AgentTurnSpawnTreeRuntimePort, CancelRunRequest, CancelRunResponse, EventCursor,
     GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse,
     RunProfileId, RunProfileRequest, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
@@ -138,6 +138,23 @@ pub trait TurnCoordinator: Send + Sync {
         &self,
         request: SubmitTurnRequest,
     ) -> Result<SubmitTurnResponse, TurnError>;
+
+    /// Re-activate an existing thread with a provenance tag.
+    ///
+    /// Defaults to a refusal rather than an untagged `submit_turn`
+    /// fallthrough: a coordinator that has not opted into activation semantics
+    /// must not silently create runs whose provenance the streak caps then
+    /// cannot see. `DefaultTurnCoordinator` provides the real implementation;
+    /// this default exists so the many test doubles of this trait need not
+    /// each restate it (the same reason `abort_prepared_turn` carries one).
+    async fn activate(
+        &self,
+        _request: ActivateThreadRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        Err(TurnError::InvalidRequest {
+            reason: "this coordinator does not support thread activation".to_string(),
+        })
+    }
 
     async fn resume_turn(
         &self,
@@ -584,6 +601,33 @@ where
         Ok(response)
     }
 
+    async fn activate(
+        &self,
+        request: ActivateThreadRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        // Routed through this coordinator's own `submit_turn` on purpose:
+        // admission, idempotency replay, profile resolution, and the wake
+        // notification are shared with every other submission. The only
+        // difference an activation makes is the provenance stamp.
+        self.submit_turn(SubmitTurnRequest {
+            scope: request.scope,
+            actor: request.actor,
+            accepted_message_ref: request.accepted_message_ref,
+            requested_run_profile: request.requested_run_profile,
+            output_contract: None,
+            requested_model: None,
+            idempotency_key: request.idempotency_key,
+            received_at: request.received_at,
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+            product_context: None,
+            subagent_activation_provenance: Some(request.provenance),
+        })
+        .await
+    }
+
     async fn resume_turn(
         &self,
         request: ResumeTurnRequest,
@@ -785,6 +829,13 @@ where
         request: SubmitTurnRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
         self.as_ref().submit_turn(request).await
+    }
+
+    async fn activate(
+        &self,
+        request: ActivateThreadRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        self.as_ref().activate(request).await
     }
 
     async fn resume_turn(

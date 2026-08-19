@@ -85,6 +85,26 @@ pub struct SubmitTurnRequest {
     pub subagent_activation_provenance: Option<ActivationProvenance>,
 }
 
+/// Re-activate an existing thread with an explicit provenance tag — the single
+/// re-activation primitive.
+///
+/// Deliberately *not* a second admission path: `activate` builds an ordinary
+/// [`SubmitTurnRequest`], so one-active-run exclusivity, idempotency replay,
+/// and busy rejection behave exactly as they do for any other submission. The
+/// only thing activation adds is the provenance stamp the derived streak caps
+/// read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivateThreadRequest {
+    pub scope: TurnScope,
+    pub actor: TurnActor,
+    pub accepted_message_ref: AcceptedMessageRef,
+    pub provenance: ActivationProvenance,
+    pub idempotency_key: IdempotencyKey,
+    pub received_at: TurnTimestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_run_profile: Option<RunProfileRequest>,
+}
+
 /// Request shape for callers that are creating a child run from an existing
 /// parent. The coordinator derives the persisted lineage fields on
 /// `SubmitTurnRequest` from the parent record.

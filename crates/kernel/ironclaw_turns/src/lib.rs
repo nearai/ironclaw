@@ -82,8 +82,8 @@ pub use process_projection::{
     claimed_turn_run_from_process_claim, turn_run_state_from_process_snapshot,
 };
 pub use request::{
-    CancelRunRequest, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
-    RetryTurnRequest, SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,
+    ActivateThreadRequest, CancelRunRequest, GetRunStateRequest, ResumeTurnPrecondition,
+    ResumeTurnRequest, RetryTurnRequest, SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,
 };
 pub use response::{CancelRunResponse, ResumeTurnResponse, RetryTurnResponse, ThreadBusy};
 pub use status::{
