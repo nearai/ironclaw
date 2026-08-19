@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn wall_clock_spans_run_receipt_to_the_newest_message_update() {
         let received = Utc::now();
-        let messages = vec![
+        let messages = [
             message(Some(received + chrono::Duration::seconds(12))),
             message(Some(received + chrono::Duration::seconds(91))),
             message(Some(received + chrono::Duration::seconds(40))),
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn wall_clock_is_absent_rather_than_negative_when_clocks_disagree() {
         let received = Utc::now();
-        let messages = vec![message(Some(received - chrono::Duration::seconds(5)))];
+        let messages = [message(Some(received - chrono::Duration::seconds(5)))];
         assert_eq!(derive_wall_clock_ms(received, messages.iter()), None);
     }
 }
