@@ -448,7 +448,7 @@ impl RebornScopedSandboxCommandTransport {
             ..Default::default()
         };
         let config = Config {
-            image: Some(self.config.image.clone()),
+            image: Some(resolved_image.to_string()),
             working_dir: Some(CONTAINER_WORKSPACE_ROOT.to_string()),
             env: Some(env),
             labels: Some(labels.clone()),
@@ -942,6 +942,7 @@ mod tests {
             .await
             .unwrap();
         let launch = launch.config;
+        assert_eq!(launch.image.as_deref(), Some("sha256:test-worker"));
         let host_config = launch.host_config.unwrap();
         let binds = host_config.binds.unwrap();
         let env = launch.env.unwrap();
