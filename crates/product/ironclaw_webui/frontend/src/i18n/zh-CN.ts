@@ -1613,5 +1613,20 @@ registerPack("zh-CN", {
   "deviceLink.error.identity_conflict": "此账号已关联。请先在其所连接的 IronClaw 账号中取消关联，然后重试。",
   "deviceLink.error.vendor_unavailable": "服务暂时不可用。",
   "deviceLink.error.custody_failed": "无法安全保存关联。",
-  "deviceLink.error.internal": "关联时出现问题。"
+  "deviceLink.error.internal": "关联时出现问题。",
+  "ironhub.install.title": "从 IronHub 安装",
+  "ironhub.install.description": "在批准之前，请查看此链接将安装的内容。",
+  "ironhub.install.name": "名称",
+  "ironhub.install.version": "版本",
+  "ironhub.install.digest": "构件摘要",
+  "ironhub.install.privateSource": "私有清单来源",
+  "ironhub.install.confirm": "安装",
+  "ironhub.install.installing": "正在安装...",
+  "ironhub.install.installed": "已安装。",
+  "ironhub.install.notInstalled": "中心报告未安装任何内容。",
+  "ironhub.install.linkInvalid": "此安装链接不完整或格式有误。",
+  "ironhub.install.rejected": "此安装链接不是为该代理签名的。",
+  "ironhub.install.expired": "此安装链接已过期。请从中心重新开始安装。",
+  "ironhub.install.alreadyUsed": "此安装链接已被使用。请从中心重新开始安装。",
+  "ironhub.install.failed": "安装未能完成。"
 });

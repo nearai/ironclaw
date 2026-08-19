@@ -1564,5 +1564,20 @@ registerPack("en", {
   "deviceLink.error.identity_conflict": "This account is already linked. Unlink it from the IronClaw account where it is connected, then try again.",
   "deviceLink.error.vendor_unavailable": "The service is temporarily unavailable.",
   "deviceLink.error.custody_failed": "The link could not be saved securely.",
-  "deviceLink.error.internal": "Something went wrong while linking."
+  "deviceLink.error.internal": "Something went wrong while linking.",
+  "ironhub.install.title": "Install from IronHub",
+  "ironhub.install.description": "Review what this link installs before you approve it.",
+  "ironhub.install.name": "Name",
+  "ironhub.install.version": "Version",
+  "ironhub.install.digest": "Artifact digest",
+  "ironhub.install.privateSource": "Private manifest source",
+  "ironhub.install.confirm": "Install",
+  "ironhub.install.installing": "Installing...",
+  "ironhub.install.installed": "Installed.",
+  "ironhub.install.notInstalled": "The hub reported that nothing was installed.",
+  "ironhub.install.linkInvalid": "This install link is incomplete or malformed.",
+  "ironhub.install.rejected": "This install link was not signed for this agent.",
+  "ironhub.install.expired": "This install link has expired. Start the install again from the hub.",
+  "ironhub.install.alreadyUsed": "This install link has already been used. Start the install again from the hub.",
+  "ironhub.install.failed": "The install could not be completed."
 });

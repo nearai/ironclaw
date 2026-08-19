@@ -18,6 +18,11 @@ const OnboardingPage = React.lazy(() =>
     default: OnboardingPage,
   }))
 );
+const InstallPage = React.lazy(() =>
+  import("../pages/install/install-page").then(({ InstallPage }) => ({
+    default: InstallPage,
+  }))
+);
 const WorkspacePage = React.lazy(() =>
   import("../pages/workspace/workspace-page").then(({ WorkspacePage }) => ({
     default: WorkspacePage,
@@ -217,6 +222,7 @@ export function App() {
           <Route index element={(<Navigate to={defaultRoute} replace />)} />
           <Route path="overview" element={(<Navigate to={defaultRoute} replace />)} />
           <Route path="welcome" element={(<LazyRoute><OnboardingPage /></LazyRoute>)} />
+          <Route path="install" element={(<LazyRoute><InstallPage /></LazyRoute>)} />
           <Route path="chat" element={(<LazyRoute><ChatPage /></LazyRoute>)} />
           <Route path="chat/:threadId" element={(<LazyRoute><ChatPage /></LazyRoute>)} />
           <Route

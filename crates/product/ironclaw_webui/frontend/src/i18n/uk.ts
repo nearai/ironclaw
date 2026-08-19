@@ -1615,5 +1615,20 @@ registerPack("uk", {
   "deviceLink.error.identity_conflict": "Цей обліковий запис уже прив'язано. Від'єднайте його від облікового запису IronClaw, до якого його підключено, і повторіть спробу.",
   "deviceLink.error.vendor_unavailable": "Сервіс тимчасово недоступний.",
   "deviceLink.error.custody_failed": "Не вдалося безпечно зберегти прив'язку.",
-  "deviceLink.error.internal": "Під час прив'язки сталася помилка."
+  "deviceLink.error.internal": "Під час прив'язки сталася помилка.",
+  "ironhub.install.title": "Встановити з IronHub",
+  "ironhub.install.description": "Перевірте, що встановлює це посилання, перш ніж підтвердити.",
+  "ironhub.install.name": "Назва",
+  "ironhub.install.version": "Версія",
+  "ironhub.install.digest": "Дайджест артефакту",
+  "ironhub.install.privateSource": "Приватне джерело маніфесту",
+  "ironhub.install.confirm": "Встановити",
+  "ironhub.install.installing": "Встановлення...",
+  "ironhub.install.installed": "Встановлено.",
+  "ironhub.install.notInstalled": "Хаб повідомив, що нічого не встановлено.",
+  "ironhub.install.linkInvalid": "Це посилання на встановлення неповне або пошкоджене.",
+  "ironhub.install.rejected": "Це посилання на встановлення не підписане для цього агента.",
+  "ironhub.install.expired": "Термін дії цього посилання минув. Розпочніть встановлення з хаба ще раз.",
+  "ironhub.install.alreadyUsed": "Це посилання вже було використане. Розпочніть встановлення з хаба ще раз.",
+  "ironhub.install.failed": "Не вдалося завершити встановлення."
 });

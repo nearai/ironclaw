@@ -1615,5 +1615,20 @@ registerPack("de", {
   "deviceLink.error.identity_conflict": "Dieses Konto ist bereits verknüpft. Trennen Sie es von dem verbundenen IronClaw-Konto und versuchen Sie es erneut.",
   "deviceLink.error.vendor_unavailable": "Der Dienst ist vorübergehend nicht verfügbar.",
   "deviceLink.error.custody_failed": "Die Verknüpfung konnte nicht sicher gespeichert werden.",
-  "deviceLink.error.internal": "Beim Verknüpfen ist etwas schiefgelaufen."
+  "deviceLink.error.internal": "Beim Verknüpfen ist etwas schiefgelaufen.",
+  "ironhub.install.title": "Aus IronHub installieren",
+  "ironhub.install.description": "Prüfen Sie, was dieser Link installiert, bevor Sie zustimmen.",
+  "ironhub.install.name": "Name",
+  "ironhub.install.version": "Version",
+  "ironhub.install.digest": "Artefakt-Digest",
+  "ironhub.install.privateSource": "Private Manifestquelle",
+  "ironhub.install.confirm": "Installieren",
+  "ironhub.install.installing": "Wird installiert...",
+  "ironhub.install.installed": "Installiert.",
+  "ironhub.install.notInstalled": "Der Hub meldet, dass nichts installiert wurde.",
+  "ironhub.install.linkInvalid": "Dieser Installationslink ist unvollständig oder fehlerhaft.",
+  "ironhub.install.rejected": "Dieser Installationslink wurde nicht für diesen Agenten signiert.",
+  "ironhub.install.expired": "Dieser Installationslink ist abgelaufen. Starten Sie die Installation im Hub erneut.",
+  "ironhub.install.alreadyUsed": "Dieser Installationslink wurde bereits verwendet. Starten Sie die Installation im Hub erneut.",
+  "ironhub.install.failed": "Die Installation konnte nicht abgeschlossen werden."
 });

@@ -1615,5 +1615,20 @@ registerPack("fr", {
   "deviceLink.error.identity_conflict": "Ce compte est déjà associé. Dissociez-le du compte IronClaw auquel il est connecté, puis réessayez.",
   "deviceLink.error.vendor_unavailable": "Le service est temporairement indisponible.",
   "deviceLink.error.custody_failed": "L'association n'a pas pu être enregistrée en toute sécurité.",
-  "deviceLink.error.internal": "Un problème est survenu pendant l'association."
+  "deviceLink.error.internal": "Un problème est survenu pendant l'association.",
+  "ironhub.install.title": "Installer depuis IronHub",
+  "ironhub.install.description": "Vérifiez ce que ce lien installe avant de l'approuver.",
+  "ironhub.install.name": "Nom",
+  "ironhub.install.version": "Version",
+  "ironhub.install.digest": "Empreinte de l'artefact",
+  "ironhub.install.privateSource": "Source de manifeste privée",
+  "ironhub.install.confirm": "Installer",
+  "ironhub.install.installing": "Installation...",
+  "ironhub.install.installed": "Installé.",
+  "ironhub.install.notInstalled": "Le hub indique que rien n'a été installé.",
+  "ironhub.install.linkInvalid": "Ce lien d'installation est incomplet ou mal formé.",
+  "ironhub.install.rejected": "Ce lien d'installation n'a pas été signé pour cet agent.",
+  "ironhub.install.expired": "Ce lien d'installation a expiré. Relancez l'installation depuis le hub.",
+  "ironhub.install.alreadyUsed": "Ce lien d'installation a déjà été utilisé. Relancez l'installation depuis le hub.",
+  "ironhub.install.failed": "L'installation n'a pas pu aboutir."
 });
