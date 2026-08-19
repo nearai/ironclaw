@@ -119,7 +119,7 @@ pub(super) async fn process_capability_response(
             if should_fail_dispatch_run {
                 runtime
                     .fail_dispatch_run(&failure, context.scope, context.invocation_id)
-                    .await;
+                    .await?;
             }
             Ok(RuntimeCapabilityOutcome::Failed(failure))
         }

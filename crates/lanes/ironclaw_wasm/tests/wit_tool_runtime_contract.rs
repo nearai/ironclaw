@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use ironclaw_wasm::{
-    DenyWasmHostHttp, RecordingWasmHostHttp, WasmError, WasmHostHttp, WasmHttpRequest,
-    WasmHttpResponse, WitToolHost, WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
+    DenyWasmHostHttp, RecordingWasmHostHttp, WasmError, WasmHostError, WasmHostHttp,
+    WasmHttpRequest, WasmHttpResponse, WitToolHost, WitToolRequest, WitToolRuntime,
+    WitToolRuntimeConfig,
 };
 use serde_json::json;
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
@@ -432,6 +433,35 @@ fn execution_error_preserves_usage_when_guest_traps_after_host_egress() {
     assert_eq!(http.requests().unwrap().len(), 1);
     match error {
         ironclaw_wasm::WasmError::ExecutionFailed { usage, .. } => {
+            assert_eq!(usage.network_egress_bytes, 5);
+        }
+        other => panic!("expected execution failure with usage, got {other:?}"),
+    }
+}
+
+#[test]
+fn execution_failure_scrubs_secret_from_call_execute_trap_message() {
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+    let prepared = runtime
+        .prepare("http", &tool_component(&trap_after_http_wat()))
+        .unwrap();
+    let marker = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+    let http = Arc::new(RecordingWasmHostHttp::err(
+        WasmHostError::FailedAfterRequestSent(format!("upstream rejected token {marker}")),
+    ));
+    let host = WitToolHost::deny_all().with_http(http.clone());
+
+    let error = runtime
+        .execute(&prepared, host, WitToolRequest::new("{}"))
+        .unwrap_err();
+
+    assert_eq!(http.requests().unwrap().len(), 1);
+    match error {
+        WasmError::ExecutionFailed { message, usage, .. } => {
+            assert!(
+                !message.contains(marker),
+                "call_execute trap message leaked the guest error: {message}"
+            );
             assert_eq!(usage.network_egress_bytes, 5);
         }
         other => panic!("expected execution failure with usage, got {other:?}"),

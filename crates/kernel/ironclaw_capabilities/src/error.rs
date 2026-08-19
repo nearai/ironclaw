@@ -319,6 +319,7 @@ mod tests {
 
     #[test]
     fn provider_rejection_preserves_typed_diagnostic_for_model_projection() {
+        let detail_marker = "CAPABILITY_DIAGNOSTIC_SECRET_MARKER";
         let error = CapabilityInvocationError::from(DispatchError::Rejected {
             runtime: Some(RuntimeKind::Mcp),
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client),
@@ -331,9 +332,16 @@ mod tests {
                 )),
                 retry_after: None,
             }),
-            detail: None,
+            detail: Some(DispatchFailureDetail::Diagnostic {
+                text: detail_marker.to_string(),
+            }),
         });
-        assert!(!format!("{error:?}").contains("token lacks repo scope"));
+        let debug = format!("{error:?}");
+        assert!(!debug.contains("token lacks repo scope"));
+        assert!(
+            !debug.contains(detail_marker),
+            "diagnostic detail leaked: {debug}"
+        );
 
         let CapabilityInvocationError::Dispatch {
             kind,

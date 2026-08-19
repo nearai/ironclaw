@@ -562,12 +562,8 @@ impl HostRuntime for DefaultHostRuntime {
         // host_runtime pre-authorization + `context.trust` stamp).
         let registry = self.registry.snapshot();
         // `context` is moved into `resume_json` below, so `resource_scope` must be
-        // cloned out first. `process_capability_response` doesn't read
-        // `context.scope` on the `ApprovalResume` path this PR sends here —
-        // `fail_dispatch_run` is Fresh-gated — but a stacked PR un-gates
-        // `fail_dispatch_run` for resumes too, which reads it again. Left
-        // unconditional rather than threading an `Option`/mode-gated clone that a
-        // near-term rebase would just undo.
+        // cloned out first. The response processor uses it if a dispatch failure
+        // also needs to transition this resumed invocation to a terminal state.
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
         let host = self.capability_host(&registry);
@@ -623,11 +619,8 @@ impl HostRuntime for DefaultHostRuntime {
         // stamp.
         let registry = self.registry.snapshot();
         // Same clone-before-move as `resume_capability` above: `context` is
-        // consumed by `auth_resume_json`, and `process_capability_response`
-        // doesn't read `context.scope` on the `AuthResume` path this PR sends
-        // here (`fail_dispatch_run` is Fresh-gated) — a stacked PR un-gates it
-        // for resumes and reads it again, so this is left unconditional rather
-        // than churned twice.
+        // consumed by `auth_resume_json`, while the response processor uses the
+        // scope if a dispatch failure must transition this resumed invocation.
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
         let host = self.capability_host(&registry);
@@ -1017,22 +1010,25 @@ impl DefaultHostRuntime {
         failure: &RuntimeCapabilityFailure,
         scope: &ResourceScope,
         invocation_id: InvocationId,
-    ) {
+    ) -> Result<(), HostRuntimeError> {
         let Some(invocation_state) = self.invocation_state.as_ref() else {
-            return;
+            return Ok(());
         };
-        if let Err(error) = invocation_state
+        let result = invocation_state
             .fail(scope, invocation_id, "Dispatch".to_string())
             .await
-        {
+            .map(|_| ())
+            .map_err(unavailable_from_invocation_state);
+        if let Err(error) = &result {
             tracing::warn!(
                 invocation_id = %invocation_id,
                 capability_id = %failure.capability_id,
                 failure_kind = failure.kind.as_str(),
-                transition_error = %unavailable_from_invocation_state(error),
+                transition_error = %error,
                 "terminal dispatch failure could not transition run state; failure is returned to caller",
             );
         }
+        result
     }
 
     pub(super) async fn lookup_approval_request_id(

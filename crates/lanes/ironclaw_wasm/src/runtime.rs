@@ -108,7 +108,7 @@ impl WitToolRuntime {
                 let message = if store.data().deadline_exceeded() {
                     "WASM execution deadline exceeded".to_string()
                 } else {
-                    error.to_string()
+                    scrub_guest_error(error.to_string())
                 };
                 return Err(execution_failed_with_usage(message, &store, started));
             }

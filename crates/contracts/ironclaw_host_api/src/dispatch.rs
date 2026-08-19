@@ -227,7 +227,7 @@ impl DispatchInputIssue {
 }
 
 /// Stable structured dispatch failure details for dispatch validation failures.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum DispatchFailureDetail {
     InvalidInput {
         issues: Vec<DispatchInputIssue>,
@@ -254,6 +254,25 @@ pub enum DispatchFailureDetail {
     HostRemediation {
         text: HostRemediation,
     },
+}
+
+impl fmt::Debug for DispatchFailureDetail {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidInput { issues } => formatter
+                .debug_struct("InvalidInput")
+                .field("issues", issues)
+                .finish(),
+            Self::Diagnostic { .. } => formatter
+                .debug_struct("Diagnostic")
+                .field("text", &"<redacted>")
+                .finish(),
+            Self::HostRemediation { text } => formatter
+                .debug_struct("HostRemediation")
+                .field("text", text)
+                .finish(),
+        }
+    }
 }
 
 /// Stable, redacted runtime failure categories surfaced through the dispatch port.

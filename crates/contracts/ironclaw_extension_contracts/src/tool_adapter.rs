@@ -263,6 +263,7 @@ impl ToolCall {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_host_api::dispatch::{DispatchInputIssue, DispatchInputIssueCode};
 
     #[test]
     fn tool_error_display_stays_redacted() {
@@ -274,6 +275,51 @@ mod tests {
         let rendered = error.to_string();
         assert!(rendered.contains("Backend"), "{rendered}");
         assert!(!rendered.contains("token"), "{rendered}");
+    }
+
+    #[test]
+    fn rejected_debug_redacts_nested_diagnostic_detail_but_keeps_input_detail() {
+        let marker = "TOOL_DIAGNOSTIC_SECRET_MARKER";
+        let error = ToolError::Rejected {
+            runtime: Some(RuntimeKind::Wasm),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest),
+            diagnostic: None,
+            detail: Some(DispatchFailureDetail::Diagnostic {
+                text: marker.to_string(),
+            }),
+        };
+        let debug = format!("{error:?}");
+        assert!(!debug.contains(marker), "diagnostic text leaked: {debug}");
+        assert!(
+            debug.contains("Diagnostic"),
+            "detail kind was lost: {debug}"
+        );
+        assert!(
+            debug.contains("<redacted>"),
+            "redaction is not visible: {debug}"
+        );
+
+        let useful = ToolError::Rejected {
+            runtime: Some(RuntimeKind::Wasm),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest),
+            diagnostic: None,
+            detail: Some(DispatchFailureDetail::InvalidInput {
+                issues: vec![
+                    DispatchInputIssue::new("/title", DispatchInputIssueCode::TypeMismatch)
+                        .expected("string")
+                        .received("integer"),
+                ],
+            }),
+        };
+        let useful_debug = format!("{useful:?}");
+        assert!(
+            useful_debug.contains("/title"),
+            "input path was lost: {useful_debug}"
+        );
+        assert!(
+            useful_debug.contains("string"),
+            "input detail was lost: {useful_debug}"
+        );
     }
 
     #[test]
