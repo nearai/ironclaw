@@ -30,9 +30,39 @@ Copied verbatim from the spec and the repo contract. Every task's requirements i
 - **Test-first, always.** Write the failing test, run it, watch it fail for the right reason, then implement. Never weaken an assertion to go green.
 - **Run after any task that moves dependency edges, layer keys, or pinned guidance:** `cargo test -p ironclaw_architecture_tests`.
 
+## Status (updated 2026-08-19)
+
+**Slice 1 is complete and committed** — Tasks 1–5, each test-first, each with
+its verification command run and green. Commits:
+
+| Task | Commit | Evidence |
+|---|---|---|
+| 1 | `2ee01e5a2` | wire-string test red → green |
+| 2 | `aea2c81e3` | metadata round-trip + legacy-default tests; workspace check clean across 26 changed files |
+| 3 | `4a953a5d9` | 4 tests, incl. the fail-closed default |
+| 4 | `8ae9832f7` | 2 tests, **mutation-verified** (flipping the sort and dropping the kind filter each kill the test) |
+| 5 | `fc0a2f8f8` | 6 predicate tests + 3 caller tests, **mutation-verified** (disabling the cap kills 2) |
+
+Gates run at slice close: `cargo test -p ironclaw_turns -p ironclaw_processes`
+(12 suites green), `cargo test -p ironclaw_architecture_tests` (all green after
+re-pinning the `host_api` contracts size ceiling, which `ActivationProvenance`
+tipped over), `cargo check --workspace --all-targets` clean, `cargo fmt`.
+Both standing invariants re-verified: the production deny-filter is untouched
+and the diff adds no trusted-ingress minting.
+
+**Two gates could not be run in this environment, and are outstanding:**
+- `cargo clippy` — the only Rust toolchain on this box has no `clippy`
+  component and no `rustup` to add one.
+- Anything requiring the WebUI build — its build script shells out to
+  `pnpm` via a corepack that is broken here (`ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING`),
+  unrelated to these changes. Everything else was verified with
+  `SKIP_FRONTEND_BUILD=1`, the build script's own sanctioned opt-out.
+
+**Slice 2 (Tasks 6–10) has not been started.** Task 6 is the next action.
+
 ---
 
-### Task 1: `ActivationProvenance` vocabulary
+### Task 1 ✅ DONE: `ActivationProvenance` vocabulary
 
 Adds the enum that tags *why* a run was created. Nothing reads it yet — Task 2 persists it, Tasks 3/4 act on it.
 
@@ -44,7 +74,7 @@ Adds the enum that tags *why* a run was created. Nothing reads it yet — Task 2
 - Consumes: nothing.
 - Produces: `ironclaw_host_api::turn::ActivationProvenance` with variants `Human`, `ParentAgent`, `System`; wire strings `"human"`, `"parent_agent"`, `"system"`. Re-exported through `ironclaw_turns`' prelude (which already re-exports `TurnStatus` and friends), so downstream crates write `use ironclaw_turns::ActivationProvenance;`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to the `#[cfg(test)] mod tests` block in `crates/contracts/ironclaw_host_api/src/turn.rs`:
 
@@ -72,12 +102,12 @@ fn activation_provenance_wire_strings_are_snake_case() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p ironclaw_host_api activation_provenance_wire_strings_are_snake_case`
 Expected: FAIL to compile — `cannot find type ActivationProvenance in this scope`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add to `crates/contracts/ironclaw_host_api/src/turn.rs`, immediately before the `TurnStatus` definition:
 
@@ -98,19 +128,19 @@ pub enum ActivationProvenance {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p ironclaw_host_api activation_provenance_wire_strings_are_snake_case`
 Expected: PASS.
 
-- [ ] **Step 5: Re-export from the turns prelude**
+- [x] **Step 5: Re-export from the turns prelude**
 
 Find the prelude re-export list in `crates/kernel/ironclaw_turns/src/lib.rs` (the one that already names `TurnStatus`) and add `ActivationProvenance` to it, alphabetically within its group. Confirm with:
 
 Run: `cargo build -p ironclaw_turns`
 Expected: builds clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/contracts/ironclaw_host_api/src/turn.rs crates/kernel/ironclaw_turns/src/lib.rs
@@ -119,7 +149,7 @@ git commit -m "feat(turns): add ActivationProvenance vocabulary for subagent act
 
 ---
 
-### Task 2: Persist provenance on the run record
+### Task 2 ✅ DONE: Persist provenance on the run record
 
 Threads the provenance from a submission into durable process metadata and back out onto `TurnRunRecord`. This is the field Tasks 3 and 4 read.
 
@@ -138,7 +168,7 @@ Threads the provenance from a submission into durable process metadata and back 
   - `TurnRunRecord.subagent_activation_provenance: Option<ActivationProvenance>` — set once at run creation, never mutated.
   - `AgentTurnProcessStateMetadata.subagent_activation_provenance: Option<ActivationProvenance>` — the durable carrier.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `crates/kernel/ironclaw_turns/tests/activation_provenance.rs`. Follow the construction helpers used by the crate's existing projection tests — open `crates/kernel/ironclaw_turns/src/process_projection/runtime.rs`'s own `#[cfg(test)] mod tests` and reuse its snapshot fixture builder rather than inventing one:
 
@@ -190,12 +220,12 @@ fn legacy_metadata_without_provenance_projects_as_none() {
 
 If `AgentTurnProcessStateMetadata` is not public from the crate root, place these two tests inside `crates/kernel/ironclaw_turns/src/process_projection/metadata.rs`'s own `#[cfg(test)] mod tests` instead and drop the module path prefix. Do not add a `pub` export just to make an external test compile.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p ironclaw_turns provenance_round_trips_through_agent_turn_process_metadata`
 Expected: FAIL — `no field subagent_activation_provenance on type AgentTurnProcessStateMetadata`.
 
-- [ ] **Step 3: Add the field to the durable metadata carrier**
+- [x] **Step 3: Add the field to the durable metadata carrier**
 
 In `crates/kernel/ironclaw_turns/src/process_projection/metadata.rs`, immediately after the `subagent_depth` field (line 101):
 
@@ -209,12 +239,12 @@ In `crates/kernel/ironclaw_turns/src/process_projection/metadata.rs`, immediatel
 
 Add `ActivationProvenance` to that file's `use` list.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p ironclaw_turns provenance_round_trips_through_agent_turn_process_metadata legacy_metadata_without_provenance_projects_as_none`
 Expected: PASS (both).
 
-- [ ] **Step 5: Add the field to the request and record, and fix every construction site**
+- [x] **Step 5: Add the field to the request and record, and fix every construction site**
 
 In `crates/kernel/ironclaw_turns/src/request.rs`, at the end of `SubmitTurnRequest` (after `product_context`):
 
@@ -253,7 +283,7 @@ cargo build --workspace --all-targets 2>&1 | grep -c "missing field .subagent_ac
 
 Add `subagent_activation_provenance: None,` to each reported site. There are 46 `SubmitTurnRequest { … }` literals plus the `TurnRunRecord { … }` literals. Every one of them is an ordinary submission or a test fixture — `None` is correct for all of them. Do not set a non-`None` value anywhere in this task; Task 3 owns the only caller that does.
 
-- [ ] **Step 6: Run the full crate suite plus a workspace build**
+- [x] **Step 6: Run the full crate suite plus a workspace build**
 
 Run: `cargo test -p ironclaw_turns`
 Expected: PASS.
@@ -261,7 +291,7 @@ Expected: PASS.
 Run: `cargo build --workspace --all-targets`
 Expected: builds clean, zero `missing field` errors.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add -A
@@ -270,7 +300,7 @@ git commit -m "feat(turns): persist subagent activation provenance on the run re
 
 ---
 
-### Task 3: The `activate()` re-activation primitive
+### Task 3 ✅ DONE: The `activate()` re-activation primitive
 
 The single primitive for re-activating an existing thread with a provenance tag. Background delivery (Task 7) calls it; `subagent_extend` (a later slice) will too.
 
@@ -295,7 +325,7 @@ The single primitive for re-activating an existing thread with a provenance tag.
   ```
   and `TurnCoordinator::activate(&self, request: ActivateThreadRequest) -> Result<SubmitTurnResponse, TurnError>`, with a fail-closed default impl. `TurnError::ThreadBusy`-shaped rejection when a run is already live on the thread comes from the existing admission path unchanged — `activate` adds no new busy handling.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to the `#[cfg(test)] mod tests` block in `crates/kernel/ironclaw_turns/src/coordinator.rs`. Reuse the module's existing fixture helpers for building a coordinator — read the `declared_limits_narrow_profile_ceilings_and_never_widen_them` test at line 829 first and copy its setup shape rather than inventing new fixtures:
 
@@ -397,12 +427,12 @@ async fn default_activate_impl_refuses_rather_than_submitting_untagged() {
 
 `recording_coordinator_fixture()`, `test_scope()`, `test_actor()`, and `test_message_ref()` are helpers you add alongside these tests if the module does not already provide equivalents. The recorder must capture the full `SubmitTurnRequest` the coordinator built (not just a count) — per `.claude/rules/testing.md`, doubles capture every argument the production caller passes.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p ironclaw_turns activate_submits_through_admission_and_stamps_provenance default_activate_impl_refuses_rather_than_submitting_untagged`
 Expected: FAIL to compile — `no method named activate`, `cannot find struct ActivateThreadRequest`.
 
-- [ ] **Step 3: Add the request type**
+- [x] **Step 3: Add the request type**
 
 In `crates/kernel/ironclaw_turns/src/request.rs`, after `SubmitChildRunRequest`:
 
@@ -425,7 +455,7 @@ pub struct ActivateThreadRequest {
 }
 ```
 
-- [ ] **Step 4: Add the trait method with a fail-closed default**
+- [x] **Step 4: Add the trait method with a fail-closed default**
 
 In `crates/kernel/ironclaw_turns/src/coordinator.rs`, inside `pub trait TurnCoordinator` (line 125), after `submit_turn`:
 
@@ -448,7 +478,7 @@ In `crates/kernel/ironclaw_turns/src/coordinator.rs`, inside `pub trait TurnCoor
     }
 ```
 
-- [ ] **Step 5: Implement it on `DefaultTurnCoordinator`**
+- [x] **Step 5: Implement it on `DefaultTurnCoordinator`**
 
 In the `impl<S> TurnCoordinator for DefaultTurnCoordinator<S>` block (line 484), after `submit_turn`:
 
@@ -483,7 +513,7 @@ In the `impl<S> TurnCoordinator for DefaultTurnCoordinator<S>` block (line 484),
 
 If the compiler reports fields of `SubmitTurnRequest` this literal is missing, add them with the same neutral values the crate's other non-child submissions use — do not invent new semantics here.
 
-- [ ] **Step 6: Forward it on the `Arc<C>` blanket impl**
+- [x] **Step 6: Forward it on the `Arc<C>` blanket impl**
 
 In `impl<C> TurnCoordinator for Arc<C>` (line 771), add the forwarding method beside the others:
 
@@ -498,7 +528,7 @@ In `impl<C> TurnCoordinator for Arc<C>` (line 771), add the forwarding method be
 
 Without this, `Arc<dyn TurnCoordinator>` callers would silently get the trait's refusing default instead of the real implementation.
 
-- [ ] **Step 7: Run tests to verify they pass**
+- [x] **Step 7: Run tests to verify they pass**
 
 Run: `cargo test -p ironclaw_turns activate_submits_through_admission_and_stamps_provenance default_activate_impl_refuses_rather_than_submitting_untagged`
 Expected: PASS (both).
@@ -506,7 +536,7 @@ Expected: PASS (both).
 Run: `cargo test -p ironclaw_turns`
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/kernel/ironclaw_turns/src/request.rs crates/kernel/ironclaw_turns/src/coordinator.rs
@@ -515,7 +545,7 @@ git commit -m "feat(turns): add provenance-tagged activate() re-activation primi
 
 ---
 
-### Task 4: Bounded newest-first run query for a thread
+### Task 4 ✅ DONE: Bounded newest-first run query for a thread
 
 The streak caps (Task 5, and `subagent_extend` in a later slice) are *derived* — no stored counter — so they need to read a bounded window of a thread's most recent runs. Nothing today returns newest-first bounded run records for a thread; `children_of` is parent-keyed and unbounded.
 
@@ -539,7 +569,7 @@ The streak caps (Task 5, and `subagent_extend` in a later slice) are *derived* �
 1. `process_scope_v3` is **not** keyed on `process_kind`, and a thread's scope also holds `CapabilityInvocation`/`CapabilityInvocationState` processes (`crates/kernel/ironclaw_processes/src/invocation_state.rs:695`). A raw `LIMIT 16` can therefore come back entirely non-`AgentTurn` and yield zero runs. **Over-fetch**: page the descending keyset until `limit` `AgentTurn` records are collected or a hard page budget is spent. Do not declare a new kind-keyed index — that would need the offline `migrate_row_native_indexes` step (`journal_store.rs:404-444`).
 2. The architecture gate `crates/app/ironclaw_architecture_tests/tests/reborn_process_storage_scan_gate.rs:30-41` forbids `.query(` and `.tail_bounded(` inside `journal_store.rs` outside two named migration/startup functions. It scans **only** `journal_store.rs`, not `rows.rs`, and its own self-test at lines 210-223 confirms `.query_ordered(` is deliberately not scanned. So: put the enumeration in `rows.rs` and reach storage through `.query_ordered(`. Do not add a `.query(` call to `journal_store.rs`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `crates/kernel/ironclaw_processes/tests/process_journal_store_contract.rs`, beside the existing `process_snapshots` coverage. Use the file's existing backend-parametrized harness so the case runs on every backend — read the test at line 823 first and copy its setup:
 
@@ -581,12 +611,12 @@ async fn recent_process_snapshots_returns_newest_first_bounded_by_limit() {
 
 `seed_capability_invocation_process` may not exist in the harness — if not, add it alongside the existing agent-turn seeder rather than dropping the interleaving, because the interleaving is the whole point of trap 1 above.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p ironclaw_processes recent_process_snapshots_returns_newest_first_bounded_by_limit`
 Expected: FAIL to compile — `no method named recent_process_snapshots`.
 
-- [ ] **Step 3: Add the descending bounded row query**
+- [x] **Step 3: Add the descending bounded row query**
 
 In `crates/kernel/ironclaw_processes/src/journal_store/rows.rs`, give `ordered_process_query` (line 1104) a direction parameter, replacing the hardcoded `SortDirection::Ascending` at line 1131, and pass `SortDirection::Ascending` explicitly at its four existing call sites (`query_claim_candidates` line 930, `query_active_conflict` line 972, `query_running_quota_rows` line 995, `query_expired_processes` line 1046) so their behavior is unchanged.
 
@@ -641,7 +671,7 @@ where
 
 Match `ordered_process_query`'s real signature — read it at line 1104 and adapt the call above to whatever its filter/paging parameters actually are. Do not change its paging contract; only add the direction.
 
-- [ ] **Step 4: Add the port method and thread it through**
+- [x] **Step 4: Add the port method and thread it through**
 
 `crates/kernel/ironclaw_processes/src/journal.rs`, on `ProcessSnapshotSource` (line 946):
 
@@ -660,7 +690,7 @@ Implement it in `journal_store.rs`'s `impl ProcessSnapshotSource for ProcessJour
 
 Forward it through `crates/kernel/ironclaw_turns/src/process_projection/store_adapter.rs:35-47`.
 
-- [ ] **Step 5: Run the storage test and the architecture gate**
+- [x] **Step 5: Run the storage test and the architecture gate**
 
 Run: `cargo test -p ironclaw_processes recent_process_snapshots_returns_newest_first_bounded_by_limit`
 Expected: PASS on every backend the harness parametrizes.
@@ -668,7 +698,7 @@ Expected: PASS on every backend the harness parametrizes.
 Run: `cargo test -p ironclaw_architecture_tests --test reborn_process_storage_scan_gate`
 Expected: PASS.
 
-- [ ] **Step 6: Expose it as `recent_runs_for_thread` on the turn port**
+- [x] **Step 6: Expose it as `recent_runs_for_thread` on the turn port**
 
 In `crates/kernel/ironclaw_turns/src/agent_turn_runtime.rs`, on `AgentTurnSpawnTreeRuntimePort` (line 73) — **not** on `AgentTurnRuntimePort`, which has six test doubles this would break:
 
@@ -687,7 +717,7 @@ Implement it in `crates/kernel/ironclaw_turns/src/process_projection/runtime.rs`
 
 Add stub implementations to the two test doubles — `crates/loop/ironclaw_loop_host/src/subagent_spawn_port/tests.rs:947` and `crates/loop/ironclaw_turn_runner/src/structured_finalization/tests.rs:189` — returning `Ok(Vec::new())`.
 
-- [ ] **Step 7: Verify the whole workspace still builds and the projection test passes**
+- [x] **Step 7: Verify the whole workspace still builds and the projection test passes**
 
 Run: `cargo test -p ironclaw_turns`
 Expected: PASS.
@@ -695,7 +725,7 @@ Expected: PASS.
 Run: `cargo build --workspace --all-targets`
 Expected: clean.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add -A
@@ -704,7 +734,7 @@ git commit -m "feat(processes): add bounded newest-first agent-turn query for a 
 
 ---
 
-### Task 5: System-wake streak cap in `activate()`
+### Task 5 ✅ DONE: System-wake streak cap in `activate()`
 
 Bounds the autonomous spawn → settle → wake → spawn cycle. Without it a parent that spawns a fresh child on every background completion loops forever with no human in it, under every existing cap.
 
@@ -725,7 +755,7 @@ Bounds the autonomous spawn → settle → wake → spawn cycle. Without it a pa
 - A refusal loses nothing durable: the settled edge stays `Settled` and is drained by the run-start sweep or the boot pass. The cap gates the *reactive wake* only, never delivery.
 - `SYSTEM_WAKE_STREAK_CAP` stays its own named constant. It must not be merged with `DEFAULT_SUBAGENT_MAX_TREE_DESCENDANTS` or the SUBAGENT family `iteration_limit`, which also happen to be 16.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `crates/kernel/ironclaw_turns/src/activation_streak.rs` with the tests first (implementation stub returning `unimplemented!()` so the file compiles):
 
@@ -797,12 +827,12 @@ mod tests {
 
 Note the `ParentAgent` exclusion is **not** tested here: it is enforced by the *fetch*, not this function, and is covered in Step 4.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p ironclaw_turns activation_streak`
 Expected: FAIL — `not yet implemented` panic from the stub (or a compile error if the stub is absent).
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In the same file, above the test module:
 
@@ -845,12 +875,12 @@ pub fn system_wake_admitted(recent: &[TurnRunRecord]) -> bool {
 
 Declare `pub mod activation_streak;` in `crates/kernel/ironclaw_turns/src/lib.rs`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p ironclaw_turns activation_streak`
 Expected: PASS (all five).
 
-- [ ] **Step 5: Enforce the cap inside `activate()`**
+- [x] **Step 5: Enforce the cap inside `activate()`**
 
 In `DefaultTurnCoordinator::activate` (Task 3), before building the `SubmitTurnRequest`, add the guard. It applies to `System` provenance only:
 
@@ -886,7 +916,7 @@ In `DefaultTurnCoordinator::activate` (Task 3), before building the `SubmitTurnR
 
 Note the filter above is a belt-and-braces second pass: the *fetch* is what the spec requires to exclude `ParentAgent`, and `recent_runs_for_thread` returns all kinds. Keeping the filter here (rather than pushing a provenance predicate into the storage query) keeps Task 4's query general and the exclusion visible at the policy site.
 
-- [ ] **Step 6: Add the caller-level test**
+- [x] **Step 6: Add the caller-level test**
 
 Add to `crates/kernel/ironclaw_turns/src/coordinator.rs`'s test module, beside Task 3's tests:
 
@@ -946,7 +976,7 @@ async fn parent_agent_runs_do_not_saturate_the_system_streak() {
 }
 ```
 
-- [ ] **Step 7: Run tests to verify they pass**
+- [x] **Step 7: Run tests to verify they pass**
 
 Run: `cargo test -p ironclaw_turns`
 Expected: PASS.
@@ -954,7 +984,7 @@ Expected: PASS.
 Run: `cargo clippy -p ironclaw_turns --all-targets --all-features -- -D warnings`
 Expected: zero warnings.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add -A
