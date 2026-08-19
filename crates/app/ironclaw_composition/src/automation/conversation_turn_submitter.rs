@@ -75,6 +75,7 @@ fn coordinator_submit_request(submission: ConversationTurnSubmission) -> SubmitT
         product_context.execution_policy = submission.execution_policy;
     }
     SubmitTurnRequest {
+        subagent_activation_provenance: None,
         requested_model: None,
         scope: submission.scope,
         actor: submission.actor,

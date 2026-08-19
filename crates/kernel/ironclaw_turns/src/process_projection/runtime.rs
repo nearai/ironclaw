@@ -212,6 +212,7 @@ impl AgentTurnProcessRuntime {
             model_usage: None,
             execution_outcome: None,
             subagent_depth: 0,
+            subagent_activation_provenance: request.subagent_activation_provenance,
             spawn_tree_descendant_cap: None,
             product_context: request.product_context,
             resume_disposition: None,
@@ -291,6 +292,9 @@ impl AgentTurnProcessRuntime {
             subagent_depth,
             spawn_tree_root_run_id: Some(turn_run_id_from_process_id(root_process_id)),
             product_context: parent_metadata.product_context.clone(),
+            // A fresh child run is a spawn, not a re-activation of an existing
+            // thread, so it carries no activation provenance.
+            subagent_activation_provenance: None,
         };
         admission_policy
             .check_submit(&submit_template)
@@ -317,6 +321,11 @@ impl AgentTurnProcessRuntime {
             model_usage: None,
             execution_outcome: None,
             subagent_depth,
+            // A fresh child run is a spawn, not a re-activation of an existing
+            // thread, so it carries no activation provenance. `ParentAgent` is
+            // reserved for `subagent_extend` re-activating an already-terminal
+            // child.
+            subagent_activation_provenance: None,
             spawn_tree_descendant_cap: Some(request.spawn_tree_descendant_cap),
             product_context: parent_metadata.product_context,
             resume_disposition: None,
@@ -1128,6 +1137,7 @@ fn turn_run_record_from_process_snapshot(
         received_at: state.received_at,
         parent_run_id: snapshot.parent_process_id.map(turn_run_id_from_process_id),
         subagent_depth: metadata.subagent_depth,
+        subagent_activation_provenance: metadata.subagent_activation_provenance,
         spawn_tree_root_run_id: snapshot.root_process_id.map(turn_run_id_from_process_id),
         product_context: state.product_context,
         resume_disposition: state.resume_disposition,

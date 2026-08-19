@@ -2328,6 +2328,7 @@ impl RebornRuntime {
         let response = match self
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
+                subagent_activation_provenance: None,
                 requested_model: accepted.replay_metadata.resolved_model.clone(),
                 scope: scope.clone(),
                 actor: TurnActor::new(self.actor_user_id.clone()),

@@ -4257,6 +4257,7 @@ async fn cancel_run_propagates_to_children_when_event_sink_is_unavailable() {
     let parent = runtime
         .turn_coordinator
         .submit_turn(SubmitTurnRequest {
+            subagent_activation_provenance: None,
             requested_model: None,
             output_contract: None,
             scope: parent_scope.clone(),
@@ -7195,6 +7196,7 @@ async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
     let submitted_a = runtime
         .turn_coordinator
         .submit_turn(SubmitTurnRequest {
+            subagent_activation_provenance: None,
             requested_model: None,
             output_contract: None,
             scope: scope.clone(),

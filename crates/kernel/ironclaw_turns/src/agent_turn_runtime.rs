@@ -183,6 +183,9 @@ pub struct TurnRunRecord {
     pub subagent_depth: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_tree_root_run_id: Option<TurnRunId>,
+    /// Why this run was activated. Immutable after creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_activation_provenance: Option<crate::ActivationProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product_context: Option<crate::ProductTurnContext>,
     #[serde(
@@ -234,6 +237,7 @@ mod tests {
         }))
         .expect("profile deserialization");
         TurnRunRecord {
+            subagent_activation_provenance: None,
             run_id: TurnRunId::new(),
             turn_id: crate::TurnId::new(),
             scope,

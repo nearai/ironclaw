@@ -3760,6 +3760,7 @@ async fn claimed_run_context() -> LoopRunContext {
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let response = coordinator
         .submit_turn(SubmitTurnRequest {
+            subagent_activation_provenance: None,
             requested_model: None,
             scope: scope.clone(),
             actor: TurnActor::new(UserId::new("user-loop").unwrap()),

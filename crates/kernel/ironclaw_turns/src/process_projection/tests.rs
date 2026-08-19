@@ -10,8 +10,8 @@ use std::sync::Arc;
 use super::*;
 use crate::TurnEventProjectionFromProcessJournal;
 use crate::{
-    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, CapabilityActivityId, EventCursor,
-    IdempotencyKey, RunProfileId, RunProfileVersion, TurnActor, TurnGateRef, TurnId,
+    AcceptedMessageRef, ActivationProvenance, AllowAllTurnAdmissionPolicy, CapabilityActivityId,
+    EventCursor, IdempotencyKey, RunProfileId, RunProfileVersion, TurnActor, TurnGateRef, TurnId,
     TurnRunProfile, TurnScope, events::TurnEventProjectionSource,
 };
 use ironclaw_loop_contracts::InMemoryRunProfileResolver;
@@ -37,6 +37,7 @@ fn profile() -> TurnRunProfile {
 
 fn record_with_status(status: TurnStatus) -> TurnRunRecord {
     TurnRunRecord {
+        subagent_activation_provenance: None,
         run_id: TurnRunId::new(),
         turn_id: TurnId::new(),
         scope: scope(),
@@ -76,6 +77,7 @@ fn agent_turn_metadata(
 ) -> AgentTurnProcessStateMetadata {
     let run_profile = profile();
     AgentTurnProcessStateMetadata {
+        subagent_activation_provenance: None,
         turn_id,
         actor: Some(actor),
         accepted_message_ref: AcceptedMessageRef::new("accepted-runtime-test")
@@ -94,6 +96,59 @@ fn agent_turn_metadata(
         resume_disposition: None,
         ownerless_thread: false,
     }
+}
+
+#[test]
+fn activation_provenance_survives_the_agent_turn_metadata_round_trip() {
+    let mut metadata = agent_turn_metadata(
+        TurnActor::new(UserId::new("activation-provenance-user").expect("user")),
+        TurnId::new(),
+        0,
+    );
+    metadata.subagent_activation_provenance = Some(ActivationProvenance::System);
+
+    let wire = serde_json::to_value(&metadata).expect("serialize metadata");
+    assert_eq!(
+        wire["subagent_activation_provenance"],
+        serde_json::json!("system"),
+        "provenance must reach the durable wire shape"
+    );
+
+    let decoded: AgentTurnProcessStateMetadata =
+        serde_json::from_value(wire).expect("deserialize metadata");
+    assert_eq!(
+        decoded.subagent_activation_provenance,
+        Some(ActivationProvenance::System),
+        "a System-tagged submission must round-trip through durable metadata"
+    );
+}
+
+#[test]
+fn legacy_agent_turn_metadata_without_activation_provenance_defaults_to_none() {
+    let mut metadata = agent_turn_metadata(
+        TurnActor::new(UserId::new("activation-provenance-user").expect("user")),
+        TurnId::new(),
+        0,
+    );
+    // Set a non-default value before removing the field so this exercises the
+    // serde default rather than merely round-tripping an absent one.
+    metadata.subagent_activation_provenance = Some(ActivationProvenance::ParentAgent);
+
+    let mut wire = serde_json::to_value(&metadata).expect("serialize metadata");
+    assert!(
+        wire.as_object_mut()
+            .expect("metadata object")
+            .remove("subagent_activation_provenance")
+            .is_some(),
+        "current wire shape must serialize a present provenance"
+    );
+
+    let decoded: AgentTurnProcessStateMetadata =
+        serde_json::from_value(wire).expect("legacy metadata deserializes");
+    assert_eq!(
+        decoded.subagent_activation_provenance, None,
+        "rows written before this field existed must stay readable as None"
+    );
 }
 
 #[test]
@@ -882,6 +937,7 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
     let state_ref = ProcessCheckpointRef::from_trusted("source-state");
     let run_profile = profile();
     let metadata = AgentTurnProcessStateMetadata {
+        subagent_activation_provenance: None,
         turn_id: TurnId::new(),
         actor: Some(actor.clone()),
         accepted_message_ref: AcceptedMessageRef::new("accepted-retry").expect("accepted"),
