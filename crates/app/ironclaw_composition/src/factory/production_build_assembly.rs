@@ -320,17 +320,31 @@ async fn build_local_storage_production_shaped(
     )
     .await?;
     let secret_credentials = SecretCredentialStores::new(scoped_filesystem, crypto);
-    let resource_governor = filesystem_resource_governor(&filesystem);
+    // libSQL journals share one bounded lane (#7714); Postgres keeps its
+    // existing process-journal pool and data-plane governor (#7471).
+    let libsql_journal_lane = match &filesystem_bundle.durable_backend {
+        DurableBackend::LibSql { runtime, .. } => Some(
+            crate::filesystem_assembly::libsql_journal_lane_filesystem(runtime, |backend| {
+                crate::filesystem_assembly::process_journal_root_filesystem(backend)
+            })?,
+        ),
+        DurableBackend::Postgres(_) => None,
+    };
+    let resource_governor =
+        filesystem_resource_governor(libsql_journal_lane.as_ref().unwrap_or(&filesystem));
     if let Some(singleton) = postgres_resource_governor_singleton {
         ensure_postgres_resource_governor_authority_for_build(singleton)?;
     }
-    let process_journal_filesystem = process_journal_pool
-        .map(|pool| {
-            crate::filesystem_assembly::process_journal_root_filesystem(Arc::new(
-                ironclaw_filesystem::PostgresRootFilesystem::new(pool),
-            ))
-        })
-        .transpose()?;
+    let process_journal_filesystem = match libsql_journal_lane {
+        Some(lane) => Some(lane),
+        None => process_journal_pool
+            .map(|pool| {
+                crate::filesystem_assembly::process_journal_root_filesystem(Arc::new(
+                    ironclaw_filesystem::PostgresRootFilesystem::new(pool),
+                ))
+            })
+            .transpose()?,
+    };
     let stores = ProductionStoreBundle::with_secret_credentials(
         filesystem,
         resource_governor,
