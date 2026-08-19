@@ -1,6 +1,6 @@
 # Proposed: Storybook + Design-System Catalog for the IronClaw WebUI
 
-**Status:** Proposal, under review · **Authored against:** `origin/main` @ `d3791e0f8` · **Tracks:** Epic [#7038](https://github.com/nearai/ironclaw/issues/7038) · **Benchmarks:** [`apdd-kit`](../../../apdd-kit) · [`docs/reborn/target-architecture/`](../target-architecture/PROPOSAL.md) (PR #6918)
+**Status:** Proposal, under review · **Authored against:** `origin/main` @ `d3791e0f8` · **Tracks:** Epic [#7038](https://github.com/nearai/ironclaw/issues/7038) · **Benchmarks:** [`apdd-kit`](../../../../apdd-kit) · [`docs/internal/reborn/target-architecture/`](../target-architecture/PROPOSAL.md) (PR #6918)
 
 ## 1. Executive decision
 
@@ -107,6 +107,6 @@ flowchart LR
 
 ## 10. References
 
-- APDD kit: [`apdd-kit/guides/design-ux-governance.md`](../../../apdd-kit/guides/design-ux-governance.md), [`apdd-kit/templates/DESIGN.template.md`](../../../apdd-kit/templates/DESIGN.template.md)
-- Benchmark package: [`docs/reborn/target-architecture/`](../target-architecture/README.md) (PR #6918)
+- APDD kit: [`apdd-kit/guides/design-ux-governance.md`](../../../../apdd-kit/guides/design-ux-governance.md), [`apdd-kit/templates/DESIGN.template.md`](../../../../apdd-kit/templates/DESIGN.template.md)
+- Benchmark package: [`docs/internal/reborn/target-architecture/`](../target-architecture/README.md) (PR #6918)
 - This initiative: `DESIGN.md`, `.claude/rules/design-system.md`, `src/design-system/README.md`; Epic #7038; PRs #7039, #7043.

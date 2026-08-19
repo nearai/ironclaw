@@ -10,7 +10,7 @@
 
 Formalize the design-system work already underway (Storybook integration + a catalogued primitive/component library) into a **benchmarked, phased program** to redefine the WebUI's theming, visual assets, interactions, and information architecture around an agent-first experience. Phases 1–2 have **already landed** (PRs #7039, #7043); this package is the north-star that frames the remaining phases and the dependencies they carry.
 
-It deliberately follows two internal benchmarks: the **APDD governance kit** (`../../../apdd-kit` — docs-are-source-of-truth, a `DESIGN.md` constitution, Storybook-as-workbench/test/MCP, a design validation gate) and the **target-crate-architecture package** ([`docs/reborn/target-architecture/`](../target-architecture/README.md), PR #6918 — README/PROPOSAL/PLAN/CHECKLIST + interactive explorer).
+It deliberately follows two internal benchmarks: the **APDD governance kit** (`../../../../apdd-kit` — docs-are-source-of-truth, a `DESIGN.md` constitution, Storybook-as-workbench/test/MCP, a design validation gate) and the **target-crate-architecture package** ([`docs/internal/reborn/target-architecture/`](../target-architecture/README.md), PR #6918 — README/PROPOSAL/PLAN/CHECKLIST + interactive explorer).
 
 ## Why this shape
 
@@ -73,5 +73,5 @@ The reskin/interaction phases carry hard prerequisites. Each has a proposed impl
 
 1. Skim this README for the shape and the phase table.
 2. Read [PROPOSAL.md](PROPOSAL.md) §1–§4 (decision + alternatives) and **§7 (dependencies)** — that's where the real risk lives.
-3. Open [explorer.html](explorer.html) for the schematics and phase map — a self-contained page (no build step); render it in-browser via [html-preview](https://html-preview.github.io/?url=https://github.com/nearai/ironclaw/blob/docs/design-system-proposal/docs/reborn/design-system/explorer.html) if you don't want to clone.
+3. Open [explorer.html](explorer.html) for the schematics and phase map — a self-contained page (no build step); render it in-browser via [html-preview](https://html-preview.github.io/?url=https://github.com/nearai/ironclaw/blob/docs/design-system-proposal/docs/internal/reborn/design-system/explorer.html) if you don't want to clone.
 4. Challenge [CHECKLIST.md](CHECKLIST.md) (is this the right definition of done?) and argue [PLAN.md](PLAN.md) sequencing.
