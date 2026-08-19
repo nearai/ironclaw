@@ -232,14 +232,14 @@ mod tests {
         assert_eq!(
             crate::reborn_services::timings_source::derive_wall_clock_ms(
                 origin,
-                messages_by_run["run-a"].iter().copied(),
+                messages_by_run[&run_a].iter().copied(),
             ),
             Some(12),
         );
         assert_eq!(
             crate::reborn_services::timings_source::derive_wall_clock_ms(
                 origin + Duration::seconds(2),
-                messages_by_run["run-b"].iter().copied(),
+                messages_by_run[&run_b].iter().copied(),
             ),
             Some(34),
         );
