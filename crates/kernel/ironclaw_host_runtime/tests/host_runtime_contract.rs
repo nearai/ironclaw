@@ -555,6 +555,64 @@ async fn default_runtime_fresh_dispatch_error_becomes_failed_and_fails_run_state
 }
 
 #[tokio::test]
+async fn default_runtime_fresh_dispatch_error_preserves_failure_when_fail_transition_fails() {
+    // A fresh invocation's dispatch failure is model-visible even when the
+    // best-effort durable transition cannot find or update its run record. The
+    // transition failure must not replace the actionable provider failure with
+    // HostRuntimeError::Unavailable.
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(TestDispatcher::responding(|_, _| {
+        Err(DispatchError::UnknownProvider {
+            capability: capability_id(),
+            provider: extension_id(),
+        })
+    }));
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let inner_run_state =
+        Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let run_state = Arc::new(FailingDispatchTransitionRunStateStore::new(
+        inner_run_state.clone(),
+    ));
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher.clone(),
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_invocation_state(run_state);
+
+    let context = execution_context_with_dispatch_grant();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let outcome = runtime
+        .invoke_capability((
+            context,
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "hello"}),
+        ))
+        .await
+        .expect("fresh dispatch failure must remain model-visible");
+
+    match outcome {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.capability_id, capability_id());
+            assert_eq!(failure.kind, FailureKind::UnknownProvider);
+        }
+        other => panic!("expected Failed outcome, got {:?}", other),
+    }
+    assert_eq!(dispatcher.call_count(), 1);
+    let record = inner_run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .expect("fresh invocation remains recorded when its transition fails");
+    assert_eq!(record.status, ProcessInvocationStatus::Running);
+}
+
+#[tokio::test]
 async fn default_runtime_fresh_auth_required_gate_is_stable_across_calls() {
     // Fresh-invocation pin for the processor's `AuthorizationRequiresAuth` arm:
     // two independent fresh invocations that hit the same auth requirement must

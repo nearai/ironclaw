@@ -108,18 +108,26 @@ pub(super) async fn process_capability_response(
             }
         }
         Err(error) => {
-            // Applies to all inline modes: a genuine Dispatch error must
-            // terminalize the durable run-state record whether it surfaces on
-            // a fresh invocation or a resumed approval/auth run, otherwise the
-            // record stays blocked forever and can match a later resume via
-            // `fail_matching_blocked_resume_run`.
-            let should_fail_dispatch_run =
+            // Dispatch failures are model-visible. Fresh invocations use a
+            // best-effort durable transition because the corresponding record
+            // may already be absent; replacing the actionable provider failure
+            // with HostRuntimeError::Unavailable would hide the real cause.
+            // Resumed invocations own an existing blocked record, so a failed
+            // terminal transition must propagate as host unavailability rather
+            // than leaving that record eligible for a later resume.
+            let is_dispatch_error =
                 matches!(error, CapabilityInvocationError::Dispatch { .. });
             let failure = failed_response(error, context.registry, context.capability_id);
-            if should_fail_dispatch_run {
-                runtime
+            if is_dispatch_error {
+                let transition = runtime
                     .fail_dispatch_run(&failure, context.scope, context.invocation_id)
-                    .await?;
+                    .await;
+                if matches!(
+                    context.mode,
+                    InlineInvocationMode::ApprovalResume | InlineInvocationMode::AuthResume
+                ) {
+                    transition?;
+                }
             }
             Ok(RuntimeCapabilityOutcome::Failed(failure))
         }
