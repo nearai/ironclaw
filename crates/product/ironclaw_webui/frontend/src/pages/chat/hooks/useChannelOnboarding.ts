@@ -10,6 +10,9 @@ import {
   subscribeChannelConnected,
 } from "../../../lib/channel-connection-events";
 import {
+  OAUTH_FLOW_POLL_MS,
+  OAUTH_FLOW_STATUS_ERROR_KEYS,
+  OAUTH_FLOW_TIMEOUT_MS,
   completionMatchesFlow,
   failureMatchesFlow,
   openAuthPopup,
@@ -28,17 +31,6 @@ import {
 const DISMISSED_ONBOARDING_STORAGE_PREFIX =
   "ironclaw.chat.dismissedOnboarding.v1:";
 const DISMISSED_ONBOARDING_STORAGE_LIMIT = 100;
-
-// In-chat OAuth watcher bounds. Mirror the Extensions page watcher
-// (`OAUTH_SETUP_TIMEOUT_MS` / `OAUTH_SETUP_REFRESH_MS` in useExtensions.ts) so
-// an abandoned popup cannot leave the card polling the server forever.
-const CHAT_OAUTH_TIMEOUT_MS = 10 * 60 * 1000;
-const CHAT_OAUTH_POLL_MS = 2000;
-const CHAT_OAUTH_STATUS_ERROR_KEYS = Object.freeze({
-  failed: "extensions.oauthFailed",
-  canceled: "extensions.oauthCanceled",
-  expired: "extensions.oauthExpired",
-});
 
 function authPopupFailureMessage(reason, t) {
   return reason === "popup_blocked"
@@ -435,7 +427,7 @@ export function useChannelOnboarding(
         .then((result) => {
           if (!flowSnapshotIsCurrent(pending)) return null;
           if (result?.status === "completed") return finishCompletion(pending);
-          const statusErrorKey = CHAT_OAUTH_STATUS_ERROR_KEYS[result?.status];
+          const statusErrorKey = OAUTH_FLOW_STATUS_ERROR_KEYS[result?.status];
           if (statusErrorKey) {
             failOauthFlow(pending, t(statusErrorKey));
             return null;
@@ -467,14 +459,14 @@ export function useChannelOnboarding(
       if (
         !pending.completing &&
         pending.startedAt &&
-        Date.now() - pending.startedAt > CHAT_OAUTH_TIMEOUT_MS
+        Date.now() - pending.startedAt > OAUTH_FLOW_TIMEOUT_MS
       ) {
         failOauthFlow(pending, t("extensions.oauthTimedOut"));
         return;
       }
       handleCompletion(readLatestProductAuthOAuthCompletion(browserWindow));
       pollServerState();
-    }, CHAT_OAUTH_POLL_MS);
+    }, OAUTH_FLOW_POLL_MS);
     return () => {
       browserWindow.clearInterval(timer);
       unsubscribe();

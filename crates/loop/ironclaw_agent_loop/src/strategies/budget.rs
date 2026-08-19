@@ -163,6 +163,7 @@ mod tests {
                 max_checkpoint_bytes: 64 * 1024,
                 require_final_checkpoint: false,
                 allow_no_reply_completion: false,
+                before_model_checkpoint_interval: 1,
             },
             resource_budget_policy: ResourceBudgetPolicy {
                 tier: ResourceBudgetTier::new("budget_strategy_test_tier").expect("valid"),

@@ -24,8 +24,8 @@ use ironclaw_assistant::{
 };
 use ironclaw_extension_contracts::auth_prompt::AuthPromptView;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelError, DeliveryReport, OutboundEnvelope, OutboundPart, PartDeliveryOutcome,
-    ProductTriggerReason, ReactionAction, RunReaction,
+    ChannelError, DeliveryReport, OutboundEnvelope, OutboundPart, OutboundVisibility,
+    PartDeliveryOutcome, ProductTriggerReason, ReactionAction, RunReaction,
 };
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
@@ -2221,6 +2221,17 @@ async fn observer_connect_nudge_reaches_unbound_senders_in_direct_and_shared_cha
         shared_conversation.conversation_fingerprint(),
         "the shared nudge must land in the shared conversation itself"
     );
+    // #7681: …and privately — the nudge reaches the one unpaired sender, not
+    // the room. (An adapter that cannot honor this falls back to public
+    // delivery, but the request must always be made.)
+    assert!(
+        matches!(
+            &shared_nudges[0].visibility,
+            OutboundVisibility::EphemeralTo(actor) if actor.id() == "U-1"
+        ),
+        "shared nudge must request EphemeralTo the sender: {:?}",
+        shared_nudges[0].visibility
+    );
     // A repeat in the same shared conversation stays throttled.
     harness
         .observer
@@ -2278,6 +2289,15 @@ async fn observer_connect_nudge_reaches_unbound_senders_in_direct_and_shared_cha
             .iter()
             .all(|text| text == &harness.connection_notices.connect_required),
         "every nudge is the fixed host-authored connect notice"
+    );
+    // #7681: a DIRECT chat is already 1:1 private, so its nudges stay Public —
+    // only the shared-conversation nudge (envelope 0) asks to be hidden.
+    let dm_nudges = &harness.adapter.envelopes()[1..];
+    assert!(
+        dm_nudges
+            .iter()
+            .all(|envelope| matches!(envelope.visibility, OutboundVisibility::Public)),
+        "direct-chat connect nudges must stay Public"
     );
     let attempts = harness
         .store

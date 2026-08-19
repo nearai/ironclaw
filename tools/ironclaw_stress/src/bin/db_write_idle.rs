@@ -199,6 +199,8 @@ struct LifecycleReport {
 #[derive(Debug, Clone, Default, Serialize)]
 struct IdleWriteFamilies {
     heartbeat_scheduler_calls: u64,
+    /// Observer-visible heartbeat journal commits. Heartbeats update only the
+    /// durable process row, so this remains zero after journal churn removal.
     heartbeat_writes: u64,
     claim_poll_calls: u64,
     claim_writes: u64,
@@ -708,7 +710,7 @@ where
         observer_checkpoint_writes: active.observer_counts.batches.load(Ordering::SeqCst),
         ..IdleWriteFamilies::default()
     };
-    if write_families.heartbeat_writes == 0
+    if write_families.heartbeat_scheduler_calls == 0
         || write_families.claim_writes == 0
         || write_families.claim_poll_calls == 0
         || write_families.recovery_sweep_calls == 0
@@ -745,7 +747,7 @@ where
                     .recovery_calls
                     .load(Ordering::SeqCst)
                     >= 1
-                && active.observer_counts.heartbeats.load(Ordering::SeqCst) >= 1
+                && active.scheduler_counts.heartbeat_calls.load(Ordering::SeqCst) >= 1
             {
                 return;
             }
@@ -755,10 +757,10 @@ where
     .await
     .map_err(|_| {
         IdleError::Workload(format!(
-            "timed out waiting for idle scheduler activity: claim_calls={}, recovery_calls={}, heartbeat_writes={}",
+            "timed out waiting for idle scheduler activity: claim_calls={}, recovery_calls={}, heartbeat_calls={}",
             active.scheduler_counts.claim_calls.load(Ordering::SeqCst),
             active.scheduler_counts.recovery_calls.load(Ordering::SeqCst),
-            active.observer_counts.heartbeats.load(Ordering::SeqCst),
+            active.scheduler_counts.heartbeat_calls.load(Ordering::SeqCst),
         ))
     })
 }
@@ -1123,7 +1125,8 @@ mod tests {
             report.lifecycle.terminal_status,
             ProcessLifecycleStatus::Completed
         );
-        assert!(report.write_families.heartbeat_writes > 0);
+        assert!(report.write_families.heartbeat_scheduler_calls > 0);
+        assert_eq!(report.write_families.heartbeat_writes, 0);
         assert!(report.write_families.claim_poll_calls >= 1);
         assert!(report.write_families.recovery_sweep_calls > 0);
         assert_eq!(report.write_families.recovery_writes, 0);
@@ -1164,7 +1167,8 @@ mod tests {
         assert!(report.lifecycle.live_before_capture);
         assert!(report.lifecycle.live_after_capture);
         assert!(report.lifecycle.terminal_after_capture);
-        assert!(report.write_families.heartbeat_writes > 0);
+        assert!(report.write_families.heartbeat_scheduler_calls > 0);
+        assert_eq!(report.write_families.heartbeat_writes, 0);
         assert_eq!(report.write_families.recovery_writes, 0);
         assert!(report.write_families.claim_poll_calls >= 1);
         assert!(report.write_families.recovery_sweep_calls > 0);

@@ -236,7 +236,8 @@ use ironclaw_threads::{
     ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    AgentTurnSpawnTreeRuntimePort, LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope,
+    AgentTurnSpawnTreeRuntimePort, LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnRunRecord,
+    TurnScope,
 };
 use serde::{Deserialize, Serialize};
 
@@ -838,6 +839,63 @@ where
 struct RunLeaseFence {
     runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
     lease_token: TurnLeaseToken,
+    /// Monotonic deadline until which the journal's last affirmative answer
+    /// stays usable, or `None` when the next write must ask again.
+    ///
+    /// Shared across clones of the adapter on purpose: they all write under the
+    /// same claimed lease, so they may share the same answer.
+    verified_until: Arc<Mutex<Option<Instant>>>,
+}
+
+/// Margin trimmed off an observed lease's remaining life before it bounds the
+/// memo. It absorbs clock skew between this worker's clock and the journal's
+/// (the lease timestamps are the journal's), plus the latency of the write the
+/// memo admits. A lease with less life than this left is not memoized at all.
+const RUN_LEASE_MEMO_SKEW_MARGIN: Duration = Duration::from_secs(5);
+
+/// Hard ceiling on how long one journal answer stays usable, independent of the
+/// lease TTL. Today's TTL is 90s (`DEFAULT_PROCESS_LEASE_DURATION`), so this
+/// binds; it keeps the memo short if a backend ever hands out a much longer
+/// lease.
+const RUN_LEASE_MEMO_MAX: Duration = Duration::from_secs(30);
+
+impl RunLeaseFence {
+    /// Whether the journal's last affirmative answer is still inside the lease
+    /// life it described.
+    async fn answer_is_still_good(&self) -> bool {
+        let deadline = *self.verified_until.lock().await;
+        deadline.is_some_and(|deadline| Instant::now() < deadline)
+    }
+
+    /// Record how long the journal's "yes" stays usable. Anything that leaves
+    /// the remaining lease life unknown or too short clears the memo, so the
+    /// next write asks again.
+    async fn remember(&self, lease_expires_at: Option<DateTime<Utc>>) {
+        *self.verified_until.lock().await = lease_expires_at.and_then(memo_deadline_for);
+    }
+}
+
+/// The monotonic instant after which an affirmative answer about a lease
+/// expiring at `lease_expires_at` must be re-asked.
+///
+/// Never later than the observed expiry minus [`RUN_LEASE_MEMO_SKEW_MARGIN`],
+/// which is what keeps the fence's guarantee: recovery only touches a run whose
+/// lease has already expired, so no write this deadline admits can land on a
+/// run recovery has requeued.
+fn memo_deadline_for(lease_expires_at: DateTime<Utc>) -> Option<Instant> {
+    let remaining = lease_expires_at
+        .signed_duration_since(Utc::now())
+        // silent-ok: conversion fails only for an already-expired lease; not
+        // memoizing that affirmative answer is the fail-closed result.
+        .to_std()
+        .ok()?;
+    let window = remaining
+        .saturating_sub(RUN_LEASE_MEMO_SKEW_MARGIN)
+        .min(RUN_LEASE_MEMO_MAX);
+    if window.is_zero() {
+        return None;
+    }
+    Instant::now().checked_add(window)
 }
 
 /// Verify that a claimed run still belongs to `lease_token` before publishing
@@ -852,6 +910,16 @@ pub async fn ensure_run_lease_is_current(
     run_context: &LoopRunContext,
     lease_token: TurnLeaseToken,
 ) -> Result<(), AgentLoopHostError> {
+    verify_run_lease_is_current(runtime, run_context, lease_token)
+        .await
+        .map(|_| ())
+}
+
+async fn verify_run_lease_is_current(
+    runtime: &dyn AgentTurnSpawnTreeRuntimePort,
+    run_context: &LoopRunContext,
+    lease_token: TurnLeaseToken,
+) -> Result<TurnRunRecord, AgentLoopHostError> {
     let record = runtime
         .get_run_record(&run_context.scope, run_context.run_id)
         .await
@@ -866,8 +934,10 @@ pub async fn ensure_run_lease_is_current(
                 "run lease ownership could not be verified",
             )
         })?;
-    if record.is_some_and(|record| record.lease_token == Some(lease_token)) {
-        return Ok(());
+    if let Some(record) = record
+        && record.lease_token == Some(lease_token)
+    {
+        return Ok(record);
     }
     tracing::debug!(
         run_id = %run_context.run_id,
@@ -938,6 +1008,7 @@ where
         self.run_lease_fence = Some(RunLeaseFence {
             runtime,
             lease_token,
+            verified_until: Arc::new(Mutex::new(None)),
         });
         self
     }
@@ -945,22 +1016,52 @@ where
     /// Refuse the caller when the journal no longer records this adapter's
     /// lease as the run's live one.
     ///
-    /// One bounded, exact-key journal read per call — cheap at today's call
-    /// rates. If `update_assistant_draft` ever becomes a per-token streaming
-    /// path, revisit whether the draft paths should keep paying it.
+    /// A bounded, exact-key journal read, reused for the rest of the lease life
+    /// the journal reported.
+    ///
+    /// The read lands on the two-connection process-journal pool, and a
+    /// tool-heavy turn makes a dozen transcript writes, so paying it per write
+    /// is the single busiest read on the tightest pool in the system. The memo
+    /// removes most of them without moving the fence:
+    ///
+    /// - An affirmative answer is reused only while the lease *that answer
+    ///   described* is still live, minus [`RUN_LEASE_MEMO_SKEW_MARGIN`].
+    /// - Recovery never touches a run whose lease has not already expired
+    ///   (`ironclaw_processes::journal_store::state`; the checkpointed-requeue
+    ///   branch waits a further full lease TTL of grace on top).
+    ///
+    /// So every write the memo admits happens strictly before the earliest
+    /// instant recovery could requeue this run — the window in which a
+    /// lease-reclaimed worker can still append is not widened. What the memo
+    /// does cost is *detection latency inside our own lease*: an operator
+    /// `Stop`/`Kill` clears a live lease without waiting for expiry, so this
+    /// worker can append for up to one memo window past it. Those actions all
+    /// land on terminal statuses, which are never claimable, so there is no
+    /// replacement worker to interleave with — and cancellation reaches the
+    /// loop through the cancellation port, not this fence.
     ///
     /// Fails closed on both answers that are not "yes": a stale lease and a
-    /// backend error that leaves ownership unknown. The refusal is explicit —
-    /// the model output is not dropped silently, it is returned to the agent
-    /// loop as a transcript-write failure, which the loop carries into its exit
-    /// claim; that exit is itself lease-fenced by the journal, so a stale
-    /// worker's failure can never land on the run the replacement completed.
+    /// backend error that leaves ownership unknown. Neither is ever memoized.
+    /// The refusal is explicit — the model output is not dropped silently, it
+    /// is returned to the agent loop as a transcript-write failure, which the
+    /// loop carries into its exit claim; that exit is itself lease-fenced by
+    /// the journal, so a stale worker's failure can never land on the run the
+    /// replacement completed.
     async fn ensure_run_lease_is_current(&self) -> Result<(), AgentLoopHostError> {
         let Some(fence) = self.run_lease_fence.as_ref() else {
             return Ok(());
         };
-        ensure_run_lease_is_current(fence.runtime.as_ref(), &self.run_context, fence.lease_token)
-            .await
+        if fence.answer_is_still_good().await {
+            return Ok(());
+        }
+        let record = verify_run_lease_is_current(
+            fence.runtime.as_ref(),
+            &self.run_context,
+            fence.lease_token,
+        )
+        .await?;
+        fence.remember(record.lease_expires_at).await;
+        Ok(())
     }
 }
 

@@ -464,6 +464,29 @@ pub enum CheckpointKind {
     Final,
 }
 
+impl CheckpointKind {
+    /// Whether resuming from a checkpoint of this kind would re-execute an
+    /// external side effect.
+    ///
+    /// Mirrors `ironclaw_processes::ProcessCheckpointKind::replays_side_effect`,
+    /// which is what the scheduler's lease-expiry recovery reads off the
+    /// process row: a run whose newest checkpoint replays a side effect is
+    /// FAILED rather than requeued, because no durable tool-idempotency table
+    /// exists to prove the effect did not land. Deliberately duplicated rather
+    /// than imported — `ironclaw_agent_loop` does not depend on the process
+    /// kernel, and the two enums are separate contracts that happen to agree.
+    /// Fail-closed: only the kinds proven safe answer `false`.
+    pub fn replays_side_effect(self) -> bool {
+        match self {
+            Self::BeforeModel | Self::BeforeBlock => false,
+            // `Final` is terminal evidence, never a resume point. Treating it
+            // as side-effecting keeps this predicate fail-closed if a future
+            // caller reaches it.
+            Self::BeforeSideEffect | Self::Final => true,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CheckpointPayloadError {
     #[error("checkpoint payload schema id mismatch: expected `{expected}`, got `{actual}`")]
@@ -545,6 +568,7 @@ mod tests {
                 max_checkpoint_bytes: 64 * 1024,
                 require_final_checkpoint: false,
                 allow_no_reply_completion: false,
+                before_model_checkpoint_interval: 1,
             },
             resource_budget_policy: ResourceBudgetPolicy {
                 tier: ResourceBudgetTier::new("loop_state_test_tier").expect("valid"),

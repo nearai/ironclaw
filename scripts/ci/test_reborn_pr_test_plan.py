@@ -1413,9 +1413,9 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "skills/routine-advisor/SKILL.md",
             # Depth-independent: the bundler recurses, so a skill's auxiliary
             # Markdown two levels down is embedded the same as its SKILL.md.
-            "skills/github/references/workflows.md",
+            "skills/example/references/workflows.md",
             # Non-Markdown skill files ride the plain asset arm.
-            "skills/code-review/checklist.toml",
+            "skills/example/checklist.toml",
         ):
             with self.subTest(path=path):
                 plan = self.plan_real_owners([path])

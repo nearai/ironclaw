@@ -252,6 +252,9 @@ pub use run_delivery::{
 // Adapter, projection, and event DTOs are re-exported from
 // `ironclaw_host_api::product_adapter` above so product terminals consume a
 // single product service.
+pub use reborn_services::run_artifact::timings::{
+    RunArtifactIterationTiming, RunArtifactTimingTotals, RunArtifactTimings, RunArtifactToolTiming,
+};
 pub use reborn_services::{
     ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID,
     ADMIN_CONFIGURATION_VIEW, ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW,
@@ -370,7 +373,7 @@ pub use reborn_services::{
     RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
     RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
     RebornVendorAuthAccounts, RegistrationChannelNotificationSetupService, RunArtifactLogs,
-    RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall,
+    RunArtifactMessage, RunArtifactRedaction, RunArtifactRunTimings, RunArtifactToolCall,
     SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW,
     SKILL_INSTALL_CAPABILITY, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY,

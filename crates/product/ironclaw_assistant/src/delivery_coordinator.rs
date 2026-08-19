@@ -28,7 +28,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
 use ironclaw_extension_contracts::channel_adapter::{
-    OutboundEnvelope, OutboundPart, OutboundTarget, PartDeliveryOutcome,
+    OutboundEnvelope, OutboundPart, OutboundTarget, OutboundVisibility, PartDeliveryOutcome,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_host_api::ids::ExtensionId;
@@ -416,6 +416,8 @@ pub struct NoticeDeliveryRequest<'a> {
     /// Audit discriminator recorded in the attempt's projection ref
     /// (e.g. a run id or event id), so repeated notices stay distinguishable.
     pub notice_ref: String,
+    /// Who may see this notice.
+    pub visibility: OutboundVisibility,
 }
 
 /// Coordinator outcome for one request.
@@ -791,6 +793,7 @@ impl DeliveryCoordinator {
                 request.thread_anchor,
                 request.parts,
                 route,
+                request.visibility,
             )
             .await;
         self.in_flight
@@ -869,6 +872,9 @@ impl DeliveryCoordinator {
             parts,
             reply_context,
             route,
+            // Policy-routed deliveries are never ephemeral; only source-routed
+            // notices may request that, through `drive_resolved`.
+            OutboundVisibility::Public,
         )
         .await
     }
@@ -886,6 +892,7 @@ impl DeliveryCoordinator {
         thread_anchor: Option<String>,
         parts: Vec<OutboundPart>,
         route: OutboundRoute,
+        visibility: OutboundVisibility,
     ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
         let (channel, reply_context) = self
             .resolve_channel_context(&attempt, extension_id, &conversation)
@@ -909,6 +916,7 @@ impl DeliveryCoordinator {
             parts,
             reply_context,
             route,
+            visibility,
         )
         .await
     }
@@ -1080,6 +1088,7 @@ impl DeliveryCoordinator {
         parts: Vec<OutboundPart>,
         reply_context: Option<Vec<u8>>,
         route: OutboundRoute,
+        visibility: OutboundVisibility,
     ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
         // Per-user delivery registrations (design §8). Resolved on the
         // DELIVERY axis only — a reply is source-routed and has no enrolled
@@ -1140,6 +1149,7 @@ impl DeliveryCoordinator {
             parts,
             reply_context,
             registrations,
+            visibility,
         };
 
         // Resolve the half ONCE, by axis, before the retry loop. A channel

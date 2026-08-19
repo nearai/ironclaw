@@ -85,7 +85,7 @@ use ironclaw_assistant::{
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
     RebornThreadArtifact, RebornThreadArtifactRequest, RebornTimelineRequest,
     RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
-    RebornTraceHoldAuthorizeResponse, RunArtifactLogs, RunArtifactRedaction,
+    RebornTraceHoldAuthorizeResponse, RunArtifactLogs, RunArtifactRedaction, RunArtifactTimings,
     SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
     SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW,
     SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW, THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW,
@@ -424,6 +424,7 @@ fn stub_thread_artifact(thread_id: String) -> RebornThreadArtifact {
             unavailable_reason: None,
             entries: Vec::new(),
         },
+        timings_by_run: Vec::new(),
         redaction: RunArtifactRedaction {
             pipeline: "deterministic-trace-redactor-v1".to_string(),
             applied: false,
@@ -460,6 +461,7 @@ fn stub_run_artifact(thread_id: String, run_id: TurnRunId) -> RebornRunArtifact 
             unavailable_reason: None,
             entries: Vec::new(),
         },
+        timings: RunArtifactTimings::default(),
         redaction: RunArtifactRedaction {
             pipeline: "deterministic-trace-redactor-v1".to_string(),
             applied: false,

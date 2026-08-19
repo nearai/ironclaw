@@ -507,6 +507,10 @@ name = "reborn_integration_wiring_parity"
 path = "tests/integration/wiring_parity.rs"
 
 [[test]]
+name = "reborn_integration_run_artifact_timings"
+path = "tests/integration/run_artifact_timings.rs"
+
+[[test]]
 name = "reborn_integration_db_write_canonical"
 path = "tests/integration/db_write_canonical.rs"
 

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use ironclaw_extension_contracts::channel_adapter::ChannelSurfaces;
 use ironclaw_extension_contracts::channel_adapter::{
     ChannelError, ChannelIngress, InboundOutcome, OutboundEnvelope, OutboundPart, OutboundTarget,
-    VerifiedInbound,
+    OutboundVisibility, VerifiedInbound,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::test_support::conformance::{
@@ -91,6 +91,7 @@ async fn telegram_adapter_satisfies_the_conformance_contract() {
             ],
             reply_context: None,
             registrations: Vec::new(),
+            visibility: OutboundVisibility::Public,
         },
         vendor_responses: Arc::new(scripted_bot_api),
         config: vec![

@@ -27,7 +27,9 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ironclaw_extension_contracts::channel_adapter::{OutboundPart, ReactionAction, RunReaction};
+use ironclaw_extension_contracts::channel_adapter::{
+    OutboundPart, OutboundVisibility, ReactionAction, RunReaction,
+};
 use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
 use ironclaw_host_api::product_adapter::ProductAdapterError;
 use ironclaw_host_api::turn::{TurnRunId, TurnScope, TurnStatus};
@@ -391,7 +393,8 @@ pub(crate) fn turn_scope_from_thread_scope(
 impl RunDeliveryServices {
     /// Best-effort source-routed system notice on `conversation`. Failures
     /// are logged, never propagated — a notice must not break the flow that
-    /// raised it.
+    /// raised it. Delivered publicly; see [`Self::post_notice_with_visibility`]
+    /// for a notice that should reach only one external actor.
     pub(crate) async fn post_notice(
         &self,
         intent: DeliveryIntent,
@@ -400,6 +403,31 @@ impl RunDeliveryServices {
         conversation: &ExternalConversationRef,
         text: &str,
         notice_ref: String,
+    ) -> Option<DeliveredChannelMessage> {
+        self.post_notice_with_visibility(
+            intent,
+            scope,
+            run_id,
+            conversation,
+            text,
+            notice_ref,
+            OutboundVisibility::Public,
+        )
+        .await
+    }
+
+    /// [`Self::post_notice`] with an explicit visibility request.
+    // arch-exempt: too_many_args, needs a notice-request bundle, which would duplicate NoticeDeliveryRequest one layer up, plan #7681
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn post_notice_with_visibility(
+        &self,
+        intent: DeliveryIntent,
+        scope: TurnScope,
+        run_id: Option<TurnRunId>,
+        conversation: &ExternalConversationRef,
+        text: &str,
+        notice_ref: String,
+        visibility: OutboundVisibility,
     ) -> Option<DeliveredChannelMessage> {
         match self
             .coordinator
@@ -412,6 +440,7 @@ impl RunDeliveryServices {
                 parts: vec![OutboundPart::Text(text.to_string())],
                 extension_id: &self.extension_id,
                 notice_ref,
+                visibility,
             })
             .await
         {
@@ -471,6 +500,7 @@ impl RunDeliveryServices {
                 }],
                 extension_id,
                 notice_ref,
+                visibility: OutboundVisibility::Public,
             })
             .await
         {
@@ -526,6 +556,7 @@ impl RunDeliveryServices {
                 }],
                 extension_id: &self.extension_id,
                 notice_ref: format!("{run_id}:{seq}:{action_key}-{reaction_key}"),
+                visibility: OutboundVisibility::Public,
             })
             .await
         {

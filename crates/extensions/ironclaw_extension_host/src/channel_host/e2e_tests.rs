@@ -414,6 +414,12 @@ impl Harness {
         self.egress.bodies_for("/api/chat.postMessage")
     }
 
+    /// Sender-visible-only posts (#7681). Deliberately separate from
+    /// `slack_messages()` above, which stays the room-visible log.
+    fn slack_ephemeral_messages(&self) -> Vec<serde_json::Value> {
+        self.egress.bodies_for("/api/chat.postEphemeral")
+    }
+
     fn slack_deletes(&self) -> Vec<serde_json::Value> {
         self.egress.bodies_for("/api/chat.delete")
     }
@@ -437,6 +443,10 @@ struct HarnessOptions {
     actor_role: AdminUserRole,
     /// Optional connection-strategy override for migration boundary tests.
     connection_strategy: Option<ChannelConnectionStrategy>,
+    /// The deployment's public web origin, as composition resolves it from
+    /// `IRONCLAW_REBORN_WEBUI_BASE_URL`. `None` (the default) keeps the
+    /// connect notice link-free.
+    connect_link_base_url: Option<String>,
 }
 
 impl HarnessOptions {
@@ -449,6 +459,7 @@ impl HarnessOptions {
             foreign_scope_approvals: false,
             actor_role: AdminUserRole::Member,
             connection_strategy: None,
+            connect_link_base_url: None,
         }
     }
 }
@@ -478,6 +489,12 @@ async fn build_harness_with_manifest_commands(
 ) -> Harness {
     let mut options = HarnessOptions::new(mode);
     options.manifest_commands = Some(commands);
+    build_harness_with_options(options).await
+}
+
+async fn build_harness_with_connect_link_base_url(mode: TurnMode, base_url: &str) -> Harness {
+    let mut options = HarnessOptions::new(mode);
+    options.connect_link_base_url = Some(base_url.to_string());
     build_harness_with_options(options).await
 }
 
@@ -679,6 +696,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         dm_targets: Some(Arc::clone(&dm_targets)),
         channel_pairing: None,
         admin_users: Arc::new(FakeAdminUsers::seeded(USER, options.actor_role)),
+        connect_link_base_url: options.connect_link_base_url.clone(),
     };
     let assembly = GenericChannelHostAssembly::start(deps);
     let command_executions = Arc::new(RecordingCommandExecutionSurface::new(model_preferences));
@@ -2525,15 +2543,18 @@ async fn slack_top_level_mention_roots_a_thread_and_replies_in_it() {
     );
 }
 
-/// Added with the run-acts-as-invoker ruling (#7377): an UNPAIRED user's
-/// channel mention executes NO run. The fixed `connect_required` notice is
-/// posted into the conversation through the same anchored placement replies
-/// use (threaded on the pinged message's ts), and a repeat mention in that
-/// same thread inside the throttle window posts nothing more — presence
-/// admits the conversation, pairing gates the run, and the nudge addresses
-/// the one unpaired sender rather than the room.
+/// Added with the run-acts-as-invoker ruling (#7377), delivery inverted by
+/// #7681: an UNPAIRED user's channel mention executes NO run. The fixed
+/// `connect_required` notice reaches only that sender, so it rides
+/// `chat.postEphemeral` at CHANNEL level and is deliberately un-threaded —
+/// Slack renders an ephemeral message inside a thread only when that thread is
+/// already active, and a top-level mention self-roots its own, so threading it
+/// makes Slack answer `ok` and show nothing (verified live). A repeat mention
+/// in that same conversation inside the throttle window posts nothing more —
+/// presence admits the conversation, pairing gates the run, and the nudge
+/// addresses the one unpaired sender rather than the room.
 #[tokio::test]
-async fn slack_unpaired_mention_gets_a_threaded_pairing_notice() {
+async fn slack_unpaired_mention_gets_an_ephemeral_pairing_notice() {
     let harness = build_harness(TurnMode::Complete {
         assistant_text: "never produced".into(),
     })
@@ -2547,7 +2568,14 @@ async fn slack_unpaired_mention_gets_a_threaded_pairing_notice() {
         harness.coordinator.submitted_scopes().is_empty(),
         "an unpaired sender must not execute a run"
     );
-    let messages = harness.slack_messages();
+    // #7681: the nudge reaches only the unpaired sender, so it rides
+    // `chat.postEphemeral` and never the room-visible `chat.postMessage`.
+    assert!(
+        harness.slack_messages().is_empty(),
+        "the nudge must not post publicly: {:?}",
+        harness.slack_messages()
+    );
+    let messages = harness.slack_ephemeral_messages();
     assert_eq!(
         messages.len(),
         1,
@@ -2555,14 +2583,22 @@ async fn slack_unpaired_mention_gets_a_threaded_pairing_notice() {
     );
     assert_eq!(messages[0]["channel"], "C889");
     assert_eq!(
+        messages[0]["user"], "U999",
+        "the ephemeral notice is scoped to the unpaired sender"
+    );
+    assert_eq!(
         messages[0]["text"].as_str(),
         Some(slack_manifest_connect_required_notice().as_str()),
         "the notice is this wiring's connect_required copy, verbatim"
     );
-    assert_eq!(
-        messages[0]["thread_ts"], "1710000005.000001",
-        "the nudge threads on the sender's own ping — same anchored \
-         placement as replies"
+    // Deliberately un-threaded: Slack renders an ephemeral message in a thread
+    // only when that thread is already active, and a top-level mention
+    // self-roots its own. Threading it makes Slack answer `ok` and show
+    // nothing (verified live), so the nudge posts at channel level.
+    assert!(
+        messages[0].get("thread_ts").is_none(),
+        "an ephemeral nudge must not be threaded: {:?}",
+        messages[0]
     );
 
     // A second mention from the same unpaired sender inside the SAME thread
@@ -2573,9 +2609,56 @@ async fn slack_unpaired_mention_gets_a_threaded_pairing_notice() {
     harness.drain().await;
     assert!(harness.coordinator.submitted_scopes().is_empty());
     assert_eq!(
-        harness.slack_messages().len(),
+        harness.slack_ephemeral_messages().len(),
         1,
         "the per-conversation throttle suppresses the repeat nudge"
+    );
+}
+
+/// #7681/#7682, through the production assembly: on a deployment that
+/// configured a public web origin, the SAME ephemeral nudge carries the
+/// one-click connect link. This is the caller-path proof that composition's
+/// `connect_link_base_url` reaches the notice the vendor actually receives —
+/// the unit test over `connect_required_notice` cannot show that. A trailing
+/// slash on the configured origin must not produce `//chat`.
+#[tokio::test]
+async fn slack_unpaired_mention_nudge_carries_the_connect_link_when_an_origin_is_configured() {
+    let harness = build_harness_with_connect_link_base_url(
+        TurnMode::Complete {
+            assistant_text: "never produced".into(),
+        },
+        "https://app.example.com/",
+    )
+    .await;
+
+    let response = harness.post_event(UNPAIRED_MENTION_EVENT).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    assert!(
+        harness.coordinator.submitted_scopes().is_empty(),
+        "an unpaired sender must not execute a run"
+    );
+    let messages = harness.slack_ephemeral_messages();
+    assert_eq!(
+        messages.len(),
+        1,
+        "exactly one connect notice: {messages:?}"
+    );
+    let text = messages[0]["text"]
+        .as_str()
+        .expect("the ephemeral nudge carries text");
+    assert_eq!(
+        text,
+        format!(
+            "{} Or connect directly: https://app.example.com/chat?connect=slack",
+            slack_manifest_connect_required_notice()
+        ),
+        "the nudge is the manifest copy plus the one-click connect link"
+    );
+    assert!(
+        text.ends_with("/chat?connect=slack"),
+        "the link must resolve against the configured origin exactly once: {text}"
     );
 }
 
@@ -2630,8 +2713,8 @@ async fn slack_in_thread_mentions_each_run_in_their_own_thread_replying_in_the_v
 }
 
 /// Ephemeral-per-ping: pairing mid-thread. Unpaired carol is nudged in place
-/// inside A's ACTIVE thread (threaded connect notice, no run); carol pairs
-/// through the harness pairing seam; her next in-thread message is then served
+/// while A's thread is ACTIVE (channel-level ephemeral connect notice, no run);
+/// carol pairs through the harness pairing seam; her next message is then served
 /// in her OWN pinger-owned ephemeral thread (distinct from A's), acting as
 /// carol — the vendor thread's context is supplied by hydration, not a shared
 /// transcript.
@@ -2649,7 +2732,8 @@ async fn slack_pairing_mid_thread_runs_in_carols_own_thread() {
     assert_eq!(harness.coordinator.submitted_scopes().len(), 1);
 
     // Unpaired carol mentions inside A's active thread: NO run, one connect
-    // nudge threaded at the same T.
+    // nudge posted at CHANNEL level and visible only to carol (#7681) — never
+    // threaded, so A's room-visible reply is unaffected.
     let response = harness.post_event(MIDTHREAD_UNPAIRED_MENTION_CAROL).await;
     assert_eq!(response.status(), StatusCode::OK);
     harness.drain().await;
@@ -2658,15 +2742,26 @@ async fn slack_pairing_mid_thread_runs_in_carols_own_thread() {
         1,
         "an unpaired sender must not execute a run"
     );
-    let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 2, "A's reply + carol's nudge: {messages:?}");
     assert_eq!(
-        messages[1]["text"].as_str(),
-        Some(slack_manifest_connect_required_notice().as_str()),
+        harness.slack_messages().len(),
+        1,
+        "carol's nudge must not post publicly: {:?}",
+        harness.slack_messages()
+    );
+    let nudges = harness.slack_ephemeral_messages();
+    assert_eq!(nudges.len(), 1, "carol's connect nudge: {nudges:?}");
+    assert_eq!(
+        nudges[0]["user"], "U457",
+        "the ephemeral nudge is scoped to carol"
     );
     assert_eq!(
-        messages[1]["thread_ts"], "1710000007.000001",
-        "the nudge is threaded into A's active thread"
+        nudges[0]["text"].as_str(),
+        Some(slack_manifest_connect_required_notice().as_str()),
+    );
+    assert!(
+        nudges[0].get("thread_ts").is_none(),
+        "ephemeral nudges post at channel level, never threaded: {:?}",
+        nudges[0]
     );
 
     // Carol pairs (the harness identity-binding seam), then messages in the
@@ -2688,11 +2783,12 @@ async fn slack_pairing_mid_thread_runs_in_carols_own_thread() {
     let actors = harness.coordinator.submitted_actors();
     assert_eq!(actors[1].user_id.as_str(), "user:slack-carol");
 
-    // Both replies (A's and carol's) are threaded on A's root ping.
+    // Both replies (A's and carol's) are threaded on A's root ping; carol's
+    // earlier nudge stays off this room-visible log.
     let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 3, "A reply + nudge + carol reply");
-    assert_eq!(messages[2]["text"], "midthread reply");
-    assert_eq!(messages[2]["thread_ts"], "1710000007.000001");
+    assert_eq!(messages.len(), 2, "A reply + carol reply");
+    assert_eq!(messages[1]["text"], "midthread reply");
+    assert_eq!(messages[1]["thread_ts"], "1710000007.000001");
 }
 
 /// Added with the run-acts-as-invoker ruling (#7377): shared-channel pings
@@ -4130,7 +4226,7 @@ fn slack_response_for_approved(
             return response(br#"{"ok":false,"error":"missing_post_type"}"#);
         }
     }
-    if path == "/api/chat.postMessage" {
+    if path == "/api/chat.postMessage" || path == "/api/chat.postEphemeral" {
         let body: serde_json::Value = match serde_json::from_slice(&approved.body) {
             Ok(body) => body,
             Err(_) => {
@@ -4139,15 +4235,14 @@ fn slack_response_for_approved(
         };
         let channel = body["channel"].as_str().unwrap_or("DTEST");
         let ts_seed = stable_slack_test_ts(&approved.body);
-        return response(
-            serde_json::json!({
-                "ok": true,
-                "channel": channel,
-                "ts": ts_seed,
-            })
-            .to_string()
-            .as_bytes(),
-        );
+        // `chat.postEphemeral` returns `message_ts`, not `ts` — see
+        // `SlackChatPostResponse`'s `#[serde(alias = "message_ts")]`.
+        let payload = if path == "/api/chat.postEphemeral" {
+            serde_json::json!({ "ok": true, "channel": channel, "message_ts": ts_seed })
+        } else {
+            serde_json::json!({ "ok": true, "channel": channel, "ts": ts_seed })
+        };
+        return response(payload.to_string().as_bytes());
     }
     // Channel-context hydration fixture (#7377): only C892 has scripted
     // channel history (NEWEST-first, as `conversations.history` returns it;
@@ -4650,7 +4745,7 @@ const TOP_LEVEL_MENTION_EVENT: &str = r#"{
 }"#;
 
 /// U999 has no identity binding anywhere in the harness; used by
-/// `slack_unpaired_mention_gets_a_threaded_pairing_notice`.
+/// `slack_unpaired_mention_gets_an_ephemeral_pairing_notice`.
 const UNPAIRED_MENTION_EVENT: &str = r#"{
   "type":"event_callback",
   "team_id":"T-A",
