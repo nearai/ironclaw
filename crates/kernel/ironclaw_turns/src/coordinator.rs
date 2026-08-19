@@ -56,12 +56,13 @@ fn trace_coordinator_latency_error<E: ?Sized>(
 }
 
 use crate::{
-    ActivateThreadRequest, AdmissionRejection, AdmissionRejectionReason, AgentTurnRuntimePort,
-    AgentTurnSpawnTreeRuntimePort, CancelRunRequest, CancelRunResponse, EventCursor,
-    GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse,
-    RunProfileId, RunProfileRequest, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
-    TurnCapacityResource, TurnError, TurnOriginKind, TurnRunId, TurnRunState, TurnScope,
-    TurnStatus, process_projection::AgentTurnProcessRuntime,
+    ActivateThreadRequest, ActivationProvenance, AdmissionRejection, AdmissionRejectionReason,
+    AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort, CancelRunRequest, CancelRunResponse,
+    EventCursor, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
+    RetryTurnResponse, RunProfileId, RunProfileRequest, SYSTEM_WAKE_STREAK_CAP,
+    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnCapacityResource, TurnError,
+    TurnOriginKind, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    process_projection::AgentTurnProcessRuntime, system_wake_admitted,
 };
 use ironclaw_host_api::prepared_context::{
     PreparedContextSource, PreparedTurnDeclarations, TurnLimits,
@@ -605,6 +606,40 @@ where
         &self,
         request: ActivateThreadRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
+        // Autonomous-wake containment. Nothing else bounds the cumulative
+        // spawn -> settle -> wake -> spawn cycle: a parent that spawns a fresh
+        // child on every background completion would otherwise loop
+        // indefinitely under every existing cap, with no human in it.
+        //
+        // Refusing costs nothing durable. A settled await-edge stays settled
+        // and drains via the run-start sweep or the boot pass, so this gates
+        // the reactive wake only, never delivery.
+        if request.provenance == ActivationProvenance::System {
+            let recent = self
+                .store
+                .recent_runs_for_thread(&request.scope, SYSTEM_WAKE_STREAK_CAP)
+                .await?
+                .into_iter()
+                // ParentAgent runs are outside this window entirely: they
+                // neither count toward the System streak nor reset it. The
+                // two caps read disjoint windows so that any human-free
+                // sequence, however interleaved, stays bounded by both.
+                .filter(|record| {
+                    record.subagent_activation_provenance != Some(ActivationProvenance::ParentAgent)
+                })
+                .collect::<Vec<_>>();
+            if !system_wake_admitted(&recent) {
+                debug!(
+                    thread_id = %request.scope.thread_id,
+                    cap = SYSTEM_WAKE_STREAK_CAP,
+                    "refusing System activation: consecutive-wake streak cap reached"
+                );
+                return Err(TurnError::InvalidRequest {
+                    reason: "system activation streak cap reached for this thread".to_string(),
+                });
+            }
+        }
+
         // Routed through this coordinator's own `submit_turn` on purpose:
         // admission, idempotency replay, profile resolution, and the wake
         // notification are shared with every other submission. The only

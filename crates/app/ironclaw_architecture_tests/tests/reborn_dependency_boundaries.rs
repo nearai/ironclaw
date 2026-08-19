@@ -861,7 +861,13 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // this test's own failure message.
         // Reviewed growth: immutable, provider-neutral output-contract DTOs
         // belong beside the turn contract consumed across loop families.
-        ("ironclaw_host_api", 20_156),
+        // ✎ Re-pinned 2026-08-19: +14 for `turn::ActivationProvenance`, the
+        // enum tagging why a run was created (Human / ParentAgent / System).
+        // It is turn vocabulary, and `ironclaw_turns` may not own turn
+        // vocabulary — a new turn type goes to `host_api` by that crate's own
+        // charter — so there is no lower crate to move it to. Pure DTO: three
+        // unit variants and a serde derive, no behavior.
+        ("ironclaw_host_api", 20_320),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

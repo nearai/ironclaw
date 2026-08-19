@@ -41,6 +41,27 @@ pub trait AgentTurnRuntimePort: Send + Sync {
     /// [`TurnError::ScopeNotFound`]. This keeps scoped lookups non-enumerating
     /// and gives higher-level helpers one canonical missing-run shape.
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError>;
+
+    /// The newest `limit` agent-turn runs on this exact thread scope, newest
+    /// first.
+    ///
+    /// Bounded by construction: the derived activation-streak caps read a
+    /// fixed window of recent runs instead of keeping a stored counter, so
+    /// this must never enumerate a thread's whole history.
+    ///
+    /// Defaults to a refusal rather than an empty window. An empty window
+    /// reads as "streak not established" and would admit every autonomous
+    /// wake, so a runtime that cannot answer this question must not be able
+    /// to silently disable the cap that depends on it.
+    async fn recent_runs_for_thread(
+        &self,
+        _scope: &TurnScope,
+        _limit: u32,
+    ) -> Result<Vec<TurnRunRecord>, TurnError> {
+        Err(TurnError::InvalidRequest {
+            reason: "this turn runtime cannot read a thread's recent run window".to_string(),
+        })
+    }
 }
 
 /// Classify an active run reference through the shared turn-state lookup.
@@ -89,18 +110,6 @@ pub trait AgentTurnSpawnTreeRuntimePort: AgentTurnRuntimePort {
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-    ) -> Result<Vec<TurnRunRecord>, TurnError>;
-
-    /// The newest `limit` agent-turn runs on this exact thread scope, newest
-    /// first.
-    ///
-    /// Bounded by construction: the derived activation-streak caps read a
-    /// fixed window of recent runs instead of keeping a stored counter, so
-    /// this must never enumerate a thread's whole history.
-    async fn recent_runs_for_thread(
-        &self,
-        scope: &TurnScope,
-        limit: u32,
     ) -> Result<Vec<TurnRunRecord>, TurnError>;
 
     /// Return a run record only when it belongs to the supplied exact scope.

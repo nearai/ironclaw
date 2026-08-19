@@ -10,14 +10,48 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_processes::{
+    ClaimProcessesRequest, ProcessKind, ProcessLeaseRequest, ProcessStateTransitionRequest,
+    ProcessWorkerId,
+};
 use ironclaw_turns::{
     AcceptedMessageRef, ActivateThreadRequest, ActivationProvenance, AgentTurnSpawnTreeRuntimePort,
     CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator, GetRunStateRequest,
     IdempotencyKey, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId,
-    TurnRunState, TurnScope, test_support::in_memory_agent_turn_runtime,
+    SYSTEM_WAKE_STREAK_CAP, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
+    TurnError, TurnRunId, TurnRunState, TurnScope,
+    test_support::{InMemoryAgentTurnProcessSystem, in_memory_agent_turn_process_system},
 };
 use std::sync::Arc;
+
+/// Drive the thread's single active run to a terminal state so the next
+/// activation is admitted on an idle thread rather than rejected as busy.
+async fn complete_active_run(system: &InMemoryAgentTurnProcessSystem, scope: &TurnScope) {
+    let transitions = system.transitions();
+    let claimed = transitions
+        .claim_next_processes(ClaimProcessesRequest {
+            worker_id: ProcessWorkerId::from_trusted("activation-contract-worker"),
+            scope_filter: Some(scope.to_resource_scope()),
+            process_id_filter: None,
+            process_kind_filter: Some(ProcessKind::AgentTurn),
+            max_processes: 1,
+        })
+        .await
+        .expect("claim succeeds")
+        .pop()
+        .expect("a run is claimable");
+    transitions
+        .complete_process(ProcessStateTransitionRequest {
+            lease: ProcessLeaseRequest {
+                process_id: claimed.state.process_id,
+                worker_id: claimed.worker_id.clone(),
+                lease_token: claimed.lease_token.clone(),
+            },
+            metadata: None,
+        })
+        .await
+        .expect("run completes");
+}
 
 fn scope(thread: &str) -> TurnScope {
     TurnScope::new(
@@ -71,7 +105,8 @@ fn submit_request(scope: TurnScope, key: &str) -> SubmitTurnRequest {
 /// onto the run it creates, so the derived streak caps can later see it.
 #[tokio::test]
 async fn activate_stamps_provenance_on_the_created_run_record() {
-    let runtime = Arc::new(in_memory_agent_turn_runtime());
+    let system = in_memory_agent_turn_process_system();
+    let runtime = Arc::new(system.runtime());
     let coordinator = DefaultTurnCoordinator::new(runtime.clone());
     let scope = scope("thread-activate-system");
 
@@ -101,7 +136,8 @@ async fn activate_stamps_provenance_on_the_created_run_record() {
 /// run can never be mistaken for an autonomous wake by the streak caps.
 #[tokio::test]
 async fn ordinary_submit_turn_records_no_activation_provenance() {
-    let runtime = Arc::new(in_memory_agent_turn_runtime());
+    let system = in_memory_agent_turn_process_system();
+    let runtime = Arc::new(system.runtime());
     let coordinator = DefaultTurnCoordinator::new(runtime.clone());
     let scope = scope("thread-activate-plain");
 
@@ -127,7 +163,8 @@ async fn ordinary_submit_turn_records_no_activation_provenance() {
 /// change which budget a run consumes.
 #[tokio::test]
 async fn activate_distinguishes_parent_agent_from_system_provenance() {
-    let runtime = Arc::new(in_memory_agent_turn_runtime());
+    let system = in_memory_agent_turn_process_system();
+    let runtime = Arc::new(system.runtime());
     let coordinator = DefaultTurnCoordinator::new(runtime.clone());
     let scope = scope("thread-activate-parent");
 
@@ -209,4 +246,150 @@ async fn default_activate_impl_refuses_rather_than_submitting_untagged() {
         matches!(error, TurnError::InvalidRequest { .. }),
         "the default activate() must fail closed, got {error:?}"
     );
+}
+
+/// The cap must be enforced at the caller, not only in the predicate, and a
+/// refusal must not create a run. Sixteen consecutive System activations
+/// saturate the streak; the seventeenth is refused.
+#[tokio::test]
+async fn activate_refuses_a_system_wake_past_the_streak_cap() {
+    let system = in_memory_agent_turn_process_system();
+    let runtime = Arc::new(system.runtime());
+    let coordinator = DefaultTurnCoordinator::new(runtime.clone());
+    let scope = scope("thread-streak-saturated");
+
+    for index in 0..SYSTEM_WAKE_STREAK_CAP {
+        let SubmitTurnResponse::Accepted { .. } = coordinator
+            .activate(activate_request(
+                scope.clone(),
+                ActivationProvenance::System,
+                &format!("streak-key-{index}"),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("wake {index} must be admitted, got {error:?}"));
+        // Drive each run terminal so the thread is idle for the next wake;
+        // otherwise the second activation would be refused as busy and this
+        // test would pass for the wrong reason.
+        complete_active_run(&system, &scope).await;
+    }
+
+    let error = coordinator
+        .activate(activate_request(
+            scope.clone(),
+            ActivationProvenance::System,
+            "streak-key-over",
+        ))
+        .await
+        .expect_err("a saturated System streak must refuse the next wake");
+
+    assert!(
+        matches!(error, TurnError::InvalidRequest { .. }),
+        "expected a streak-cap refusal, got {error:?}"
+    );
+}
+
+/// A `Human` activation resets the streak, so a thread that a person has come
+/// back to can autonomously wake again.
+#[tokio::test]
+async fn a_human_activation_lets_system_wakes_resume_after_saturation() {
+    let system = in_memory_agent_turn_process_system();
+    let runtime = Arc::new(system.runtime());
+    let coordinator = DefaultTurnCoordinator::new(runtime.clone());
+    let scope = scope("thread-streak-reset");
+
+    for index in 0..SYSTEM_WAKE_STREAK_CAP {
+        let SubmitTurnResponse::Accepted { .. } = coordinator
+            .activate(activate_request(
+                scope.clone(),
+                ActivationProvenance::System,
+                &format!("reset-key-{index}"),
+            ))
+            .await
+            .expect("wake admitted");
+        complete_active_run(&system, &scope).await;
+    }
+
+    let SubmitTurnResponse::Accepted { .. } = coordinator
+        .activate(activate_request(
+            scope.clone(),
+            ActivationProvenance::Human,
+            "reset-key-human",
+        ))
+        .await
+        .expect("a Human activation is never capped");
+    complete_active_run(&system, &scope).await;
+
+    coordinator
+        .activate(activate_request(
+            scope.clone(),
+            ActivationProvenance::System,
+            "reset-key-after-human",
+        ))
+        .await
+        .expect("a Human activation must reset the System streak");
+}
+
+/// A runtime that cannot answer the recent-window question must refuse a
+/// System activation rather than admit it. An empty window reads as "streak
+/// not established", so defaulting to one would silently disable the cap.
+#[tokio::test]
+async fn a_runtime_without_a_recent_window_refuses_system_activation() {
+    let runtime = Arc::new(WindowlessRuntime(
+        in_memory_agent_turn_process_system().runtime(),
+    ));
+    let coordinator = DefaultTurnCoordinator::new(runtime);
+
+    let error = coordinator
+        .activate(activate_request(
+            scope("thread-no-window"),
+            ActivationProvenance::System,
+            "no-window-key",
+        ))
+        .await
+        .expect_err("a runtime that cannot read the window must refuse");
+
+    assert!(
+        matches!(error, TurnError::InvalidRequest { .. }),
+        "expected a fail-closed refusal, got {error:?}"
+    );
+}
+
+/// Wraps a real runtime but declines to answer the recent-window query, taking
+/// the trait's fail-closed default.
+struct WindowlessRuntime(ironclaw_turns::process_projection::AgentTurnProcessRuntime);
+
+#[async_trait]
+impl ironclaw_turns::AgentTurnRuntimePort for WindowlessRuntime {
+    async fn submit_turn(
+        &self,
+        request: SubmitTurnRequest,
+        admission_policy: &dyn ironclaw_turns::TurnAdmissionPolicy,
+        run_profile_resolver: &dyn ironclaw_loop_contracts::RunProfileResolver,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        self.0
+            .submit_turn(request, admission_policy, run_profile_resolver)
+            .await
+    }
+
+    async fn resume_turn(
+        &self,
+        request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        ironclaw_turns::AgentTurnRuntimePort::resume_turn(&self.0, request).await
+    }
+
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        ironclaw_turns::AgentTurnRuntimePort::retry_turn(&self.0, request).await
+    }
+
+    async fn request_cancel(
+        &self,
+        request: CancelRunRequest,
+    ) -> Result<CancelRunResponse, TurnError> {
+        ironclaw_turns::AgentTurnRuntimePort::request_cancel(&self.0, request).await
+    }
+
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        ironclaw_turns::AgentTurnRuntimePort::get_run_state(&self.0, request).await
+    }
 }

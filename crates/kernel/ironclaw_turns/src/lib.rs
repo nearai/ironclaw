@@ -6,6 +6,7 @@
 //! transition APIs are intentionally not re-exported from this crate prelude.
 #![warn(unreachable_pub)]
 
+mod activation_streak;
 mod admission;
 mod agent_turn_runtime;
 mod checkpoint_state;
@@ -23,6 +24,7 @@ mod status;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
+pub use activation_streak::{SYSTEM_WAKE_STREAK_CAP, system_wake_admitted};
 pub use admission::{
     AllowAllTurnAdmissionLimitProvider, StaticTurnAdmissionLimitProvider, TurnAdmissionAxisKind,
     TurnAdmissionBucket, TurnAdmissionBucketKind, TurnAdmissionBucketScope,

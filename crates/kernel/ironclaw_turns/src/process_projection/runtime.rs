@@ -637,6 +637,19 @@ fn failure_prohibits_retry(failure: &SanitizedFailure) -> bool {
 
 #[async_trait]
 impl crate::AgentTurnRuntimePort for AgentTurnProcessRuntime {
+    async fn recent_runs_for_thread(
+        &self,
+        scope: &TurnScope,
+        limit: u32,
+    ) -> Result<Vec<TurnRunRecord>, TurnError> {
+        self.snapshots
+            .recent_agent_turn_snapshots(&scope.to_resource_scope(), limit)
+            .await?
+            .into_iter()
+            .map(turn_run_record_from_process_snapshot)
+            .collect()
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
@@ -688,19 +701,6 @@ impl crate::AgentTurnSpawnTreeRuntimePort for AgentTurnProcessRuntime {
             run_profile_resolver,
         )
         .await
-    }
-
-    async fn recent_runs_for_thread(
-        &self,
-        scope: &TurnScope,
-        limit: u32,
-    ) -> Result<Vec<TurnRunRecord>, TurnError> {
-        self.snapshots
-            .recent_agent_turn_snapshots(&scope.to_resource_scope(), limit)
-            .await?
-            .into_iter()
-            .map(turn_run_record_from_process_snapshot)
-            .collect()
     }
 
     async fn children_of(
