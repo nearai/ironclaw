@@ -788,7 +788,15 @@ async fn notify_background_run(
                     error = %err,
                     "background run wait failed"
                 );
-                let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
+                // A WebUI-only fire attempted no external delivery, so a failed
+                // observation is not a delivery failure. Reporting `Failed`
+                // here would record a channel outage that never happened —
+                // the same conflation the lookup arm keeps distinct.
+                let outcome = if web_inbox_only {
+                    TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+                } else {
+                    TriggeredRunDeliveryOutcomeKind::Failed
+                };
                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
                 return outcome;
             }
