@@ -289,6 +289,7 @@ SEL_V2 = {
     "admin_secret_delete_dialog": "[data-testid='admin-secret-delete-dialog']",
     "admin_secret_delete_confirm": "[data-testid='admin-secret-delete-confirm']",
     "sidebar":        "#gateway-sidebar",  # app navigation sidebar
+    "sidebar_nav_for": "nav-{id}",
     "sidebar_button": "#gateway-sidebar button",
     "nav_workspace": "[data-testid='nav-workspace']",
     "workspace_heading": "[data-testid='workspace-heading']",
