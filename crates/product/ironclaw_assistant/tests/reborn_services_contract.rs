@@ -8984,6 +8984,12 @@ async fn thread_artifact_per_run_timings_do_not_reach_into_another_runs_activity
         .expect("run a timing entry");
     assert!(run_a_timing.timings.available);
     assert!(run_a_timing.timings.totals.wall_clock_ms.is_some());
+    let run_b_timing = artifact
+        .timings_by_run
+        .iter()
+        .find(|entry| entry.run_id == run_b.to_string())
+        .expect("run b timing entry");
+    assert!(run_b_timing.timings.available);
     let run_c_timing = artifact
         .timings_by_run
         .iter()
