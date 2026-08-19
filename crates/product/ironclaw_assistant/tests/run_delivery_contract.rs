@@ -810,9 +810,13 @@ fn notification_inbox() -> Arc<NotificationInboxStore<InMemoryBackend>> {
         MountPermissions::read_write_list_delete(),
     )])
     .expect("notification mount view");
-    Arc::new(NotificationInboxStore::new(Arc::new(
-        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
-    )))
+    Arc::new(NotificationInboxStore::new(
+        Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::new()),
+            mounts,
+        )),
+        ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
+    ))
 }
 
 async fn inbox_records(
