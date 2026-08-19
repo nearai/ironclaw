@@ -926,6 +926,8 @@ mod tests {
             Docker::connect_with_local_defaults().unwrap(),
             config,
         );
+        // Config-shape tests inject an immutable identity directly; only the
+        // real run path resolves the configured reference through Docker.
         let launch = transport
             .user_container_launch_config(
                 &CommandExecutionRequest {
