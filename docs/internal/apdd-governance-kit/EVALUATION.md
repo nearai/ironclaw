@@ -116,11 +116,12 @@ everywhere because they are VCS/CI features, not agent features.
 IronClaw is **not** a greenfield adopter. It has independently converged on a
 large fraction of the kit's model. Concretely, in this repo today:
 
-- **Path-scoped auto-loading rules already exist** — `.claude/rules/` holds 12
+- **Path-scoped auto-loading rules already exist** — `.claude/rules/` holds 14
   rules (`architecture.md`, `cargo-features.md`, `database.md`,
   `error-handling.md`, `gateway-events.md`, `lifecycle.md`,
   `review-discipline.md`, `safety-and-sandbox.md`, `skills.md`, `testing.md`,
-  `type-placement.md`, `types.md`). This *is* the kit's Layer ②.
+  `tool-evidence.md`, `tools.md`, `type-placement.md`, `types.md`). This *is* the
+  kit's Layer ②.
 - **Rule 2 is already enforced deterministically** — the commit-msg hook and
   [`.github/workflows/regression-test-check.yml`](../../../.github/workflows/regression-test-check.yml)
   require a regression test with every bug fix; [`.claude/rules/testing.md`](../../../.claude/rules/testing.md)
@@ -144,7 +145,7 @@ large fraction of the kit's model. Concretely, in this repo today:
 Where IronClaw diverges from the kit:
 
 - **No structured, per-feature docs-first workflow (Layer ①).** Plans live in
-  [`docs/plans/`](../) as flat, dated single files (`YYYY-MM-DD-<slug>.md`) —
+  [`docs/internal/plans/`](../plans/) as flat, dated single files (`YYYY-MM-DD-<slug>.md`) —
   useful, but they are point-in-time plans, not *living* per-feature
   spec/plan/test sets with a registry and a code-to-feature map. There is no
   standing "read the spec before you edit this feature's code" trigger.
@@ -186,17 +187,17 @@ informal / not wired as the kit does) · **❌ Gap** (absent).
 
 | Kit component | Layer | IronClaw today | Verdict |
 |---|---|---|---|
-| Path-scoped `.claude/rules/*.md` (`paths:` auto-load) | ② | 12 rules in `.claude/rules/` | **✅ Have** — same mechanism |
-| Rule 2: regression test + doc update per critical fix | ①/④ | commit-msg hook + `regression-test-check.yml` + `testing.md` | **✅ Have** — CI-enforced, stronger than kit |
+| Path-scoped `.claude/rules/*.md` (`paths:` auto-load) | ② | 14 rules in `.claude/rules/` | **✅ Have** — same mechanism |
+| Rule 2: critical fix → regression test + doc update | ①/④ | commit-msg hook + `regression-test-check.yml` enforce a **regression test or reviewed exemption** (not the doc-update, which stays convention in `testing.md`/CLAUDE.md) | **✅ Have** — the *test* is CI-gated (stronger than kit); the doc-update half is convention |
 | Enforcement: hooks + CI, self-skipping, aggregate gate | ④ | ~30 workflows, path-filtered jobs | **✅ Have** |
 | Reusable, user-invocable skills | — | `.claude/skills/` (reborn-feature, testing, review…) | **✅ Have** |
 | Test-first discipline | ①/④ | CLAUDE.md + testing.md mandate red-then-green | **✅ Have** |
 | Embedded-AI-agent invariants (keys at rest, scoped context) | module | Encoded across CLAUDE.md / safety rules, not one list | **◑ Partial** — captured but scattered |
-| Rule 1: docs-are-source-of-truth, read-spec-before-edit | ① | `reborn-feature` skill + `docs/plans/*` (ad-hoc, flat) | **◑ Partial** — no living per-feature set / registry |
+| Rule 1: docs-are-source-of-truth, read-spec-before-edit | ① | `reborn-feature` skill + `docs/internal/plans/*` (ad-hoc, flat) | **◑ Partial** — no living per-feature set / registry |
 | `docs/<slug>/{SPEC,PLAN,TEST}` + FEATURE_REGISTRY | ① | dated single-file plans only | **❌ Gap** (structure) |
 | Code-to-feature mapping (`// Feature: <slug>` headers) | ① | knowledge graph + openwiki instead | **◑ Partial** — different, backend-oriented |
 | Feature-impact flag (spec §5 *Architecture Impact*) | ① | `architecture.md` rule + knowledge-graph blast-radius; no per-feature spec field | **◑ Partial** — different shape |
-| Dependency/sequencing section (plan §4) | ① | `docs/plans/*` note deps ad-hoc; not a structured field | **◑ Partial** |
+| Dependency/sequencing section (plan §4) | ① | `docs/internal/plans/*` note deps ad-hoc; not a structured field | **◑ Partial** |
 | Review gate (spec §8 *Feedback & Decisions*, hard gate) | ① | PR review + `review-discipline.md`; not a spec-embedded pre-code gate | **◑ Partial** |
 | **Cross-functional-partner review trigger** (auto-route to engineering/product/design) | ① | `review-discipline.md` + PR *Reborn Trust-Boundary Checklist* — strong, but **manual, not auto-routed** | **❌ Gap in both** — the kit has only a generic team gate; opportunity to wire IronClaw's boundary signals into an explicit trigger |
 | Critical User Journeys registry + `critical-flows` rule | ③ | e2e/Playwright exist; no CUJ catalog/rule | **❌ Gap** |
