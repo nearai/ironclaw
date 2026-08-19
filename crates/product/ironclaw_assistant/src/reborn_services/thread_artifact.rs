@@ -215,7 +215,11 @@ mod tests {
         let run_a = TurnRunId::new();
         let run_b = TurnRunId::new();
         let messages = vec![
-            message(&run_a.to_string(), origin, origin + Duration::milliseconds(12)),
+            message(
+                &run_a.to_string(),
+                origin,
+                origin + Duration::milliseconds(12),
+            ),
             message(
                 &run_b.to_string(),
                 origin + Duration::seconds(2),
