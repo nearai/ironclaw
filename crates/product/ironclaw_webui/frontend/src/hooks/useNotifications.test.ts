@@ -138,6 +138,12 @@ function instantiate({
     listNotifications: async (request) => {
       inboxCalls.push(request);
       if (inboxError) throw inboxError;
+      if (data?.inboxPages) {
+        const index = request.cursor
+          ? data.inboxPages.findIndex((page) => page.requestCursor === request.cursor)
+          : 0;
+        return data.inboxPages[index] || { notifications: [], unread_count: 0 };
+      }
       return data?.inbox || { notifications: [], unread_count: 0 };
     },
     listThreads: async (request) => {
@@ -403,28 +409,98 @@ test("a compatibility notification is never archived through the server", () => 
   );
 });
 
-test("offers more pages only while the inbox reports one and grows the request", () => {
-  const harness = instantiate({
-    data: {
-      inbox: {
-        notifications: [notification()],
-        unread_count: 1,
-        next_cursor: "cursor-page-2",
-      },
-      approvalThreads: { threads: [] },
+const PAGED_INBOX = {
+  // The harness's `useQuery` hands `data` straight back, so `inbox` stands in
+  // for the merged state the hook derives from; `inboxPages` is what the
+  // queryFn reads through the cursor.
+  inbox: {
+    notifications: [notification("page1-a"), notification("page1-b")],
+    unread_count: 5,
+    next_cursor: "cursor-2",
+  },
+  inboxPages: [
+    {
+      notifications: [notification("page1-a"), notification("page1-b")],
+      unread_count: 5,
+      next_cursor: "cursor-2",
     },
-  });
+    {
+      requestCursor: "cursor-2",
+      notifications: [notification("page2-a")],
+      unread_count: 5,
+      next_cursor: "cursor-3",
+    },
+    {
+      requestCursor: "cursor-3",
+      notifications: [notification("page3-a")],
+      unread_count: 5,
+      next_cursor: null,
+    },
+  ],
+  approvalThreads: { threads: [] },
+};
 
+test("paging follows the cursor instead of only widening one request", async () => {
+  const harness = instantiate({ data: PAGED_INBOX });
+  await harness.queryOptions.queryFn();
+
+  assert.deepEqual(
+    harness.inboxCalls.map((call) => call.cursor),
+    [undefined],
+    "the first pass asks for the head with no cursor",
+  );
   assert.equal(harness.hook.canLoadMore, true);
-  assert.equal(harness.hook.requestedLimit, 30);
 
   harness.hook.loadMore();
-  const grown = harness.render();
+  harness.render();
+  harness.inboxCalls.length = 0;
+  const merged = await harness.queryOptions.queryFn();
 
+  assert.deepEqual(
+    harness.inboxCalls.map((call) => call.cursor),
+    [undefined, "cursor-2"],
+    "loading more re-reads the head and follows the reported cursor",
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(merged.inbox.notifications.map((record) => record.id))),
+    ["page1-a", "page1-b", "page2-a"],
+    "the loaded pages are one flat list, head first",
+  );
   assert.equal(
-    grown.requestedLimit,
-    60,
-    "loading more raises the page the polled query asks for",
+    merged.inbox.unread_count,
+    5,
+    "the badge keeps the server total rather than summing pages",
+  );
+  assert.equal(
+    merged.inbox.next_cursor,
+    "cursor-3",
+    "the cursor to continue from is the last loaded page's",
+  );
+});
+
+test("paging is not capped by the per-request ceiling", async () => {
+  const harness = instantiate({ data: PAGED_INBOX });
+  let hook = harness.hook;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    hook.loadMore();
+    hook = harness.render();
+  }
+  harness.inboxCalls.length = 0;
+  const merged = await harness.queryOptions.queryFn();
+
+  assert.deepEqual(
+    harness.inboxCalls.map((call) => call.cursor),
+    [undefined, "cursor-2", "cursor-3"],
+    "every reported cursor is followed, so records past one page stay reachable",
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(merged.inbox.notifications.map((record) => record.id))),
+    ["page1-a", "page1-b", "page2-a", "page3-a"],
+  );
+  assert.equal(
+    merged.inbox.next_cursor,
+    null,
+    "the last page reports no cursor, so there is nothing left to load",
   );
 });
 
@@ -437,32 +513,6 @@ test("stops offering more pages once the inbox reports no cursor", () => {
   });
 
   assert.equal(harness.hook.canLoadMore, false);
-});
-
-test("never asks the inbox for more than the server page ceiling", () => {
-  const harness = instantiate({
-    data: {
-      inbox: {
-        notifications: [notification()],
-        unread_count: 1,
-        next_cursor: "cursor-page-2",
-      },
-      approvalThreads: { threads: [] },
-    },
-  });
-
-  let hook = harness.hook;
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    hook.loadMore();
-    hook = harness.render();
-  }
-
-  assert.equal(hook.requestedLimit, 100);
-  assert.equal(
-    hook.canLoadMore,
-    false,
-    "at the ceiling the control retires instead of asking for a rejected limit",
-  );
 });
 
 test("does not mark a notification merely because its thread route is active", () => {

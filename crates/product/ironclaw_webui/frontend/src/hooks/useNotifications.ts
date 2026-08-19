@@ -12,12 +12,37 @@ import { useThreadStates } from "../lib/thread-state";
 import { notificationMessages } from "../lib/notifications";
 
 const NOTIFICATION_LIMIT = 30;
-/* The view's own page ceiling (`NOTIFICATION_PAGE_LIMIT_MAX` server-side).
- * Asking for more is rejected, so the control retires at this point rather
- * than sending a request the surface will refuse. */
-const NOTIFICATION_LIMIT_MAX = 100;
+/* A stop so one hook cannot walk an unbounded inbox in a single pass. The
+ * store's own per-recipient bound is far larger than anyone pages through by
+ * hand, and the control retires before this whenever the surface stops
+ * reporting a cursor. */
+const NOTIFICATION_PAGE_MAX = 20;
+
 const NOTIFICATION_THREAD_LIMIT = 20;
 const NOTIFICATION_REFETCH_MS = 10_000;
+
+/* Read the head plus every page the reader has asked to keep, following the
+ * cursor the surface reports. The pages come back as one flat list so the
+ * optimistic mark-read and archive writes, the unread total and the
+ * compatibility de-duplication all keep working on a single shape — and so a
+ * poll refreshes every loaded page instead of leaving appended ones to rot. */
+async function readInboxPages(pages) {
+  const head = await listNotifications({ limit: NOTIFICATION_LIMIT });
+  const notifications = [...(head?.notifications || [])];
+  let cursor = head?.next_cursor || null;
+  for (let page = 1; page < pages && cursor; page += 1) {
+    const next = await listNotifications({ limit: NOTIFICATION_LIMIT, cursor });
+    notifications.push(...(next?.notifications || []));
+    cursor = next?.next_cursor || null;
+  }
+  return {
+    ...head,
+    notifications,
+    // The surface counts unread across the whole inbox, not per page, so the
+    // head's total is already the real one.
+    next_cursor: cursor,
+  };
+}
 
 function isNotificationInboxUnsupported(error) {
   const status = Number(error?.status);
@@ -96,14 +121,12 @@ export function useNotifications(options = {}) {
   const tenantId = profile?.tenant_id || null;
   const userId = profile?.user_id || null;
   const scope = tenantId && userId ? `${tenantId}:${userId}` : null;
-  /* Paging grows the page the polled query asks for instead of chaining
-   * cursors into a second list. One request stays the single source of truth,
-   * so the optimistic mark-read/archive writes keep applying and a poll can
-   * never disagree with an appended page about the same record. */
-  const [requestedLimit, setRequestedLimit] = React.useState(NOTIFICATION_LIMIT);
+  /* How many pages the reader has asked to keep loaded. The polled query owns
+   * them all, so there is no second list to fall out of step with the head. */
+  const [loadedPages, setLoadedPages] = React.useState(1);
   const queryKey = React.useMemo(
-    () => ["notifications", "inbox", tenantId, userId, requestedLimit],
-    [requestedLimit, tenantId, userId],
+    () => ["notifications", "inbox", tenantId, userId, loadedPages],
+    [loadedPages, tenantId, userId],
   );
 
   const query = useQuery({
@@ -114,7 +137,7 @@ export function useNotifications(options = {}) {
       // existing approval notifications disappear. Durable records win in
       // the presentation-layer de-duplication below.
       const [inboxResult, approvalResult] = await Promise.allSettled([
-        listNotifications({ limit: requestedLimit }),
+        readInboxPages(loadedPages),
         listThreads({
           limit: NOTIFICATION_THREAD_LIMIT,
           needsApproval: true,
@@ -288,13 +311,12 @@ export function useNotifications(options = {}) {
     }
   }, [inboxSupported, markAllReadMutation, markCompatibilitySeen, messages, scope]);
 
-  // `next_cursor` is the surface's own has-more signal.
+  // `next_cursor` is the surface's own has-more signal, and it now survives
+  // paging: the merged result carries the last loaded page's cursor.
   const canLoadMore =
-    Boolean(query.data?.inbox?.next_cursor) && requestedLimit < NOTIFICATION_LIMIT_MAX;
+    Boolean(query.data?.inbox?.next_cursor) && loadedPages < NOTIFICATION_PAGE_MAX;
   const loadMore = React.useCallback(() => {
-    setRequestedLimit((current) =>
-      Math.min(current + NOTIFICATION_LIMIT, NOTIFICATION_LIMIT_MAX),
-    );
+    setLoadedPages((current) => Math.min(current + 1, NOTIFICATION_PAGE_MAX));
   }, []);
 
   const serverUnreadCount = Number(query.data?.inbox?.unread_count || 0);
@@ -325,6 +347,6 @@ export function useNotifications(options = {}) {
     archiveMessage,
     canLoadMore,
     loadMore,
-    requestedLimit,
+    loadedPages,
   };
 }
