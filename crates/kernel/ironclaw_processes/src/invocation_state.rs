@@ -114,16 +114,6 @@ pub trait ProcessInvocationStatePort: Send + Sync {
         invocation_id: InvocationId,
         error_kind: String,
     ) -> Result<ProcessInvocationRecord, ProcessInvocationError>;
-    /// Removes worker-local state when a fresh invocation exits without a
-    /// durable gate or terminal edge. Stores without local pending state may
-    /// keep the default no-op.
-    async fn discard_pending(
-        &self,
-        _scope: &ResourceScope,
-        _invocation_id: InvocationId,
-    ) -> Result<(), ProcessInvocationError> {
-        Ok(())
-    }
 
     async fn get(
         &self,
@@ -508,13 +498,6 @@ impl ProcessInvocationStatePort for ProcessInvocationStore {
         }
         pending.insert(invocation_id, start);
         Ok(record)
-    }
-    async fn discard_pending(
-        &self,
-        scope: &ResourceScope,
-        invocation_id: InvocationId,
-    ) -> Result<(), ProcessInvocationError> {
-        self.remove_pending(scope, invocation_id)
     }
 
     async fn block_approval(
