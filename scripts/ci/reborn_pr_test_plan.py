@@ -216,25 +216,10 @@ QA_HARNESS_PREFIXES = (
     "scripts/telegram_smoke/",
 )
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
-SANDBOX_DOCKER_EXACT_PATHS = {
+# Path classes with no owning crate: no relocation can ever change them, so
+# they stay plain literals.
+SANDBOX_DOCKER_EXACT_PATH_LITERALS = (
     "Dockerfile.sandbox-worker",
-    "crates/app/ironclaw_cli/src/runtime/mod.rs",
-    "crates/app/ironclaw_composition/src/sandbox.rs",
-    "crates/app/ironclaw_composition/src/builtin_capability_policy.rs",
-    "crates/app/ironclaw_composition/src/deployment.rs",
-    "crates/app/ironclaw_composition/src/factory/production_backend_assembly.rs",
-    "crates/app/ironclaw_composition/src/factory/runtime_lane_assembly.rs",
-    "crates/app/ironclaw_composition/src/input.rs",
-    "crates/app/ironclaw_config/src/profile.rs",
-    "crates/kernel/ironclaw_host_runtime/src/first_party_tools/mod.rs",
-    "crates/kernel/ironclaw_host_runtime/src/invocation_services.rs",
-    "crates/kernel/ironclaw_host_runtime/src/process_port.rs",
-    "crates/kernel/ironclaw_host_runtime/src/services.rs",
-    "crates/kernel/ironclaw_host_runtime/src/services/builder.rs",
-    "crates/kernel/ironclaw_runtime_policy/src/planner.rs",
-    "crates/kernel/ironclaw_runtime_policy/src/resolver.rs",
-    "crates/lanes/ironclaw_sandbox/tests/support/docker_gate.rs",
-    "crates/lanes/ironclaw_sandbox/tests/user_sandbox_docker_live.rs",
     "tests/integration/reborn_sandbox_shell_turn.rs",
     "tests/e2e_trace_runtime_policy_serde.rs",
     "tests/fixtures/llm_traces/runtime_policy/hosted_dev_no_shell.json",
@@ -244,7 +229,59 @@ SANDBOX_DOCKER_EXACT_PATHS = {
     "tests/integration/support/harness/mod.rs",
     "tests/integration/support/harness/options.rs",
     "tests/integration/support/harness/profiles/sandbox_shell.rs",
+)
+# Crate-relative suffixes for entries that live inside a workspace crate's own
+# directory. `_sandbox_docker_exact_paths()` resolves each crate's root by
+# name through the shared inventory (scripts/ci/lib/crate_tree.py), the same
+# mechanism `_sandbox_docker_prefixes()` above already uses for
+# `ironclaw_sandbox` — a hardcoded `crates/<family>/<crate>` prefix stops
+# matching the moment any of these crates is relocated, and the planner would
+# then silently stop routing that crate's listed files to the Docker lane.
+SANDBOX_DOCKER_EXACT_PATH_CRATE_SUFFIXES: dict[str, tuple[str, ...]] = {
+    "ironclaw_cli": ("src/runtime/mod.rs",),
+    "ironclaw_composition": (
+        "src/sandbox.rs",
+        "src/builtin_capability_policy.rs",
+        "src/deployment.rs",
+        "src/factory/production_backend_assembly.rs",
+        "src/factory/runtime_lane_assembly.rs",
+        "src/input.rs",
+    ),
+    "ironclaw_config": ("src/profile.rs",),
+    "ironclaw_host_runtime": (
+        "src/first_party_tools/mod.rs",
+        "src/invocation_services.rs",
+        "src/process_port.rs",
+        "src/services.rs",
+        "src/services/builder.rs",
+    ),
+    "ironclaw_runtime_policy": (
+        "src/planner.rs",
+        "src/resolver.rs",
+    ),
+    "ironclaw_sandbox": (
+        "tests/support/docker_gate.rs",
+        "tests/user_sandbox_docker_live.rs",
+    ),
 }
+
+
+def _sandbox_docker_exact_paths() -> set[str]:
+    """Exact-match sandbox Docker paths, crate-owned entries resolved by name."""
+    paths = set(SANDBOX_DOCKER_EXACT_PATH_LITERALS)
+    for crate, suffixes in SANDBOX_DOCKER_EXACT_PATH_CRATE_SUFFIXES.items():
+        try:
+            directory = crate_directory(crate, ROOT)
+        except CrateTreeError as error:
+            raise RuntimeError(
+                f"reborn_pr_test_plan: cannot resolve the {crate} crate, so "
+                "the exact source paths used to route the Docker lane are "
+                f"unknown: {error}"
+            ) from error
+        paths.update(f"{directory}/{suffix}" for suffix in suffixes)
+    return paths
+
+
 # Asset trees that live outside every crate root but are compiled *into* a
 # workspace crate through a relative `include_bytes!` / `include_str!` that
 # escapes its own crate (the §11.2.7 reach-ins inventoried by
@@ -849,7 +886,7 @@ def build_plan(
     root_inventory = _root_test_partitions()
     integration_inventory = _integration_test_lanes()
     sandbox_docker_prefixes = _sandbox_docker_prefixes()
-    sandbox_docker_exact_paths = set(SANDBOX_DOCKER_EXACT_PATHS)
+    sandbox_docker_exact_paths = _sandbox_docker_exact_paths()
     if sandbox_docker_prefixes:
         sandbox_crate_directory = sandbox_docker_prefixes[0].removesuffix(
             "/src/sandbox_process"
