@@ -740,7 +740,10 @@ where
         limit: u32,
     ) -> Result<Vec<JournaledProcessSnapshot>, Self::Error> {
         self.ensure_materialized().await?;
-        if *scope == ResourceScope::system() {
+        // `is_system()`, not `== ResourceScope::system()`: the constructor
+        // mints a fresh `invocation_id` on every call, so an equality check
+        // against it can never match and the guard would be dead.
+        if scope.is_system() {
             return Err(ProcessJournalStoreError::InvalidRequest(
                 "system-wide process snapshot reads are unbounded; use paged process journal reads"
                     .to_string(),

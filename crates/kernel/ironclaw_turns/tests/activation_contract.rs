@@ -393,3 +393,60 @@ impl ironclaw_turns::AgentTurnRuntimePort for WindowlessRuntime {
         ironclaw_turns::AgentTurnRuntimePort::get_run_state(&self.0, request).await
     }
 }
+
+/// Design section 8.3 requires ParentAgent runs to be excluded from the FETCH,
+/// not filtered afterwards. Filtering a K-sized fetch yields fewer than K
+/// records whenever ParentAgent runs are interleaved, and a short window reads
+/// as "streak not established" — which silently disables the cap on exactly
+/// the human-free interleaved sequences it exists to bound.
+///
+/// This drives the design's required assertion (c): an interleaved ParentAgent
+/// activation neither resets nor counts toward the System streak.
+#[tokio::test]
+async fn interleaved_parent_agent_runs_do_not_disable_the_system_streak_cap() {
+    let system = in_memory_agent_turn_process_system();
+    let runtime = Arc::new(system.runtime());
+    let coordinator = DefaultTurnCoordinator::new(runtime.clone());
+    let scope = scope("thread-streak-interleaved");
+
+    // Alternate System / ParentAgent. No Human ever touches this thread, so the
+    // System streak must still saturate at SYSTEM_WAKE_STREAK_CAP.
+    for index in 0..SYSTEM_WAKE_STREAK_CAP {
+        coordinator
+            .activate(activate_request(
+                scope.clone(),
+                ActivationProvenance::System,
+                &format!("interleaved-system-{index}"),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("system wake {index} admitted, got {error:?}"));
+        complete_active_run(&system, &scope).await;
+
+        coordinator
+            .activate(activate_request(
+                scope.clone(),
+                ActivationProvenance::ParentAgent,
+                &format!("interleaved-parent-{index}"),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("parent extend {index} admitted, got {error:?}"));
+        complete_active_run(&system, &scope).await;
+    }
+
+    let error = coordinator
+        .activate(activate_request(
+            scope.clone(),
+            ActivationProvenance::System,
+            "interleaved-system-over",
+        ))
+        .await
+        .expect_err(
+            "ParentAgent runs must be excluded from the window, so the System streak \
+             still saturates and the next wake is refused",
+        );
+
+    assert!(
+        matches!(error, TurnError::InvalidRequest { .. }),
+        "expected a streak-cap refusal, got {error:?}"
+    );
+}

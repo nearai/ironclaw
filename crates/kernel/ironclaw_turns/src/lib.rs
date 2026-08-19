@@ -24,7 +24,9 @@ mod status;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-pub use activation_streak::{SYSTEM_WAKE_STREAK_CAP, system_wake_admitted};
+pub use activation_streak::{
+    SYSTEM_WAKE_STREAK_CAP, SYSTEM_WAKE_WINDOW_OVERFETCH, system_wake_admitted,
+};
 pub use admission::{
     AllowAllTurnAdmissionLimitProvider, StaticTurnAdmissionLimitProvider, TurnAdmissionAxisKind,
     TurnAdmissionBucket, TurnAdmissionBucketKind, TurnAdmissionBucketScope,

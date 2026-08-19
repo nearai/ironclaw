@@ -15,6 +15,17 @@ use crate::{ActivationProvenance, TurnRunRecord};
 /// bound unrelated things and would drift apart the moment one is tuned.
 pub const SYSTEM_WAKE_STREAK_CAP: u32 = 16;
 
+/// How many raw run records to fetch per cap-sized window so that, after
+/// `ParentAgent` runs are dropped, `SYSTEM_WAKE_STREAK_CAP` records remain.
+///
+/// The window query is provenance-blind, so the design's "excluded from the
+/// fetch" rule is approximated by over-fetching and truncating. A thread whose
+/// recent history is more than `(OVERFETCH - 1) / OVERFETCH` `ParentAgent`
+/// runs still yields a short window, which admits — a fail-open residual, not
+/// a guarantee. Once the extend cap bounds consecutive `ParentAgent`
+/// activations at 8, raising this to 9 makes the exclusion exact.
+pub const SYSTEM_WAKE_WINDOW_OVERFETCH: u32 = 4;
+
 /// Whether a pending `System` activation may be admitted, given the thread's
 /// newest-first window of `Human`/`System` runs (`ParentAgent` runs are
 /// excluded by the caller's fetch, so they neither count nor reset).

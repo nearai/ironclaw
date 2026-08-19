@@ -4249,3 +4249,53 @@ where
         .await
         .expect("agent-turn process submits")
 }
+
+/// The keyset walk pages. With limit=2 the page size is 8, so seeding more
+/// than 8 non-agent-turn processes ahead of the agent-turn rows forces the
+/// walk to advance its cursor and fetch again — the multi-page path, which a
+/// single-page test can never reach.
+#[tokio::test]
+async fn recent_agent_turn_snapshots_walks_past_a_full_page_of_other_kinds() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    let scope = scope();
+
+    let mut agent_turn_ids = Vec::new();
+    for _ in 0..2 {
+        agent_turn_ids.push(ProcessId::new());
+        submit_agent_turn_process(&store, &scope, *agent_turn_ids.last().expect("just pushed"))
+            .await;
+    }
+    // Newer than every agent-turn row, and more than one page of them.
+    for _ in 0..12 {
+        submit_internal_process(&store, &scope, ProcessId::new()).await;
+    }
+
+    let recent = store
+        .recent_agent_turn_snapshots(&scope, 2)
+        .await
+        .expect("bounded recent read");
+
+    let returned: Vec<_> = recent.iter().map(|snapshot| snapshot.process_id).collect();
+    let expected: Vec<_> = agent_turn_ids.iter().rev().copied().collect();
+    assert_eq!(
+        returned, expected,
+        "the walk must page past a full page of non-agent-turn rows to fill the window"
+    );
+}
+
+/// The bounded read carries its own system-scope rejection, distinct from the
+/// unbounded `process_snapshots` it deliberately restricts.
+#[tokio::test]
+async fn recent_agent_turn_snapshots_rejects_a_system_wide_scope() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+
+    let error = store
+        .recent_agent_turn_snapshots(&ResourceScope::system(), 4)
+        .await
+        .expect_err("system-wide reads are unbounded and must be refused");
+
+    assert!(
+        matches!(error, ProcessJournalStoreError::InvalidRequest(_)),
+        "expected InvalidRequest, got {error:?}"
+    );
+}

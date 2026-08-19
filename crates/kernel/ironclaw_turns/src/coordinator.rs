@@ -60,9 +60,9 @@ use crate::{
     AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort, CancelRunRequest, CancelRunResponse,
     EventCursor, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
     RetryTurnResponse, RunProfileId, RunProfileRequest, SYSTEM_WAKE_STREAK_CAP,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnCapacityResource, TurnError,
-    TurnOriginKind, TurnRunId, TurnRunState, TurnScope, TurnStatus,
-    process_projection::AgentTurnProcessRuntime, system_wake_admitted,
+    SYSTEM_WAKE_WINDOW_OVERFETCH, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
+    TurnCapacityResource, TurnError, TurnOriginKind, TurnRunId, TurnRunState, TurnScope,
+    TurnStatus, process_projection::AgentTurnProcessRuntime, system_wake_admitted,
 };
 use ironclaw_host_api::prepared_context::{
     PreparedContextSource, PreparedTurnDeclarations, TurnLimits,
@@ -615,18 +615,31 @@ where
         // and drains via the run-start sweep or the boot pass, so this gates
         // the reactive wake only, never delivery.
         if request.provenance == ActivationProvenance::System {
+            // ParentAgent runs are outside this window entirely: they neither
+            // count toward the System streak nor reset it, so that any
+            // human-free sequence — however interleaved — stays bounded by
+            // both caps.
+            //
+            // They must be excluded from the FETCH, not filtered after it.
+            // Filtering a K-sized fetch returns fewer than K records the
+            // moment ParentAgent runs are interleaved, and a short window
+            // reads as "streak not established" and admits — which silently
+            // disabled this cap on exactly the interleaved human-free
+            // sequences it exists to bound. The window query is
+            // provenance-blind, so the exclusion is done by over-fetching and
+            // truncating to the cap.
             let recent = self
                 .store
-                .recent_runs_for_thread(&request.scope, SYSTEM_WAKE_STREAK_CAP)
+                .recent_runs_for_thread(
+                    &request.scope,
+                    SYSTEM_WAKE_STREAK_CAP.saturating_mul(SYSTEM_WAKE_WINDOW_OVERFETCH),
+                )
                 .await?
                 .into_iter()
-                // ParentAgent runs are outside this window entirely: they
-                // neither count toward the System streak nor reset it. The
-                // two caps read disjoint windows so that any human-free
-                // sequence, however interleaved, stays bounded by both.
                 .filter(|record| {
                     record.subagent_activation_provenance != Some(ActivationProvenance::ParentAgent)
                 })
+                .take(SYSTEM_WAKE_STREAK_CAP as usize)
                 .collect::<Vec<_>>();
             if !system_wake_admitted(&recent) {
                 debug!(
