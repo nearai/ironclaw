@@ -1,3 +1,9 @@
+---
+type: "Reference"
+title: "Crate Reference"
+description: "Comprehensive reference for all 65+ crates in IronClaw, organized by functional group: contracts, authority gates, capability execution, durable state, products, storage backends, and utilities."
+---
+
 # Crate Reference
 
 This page documents all 68+ crates in the IronClaw repository, organized by functional group. Use this as a reference when exploring code or deciding where to add new features.
@@ -814,7 +820,9 @@ subscriber.subscribe(filter, |event| async {
 1. **To understand the overall architecture:** Start with [overview.md](overview.md)
 2. **To understand a specific crate:** Find it in this reference
 3. **To add a new feature:** Use [overview.md: Where to Build New Features](overview.md#where-to-build-new-features) to pick a crate, then read its docs
+<!-- openwiki: broken internal link [data-model.md] file "data-model.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 4. **To understand data flow:** Read [data-model.md](data-model.md)
+<!-- openwiki: broken internal link [security.md] file "security.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 5. **To understand security:** Read [security.md](security.md)
 
 ---
@@ -822,7 +830,9 @@ subscriber.subscribe(filter, |event| async {
 ## See Also
 
 - **[Overview](overview.md)** — System design and four-layer model
+<!-- openwiki: broken internal link [data-model.md] file "data-model.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **[Data Model](data-model.md)** — Events, threads, turns, capabilities
+<!-- openwiki: broken internal link [security.md] file "security.md" does not exist. Fix the href or restore the target, then delete this comment. -->
 - **[Security & Safety](security.md)** — Kernel boundary and threat model
 - **[AGENTS.md](/AGENTS.md)** — Quick rules and code discovery
 - **[CLAUDE.md](/CLAUDE.md)** — Subsystem deep-dives
