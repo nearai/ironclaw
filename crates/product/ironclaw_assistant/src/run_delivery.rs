@@ -34,9 +34,9 @@ use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEv
 use ironclaw_host_api::product_adapter::ProductAdapterError;
 use ironclaw_host_api::turn::{TurnRunId, TurnScope, TurnStatus};
 use ironclaw_notifications::{
-    NotificationAction, NotificationId, NotificationInboxError, NotificationInboxStorePort,
-    NotificationKind, NotificationMutationRequest, NotificationRecipient, NotificationSeverity,
-    NotificationSource, PublishNotificationRequest,
+    LifecycleRef, NotificationAction, NotificationId, NotificationInboxError,
+    NotificationInboxStorePort, NotificationKind, NotificationMutationRequest,
+    NotificationRecipient, NotificationSeverity, NotificationSource, PublishNotificationRequest,
 };
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundDeliveryTargetProvider,
@@ -419,6 +419,13 @@ impl RunDeliveryServices {
                 return;
             }
         };
+        let lifecycle_ref = match lifecycle_ref.map(LifecycleRef::new).transpose() {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(%error, %run_id, "invalid durable Inbox lifecycle reference");
+                return;
+            }
+        };
         let severity = match kind {
             NotificationKind::RunCompleted => NotificationSeverity::Success,
             NotificationKind::RunFailed | NotificationKind::DeliveryFailed => {
@@ -440,7 +447,7 @@ impl RunDeliveryServices {
                 source: NotificationSource {
                     thread_id: scope.thread_id.clone(),
                     turn_run_id: Some(run_id),
-                    lifecycle_ref: lifecycle_ref.map(str::to_string),
+                    lifecycle_ref,
                 },
                 action: NotificationAction::OpenThread {
                     thread_id: scope.thread_id.clone(),
