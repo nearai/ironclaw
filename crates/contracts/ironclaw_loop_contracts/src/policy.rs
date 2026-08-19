@@ -42,13 +42,60 @@ pub struct CheckpointPolicy {
     /// explicitly permit no-reply completion.
     #[serde(default)]
     pub allow_no_reply_completion: bool,
+    /// How many loop iterations may pass between durable `BeforeModel`
+    /// checkpoint flushes. `1` (the default) writes one per model call; `3`
+    /// lets up to two iterations in between resume from the previous durable
+    /// checkpoint instead.
+    ///
+    /// This is a ceiling, not a schedule. The executor overrides it and
+    /// flushes anyway whenever the previous durable checkpoint was
+    /// `BeforeSideEffect`, because the newest checkpoint's kind is what the
+    /// scheduler reads to decide whether a lease-expired run may be requeued
+    /// at all — see `CheckpointStage::write_before_model_batched` and #7603.
+    /// In practice that means a tool-calling turn still checkpoints every
+    /// iteration; only runs of consecutive model-only iterations batch.
+    /// Removing that inference is #7707.
+    ///
+    /// Only `BeforeModel` is ever batched. `BeforeSideEffect`, `BeforeBlock`,
+    /// and `Final` stay per-occurrence — they are the durable evidence that a
+    /// side effect may have been attempted, the gate identity cross-checked on
+    /// resume, and the terminal resume point.
+    ///
+    /// Missing wire fields default to `1`, so a profile persisted before this
+    /// field existed keeps its original per-model-call cadence.
+    #[serde(default = "default_before_model_checkpoint_interval")]
+    pub before_model_checkpoint_interval: u32,
 }
 
 fn default_require_final_checkpoint() -> bool {
     true
 }
 
+/// Batching is opt-in. `1` writes a `BeforeModel` checkpoint before every
+/// model call, which is the behavior every profile had before the interval
+/// existed, so an unset or legacy-persisted profile is unchanged.
+fn default_before_model_checkpoint_interval() -> u32 {
+    1
+}
+
 impl CheckpointPolicy {
+    /// Effective `BeforeModel` flush cadence, in iterations.
+    ///
+    /// A persisted or hand-written `0` is coerced to `1`, so a malformed
+    /// profile fails toward MORE durability (a checkpoint every iteration)
+    /// rather than toward never checkpointing.
+    pub fn before_model_flush_interval(&self) -> u32 {
+        self.before_model_checkpoint_interval.max(1)
+    }
+
+    /// Whether the `BeforeModel` checkpoint for `iteration` is a flush point.
+    ///
+    /// Iteration 0 always flushes, so every run has a durable pre-model
+    /// resume point from its first model call onward.
+    pub fn flushes_before_model_at(&self, iteration: u32) -> bool {
+        iteration.is_multiple_of(self.before_model_flush_interval())
+    }
+
     /// The interactive-coding tier checkpoint policy, shared by the interactive
     /// profile and its legacy-persisted reconstruction: gate before side effects
     /// and blocks (not before every model call), a 64 KiB cap, no final
@@ -61,6 +108,7 @@ impl CheckpointPolicy {
             max_checkpoint_bytes: 64 * 1024,
             require_final_checkpoint: false,
             allow_no_reply_completion: false,
+            before_model_checkpoint_interval: default_before_model_checkpoint_interval(),
         }
     }
 }

@@ -196,6 +196,11 @@ async def test_reborn_v2_error_toast_pauses_dismisses_and_stays_above_notificati
         await expect(toast).to_have_attribute("aria-live", "assertive")
         await expect(page.locator(SEL_V2["toast_dismiss"])).to_be_visible()
 
+        # A failed deletion keeps the confirmation dialog open so the user can
+        # retry. Close it before exercising controls behind the modal backdrop.
+        await page.locator(SEL_V2["confirm_dialog_cancel"]).click()
+        await expect(page.locator(SEL_V2["confirm_dialog_confirm"])).to_have_count(0)
+
         # Hover beyond the full eight-second error duration. The toast must
         # retain its remaining lifetime rather than expiring underneath the user.
         await toast.hover()

@@ -176,16 +176,16 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// --print` is the single authoritative re-capture, and this record moves
 /// with `scripts/ci/composition-budget.toml`'s `loc_ceiling`/`loc_observed`
 /// to the same figure in this commit.
-/// ✎ Re-measured 41_991 -> 42_197 on 2026-08-18 after merging main (#7717)
-/// into fix/7681-private-connect-nudge-with-one-click-link: main alone had
-/// already consumed the prior ceiling+tolerance window, and this branch's own
+/// ✎ Re-measured 42_142 -> 42_198 on 2026-08-19 after merging main
+/// into fix/7681-private-connect-nudge-with-one-click-link. Main's own growth
+/// (#7712's checkpoint-policy field, #7717's libSQL write-lane fix) had
+/// already consumed the prior ceiling+tolerance window; this branch's own
 /// delta is the #7681 connect-link notice wiring in
 /// `extension_host_assembly.rs` (~11 lines), predating that growth. Measured
 /// on the merged tree with `bash scripts/ci/check-composition-budget.sh
-/// --print` -> "composition absolute: 42197 LOC (production src)"; this
-/// record moves with `scripts/ci/composition-budget.toml`'s
+/// --print`; this record moves with `scripts/ci/composition-budget.toml`'s
 /// `loc_ceiling`/`loc_observed` to the same figure in this commit.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_197;
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_198;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".
