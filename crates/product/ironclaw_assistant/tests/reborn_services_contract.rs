@@ -8914,6 +8914,7 @@ async fn thread_artifact_per_run_timings_do_not_reach_into_another_runs_activity
     let thread_id = ThreadId::new("thread-multi-run-timings").expect("thread id");
     let run_a = TurnRunId::parse(&run_id_string()).expect("run id");
     let run_b = TurnRunId::new();
+    let run_c = TurnRunId::new();
     let thread_service = Arc::new(InMemorySessionThreadService::default());
     thread_service
         .ensure_thread(EnsureThreadRequest {
@@ -8928,6 +8929,7 @@ async fn thread_artifact_per_run_timings_do_not_reach_into_another_runs_activity
 
     seed_submitted_message(&thread_service, &thread_scope, &thread_id, &run_a, "run a").await;
     seed_submitted_message(&thread_service, &thread_scope, &thread_id, &run_b, "run b").await;
+    seed_submitted_message(&thread_service, &thread_scope, &thread_id, &run_c, "run c").await;
 
     let diagnostic_store =
         InMemoryDiagnosticStore::new(DiagnosticStoreLimits::default()).expect("diagnostic store");
@@ -8974,7 +8976,7 @@ async fn thread_artifact_per_run_timings_do_not_reach_into_another_runs_activity
     let artifact: RebornThreadArtifact =
         serde_json::from_value(page.payload).expect("artifact payload");
 
-    assert_eq!(artifact.timings_by_run.len(), 2);
+    assert_eq!(artifact.timings_by_run.len(), 3);
     let run_a_timing = artifact
         .timings_by_run
         .iter()
@@ -8982,6 +8984,16 @@ async fn thread_artifact_per_run_timings_do_not_reach_into_another_runs_activity
         .expect("run a timing entry");
     assert!(run_a_timing.timings.available);
     assert!(run_a_timing.timings.totals.wall_clock_ms.is_some());
+    let run_c_timing = artifact
+        .timings_by_run
+        .iter()
+        .find(|entry| entry.run_id == run_c.to_string())
+        .expect("run c timing entry");
+    assert!(!run_c_timing.timings.available);
+    assert_eq!(
+        run_c_timing.timings.unavailable_reason.as_deref(),
+        Some("run_not_resident")
+    );
 }
 
 #[tokio::test]

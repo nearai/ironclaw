@@ -92,12 +92,17 @@ pub struct RunArtifactTimingTotals {
     pub retained_tool_ms: Option<u64>,
     /// False when the store's cumulative tool count exceeds its retained
     /// execution records, so `retained_tool_ms` is known to be partial.
+    #[serde(default, skip_serializing_if = "is_false")]
     pub retained_tool_ms_complete: bool,
     /// run.received_at → the newest message `updated_at`. Approximate: it
     /// includes queue and persistence latency around the run, and it is the
     /// only end-to-end number available without widening into turn state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_clock_ms: Option<u64>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// The "no numbers, and here is why" value. Never an error — a missing
@@ -378,6 +383,26 @@ mod tests {
         assert_eq!(projected.totals.inference_ms.unavailable_samples, 1);
         assert_eq!(projected.totals.retained_tool_ms, Some(7));
         assert!(!projected.totals.retained_tool_ms_complete);
+    }
+
+    #[test]
+    fn timing_totals_decode_legacy_payload_without_completion_flag() {
+        let legacy = r#"{
+            "iterations": 1,
+            "tool_calls": 0,
+            "failed_tool_calls": 0,
+            "inference_ms": {
+                "known_total": 5,
+                "unavailable_samples": 0
+            }
+        }"#;
+
+        let totals: RunArtifactTimingTotals =
+            serde_json::from_str(legacy).expect("legacy timing totals should decode");
+        assert!(!totals.retained_tool_ms_complete);
+
+        let serialized = serde_json::to_string(&totals).expect("timing totals should serialize");
+        assert!(!serialized.contains("retained_tool_ms_complete"));
     }
 
     #[test]

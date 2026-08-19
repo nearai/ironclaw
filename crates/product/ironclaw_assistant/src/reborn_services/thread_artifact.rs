@@ -40,8 +40,8 @@ pub struct RebornThreadArtifact {
     pub thread_id: String,
     pub messages: Vec<RunArtifactMessage>,
     pub logs: RunArtifactLogs,
-    /// One timing block per run still resident in the process-local store.
-    /// Absent runs are simply not listed.
+    /// One timing block per run with a durable message timestamp. Runs absent
+    /// from the process-local store retain an explicit unavailable block.
     #[serde(default)]
     pub timings_by_run: Vec<RunArtifactRunTimings>,
     pub redaction: RunArtifactRedaction,
@@ -119,12 +119,10 @@ where
                 origin,
                 run_messages.iter().copied(),
             );
-            if timings.available {
-                timings_by_run.push(RunArtifactRunTimings {
-                    run_id: run_id.to_string(),
-                    timings,
-                });
-            }
+            timings_by_run.push(RunArtifactRunTimings {
+                run_id: run_id.to_string(),
+                timings,
+            });
         }
 
         let (logs, log_redaction_applied) = self
