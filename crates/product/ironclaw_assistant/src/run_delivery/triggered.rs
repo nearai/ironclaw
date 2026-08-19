@@ -749,7 +749,9 @@ async fn notify_background_run(
                     notifications: vec![TriggeredNotification {
                         event_kind: RunNotificationEventKind::RunBlocked,
                         intent: DeliveryIntent::BackgroundRunNotice,
-                        notice_discriminator: Some("timeout".to_string()),
+                        notice_discriminator: Some(
+                            crate::run_delivery::TIMEOUT_LIFECYCLE_REF.to_string(),
+                        ),
                         text: format!(
                             "{}{}",
                             prompts::DELIVERY_TIMEOUT_MESSAGE,
@@ -767,7 +769,7 @@ async fn notify_background_run(
                         &scope,
                         run_id,
                         NotificationKind::RunBlocked,
-                        Some("timeout"),
+                        Some(crate::run_delivery::TIMEOUT_LIFECYCLE_REF),
                     )
                     .await;
                 let fan =

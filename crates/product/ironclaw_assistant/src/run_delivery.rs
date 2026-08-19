@@ -689,7 +689,12 @@ impl RunDeliveryServices {
     }
 }
 
-fn run_notification_inbox_id(
+/// Lifecycle reference for the actionable block a delivery timeout leaves
+/// behind. Publisher and resolver must derive the same stable id from it, so
+/// it is named once rather than spelled at each site.
+pub(crate) const TIMEOUT_LIFECYCLE_REF: &str = "timeout";
+
+pub(crate) fn run_notification_inbox_id(
     run_id: TurnRunId,
     kind: NotificationKind,
     lifecycle_ref: Option<&str>,

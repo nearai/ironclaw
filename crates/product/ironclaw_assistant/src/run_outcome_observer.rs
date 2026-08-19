@@ -8,7 +8,8 @@ use ironclaw_host_api::{
     turn::{TurnExecutionOutcome, TurnOriginKind, TurnRunId},
 };
 use ironclaw_notifications::{
-    LifecycleRef, NotificationAction, NotificationId, NotificationInboxStorePort, NotificationKind,
+    LifecycleRef, NotificationAction, NotificationId, NotificationInboxError,
+    NotificationInboxStorePort, NotificationKind, NotificationMutationRequest,
     NotificationRecipient, NotificationSeverity, NotificationSource, PublishNotificationRequest,
 };
 use ironclaw_processes::{
@@ -85,6 +86,47 @@ impl RunOutcomeProcessCommitObserver {
     }
 }
 
+impl RunOutcomeProcessCommitObserver {
+    /// Retire the actionable block a delivery timeout left behind. That
+    /// publisher returns straight after recording it, so no watcher observes
+    /// the run again — a terminal fact is the only thing that can close it.
+    /// A run that never timed out simply has no such record.
+    async fn resolve_timed_out_block(
+        &self,
+        snapshot: &JournaledProcessSnapshot,
+        run_id: TurnRunId,
+        occurred_at: Timestamp,
+    ) -> Result<(), String> {
+        let Some(owner_user_id) = snapshot.owner_user_id.clone() else {
+            return Ok(());
+        };
+        let notification_id = crate::run_delivery::run_notification_inbox_id(
+            run_id,
+            NotificationKind::RunBlocked,
+            Some(crate::run_delivery::TIMEOUT_LIFECYCLE_REF),
+        )
+        .map_err(|error| format!("build timed-out run block id failed: {error}"))?;
+        match self
+            .inbox
+            .resolve(NotificationMutationRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: snapshot.scope.tenant_id.clone(),
+                    user_id: owner_user_id,
+                },
+                notification_id,
+                occurred_at,
+            })
+            .await
+        {
+            // Most runs never time out, so there is usually nothing to retire;
+            // the outcome itself is not interesting here, only that the store
+            // was reached.
+            Ok(_) | Err(NotificationInboxError::NotificationNotFound) => Ok(()),
+            Err(error) => Err(format!("resolve timed-out run block failed: {error}")),
+        }
+    }
+}
+
 #[async_trait]
 impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
     fn process_observer_id(&self) -> &'static str {
@@ -97,6 +139,10 @@ impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
         };
         let run_id = TurnRunId::from_uuid(commit.state.process_id.as_uuid());
         let occurred_at = commit.occurred_at.unwrap_or(commit.state.created_at);
+        if commit.state.status.is_terminal() {
+            self.resolve_timed_out_block(&commit.state, run_id, occurred_at)
+                .await?;
+        }
         match (commit.kind, commit.state.status) {
             (ProcessJournalKind::Completed, ProcessLifecycleStatus::Completed) => {
                 if !metadata.output_contract.is_assistant_message() {
@@ -133,9 +179,14 @@ impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
                     .await
                     .map_err(|error| format!("read finalized run reply failed: {error}"))?;
                 let Some(final_reply) = final_reply else {
-                    tracing::debug!(
+                    // The loop host appends the finalized reply, with retry,
+                    // before the turn can report completion, so an absent one
+                    // here is a contract miss rather than a routine race —
+                    // `run_delivery::observer` warns on the same condition.
+                    tracing::warn!(
                         %run_id,
-                        "completed background run has no finalized assistant reply"
+                        "completed background run has no finalized assistant reply; \
+                         skipping its completion notification"
                     );
                     return Ok(());
                 };
@@ -268,8 +319,9 @@ mod tests {
         turn::TurnRunId,
     };
     use ironclaw_notifications::{
-        ListNotificationsRequest, NotificationInboxStore, NotificationInboxStorePort,
-        NotificationKind, NotificationRecipient,
+        LifecycleRef, ListNotificationsRequest, NotificationAction, NotificationInboxStore,
+        NotificationInboxStorePort, NotificationKind, NotificationRecipient, NotificationSeverity,
+        NotificationSource, PublishNotificationRequest,
     };
     use ironclaw_processes::{
         JournaledProcessSnapshot, ProcessJournalCommit, ProcessJournalCommitObserver,
@@ -386,6 +438,96 @@ mod tests {
             .into_iter()
             .map(|record| record.kind)
             .collect()
+    }
+
+    /// A timed-out fire publishes an actionable block and the delivery watcher
+    /// then returns, so nothing else ever observes that run again. Only a
+    /// terminal fact can retire the record.
+    #[tokio::test]
+    async fn a_terminal_run_resolves_the_block_left_behind_by_a_delivery_timeout() {
+        for status in [
+            ProcessLifecycleStatus::Completed,
+            ProcessLifecycleStatus::Failed,
+            ProcessLifecycleStatus::Cancelled,
+        ] {
+            let inbox = inbox();
+            let threads = Arc::new(InMemorySessionThreadService::default());
+            threads
+                .ensure_thread(EnsureThreadRequest {
+                    scope: thread_scope(),
+                    thread_id: Some(thread()),
+                    created_by_actor_id: user().to_string(),
+                    title: None,
+                    metadata_json: None,
+                })
+                .await
+                .expect("thread");
+            let run_id = TurnRunId::new();
+            let recipient = NotificationRecipient {
+                tenant_id: tenant(),
+                user_id: user(),
+            };
+
+            inbox
+                .publish(PublishNotificationRequest {
+                    id: crate::run_delivery::run_notification_inbox_id(
+                        run_id,
+                        NotificationKind::RunBlocked,
+                        Some(crate::run_delivery::TIMEOUT_LIFECYCLE_REF),
+                    )
+                    .expect("timeout block id"),
+                    recipient: recipient.clone(),
+                    kind: NotificationKind::RunBlocked,
+                    severity: NotificationSeverity::Warning,
+                    source: NotificationSource {
+                        thread_id: thread(),
+                        turn_run_id: Some(run_id),
+                        lifecycle_ref: Some(
+                            LifecycleRef::new(crate::run_delivery::TIMEOUT_LIFECYCLE_REF)
+                                .expect("timeout lifecycle ref"),
+                        ),
+                    },
+                    action: NotificationAction::OpenThread {
+                        thread_id: thread(),
+                    },
+                    occurred_at: Utc::now(),
+                })
+                .await
+                .expect("seed the timed-out block");
+
+            let observer = RunOutcomeProcessCommitObserver::new(
+                Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+                Arc::clone(&threads) as Arc<dyn SessionThreadService>,
+            );
+            observer
+                .observe_process_commit(commit(
+                    run_id,
+                    status,
+                    ProcessJournalKind::Completed,
+                    "scheduled_trigger",
+                ))
+                .await
+                .expect("terminal commit");
+
+            let page = inbox
+                .list(ListNotificationsRequest {
+                    recipient,
+                    limit: 10,
+                    cursor: None,
+                    include_archived: true,
+                })
+                .await
+                .expect("list");
+            let block = page
+                .notifications
+                .iter()
+                .find(|record| record.kind == NotificationKind::RunBlocked)
+                .expect("the block record survives");
+            assert!(
+                block.resolved_at.is_some(),
+                "{status:?} must retire the block a delivery timeout left open",
+            );
+        }
     }
 
     #[tokio::test]
