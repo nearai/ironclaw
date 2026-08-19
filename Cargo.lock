@@ -4242,6 +4242,7 @@ dependencies = [
  "ironclaw_trust",
  "ironclaw_turns",
  "lru",
+ "percent-encoding",
  "proptest",
  "rand 0.10.2",
  "rust_decimal",

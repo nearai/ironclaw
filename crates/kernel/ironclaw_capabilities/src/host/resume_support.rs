@@ -10,7 +10,7 @@ use ironclaw_authorization::{CapabilityLease, CapabilityLeaseStorePort};
 use ironclaw_host_api::{
     authorized::AuthorizeResult,
     decision::Decision,
-    dispatch::CapabilityDispatcher,
+    dispatch::{CapabilityDispatchResult, CapabilityDispatcher},
     ids::{CapabilityId, DenyRef, GateRef},
     resolution::{Blocked, GateWaypoint},
     scope::ExecutionContext,
@@ -33,10 +33,7 @@ use crate::helpers::{
     fail_invocation_if_configured, invocation_state_error_kind,
 };
 use crate::ports::PolicyAction;
-use crate::{
-    CapabilityInvocationError, CapabilityInvocationResult, CapabilityObligationOutcome,
-    CapabilityObligationPhase,
-};
+use crate::{CapabilityInvocationError, CapabilityObligationOutcome, CapabilityObligationPhase};
 
 impl<'a, D> CapabilityHost<'a, D>
 where
@@ -311,7 +308,7 @@ where
     pub(super) async fn dispatch_resumed_capability(
         &self,
         params: ResumedDispatchParams<'_>,
-    ) -> Result<CapabilityInvocationResult, CapabilityInvocationError> {
+    ) -> Result<CapabilityDispatchResult, CapabilityInvocationError> {
         // Pre-dispatch authority fold (trust-aware authorization + Decision
         // mapping) extracted to `authorize_resumed`, mirroring `authorize()`.
         // The claim-before-dispatch ordering the resume paths depend on stays in
@@ -587,6 +584,6 @@ where
             "dispatch",
         )
         .await;
-        Ok(CapabilityInvocationResult { dispatch })
+        Ok(dispatch)
     }
 }

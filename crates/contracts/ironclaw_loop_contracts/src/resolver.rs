@@ -401,6 +401,7 @@ fn long_running_mission_profile() -> RunProfileDefinition {
             max_checkpoint_bytes: 256 * 1024,
             require_final_checkpoint: true,
             allow_no_reply_completion: false,
+            before_model_checkpoint_interval: 1,
         },
         resource_budget_policy: ResourceBudgetPolicy {
             tier: ResourceBudgetTier::from_trusted_static("mission_high"),
@@ -532,6 +533,12 @@ fn fingerprint_for(
     update_bool(
         definition.checkpoint_policy.allow_no_reply_completion,
         &mut update,
+    );
+    update(
+        &definition
+            .checkpoint_policy
+            .before_model_checkpoint_interval
+            .to_string(),
     );
     update(resource_budget_policy.tier.as_str());
     update(&resource_budget_policy.max_model_calls.to_string());

@@ -4100,10 +4100,11 @@ fn process_input_payload_is_bounded_and_redacted() {
     assert!(!debug.contains("private-goal"));
 }
 
-async fn submit_internal_process<F>(
+async fn submit_internal_process_at<F>(
     store: &ProcessJournalStore<F>,
     scope: &ResourceScope,
     process_id: ProcessId,
+    created_at: chrono::DateTime<Utc>,
 ) -> ironclaw_processes::JournaledProcessSnapshot
 where
     F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
@@ -4123,11 +4124,22 @@ where
             dependency: None,
             checkpoint_ref: None,
             input: None,
-            created_at: Utc::now(),
+            created_at,
             metadata: serde_json::Value::Null,
         })
         .await
         .expect("submit internal process")
+}
+
+async fn submit_internal_process<F>(
+    store: &ProcessJournalStore<F>,
+    scope: &ResourceScope,
+    process_id: ProcessId,
+) -> ironclaw_processes::JournaledProcessSnapshot
+where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    submit_internal_process_at(store, scope, process_id, Utc::now()).await
 }
 
 fn scope() -> ResourceScope {
@@ -4169,12 +4181,22 @@ async fn recent_agent_turn_snapshots_are_newest_first_and_bounded_by_agent_turn_
 
     // Interleave agent-turn runs with internal processes in the same scope so
     // a kind-blind limit would come back short (or empty).
+    // Strictly increasing stamps: the keyset tie-breaker is a random UUID, so
+    // equal timestamps would make the expected order unpredictable.
+    let base = Utc::now();
     let mut agent_turn_ids = Vec::new();
-    for _ in 0..5 {
+    for index in 0..5 {
+        let at = base + chrono::Duration::seconds(index * 2);
         let agent_turn = ProcessId::new();
-        submit_agent_turn_process(&store, &scope, agent_turn).await;
+        submit_agent_turn_process_at(&store, &scope, agent_turn, at).await;
         agent_turn_ids.push(agent_turn);
-        submit_internal_process(&store, &scope, ProcessId::new()).await;
+        submit_internal_process_at(
+            &store,
+            &scope,
+            ProcessId::new(),
+            at + chrono::Duration::seconds(1),
+        )
+        .await;
     }
 
     let recent = store
@@ -4220,10 +4242,11 @@ async fn recent_agent_turn_snapshots_returns_a_short_window_for_a_young_thread()
     assert_eq!(recent.len(), 2);
 }
 
-async fn submit_agent_turn_process<F>(
+async fn submit_agent_turn_process_at<F>(
     store: &ProcessJournalStore<F>,
     scope: &ResourceScope,
     process_id: ProcessId,
+    created_at: chrono::DateTime<Utc>,
 ) -> ironclaw_processes::JournaledProcessSnapshot
 where
     F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
@@ -4243,11 +4266,27 @@ where
             dependency: None,
             checkpoint_ref: None,
             input: None,
-            created_at: Utc::now(),
+            created_at,
             metadata: serde_json::Value::Null,
         })
         .await
         .expect("agent-turn process submits")
+}
+
+/// The window walk sorts on `(created_at micros, process_id text)` descending,
+/// and `ProcessId` is a random UUID — so any two rows sharing a microsecond
+/// resolve by UUID, which is not the order a test can predict. Ordering tests
+/// seed strictly increasing stamps through this helper so the tie-breaker is
+/// never reached.
+async fn submit_agent_turn_process<F>(
+    store: &ProcessJournalStore<F>,
+    scope: &ResourceScope,
+    process_id: ProcessId,
+) -> ironclaw_processes::JournaledProcessSnapshot
+where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    submit_agent_turn_process_at(store, scope, process_id, Utc::now()).await
 }
 
 /// The keyset walk pages. With limit=2 the page size is 8, so seeding more
@@ -4314,16 +4353,24 @@ where
 {
     let scope = scope();
 
+    let base = Utc::now();
     let mut agent_turn_ids = Vec::new();
-    for _ in 0..3 {
+    for index in 0..3 {
         let id = ProcessId::new();
-        submit_agent_turn_process(&store, &scope, id).await;
+        submit_agent_turn_process_at(&store, &scope, id, base + chrono::Duration::seconds(index))
+            .await;
         agent_turn_ids.push(id);
     }
     // Newer than every agent-turn row and more than one page, so the walk must
     // advance its cursor across pages to fill the window.
-    for _ in 0..12 {
-        submit_internal_process(&store, &scope, ProcessId::new()).await;
+    for index in 0..12 {
+        submit_internal_process_at(
+            &store,
+            &scope,
+            ProcessId::new(),
+            base + chrono::Duration::seconds(100 + index),
+        )
+        .await;
     }
 
     let recent = store

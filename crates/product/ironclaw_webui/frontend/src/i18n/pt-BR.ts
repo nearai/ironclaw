@@ -1421,6 +1421,7 @@ registerPack("pt-BR", {
   "pairing.connectInstructions": "Siga as etapas de conexão de {name} para continuar.",
   "pairing.connectFromExtensions": "Conecte {name} pela página Extensões para continuar.",
   "pairing.connectFailedRetry": "A conexão falhou. Tente novamente.",
+  "pairing.continueConnect": "Continuar para conectar {name}",
   "extensions.authUrlHttpsRequired": "A URL de autenticação deve usar HTTPS.",
   "tools.available": "Ferramentas disponíveis",
   "slackSetup.placeholder.keepSecret": "Configurado; deixe em branco para manter",

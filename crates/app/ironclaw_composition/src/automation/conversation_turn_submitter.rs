@@ -242,6 +242,13 @@ mod tests {
             ),
             (
                 TurnError::AdmissionRejected(AdmissionRejection::new(
+                    AdmissionRejectionReason::SystemWakeStreak,
+                )),
+                TurnSubmissionErrorCategory::AdmissionRejected,
+                TurnSubmissionRetry::RetryableAfterKeyRotation,
+            ),
+            (
+                TurnError::AdmissionRejected(AdmissionRejection::new(
                     AdmissionRejectionReason::Policy,
                 )),
                 TurnSubmissionErrorCategory::Unauthorized,
@@ -359,7 +366,7 @@ mod tests {
             distinct.len(),
             12,
             "TurnError has 12 variants; the class table must name every one \
-             (AdmissionRejected appears four times, once per rejection reason)"
+             (AdmissionRejected appears six times, once per rejection reason)"
         );
     }
 

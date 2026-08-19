@@ -249,7 +249,7 @@ use ironclaw_assistant::{
     DeliveryCoordinator, DeliveryIntent, DeliveryRetryPolicy, NoticeDeliveryRequest,
 };
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelError, DeliveryReport, OutboundEnvelope, PartDeliveryOutcome,
+    ChannelError, DeliveryReport, OutboundEnvelope, OutboundVisibility, PartDeliveryOutcome,
 };
 use ironclaw_product_contracts::delivery::{
     ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
@@ -2293,6 +2293,7 @@ fn working_notice(scope: TurnScope, extension_id: &str) -> NoticeDeliveryRequest
         ],
         extension_id,
         notice_ref: "run-42".to_string(),
+        visibility: OutboundVisibility::Public,
     }
 }
 

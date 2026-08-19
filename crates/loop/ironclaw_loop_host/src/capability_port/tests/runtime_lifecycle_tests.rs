@@ -21,9 +21,8 @@ use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, HostRuntime, HostRuntimeError,
     HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeApprovalResume,
     RuntimeAuthGate, RuntimeAuthResume, RuntimeBlockedReason, RuntimeCapabilityCompleted,
-    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityUnknown, RuntimeGateId,
-    RuntimeInvocation, RuntimeProcessHandle, RuntimeResourceGate, RuntimeStatusRequest,
-    VisibleCapabilitySurface,
+    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeGateId, RuntimeInvocation,
+    RuntimeProcessHandle, RuntimeResourceGate, RuntimeStatusRequest, VisibleCapabilitySurface,
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
@@ -402,72 +401,54 @@ async fn runtime_capability_batch_continues_after_runtime_failure_outcome() {
 }
 
 #[tokio::test]
-async fn runtime_capability_failed_and_unknown_outcomes_emit_failure_milestones() {
-    let cases = [
-        (
-            RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
-                CapabilityId::new("demo.echo").expect("valid capability id"),
-                FailureKind::InputEncode,
-                Some("invalid input".to_string()),
-            )),
-            FailureKind::InputEncode,
-        ),
-        (
-            RuntimeCapabilityOutcome::Unknown(RuntimeCapabilityUnknown {
-                capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
-                kind: "custom_failure".to_string(),
-                message: Some("custom failure".to_string()),
-            }),
-            // Unrecognized legacy open-set tag: the closed vocabulary's total
-            // `from_tag` fallback lands on the non-retryable `Unclassified`
-            // sink.
-            FailureKind::Unclassified,
-        ),
-    ];
-
-    for (outcome, expected_kind) in cases {
-        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
-        let provider_id = ExtensionId::new("demo").expect("valid provider id");
-        let milestone_sink =
-            Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
-        let port = runtime_capability_port(
-            &capability_id,
-            &provider_id,
-            Arc::new(QueuedHostRuntime::new(
-                vec![visible_capability(
+async fn runtime_capability_failed_outcome_emits_failure_milestone() {
+    let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+    let provider_id = ExtensionId::new("demo").expect("valid provider id");
+    let milestone_sink =
+        Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
+    let port = runtime_capability_port(
+        &capability_id,
+        &provider_id,
+        Arc::new(QueuedHostRuntime::new(
+            vec![visible_capability(
+                capability_id.clone(),
+                provider_id.clone(),
+            )],
+            vec![Ok(RuntimeCapabilityOutcome::Failed(
+                RuntimeCapabilityFailure::new(
                     capability_id.clone(),
-                    provider_id.clone(),
-                )],
-                vec![Ok(outcome)],
-            )),
-            Arc::new(RecordingResultWriter::default()),
-            milestone_sink.clone(),
-            "thread-runtime-capability-failure-milestone",
-        )
-        .await;
+                    FailureKind::InputEncode,
+                    Some("invalid input".to_string()),
+                ),
+            ))],
+        )),
+        Arc::new(RecordingResultWriter::default()),
+        milestone_sink.clone(),
+        "thread-runtime-capability-failure-milestone",
+    )
+    .await;
 
-        let outcome = invoke_visible_runtime_capability(&port)
-            .await
-            .expect("runtime failure outcome maps to loop outcome");
+    let outcome = invoke_visible_runtime_capability(&port)
+        .await
+        .expect("runtime failure outcome maps to loop outcome");
 
-        assert!(matches!(
-            &outcome,
-            Resolution::Done(o) if o.verdict.error_kind().is_some()
-        ));
-        let milestones = milestone_sink.milestones();
-        assert_eq!(milestones.len(), 2);
-        assert!(matches!(
-            &milestones[1].kind,
-            ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityFailed {
-                activity_id: _,
-                capability_id: actual,
-                provider: Some(provider),
-                runtime: Some(RuntimeKind::FirstParty),
-                reason_kind,
-                ..
-            } if actual == &capability_id && provider == &provider_id && reason_kind == &expected_kind
-        ));
-    }
+    assert!(matches!(
+        &outcome,
+        Resolution::Done(o) if o.verdict.error_kind().is_some()
+    ));
+    let milestones = milestone_sink.milestones();
+    assert_eq!(milestones.len(), 2);
+    assert!(matches!(
+        &milestones[1].kind,
+        ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityFailed {
+            activity_id: _,
+            capability_id: actual,
+            provider: Some(provider),
+            runtime: Some(RuntimeKind::FirstParty),
+            reason_kind: FailureKind::InputEncode,
+            ..
+        } if actual == &capability_id && provider == &provider_id
+    ));
 }
 
 #[tokio::test]
@@ -957,65 +938,6 @@ async fn host_runtime_default_auth_decline_fails_closed_as_unavailable() {
         .expect_err("runtime without durable decline support must fail closed");
 
     assert!(matches!(error, HostRuntimeError::Unavailable { .. }));
-}
-
-/// The unified `FailureKind` vocabulary is closed and `from_tag` is total, so
-/// a wild/unsafe unknown-outcome tag no longer aborts the run with an internal
-/// "could not be represented" host error — it lands in the non-retryable
-/// `Unclassified` sink, emits the failure milestone, and returns a
-/// model-visible failed resolution.
-#[tokio::test]
-async fn runtime_capability_unknown_outcome_with_wild_kind_maps_to_unclassified_failure() {
-    let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
-    let provider_id = ExtensionId::new("demo").expect("valid provider id");
-    let milestone_sink =
-        Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
-    let port = runtime_capability_port(
-        &capability_id,
-        &provider_id,
-        Arc::new(QueuedHostRuntime::new(
-            vec![visible_capability(
-                capability_id.clone(),
-                provider_id.clone(),
-            )],
-            vec![Ok(RuntimeCapabilityOutcome::Unknown(
-                RuntimeCapabilityUnknown {
-                    capability_id: capability_id.clone(),
-                    kind: "invalid kind with spaces".to_string(),
-                    message: Some("bad kind".to_string()),
-                },
-            ))],
-        )),
-        Arc::new(RecordingResultWriter::default()),
-        milestone_sink.clone(),
-        "thread-runtime-capability-invalid-unknown-kind",
-    )
-    .await;
-
-    let outcome = invoke_visible_runtime_capability(&port)
-        .await
-        .expect("wild unknown-outcome kind becomes a model-visible failure");
-
-    assert!(matches!(
-        &outcome,
-        Resolution::Done(o)
-            if o.verdict.error_kind() == Some(&FailureKind::Unclassified)
-    ));
-    let milestones = milestone_sink.milestones();
-    assert_eq!(milestones.len(), 2);
-    assert!(matches!(
-        &milestones[1].kind,
-        ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityFailed {
-            activity_id: _,
-            capability_id: actual,
-            provider: Some(provider),
-            runtime: Some(RuntimeKind::FirstParty),
-            reason_kind,
-            ..
-        } if actual == &capability_id
-            && provider == &provider_id
-            && reason_kind == &FailureKind::Unclassified
-    ));
 }
 
 #[tokio::test]

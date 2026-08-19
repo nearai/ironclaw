@@ -402,6 +402,7 @@ methods = ["post"]
 credential_handle = "slack_bot_token"
 paths = [
   "/api/chat.postMessage",
+  "/api/chat.postEphemeral",
   "/api/chat.delete",
   "/api/conversations.open",
   "/api/files.completeUploadExternal",

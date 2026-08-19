@@ -1421,6 +1421,7 @@ registerPack("ar", {
   "pairing.connectInstructions": "اتبع خطوات الاتصال الخاصة بـ {name} للمتابعة.",
   "pairing.connectFromExtensions": "اربط {name} من صفحة الإضافات للمتابعة.",
   "pairing.connectFailedRetry": "فشل الاتصال. حاول مرة أخرى.",
+  "pairing.continueConnect": "متابعة لربط {name}",
   "extensions.authUrlHttpsRequired": "يجب أن يستخدم عنوان URL للمصادقة HTTPS.",
   "tools.available": "الأدوات المتاحة",
   "slackSetup.placeholder.keepSecret": "مكوّن؛ اتركه فارغًا للإبقاء عليه",

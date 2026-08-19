@@ -91,7 +91,7 @@ async fn auth_resume_json_accepts_blocked_auth_run_and_dispatches() {
         .await
         .unwrap();
 
-    assert_eq!(result.dispatch.output, json!({"ok": true}));
+    assert_eq!(result.output, json!({"ok": true}));
     assert!(dispatcher.call_count() > 0);
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, ProcessInvocationStatus::Completed);
@@ -460,7 +460,7 @@ async fn auth_resume_json_with_approval_request_id_claims_active_lease_and_dispa
         .unwrap();
 
     assert_eq!(
-        result.dispatch.output,
+        result.output,
         json!({"ok": true}),
         "auth_resume with original invocation_id must complete dispatch"
     );
@@ -765,7 +765,7 @@ async fn auth_resume_json_without_approval_request_id_skips_lease_path_and_dispa
         .await
         .unwrap();
 
-    assert_eq!(result.dispatch.output, json!({"ok": true}));
+    assert_eq!(result.output, json!({"ok": true}));
     assert!(dispatcher.call_count() > 0);
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, ProcessInvocationStatus::Completed);
@@ -947,7 +947,7 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
         });
 
     assert_eq!(
-        auth_result.dispatch.output,
+        auth_result.output,
         json!({"ok": true}),
         "(b) auth_resume_json must dispatch successfully"
     );

@@ -3647,21 +3647,6 @@ async fn runtime_outcome_to_loop(
             }
             GatedResolution::bare(class.into_resolution())
         }
-        RuntimeCapabilityOutcome::Unknown(unknown) => {
-            let detail = unknown
-                .message
-                .as_deref()
-                .and_then(model_visible_diagnostic_text)
-                .unwrap_or_else(|| ModelDiagnostic::unavailable().into_inner());
-            GatedResolution::bare(resolution::failed(
-                FailureKind::from_tag(&unknown.kind),
-                runtime_safe_summary(
-                    unknown.message,
-                    "capability invocation returned an unknown outcome",
-                ),
-                CapabilityFailureDetail::Diagnostic { text: detail },
-            ))
-        }
     })
 }
 
@@ -3725,16 +3710,6 @@ fn runtime_terminal_milestone(
                 // so the live per-tool UI card shows the real reason, not just
                 // the bare error kind.
                 safe_summary,
-            })
-        }
-        RuntimeCapabilityOutcome::Unknown(unknown) => {
-            Some(LoopHostMilestoneKind::CapabilityFailed {
-                activity_id,
-                capability_id: unknown.capability_id.clone(),
-                provider: Some(provider),
-                runtime: Some(runtime),
-                reason_kind: FailureKind::from_tag(&unknown.kind),
-                safe_summary: None,
             })
         }
         RuntimeCapabilityOutcome::ApprovalRequired(_)
@@ -3950,7 +3925,6 @@ fn ensure_runtime_outcome_matches(
         RuntimeCapabilityOutcome::ResourceBlocked(gate) => &gate.capability_id,
         RuntimeCapabilityOutcome::SpawnedProcess(process) => &process.capability_id,
         RuntimeCapabilityOutcome::Failed(failure) => &failure.capability_id,
-        RuntimeCapabilityOutcome::Unknown(unknown) => &unknown.capability_id,
     };
     if actual != expected {
         return Err(AgentLoopHostError::new(
@@ -4168,9 +4142,8 @@ mod tests {
     use ironclaw_host_runtime::{
         CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceVersion,
         HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalResume, RuntimeCapabilityCompleted,
-        RuntimeCapabilityFailure, RuntimeCapabilityUnknown, RuntimeInvocation,
-        RuntimeStatusRequest, SurfaceKind, VisibleCapability, VisibleCapabilityAccess,
-        VisibleCapabilitySurface,
+        RuntimeCapabilityFailure, RuntimeInvocation, RuntimeStatusRequest, SurfaceKind,
+        VisibleCapability, VisibleCapabilityAccess, VisibleCapabilitySurface,
     };
     use ironclaw_loop_contracts::{
         InMemoryRunProfileResolver, LoopDriverId, RunProfileResolutionRequest, RunProfileResolver,

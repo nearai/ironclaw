@@ -1421,6 +1421,7 @@ registerPack("uk", {
   "pairing.connectInstructions": "Виконайте кроки підключення для {name}, щоб продовжити.",
   "pairing.connectFromExtensions": "Підключіть {name} на сторінці Розширення, щоб продовжити.",
   "pairing.connectFailedRetry": "Не вдалося підключитися. Спробуйте ще раз.",
+  "pairing.continueConnect": "Продовжити, щоб підключити {name}",
   "extensions.authUrlHttpsRequired": "URL автентифікації має використовувати HTTPS.",
   "tools.available": "Доступні інструменти",
   "slackSetup.placeholder.keepSecret": "Налаштовано; залиште порожнім, щоб зберегти",

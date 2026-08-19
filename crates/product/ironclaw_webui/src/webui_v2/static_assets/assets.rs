@@ -910,9 +910,15 @@ mod tests {
     fn extension_oauth_setup_refreshes_while_popup_is_open() {
         let use_extensions = source_text("pages/extensions/hooks/useExtensions.ts");
 
+        let oauth_events = source_text("lib/product-auth-oauth-events.ts");
+
         assert!(
-            use_extensions.contains("OAUTH_SETUP_REFRESH_MS = 2000"),
+            oauth_events.contains("OAUTH_FLOW_POLL_MS = 2000"),
             "OAuth setup should poll often enough for setup-complete state to appear promptly"
+        );
+        assert!(
+            use_extensions.contains("OAUTH_FLOW_POLL_MS"),
+            "OAuth setup should poll on the shared product-auth OAuth flow cadence"
         );
         assert!(
             use_extensions.contains("const watchOauthProgress = React.useCallback"),
