@@ -115,6 +115,29 @@ test("keeps the generated ID hidden until Advanced options and validates each co
   assert.match(document.body.textContent || "", /customMcpIdInvalid/);
 });
 
+test("accepts a literal loopback IP over http and advances to review", () => {
+  renderModal();
+  setInput(document.querySelectorAll<HTMLInputElement>("input")[0], "Pantry Host MCP");
+  setInput(document.querySelectorAll<HTMLInputElement>("input")[2], "http://127.0.0.1:5001/mcp");
+  clickButton("common.continue");
+
+  // A literal loopback IP is a safe on-device target: no endpoint error, and
+  // the wizard advances to the Review step.
+  assert.doesNotMatch(document.body.textContent || "", /customMcpEndpointHttps/);
+  assert.match(document.body.textContent || "", /customMcpReviewHint/);
+});
+
+test("still rejects localhost as a hosted MCP endpoint", () => {
+  renderModal();
+  setInput(document.querySelectorAll<HTMLInputElement>("input")[0], "Local MCP");
+  // `localhost` is a DNS name that could rebind, so it stays rejected even
+  // though a literal loopback IP is now allowed.
+  setInput(document.querySelectorAll<HTMLInputElement>("input")[2], "http://localhost:5001/mcp");
+  clickButton("common.continue");
+
+  assert.match(document.body.textContent || "", /customMcpEndpointHttps/);
+});
+
 test("review submits automatic authentication without asking the user to classify the server", () => {
   let payload: CustomMcpRegistrationPayload | null = null;
   renderModal({ onRegister: (request) => { payload = request; } });
