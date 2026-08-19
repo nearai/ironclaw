@@ -22,13 +22,23 @@ function emptyStateSourceForTest() {
   );
 }
 
-function renderEmptyState({ oobeSuggestionsEnabled = true, ...props } = {}) {
+function renderEmptyState({
+  oobeSuggestionsEnabled = true,
+  drawerState = "open",
+  ...props
+} = {}) {
   const components = {
     Icon() {},
     ChatInput() {},
     SuggestedTaskSurface() {},
+    OobeRestorePill() {},
     NearProcessIndicator() {},
   };
+  // Two module-scope React.lazy() calls, in source order: the surface, then the
+  // restore pill. Hand each its own stub identity so findComponent can tell
+  // them apart.
+  const lazyComponents = [components.SuggestedTaskSurface, components.OobeRestorePill];
+  let lazyIndex = 0;
   const context = {
     ...components,
     globalThis: {},
@@ -48,8 +58,12 @@ function renderEmptyState({ oobeSuggestionsEnabled = true, ...props } = {}) {
     // still conditional on the flag: with it off, EmptyState never renders
     // the Suspense/lazy subtree, so the surface is never reached.
     React: {
-      lazy: () => components.SuggestedTaskSurface,
+      lazy: () => lazyComponents[lazyIndex++] ?? components.SuggestedTaskSurface,
       Suspense: ({ children }) => children,
+      // EmptyState owns the drawer-visibility state (open/dismissed/gone). Drive
+      // it from the test arg so we can observe what it forwards to the surface
+      // and whether the restore pill renders.
+      useState: () => [drawerState, () => {}],
     },
   };
   vm.runInNewContext(emptyStateSourceForTest(), context);
@@ -141,4 +155,44 @@ test("EmptyState supplies a renderRunningIndicator that renders NearProcessIndic
   const indicatorProps = componentProps(rendered, components.NearProcessIndicator);
   assert.equal(indicatorProps.state, "working");
   assert.equal(indicatorProps.label, "Working…");
+});
+
+test("with the drawer open, EmptyState mounts the surface unhidden and shows no restore pill", () => {
+  const { tree, components } = renderEmptyState({ drawerState: "open" });
+  const surface = findComponent(tree, components.SuggestedTaskSurface);
+  assert.ok(surface, "surface mounts when open");
+  assert.equal(
+    componentProps(surface, components.SuggestedTaskSurface).hidden,
+    false,
+    "surface is not hidden while the drawer is open",
+  );
+  assert.equal(
+    findComponent(tree, components.OobeRestorePill),
+    null,
+    "no restore pill while the drawer is open",
+  );
+});
+
+test("with the drawer dismissed, EmptyState hides the surface and shows the restore pill", () => {
+  // Section-dismiss: the surface is told to hide, and the in-composer
+  // "Show suggestions" pill appears so the user can bring it back.
+  const { tree, components } = renderEmptyState({ drawerState: "dismissed" });
+  const surface = findComponent(tree, components.SuggestedTaskSurface);
+  assert.equal(
+    componentProps(surface, components.SuggestedTaskSurface).hidden,
+    true,
+    "surface is hidden once the drawer is dismissed",
+  );
+  const pill = findComponent(tree, components.OobeRestorePill);
+  assert.ok(pill, "the restore pill is mounted when dismissed");
+  const pillProps = componentProps(pill, components.OobeRestorePill);
+  assert.equal(typeof pillProps.onRestore, "function", "pill can reopen the drawer");
+  assert.equal(typeof pillProps.onDismiss, "function", "pill can dismiss fully");
+});
+
+test("EmptyState hands the surface an onClose that dismisses the drawer section", () => {
+  const { tree, components } = renderEmptyState({ drawerState: "open" });
+  const surface = findComponent(tree, components.SuggestedTaskSurface);
+  const props = componentProps(surface, components.SuggestedTaskSurface);
+  assert.equal(typeof props.onClose, "function", "surface receives a section-close callback");
 });

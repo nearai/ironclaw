@@ -91,7 +91,9 @@ registerPack("zh-CN", {
   "chat.suggestion3Desc": "验证设置、认证、配对和可用能力。",
   // Chat — OOBE suggestion cards (English placeholder; localized in a later slice)
   "chat.oobe.heading": "Suggested for you",
-  "chat.oobe.subtitle": "Approve to run, or tweak first",
+  "chat.oobe.subtitle": "Approve to run",
+  "chat.oobe.showSuggestions": "Show suggestions",
+  "chat.oobe.hideSuggestions": "Hide suggestions",
   "chat.oobe.from": "From {sources}",
   "chat.oobe.dismiss": "Dismiss suggestion",
   "chat.oobe.action.approve": "Approve",

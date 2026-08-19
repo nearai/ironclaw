@@ -31,9 +31,16 @@ import { SuggestedTaskCard } from "./suggested-task-card";
 export function SuggestedTaskSurface({
   onOpenThread,
   renderRunningIndicator,
+  hidden = false,
+  onClose,
 }: {
   onOpenThread?: (threadId: string) => void;
   renderRunningIndicator?: (label: string) => ReactNode;
+  // Section-level dismiss: the parent (empty-state) hides the whole drawer and
+  // shows a "Show suggestions" pill to restore it. Distinct from per-card
+  // dismiss, which removes one suggestion.
+  hidden?: boolean;
+  onClose?: () => void;
 } = {}) {
   const t = useT();
   const {
@@ -51,6 +58,8 @@ export function SuggestedTaskSurface({
   // CTA over a set that already exists would be a lie, and a flash of empty
   // state on every landing visit is worse than a beat of nothing.
   if (isLoading) return null;
+  // Section-dismissed: the parent shows the restore pill instead.
+  if (hidden) return null;
 
   const hasCards = suggestions.length > 0;
   // `generating` is the backend's own status; `isGenerating` also covers the
@@ -69,13 +78,21 @@ export function SuggestedTaskSurface({
     >
       {showFrame ? (
         <div className="rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-3 shadow-[var(--v2-card-shadow)]">
-          <div className="mb-2.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 px-0.5">
+          <div className="mb-2.5 flex items-baseline gap-x-2 px-0.5">
             <span className="text-[12px] font-semibold text-[var(--v2-text-strong)]">
               {t("chat.oobe.heading")}
             </span>
             <span className="text-[11px] text-[var(--v2-text-faint)]">
               {t("chat.oobe.subtitle")}
             </span>
+            <button
+              type="button"
+              onClick={() => onClose?.()}
+              aria-label={t("chat.oobe.hideSuggestions")}
+              className="ml-auto -my-0.5 grid h-6 w-6 shrink-0 place-items-center self-start rounded-[6px] text-[var(--v2-text-faint)] transition-colors hover:text-[var(--v2-text-strong)]"
+            >
+              <Icon name="close" className="h-4 w-4" />
+            </button>
           </div>
           {hasCards ? renderCards() : renderSkeleton()}
         </div>
@@ -90,27 +107,30 @@ export function SuggestedTaskSurface({
     </section>
   );
 
+  // Horizontal scrollable strip (matches the mockup): cards are fixed-width and
+  // overflow into a scroll region rather than reflowing into a grid.
   function renderCards() {
     return (
-      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="oobe-strip flex gap-2 overflow-x-auto pb-1">
         {suggestions.map((suggestion) => (
-          <SuggestedTaskCard
-            key={suggestion.id}
-            suggestion={suggestion}
-            starting={startingId === suggestion.id}
-            renderRunningIndicator={renderRunningIndicator}
-            onApprove={() => {
-              start(suggestion.id, {
-                onSuccess: (response) => {
-                  if (response?.thread_id) onOpenThread?.(response.thread_id);
-                },
-              });
-            }}
-            onOpenThread={() => {
-              if (suggestion.thread_id) onOpenThread?.(suggestion.thread_id);
-            }}
-            onDismiss={() => dismiss(suggestion.id)}
-          />
+          <div key={suggestion.id} className="w-[248px] shrink-0">
+            <SuggestedTaskCard
+              suggestion={suggestion}
+              starting={startingId === suggestion.id}
+              renderRunningIndicator={renderRunningIndicator}
+              onApprove={() => {
+                start(suggestion.id, {
+                  onSuccess: (response) => {
+                    if (response?.thread_id) onOpenThread?.(response.thread_id);
+                  },
+                });
+              }}
+              onOpenThread={() => {
+                if (suggestion.thread_id) onOpenThread?.(suggestion.thread_id);
+              }}
+              onDismiss={() => dismiss(suggestion.id)}
+            />
+          </div>
         ))}
       </div>
     );
@@ -126,11 +146,11 @@ export function SuggestedTaskSurface({
         {renderRunningIndicator
           ? renderRunningIndicator(t("chat.oobe.status.generating"))
           : null}
-        <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3" aria-hidden="true">
+        <div className="oobe-strip mt-2 flex gap-2 overflow-x-auto pb-1" aria-hidden="true">
           {[0, 1, 2].map((i) => (
             <div
               key={i}
-              className="flex flex-col gap-2 rounded-[13px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] p-3"
+              className="flex w-[248px] shrink-0 flex-col gap-2 rounded-[13px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] p-3"
             >
               <div className="v2-skeleton h-4 w-4/5" />
               <div className="v2-skeleton h-3 w-full" />

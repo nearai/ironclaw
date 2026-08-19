@@ -474,6 +474,15 @@ input:focus, select:focus, textarea:focus {
 .oobe-card-reveal {
   animation: v2-page-in 0.42s cubic-bezier(0.2, 0.7, 0.2, 1) both !important;
 }
+
+/* OOBE suggestion strip: horizontal scroll with the scrollbar hidden (the
+   cards themselves signal overflow). Matches the mockup's `.strip`. */
+.oobe-strip {
+  scrollbar-width: none;
+}
+.oobe-strip::-webkit-scrollbar {
+  display: none;
+}
 @keyframes near-chase {
   to { stroke-dashoffset: -66; }
 }

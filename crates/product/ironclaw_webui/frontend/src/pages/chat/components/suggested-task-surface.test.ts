@@ -36,6 +36,8 @@ function renderSurface({
   startingId = null,
   onOpenThread,
   renderRunningIndicator,
+  hidden = false,
+  onClose,
 } = {}) {
   const generateCalls = [];
   const startCalls = [];
@@ -58,12 +60,44 @@ function renderSurface({
     }),
   };
   vm.runInNewContext(surfaceSourceForTest(), context);
-  const props = {};
+  const props = { hidden };
   if (onOpenThread) props.onOpenThread = onOpenThread;
   if (renderRunningIndicator) props.renderRunningIndicator = renderRunningIndicator;
+  if (onClose) props.onClose = onClose;
   const tree = context.globalThis.__testExports.SuggestedTaskSurface(props);
   return { tree, components, generateCalls, startCalls, dismissCalls };
 }
+
+test("renders nothing when the drawer is section-hidden", () => {
+  // The parent (empty-state) dismisses the whole drawer and shows a restore
+  // pill; the surface must render nothing in that state.
+  const { tree } = renderSurface({ hidden: true });
+  assert.equal(tree, null);
+});
+
+test("a framed drawer exposes a section-close control wired to onClose", () => {
+  const closes = [];
+  const { tree, components } = renderSurface({ onClose: () => closes.push(true) });
+  // The close control carries the hide-suggestions label.
+  assert.ok(
+    JSON.stringify(tree).includes("chat.oobe.hideSuggestions"),
+    "the drawer header renders a section-close control",
+  );
+  // Find the raw <button> whose onClick is the close handler and invoke it.
+  const handlers = [];
+  (function walk(node) {
+    if (!node || typeof node !== "object" || !Array.isArray(node.values)) return;
+    const strings = node.strings || [];
+    node.values.forEach((v, i) => {
+      if (typeof v === "function" && /onClick=\s*$/.test(strings[i] || "")) handlers.push(v);
+      walk(v);
+    });
+  })(tree);
+  handlers.forEach((h) => h());
+  assert.ok(closes.length >= 1, "invoking the header control calls onClose");
+  // Guard: components stub keeps findComponent usable elsewhere.
+  assert.ok(components.SuggestedTaskCard);
+});
 
 test("renders nothing until the first read resolves", () => {
   // Offering a "generate" CTA over a set that may already exist would be a

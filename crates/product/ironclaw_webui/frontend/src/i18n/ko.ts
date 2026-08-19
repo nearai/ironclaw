@@ -91,7 +91,9 @@ registerPack("ko", {
   "chat.suggestion3Desc": "설정, 인증, 페어링, 사용 가능한 기능을 확인합니다.",
   // Chat — OOBE suggestion cards (English placeholder; localized in a later slice)
   "chat.oobe.heading": "Suggested for you",
-  "chat.oobe.subtitle": "Approve to run, or tweak first",
+  "chat.oobe.subtitle": "Approve to run",
+  "chat.oobe.showSuggestions": "Show suggestions",
+  "chat.oobe.hideSuggestions": "Hide suggestions",
   "chat.oobe.from": "From {sources}",
   "chat.oobe.dismiss": "Dismiss suggestion",
   "chat.oobe.action.approve": "Approve",

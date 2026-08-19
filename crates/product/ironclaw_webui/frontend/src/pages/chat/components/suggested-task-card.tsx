@@ -48,7 +48,7 @@ export function SuggestedTaskCard({
     <div
       role="group"
       aria-label={suggestion.title}
-      className="oobe-card-reveal flex flex-col rounded-[13px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] p-3 text-left transition-colors hover:border-[color-mix(in_srgb,var(--v2-accent)_32%,var(--v2-panel-border))]"
+      className="oobe-card-reveal flex h-full w-full flex-col rounded-[13px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] p-3 text-left transition-colors hover:border-[color-mix(in_srgb,var(--v2-accent)_32%,var(--v2-panel-border))]"
     >
       {/* Brand icon + dismiss */}
       <div className="mb-1.5 flex items-center gap-1.5">
