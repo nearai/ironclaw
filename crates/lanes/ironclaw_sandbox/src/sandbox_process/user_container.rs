@@ -1,0 +1,568 @@
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use bollard::{
+    Docker,
+    container::{
+        Config, CreateContainerOptions, InspectContainerOptions, RemoveContainerOptions,
+        StartContainerOptions, StopContainerOptions,
+    },
+    exec::{CreateExecOptions, StartExecOptions, StartExecResults},
+    models::ContainerInspectResponse,
+};
+use futures_util::StreamExt;
+use ironclaw_host_api::process::{CommandExecutionOutput, RuntimeProcessError};
+
+use super::{
+    ContainerWorkdir, RebornScopedSandboxCommandTransport, append_with_limit,
+    registry::{ExistingContainerDecision, SandboxActivityRegistry, existing_container_decision},
+    user_key::RebornSandboxUserKey,
+};
+
+pub(super) const LABEL_PREFIX: &str = "ironclaw";
+const EXEC_HELPER: &str = "/usr/local/bin/ironclaw-exec";
+const HOST_TIMEOUT_GRACE: Duration = Duration::from_secs(5);
+const CONTAINER_STOP_TIMEOUT_SECS: i64 = 10;
+
+pub(super) struct UserContainerLaunch {
+    pub(super) config: Config<String>,
+    pub(super) labels: HashMap<String, String>,
+}
+
+pub(super) struct UserContainerSweeper {
+    shutdown: tokio::sync::watch::Sender<bool>,
+    task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl UserContainerSweeper {
+    pub(super) fn spawn(
+        docker: Docker,
+        registry: Arc<SandboxActivityRegistry>,
+        idle_timeout: Duration,
+    ) -> Arc<Self> {
+        let (shutdown, mut receiver) = tokio::sync::watch::channel(false);
+        let interval = idle_timeout
+            .checked_div(2)
+            .unwrap_or(Duration::from_millis(50))
+            .clamp(Duration::from_millis(50), Duration::from_secs(60));
+        let task = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => sweep_idle_user_containers(&docker, &registry, idle_timeout).await,
+                    changed = receiver.changed() => {
+                        if changed.is_err() || *receiver.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        Arc::new(Self {
+            shutdown,
+            task: std::sync::Mutex::new(Some(task)),
+        })
+    }
+
+    pub(super) async fn shutdown(&self) {
+        let _ = self.shutdown.send(true);
+        let task = self
+            .task
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take();
+        if let Some(task) = task {
+            let _ = task.await;
+        }
+    }
+}
+
+/// Ensures the stable container is ready while its user's lifecycle gate is held.
+///
+/// The caller must retain that gate until the command exec and any recycle finish.
+pub(super) async fn ensure_user_container(
+    transport: &RebornScopedSandboxCommandTransport,
+    key: &RebornSandboxUserKey,
+    launch: UserContainerLaunch,
+) -> Result<String, RuntimeProcessError> {
+    let name = key.container_name();
+    transport
+        .activity
+        .set_expected_labels(key, launch.labels.clone());
+
+    if transport.activity.recycle_required(key) {
+        remove_user_container(&transport.docker, &name).await?;
+        transport.activity.clear_recycle_required(key);
+    }
+
+    for attempt in 0..2 {
+        if let Some(inspected) = inspect_user_container(&transport.docker, &name).await? {
+            match user_container_adoption_decision(&inspected, &launch.labels) {
+                ExistingContainerDecision::ReuseRunning => return Ok(name),
+                ExistingContainerDecision::StartStopped => {
+                    start_user_container(&transport.docker, &name).await?;
+                    return Ok(name);
+                }
+                ExistingContainerDecision::Recreate => {
+                    remove_user_container(&transport.docker, &name).await?;
+                }
+            }
+        }
+
+        match transport
+            .docker
+            .create_container(
+                Some(CreateContainerOptions {
+                    name: name.clone(),
+                    platform: None,
+                }),
+                launch.config.clone(),
+            )
+            .await
+        {
+            Ok(_) => {
+                start_user_container(&transport.docker, &name).await?;
+                return Ok(name);
+            }
+            Err(error) if docker_status(&error) == Some(409) && attempt == 0 => continue,
+            Err(error) => {
+                return Err(RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox container create failed: {error}"
+                )));
+            }
+        }
+    }
+
+    Err(RuntimeProcessError::ExecutionFailed(
+        "sandbox container name collision did not converge".to_string(),
+    ))
+}
+
+/// Executes a command while its user's lifecycle gate is held.
+///
+/// The caller must retain that gate through any error or timeout recycle.
+pub(super) async fn execute_in_user_container(
+    transport: &RebornScopedSandboxCommandTransport,
+    key: &RebornSandboxUserKey,
+    container_name: &str,
+    command: String,
+    workdir: ContainerWorkdir,
+    timeout: Duration,
+) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+    let started_at = Instant::now();
+    let helper_timeout_secs = timeout
+        .as_secs()
+        .saturating_add(u64::from(timeout.subsec_nanos() > 0))
+        .max(1);
+    let created = transport
+        .docker
+        .create_exec(
+            container_name,
+            CreateExecOptions {
+                attach_stdin: Some(false),
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                tty: Some(false),
+                cmd: Some(vec![
+                    EXEC_HELPER.to_string(),
+                    helper_timeout_secs.to_string(),
+                    command,
+                ]),
+                privileged: Some(false),
+                working_dir: Some(workdir.into_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!("sandbox exec create failed: {error}"))
+        })?;
+
+    let exec_id = created.id;
+    let run = async {
+        let started = transport
+            .docker
+            .start_exec(
+                &exec_id,
+                Some(StartExecOptions {
+                    detach: false,
+                    tty: false,
+                    output_capacity: Some(transport.config.max_output_bytes.max(1024 * 1024)),
+                }),
+            )
+            .await
+            .map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!("sandbox exec start failed: {error}"))
+            })?;
+        let StartExecResults::Attached { mut output, input } = started else {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox exec unexpectedly detached".to_string(),
+            ));
+        };
+        drop(input);
+
+        let mut captured = BoundedExecOutput::new(transport.config.max_output_bytes);
+        while let Some(frame) = output.next().await {
+            match frame {
+                Ok(bollard::container::LogOutput::StdOut { message }) => {
+                    captured.push_stdout(&String::from_utf8_lossy(&message));
+                }
+                Ok(bollard::container::LogOutput::StdErr { message }) => {
+                    captured.push_stderr(&String::from_utf8_lossy(&message));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    return Err(RuntimeProcessError::ExecutionFailed(format!(
+                        "sandbox exec output failed: {error}"
+                    )));
+                }
+            }
+        }
+
+        let inspected = transport
+            .docker
+            .inspect_exec(&exec_id)
+            .await
+            .map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox exec inspect failed: {error}"
+                ))
+            })?;
+        let exit_code = inspected.exit_code.ok_or_else(|| {
+            RuntimeProcessError::ExecutionFailed(
+                "sandbox exec completed without an exit code".to_string(),
+            )
+        })?;
+        map_exec_exit(exit_code, timeout)?;
+        Ok(CommandExecutionOutput {
+            output: captured.finish(),
+            saved_output: None,
+            exit_code,
+            sandboxed: true,
+            duration: started_at.elapsed(),
+        })
+    };
+
+    match tokio::time::timeout(timeout.saturating_add(HOST_TIMEOUT_GRACE), run).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(error @ RuntimeProcessError::Timeout(_))) => Err(error),
+        Ok(Err(error)) => {
+            recycle_untrusted_user_container(transport, key, container_name).await;
+            Err(error)
+        }
+        Err(_) => {
+            recycle_untrusted_user_container(transport, key, container_name).await;
+            Err(RuntimeProcessError::Timeout(timeout))
+        }
+    }
+}
+
+/// Recycles a container that cannot safely accept another command.
+///
+/// The caller must already hold this user's lifecycle gate for the whole call.
+/// Acquiring it here would self-deadlock the serialized command path.
+async fn recycle_untrusted_user_container(
+    transport: &RebornScopedSandboxCommandTransport,
+    key: &RebornSandboxUserKey,
+    container_name: &str,
+) {
+    transport.activity.mark_recycle_required(key);
+    match tokio::time::timeout(
+        HOST_TIMEOUT_GRACE,
+        remove_user_container(&transport.docker, container_name),
+    )
+    .await
+    {
+        Ok(Ok(())) => transport.activity.clear_recycle_required(key),
+        Ok(Err(error)) => tracing::warn!(
+            ?error,
+            container_name,
+            "untrusted sandbox user container could not be recycled"
+        ),
+        Err(_) => tracing::warn!(
+            container_name,
+            "untrusted sandbox user container recycle request exceeded its grace period"
+        ),
+    }
+}
+
+async fn inspect_user_container(
+    docker: &Docker,
+    name: &str,
+) -> Result<Option<ContainerInspectResponse>, RuntimeProcessError> {
+    match docker
+        .inspect_container(name, None::<InspectContainerOptions>)
+        .await
+    {
+        Ok(container) => Ok(Some(container)),
+        Err(error) if docker_status(&error) == Some(404) => Ok(None),
+        Err(error) => Err(RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox container inspect failed: {error}"
+        ))),
+    }
+}
+
+async fn start_user_container(docker: &Docker, name: &str) -> Result<(), RuntimeProcessError> {
+    match docker
+        .start_container(name, None::<StartContainerOptions<String>>)
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(error) if docker_status(&error) == Some(304) => Ok(()),
+        Err(error) => Err(RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox container start failed: {error}"
+        ))),
+    }
+}
+
+fn user_container_adoption_decision(
+    inspected: &ContainerInspectResponse,
+    expected_labels: &HashMap<String, String>,
+) -> ExistingContainerDecision {
+    let state = inspected.state.as_ref();
+    let unsafe_state = state.is_none_or(|state| {
+        state.running.is_none()
+            || state.paused.unwrap_or(false)
+            || state.restarting.unwrap_or(false)
+            || state.dead.unwrap_or(false)
+    });
+    let configured_image = inspected
+        .config
+        .as_ref()
+        .and_then(|config| config.image.as_deref());
+    let expected_image = expected_labels
+        .get(&super::registry::label_image(LABEL_PREFIX))
+        .map(String::as_str);
+    if unsafe_state || configured_image != expected_image {
+        return ExistingContainerDecision::Recreate;
+    }
+    let labels = inspected
+        .config
+        .as_ref()
+        .and_then(|config| config.labels.as_ref());
+    existing_container_decision(
+        labels,
+        state.and_then(|state| state.running).unwrap_or(false),
+        expected_labels,
+    )
+}
+
+/// Force-removes a user container.
+///
+/// The caller must hold that user's lifecycle gate for the whole operation.
+async fn remove_user_container(docker: &Docker, name: &str) -> Result<(), RuntimeProcessError> {
+    match docker
+        .remove_container(
+            name,
+            Some(RemoveContainerOptions {
+                force: true,
+                ..Default::default()
+            }),
+        )
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(error) if docker_status(&error) == Some(404) => Ok(()),
+        Err(error) => Err(RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox container recycle failed: {error}"
+        ))),
+    }
+}
+
+fn docker_status(error: &bollard::errors::Error) -> Option<u16> {
+    match error {
+        bollard::errors::Error::DockerResponseServerError { status_code, .. } => Some(*status_code),
+        _ => None,
+    }
+}
+
+async fn sweep_idle_user_containers(
+    docker: &Docker,
+    registry: &Arc<SandboxActivityRegistry>,
+    idle_timeout: Duration,
+) {
+    for (key, expected_labels) in registry.sweep_candidates(Instant::now(), idle_timeout) {
+        let Some(gate) = registry.gate(&key) else {
+            continue;
+        };
+        let _gate = gate.lock().await;
+        if !registry.sweep_eligible(&key, Instant::now(), idle_timeout) {
+            continue;
+        }
+        let name = key.container_name();
+        let inspected = match inspect_user_container(docker, &name).await {
+            Ok(inspected) => inspected,
+            Err(error) => {
+                tracing::debug!(?error, container_name = name, "idle sandbox inspect failed");
+                continue;
+            }
+        };
+        let Some(inspected) = inspected else {
+            registry.forget_if_inactive(&key);
+            continue;
+        };
+        match user_container_adoption_decision(&inspected, &expected_labels) {
+            ExistingContainerDecision::ReuseRunning => {
+                if let Err(error) = docker
+                    .stop_container(
+                        &name,
+                        Some(StopContainerOptions {
+                            t: CONTAINER_STOP_TIMEOUT_SECS,
+                        }),
+                    )
+                    .await
+                {
+                    tracing::debug!(?error, container_name = name, "idle sandbox stop failed");
+                    continue;
+                }
+                registry.forget_if_inactive(&key);
+            }
+            ExistingContainerDecision::StartStopped | ExistingContainerDecision::Recreate => {
+                registry.forget_if_inactive(&key);
+            }
+        }
+    }
+}
+
+fn map_exec_exit(exit_code: i64, timeout: Duration) -> Result<i64, RuntimeProcessError> {
+    if exit_code == 124 {
+        Err(RuntimeProcessError::Timeout(timeout))
+    } else {
+        Ok(exit_code)
+    }
+}
+
+struct BoundedExecOutput {
+    stdout: String,
+    stderr: String,
+    stream_limit: usize,
+    total_limit: usize,
+}
+
+impl BoundedExecOutput {
+    fn new(total_limit: usize) -> Self {
+        Self {
+            stdout: String::new(),
+            stderr: String::new(),
+            stream_limit: total_limit / 2,
+            total_limit,
+        }
+    }
+
+    fn push_stdout(&mut self, text: &str) {
+        append_with_limit(&mut self.stdout, text, self.stream_limit);
+    }
+
+    fn push_stderr(&mut self, text: &str) {
+        append_with_limit(&mut self.stderr, text, self.stream_limit);
+    }
+
+    fn finish(self) -> String {
+        let mut combined = String::new();
+        append_with_limit(&mut combined, &self.stdout, self.total_limit);
+        if !self.stderr.is_empty() {
+            let separator = if self.stdout.is_empty() {
+                ""
+            } else {
+                "\n\n--- stderr ---\n"
+            };
+            append_with_limit(&mut combined, separator, self.total_limit);
+            append_with_limit(&mut combined, &self.stderr, self.total_limit);
+        }
+        combined
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_is_bounded_across_stdout_stderr_and_separator() {
+        let mut output = BoundedExecOutput::new(16);
+        output.push_stdout("abcdefghijk");
+        output.push_stderr("0123456789");
+        let combined = output.finish();
+
+        assert!(combined.len() <= 16);
+        assert!(combined.starts_with("abcdefgh"));
+    }
+
+    #[test]
+    fn output_truncation_keeps_utf8_boundaries() {
+        let mut output = BoundedExecOutput::new(7);
+        output.push_stdout("éééé");
+        let combined = output.finish();
+
+        assert!(combined.is_char_boundary(combined.len()));
+        assert!(combined.len() <= 7);
+    }
+
+    #[test]
+    fn helper_timeout_exit_maps_to_requested_timeout() {
+        let timeout = Duration::from_secs(17);
+        assert!(matches!(
+            map_exec_exit(124, timeout),
+            Err(RuntimeProcessError::Timeout(value)) if value == timeout
+        ));
+        assert_eq!(map_exec_exit(23, timeout).unwrap(), 23);
+    }
+
+    #[test]
+    fn adoption_recycles_user_container_on_image_or_posture_mismatch() {
+        let expected = HashMap::from([
+            (
+                super::super::registry::label_image(LABEL_PREFIX),
+                "image:v1".to_string(),
+            ),
+            (
+                super::super::registry::label_security_posture(LABEL_PREFIX),
+                "posture-v1".to_string(),
+            ),
+        ]);
+        let compatible = ContainerInspectResponse {
+            state: Some(bollard::models::ContainerState {
+                running: Some(true),
+                ..Default::default()
+            }),
+            config: Some(bollard::models::ContainerConfig {
+                image: Some("image:v1".to_string()),
+                labels: Some(expected.clone()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            user_container_adoption_decision(&compatible, &expected),
+            ExistingContainerDecision::ReuseRunning
+        );
+
+        let mut wrong_image = compatible.clone();
+        wrong_image.config.as_mut().unwrap().image = Some("image:v2".to_string());
+        assert_eq!(
+            user_container_adoption_decision(&wrong_image, &expected),
+            ExistingContainerDecision::Recreate
+        );
+
+        let mut wrong_posture = compatible;
+        wrong_posture
+            .config
+            .as_mut()
+            .unwrap()
+            .labels
+            .as_mut()
+            .unwrap()
+            .insert(
+                super::super::registry::label_security_posture(LABEL_PREFIX),
+                "posture-v2".to_string(),
+            );
+        assert_eq!(
+            user_container_adoption_decision(&wrong_posture, &expected),
+            ExistingContainerDecision::Recreate
+        );
+    }
+}

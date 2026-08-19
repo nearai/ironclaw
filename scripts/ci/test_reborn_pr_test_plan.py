@@ -635,6 +635,28 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(docker_only_plan["root_partitions"], [])
         self.assertEqual(docker_only_plan["integration_lanes"], [])
 
+    def test_sandbox_worker_helpers_are_not_unclassified_docker_paths(
+        self,
+    ) -> None:
+        for path in (
+            "docker/sandbox/ironclaw-exec",
+            "docker/sandbox/ironclaw-sandbox-idle",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "selected")
+                self.assertTrue(plan["run_sandbox_docker"])
+                self.assertEqual(plan["crate_buckets"], [])
+                self.assertEqual(plan["root_partitions"], [])
+                self.assertEqual(plan["integration_lanes"], [])
+
+        unrelated_path = "docker/unrelated-helper"
+        with self.subTest(path=unrelated_path):
+            with self.assertRaisesRegex(
+                ValueError, "unclassified pull-request path"
+            ):
+                self.plan("pull_request", [unrelated_path])
+
     def test_empty_diff_fails_fast(self) -> None:
         with self.assertRaisesRegex(ValueError, "empty pull-request diff"):
             self.plan("pull_request", [])
