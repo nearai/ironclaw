@@ -62,13 +62,13 @@ pub use external_tool_catalog::{
 // `ironclaw_host_api` directly — see this crate's CLAUDE.md.
 pub use host_managed_ports::{HostManagedLoopModelPort, HostManagedLoopPromptPort};
 pub use ironclaw_host_api::turn::{
-    AcceptedMessageRef, BlockedReason, CapabilityActivityId, EventCursor, GateKind,
-    GateResumeDisposition, IdempotencyKey, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef,
-    ModelInvalidOutputDetailReason, ProductTurnContext, ReplyTargetBindingRef, RunOriginAdapter,
-    RunProfileId, RunProfileRequest, RunProfileVersion, SanitizedCancelReason, SanitizedFailure,
-    SourceBindingRef, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnExecutionOutcome,
-    TurnGateRef, TurnId, TurnLeaseToken, TurnOriginKind, TurnOwner, TurnRunId, TurnRunnerId,
-    TurnScope, TurnStatus, TurnSurfaceType,
+    AcceptedMessageRef, ActivationProvenance, BlockedReason, CapabilityActivityId, EventCursor,
+    GateKind, GateResumeDisposition, IdempotencyKey, LoopExitId, LoopGateRef, LoopMessageRef,
+    LoopResultRef, ModelInvalidOutputDetailReason, ProductTurnContext, ReplyTargetBindingRef,
+    RunOriginAdapter, RunProfileId, RunProfileRequest, RunProfileVersion, SanitizedCancelReason,
+    SanitizedFailure, SourceBindingRef, SubmitTurnResponse, TurnActor, TurnCheckpointId,
+    TurnExecutionOutcome, TurnGateRef, TurnId, TurnLeaseToken, TurnOriginKind, TurnOwner,
+    TurnRunId, TurnRunnerId, TurnScope, TurnStatus, TurnSurfaceType,
 };
 pub use loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
