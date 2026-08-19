@@ -35,8 +35,10 @@ validated in RC2 and the complete RC1 scope below.
   files, and PDF rendering from HTML.
 - **Telegram linked devices.** Pair a personal Telegram account with the bot
   channel so the agent can read your conversations and act as you through the
-  standard messaging operations. Reads are live; no message content is
-  persisted.
+  standard messaging operations. Reads are live against Telegram's own servers
+  — there is no local mirror, retention policy, or search index of the account
+  — while message content a run actually reads is retained in that run's
+  transcript like any other tool result.
 - **The full Slack messaging vocabulary.** Eight more standard operations —
   edit message, delete message, add reaction, remove reaction, open DM, get
   message, resolve user, list members — complete the core surface.
