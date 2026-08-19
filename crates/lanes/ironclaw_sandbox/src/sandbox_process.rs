@@ -368,10 +368,28 @@ impl RebornScopedSandboxCommandTransport {
         }
     }
 
+    async fn resolve_worker_image(&self) -> Result<String, RuntimeProcessError> {
+        self.docker
+            .inspect_image(&self.config.image)
+            .await
+            .map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox worker image could not be resolved: {error}"
+                ))
+            })?
+            .id
+            .ok_or_else(|| {
+                RuntimeProcessError::ExecutionFailed(
+                    "sandbox worker image resolved without an immutable image id".to_string(),
+                )
+            })
+    }
+
     async fn user_container_launch_config(
         &self,
         request: &CommandExecutionRequest,
         workspace: &Path,
+        resolved_image: &str,
     ) -> Result<user_container::UserContainerLaunch, RuntimeProcessError> {
         let env = self.config.command_env(request.extra_env.clone())?;
         let container_user = self
@@ -391,21 +409,6 @@ impl RebornScopedSandboxCommandTransport {
             .collect::<Vec<_>>();
         self.config.append_broker_binds(&mut binds)?;
         binds.sort();
-        let resolved_image = self
-            .docker
-            .inspect_image(&self.config.image)
-            .await
-            .map_err(|error| {
-                RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox worker image could not be resolved: {error}"
-                ))
-            })?
-            .id
-            .ok_or_else(|| {
-                RuntimeProcessError::ExecutionFailed(
-                    "sandbox worker image resolved without an immutable image id".to_string(),
-                )
-            })?;
         let posture = security_posture_stamp(
             &container_user,
             self.config.container_identity.workspace_mode(),
@@ -419,7 +422,7 @@ impl RebornScopedSandboxCommandTransport {
             user_container::LABEL_PREFIX,
             &request.scope.tenant_id,
             &request.scope.user_id,
-            &resolved_image,
+            resolved_image,
             &posture,
         );
         let host_config = HostConfig {
@@ -480,8 +483,9 @@ impl RebornScopedSandboxCommandTransport {
                 "sandbox user container lifecycle gate disappeared".to_string(),
             )
         })?;
+        let resolved_image = self.resolve_worker_image().await?;
         let launch = self
-            .user_container_launch_config(&request, &workspace)
+            .user_container_launch_config(&request, &workspace, &resolved_image)
             .await?;
         let _user_lifecycle = gate.lock().await;
         let container_name =
@@ -933,6 +937,7 @@ mod tests {
                     extra_env: HashMap::new(),
                 },
                 &workspace,
+                "sha256:test-worker",
             )
             .await
             .unwrap();
@@ -1017,6 +1022,7 @@ mod tests {
                     extra_env: HashMap::new(),
                 },
                 &workspace,
+                "sha256:test-worker",
             )
             .await
             .unwrap();
