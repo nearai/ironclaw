@@ -1,94 +1,164 @@
-#!/bin/sh
+#!/usr/bin/env python3
+"""Run one sandbox command with bounded, descendant-complete cleanup."""
 
-set -u
+from __future__ import annotations
 
-readonly MAX_TIMEOUT_SECONDS=86400
-readonly TERMINATION_GRACE_SECONDS=1
+import ctypes
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
 
-usage() {
-    echo "usage: ironclaw-exec <timeout-seconds> <outcome-nonce> <command>" >&2
-    exit 64
-}
+MAX_TIMEOUT_SECONDS = 86_400
+TERMINATION_GRACE_SECONDS = 1.0
+PR_SET_CHILD_SUBREAPER = 36
 
-[ "$#" -eq 3 ] || usage
 
-timeout_seconds=$1
-outcome_nonce=$2
-command=$3
+def usage() -> "NoReturn":
+    print(
+        "usage: ironclaw-exec <timeout-seconds> <outcome-nonce> <command>",
+        file=sys.stderr,
+    )
+    raise SystemExit(64)
 
-case "$timeout_seconds" in
-    ''|*[!0-9]*) usage ;;
-esac
-while [ "${timeout_seconds#0}" != "$timeout_seconds" ]; do
-    timeout_seconds=${timeout_seconds#0}
-done
-[ -n "$timeout_seconds" ] || usage
-case "$timeout_seconds" in
-    ??????*) usage ;;
-esac
-[ "$timeout_seconds" -le "$MAX_TIMEOUT_SECONDS" ] || usage
 
-case "$outcome_nonce" in
-    ''|*[!0-9a-f-]*) usage ;;
-esac
+def parse_args() -> tuple[int, str, str]:
+    if len(sys.argv) != 4:
+        usage()
+    try:
+        timeout = int(sys.argv[1], 10)
+    except ValueError:
+        usage()
+    if not 1 <= timeout <= MAX_TIMEOUT_SECONDS:
+        usage()
+    nonce = sys.argv[2]
+    if not nonce or any(char not in "0123456789abcdef-" for char in nonce):
+        usage()
+    return timeout, nonce, sys.argv[3]
 
-record_outcome() {
-    # The supervisor writes the final line only after the command group is
-    # gone. The host matches this invocation-specific trailer in an uncapped
-    # tail buffer, so an earlier command-written lookalike cannot win.
-    printf '\n__IRONCLAW_EXEC_OUTCOME_%s=%s\n' "$outcome_nonce" "$1"
-}
 
-# The container already runs as its configured non-root identity.
-setsid sh -c "$command" </dev/null &
-command_pid=$!
+def make_subreaper() -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
 
-group_is_live() {
-    kill -0 "-$command_pid" >/dev/null 2>&1
-}
 
-terminate_group() {
-    if group_is_live; then
-        kill -TERM "-$command_pid" >/dev/null 2>&1 || :
-        sleep "$TERMINATION_GRACE_SECONDS" </dev/null >/dev/null 2>&1
-        kill -KILL "-$command_pid" >/dev/null 2>&1 || :
-        return 0
-    fi
-    return 1
-}
+def process_table() -> dict[int, int]:
+    table: dict[int, int] = {}
+    for status in Path("/proc").glob("[0-9]*/status"):
+        try:
+            pid = int(status.parent.name)
+            ppid_line = next(
+                line for line in status.read_text().splitlines() if line.startswith("PPid:")
+            )
+            table[pid] = int(ppid_line.split()[1])
+        except (OSError, StopIteration, ValueError):
+            continue
+    return table
 
-timeout_fired=false
-on_timeout() {
-    # A late USR1 after the foreground group exited is not a timeout.
-    if group_is_live; then
-        timeout_fired=true
-        terminate_group || :
-    fi
-}
-trap on_timeout USR1
 
-wrapper_pid=$$
-(
-    sleep "$timeout_seconds"
-    kill -USR1 "$wrapper_pid"
-) </dev/null >/dev/null 2>&1 &
-watchdog_pid=$!
+def descendant_pids(root_pid: int) -> set[int]:
+    table = process_table()
+    descendants: set[int] = set()
+    frontier = {root_pid, os.getpid()}
+    while frontier:
+        parents = frontier
+        frontier = {
+            pid
+            for pid, ppid in table.items()
+            if ppid in parents and pid != os.getpid() and pid not in descendants
+        }
+        descendants.update(frontier)
+    descendants.discard(root_pid)
+    return descendants
 
-wait "$command_pid"
-command_status=$?
 
-kill "$watchdog_pid" >/dev/null 2>&1 || :
-wait "$watchdog_pid" >/dev/null 2>&1 || :
-trap - USR1
+def signal_processes(root_pid: int, sig: signal.Signals) -> None:
+    pids = descendant_pids(root_pid)
+    pids.add(root_pid)
+    groups: set[int] = set()
+    for pid in pids:
+        try:
+            groups.add(os.getpgid(pid))
+        except ProcessLookupError:
+            continue
+    for pgid in groups:
+        if pgid == os.getpgrp():
+            continue
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            pass
+    for pid in pids:
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            pass
 
-if [ "$timeout_fired" = true ]; then
-    wait "$command_pid" >/dev/null 2>&1 || :
-    terminate_group || :
-    record_outcome timeout
-    exit 0
-fi
 
-# A foreground shell can exit while jobs in its process group remain.
-terminate_group || :
-record_outcome "exit:$command_status"
-exit 0
+def reap_children() -> None:
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid == 0:
+            return
+
+
+def cleanup_processes(root_pid: int) -> None:
+    signal_processes(root_pid, signal.SIGTERM)
+    deadline = time.monotonic() + TERMINATION_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        reap_children()
+        if not descendant_pids(root_pid):
+            try:
+                os.kill(root_pid, 0)
+            except ProcessLookupError:
+                return
+        time.sleep(0.02)
+    signal_processes(root_pid, signal.SIGKILL)
+    for _ in range(20):
+        reap_children()
+        if not descendant_pids(root_pid):
+            break
+        time.sleep(0.01)
+
+
+def main() -> int:
+    timeout, nonce, command = parse_args()
+    try:
+        make_subreaper()
+    except OSError as error:
+        print(f"ironclaw-exec: cannot become subreaper: {error}", file=sys.stderr)
+        return 70
+
+    process = subprocess.Popen(
+        ["sh", "-c", command],
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    timed_out = False
+    try:
+        status = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        status = 124
+    finally:
+        cleanup_processes(process.pid)
+        try:
+            process.wait(timeout=TERMINATION_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+        reap_children()
+
+    outcome = "timeout" if timed_out else f"exit:{status & 0xFF}"
+    print(f"\n__IRONCLAW_EXEC_OUTCOME_{nonce}={outcome}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

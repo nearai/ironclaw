@@ -250,7 +250,7 @@ pub struct RebornScopedSandboxCommandTransport {
     docker: Docker,
     config: RebornSandboxConfig,
     activity: Arc<SandboxActivityRegistry>,
-    sweeper: Arc<user_container::UserContainerSweeper>,
+    sweeper: Option<Arc<user_container::UserContainerSweeper>>,
 }
 
 impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
@@ -270,33 +270,35 @@ impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
 impl RebornScopedSandboxCommandTransport {
     pub async fn connect(config: RebornSandboxConfig) -> Result<Self, RuntimeProcessError> {
         let docker = connect_docker().await?;
-        Ok(Self::new(docker, config))
+        Ok(Self::new(docker, config).with_sweeper())
     }
 
-    /// Construct a transport around an existing Docker client.
+    /// Construct a side-effect-free transport around an existing Docker client.
     ///
-    /// # Panics
-    ///
-    /// An active Tokio runtime is required because construction starts the
-    /// idle-container sweeper. Production callers should prefer [`Self::connect`],
-    /// which is already async and establishes that runtime precondition.
+    /// This constructor does not require an active Tokio runtime. Idle cleanup
+    /// is enabled by the async production constructor [`Self::connect`].
     pub fn new(docker: Docker, config: RebornSandboxConfig) -> Self {
-        let activity = Arc::new(SandboxActivityRegistry::new());
-        let sweeper = user_container::UserContainerSweeper::spawn(
-            docker.clone(),
-            Arc::clone(&activity),
-            config.idle_timeout,
-        );
         Self {
             docker,
             config,
-            activity,
-            sweeper,
+            activity: Arc::new(SandboxActivityRegistry::new()),
+            sweeper: None,
         }
     }
 
+    fn with_sweeper(mut self) -> Self {
+        self.sweeper = Some(user_container::UserContainerSweeper::spawn(
+            self.docker.clone(),
+            Arc::clone(&self.activity),
+            self.config.idle_timeout,
+        ));
+        self
+    }
+
     pub async fn shutdown(&self) {
-        self.sweeper.shutdown().await;
+        if let Some(sweeper) = &self.sweeper {
+            sweeper.shutdown().await;
+        }
     }
 
     // `into_process_port` was deleted with the lane merge: it returned
@@ -511,6 +513,11 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
             ))
         })?
     }
+
+    async fn shutdown(&self) -> Result<(), RuntimeProcessError> {
+        RebornScopedSandboxCommandTransport::shutdown(self).await;
+        Ok(())
+    }
 }
 
 // Kept as the crate-local seam used by Docker-backed tests. Connection policy
@@ -681,6 +688,16 @@ mod tests {
             error.to_string().contains("IRONCLAW_REBORN_DOCKER_HOST"),
             "constructor must use the canonical connector, including its bounded retry and override handling: {error}"
         );
+    }
+
+    #[test]
+    fn direct_constructor_is_side_effect_free_without_tokio_runtime() {
+        let docker = Docker::connect_with_local_defaults().expect("construct Docker client");
+        let transport = RebornScopedSandboxCommandTransport::new(
+            docker,
+            RebornSandboxConfig::new("/tmp/reborn-sandbox-pure-constructor"),
+        );
+        assert!(transport.sweeper.is_none());
     }
 
     #[test]

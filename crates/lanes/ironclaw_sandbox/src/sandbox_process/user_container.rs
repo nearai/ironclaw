@@ -7,18 +7,24 @@ use std::{
 use bollard::{
     Docker,
     container::{
-        Config, CreateContainerOptions, InspectContainerOptions, RemoveContainerOptions,
-        StartContainerOptions, StopContainerOptions,
+        Config, CreateContainerOptions, InspectContainerOptions, ListContainersOptions,
+        RemoveContainerOptions, StartContainerOptions, StopContainerOptions,
     },
     exec::{CreateExecOptions, StartExecOptions, StartExecResults},
     models::ContainerInspectResponse,
 };
 use futures_util::StreamExt;
-use ironclaw_host_api::process::{CommandExecutionOutput, RuntimeProcessError};
+use ironclaw_host_api::{
+    ids::{TenantId, UserId},
+    process::{CommandExecutionOutput, RuntimeProcessError},
+};
 
 use super::{
     ContainerWorkdir, RebornScopedSandboxCommandTransport, append_with_limit,
-    registry::{ExistingContainerDecision, SandboxActivityRegistry, existing_container_decision},
+    registry::{
+        ExistingContainerDecision, SandboxActivityRegistry, existing_container_decision,
+        label_tenant, label_user,
+    },
     user_key::RebornSandboxUserKey,
 };
 
@@ -49,6 +55,7 @@ impl UserContainerSweeper {
             .unwrap_or(Duration::from_millis(50))
             .clamp(Duration::from_millis(50), Duration::from_secs(60));
         let task = tokio::spawn(async move {
+            reconcile_labeled_user_containers(&docker, &registry).await;
             let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -193,7 +200,9 @@ pub(super) async fn execute_in_user_container(
                 Some(StartExecOptions {
                     detach: false,
                     tty: false,
-                    output_capacity: Some(transport.config.max_output_bytes.max(1024 * 1024)),
+                    output_capacity: Some(
+                        transport.config.max_output_bytes.clamp(8 * 1024, 64 * 1024),
+                    ),
                 }),
             )
             .await
@@ -391,6 +400,56 @@ fn docker_status(error: &bollard::errors::Error) -> Option<u16> {
     match error {
         bollard::errors::Error::DockerResponseServerError { status_code, .. } => Some(*status_code),
         _ => None,
+    }
+}
+
+async fn reconcile_labeled_user_containers(
+    docker: &Docker,
+    registry: &Arc<SandboxActivityRegistry>,
+) {
+    let tenant_label = label_tenant(LABEL_PREFIX);
+    let user_label = label_user(LABEL_PREFIX);
+    let filters = HashMap::from([(
+        "label".to_string(),
+        vec![tenant_label.clone(), user_label.clone()],
+    )]);
+    let containers = match docker
+        .list_containers(Some(ListContainersOptions {
+            all: true,
+            filters,
+            ..Default::default()
+        }))
+        .await
+    {
+        Ok(containers) => containers,
+        Err(error) => {
+            tracing::warn!(?error, "sandbox user-container reconciliation failed");
+            return;
+        }
+    };
+    for container in containers {
+        let Some(labels) = container.labels else {
+            continue;
+        };
+        let (Some(tenant), Some(user)) = (labels.get(&tenant_label), labels.get(&user_label))
+        else {
+            continue;
+        };
+        let (Ok(tenant), Ok(user)) = (TenantId::new(tenant), UserId::new(user)) else {
+            tracing::warn!(
+                container_id = container.id.as_deref().unwrap_or("<unknown>"),
+                "sandbox user-container reconciliation ignored invalid identity labels"
+            );
+            continue;
+        };
+        let key = RebornSandboxUserKey::from_tenant_user(&tenant, &user);
+        if let Err(error) = registry.register_discovered_container(key, labels) {
+            tracing::warn!(
+                ?error,
+                container_id = container.id.as_deref().unwrap_or("<unknown>"),
+                "sandbox user-container reconciliation reached registry capacity"
+            );
+        }
     }
 }
 

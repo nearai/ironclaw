@@ -245,6 +245,34 @@ impl SandboxActivityRegistry {
             .is_some_and(|entry| entry.recycle_required)
     }
 
+    pub(crate) fn register_discovered_container(
+        &self,
+        key: RebornSandboxUserKey,
+        labels: HashMap<String, String>,
+    ) -> Result<(), RuntimeProcessError> {
+        let mut state = self.lock();
+        if let Some(entry) = state.get_mut(&key) {
+            entry.expected_labels = Some(labels);
+            return Ok(());
+        }
+        if state.len() >= MAX_TRACKED_USERS {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox user activity registry is at capacity".to_string(),
+            ));
+        }
+        state.insert(
+            key,
+            ActivityEntry {
+                last_activity: Instant::now(),
+                active_execs: 0,
+                gate: Arc::new(tokio::sync::Mutex::new(())),
+                expected_labels: Some(labels),
+                recycle_required: false,
+            },
+        );
+        Ok(())
+    }
+
     pub(crate) fn sweep_candidates(
         &self,
         now: Instant,

@@ -1,160 +1,18 @@
 //! Real-Docker proof for persistent per-user containers and workspaces.
 
-use std::{
-    collections::{HashMap, HashSet},
-    process::Command,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{process::Command, sync::Arc, time::Duration};
 
 use ironclaw_host_api::{
-    ids::{AgentId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
-    process::{CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport},
-    resource::ResourceScope,
+    ids::InvocationId,
+    process::{RuntimeProcessError, SandboxCommandTransport},
 };
 use ironclaw_sandbox::{RebornSandboxConfig, RebornScopedSandboxCommandTransport};
 
 #[path = "support/docker_gate.rs"]
 mod docker_gate;
-
-fn scope(tenant: &str, user: &str, project: &str, thread: &str) -> ResourceScope {
-    ResourceScope {
-        tenant_id: TenantId::new(tenant).expect("tenant id"),
-        user_id: UserId::new(user).expect("user id"),
-        agent_id: Some(AgentId::new("docker-live-agent").expect("agent id")),
-        project_id: Some(ProjectId::new(project).expect("project id")),
-        mission_id: None,
-        thread_id: Some(ThreadId::new(thread).expect("thread id")),
-        invocation_id: InvocationId::new(),
-    }
-}
-
-fn request(scope: ResourceScope, command: impl Into<String>) -> CommandExecutionRequest {
-    CommandExecutionRequest {
-        scope,
-        mounts: None,
-        command: command.into(),
-        workdir: Some("/workspace".to_string()),
-        timeout_secs: Some(60),
-        extra_env: HashMap::new(),
-    }
-}
-
-const CONTAINER_PREFIX: &str = "ironclaw-reborn-sandbox-user-";
-const LABEL_TENANT: &str = "ironclaw.tenant";
-const LABEL_USER: &str = "ironclaw.user";
-const LABEL_IMAGE: &str = "ironclaw.image";
-const LABEL_SECURITY_POSTURE: &str = "ironclaw.security_posture";
-
-#[derive(Clone, Debug)]
-struct TestScope {
-    tenant: String,
-    user: String,
-    project: String,
-    thread: String,
-}
-
-impl TestScope {
-    fn unique(label: &str) -> Self {
-        let suffix = InvocationId::new();
-        Self {
-            tenant: format!("{label}-tenant-{suffix}"),
-            user: format!("{label}-user-{suffix}"),
-            project: format!("{label}-project-{suffix}"),
-            thread: format!("{label}-thread-{suffix}"),
-        }
-    }
-
-    fn resource_scope(&self) -> ResourceScope {
-        scope(&self.tenant, &self.user, &self.project, &self.thread)
-    }
-}
-
-#[derive(Clone, Debug)]
-struct ContainerSnapshot {
-    id: String,
-    name: String,
-    hostname: String,
-    image: String,
-    running: bool,
-    labels: HashMap<String, String>,
-}
-
-#[derive(Default)]
-struct DockerCleanup {
-    scopes: Vec<TestScope>,
-    container_ids: HashSet<String>,
-    image_tags: Vec<String>,
-}
-
-impl DockerCleanup {
-    fn with_scopes(scopes: impl IntoIterator<Item = TestScope>) -> Self {
-        Self {
-            scopes: scopes.into_iter().collect(),
-            container_ids: HashSet::new(),
-            image_tags: Vec::new(),
-        }
-    }
-
-    fn capture(&mut self, scope: &TestScope) -> ContainerSnapshot {
-        let matches = containers_for_user(scope);
-        self.container_ids
-            .extend(matches.iter().map(|container| container.id.clone()));
-        assert_eq!(
-            matches.len(),
-            1,
-            "expected exactly one container for tenant {:?} and user {:?}, found {matches:?}",
-            scope.tenant,
-            scope.user,
-        );
-        matches.into_iter().next().expect("length checked")
-    }
-
-    fn track_image(&mut self, image: String) {
-        self.image_tags.push(image);
-    }
-}
-
-impl Drop for DockerCleanup {
-    fn drop(&mut self) {
-        for scope in &self.scopes {
-            let tenant = format!("{LABEL_TENANT}={}", scope.tenant);
-            let user = format!("{LABEL_USER}={}", scope.user);
-            let tenant_filter = format!("label={tenant}");
-            let user_filter = format!("label={user}");
-            if let Ok(output) = Command::new("docker")
-                .args([
-                    "container",
-                    "list",
-                    "--all",
-                    "--quiet",
-                    "--filter",
-                    tenant_filter.as_str(),
-                    "--filter",
-                    user_filter.as_str(),
-                ])
-                .output()
-                && output.status.success()
-            {
-                self.container_ids.extend(
-                    String::from_utf8_lossy(&output.stdout)
-                        .lines()
-                        .map(str::to_string),
-                );
-            }
-        }
-        for id in &self.container_ids {
-            let _ = Command::new("docker")
-                .args(["container", "rm", "--force", id])
-                .output();
-        }
-        for image in &self.image_tags {
-            let _ = Command::new("docker")
-                .args(["image", "rm", "--force", image])
-                .output();
-        }
-    }
-}
+#[path = "support/user_sandbox_live.rs"]
+mod user_sandbox_live;
+use user_sandbox_live::*;
 
 fn docker_worker_image(test_name: &str) -> Option<String> {
     if !docker_gate::docker_available() {
@@ -169,177 +27,8 @@ fn docker_worker_image(test_name: &str) -> Option<String> {
     Some(image)
 }
 
-fn docker_command(args: &[&str]) -> std::process::Output {
-    let output = Command::new("docker")
-        .args(args)
-        .output()
-        .unwrap_or_else(|error| panic!("docker {args:?} could not start: {error}"));
-    assert!(
-        output.status.success(),
-        "docker {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output
-}
-
-fn containers_for_user(scope: &TestScope) -> Vec<ContainerSnapshot> {
-    let tenant_filter = format!("label={LABEL_TENANT}={}", scope.tenant);
-    let user_filter = format!("label={LABEL_USER}={}", scope.user);
-    let output = Command::new("docker")
-        .args(["container", "list", "--all", "--filter"])
-        .arg(&tenant_filter)
-        .arg("--filter")
-        .arg(&user_filter)
-        .args(["--format", "{{.ID}}"])
-        .output()
-        .expect("docker container list starts");
-    assert!(
-        output.status.success(),
-        "docker container list failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|id| inspect_container(id.trim()))
-        .collect()
-}
-
-fn inspect_container(id: &str) -> ContainerSnapshot {
-    let output = docker_command(&["container", "inspect", id]);
-    let value: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("docker inspect returns JSON");
-    let container = value
-        .as_array()
-        .and_then(|containers| containers.first())
-        .expect("docker inspect returns one container");
-    let labels = container["Config"]["Labels"]
-        .as_object()
-        .expect("sandbox container has labels")
-        .iter()
-        .map(|(key, value)| {
-            (
-                key.clone(),
-                value
-                    .as_str()
-                    .unwrap_or_else(|| panic!("label {key:?} is not a string"))
-                    .to_string(),
-            )
-        })
-        .collect();
-    ContainerSnapshot {
-        id: container["Id"]
-            .as_str()
-            .expect("container has an id")
-            .to_string(),
-        name: container["Name"]
-            .as_str()
-            .expect("container has a name")
-            .trim_start_matches('/')
-            .to_string(),
-        hostname: container["Config"]["Hostname"]
-            .as_str()
-            .expect("container has a hostname")
-            .to_string(),
-        image: container["Config"]["Image"]
-            .as_str()
-            .expect("container has an image")
-            .to_string(),
-        running: container["State"]["Running"]
-            .as_bool()
-            .expect("container running state is boolean"),
-        labels,
-    }
-}
-
-fn assert_stable_identity(container: &ContainerSnapshot, scope: &TestScope) {
-    let suffix = container
-        .name
-        .strip_prefix(CONTAINER_PREFIX)
-        .unwrap_or_else(|| panic!("unexpected sandbox container name: {}", container.name));
-    assert_eq!(suffix.len(), 24, "stable name uses a 96-bit hex digest");
-    assert!(
-        suffix.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "stable name digest is hexadecimal: {}",
-        container.name
-    );
-    assert_eq!(container.labels.get(LABEL_TENANT), Some(&scope.tenant));
-    assert_eq!(container.labels.get(LABEL_USER), Some(&scope.user));
-    assert!(
-        container
-            .labels
-            .get(LABEL_IMAGE)
-            .is_some_and(|value| !value.is_empty()),
-        "container records image identity"
-    );
-    assert!(
-        container
-            .labels
-            .get(LABEL_SECURITY_POSTURE)
-            .is_some_and(|value| !value.is_empty()),
-        "container records the security-posture stamp"
-    );
-}
-
-async fn wait_for_running_state(id: &str, running: bool, timeout: Duration) -> ContainerSnapshot {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let snapshot = inspect_container(id);
-        if snapshot.running == running {
-            return snapshot;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "container {id} did not reach running={running} within {timeout:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-async fn wait_for_user_container(scope: &TestScope, timeout: Duration) -> ContainerSnapshot {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let mut matches = containers_for_user(scope);
-        assert!(
-            matches.len() <= 1,
-            "expected at most one container for tenant {:?} and user {:?}, found {matches:?}",
-            scope.tenant,
-            scope.user,
-        );
-        if let Some(container) = matches.pop() {
-            return container;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "user container did not appear within {timeout:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-async fn wait_for_container_file(id: &str, path: &str, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let output = Command::new("docker")
-            .args(["container", "exec", id, "test", "-e", path])
-            .output()
-            .expect("docker container exec starts");
-        if output.status.success() {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "container {id} did not create {path:?} within {timeout:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-fn docker_visible_tempdir() -> tempfile::TempDir {
-    // Colima only bind-mounts configured host roots into its Docker VM.
-    tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))
-        .expect("Docker-visible sandbox workspace tempdir")
-}
+#[path = "user_sandbox_docker_live/extra.rs"]
+mod extra;
 
 #[tokio::test]
 async fn user_container_reuses_state_across_threads_and_isolates_other_users_and_tenants() {
@@ -686,6 +375,72 @@ async fn same_user_shell_commands_are_intentionally_serialized_across_threads() 
 }
 
 #[tokio::test]
+async fn different_users_execute_in_parallel() {
+    let Some(_image) = docker_worker_image("cross-user parallelism test") else {
+        return;
+    };
+    let first_user = TestScope::unique("parallel-a");
+    let second_user = TestScope::unique("parallel-b");
+    let temp = docker_visible_tempdir();
+    let mut cleanup = DockerCleanup::with_scopes([first_user.clone(), second_user.clone()]);
+    let transport = RebornScopedSandboxCommandTransport::connect(RebornSandboxConfig::new(
+        temp.path().join("sandbox-workspaces"),
+    ))
+    .await
+    .expect("Docker transport connects");
+
+    let first_transport = transport.clone();
+    let first_scope = first_user.resource_scope();
+    let first = tokio::spawn(async move {
+        first_transport
+            .run_command(request(
+                first_scope,
+                "touch /tmp/parallel-a-started; \
+                 while [ ! -e /tmp/parallel-a-release ]; do sleep 0.02; done; \
+                 echo USER_A_COMPLETED",
+            ))
+            .await
+    });
+    let first_container = wait_for_user_container(&first_user, Duration::from_secs(10)).await;
+    cleanup.container_ids.insert(first_container.id.clone());
+    wait_for_container_file(
+        &first_container.id,
+        "/tmp/parallel-a-started",
+        Duration::from_secs(10),
+    )
+    .await;
+
+    let second = tokio::time::timeout(
+        Duration::from_secs(5),
+        transport.run_command(request(
+            second_user.resource_scope(),
+            "echo USER_B_COMPLETED",
+        )),
+    )
+    .await
+    .expect("a different user's command is not blocked by user A")
+    .expect("user B command runs");
+    assert_eq!(second.exit_code, 0, "user B output: {}", second.output);
+    assert!(second.output.contains("USER_B_COMPLETED"));
+    let second_container = cleanup.capture(&second_user);
+    assert_ne!(first_container.id, second_container.id);
+
+    docker_command(&[
+        "container",
+        "exec",
+        &first_container.id,
+        "touch",
+        "/tmp/parallel-a-release",
+    ]);
+    let first = first
+        .await
+        .expect("user A task joins")
+        .expect("user A command completes");
+    assert_eq!(first.exit_code, 0, "user A output: {}", first.output);
+    assert!(first.output.contains("USER_A_COMPLETED"));
+}
+
+#[tokio::test]
 async fn aborting_caller_does_not_release_same_user_serialization() {
     let Some(_image) = docker_worker_image("user container cancellation test") else {
         return;
@@ -703,9 +458,15 @@ async fn aborting_caller_does_not_release_same_user_serialization() {
 
     let first_transport = transport.clone();
     let first_scope = primary.resource_scope();
+    let token = format!("cancelled-exec-{}", InvocationId::new());
     let mut first_request = request(
         first_scope,
-        "touch /tmp/cancel-started; sleep 3; touch /tmp/cancel-finished",
+        format!(
+            "printf '%s' '{token}' > /workspace/cancel.token; \
+             touch /tmp/cancel-started; \
+             python -c 'import time; time.sleep(3)' '{token}'; \
+             touch /tmp/cancel-finished"
+        ),
     );
     first_request.timeout_secs = Some(10);
     let first = tokio::spawn(async move { first_transport.run_command(first_request).await });
@@ -724,17 +485,21 @@ async fn aborting_caller_does_not_release_same_user_serialization() {
     let second = transport
         .run_command(request(
             other_thread.resource_scope(),
-            "test -e /tmp/cancel-finished && echo CANCELLED_CALLER_DID_NOT_OVERLAP",
+            "token=$(cat /workspace/cancel.token); \
+             if grep -al \"$token\" /proc/[0-9]*/cmdline 2>/dev/null; then \
+             echo CANCELLED_EXEC_STILL_RUNNING; exit 1; fi; \
+             echo CANCELLED_CALLER_DID_NOT_OVERLAP",
         ))
         .await
-        .expect("queued same-user command runs after detached execution completes");
+        .expect("queued same-user command runs after detached execution settles");
     assert_eq!(
         second.exit_code, 0,
         "aborted caller released the lifecycle gate too early: {}",
         second.output
     );
     assert!(second.output.contains("CANCELLED_CALLER_DID_NOT_OVERLAP"));
-    assert_eq!(cleanup.capture(&other_thread).id, container.id);
+    let final_container = cleanup.capture(&other_thread);
+    cleanup.container_ids.insert(final_container.id);
 }
 
 #[tokio::test]
@@ -818,6 +583,59 @@ async fn stopped_user_container_restarts_and_image_mismatch_recycles_it() {
         initial_container.labels.get(LABEL_SECURITY_POSTURE),
         "changing only the image must preserve the security posture"
     );
+}
+
+#[tokio::test]
+async fn foreground_exit_reaps_descendant_that_detaches_into_a_new_session() {
+    let Some(_image) = docker_worker_image("detached descendant cleanup test") else {
+        return;
+    };
+    let user = TestScope::unique("detached");
+    let temp = docker_visible_tempdir();
+    let mut cleanup = DockerCleanup::with_scopes([user.clone()]);
+    let transport = RebornScopedSandboxCommandTransport::connect(RebornSandboxConfig::new(
+        temp.path().join("sandbox-workspaces"),
+    ))
+    .await
+    .expect("Docker transport connects");
+    let token = format!("detached-descendant-{}", InvocationId::new());
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        transport.run_command(request(
+            user.resource_scope(),
+            format!(
+                "setsid python -c 'import time; time.sleep(300)' '{token}' \
+                 >/dev/null 2>&1 </dev/null & \
+                 printf '%s' \"$!\" > /workspace/detached.pid; \
+                 echo FOREGROUND_RETURNED"
+            ),
+        )),
+    )
+    .await
+    .expect("foreground command and detached cleanup are bounded")
+    .expect("foreground command succeeds");
+    assert_eq!(result.exit_code, 0, "foreground output: {}", result.output);
+    assert!(result.output.contains("FOREGROUND_RETURNED"));
+    let container = cleanup.capture(&user);
+
+    let inspection = transport
+        .run_command(request(
+            user.resource_scope(),
+            "pid=$(cat /workspace/detached.pid); \
+             token=$(cat /workspace/detached.token 2>/dev/null || true); \
+             if [ -d \"/proc/$pid\" ]; then echo DETACHED_PID_ALIVE; exit 1; fi; \
+             echo DETACHED_DESCENDANT_GONE",
+        ))
+        .await
+        .expect("post-exit descendant inspection runs");
+    assert_eq!(
+        inspection.exit_code, 0,
+        "detached descendant survived: {}",
+        inspection.output
+    );
+    assert!(inspection.output.contains("DETACHED_DESCENDANT_GONE"));
+    assert_eq!(cleanup.capture(&user).id, container.id);
 }
 
 #[tokio::test]
@@ -1106,100 +924,4 @@ async fn idle_stop_respects_one_active_serialized_command_and_restarts_the_same_
     assert_eq!(restarted_container.name, running_container.name);
     assert_eq!(restarted_container.hostname, running_container.hostname);
     assert!(restarted_container.running);
-}
-
-#[tokio::test]
-async fn thread_id_none_uses_and_reuses_the_user_container() {
-    let Some(_image) = docker_worker_image("optional thread identity test") else {
-        return;
-    };
-    let user = TestScope::unique("optional-thread");
-    let temp = docker_visible_tempdir();
-    let mut cleanup = DockerCleanup::with_scopes([user.clone()]);
-    let transport = RebornScopedSandboxCommandTransport::connect(RebornSandboxConfig::new(
-        temp.path().join("sandbox-workspaces"),
-    ))
-    .await
-    .expect("Docker transport connects");
-    let mut no_thread = user.resource_scope();
-    no_thread.thread_id = None;
-    let workspace_marker = format!("workspace-{}", InvocationId::new());
-    let ephemeral_marker = format!("ephemeral-{}", InvocationId::new());
-
-    let without_thread = transport
-        .run_command(request(
-            no_thread,
-            format!(
-                "printf '%s' '{workspace_marker}' > /workspace/optional-thread; \
-                 printf '%s' '{ephemeral_marker}' > /tmp/optional-thread; \
-                 echo NO_THREAD_OK"
-            ),
-        ))
-        .await
-        .expect("scope without a thread id runs");
-    assert_eq!(
-        without_thread.exit_code, 0,
-        "threadless command failed: {}",
-        without_thread.output
-    );
-    assert!(without_thread.output.contains("NO_THREAD_OK"));
-    let without_thread_container = cleanup.capture(&user);
-
-    let with_thread = transport
-        .run_command(request(
-            user.resource_scope(),
-            "cat /workspace/optional-thread /tmp/optional-thread",
-        ))
-        .await
-        .expect("threaded scope reuses the user container");
-    let with_thread_container = cleanup.capture(&user);
-    assert_eq!(
-        with_thread.exit_code, 0,
-        "threaded command failed: {}",
-        with_thread.output
-    );
-    assert!(with_thread.output.contains(&workspace_marker));
-    assert!(with_thread.output.contains(&ephemeral_marker));
-    assert_eq!(with_thread_container.id, without_thread_container.id);
-    assert_eq!(with_thread_container.name, without_thread_container.name);
-    assert_eq!(
-        with_thread_container.hostname,
-        without_thread_container.hostname
-    );
-    assert_stable_identity(&with_thread_container, &user);
-}
-
-#[tokio::test]
-#[ignore = "requires public DNS and Internet access; run as a live egress canary"]
-async fn sandbox_profile_allows_public_https_egress() {
-    let Some(_image) = docker_worker_image("sandbox egress canary") else {
-        return;
-    };
-
-    let egress_scope = TestScope::unique("egress");
-    let temp = docker_visible_tempdir();
-    let mut cleanup = DockerCleanup::with_scopes([egress_scope.clone()]);
-    let transport = RebornScopedSandboxCommandTransport::connect(
-        RebornSandboxConfig::new(temp.path().join("sandbox-workspaces")).with_network_enabled(),
-    )
-    .await
-    .expect("Docker transport connects");
-
-    let result = transport
-        .run_command(request(
-            egress_scope.resource_scope(),
-            "python -c \"import os, urllib.request; assert os.environ['IRONCLAW_REBORN_NETWORK_MODE'] == 'direct'; response = urllib.request.urlopen('https://example.com', timeout=15); assert response.status == 200; response.close(); print('SANDBOX_PUBLIC_HTTPS_OK')\"",
-        ))
-        .await
-        .expect("public HTTPS request runs");
-    let container = cleanup.capture(&egress_scope);
-    assert_stable_identity(&container, &egress_scope);
-
-    assert_eq!(
-        result.exit_code, 0,
-        "egress canary failed: {}",
-        result.output
-    );
-    assert!(result.output.contains("SANDBOX_PUBLIC_HTTPS_OK"));
-    assert!(result.sandboxed);
 }
