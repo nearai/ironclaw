@@ -1275,12 +1275,14 @@ async fn replay_routine_phrase_fires(case: &QaPhrase, cron_fragment: &str) {
     );
 
     let now = Utc::now();
-    // At an exact cron boundary the live poller may claim the trigger before
-    // the test forces it due. Do not schedule a second fire in that case.
+    // Make the persisted slot due without moving it behind the current cron
+    // boundary. If this used `now - 120s`, a `*/30` trigger started just after
+    // `:00` or `:30` would reschedule to that already-passed boundary after
+    // the first fire, letting the poller submit the same test routine twice.
     let already_due_or_fired =
         trigger.is_due_at(now) || trigger.has_active_fire() || trigger.last_fired_slot.is_some();
     if !already_due_or_fired {
-        trigger.next_run_at = now - chrono::Duration::try_seconds(120).expect("duration");
+        trigger.next_run_at = now;
         repo.upsert_trigger(trigger)
             .await
             .expect("make replayed routine due");
