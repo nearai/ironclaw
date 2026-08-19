@@ -26,10 +26,10 @@ export interface Suggestion {
   title: string;
   description: string;
   suggested_prompt: string;
-  // Brand-icon enum (values are `BrandIconId`) + `sources`, concise
-  // human-readable tool names for display ("Gmail", "Slack"). Both are required
+  // Provider-neutral semantic icon enum + `sources`, concise human-readable
+  // tool names for display. Both are required
   // in the shipped contract (PR #7694); typed optional here so the card renders
-  // defensively even if a value is ever missing (see `brand-icons.ts`).
+  // defensively even if a value is ever missing (see `suggestion-icons.tsx`).
   icon?: string;
   sources?: string[];
   thread_id?: string;
@@ -84,8 +84,7 @@ export function dismissSuggestion(suggestionId: string) {
   });
 }
 
-/** Human-readable provenance for a card's `sources` — "Gmail",
- *  "Gmail & Slack", "Gmail, Slack & Telegram". Sources are already
+/** Human-readable provenance for a card's `sources`. Sources are already
  *  human-readable names from the backend, so this only joins them. */
 export function formatSources(sources: string[] | null | undefined): string {
   const list = (sources || []).filter((s) => typeof s === "string" && s.trim());

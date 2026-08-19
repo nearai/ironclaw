@@ -1,70 +1,58 @@
-# Suggestion card icons — enum + schema addendum
+# Suggestion card icons — semantic enum contract
 
-Companion to [VISION-RECONCILIATION.md](VISION-RECONCILIATION.md). The brand-icon
-vocabulary for the durable suggestions contract
-([PR #7694](https://github.com/nearai/ironclaw/pull/7694), **now on `main`**) and
-how the frontend consumes it. **This matches the shipped schema** — no longer a
-proposal.
+Companion to [VISION-RECONCILIATION.md](VISION-RECONCILIATION.md). This document
+defines the shipped suggestion icon contract and its frontend rendering.
 
-## The shipped card
+## Card shape
 
 ```jsonc
 { "title": "...", "description": "...", "suggested_prompt": "...",
-  "icon": "slack", "sources": ["Gmail", "Slack"] }
+  "icon": "messaging", "sources": ["Team chat"] }
 ```
 
-- `icon` — **required** brand-icon enum (values are exactly the list below). The
-  model must choose one enum value; making it required forces it to reason about
-  which tool a suggestion touches. **This is the authoritative icon source.**
-- `sources` — 1–5 **concise human-readable tool names** ("Gmail", "Slack",
-  "Web Search"), translated from the discovered extension/tool metadata. They are
-  **display strings, not extension ids and not the icon source** — the
-  generation prompt explicitly forbids exposing internal capability ids.
+- `icon` is a required, provider-neutral task category. It controls only the
+  card glyph; it is not an extension, vendor, or capability identity.
+- `sources` contains one to five concise, human-readable provenance labels
+  translated from discovered extension or tool metadata. Sources are display
+  strings, not extension IDs, and the frontend never derives an icon or setup
+  route from them.
 
-**This reversed a finding.** VISION-RECONCILIATION §3 said cards carried no tool
-identity, which drove the connect-model conflict. With `icon`/`sources`, cards
-*do* carry tool identity. The connect model **stays decoupled** (a catalog-driven
-surface, §3.1); `icon` drives the card's brand mark and `sources` are available
-for display, while per-card "Connect &lt;tool&gt;" is reopened as a review
-question (VISION-RECONCILIATION §6.4).
+This separation keeps generic suggestion rendering independent of the set of
+installed extensions. Extension-owned presentation metadata can be introduced
+through the extension catalog later without embedding concrete identities in
+generic chat code.
 
-## Icon comes straight from `icon`
+## Semantic vocabulary
 
-`icon` is required and enum-constrained, so the frontend trusts it directly —
-`resolveIconId` returns the `icon` value when it is a known enum member, else
-`generic`. It does **not** derive the icon from `sources` (those are free-form
-display names, not mappable ids), which also removes any icon-vs-sources drift.
+The schema and frontend use the same ordered vocabulary:
 
-## The enum (shipped)
-
-`generic` is the **guaranteed-valid** value for tool-less suggestions
-(e.g. "draft a project plan"). The frontend `BrandIconId` union equals this list
-exactly, and a test pins every enum value to a renderable glyph.
-
-| enum value | glyph |
+| enum value | task concept |
 |---|---|
-| `gmail` | Gmail |
-| `google_calendar` | Google Calendar |
-| `google_docs` | Google Docs |
-| `google_drive` | Google Drive |
-| `google_sheets` | Google Sheets |
-| `google_slides` | Google Slides |
-| `github` | GitHub |
-| `slack` | Slack |
-| `notion` | Notion |
-| `telegram` | Telegram |
-| `web` | globe |
-| `memory` | store |
-| `generic` | sparkle |
+| `email` | email work |
+| `calendar` | scheduling |
+| `document` | documents |
+| `storage` | files and storage |
+| `spreadsheet` | tables and spreadsheets |
+| `presentation` | slides and presentations |
+| `code` | source code |
+| `messaging` | conversations and messages |
+| `notes` | notes and writing |
+| `web` | web research |
+| `memory` | retained context |
+| `generic` | uncategorized work and fallback |
 
-### Shipped schema (`suggestions.output.json`)
+`generic` is the guaranteed fallback. The model must choose a schema member,
+but the frontend also maps unknown, missing, and legacy persisted values to
+`generic` so cards always remain renderable.
+
+### Schema (`suggestions.output.json`)
 
 ```jsonc
 "icon": {
   "type": "string",
-  "enum": ["gmail","google_calendar","google_docs","google_drive",
-           "google_sheets","google_slides","github","slack","notion",
-           "telegram","web","memory","generic"]
+  "enum": ["email", "calendar", "document", "storage", "spreadsheet",
+           "presentation", "code", "messaging", "notes", "web", "memory",
+           "generic"]
 },
 "sources": {
   "type": "array", "minItems": 1, "maxItems": 5, "uniqueItems": true,
@@ -72,29 +60,19 @@ exactly, and a test pins every enum value to a renderable glyph.
 }
 ```
 
-Both are in `required`, so every card carries an `icon` and ≥1 `source`.
+Both fields are required. The Rust wire contract intentionally stores `icon`
+as a string so schema evolution does not require a persistence migration.
 
-### Shipped Rust contract
+## Frontend
 
-`RebornSuggestion` (in `ironclaw_product_contracts`) carries
-`pub icon: String,` and `pub sources: Vec<String>,`.
+`pages/chat/lib/suggestion-icons.tsx` owns `SuggestionIconId`,
+`SUGGESTION_ICON_IDS`, `resolveIconId`, and `<SuggestionIcon>`. It maps semantic
+categories to the shared design-system glyphs and lives in the lazy suggestion
+surface chunk. `Suggestion` types `icon` and `sources` as optional only for
+defensive rendering of incomplete or older records.
 
-## Frontend (PR #6994)
+## Compatibility
 
-- `pages/chat/lib/brand-icons.tsx` — `BrandIconId`, `BRAND_ICON_IDS` (equal to
-  the shipped enum), `resolveIconId(suggestion)` (trusts the required `icon`,
-  falls back to `generic`), and `<BrandIcon>`. The colored marks reuse the
-  license-clean inline SVGs already committed in the OOBE mockup;
-  sheets/slides/web/memory/generic are neutral in-house glyphs. It lives in the
-  lazy suggestion-surface chunk, so it adds **nothing** to the eager `/chat`
-  bundle.
-- `Suggestion` (in `suggestions-api.ts`) carries `icon` + `sources` (typed
-  optional for defensive rendering); the card renders the resolved brand mark.
-
-## Assets & sourcing
-
-No web scraping. The eight primary marks were already committed to the repo
-(the mockup); the gaps are in-house neutral glyphs. If a future brand needs a
-mark, extend the in-repo set or take a path from a permissively-licensed set
-(e.g. Simple Icons, CC0) — brand trademarks remain their owners'; these are
-nominative-use marks for "this suggestion touches &lt;tool&gt;".
+Suggestions persisted with the retired concrete-brand values still load and
+remain startable. Their unknown icon value renders the neutral `generic` glyph;
+no rows are rewritten or deleted.

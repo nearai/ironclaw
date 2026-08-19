@@ -8,7 +8,7 @@
  *   started      → View in thread (onOpenThread) — the card keeps its durable
  *                  `thread_id` binding, so a returning user can rejoin the run
  *
- * The card shows the suggestion's brand `icon` and a "From <sources>"
+ * The card shows the suggestion's semantic `icon` and a "From <sources>"
  * provenance line (both from the backend card schema). Connect is still a
  * separate landing surface, not a card state — see
  * docs/internal/design/oobe/VISION-RECONCILIATION.md §3.1.
@@ -21,7 +21,7 @@ import type { ReactNode } from "react";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
 import { useT } from "../../../lib/i18n";
-import { BrandIcon, resolveIconId } from "../lib/brand-icons";
+import { resolveIconId, SuggestionIcon } from "../lib/suggestion-icons";
 import { formatSources, type Suggestion } from "../lib/suggestions-api";
 
 export function SuggestedTaskCard({
@@ -50,11 +50,11 @@ export function SuggestedTaskCard({
       aria-label={suggestion.title}
       className="oobe-card-reveal flex h-full w-full flex-col rounded-[13px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] p-3 text-left transition-colors hover:border-[color-mix(in_srgb,var(--v2-accent)_32%,var(--v2-panel-border))]"
     >
-      {/* Brand icon + dismiss */}
+      {/* Task icon + dismiss */}
       <div className="mb-1.5 flex items-center gap-1.5">
-        <BrandIcon
+        <SuggestionIcon
           id={iconId}
-          className="grid h-5 w-5 shrink-0 place-items-center [&_svg]:h-full [&_svg]:w-full"
+          className="h-5 w-5 shrink-0"
         />
         <button
           type="button"
