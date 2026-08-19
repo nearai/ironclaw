@@ -85,7 +85,11 @@ validated in RC2 and the complete RC1 scope below.
   hover, exposed-route copy is localized, and a failed tool call reads as a
   subtle badge instead of a loud summary.
 - The resource governor keeps retrying through a full libSQL writer attempt
-  instead of surfacing the contention as a failure.
+  instead of surfacing the contention as a failure, and libSQL write-lane
+  starvation no longer cascades through it: the delta journal gets its own
+  bounded write lane, congestion is distinguished from storage damage so a
+  contended write replays instead of invalidating the authority, and stale
+  reservations are swept rather than leaking as permanent `Active` holds.
 
 ### Removed
 
