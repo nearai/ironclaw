@@ -10,6 +10,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `config.rs` | LLM config types (`LlmConfig`, `RegistryProviderConfig`, `NearAiConfig`, `BedrockConfig`) |
 | `error.rs` | `LlmError` enum used by all providers |
 | `provider.rs` | `LlmProvider` trait, `ChatMessage`, `ToolCall`, `CompletionRequest`, `sanitize_tool_messages` |
+| `agent_message.rs` | Canonical parts-list message vocabulary (`AgentMessage`) with validity/pairing/bounds validation and total conversions to/from `ChatMessage` |
 | `nearai_chat.rs` | NEAR AI Chat Completions provider (dual auth: session token or API key) |
 | `nearai_tool_message_flattening.rs` | NEAR AI compatibility rewrite for tool-call history |
 | `codex_auth.rs` | Reads Codex CLI `auth.json`, extracts tokens, refreshes ChatGPT OAuth access tokens |
@@ -62,7 +63,7 @@ owner, and a deleted one fails until its entry goes.
 
 | Sub-owner | Owns | Never contains | Files |
 |---|---|---|---|
-| `core-contract` | The `LlmProvider` trait, the request/response vocabulary, the error taxonomy, the config types, shared HTTP hardening, and the factory that assembles everything | A vendor protocol, or reliability behavior | `lib.rs`, `provider.rs`, `error.rs`, `config.rs`, `url_check.rs` |
+| `core-contract` | The `LlmProvider` trait, the request/response vocabulary, the error taxonomy, the config types, shared HTTP hardening, and the factory that assembles everything | A vendor protocol, or reliability behavior | `lib.rs`, `provider.rs`, `agent_message.rs`, `error.rs`, `config.rs`, `url_check.rs` |
 | `providers` | One concrete `LlmProvider` per vendor and the protocol shims used by that vendor alone | Cross-provider normalization (that is `normalization`), or credential lifecycle (that is `auth-sessions`) | `nearai_chat.rs`, `rig_adapter.rs`, `gemini_oauth.rs`, `codex_chatgpt.rs`, `bedrock.rs`, `openai_codex_provider.rs`, `anthropic_oauth.rs`, `github_copilot.rs`, `nearai_tool_message_flattening.rs`, `responses_reasoning.rs`, `anthropic_thinking.rs` |
 | `auth-sessions` | Acquiring, persisting, refreshing and revoking provider credentials, plus the host seam that stores them | Request/response shaping | `auth.rs`, `session.rs`, `openai_codex_session.rs`, `github_copilot_auth.rs`, `codex_auth.rs`, `token_refreshing.rs`, `host.rs` |
 | `registry` | The **provider** catalog: definitions, protocols, base-URL and api-key resolution | Model facts (that is `model-catalog`) | `registry.rs`, `resolution.rs` |
@@ -261,7 +262,7 @@ before assuming any of these ports is wired.
 
 ## Response Cache
 
-`CachedProvider` in `response_cache.rs` caches `complete()` responses. `complete_with_tools()` is never cached (side effects). Cache key is SHA-256 of `(model_name, messages_json, max_tokens, temperature, stop_sequences)`. LRU eviction when `max_entries` is reached; TTL-based expiry on access.
+`CachedProvider` in `response_cache.rs` caches `complete()` responses. `complete_with_tools()` is never cached (side effects). Cache key is SHA-256 of `(model_name, messages_json, max_tokens, temperature, stop_sequences, response_format)`. The `response_format` identity includes an explicit ordinary-vs-structured variant marker and, for structured output, the complete `(name, schema, strict)` envelope. LRU eviction when `max_entries` is reached; TTL-based expiry on access.
 
 **Defaults:** TTL = 1 hour, max entries = 1000. Configure via `LlmConfig` fields: `response_cache_enabled` (env: `LLM_RESPONSE_CACHE_ENABLED`, falls back to `RESPONSE_CACHE_ENABLED`), `response_cache_ttl_secs` (env: `LLM_RESPONSE_CACHE_TTL_SECS`), `response_cache_max_entries` (env: `LLM_RESPONSE_CACHE_MAX_ENTRIES`). Cache is in-memory only — evicted on restart.
 

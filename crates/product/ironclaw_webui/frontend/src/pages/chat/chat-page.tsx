@@ -3,6 +3,8 @@ import { useLocation, useNavigate, useOutletContext, useParams } from "react-rou
 import React from "react";
 import { Chat } from "./chat";
 import { ConnectionStatus } from "./components/connection-status";
+import { OnboardingPairingCard } from "./components/onboarding-pairing-card";
+import { useConnectLinkLanding } from "./hooks/useConnectLinkLanding";
 
 export function ChatPage() {
   const {
@@ -17,6 +19,8 @@ export function ChatPage() {
   const location = useLocation();
   const composerDraft = location.state?.composerDraft || "";
   const routeThreadId = urlThreadId || null;
+  const { connectLanding, startConnectLinkOAuth, dismissConnectLanding } =
+    useConnectLinkLanding();
 
   const handleConnectionStatusChange = React.useCallback(
     (status) => setHeaderStatus(<ConnectionStatus status={status} />),
@@ -50,17 +54,27 @@ export function ChatPage() {
   );
 
   return (
-    <Chat
-      threads={threadsState.threads}
-      activeThreadId={routeThreadId}
-      onSelectThread={handleSelectThread}
-      isCreatingThread={threadsState.isCreating}
-      composerDraft={composerDraft}
-      composerResetKey={location.key}
-      gatewayStatus={gatewayStatus}
-      regressionArtifactExportEnabled={regressionArtifactExportEnabled}
-      globalAutoApproveEnabled={globalAutoApproveEnabled}
-      onConnectionStatusChange={handleConnectionStatusChange}
-    />
+    <>
+      {connectLanding &&
+      (
+        <OnboardingPairingCard
+          onboarding={connectLanding}
+          onConfigure={startConnectLinkOAuth}
+          onCancel={dismissConnectLanding}
+        />
+      )}
+      <Chat
+        threads={threadsState.threads}
+        activeThreadId={routeThreadId}
+        onSelectThread={handleSelectThread}
+        isCreatingThread={threadsState.isCreating}
+        composerDraft={composerDraft}
+        composerResetKey={location.key}
+        gatewayStatus={gatewayStatus}
+        regressionArtifactExportEnabled={regressionArtifactExportEnabled}
+        globalAutoApproveEnabled={globalAutoApproveEnabled}
+        onConnectionStatusChange={handleConnectionStatusChange}
+      />
+    </>
   );
 }

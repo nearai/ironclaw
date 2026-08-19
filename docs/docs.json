@@ -160,6 +160,13 @@
                     ]
                   }
                 ]
+              },
+              {
+                "group": "Releases",
+                "icon": "clock-rotate-left",
+                "pages": [
+                  "changelog"
+                ]
               }
             ]
           }

@@ -66,14 +66,20 @@ impl LoopCapabilityPort for HostSurfaceDisclosurePort {
         &self,
         request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner.register_provider_tool_call(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.inner.register_provider_tool_call(request)).await
     }
 
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let mut surface = self.inner.visible_capabilities(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let mut surface = Box::pin(self.inner.visible_capabilities(request)).await?;
         for descriptor in &mut surface.descriptors {
             self.disclosure.apply_to_descriptor(descriptor);
         }
@@ -84,14 +90,20 @@ impl LoopCapabilityPort for HostSurfaceDisclosurePort {
         &self,
         request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
-        self.inner.invoke_capability(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.inner.invoke_capability(request)).await
     }
 
     async fn invoke_capability_batch(
         &self,
         request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
-        self.inner.invoke_capability_batch(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.inner.invoke_capability_batch(request)).await
     }
 }
 

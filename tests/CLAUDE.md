@@ -53,18 +53,18 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Triggers / automations / routines | 11 | 2 | ✓ | ✓ |
 | Memory & workspace | 8 | 2 | — | ✓ |
 | Skills | 1 | 1 | — | ✓ |
-| Multi-user / scope isolation | 5 | 2 | 9 | ✓ |
+| Multi-user / scope isolation | 5 | 3 | 9 | ✓ |
 | Tools & tool dispatch | — | 11 | ✓ | ✓ |
 | Turn lifecycle (cancel/steer/retry/restart) | — | 8 | ✓ | ✓ |
 | WebUI surfaces & APIs | 2 | 2 | — | ✓ (largest) |
-| Durability & restart | 4 | 5 | ✓ | ✓ |
+| Durability & restart | 4 | 6 | ✓ | ✓ |
 | Security & redaction | — | 3 | ✓ | ✓ |
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **59** group scenarios · **56** flat integration bins (50 in
-`tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
-**102** Python scenario files (**869** test functions) registered in the active
+Totals: **59** group scenarios · **61** flat integration bins (54 in
+`tests/integration/`, 7 in `tests/integration/auth/`) · **39** top-level Rust bins ·
+**102** Python scenario files (**870** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
 Python scenarios, so its exhaustive totals are intentionally broader.
 
@@ -181,7 +181,7 @@ ones speak MTProto over a raw socket with no injectable seam.
 
 ---
 
-## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (56)
+## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (61)
 
 One thread, whole real turn. Grouped by what the user experiences.
 
@@ -198,6 +198,17 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Repeating the same inbound message does not start a second run | `idempotent_replay.rs` |
 | Spend accounting fires on a real turn | `budget.rs` |
 | Sub-agents spawn and awaiting them behaves at the edges | `subagent_await_edge.rs` |
+| A caller hands the engine a prepared prompt and gets its outcome back: a schema-validated JSON result (invalid attempts are retried and the corrected payload is durably recorded) or a plain answer; seeded tool history is honored by the run; resubmitting the same request is replay-safe; the private work thread belongs to the calling user (stored under their owner scope, foreign-owner run-state reads rejected) yet never appears in conversation listings | `unbound_turns.rs` |
+
+**Suggestions**
+| Behavior | Evidence |
+|---|---|
+| Generate suggestion cards and replay the same client action without starting another generation | `suggestions.rs::generate_suggestions_returns_cards_and_cached_replay` |
+| Replace the visible suggestion cards with a new generation while preserving existing start reservations | `suggestions.rs::replacement_generation_preserves_reservations_and_replaces_cards` |
+| Start a suggestion card and create one canonical thread containing its suggested prompt | `suggestions.rs::starting_a_replacement_suggestion_creates_one_thread` |
+| Keep suggestion cards and their start/dismiss actions isolated to the authenticated tenant and user scope | `suggestions.rs::suggestions_are_isolated_by_authenticated_scope` |
+| Dismiss a started suggestion across restart without deleting its thread or timeline | `suggestions.rs::dismissing_a_started_suggestion_persists_across_restart` |
+| Settle failed or contract-invalid suggestion generation as failed with no visible cards | `suggestions.rs::failed_suggestion_run_settles_failed_and_retryable_via_list_view`, `suggestions.rs::semantically_invalid_completed_suggestion_output_settles_failed`, `suggestions.rs::unknown_field_in_completed_suggestion_output_settles_failed` |
 
 **Tools**
 | Behavior | Evidence |
@@ -250,11 +261,12 @@ One thread, whole real turn. Grouped by what the user experiences.
 **Durability, storage & restart**
 | Behavior | Evidence |
 |---|---|
-| Behavior is identical on in-memory and libSQL storage | `backend_matrix.rs` |
+| Behavior is identical on in-memory, libSQL, and PostgreSQL storage; message exact lookups avoid sibling entry rows on both durable databases | `backend_matrix.rs` |
 | Installed extensions survive a fresh store reopen | `durable.rs` |
 | Secrets survive a genuine on-disk reopen | `secrets.rs` |
 | Outbound preferences survive a process-level reopen | `outbound_store_durability.rs` |
 | Restart sequences over a gated run recover correctly | `generated_restart_sequences.rs` |
+| A suggestions generation survives a backend restart: GET/list alone shows it generating and then ready after durable recovery | `suggestions.rs::generation_in_progress_survives_runtime_restart_and_recovers_via_list_view` |
 | Odd gate sequences (double-resolve, cancel-after-finish, approve-a-done-run) behave | `generated_gate_sequences.rs` |
 
 **Platform / wiring**
@@ -268,8 +280,10 @@ One thread, whole real turn. Grouped by what the user experiences.
 | WebUI v2 routes work over the real services facade | `webui_v2_product_api.rs`, `webui_v2_router_smoke.rs` |
 | Enroll/refresh/remove a browser for web push over the real routes — advertised VAPID key, endpoint redacted to its push-service host, undeclared push hosts rejected, and the `web-app` catalog row selectable through the same notification-channels wire as every vendor channel | `webui_v2_product_api.rs::browser_channel_notification_setup_round_trip_through_production_facade` |
 | Identity resolution runs on the coverage lane | `identity_resolution_smoke.rs` |
+| A canonical 10-tool-call agent turn's database write volume is measured and reported (for tracking, not gated) on both libSQL and Postgres, and custom-actor group threads are rejected from canonical durable milestones | `db_write_canonical.rs` |
+| A downloaded run artifact carries per-iteration model-call timing evidence for a completed run, and still carries durable per-message timestamps (with an explicit `run_not_resident` reason) when the process-local timing buffer was evicted or the process restarted | `run_artifact_timings.rs` |
 
-One of the 56 registered bins, `delivery_user_journeys.rs`, holds the explicit
+One of the 61 registered bins, `delivery_user_journeys.rs`, holds the explicit
 channel-delivery journeys (two-lane model):
 
 | A user can… | Scenario |
@@ -338,7 +352,7 @@ enums), `trace_format.rs`, `trace_llm_tests.rs`,
 
 ---
 
-## 6. Python E2E scenarios — `tests/e2e/scenarios/` (103 files, 1,143 tests)
+## 6. Python E2E scenarios — `tests/e2e/scenarios/` (103 files, 1,144 tests)
 
 This is an exhaustive inventory, not a claim that every retained scenario is
 currently executable. Current Reborn coverage starts `ironclaw serve` through the
@@ -363,7 +377,7 @@ entries.
 | Keep DOM bounded on huge histories, without SSE timer leaks | `test_reborn_webui_v2_legacy_dom_resource_limits.py` (4) |
 | Copy a message, use the command palette | `test_reborn_webui_v2_legacy_chat_actions.py` (3) |
 | Delete a thread behind a shared confirmation dialog | `test_reborn_webui_v2_smoke.py::test_reborn_v2_thread_delete_uses_shared_confirmation_dialog` |
-| Collapse the sidebar, pick a theme, pick a language — and have it persist | `test_reborn_webui_v2_smoke.py` |
+| Collapse the sidebar, collapse and reopen each expandable navigation section, and pick a theme that persists | `test_reborn_webui_v2_smoke.py::test_reborn_v2_desktop_sidebar_can_collapse_and_persist`, `test_reborn_webui_v2_smoke.py::test_reborn_v2_expandable_sidebar_sections_can_collapse`, `test_reborn_webui_v2_smoke.py::test_reborn_v2_appearance_theme_selection_persists` |
 | Opt into the inspector for the browser session, toggle it from the header icon, preserve its selected tab while closing, resizing, reloading, and reconnecting after visibility changes, explicitly disable it, and leave the ordinary chat shell unchanged when debug mode is off | `test_reborn_webui_v2_smoke.py::test_inspector_debug_activation_and_responsive_shell` |
 | Inspect the bounded host-resolved prompt, ordered activity timeline, turn navigation, and model-call statistics for completed runs, including continued diagnostic observation while the panel is closed | `test_reborn_webui_v2_smoke.py::test_inspector_prompt_and_stats_render_host_diagnostics` |
 | Reconnect SSE without gaps or duplicates; multiple tabs both get the reply; excess connections are rate-limited | `test_reborn_webui_v2_legacy_sse_history.py`, `test_reborn_webui_v2_streaming_run_control_api.py` (10) |
@@ -438,7 +452,7 @@ entries.
 | Search across settings sections and clear the search | `test_reborn_webui_v2_legacy_settings_search.py` (6), `test_settings_search.py` (5) |
 | As an admin, publish the active provider's allowlist/default from Settings; then, as a non-admin member, choose a long-name allowed model, verify the selector stacks at narrow width and right-aligns at wide width without overflow, and have that preference reach future provider requests across chats without changing another member's workspace-default routing | `test_reborn_webui_v2_smoke.py::test_reborn_v2_settings_model_preference_reaches_provider` |
 | Add, test, activate, edit and delete a custom inference provider | `test_reborn_webui_v2_legacy_settings_search.py` |
-| Add/edit/delete skills, with read-only sources locked | `test_reborn_webui_v2_legacy_skills.py` (3), `test_reborn_webui_v2_skills_api.py` (3), `test_portfolio.py` (10) |
+| Add/edit/delete skills, with read-only sources locked | `test_reborn_webui_v2_legacy_skills.py` (3), `test_reborn_webui_v2_skills_api.py` (3) |
 | Filter scoped logs by target and level with the shared SelectMenu while polling and pagination continue | `test_reborn_webui_v2_smoke.py::test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context` |
 | Use plan mode (`/plan`, checklist, approve, status) | `test_plan_mode.py` (5) |
 | As an admin: create users, hand out one-time tokens, page the user list, set roles, suspend/activate, manage write-only secrets, delete users | `test_admin_api.py` (18) |

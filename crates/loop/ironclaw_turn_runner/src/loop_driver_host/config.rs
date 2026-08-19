@@ -1,11 +1,12 @@
 use std::{error::Error, fmt};
 
-use ironclaw_loop_contracts::LoopRunContext;
+use ironclaw_loop_contracts::{LoopRunContext, PromptContextTokenBudget};
 use ironclaw_turns::runner::ClaimedTurnRun;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextOnlyLoopHostConfig {
     pub max_messages: usize,
+    pub prompt_context_budget: PromptContextTokenBudget,
     pub require_model_route_snapshot: bool,
 }
 
@@ -13,6 +14,7 @@ impl Default for TextOnlyLoopHostConfig {
     fn default() -> Self {
         Self {
             max_messages: 128,
+            prompt_context_budget: PromptContextTokenBudget::default(),
             require_model_route_snapshot: false,
         }
     }

@@ -393,14 +393,20 @@ impl LoopCapabilityPort for HookGateInvocationScopePort {
         &self,
         request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner.register_provider_tool_call(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.inner.register_provider_tool_call(request)).await
     }
 
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        self.inner.visible_capabilities(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.inner.visible_capabilities(request)).await
     }
 
     async fn invoke_capability(
@@ -409,8 +415,11 @@ impl LoopCapabilityPort for HookGateInvocationScopePort {
     ) -> Result<Resolution, AgentLoopHostError> {
         let metadata = HookGateInvocationMetadata::for_invocation(&request)
             .map_err(AgentLoopHostError::from)?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
         HOOK_GATE_INVOCATION
-            .scope(metadata, self.inner.invoke_capability(request))
+            .scope(metadata, Box::pin(self.inner.invoke_capability(request)))
             .await
     }
 
@@ -428,7 +437,10 @@ impl LoopCapabilityPort for HookGateInvocationScopePort {
             if stopped_on_suspension {
                 break;
             }
-            let resolution = self.invoke_capability(invocation).await?;
+            // Chain-boxing: each port delegation is boxed so the stacked
+            // decorator chain never compiles into a single oversized poll
+            // frame (see reborn_integration_model_recovery stack-overflow).
+            let resolution = Box::pin(self.invoke_capability(invocation)).await?;
             // H1: the batch stops on the first invocation that *parks* — a
             // re-entrant gate as well as a suspension (the loop enum's old
             // `is_suspension()` also lumped gates in). `Resolution::parks()` is

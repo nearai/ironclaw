@@ -952,9 +952,10 @@ fn code_prompt() -> DeviceLinkStep {
         DeviceLinkInputKind::Code,
         "Login code",
         Some(
-            "Telegram delivered the code to your other signed-in Telegram apps — look for a \
-             message from \"Telegram\" (the service chat). While you have active sessions it \
-             is not sent as an SMS.",
+            "Telegram chooses where this code goes: usually a message from \"Telegram\" (the \
+             service chat) in your other signed-in Telegram apps, sometimes an SMS. Check \
+             both; if nothing arrives within a minute, choose Start again to request a new \
+             code, or link by scanning the code instead.",
         ),
     )
 }

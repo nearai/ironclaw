@@ -26,6 +26,8 @@ Six private modules re-exported flat (`src/lib.rs`):
   that collapse unsafe error detail rather than leak it.
 - Best-effort sink traits: `EventSink` / `AuditSink` (+ `SecurityAuditSink`) —
   a sink failure must never alter a runtime or control-plane outcome.
+  `NonBlockingEventSink` is the stronger contract required by runtime-critical
+  producers; async-only sinks cannot be wired into those paths.
 - Explicit-error durable traits: `DurableEventLog` / `DurableAuditLog`, with
   the `DurableEventSink` / `DurableAuditSink` adapters composition uses to
   hand durable logs to producers expecting sink traits.

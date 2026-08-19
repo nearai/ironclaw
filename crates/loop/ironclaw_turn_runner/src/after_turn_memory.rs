@@ -64,6 +64,13 @@ impl AfterTurnMemoryRecorder {
     /// Best-effort record of a `Completed` run's exchange. Never fails the run:
     /// every error path logs at `debug!` and returns.
     pub async fn record_completed_run(&self, state: &TurnRunState) {
+        // An unbound run executes a caller-prepared context, not a user
+        // conversation — its exchange is the caller's data, never a memory
+        // observation about the user.
+        if state.resolved_run_profile_id.is_unbound() {
+            debug!("after-turn memory: unbound run; skipping interaction record");
+            return;
+        }
         // Without a run actor there is no user identity to scope the memory write
         // to, so there is nothing to record. Degrade silently.
         let Some(actor) = state.actor.as_ref() else {

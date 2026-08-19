@@ -2,6 +2,8 @@
 use std::{
     collections::HashMap,
     fmt,
+    future::Future,
+    pin::Pin,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -30,9 +32,10 @@ use ironclaw_loop_host::{
     HostManagedModelGateway, HostQueueLoopInputPort, HostSkillContextSource, HostUserProfileSource,
     LoopAttachmentReadPort, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
     ModelGatewayBackedSystemInferencePort, RunCancellationFactory, RunCancellationObservationKind,
-    RunStateLoopCancellationPort, SubagentLoopPromptPort, SubagentPromptComposer,
-    ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort, ThreadContextWindowCache,
-    active_task_compaction_prompt_id, host_managed_loop_compaction_port_with_prompt_id,
+    RunStateLoopCancellationPort, StructuredOutputLoopPromptPort, SubagentLoopPromptPort,
+    SubagentPromptComposer, ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort,
+    ThreadContextWindowCache, active_task_compaction_prompt_id,
+    host_managed_loop_compaction_port_with_prompt_id,
 };
 use ironclaw_outbound::ReplyAttachmentIntentPort;
 use ironclaw_threads::{SessionThreadService, ThreadScope};
@@ -40,6 +43,10 @@ use ironclaw_threads::{SessionThreadService, ThreadScope};
 use crate::driver_registry::{DriverRequirements, LoopDriverRegistryKey, RequirementLevel};
 use crate::hook_gate_refs::HookGateInvocationScopePort;
 use crate::planned_driver_factory::is_subagent_planned_run_profile;
+use crate::structured_finalization::{
+    StructuredFinalizationContextLimits, StructuredFinalizationCoordinator,
+    StructuredFinalizationPort,
+};
 use crate::text_loop_driver::{TEXT_ONLY_DRIVER_ID, TEXT_ONLY_DRIVER_VERSION};
 use ironclaw_loop_host::{ModelRouteError, ModelRouteResolver, ModelSlot};
 
@@ -119,16 +126,17 @@ use ironclaw_loop_contracts::{
     InstructionMaterializationStore, InstructionSafetyContext, LoadCheckpointPayloadRequest,
     LoadedCheckpointPayload, LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort,
     LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError,
-    LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest, LoopContextBundle,
-    LoopContextPort, LoopContextRequest, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
-    LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
-    LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
-    LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRequest,
-    LoopPromptPort, LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort,
-    LoopRuntimeContext, LoopTranscriptPort, MemoryPromptContextService, NoOpBudgetAccountant,
-    NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
-    RunScopedHookMilestoneSink, StageCheckpointPayloadRequest, SystemInferencePort,
-    UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest, LoopCompletionKind,
+    LoopContextBundle, LoopContextPort, LoopContextRequest, LoopExit, LoopHostMilestoneSink,
+    LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant,
+    LoopModelGateway, LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
+    LoopModelUsage, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
+    LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRequest,
+    LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort,
+    MemoryPromptContextService, NoOpBudgetAccountant, NoOpPolicyGuard, ProviderToolCall,
+    ProviderToolDefinition, RegisterProviderToolCallRequest, RunScopedHookMilestoneSink,
+    StageCheckpointPayloadRequest, SystemInferencePort, UpdateAssistantDraft,
+    VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 use ironclaw_turns::{
     AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort, LoopCheckpointStore, RunProfileId,
@@ -314,14 +322,20 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
         &self,
         request: RegisterProviderToolCallRequest,
     ) -> Result<ironclaw_loop_contracts::CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner.register_provider_tool_call(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.inner.register_provider_tool_call(request)).await
     }
 
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let surface = self.inner.visible_capabilities(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let surface = Box::pin(self.inner.visible_capabilities(request)).await?;
         self.surface_state.set_current(surface.clone())?;
         Ok(surface)
     }
@@ -331,7 +345,10 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
         request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         let may_change_surface = capability_may_change_visible_surface(&request.capability_id);
-        let resolution = self.inner.invoke_capability(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let resolution = Box::pin(self.inner.invoke_capability(request)).await?;
         if may_change_surface {
             self.surface_state.clear_current()?;
         }
@@ -346,7 +363,10 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
             .invocations
             .iter()
             .any(|invocation| capability_may_change_visible_surface(&invocation.capability_id));
-        let resolution = self.inner.invoke_capability_batch(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let resolution = Box::pin(self.inner.invoke_capability_batch(request)).await?;
         if may_change_surface {
             self.surface_state.clear_current()?;
         }
@@ -1201,14 +1221,11 @@ where
         )
     }
 
-    fn build_compaction_ports(&self, run_context: &LoopRunContext) -> Arc<dyn LoopCompactionPort> {
-        // Two arms (not a shared `Arc<dyn _>` helper) because the host's
-        // `model_gateway: Arc<G>` is `G: ?Sized`: the resolved test gateway is
-        // `Arc<dyn HostManagedModelGateway>` while the production fallback keeps
-        // the host's own `Arc<G>`, and `Arc<G>` cannot be coerced to
-        // `Arc<dyn _>` for a `?Sized` G (E0277). Unifying would require dropping
-        // the gateway generic (the S1 seam the plan deliberately rejected).
-        let direct_system_inference: Arc<dyn SystemInferencePort> =
+    fn build_guarded_system_inference(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Arc<dyn SystemInferencePort> {
+        let direct: Arc<dyn SystemInferencePort> =
             if let Some(gw) = self.model_gateway.resolve_for_scope(&run_context.scope) {
                 Arc::new(ModelGatewayBackedSystemInferencePort::new(
                     gw,
@@ -1220,13 +1237,16 @@ where
                     run_context.clone(),
                 ))
             };
-        let system_inference: Arc<dyn SystemInferencePort> =
-            Arc::new(GuardedSystemInferencePort::new(
-                direct_system_inference,
-                run_context.clone(),
-                Arc::clone(&self.model_accountant),
-                Arc::clone(&self.model_policy_guard),
-            ));
+        Arc::new(GuardedSystemInferencePort::new(
+            direct,
+            run_context.clone(),
+            Arc::clone(&self.model_accountant),
+            Arc::clone(&self.model_policy_guard),
+        ))
+    }
+
+    fn build_compaction_ports(&self, run_context: &LoopRunContext) -> Arc<dyn LoopCompactionPort> {
+        let system_inference = self.build_guarded_system_inference(run_context);
         host_managed_loop_compaction_port_with_prompt_id(
             system_inference,
             Arc::clone(&self.thread_service),
@@ -1581,6 +1601,7 @@ where
         validate_thread_scope(&effective_scope, &request.loop_run_context)?;
 
         let max_messages = self.config.max_messages.max(1);
+        let prompt_context_budget = self.config.prompt_context_budget;
         let run_context = self.attach_model_route_snapshot(request.loop_run_context)?;
 
         // Kick off advisory communication-context fetches only for origins that
@@ -1630,13 +1651,17 @@ where
             max_messages,
         )
         .with_context_window_cache(Arc::clone(&context_window_cache));
-        if let Some(source) = self.skill_context_source.as_ref() {
+        // An unbound run's prepared context is its COMPLETE input by
+        // contract: no skill, identity, or memory lane is folded in, so the
+        // caller's declared context is exactly what the model sees.
+        let unbound_run = run_context.resolved_run_profile.profile_id.is_unbound();
+        if !unbound_run && let Some(source) = self.skill_context_source.as_ref() {
             context_adapter = context_adapter.with_skill_context_source(source.clone());
         }
-        if let Some(source) = self.identity_context_source.as_ref() {
+        if !unbound_run && let Some(source) = self.identity_context_source.as_ref() {
             context_adapter = context_adapter.with_identity_context_source(source.clone());
         }
-        if let Some(service) = self.memory_context_service.as_ref() {
+        if !unbound_run && let Some(service) = self.memory_context_service.as_ref() {
             context_adapter = context_adapter.with_memory_context_service(service.clone());
         }
         // Channel-origin runs carry host-fetched conversation history on the
@@ -1910,6 +1935,12 @@ where
                 composer,
             ));
         }
+        if run_context.output_contract.is_structured_output() {
+            prompt = Arc::new(StructuredOutputLoopPromptPort::new(
+                prompt,
+                run_context.clone(),
+            ));
+        }
         let input: Arc<dyn LoopInputPort> = match self.input_queue.as_ref() {
             Some(queue) => Arc::new(HostQueueLoopInputPort::new(
                 queue.clone(),
@@ -1933,8 +1964,12 @@ where
                         thread_scope: effective_scope.clone(),
                         host_gateway: gw,
                         max_messages,
-                        skill_context_source: self.skill_context_source.clone(),
-                        identity_context_source: self.identity_context_source.clone(),
+                        skill_context_source: (!unbound_run)
+                            .then(|| self.skill_context_source.clone())
+                            .flatten(),
+                        identity_context_source: (!unbound_run)
+                            .then(|| self.identity_context_source.clone())
+                            .flatten(),
                         instruction_materialization_store: Some(Arc::clone(
                             &instruction_materialization_store,
                         )),
@@ -1952,8 +1987,12 @@ where
                         thread_scope: effective_scope.clone(),
                         host_gateway: Arc::clone(&self.model_gateway),
                         max_messages,
-                        skill_context_source: self.skill_context_source.clone(),
-                        identity_context_source: self.identity_context_source.clone(),
+                        skill_context_source: (!unbound_run)
+                            .then(|| self.skill_context_source.clone())
+                            .flatten(),
+                        identity_context_source: (!unbound_run)
+                            .then(|| self.identity_context_source.clone())
+                            .flatten(),
                         instruction_materialization_store: Some(Arc::clone(
                             &instruction_materialization_store,
                         )),
@@ -1964,6 +2003,23 @@ where
                         prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
                     },
                 ))
+            };
+        let structured_finalization: Option<Arc<dyn StructuredFinalizationPort>> =
+            if run_context.output_contract.is_structured_output() {
+                Some(Arc::new(StructuredFinalizationCoordinator::new(
+                    Arc::clone(&self.thread_service),
+                    effective_scope.clone(),
+                    run_context.clone(),
+                    self.build_guarded_system_inference(&run_context),
+                    Arc::clone(&self.agent_turn_runtime),
+                    request.claimed_run.lease_token,
+                    StructuredFinalizationContextLimits {
+                        max_messages,
+                        token_budget: prompt_context_budget,
+                    },
+                )))
+            } else {
+                None
             };
         let mut model: Arc<dyn LoopModelPort> = Arc::new(HostManagedLoopModelPort::with_guards(
             run_context.clone(),
@@ -2060,6 +2116,7 @@ where
             prompt,
             input,
             model,
+            structured_finalization,
             checkpoint,
             capabilities,
             surface_state,
@@ -2143,6 +2200,7 @@ pub struct RebornLoopDriverHost {
     prompt: Arc<dyn LoopPromptPort>,
     input: Arc<dyn LoopInputPort>,
     model: Arc<dyn LoopModelPort>,
+    structured_finalization: Option<Arc<dyn StructuredFinalizationPort>>,
     checkpoint: Arc<dyn LoopCheckpointPort>,
     capabilities: Arc<dyn LoopCapabilityPort>,
     surface_state: Arc<CapabilitySurfaceState>,
@@ -2165,9 +2223,215 @@ impl fmt::Debug for RebornLoopDriverHost {
     }
 }
 
+fn terminal_structured_reply_ref(exit: &LoopExit) -> Option<&ironclaw_turns::LoopMessageRef> {
+    match exit {
+        LoopExit::Completed(completed)
+            if completed.completion_kind == LoopCompletionKind::FinalReply =>
+        {
+            completed.reply_message_refs.last()
+        }
+        LoopExit::Completed(_)
+        | LoopExit::Blocked(_)
+        | LoopExit::Cancelled(_)
+        | LoopExit::Failed(_) => None,
+    }
+}
+
+async fn finalize_selected_terminal_output(
+    exit: &LoopExit,
+    finalization: Option<&dyn StructuredFinalizationPort>,
+) -> Result<(), AgentLoopHostError> {
+    let Some(finalization) = finalization else {
+        return Ok(());
+    };
+    let Some(message_ref) = terminal_structured_reply_ref(exit) else {
+        return Ok(());
+    };
+    finalization.finalize_terminal_reply(message_ref).await
+}
+
+#[cfg(test)]
+mod terminal_output_selection_tests {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use super::{
+        LoopExit, StructuredFinalizationPort, finalize_selected_terminal_output,
+        terminal_structured_reply_ref,
+    };
+    use async_trait::async_trait;
+    use ironclaw_host_api::turn::{LoopExitId, LoopGateRef, LoopMessageRef, TurnCheckpointId};
+    use ironclaw_loop_contracts::{
+        AgentLoopHostError, LoopBlocked, LoopBlockedKind, LoopCancelled, LoopCancelledReasonKind,
+        LoopCheckpointStateRef, LoopCompleted, LoopCompletionKind, LoopExit as ContractLoopExit,
+        LoopFailed, LoopFailureKind, LoopModelUsage,
+    };
+
+    fn exit_id(value: &str) -> LoopExitId {
+        LoopExitId::new(value).expect("test exit id is valid")
+    }
+
+    fn message_ref(value: &str) -> LoopMessageRef {
+        LoopMessageRef::new(value).expect("test message ref is valid")
+    }
+
+    struct CountingFinalization {
+        calls: AtomicUsize,
+        refs: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl StructuredFinalizationPort for CountingFinalization {
+        async fn finalize_terminal_reply(
+            &self,
+            message_ref: &LoopMessageRef,
+        ) -> Result<(), AgentLoopHostError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.refs
+                .lock()
+                .expect("test lock")
+                .push(message_ref.as_str().to_string());
+            Ok(())
+        }
+
+        fn supplemental_model_usage(&self) -> Option<LoopModelUsage> {
+            None
+        }
+    }
+
+    fn completed(
+        completion_kind: LoopCompletionKind,
+        reply_message_refs: Vec<LoopMessageRef>,
+    ) -> LoopExit {
+        ContractLoopExit::Completed(LoopCompleted {
+            completion_kind,
+            reply_message_refs,
+            result_refs: Vec::new(),
+            final_checkpoint_id: None,
+            model_usage: None,
+            exit_id: exit_id("exit:terminal-selection"),
+        })
+    }
+
+    #[test]
+    fn final_reply_selects_the_exit_claimed_terminal_ref() {
+        let first = message_ref("msg:00000000-0000-0000-0000-000000000001");
+        let terminal = message_ref("msg:00000000-0000-0000-0000-000000000002");
+        let exit = completed(
+            LoopCompletionKind::FinalReply,
+            vec![first, terminal.clone()],
+        );
+
+        assert_eq!(terminal_structured_reply_ref(&exit), Some(&terminal));
+    }
+
+    #[test]
+    fn non_final_completion_and_all_non_completed_exits_select_nothing() {
+        let reply = message_ref("msg:00000000-0000-0000-0000-000000000003");
+        assert!(
+            terminal_structured_reply_ref(&completed(
+                LoopCompletionKind::ResultOnly,
+                vec![reply.clone()]
+            ))
+            .is_none()
+        );
+        assert!(
+            terminal_structured_reply_ref(&completed(LoopCompletionKind::NoReply, Vec::new()))
+                .is_none()
+        );
+
+        let failed = ContractLoopExit::Failed(LoopFailed {
+            reason_kind: LoopFailureKind::DriverBug,
+            checkpoint_id: None,
+            model_usage: None,
+            exit_id: exit_id("exit:terminal-failed"),
+            explanation_message_refs: vec![reply.clone()],
+            safe_summary: None,
+        });
+        let blocked = ContractLoopExit::Blocked(LoopBlocked {
+            kind: LoopBlockedKind::Approval,
+            gate_ref: LoopGateRef::new("gate:terminal-selection").expect("gate ref"),
+            blocked_activity_id: None,
+            credential_requirements: Vec::new(),
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: LoopCheckpointStateRef::new("checkpoint:terminal-selection")
+                .expect("state ref"),
+            exit_id: exit_id("exit:terminal-blocked"),
+        });
+        let cancelled = ContractLoopExit::Cancelled(LoopCancelled {
+            reason_kind: LoopCancelledReasonKind::HostCancellation,
+            checkpoint_id: None,
+            interrupted_message_refs: vec![reply],
+            exit_id: exit_id("exit:terminal-cancelled"),
+        });
+        assert!(terminal_structured_reply_ref(&failed).is_none());
+        assert!(terminal_structured_reply_ref(&blocked).is_none());
+        assert!(terminal_structured_reply_ref(&cancelled).is_none());
+    }
+
+    #[tokio::test]
+    async fn terminal_finalizer_runs_once_for_final_reply_and_zero_for_other_exits() {
+        let finalizer = Arc::new(CountingFinalization {
+            calls: AtomicUsize::new(0),
+            refs: Mutex::new(Vec::new()),
+        });
+        let terminal = message_ref("msg:00000000-0000-0000-0000-000000000004");
+        let final_reply = completed(LoopCompletionKind::FinalReply, vec![terminal.clone()]);
+        finalize_selected_terminal_output(&final_reply, Some(finalizer.as_ref()))
+            .await
+            .expect("final reply finalization");
+        assert_eq!(finalizer.calls.load(Ordering::SeqCst), 1);
+        {
+            let refs = finalizer.refs.lock().expect("test lock");
+            assert_eq!(refs.as_slice(), [terminal.as_str()]);
+        }
+
+        for exit in [
+            completed(LoopCompletionKind::ResultOnly, vec![terminal.clone()]),
+            completed(LoopCompletionKind::NoReply, Vec::new()),
+            ContractLoopExit::Failed(LoopFailed {
+                reason_kind: LoopFailureKind::DriverBug,
+                checkpoint_id: None,
+                model_usage: None,
+                exit_id: exit_id("exit:terminal-failed-zero"),
+                explanation_message_refs: vec![terminal.clone()],
+                safe_summary: None,
+            }),
+            ContractLoopExit::Cancelled(LoopCancelled {
+                reason_kind: LoopCancelledReasonKind::HostCancellation,
+                checkpoint_id: None,
+                interrupted_message_refs: vec![terminal.clone()],
+                exit_id: exit_id("exit:terminal-cancelled-zero"),
+            }),
+        ] {
+            finalize_selected_terminal_output(&exit, Some(finalizer.as_ref()))
+                .await
+                .expect("non-final exit must not invoke finalizer");
+        }
+        assert_eq!(finalizer.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
 impl LoopRunInfoPort for RebornLoopDriverHost {
     fn run_context(&self) -> &LoopRunContext {
         &self.run_context
+    }
+
+    fn finalize_terminal_output<'a>(
+        &'a self,
+        exit: &'a LoopExit,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AgentLoopHostError>> + Send + 'a>> {
+        Box::pin(async move {
+            finalize_selected_terminal_output(exit, self.structured_finalization.as_deref()).await
+        })
+    }
+
+    fn supplemental_model_usage(&self) -> Option<LoopModelUsage> {
+        self.structured_finalization
+            .as_ref()
+            .and_then(|finalization| finalization.supplemental_model_usage())
     }
 }
 
@@ -2249,14 +2513,20 @@ impl LoopCapabilityPort for RebornLoopDriverHost {
         &self,
         request: RegisterProviderToolCallRequest,
     ) -> Result<ironclaw_loop_contracts::CapabilityCallCandidate, AgentLoopHostError> {
-        self.capabilities.register_provider_tool_call(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.capabilities.register_provider_tool_call(request)).await
     }
 
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        self.capabilities.visible_capabilities(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.capabilities.visible_capabilities(request)).await
     }
 
     fn current_visible_capabilities(
@@ -2269,14 +2539,20 @@ impl LoopCapabilityPort for RebornLoopDriverHost {
         &self,
         request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
-        self.capabilities.invoke_capability(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.capabilities.invoke_capability(request)).await
     }
 
     async fn invoke_capability_batch(
         &self,
         request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
-        self.capabilities.invoke_capability_batch(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.capabilities.invoke_capability_batch(request)).await
     }
 }
 
@@ -2448,6 +2724,7 @@ where
             claimed.state.run_id,
             claimed.resolved_run_profile.clone(),
         )
+        .with_output_contract(claimed.state.output_contract.clone())
         .with_accepted_message_ref(claimed.state.accepted_message_ref.clone());
         if let Some(actor) = claimed.state.actor.clone() {
             loop_run_context = loop_run_context.with_actor(actor);

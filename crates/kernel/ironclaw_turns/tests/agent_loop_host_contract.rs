@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, IdempotencyKey, LoopExitId, LoopGateRef, LoopMessageRef,
-    ReplyTargetBindingRef, RunOriginAdapter, RunProfileRequest, RunProfileVersion,
-    SourceBindingRef, TurnActor, TurnCheckpointId, TurnOwner, TurnRunId, TurnRunnerId, TurnStatus,
+    RunOriginAdapter, RunProfileRequest, RunProfileVersion, TurnActor, TurnCheckpointId, TurnOwner,
+    TurnRunId, TurnRunnerId, TurnStatus,
 };
 use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
@@ -288,6 +288,7 @@ async fn host_managed_model_port_routes_gateway_and_emits_model_milestones() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -348,6 +349,7 @@ async fn host_managed_model_port_returns_response_when_model_started_milestone_f
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -394,6 +396,7 @@ async fn host_managed_model_port_returns_response_when_model_completed_milestone
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -437,6 +440,7 @@ async fn host_managed_model_port_sanitizes_gateway_errors() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -2703,13 +2707,13 @@ async fn loop_prompt_bundle_public_serialization_hides_raw_content() {
         run_id: host.context.run_id,
         status: TurnStatus::Running,
         accepted_message_ref: AcceptedMessageRef::new("message-loop-host").unwrap(),
-        source_binding_ref: SourceBindingRef::new("source-loop-host").unwrap(),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-loop-host").unwrap(),
         resolved_run_profile_id: host.context.resolved_run_profile.profile_id.clone(),
         resolved_run_profile_version: host.context.resolved_run_profile.profile_version,
+        output_contract: Default::default(),
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap(),
         checkpoint_id: None,
         gate_ref: None,
@@ -2992,6 +2996,7 @@ impl AgentLoopDriver for ReplyDriver {
                 fallback_index: 0,
                 iteration: 0,
                 capability_view: None,
+                tool_choice: None,
             })
             .await
             .map_err(driver_error)?;
@@ -3285,6 +3290,7 @@ async fn host_managed_model_port_times_out_a_hung_gateway() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .expect_err("a hung gateway must surface a timeout error");
@@ -3324,6 +3330,7 @@ async fn host_managed_model_port_allows_long_calls_that_keep_streaming_progress(
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .expect("progress must reset the model-call idle timeout");
@@ -3757,9 +3764,8 @@ async fn claimed_run_context() -> LoopRunContext {
             scope: scope.clone(),
             actor: TurnActor::new(UserId::new("user-loop").unwrap()),
             accepted_message_ref: AcceptedMessageRef::new("message-loop-host").unwrap(),
-            source_binding_ref: SourceBindingRef::new("source-loop-host").unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-loop-host").unwrap(),
             requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
+            output_contract: None,
             idempotency_key: IdempotencyKey::new("idem-loop-host").unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap(),
             requested_run_id: None,
@@ -3943,6 +3949,7 @@ fn simple_model_request(context: &LoopRunContext) -> LoopModelRequest {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     }
 }
 
@@ -4493,8 +4500,6 @@ fn submit_turn_request_product_context_defaults_to_none_when_missing_from_json()
         },
         "actor": {"user_id": "user-serde"},
         "accepted_message_ref": "accepted-serde",
-        "source_binding_ref": "source-serde",
-        "reply_target_binding_ref": "reply-serde",
         "idempotency_key": "idem-serde",
         "received_at": "2026-06-11T21:32:00Z"
     });
@@ -4516,13 +4521,13 @@ async fn turn_run_state_product_context_defaults_to_none_when_missing_from_json(
         run_id: context.run_id,
         status: TurnStatus::Queued,
         accepted_message_ref: AcceptedMessageRef::new("accepted-origin-serde").unwrap(),
-        source_binding_ref: SourceBindingRef::new("source-origin-serde").unwrap(),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-origin-serde").unwrap(),
         resolved_run_profile_id: context.resolved_run_profile.profile_id.clone(),
         resolved_run_profile_version: context.resolved_run_profile.profile_version,
+        output_contract: Default::default(),
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
         checkpoint_id: None,
         gate_ref: None,
@@ -4566,6 +4571,56 @@ async fn turn_run_state_product_context_defaults_to_none_when_missing_from_json(
 }
 
 #[tokio::test]
+async fn turn_run_state_output_contract_defaults_to_assistant_message_when_missing_from_json() {
+    // Legacy persisted TurnRunState snapshots predate output_contract and must
+    // retain the historical assistant-message result semantics on replay.
+    let context = claimed_run_context().await;
+    let state = TurnRunState {
+        scope: context.scope.clone(),
+        actor: None,
+        turn_id: ironclaw_turns::TurnId::new(),
+        run_id: context.run_id,
+        status: TurnStatus::Queued,
+        accepted_message_ref: AcceptedMessageRef::new("accepted-output-contract-serde").unwrap(),
+        resolved_run_profile_id: context.resolved_run_profile.profile_id.clone(),
+        resolved_run_profile_version: context.resolved_run_profile.profile_version,
+        // Set a non-default contract so this assertion proves serde supplied
+        // the default after the field is removed from the wire payload.
+        output_contract: ironclaw_host_api::output::OutputContract::JsonSchema {
+            name: "legacy-test_v1".to_string(),
+            schema: serde_json::json!({"type": "object"}),
+        },
+        allow_steering: true,
+        resolved_model_route: None,
+        model_usage: None,
+        execution_outcome: None,
+        received_at: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
+        checkpoint_id: None,
+        gate_ref: None,
+        blocked_activity_id: None,
+        credential_requirements: Vec::new(),
+        failure: None,
+        event_cursor: EventCursor(0),
+        product_context: None,
+        resume_disposition: None,
+    };
+
+    let mut json = serde_json::to_value(&state).unwrap();
+    assert!(
+        json.as_object_mut()
+            .unwrap()
+            .remove("output_contract")
+            .is_some(),
+        "current wire shape must serialize a non-default output contract"
+    );
+    let decoded: TurnRunState = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        decoded.output_contract,
+        ironclaw_host_api::output::OutputContract::AssistantMessage
+    );
+}
+
+#[tokio::test]
 async fn turn_run_state_resume_disposition_defaults_to_none_when_missing_from_json() {
     // Guard the #[serde(default)] backward-compat contract for resume_disposition
     // (serialized under the legacy key "auth_resume_disposition"):
@@ -4579,13 +4634,13 @@ async fn turn_run_state_resume_disposition_defaults_to_none_when_missing_from_js
         run_id: context.run_id,
         status: TurnStatus::Queued,
         accepted_message_ref: AcceptedMessageRef::new("accepted-ard-serde").unwrap(),
-        source_binding_ref: SourceBindingRef::new("source-ard-serde").unwrap(),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-ard-serde").unwrap(),
         resolved_run_profile_id: context.resolved_run_profile.profile_id.clone(),
         resolved_run_profile_version: context.resolved_run_profile.profile_version,
+        output_contract: Default::default(),
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
         checkpoint_id: None,
         gate_ref: None,
@@ -4625,15 +4680,15 @@ async fn turn_run_state_allow_steering_defaults_to_true_when_missing_from_json()
         run_id: context.run_id,
         status: TurnStatus::Queued,
         accepted_message_ref: AcceptedMessageRef::new("accepted-steer-serde").unwrap(),
-        source_binding_ref: SourceBindingRef::new("source-steer-serde").unwrap(),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-steer-serde").unwrap(),
         resolved_run_profile_id: context.resolved_run_profile.profile_id.clone(),
         resolved_run_profile_version: context.resolved_run_profile.profile_version,
+        output_contract: Default::default(),
         // Deliberately false so the assertion below can only pass through the
         // serde default fn, never by echoing the constructed value.
         allow_steering: false,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
         checkpoint_id: None,
         gate_ref: None,

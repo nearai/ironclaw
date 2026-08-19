@@ -111,6 +111,7 @@ impl CredentialAccount {
             ownership: self.ownership,
             owner_extension: self.owner_extension.clone(),
             granted_extensions: self.granted_extensions.clone(),
+            scopes: self.scopes.clone(),
             secret_handle_count,
         }
     }
@@ -172,6 +173,11 @@ pub struct CredentialAccountProjection {
     pub owner_extension: Option<ExtensionId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub granted_extensions: Vec<ExtensionId>,
+    /// The provider scopes this account was granted. Additive so a card can
+    /// diff a live grant against a recipe that widened after it (#7660);
+    /// never used for enforcement — the runtime selector gates scopes itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<ProviderScope>,
     pub secret_handle_count: usize,
 }
 

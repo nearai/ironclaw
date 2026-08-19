@@ -11,9 +11,8 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::turn::{
-    AcceptedMessageRef, CapabilityActivityId, IdempotencyKey, LoopGateRef, LoopResultRef,
-    ReplyTargetBindingRef, RunProfileRequest, SanitizedCancelReason, SourceBindingRef, TurnActor,
-    TurnGateRef, TurnRunId, TurnScope,
+    CapabilityActivityId, IdempotencyKey, LoopGateRef, LoopResultRef, RunProfileRequest,
+    SanitizedCancelReason, TurnActor, TurnGateRef, TurnRunId, TurnScope,
 };
 use ironclaw_host_api::{
     ids::{CapabilityId, InvocationId, ProviderToolName, ThreadId},
@@ -30,10 +29,7 @@ use ironclaw_loop_contracts::{
     VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
 };
 use ironclaw_processes::{ProcessInputPayload, ProcessInputRef, ProcessInputSubmission};
-use ironclaw_threads::{
-    AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, SessionThreadService,
-    ThreadMessageId, ThreadScope,
-};
+use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::{
     AgentTurnSpawnTreeRuntimePort, CancelRunRequest, SubmitChildRunRequest, SubmitTurnResponse,
     TurnCoordinator, TurnError, TurnErrorCategory, TurnSpawnTreePort,
@@ -267,8 +263,6 @@ pub struct AwaitedChildSetRecord {
     pub child_scope: TurnScope,
     pub child_run_id: TurnRunId,
     pub child_thread_id: ThreadId,
-    pub source_binding_ref: SourceBindingRef,
-    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub subagent_kind: SubagentKindId,
     pub spawn_capability_id: CapabilityId,
     /// Pins the eventual summary update to the spawn transcript row even when
@@ -943,32 +937,20 @@ impl SubagentSpawnCapabilityPort {
             .await?;
         let result_ref = write_result.result_ref;
         compensation.result_written = Some(result_ref.clone());
-        let child_thread = self
-            .deps
-            .thread_service
-            .ensure_thread(EnsureThreadRequest {
-                scope: child_scope.clone(),
-                thread_id: Some(child_thread_id.clone()),
-                created_by_actor_id: format!("subagent:{}", self.run_context.run_id),
-                title: Some("Subagent".to_string()),
-                metadata_json: Some(child_thread_metadata(SubagentThreadMetadata {
-                    kind: SubagentThreadKind::Subagent,
-                    parent_run_id: self.run_context.run_id,
-                    parent_thread_id: self.run_context.thread_id.clone(),
-                    tree_root_run_id: tree_root,
-                    child_run_id,
-                    subagent_kind: definition.subagent_kind.clone(),
-                    mode,
-                    result_ref: result_ref.clone(),
-                    spawn_provider_call_id: Some(provider_call_id.clone()),
-                    handoff: args.handoff.clone(),
-                    parent_run_context: self.run_context.clone(),
-                    gate_ref: gate_ref.clone(),
-                })?),
-            })
-            .await
-            .map_err(map_thread_error)?;
-        compensation.thread_written = Some((child_scope.clone(), child_thread.thread_id.clone()));
+        let child_thread_metadata_json = child_thread_metadata(SubagentThreadMetadata {
+            kind: SubagentThreadKind::Subagent,
+            parent_run_id: self.run_context.run_id,
+            parent_thread_id: self.run_context.thread_id.clone(),
+            tree_root_run_id: tree_root,
+            child_run_id,
+            subagent_kind: definition.subagent_kind.clone(),
+            mode,
+            result_ref: result_ref.clone(),
+            spawn_provider_call_id: Some(provider_call_id.clone()),
+            handoff: args.handoff.clone(),
+            parent_run_context: self.run_context.clone(),
+            gate_ref: gate_ref.clone(),
+        })?;
         // Mirror the parent's own scope ownership mode instead of always
         // defaulting to `ActorFallback`: an `ActorFallback` child scope maps
         // to the system mount, but `has_awaited_child_gate` reads this edge
@@ -980,14 +962,14 @@ impl SubagentSpawnCapabilityPort {
                 child_scope.tenant_id.clone(),
                 Some(child_scope.agent_id.clone()),
                 child_scope.project_id.clone(),
-                child_thread.thread_id.clone(),
+                child_thread_id.clone(),
                 Some(owner_user_id.clone()),
             ),
             None => TurnScope::new(
                 child_scope.tenant_id.clone(),
                 Some(child_scope.agent_id.clone()),
                 child_scope.project_id.clone(),
-                child_thread.thread_id.clone(),
+                child_thread_id.clone(),
             ),
         };
         // Lazy-recovery admission gate (§5.3): refuse to open a new edge onto
@@ -1037,12 +1019,7 @@ impl SubagentSpawnCapabilityPort {
             tree_root_run_id: tree_root,
             child_scope: child_turn_scope.clone(),
             child_run_id,
-            child_thread_id: child_thread.thread_id.clone(),
-            source_binding_ref: source_binding_ref(self.run_context.run_id, child_run_id)?,
-            reply_target_binding_ref: reply_target_binding_ref(
-                self.run_context.run_id,
-                child_run_id,
-            )?,
+            child_thread_id: child_thread_id.clone(),
             subagent_kind: definition.subagent_kind.clone(),
             spawn_capability_id: self.spawn_id.clone(),
             spawn_provider_call_id: Some(provider_call_id),
@@ -1056,31 +1033,39 @@ impl SubagentSpawnCapabilityPort {
             )
         })?;
 
+        // The ONE shared accept door (unbound-turn design §4.2): mints the
+        // child's unbound thread, seeds the task as its rows, and replays
+        // idempotently on an intra-call retry — the synthetic binding/event
+        // ids this path used to fabricate are gone.
         let accepted = self
             .deps
             .thread_service
-            .accept_inbound_message(AcceptInboundMessageRequest {
+            .accept_prepared_context(ironclaw_threads::PreparedContextRequest {
                 scope: child_scope.clone(),
-                thread_id: child_thread.thread_id.clone(),
                 actor_id: actor.user_id.as_str().to_string(),
-                source_binding_id: Some(format!("subagent-source:{child_run_id}")),
-                reply_target_binding_id: Some(format!("subagent-reply:{child_run_id}")),
-                external_event_id: Some(format!("subagent-spawn:{child_run_id}")),
-                content: MessageContent::text(sanitize_model_visible_text(child_initial_message(
-                    &args,
-                ))),
+                system_prompt: String::new(),
+                messages: vec![ironclaw_llm::agent_message::AgentMessage {
+                    role: ironclaw_llm::agent_message::AgentMessageRole::User,
+                    content: vec![ironclaw_llm::agent_message::ContentPart::text(
+                        sanitize_model_visible_text(child_initial_message(&args)),
+                    )],
+                }],
+                declarations:
+                    ironclaw_host_api::prepared_context::PreparedTurnDeclarations::default(),
+                idempotency_key: format!(
+                    "subagent-spawn:{}:{child_run_id}",
+                    self.run_context.run_id
+                ),
+                thread_id: child_thread_id.clone(),
+                title: Some("Subagent".to_string()),
+                metadata_json: Some(child_thread_metadata_json),
             })
             .await
             .map_err(map_thread_error)?;
-        let accepted_message_ref = accepted_message_ref(accepted.message_id)?;
-        let source_binding_ref = source_binding_ref(self.run_context.run_id, child_run_id)?;
-        let reply_target_binding_ref =
-            reply_target_binding_ref(self.run_context.run_id, child_run_id)?;
+        compensation.thread_written = Some((child_scope.clone(), accepted.thread_id.clone()));
         let idempotency_key = idempotency_key(self.run_context.run_id, child_run_id)?;
 
-        let SubmitTurnResponse::Accepted {
-            turn_id, run_id, ..
-        } = self
+        let SubmitTurnResponse::Accepted { run_id, .. } = self
             .deps
             .child_runs
             .submit_child_run(SubmitChildRunRequest {
@@ -1088,10 +1073,9 @@ impl SubagentSpawnCapabilityPort {
                 parent_run_id: self.run_context.run_id,
                 child_scope: child_turn_scope.clone(),
                 actor: actor.clone(),
-                accepted_message_ref,
-                source_binding_ref,
-                reply_target_binding_ref,
+                accepted_message_ref: accepted.accepted_message_ref,
                 requested_run_profile: Some(definition.requested_run_profile),
+                output_contract: None,
                 idempotency_key,
                 received_at: Utc::now(),
                 requested_run_id: Some(child_run_id),
@@ -1113,20 +1097,6 @@ impl SubagentSpawnCapabilityPort {
         compensation.submitted_child_tree = Some((self.run_context.scope.clone(), tree_root));
         compensation.submitted_child_run = Some((child_turn_scope.clone(), actor.clone(), run_id));
         compensation.edge_written = Some((child_turn_scope.clone(), child_run_id));
-        if let Err(error) = self
-            .deps
-            .thread_service
-            .mark_message_submitted(
-                &child_scope,
-                &child_thread.thread_id,
-                accepted.message_id,
-                turn_id.to_string(),
-                run_id.to_string(),
-            )
-            .await
-        {
-            return Err(map_thread_error(error));
-        }
 
         let loop_gate_ref = LoopGateRef::new(gate_ref.as_str()).map_err(invalid_static_ref)?;
         Ok(resolution::await_dependent_run(
@@ -1209,19 +1179,27 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 .register_spawn_provider_tool_call(tool_call, activity_id)
                 .await;
         }
-        self.inner
-            .register_provider_tool_call(RegisterProviderToolCallRequest {
-                tool_call,
-                activity_id,
-            })
-            .await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(
+            self.inner
+                .register_provider_tool_call(RegisterProviderToolCallRequest {
+                    tool_call,
+                    activity_id,
+                }),
+        )
+        .await
     }
 
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let mut surface = self.inner.visible_capabilities(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let mut surface = Box::pin(self.inner.visible_capabilities(request)).await?;
         if !surface
             .descriptors
             .iter()
@@ -1254,7 +1232,10 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 .handle_spawn_with_gate(&request, args, None, provider_call_id)
                 .await;
         }
-        self.inner.invoke_capability(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.inner.invoke_capability(request)).await
     }
 
     async fn invoke_capability_batch(
@@ -1387,13 +1368,14 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
             {
                 index += 1;
             }
-            let inner = self
-                .inner
-                .invoke_capability_batch(LoopRequestBatch {
-                    invocations: request.invocations[start..index].to_vec(),
-                    stop_on_first_suspension: request.stop_on_first_suspension,
-                })
-                .await;
+            // Chain-boxing: each port delegation is boxed so the stacked
+            // decorator chain never compiles into a single oversized poll
+            // frame (see reborn_integration_model_recovery stack-overflow).
+            let inner = Box::pin(self.inner.invoke_capability_batch(LoopRequestBatch {
+                invocations: request.invocations[start..index].to_vec(),
+                stop_on_first_suspension: request.stop_on_first_suspension,
+            }))
+            .await;
             let inner = match inner {
                 Ok(inner) => inner,
                 Err(error) => {
@@ -1569,28 +1551,6 @@ fn child_initial_message(args: &SpawnSubagentArgs) -> String {
         message.push_str(handoff);
     }
     message
-}
-
-fn accepted_message_ref(
-    message_id: ThreadMessageId,
-) -> Result<AcceptedMessageRef, AgentLoopHostError> {
-    AcceptedMessageRef::new(format!("msg:{message_id}")).map_err(invalid_static_ref)
-}
-
-fn source_binding_ref(
-    parent_run_id: TurnRunId,
-    child_run_id: TurnRunId,
-) -> Result<SourceBindingRef, AgentLoopHostError> {
-    SourceBindingRef::new(format!("subagent-source:{parent_run_id}:{child_run_id}"))
-        .map_err(invalid_static_ref)
-}
-
-fn reply_target_binding_ref(
-    parent_run_id: TurnRunId,
-    child_run_id: TurnRunId,
-) -> Result<ReplyTargetBindingRef, AgentLoopHostError> {
-    ReplyTargetBindingRef::new(format!("subagent-reply:{parent_run_id}:{child_run_id}"))
-        .map_err(invalid_static_ref)
 }
 
 fn idempotency_key(

@@ -67,7 +67,7 @@ pub use engine::admission::{
     AdmissionClientProfile, AuthorizationServerAdmissionMetadata, AuthorizationServerMetadataFetch,
     EmptyOAuthClientProfileRegistry, OAuthClientProfileRegistry, OAuthRecipeAdmission,
     OAuthRecipeAdmissionRequest, ProtectedResourceAdmissionMetadata,
-    ProtectedResourceMetadataFetch,
+    ProtectedResourceMetadataFetch, oauth_resource_matches_hosted_mcp_endpoint,
 };
 pub use engine::keepalive;
 pub use engine::keepalive::{

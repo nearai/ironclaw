@@ -142,6 +142,7 @@ Run `cargo deny check` before adding new dependencies to verify license compatib
 ## Document your Changes
 
 - The folder `/docs` contains user-facing documentation for technical savvy users, developers and operators. It is built with Mintlify and rendered on the website.
+- The live site deploys from the `docs-live` branch, which release automation points at each stable release — docs merged to `main` appear on the site with the next stable release, not immediately. To fix a wrong page on the live site mid-week, see the docs-hotfix recipe in `docs/internal/weekly-release-strategy.md` ("Docs publication").
 - For features, update the relevant capability doc in `docs/capabilities/`
 - For channels, update the relevant channel doc in `docs/channels/`
 - For extensions / tools, update the relevant doc in `docs/extensions/`

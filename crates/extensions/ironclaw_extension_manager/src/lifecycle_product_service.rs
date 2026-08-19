@@ -314,6 +314,8 @@ impl ExtensionHostLifecycleProductService {
         package_ref: LifecyclePackageRef,
         caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
+        let user_link_required =
+            extension_management.package_declares_device_link_user_link(&package_ref)?;
         let install_response = extension_management
             .install(package_ref.clone(), caller)
             .await?;
@@ -325,6 +327,7 @@ impl ExtensionHostLifecycleProductService {
                 Ok(install_response_with_activation(
                     install_response,
                     activation_response,
+                    user_link_required,
                 ))
             }
             Ok(activation_response)
@@ -333,6 +336,7 @@ impl ExtensionHostLifecycleProductService {
                 Ok(install_response_with_activation(
                     install_response,
                     activation_response,
+                    user_link_required,
                 ))
             }
             Ok(_) => Ok(install_response),
@@ -376,9 +380,19 @@ impl ExtensionHostLifecycleProductService {
     }
 }
 
+/// `next_step` for an Active install whose channel identity is established
+/// per user by the device-link ceremony. The ceremony renders a scannable
+/// code, so it can only run in the Web UI: the model must send the user
+/// there instead of reporting the connection finished from a chat surface.
+const DEVICE_LINK_USER_SETUP_NEXT_STEP: &str = "Activation completed; model-visible extension tools are ready. Personal capabilities and \
+     chatting as the user still require each user to link their own account from this \
+     extension's card in the Web UI — that ceremony cannot run from chat, so direct the user \
+     there rather than reporting the connection complete.";
+
 fn install_response_with_activation(
     mut install_response: LifecycleProductResponse,
     activation_response: LifecycleProductResponse,
+    user_link_required: bool,
 ) -> LifecycleProductResponse {
     install_response.phase = activation_response.phase;
     install_response.blockers = activation_response.blockers;
@@ -401,7 +415,11 @@ fn install_response_with_activation(
             *visible_capability_ids = activation_visible_capability_ids;
         }
         *next_step = if install_response.phase == InstallationState::Active {
-            "Activation completed; model-visible extension tools are ready.".to_string()
+            if user_link_required {
+                DEVICE_LINK_USER_SETUP_NEXT_STEP.to_string()
+            } else {
+                "Activation completed; model-visible extension tools are ready.".to_string()
+            }
         } else {
             "Activation did not complete; inspect the lifecycle phase and blockers.".to_string()
         };
@@ -722,6 +740,57 @@ fn map_local_skill_management_error(error: ScopedSkillManagementError) -> Produc
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn install_next_step_directs_device_link_users_to_the_web_ui() {
+        // QA, 2026-08-14: installed from Slack, the model announced
+        // "installed and active" and called linking optional — while the card
+        // showed the user still had to link. Device-link identity is per user
+        // and its ceremony renders a scannable code, so it can only run in
+        // the Web UI; the install result must say so instead of letting a
+        // chat surface declare the connection finished.
+        let install = LifecycleProductResponse {
+            package_ref: None,
+            phase: InstallationState::Installed,
+            blockers: Vec::new(),
+            message: None,
+            payload: Some(LifecycleProductPayload::ExtensionInstall {
+                installed: true,
+                visible_capability_ids: Vec::new(),
+                next_step: "pending".to_string(),
+            }),
+        };
+        let activation = LifecycleProductResponse {
+            package_ref: None,
+            phase: InstallationState::Active,
+            blockers: Vec::new(),
+            message: Some("activation guidance".to_string()),
+            payload: Some(LifecycleProductPayload::ExtensionActivate {
+                activated: true,
+                visible_capability_ids: Vec::new(),
+                connection_required: None,
+            }),
+        };
+
+        let response = install_response_with_activation(install, activation, true);
+        match response.payload {
+            Some(LifecycleProductPayload::ExtensionInstall { next_step, .. }) => {
+                assert!(
+                    next_step.contains("Web UI"),
+                    "next_step must send the user to the Web UI: {next_step}"
+                );
+                assert!(
+                    next_step.contains("cannot run from chat"),
+                    "next_step must say chat cannot finish this: {next_step}"
+                );
+                assert!(
+                    next_step.contains("link their own account"),
+                    "next_step must name the per-user link step: {next_step}"
+                );
+            }
+            other => panic!("expected an install payload, got {other:?}"),
+        }
+    }
+
     use super::*;
     use ironclaw_filesystem::DiskFilesystem;
     use ironclaw_host_api::{

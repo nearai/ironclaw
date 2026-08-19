@@ -4,10 +4,9 @@ use ironclaw_host_api::turn::ReplyTargetBindingRef;
 
 use crate::NOTIFICATION_TARGETS_CAP;
 use crate::{
-    AdvanceSubscriptionCursorRequest, CommunicationPreferenceRecord, DeliveryDefaultScope,
-    DeliveryFailureKind, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
-    OutboundDeliveryStatus, OutboundError, ProjectionSubscriptionRecord, ThreadNotificationPolicy,
-    UpdateDeliveryStatusRequest,
+    CommunicationPreferenceRecord, DeliveryDefaultScope, DeliveryFailureKind,
+    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryStatus, OutboundError,
+    ProjectionSubscriptionRecord, ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
 };
 
 const MAX_NOTIFICATION_TARGETS: usize = 32;
@@ -95,20 +94,6 @@ pub(crate) fn validate_subscription_cursor_progression(
         }
         _ => Ok(()),
     }
-}
-
-pub(crate) fn validate_advance_request(
-    record: &ProjectionSubscriptionRecord,
-    request: &AdvanceSubscriptionCursorRequest,
-) -> Result<(), OutboundError> {
-    if record.subscription_id != request.subscription_id
-        || record.actor != request.actor
-        || record.thread_id != request.thread_id
-        || record.scope != request.cursor.scope
-    {
-        return Err(OutboundError::SubscriptionScopeMismatch);
-    }
-    validate_subscription_cursor_progression(record.cursor.as_ref(), Some(&request.cursor))
 }
 
 pub(crate) fn validate_delivery_attempt(

@@ -302,6 +302,7 @@ pub struct RebornRuntimeReadinessSnapshot {
     pub text_only_driver: RebornRuntimeComponentStatus,
     pub planned_driver: RebornRuntimeComponentStatus,
     pub subagent_planned_driver: RebornRuntimeComponentStatus,
+    pub unbound_planned_drivers: RebornRuntimeComponentStatus,
     pub planned_default_profile: RebornRuntimeComponentStatus,
 }
 
@@ -350,12 +351,27 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
         ),
         Err(error) => RebornRuntimeComponentStatus::Failed(error.to_string()),
     };
-    let subagent_planned_driver = match family_registry {
+    let subagent_planned_driver = match &family_registry {
         Ok(family_registry) => RebornRuntimeComponentStatus::from_result(
             ironclaw_turn_runner::planned_driver_factory::register_subagent_planned_driver(
                 &mut registry,
-                family_registry,
+                Arc::clone(family_registry),
             ),
+        ),
+        Err(error) => RebornRuntimeComponentStatus::Failed(error.to_string()),
+    };
+    let unbound_planned_drivers = match family_registry {
+        Ok(family_registry) => RebornRuntimeComponentStatus::from_result(
+            ironclaw_turn_runner::planned_driver_factory::register_unbound_planned_driver(
+                &mut registry,
+                Arc::clone(&family_registry),
+            )
+            .and_then(|_| {
+                ironclaw_turn_runner::planned_driver_factory::register_unbound_structured_planned_driver(
+                    &mut registry,
+                    family_registry,
+                )
+            }),
         ),
         Err(error) => RebornRuntimeComponentStatus::Failed(error.to_string()),
     };
@@ -366,6 +382,7 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
         text_only_driver,
         planned_driver,
         subagent_planned_driver,
+        unbound_planned_drivers,
         planned_default_profile,
     }
 }
@@ -433,6 +450,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/replay-payloads",
     "/threads",
     "/conversations",
+    "/suggestions",
     "/turns",
     "/resources",
     "/engine",
@@ -486,10 +504,17 @@ fn invocation_mount_view_for_segments(
     let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 4);
     for alias in PER_USER_ALIASES {
         let target = format!("{tenant_user_prefix}{alias}");
+        let permissions = if *alias == "/suggestions" {
+            // Suggestions are retained model output. Their store performs no
+            // deletion, so do not grant filesystem deletion authority.
+            MountPermissions::read_write()
+        } else {
+            MountPermissions::read_write_list_delete()
+        };
         grants.push(MountGrant::new(
             MountAlias::new(*alias)?,
             VirtualPath::new(target)?,
-            MountPermissions::read_write_list_delete(),
+            permissions,
         ));
     }
     grants.push(MountGrant::new(
@@ -630,6 +655,8 @@ pub enum RebornCompositionError {
     Mount(#[from] ironclaw_host_api::error::HostApiError),
     #[error("reborn filesystem substrate failed: {0}")]
     Filesystem(#[from] ironclaw_filesystem::FilesystemError),
+    #[error("reborn libSQL runtime substrate failed: {0}")]
+    LibSqlRuntime(#[from] ironclaw_libsql_runtime::LibSqlRuntimeError),
     #[error("reborn resource governor substrate failed: {0}")]
     Resource(#[from] ResourceError),
     #[error("reborn approval store substrate failed: {0}")]
@@ -650,6 +677,11 @@ pub enum RebornCompositionError {
         "production runtime policy uses {process_backend:?} but a user sandbox process binding was supplied"
     )]
     UnexpectedUserSandboxProcessPort { process_backend: ProcessBackendKind },
+    /// Carries the store's filesystem cause; flattening it into a message
+    /// would leave an operator unable to tell a broken database from a
+    /// rejected index.
+    #[error("process journal startup migration failed")]
+    ProcessJournalMigration(#[from] ironclaw_processes::ProcessJournalStoreError),
     #[error("reborn production wiring failed: {report:?}")]
     ProductionWiring {
         report: ironclaw_host_runtime::ProductionWiringReport,
@@ -736,6 +768,18 @@ mod mount_view_tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn invocation_mount_view_denies_suggestion_deletion() {
+        let view = invocation_mount_view(&sample_scope()).unwrap();
+        let (_, grant) = view
+            .resolve_with_grant(&ScopedPath::new("/suggestions/doc.json").unwrap())
+            .unwrap();
+        assert!(grant.permissions.read);
+        assert!(grant.permissions.write);
+        assert!(grant.permissions.list);
+        assert!(!grant.permissions.delete);
     }
 
     #[tokio::test]

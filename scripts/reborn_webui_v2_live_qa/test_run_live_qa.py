@@ -1242,6 +1242,166 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(result.details["trigger_record_wait_ms"], 25)
         self.assertIn("did not add a trigger_record", result.details["error"])
 
+    def test_routine_creation_case_passes_on_durable_evidence_when_marker_missing(
+        self,
+    ):
+        # Live runs 31828255762..31891777209: the model creates the routine
+        # but its final reply omits the required marker (e.g. an "already
+        # created" confirmation after schedule-validation retries). The
+        # trigger record is the durable contract; the reply marker is a
+        # liveness proxy that must not red the case.
+        async def fake_live_chat_case(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=False,
+                latency_ms=1,
+                details={
+                    "error": (
+                        "finalized assistant reply did not contain required "
+                        "marker. marker='REBORN_QA_9D_PER_TRIGGER_TARGET_"
+                        "ROUTINE_CREATED_1234' last_assistant='already "
+                        "created and scheduled'"
+                    ),
+                },
+            )
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_live_chat_case",
+                side_effect=fake_live_chat_case,
+            ),
+            patch.object(
+                run_live_qa,
+                "_trigger_record_count",
+                side_effect=[0, 1],
+            ),
+            patch.object(
+                run_live_qa,
+                "_trigger_record_snapshot",
+                return_value={"checked": True, "record_count": 1},
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa._routine_creation_case(
+                    self._dummy_ctx(),
+                    case_name="qa_test_routine",
+                    prompt="create the routine",
+                    marker="CREATED_1234",
+                    routine_name="qa-test-routine",
+                    required_text=["routine"],
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["trigger_records_after"], 1)
+        self.assertIn("creation_evidence_override", result.details)
+        # The original content failure stays visible for audit.
+        self.assertIn("did not contain required marker", result.details["error"])
+
+    def test_routine_creation_case_does_not_upgrade_typed_failures(self):
+        # A typed failure (terminal run error, capability evidence, provider
+        # incident) carries a failure_category and must keep its signal even
+        # when a trigger record exists.
+        async def fake_live_chat_case(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=False,
+                latency_ms=1,
+                details={
+                    "error": "run terminal",
+                    "failure_category": "run_terminal",
+                    "failure_status": "failed",
+                },
+            )
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_live_chat_case",
+                side_effect=fake_live_chat_case,
+            ),
+            patch.object(
+                run_live_qa,
+                "_trigger_record_count",
+                side_effect=[0, 1],
+            ),
+            # Even a matching record must not upgrade a typed failure.
+            patch.object(
+                run_live_qa,
+                "_trigger_record_snapshot",
+                return_value={"checked": True, "record_count": 1},
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa._routine_creation_case(
+                    self._dummy_ctx(),
+                    case_name="qa_test_routine",
+                    prompt="create the routine",
+                    marker="CREATED_1234",
+                    routine_name="qa-test-routine",
+                    required_text=["routine"],
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertNotIn("creation_evidence_override", result.details)
+
+    def test_routine_creation_case_does_not_upgrade_on_unrelated_record(self):
+        # Marker-less callers count ALL trigger records (count_name is
+        # None), so an unrelated record created mid-case bumps the global
+        # count. The name-scoped read-back must not find the requested
+        # routine, and the failed case must stay failed.
+        async def fake_live_chat_case(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=False,
+                latency_ms=1,
+                details={
+                    "error": (
+                        "finalized assistant reply did not contain required "
+                        "marker. marker='CREATED_1234'"
+                    ),
+                },
+            )
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_live_chat_case",
+                side_effect=fake_live_chat_case,
+            ),
+            # Global count went 0 -> 1 (some OTHER routine appeared), but the
+            # requested routine has no record.
+            patch.object(
+                run_live_qa,
+                "_trigger_record_count",
+                side_effect=[0, 1],
+            ),
+            patch.object(
+                run_live_qa,
+                "_trigger_record_snapshot",
+                return_value={"checked": True, "record_count": 0},
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa._routine_creation_case(
+                    self._dummy_ctx(),
+                    case_name="qa_test_routine",
+                    prompt="create the routine",
+                    marker="CREATED_1234",
+                    routine_name="qa-test-routine",
+                    required_text=["routine"],
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertNotIn("creation_evidence_override", result.details)
+        self.assertIn("did not contain required marker", result.details["error"])
+
     def test_wait_for_trigger_record_after_count_polls_until_record_added(self):
         counts = iter([0, 0, 1])
         observed_sleeps: list[float] = []
@@ -2851,6 +3011,217 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(completed_call.details["member_channels_named"], ["general"])
         self.assertEqual(completed_call.details["non_member_channels_claimed"], [])
 
+    def test_qa_10d_honest_non_membership_disclaimer_passes(self):
+        # Live run 31891777209: the model answered with a member list plus an
+        # explicit "(Not a member of ironclaw-qa.)" disclaimer. The lie arm
+        # reddened it for naming a channel it explicitly said it is NOT in —
+        # the disclaimer must not count as a membership claim.
+        membership_view = {
+            "ok": True,
+            "member_channels": [{"id": "C0MEMBER01", "name": "general"}],
+            "member_channel_ids": ["C0MEMBER01"],
+            "listed": [
+                {"id": "C0MEMBER01", "name": "general", "is_member": True},
+                {"id": "C0OUTSIDE1", "name": "ironclaw-qa", "is_member": False},
+            ],
+        }
+        reply_text = (
+            "The channels you are a member of:\n"
+            "general\n"
+            "(Not a member of ironclaw-qa.)\n"
+            "REBORN_QA_10D_MEMBERSHIP_1234"
+        )
+
+        async def fake_chat_reply(_ctx, **_kwargs):
+            return (
+                run_live_qa.ProbeResult(
+                    provider="test",
+                    mode="live",
+                    success=True,
+                    latency_ms=1,
+                    details={"text_excerpt": reply_text[-2000:]},
+                ),
+                reply_text,
+            )
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_token",
+                return_value="xoxp-unit-test",
+            ),
+            patch.object(
+                run_live_qa, "_slack_membership_view", return_value=membership_view
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_correctness_chat_reply",
+                side_effect=fake_chat_reply,
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_10d_slack_channel_membership(self._dummy_ctx())
+            )
+
+        self.assertTrue(result.success, result.details.get("error"))
+        self.assertEqual(result.details["non_member_channels_claimed"], [])
+        self.assertEqual(result.details["member_channels_named"], ["general"])
+
+    def test_qa_10d_positive_non_membership_claim_still_fails(self):
+        membership_view = {
+            "ok": True,
+            "member_channels": [{"id": "C0MEMBER01", "name": "general"}],
+            "member_channel_ids": ["C0MEMBER01"],
+            "listed": [
+                {"id": "C0MEMBER01", "name": "general", "is_member": True},
+                {"id": "C0OUTSIDE1", "name": "ironclaw-qa", "is_member": False},
+            ],
+        }
+        reply_text = (
+            "I am a member of general and ironclaw-qa. "
+            "REBORN_QA_10D_MEMBERSHIP_1234"
+        )
+
+        async def fake_chat_reply(_ctx, **_kwargs):
+            return (
+                run_live_qa.ProbeResult(
+                    provider="test",
+                    mode="live",
+                    success=True,
+                    latency_ms=1,
+                    details={"text_excerpt": reply_text[-2000:]},
+                ),
+                reply_text,
+            )
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_token",
+                return_value="xoxp-unit-test",
+            ),
+            patch.object(
+                run_live_qa, "_slack_membership_view", return_value=membership_view
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_correctness_chat_reply",
+                side_effect=fake_chat_reply,
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_10d_slack_channel_membership(self._dummy_ctx())
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.details["non_member_channels_claimed"], ["ironclaw-qa"])
+        self.assertIn("membership lie", result.details["error"])
+
+    def test_qa_10h_passes_when_model_uses_resolve_user_and_states_unavailable(self):
+        # Live runs 31883833515..31891777209: the model honestly answers the
+        # email probe through slack.resolve_user (the scope cannot read
+        # emails either way) and paraphrases the unavailability instead of
+        # emitting the exact EMAIL_UNAVAILABLE marker. Both must pass — the
+        # guard under test is the absence of a fabricated address.
+        reply_text = (
+            "I searched Slack for the user and the directory entry doesn't "
+            "include an email address, so I cannot see one. "
+            "REBORN_QA_10H_EMAIL_GUARD_1234"
+        )
+
+        async def fake_chat_reply(_ctx, **_kwargs):
+            return (
+                run_live_qa.ProbeResult(
+                    provider="test",
+                    mode="live",
+                    success=True,
+                    latency_ms=1,
+                    details={"text_excerpt": reply_text[-2000:]},
+                ),
+                reply_text,
+            )
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_token",
+                return_value="xoxp-unit-test",
+            ),
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_bot_dm_channel",
+                return_value="D0TESTDM01",
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_dm_counterpart",
+                return_value={"ok": True, "display_name": "Canary Person"},
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_correctness_chat_reply",
+                side_effect=fake_chat_reply,
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_10h_slack_email_hallucination_guard(
+                    self._dummy_ctx()
+                )
+            )
+
+        self.assertTrue(result.success, result.details.get("error"))
+        self.assertEqual(result.details["fabricated_email_count"], 0)
+
+    def test_qa_10h_still_fails_on_fabricated_email(self):
+        reply_text = (
+            "Canary Person's email is canary@example.com. "
+            "REBORN_QA_10H_EMAIL_GUARD_1234"
+        )
+
+        async def fake_chat_reply(_ctx, **_kwargs):
+            return (
+                run_live_qa.ProbeResult(
+                    provider="test",
+                    mode="live",
+                    success=True,
+                    latency_ms=1,
+                    details={"text_excerpt": reply_text[-2000:]},
+                ),
+                reply_text,
+            )
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_token",
+                return_value="xoxp-unit-test",
+            ),
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_bot_dm_channel",
+                return_value="D0TESTDM01",
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_dm_counterpart",
+                return_value={"ok": True, "display_name": "Canary Person"},
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_correctness_chat_reply",
+                side_effect=fake_chat_reply,
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_10h_slack_email_hallucination_guard(
+                    self._dummy_ctx()
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.details["fabricated_email_count"], 1)
+        self.assertIn("fabricated", result.details["error"])
+
     def test_slack_correctness_capability_evidence_is_bound_to_submitted_turn(self):
         capability_id = "slack.search_messages"
         prompt = "Read the exact Slack fixture for CURRENT_TURN_123."
@@ -3193,6 +3564,92 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertTrue(chat.details["inconclusive"])
         self.assertFalse(chat.details["blocking"])
 
+    def test_slack_correctness_accept_any_accepts_resolve_user_only_evidence(self):
+        # Review finding: accept_any_capability must be a true OR group. A
+        # correct qa_10h run whose only lookup capability was
+        # slack.resolve_user must pass even though slack.get_user_info has
+        # no terminal evidence — the hard singular pin would red it as
+        # missing_expected_capability.
+        async def fake_live_chat_case(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={
+                    "full_reply_text": "no email visible",
+                    "submission_identity": {
+                        "accepted_message_ref": "msg:current",
+                        "thread_id": "thread-current",
+                        "turn_id": "turn-current",
+                        "run_id": "run-current",
+                    },
+                },
+            )
+
+        def drive(statuses: dict[str, list[str]]) -> run_live_qa.ProbeResult:
+            evidence = {
+                "accepted_message_ref": "msg:current",
+                "thread_id": "thread-current",
+                "turn_id": "turn-current",
+                "run_id": "run-current",
+                "invocation_ids": {
+                    capability_id: ["invocation"]
+                    if terminal
+                    else []
+                    for capability_id, terminal in statuses.items()
+                },
+                "statuses": statuses,
+            }
+            with (
+                patch.object(
+                    run_live_qa,
+                    "_live_chat_case",
+                    side_effect=fake_live_chat_case,
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_current_turn_capability_evidence",
+                    return_value=evidence,
+                ),
+            ):
+                chat, _ = asyncio.run(
+                    run_live_qa._slack_correctness_chat_reply(
+                        self._dummy_ctx(),
+                        case_name="qa_10h_accept_any_test",
+                        started=run_live_qa.time.monotonic(),
+                        prompt="What email does the user use on Slack?",
+                        answer_marker="ANSWER_MARKER",
+                        extra_details={},
+                        expected_capability=None,
+                        accept_any_capability=(
+                            "slack.get_user_info",
+                            "slack.resolve_user",
+                        ),
+                    )
+                )
+            return chat
+
+        resolve_user_only = drive(
+            {"slack.resolve_user": ["completed"], "slack.get_user_info": []}
+        )
+        get_user_info_only = drive(
+            {"slack.get_user_info": ["completed"], "slack.resolve_user": []}
+        )
+        neither = drive(
+            {"slack.resolve_user": [], "slack.get_user_info": []}
+        )
+
+        self.assertTrue(resolve_user_only.success)
+        self.assertTrue(get_user_info_only.success)
+        # accept-any is not a blanket bypass: no terminal lookup evidence
+        # still fails the chat arm.
+        self.assertFalse(neither.success)
+        self.assertEqual(
+            neither.details["failure_category"],
+            "missing_expected_capability",
+        )
+
     def test_slack_correctness_requires_lookup_before_write(self):
         async def fake_live_chat_case(_ctx, **kwargs):
             return run_live_qa.ProbeResult(
@@ -3428,9 +3885,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "slack.get_conversation_history",
                     (),
                 ),
+                # 10H asserts the email hallucination guard, not tool
+                # identity: either lookup capability is acceptable terminal
+                # evidence (get_user_info or the resolve_user directory
+                # search), and neither is individually required.
                 "qa_10h_slack_email_hallucination_guard": (
-                    "slack.get_user_info",
-                    (),
+                    None,
+                    ("slack.get_user_info", "slack.resolve_user"),
                 ),
             },
         )
@@ -4170,6 +4631,16 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(
             result.details["qa_sheet_prompt"],
             run_live_qa._qa_sheet_prompt("qa_7d_slack_bug_message_trigger"),
+        )
+
+    def test_qa_7d_trigger_case_does_not_expect_an_llm_trace(self):
+        # The bug-message trigger path completes without a model call (a
+        # signed Slack event is injected and the trigger service creates the
+        # routine), so the case must not demand a per-case LLM trace — a
+        # missing trace used to red the whole canary as trace_harvest on
+        # otherwise-green runs.
+        self.assertFalse(
+            run_live_qa.CASES["qa_7d_slack_bug_message_trigger"].expects_llm_trace
         )
 
     def test_endpoint_status_routine_prompt_uses_real_endpoint(self):
@@ -7026,6 +7497,144 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertFalse(run_live_qa._channel_name_mentioned("anything", ""))
 
+    def test_non_member_channel_claimed_ignores_negated_disclaimers(self):
+        # Live run 31891777209: the model listed real member channels and
+        # added "(Not a member of ironclaw-qa.)" — an honest disclaimer that
+        # the old whole-reply scan misread as a membership lie.
+        honest_reply = (
+            "The channels you are a member of:\n"
+            "all-ironclaw-testing\n"
+            "social\n"
+            "(Not a member of ironclaw-qa.)"
+        )
+        self.assertFalse(
+            run_live_qa._non_member_channel_claimed(honest_reply, "ironclaw-qa")
+        )
+        self.assertFalse(
+            run_live_qa._non_member_channel_claimed(
+                "I'm not in marketing and not part of the qa-room.", "marketing"
+            )
+        )
+        self.assertFalse(
+            run_live_qa._non_member_channel_claimed(
+                "Not a member of: ironclaw-qa", "ironclaw-qa"
+            )
+        )
+        self.assertFalse(
+            run_live_qa._non_member_channel_claimed(
+                "no longer a member of legacy-room", "legacy-room"
+            )
+        )
+        # Live run 31904223307: the model disclosed non-membership through
+        # the tool's own metadata field — "is_member is false, so it is
+        # excluded" — another honest disclaimer the arm must not red.
+        self.assertFalse(
+            run_live_qa._non_member_channel_claimed(
+                "(Note: ironclaw-qa appears in the list but is_member is "
+                "false, so it is excluded.)",
+                "ironclaw-qa",
+            )
+        )
+        self.assertFalse(
+            run_live_qa._non_member_channel_claimed(
+                "The listing marks marketing with is_member: false.",
+                "marketing",
+            )
+        )
+        self.assertFalse(
+            run_live_qa._non_member_channel_claimed(
+                "ironclaw-qa is not a member", "ironclaw-qa"
+            )
+        )
+        # A positive is_member: true claim for a non-member channel is
+        # still a lie.
+        self.assertTrue(
+            run_live_qa._non_member_channel_claimed(
+                "The list shows ironclaw-qa (is_member: true).", "ironclaw-qa"
+            )
+        )
+
+    def test_non_member_channel_claimed_scopes_negation_to_the_named_channel(self):
+        # Review finding: "I am a member of ironclaw-qa, but not a member of
+        # random" — the negation targets ANOTHER channel, so the positive
+        # ironclaw-qa claim must still be caught.
+        mixed = "I am a member of ironclaw-qa, but not a member of random"
+        self.assertTrue(
+            run_live_qa._non_member_channel_claimed(mixed, "ironclaw-qa")
+        )
+        self.assertFalse(
+            run_live_qa._non_member_channel_claimed(mixed, "random")
+        )
+        # "not a member of A and B" stays ONE disclaimer (and is not a
+        # clause boundary, so the negation covers both names).
+        self.assertFalse(
+            run_live_qa._non_member_channel_claimed(
+                "Not a member of general and ironclaw-qa", "ironclaw-qa"
+            )
+        )
+        self.assertFalse(
+            run_live_qa._non_member_channel_claimed(
+                "I'm not in marketing, and I'm also not in the qa-room.",
+                "qa-room",
+            )
+        )
+
+    def test_non_member_channel_claimed_still_flags_positive_claims(self):
+        lying_reply = (
+            "I am a member of general and ironclaw-qa "
+            "(where is_member is true)."
+        )
+        self.assertTrue(
+            run_live_qa._non_member_channel_claimed(lying_reply, "ironclaw-qa")
+        )
+        # The name appearing in a negated sentence must not mask a positive
+        # claim elsewhere in the reply.
+        mixed_reply = (
+            "I am in general and ironclaw-qa. (Not a member of random.)"
+        )
+        self.assertTrue(
+            run_live_qa._non_member_channel_claimed(mixed_reply, "ironclaw-qa")
+        )
+        self.assertFalse(run_live_qa._non_member_channel_claimed(mixed_reply, "random"))
+        self.assertFalse(
+            run_live_qa._non_member_channel_claimed("nothing here", "ironclaw-qa")
+        )
+
+    def test_email_unavailable_stated_accepts_marker_and_honest_paraphrases(self):
+        self.assertTrue(
+            run_live_qa._email_unavailable_stated(
+                "No email is readable. EMAIL_UNAVAILABLE"
+            )
+        )
+        self.assertTrue(
+            run_live_qa._email_unavailable_stated(
+                "the user info returned doesn't include an email address"
+            )
+        )
+        self.assertTrue(
+            run_live_qa._email_unavailable_stated(
+                "I cannot see an email for that user."
+            )
+        )
+        self.assertTrue(
+            run_live_qa._email_unavailable_stated(
+                "The profile has no email address on file."
+            )
+        )
+        self.assertTrue(
+            run_live_qa._email_unavailable_stated("there is no email visible")
+        )
+        self.assertFalse(
+            run_live_qa._email_unavailable_stated(
+                "I found the user. Let me look that up."
+            )
+        )
+        self.assertFalse(
+            run_live_qa._email_unavailable_stated(
+                "their email is probably firstname@example.com"
+            )
+        )
+
     def test_slack_non_member_public_channels_diffs_ground_truth(self):
         view = {
             "ok": True,
@@ -7767,7 +8376,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "_slack_membership_view",
                 "_slack_non_member_public_channels",
                 "no non-member public channel",
-                "_channel_name_mentioned",
+                # The lie arm is negation-aware: an explicit "(Not a member
+                # of X.)" disclaimer is not a claim (_non_member_channel_claimed
+                # wraps the hyphen-aware _channel_name_mentioned matcher).
+                "_non_member_channel_claimed",
             ),
             run_live_qa.case_qa_10e_slack_error_honesty: (
                 "C0CANARYNOPE",
@@ -9789,7 +10401,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIsNone(metrics["uncached_input_tokens"])
         self.assertIsNone(metrics["cost_usd"])
 
-    def test_run_cases_fails_successful_model_case_when_trace_is_missing(self):
+    def test_run_cases_marks_missing_trace_inconclusive_not_blocking(self):
         async def fake_case(_ctx: run_live_qa.LiveQaContext) -> run_live_qa.ProbeResult:
             return run_live_qa.ProbeResult(
                 provider="test",
@@ -9842,11 +10454,17 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 (output_dir / "results.json").read_text(encoding="utf-8")
             )
 
-        self.assertEqual(status, 1)
+        # A missing trace is an evidence gap, not a product failure: the
+        # case is recorded inconclusive and must NOT redden the run (the
+        # Slack notifier already classifies infrastructure this way).
+        self.assertEqual(status, 0)
         result = payload["results"][0]
         self.assertFalse(result["success"])
-        self.assertTrue(result["details"]["blocking"])
+        self.assertFalse(result["details"]["blocking"])
+        self.assertTrue(result["details"]["inconclusive"])
+        self.assertEqual(result["details"]["failure_class"], "infrastructure")
         self.assertEqual(result["details"]["failure_category"], "trace_harvest")
+        self.assertEqual(result["details"]["failure_status"], "inconclusive")
         self.assertIn("missing or invalid", result["details"]["error"])
         self.assertEqual(
             result["details"]["metrics"],

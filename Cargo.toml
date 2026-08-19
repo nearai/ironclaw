@@ -213,6 +213,9 @@ ironclaw_turns = { path = "crates/kernel/ironclaw_turns", version = "0.1.0", fea
 # `InMemoryDurableEventLog` for the W5-WEBUI-API-1 SSE scenario's test-local
 # `ProjectionStream` wiring (`build_webui_event_stream_for_test`).
 ironclaw_event_log = { path = "crates/events/ironclaw_event_log", version = "0.1.0" }
+# Production RootFilesystem-backed durable event store used by the canonical
+# DB-write measurement target.
+ironclaw_event_store = { path = "crates/events/ironclaw_event_store", version = "0.1.0" }
 # Binary Reborn E2E recovery scenarios replay the milestone-backed durable log
 # through the production event projection service.
 ironclaw_event_projections = { path = "crates/events/ironclaw_event_projections", version = "0.1.0" }
@@ -225,6 +228,8 @@ ironclaw_triggers = { path = "crates/domains/ironclaw_triggers", version = "0.1.
 ironclaw_conversations = { path = "crates/domains/ironclaw_conversations", version = "0.1.0" }
 ironclaw_trust = { path = "crates/kernel/ironclaw_trust", version = "0.1.0" }
 ironclaw_wasm = { path = "crates/lanes/ironclaw_wasm", version = "0.1.0" }
+# Reusable before/after database probe used by dedicated measured workloads.
+ironclaw_stress = { path = "tools/ironclaw_stress", version = "0.1.0" }
 # `ironclaw_outbound/test-support` provides the in-memory-backed
 # `OutboundStateStore` the triggered-delivery outcome-seam int-tier
 # proof injects (asserting a real `TriggeredRunDeliveryDriver`'s recorded
@@ -294,8 +299,16 @@ name = "reborn_integration_sandbox_shell_turn"
 path = "tests/integration/reborn_sandbox_shell_turn.rs"
 
 [[test]]
+name = "reborn_integration_suggestions"
+path = "tests/integration/suggestions.rs"
+
+[[test]]
 name = "reborn_integration_subagent_await_edge"
 path = "tests/integration/subagent_await_edge.rs"
+
+[[test]]
+name = "reborn_integration_unbound_turns"
+path = "tests/integration/unbound_turns.rs"
 
 [[test]]
 name = "reborn_integration_auth_failure"
@@ -492,6 +505,14 @@ path = "tests/integration/webui_v2_router_smoke.rs"
 [[test]]
 name = "reborn_integration_wiring_parity"
 path = "tests/integration/wiring_parity.rs"
+
+[[test]]
+name = "reborn_integration_run_artifact_timings"
+path = "tests/integration/run_artifact_timings.rs"
+
+[[test]]
+name = "reborn_integration_db_write_canonical"
+path = "tests/integration/db_write_canonical.rs"
 
 [profile.release]
 strip = true          # Remove debug symbols from release binaries

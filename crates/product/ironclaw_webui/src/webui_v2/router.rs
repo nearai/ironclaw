@@ -57,7 +57,9 @@ use crate::webui_v2::descriptors::{
     WEBUI_V2_PATTERN_SKILL_DETAIL, WEBUI_V2_PATTERN_START_CODEX_LOGIN,
     WEBUI_V2_PATTERN_START_NEARAI_LOGIN, WEBUI_V2_PATTERN_STAT_FS_PATH,
     WEBUI_V2_PATTERN_STAT_PROJECT_FILE, WEBUI_V2_PATTERN_STREAM_EVENTS,
-    WEBUI_V2_PATTERN_STREAM_EVENTS_WS, WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,
+    WEBUI_V2_PATTERN_STREAM_EVENTS_WS, WEBUI_V2_PATTERN_SUGGESTION_DETAIL,
+    WEBUI_V2_PATTERN_SUGGESTION_START, WEBUI_V2_PATTERN_SUGGESTIONS_GENERATE,
+    WEBUI_V2_PATTERN_SUGGESTIONS_LIST, WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,
     WEBUI_V2_PATTERN_TRACE_ACCOUNT_LOGIN_LINK, WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES,
     WEBUI_V2_PATTERN_TRACE_CREDITS, WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE,
     WEBUI_V2_PATTERN_USER_MODEL_CATALOG, WEBUI_V2_PATTERN_USER_MODEL_POLICY,
@@ -357,6 +359,22 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         .route(
             WEBUI_V2_PATTERN_AUTOMATION_DETAIL,
             post(handlers::rename_automation).delete(handlers::delete_automation),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SUGGESTIONS_LIST,
+            get(handlers::list_suggestions),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SUGGESTIONS_GENERATE,
+            post(handlers::generate_suggestions),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SUGGESTION_START,
+            post(handlers::start_suggestion),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SUGGESTION_DETAIL,
+            delete(handlers::dismiss_suggestion),
         )
         .route(WEBUI_V2_PATTERN_TRACE_CREDITS, get(handlers::trace_credits))
         .route(

@@ -108,6 +108,7 @@ async fn production_host_build_fences_transcript_writes_on_the_claimed_lease() {
         Arc::new(InMemoryLoopHostMilestoneSink::default()) as Arc<dyn LoopHostMilestoneSink>,
         TextOnlyLoopHostConfig {
             max_messages: 8,
+            prompt_context_budget: Default::default(),
             require_model_route_snapshot: false,
         },
         InstructionSafetyContext::non_production_noop(),
@@ -150,9 +151,7 @@ fn claimed_run_matching(
     run_context: &LoopRunContext,
     scope: &TurnScope,
 ) -> ironclaw_turns::runner::ClaimedTurnRun {
-    use ironclaw_turns::{
-        AcceptedMessageRef, ReplyTargetBindingRef, SourceBindingRef, TurnRunnerId, TurnStatus,
-    };
+    use ironclaw_turns::{AcceptedMessageRef, TurnRunnerId, TurnStatus};
 
     ironclaw_turns::runner::ClaimedTurnRun {
         state: ironclaw_turns::TurnRunState {
@@ -162,8 +161,7 @@ fn claimed_run_matching(
             run_id: run_context.run_id,
             status: TurnStatus::Running,
             accepted_message_ref: AcceptedMessageRef::new("msg:accepted").expect("valid"), // safety: fixed fixture satisfies the bounded-ref grammar.
-            source_binding_ref: SourceBindingRef::new("source-web").expect("valid"), // safety: fixed fixture satisfies the bounded-ref grammar.
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").expect("valid"), // safety: fixed fixture satisfies the bounded-ref grammar.
+            output_contract: ironclaw_host_api::output::OutputContract::AssistantMessage,
             // The journal persists the interactive-default alias under the
             // default profile id; `validate_claimed_run_context` compares
             // against that persisted form.
@@ -174,6 +172,7 @@ fn claimed_run_matching(
             allow_steering: true,
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: None,
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,

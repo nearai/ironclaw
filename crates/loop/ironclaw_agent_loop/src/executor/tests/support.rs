@@ -166,6 +166,25 @@ impl MockHost {
         }
     }
 
+    pub(super) fn with_suppressed_scheduled_context(mut self) -> Self {
+        let mut product_context = ProductTurnContext::new(
+            TurnOriginKind::ScheduledTrigger,
+            None,
+            None,
+            TurnOwner::Personal {
+                user: UserId::new("scheduled-owner").expect("valid user"),
+            },
+        );
+        product_context.execution_policy = Some(
+            ironclaw_host_api::execution_policy::TurnExecutionPolicy {
+                result_delivery: ironclaw_host_api::execution_policy::ResultDeliveryPolicy::SuppressWhenNothingToReport,
+                ..ironclaw_host_api::execution_policy::TurnExecutionPolicy::default()
+            },
+        );
+        self.context.product_context = Some(product_context);
+        self
+    }
+
     /// Enable driver-specific nudges on the run profile (gates the final-answer
     /// nudge at the budget / no-progress exit boundaries).
     pub(super) fn with_driver_nudges_enabled(mut self) -> Self {
@@ -301,6 +320,10 @@ impl MockHost {
     pub(super) fn fail_batch_with(self, kind: AgentLoopHostErrorKind) -> Self {
         *self.fail_batch_with.lock().expect("lock") = Some(kind);
         self
+    }
+
+    pub(super) fn clear_batch_failure(&self) {
+        *self.fail_batch_with.lock().expect("lock") = None;
     }
 
     pub(super) fn fail_transcript_with(self, kind: AgentLoopHostErrorKind) -> Self {
@@ -1607,11 +1630,13 @@ pub(super) fn test_run_context() -> LoopRunContext {
             max_checkpoint_bytes: 64 * 1024,
             require_final_checkpoint: false,
             allow_no_reply_completion: false,
+            before_model_checkpoint_interval: 1,
         },
         resource_budget_policy: ResourceBudgetPolicy {
             tier: ResourceBudgetTier::new("executor_test_tier").expect("valid"),
             max_model_calls: 32,
             max_capability_invocations: 64,
+            max_wall_clock_seconds: None,
         },
         personal_context_policy: ironclaw_loop_contracts::PersonalContextPolicy::Excluded,
         runtime_constraints: RuntimeProfileConstraints {

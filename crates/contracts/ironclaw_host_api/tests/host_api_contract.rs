@@ -41,9 +41,24 @@ use ironclaw_host_api::{
     runtime::{RuntimeKind, TrustClass},
     scope::{ExecutionContext, Principal},
     trust::{PackageIdentity, PackageSource, RequestedTrustClass},
+    turn::TurnExecutionOutcome,
 };
 use rust_decimal_macros::dec;
 use serde_json::json;
+
+#[test]
+fn turn_execution_outcome_round_trips_with_stable_wire_values() {
+    for (outcome, wire) in [
+        (TurnExecutionOutcome::ResultAvailable, "result_available"),
+        (TurnExecutionOutcome::NothingToReport, "nothing_to_report"),
+    ] {
+        assert_eq!(serde_json::to_value(outcome).unwrap(), json!(wire));
+        assert_eq!(
+            serde_json::from_value::<TurnExecutionOutcome>(json!(wire)).unwrap(),
+            outcome
+        );
+    }
+}
 
 #[test]
 fn search_messages_accepts_portable_sort_modes() {

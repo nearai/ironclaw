@@ -37,10 +37,10 @@ use capability_helpers::{
 };
 #[cfg(test)]
 use capability_helpers::{sanitize_result_ref_suffix, synthetic_provider_error_result_ref};
-use checkpoint::{CheckpointInput, CheckpointStage};
+use checkpoint::CheckpointStage;
 use exit_helpers::{
     FailedExitDetails, cancelled_exit, cancelled_exit_with_reason, cancelled_reason_from_signal,
-    completed_exit, exit_id, failed_exit,
+    completed_exit, exit_id, failed_exit, is_typed_nothing_to_report,
 };
 use failure_explanation::attach_failure_explanation;
 use gates::{AwaitDependentRunGateInput, AwaitDependentRunGateStage, GateInput, GateStage};

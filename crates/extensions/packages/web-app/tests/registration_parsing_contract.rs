@@ -24,7 +24,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use ironclaw_extension_contracts::channel_adapter::{
     ChannelDelivery, DeliveryRegistration, OutboundEnvelope, OutboundPart, OutboundTarget,
-    PartDeliveryOutcome,
+    OutboundVisibility, PartDeliveryOutcome,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::tool_adapter::{
@@ -119,6 +119,7 @@ fn envelope(registrations: Vec<DeliveryRegistration>) -> OutboundEnvelope {
         parts: vec![OutboundPart::Text("a notice".to_string())],
         reply_context: None,
         registrations,
+        visibility: OutboundVisibility::Public,
     }
 }
 

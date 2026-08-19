@@ -10,14 +10,15 @@ use ironclaw_loop_contracts::{
     RunProfileResolver, ToolObservationDetail, ToolObservationStatus, resolution,
 };
 use ironclaw_threads::{
-    AcceptedInboundMessage, AcceptedInboundMessageReplay, AppendAssistantDraftRequest,
-    AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest, ContextMessages,
-    ContextWindow, CreateSummaryArtifactRequest, InMemorySessionThreadService,
-    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
-    LoadContextMessagesRequest, LoadContextWindowRequest, RedactMessageRequest,
+    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
+    AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
+    AppendToolResultReferenceRequest, ContextMessages, ContextWindow, CreateSummaryArtifactRequest,
+    EnsureThreadRequest, InMemorySessionThreadService, LatestThreadMessageRequest,
+    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
-    ThreadHistory, ThreadHistoryRequest, ThreadMessageRecord, UpdateAssistantDraftRequest,
-    UpdateToolResultReferenceRequest,
+    ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord,
+    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AgentTurnRuntimePort, CancelRunResponse, CapabilityActivityId, EventCursor,
@@ -130,7 +131,7 @@ struct RecordingChildRuns {
 }
 
 #[derive(Default)]
-struct FailingMarkThreadService {
+struct FailingAcceptThreadService {
     inner: InMemorySessionThreadService,
 }
 
@@ -685,7 +686,6 @@ impl TurnSpawnTreePort for RecordingChildRuns {
         let run_id = request.requested_run_id.unwrap_or_default();
         let turn_id = TurnId::new();
         let accepted_message_ref = request.accepted_message_ref.clone();
-        let reply_target_binding_ref = request.reply_target_binding_ref.clone();
         let resolved_run_profile_id = request
             .requested_run_profile
             .as_ref()
@@ -700,13 +700,35 @@ impl TurnSpawnTreePort for RecordingChildRuns {
             resolved_run_profile_version: RunProfileVersion::new(1),
             event_cursor: EventCursor(2),
             accepted_message_ref,
-            reply_target_binding_ref,
         })
     }
 }
 
 #[async_trait]
-impl SessionThreadService for FailingMarkThreadService {
+impl SessionThreadService for FailingAcceptThreadService {
+    async fn read_structured_finalization(
+        &self,
+        request: ironclaw_threads::ReadStructuredFinalizationRequest,
+    ) -> Result<Option<ironclaw_threads::StructuredFinalizationRecord>, SessionThreadError> {
+        self.inner.read_structured_finalization(request).await
+    }
+
+    async fn put_structured_finalization(
+        &self,
+        request: ironclaw_threads::PutStructuredFinalizationRequest,
+    ) -> Result<ironclaw_threads::StructuredFinalizationRecord, SessionThreadError> {
+        self.inner.put_structured_finalization(request).await
+    }
+
+    async fn publish_structured_finalization_message(
+        &self,
+        request: ironclaw_threads::PublishStructuredFinalizationMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.inner
+            .publish_structured_finalization_message(request)
+            .await
+    }
+
     async fn ensure_thread(
         &self,
         request: EnsureThreadRequest,
@@ -728,17 +750,26 @@ impl SessionThreadService for FailingMarkThreadService {
         self.inner.replay_accepted_inbound_message(request).await
     }
 
+    async fn accept_prepared_context(
+        &self,
+        _request: ironclaw_threads::PreparedContextRequest,
+    ) -> Result<ironclaw_threads::AcceptedPreparedContext, SessionThreadError> {
+        Err(SessionThreadError::Backend(
+            "forced accept_prepared_context failure".to_string(),
+        ))
+    }
+
     async fn mark_message_submitted(
         &self,
-        _scope: &ThreadScope,
-        _thread_id: &ThreadId,
-        _message_id: ThreadMessageId,
-        _turn_id: String,
-        _turn_run_id: String,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+        turn_id: String,
+        turn_run_id: String,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        Err(SessionThreadError::Backend(
-            "forced mark_message_submitted failure".to_string(),
-        ))
+        self.inner
+            .mark_message_submitted(scope, thread_id, message_id, turn_id, turn_run_id)
+            .await
     }
 
     async fn mark_message_rejected_busy(
@@ -1115,12 +1146,12 @@ fn turn_record(run_context: &LoopRunContext, subagent_depth: u32) -> TurnRunReco
         turn_id: run_context.turn_id,
         scope: run_context.scope.clone(),
         accepted_message_ref: AcceptedMessageRef::new("msg:parent").unwrap(),
-        source_binding_ref: SourceBindingRef::new("source:parent").unwrap(),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply:parent").unwrap(),
         status: TurnStatus::Queued,
         profile: TurnRunProfile::from_resolved(run_context.resolved_run_profile.clone()),
+        output_contract: run_context.output_contract.clone(),
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         checkpoint_id: None,
         gate_ref: None,
         blocked_activity_id: None,
@@ -2574,13 +2605,12 @@ async fn invoke_capability_batch_preserves_spawns_on_inner_batch_suspension() {
 }
 
 #[tokio::test]
-async fn invoke_spawn_cancels_child_when_post_submit_thread_mark_fails() {
+async fn invoke_spawn_fails_closed_when_prepared_context_accept_fails() {
     let context = test_run_context_with_agent_actor("spawn-mark-fails").await;
-    let actor = context.actor.clone().unwrap();
     let turn_store = Arc::new(StaticAgentTurnRuntime::new(Some(turn_record(&context, 0))));
     let child_runs = Arc::new(RecordingChildRuns::default());
     let gate_store = Arc::new(InMemoryAwaitEdgeWriter);
-    let thread_service = Arc::new(FailingMarkThreadService::default());
+    let thread_service = Arc::new(FailingAcceptThreadService::default());
     let deps = Arc::new(SubagentSpawnDeps {
         coordinator: Arc::new(StaticCoordinator),
         child_runs: child_runs.clone(),
@@ -2619,34 +2649,16 @@ async fn invoke_spawn_cancels_child_when_post_submit_thread_mark_fails() {
         .unwrap_err();
 
     assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
-    assert!(error.safe_summary.contains("mark_message_submitted"));
-    assert_eq!(child_runs.requests().len(), 1);
-    let cancels = turn_store.cancels();
-    assert_eq!(cancels.len(), 1);
-    assert_eq!(
-        Some(cancels[0].run_id),
-        child_runs.requests()[0].requested_run_id
+    assert!(
+        error
+            .safe_summary
+            .contains("subagent thread operation failed")
     );
-    assert_eq!(submitted_process_goals(&child_runs).len(), 1);
-    let child_requests = child_runs.requests();
-    let child_request = &child_requests[0];
-    let child_thread_scope = ThreadScope {
-        tenant_id: child_request.child_scope.tenant_id.clone(),
-        agent_id: child_request.child_scope.agent_id.clone().unwrap(),
-        project_id: child_request.child_scope.project_id.clone(),
-        owner_user_id: Some(actor.user_id),
-        mission_id: None,
-    };
-    let read = thread_service
-        .read_thread(ThreadHistoryRequest {
-            scope: child_thread_scope,
-            thread_id: child_request.child_scope.thread_id.clone(),
-        })
-        .await;
-    assert!(matches!(
-        read,
-        Err(SessionThreadError::UnknownThread { .. })
-    ));
+    // The accept door fails BEFORE any child submission: nothing to cancel,
+    // nothing durable to roll back.
+    assert!(child_runs.requests().is_empty());
+    assert!(turn_store.cancels().is_empty());
+    drop(thread_service);
 }
 
 #[tokio::test]
@@ -3367,19 +3379,11 @@ async fn invoke_batch_skips_shared_gate_for_single_blocking_spawn() {
 }
 
 #[test]
-fn child_submit_bindings_are_unique_per_prepared_child_run() {
+fn child_submit_idempotency_keys_are_unique_per_prepared_child_run() {
     let parent_run_id = TurnRunId::new();
     let first_child = TurnRunId::new();
     let second_child = TurnRunId::new();
 
-    assert_ne!(
-        source_binding_ref(parent_run_id, first_child).unwrap(),
-        source_binding_ref(parent_run_id, second_child).unwrap()
-    );
-    assert_ne!(
-        reply_target_binding_ref(parent_run_id, first_child).unwrap(),
-        reply_target_binding_ref(parent_run_id, second_child).unwrap()
-    );
     assert_ne!(
         idempotency_key(parent_run_id, first_child).unwrap(),
         idempotency_key(parent_run_id, second_child).unwrap()

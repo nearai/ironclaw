@@ -1160,11 +1160,13 @@ mod tests {
                     max_checkpoint_bytes: 64 * 1024,
                     require_final_checkpoint: false,
                     allow_no_reply_completion: false,
+                    before_model_checkpoint_interval: 1,
                 },
                 resource_budget_policy: ResourceBudgetPolicy {
                     tier: ResourceBudgetTier::new("default_recovery_test_tier").expect("valid"),
                     max_model_calls: 32,
                     max_capability_invocations: 64,
+                    max_wall_clock_seconds: None,
                 },
                 personal_context_policy: ironclaw_loop_contracts::PersonalContextPolicy::Excluded,
                 runtime_constraints: RuntimeProfileConstraints {

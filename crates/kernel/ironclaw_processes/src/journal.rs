@@ -647,6 +647,20 @@ pub struct SubmitProcessRequest {
     pub metadata: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProcessSubmissionEdge {
+    Suspended { suspension: ProcessSuspension },
+    Completed,
+    Failed { failure: SanitizedFailure },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubmitProcessAtEdgeRequest {
+    pub submission: SubmitProcessRequest,
+    pub edge: ProcessSubmissionEdge,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubmitProcessWithCheckpointRequest {
     pub submission: SubmitProcessRequest,
@@ -880,10 +894,6 @@ pub struct ProcessGateRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_user_id: Option<UserId>,
     pub suspension: ProcessSuspension,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resume_source_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reply_target_ref: Option<String>,
     pub historical: bool,
 }
 
@@ -950,6 +960,11 @@ pub trait ProcessSubmissionPort: Send + Sync {
     async fn submit_process(
         &self,
         request: SubmitProcessRequest,
+    ) -> Result<JournaledProcessSnapshot, Self::Error>;
+
+    async fn submit_process_at_edge(
+        &self,
+        request: SubmitProcessAtEdgeRequest,
     ) -> Result<JournaledProcessSnapshot, Self::Error>;
 
     async fn submit_process_with_checkpoint(

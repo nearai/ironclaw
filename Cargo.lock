@@ -667,7 +667,7 @@ dependencies = [
  "aws-smithy-async",
  "aws-smithy-runtime-api",
  "aws-smithy-types",
- "h2 0.4.15",
+ "h2 0.4.16",
  "http 1.5.0",
  "hyper 1.11.0",
  "hyper-rustls 0.27.9",
@@ -3081,9 +3081,9 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.4.15"
+version = "0.4.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
+checksum = "a9f37a958b41b3b19ee2707c06439c0e9e547e847223eb791ecb0cb821c65e27"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -3346,7 +3346,7 @@ dependencies = [
  "bytes",
  "futures-channel",
  "futures-core",
- "h2 0.4.15",
+ "h2 0.4.16",
  "http 1.5.0",
  "http-body 1.1.0",
  "httparse",
@@ -3684,7 +3684,7 @@ checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 
 [[package]]
 name = "ironclaw"
-version = "1.1.0-rc.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3813,6 +3813,7 @@ dependencies = [
  "ironclaw_identity",
  "ironclaw_loop_contracts",
  "ironclaw_loop_host",
+ "ironclaw_memory",
  "ironclaw_outbound",
  "ironclaw_processes",
  "ironclaw_product_contracts",
@@ -4241,6 +4242,7 @@ dependencies = [
  "ironclaw_trust",
  "ironclaw_turns",
  "lru",
+ "percent-encoding",
  "proptest",
  "rand 0.10.2",
  "rust_decimal",
@@ -4395,6 +4397,7 @@ dependencies = [
  "tracing",
  "tracing-test",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4576,6 +4579,7 @@ dependencies = [
  "ironclaw_conversations",
  "ironclaw_event_log",
  "ironclaw_event_projections",
+ "ironclaw_event_store",
  "ironclaw_extension_contracts",
  "ironclaw_extension_host",
  "ironclaw_extension_manager",
@@ -4602,6 +4606,7 @@ dependencies = [
  "ironclaw_safety",
  "ironclaw_secrets",
  "ironclaw_slack_extension",
+ "ironclaw_stress",
  "ironclaw_telegram_extension",
  "ironclaw_threads",
  "ironclaw_trace_commons",
@@ -4669,6 +4674,7 @@ dependencies = [
  "hex",
  "insta",
  "ironclaw_common",
+ "ironclaw_host_api",
  "ironclaw_safety",
  "open",
  "proptest",
@@ -5137,17 +5143,22 @@ dependencies = [
 name = "ironclaw_stress"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "clap",
  "deadpool-postgres",
+ "ironclaw_auth",
+ "ironclaw_composition",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_libsql_runtime",
  "ironclaw_llm",
  "ironclaw_loop_contracts",
  "ironclaw_processes",
  "ironclaw_resources",
  "ironclaw_secrets",
  "ironclaw_threads",
+ "ironclaw_triggers",
  "ironclaw_turns",
  "libc",
  "libsql",
@@ -5155,8 +5166,10 @@ dependencies = [
  "rig-core",
  "rust_decimal",
  "rust_decimal_macros",
+ "secrecy",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tokio-postgres",
@@ -5198,6 +5211,7 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_llm",
  "ironclaw_safety",
  "ironclaw_threads",
  "serde",
@@ -7730,7 +7744,7 @@ dependencies = [
  "encoding_rs",
  "futures-core",
  "futures-util",
- "h2 0.4.15",
+ "h2 0.4.16",
  "http 1.5.0",
  "http-body 1.1.0",
  "http-body-util",

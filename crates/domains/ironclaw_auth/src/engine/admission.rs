@@ -56,7 +56,8 @@ impl ProtectedResourceMetadataFetch {
 /// that mediated egress may fetch after the resource document is validated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorizationServerMetadataFetch {
-    resource: ProtectedResourceMetadataFetch,
+    resource: HttpsEndpoint,
+    protected_resource_metadata_url: HttpsEndpoint,
     issuer: HttpsEndpoint,
     metadata_url: HttpsEndpoint,
 }
@@ -71,8 +72,36 @@ impl AuthorizationServerMetadataFetch {
     }
 }
 
+/// Match an admitted OAuth resource to its hosted-MCP transport endpoint.
+///
+/// RFC 9728 binds these values exactly. A small set of deployed MCP servers
+/// instead scopes the conventional `/mcp` transport to the queryless origin
+/// root. Accept only that one vendor-neutral compatibility shape; broader
+/// parent paths or query-bearing endpoints could widen a token audience.
+pub fn oauth_resource_matches_hosted_mcp_endpoint(
+    endpoint: &HttpsEndpoint,
+    resource: &HttpsEndpoint,
+) -> bool {
+    let exact_match = endpoint == resource;
+    let resource_text = resource.as_str();
+    let (Ok(endpoint), Ok(resource)) = (
+        url::Url::parse(endpoint.as_str()),
+        url::Url::parse(resource.as_str()),
+    ) else {
+        return false;
+    };
+    let canonical_origin_resource = endpoint.origin().ascii_serialization();
+    exact_match
+        || (endpoint.origin() == resource.origin()
+            && endpoint.path() == "/mcp"
+            && endpoint.query().is_none()
+            && resource.path() == "/"
+            && resource.query().is_none()
+            && resource_text == canonical_origin_resource)
+}
+
 /// An operator-managed client profile. It is usable only for its exact
-/// canonical resource and issuer, and carries handles rather than secrets.
+/// admitted OAuth resource and issuer, and carries handles rather than secrets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionClientProfile {
     pub id: String,
@@ -215,13 +244,16 @@ where
     }
 
     /// Validate the fetched RFC 9728 document and produce the only issuer
-    /// metadata URL that may be fetched next.
+    /// metadata URL that may be fetched next. Resource identity is exact apart
+    /// from the bounded conventional `/mcp`-to-origin compatibility shape.
     pub fn preflight_authorization_server(
         resource: ProtectedResourceMetadataFetch,
         metadata: &ProtectedResourceAdmissionMetadata,
     ) -> Result<AuthorizationServerMetadataFetch, AuthProductError> {
-        if metadata.resource.as_str() != resource.canonical_resource.as_str()
-            || metadata.authorization_servers.len() != 1
+        if !oauth_resource_matches_hosted_mcp_endpoint(
+            &resource.canonical_resource,
+            &metadata.resource,
+        ) || metadata.authorization_servers.len() != 1
         {
             return Err(AuthProductError::MalformedConfig);
         }
@@ -233,7 +265,8 @@ where
             malformed_config_from_host_api_error("authorization_server_metadata_url", error)
         })?;
         Ok(AuthorizationServerMetadataFetch {
-            resource,
+            resource: metadata.resource.clone(),
+            protected_resource_metadata_url: resource.metadata_url,
             issuer,
             metadata_url,
         })
@@ -244,11 +277,7 @@ where
         request: OAuthRecipeAdmissionRequest,
     ) -> Result<ResolvedVendorAuthRecipe, AuthProductError> {
         let issuer = request.authorization_server_fetch.issuer.as_str();
-        let canonical_resource = request
-            .authorization_server_fetch
-            .resource
-            .canonical_resource
-            .as_str();
+        let admitted_resource = request.authorization_server_fetch.resource.as_str();
         let expected_as_metadata = request.authorization_server_fetch.metadata_url.as_str();
         if request.authorization_server_metadata.issuer.as_str() != issuer {
             return Err(AuthProductError::MalformedConfig);
@@ -275,7 +304,7 @@ where
                     .resolve(&profile_id)
                     .await
                     .ok_or(AuthProductError::MalformedConfig)?;
-                if profile.resource.as_str() != canonical_resource
+                if profile.resource.as_str() != admitted_resource
                     || profile.issuer.as_str() != issuer
                 {
                     return Err(AuthProductError::MalformedConfig);
@@ -333,9 +362,11 @@ where
         Ok(ResolvedVendorAuthRecipe {
             vendor: request.vendor,
             recipe: VendorAuthRecipe::Oauth2Code(Box::new(recipe)),
-            token_exchange_resource: Some(canonical_resource.to_string()),
+            token_exchange_resource: Some(admitted_resource.to_string()),
             protected_resource_metadata_url: Some(
-                request.authorization_server_fetch.resource.metadata_url,
+                request
+                    .authorization_server_fetch
+                    .protected_resource_metadata_url,
             ),
         })
     }
@@ -679,6 +710,115 @@ mod tests {
         assert!(
             OAuthRecipeAdmission::<Profiles>::preflight_authorization_server(fetch, &metadata)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn hosted_mcp_resource_compatibility_is_limited_to_origin_scoped_mcp() {
+        let cases = [
+            (
+                "https://mcp.example.test/mcp",
+                "https://mcp.example.test/mcp",
+                true,
+            ),
+            (
+                "https://mcp.example.test/mcp",
+                "https://mcp.example.test",
+                true,
+            ),
+            (
+                "https://mcp.example.test/mcp",
+                "https://mcp.example.test/",
+                false,
+            ),
+            (
+                "https://mcp.example.test/mcp?tenant=one",
+                "https://mcp.example.test",
+                false,
+            ),
+            (
+                "https://mcp.example.test/team/mcp",
+                "https://mcp.example.test",
+                false,
+            ),
+            (
+                "https://mcp.example.test/mcp",
+                "https://mcp.example.test/team",
+                false,
+            ),
+            (
+                "https://mcp.example.test/mcp",
+                "https://other.example.test",
+                false,
+            ),
+            (
+                "https://mcp.example.test:8443/mcp",
+                "https://mcp.example.test",
+                false,
+            ),
+            (
+                "https://mcp.example.test/mcp",
+                "https://mcp.example.test?tenant=one",
+                false,
+            ),
+            (
+                "https://mcp.example.test/mcp",
+                "https://mcp.example.test/tenant/..",
+                false,
+            ),
+            (
+                "https://mcp.example.test/mcp",
+                "https://mcp.example.test/%2e",
+                false,
+            ),
+        ];
+
+        for (endpoint, resource, expected) in cases {
+            assert_eq!(
+                oauth_resource_matches_hosted_mcp_endpoint(&https(endpoint), &https(resource)),
+                expected,
+                "endpoint={endpoint}, resource={resource}"
+            );
+        }
+        assert!(
+            HttpsEndpoint::new("http://mcp.example.test/mcp").is_err(),
+            "non-HTTPS inputs cannot cross the typed matcher boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn origin_scoped_mcp_resource_is_preserved_as_the_token_resource() {
+        let challenge = McpAuthChallenge {
+            status: 401,
+            www_authenticate_metadata: vec![
+                McpAuthMetadataLocation::new(
+                    "https://mcp.example.test/.well-known/oauth-protected-resource",
+                )
+                .unwrap(),
+            ],
+            protected_resource_metadata: vec![],
+        };
+        let fetch = OAuthRecipeAdmission::<Profiles>::preflight_protected_resource(
+            "https://mcp.example.test/mcp",
+            &challenge,
+        )
+        .unwrap();
+        let metadata = ProtectedResourceAdmissionMetadata {
+            resource: https("https://mcp.example.test"),
+            authorization_servers: vec![https("https://auth.example.test")],
+        };
+        let authorization_server_fetch =
+            OAuthRecipeAdmission::<Profiles>::preflight_authorization_server(fetch, &metadata)
+                .expect("the conventional origin-scoped MCP resource admits");
+        let mut request = request();
+        request.authorization_server_fetch = authorization_server_fetch;
+
+        let admitted = admit(request)
+            .await
+            .expect("origin-scoped MCP resource produces an OAuth recipe");
+        assert_eq!(
+            admitted.token_exchange_resource.as_deref(),
+            Some("https://mcp.example.test")
         );
     }
     #[tokio::test]
@@ -1079,6 +1219,55 @@ mod tests {
             .admit(r)
             .await
             .unwrap();
+        let VendorAuthRecipe::Oauth2Code(recipe) = resolved.recipe else {
+            panic!("oauth recipe")
+        };
+        assert_eq!(
+            recipe.client_credentials.unwrap().client_id_handle.as_str(),
+            "client-id"
+        );
+    }
+
+    #[tokio::test]
+    async fn origin_scoped_resource_with_matching_client_profile_admits_handles() {
+        let challenge = McpAuthChallenge {
+            status: 401,
+            www_authenticate_metadata: vec![
+                McpAuthMetadataLocation::new(
+                    "https://mcp.example.test/.well-known/oauth-protected-resource",
+                )
+                .unwrap(),
+            ],
+            protected_resource_metadata: vec![],
+        };
+        let fetch = OAuthRecipeAdmission::<Profiles>::preflight_protected_resource(
+            "https://mcp.example.test/mcp",
+            &challenge,
+        )
+        .unwrap();
+        let metadata = ProtectedResourceAdmissionMetadata {
+            resource: https("https://mcp.example.test"),
+            authorization_servers: vec![https("https://auth.example.test")],
+        };
+        let mut request = request();
+        request.authorization_server_fetch =
+            OAuthRecipeAdmission::<Profiles>::preflight_authorization_server(fetch, &metadata)
+                .expect("origin-scoped resource admits");
+        request.client_profile_id = Some("known".into());
+        let profile = AdmissionClientProfile {
+            id: "known".into(),
+            resource: https("https://mcp.example.test"),
+            issuer: https("https://auth.example.test"),
+            credentials: RecipeClientCredentials {
+                client_id_handle: ironclaw_host_api::ids::SecretHandle::new("client-id").unwrap(),
+                client_secret_handle: None,
+            },
+        };
+
+        let resolved = OAuthRecipeAdmission::new(Profiles(Some(profile)))
+            .admit(request)
+            .await
+            .expect("profile bound to the admitted origin resource is accepted");
         let VendorAuthRecipe::Oauth2Code(recipe) = resolved.recipe else {
             panic!("oauth recipe")
         };

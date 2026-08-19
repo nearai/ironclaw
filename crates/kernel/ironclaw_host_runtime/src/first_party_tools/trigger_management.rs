@@ -52,7 +52,7 @@ pub const TRIGGER_RESUME_CAPABILITY_ID: &str = "builtin.trigger_resume";
 /// this trigger capability.
 const TRIGGER_LIST_DESCRIPTION: &str = "List the caller's scheduled routines \u{2014} the automations shown on the Automations page \u{2014} with each routine's state (scheduled, paused, or completed), schedule, next and last fire times, recent run history, and any active hold. This listing is the authoritative current state. Call this before answering any question about which routines or automations exist, and before saying one is running, paused, already set up, delivering results, or missing \u{2014} never report routine or automation status from conversation history or memory. An empty list means the caller has no routines: say exactly that instead of guessing.";
 
-const TRIGGER_CREATE_DESCRIPTION: &str = "Create a scheduled routine from a structured execution contract. Describe the full task each fire performs in execution_contract.goal, written for a future run with no memory of this conversation, and make completion observable with explicit success criteria, output instructions, and no-result text. A scheduled fire runs as the routine's owning user and may use the linked integration capabilities available to the owning user, subject to the user's current connection and permission settings. Write requested integration reads or user-authorized actions into execution_contract.goal explicitly. Where results go: a bare \"send me\" or \"notify me\" means the surface the user is asking from — never ask which channel. From a channel conversation, default to the channel this conversation is on: pick its target id from builtin__outbound_delivery_targets_list while the user is present and write delivery as an explicit goal step naming the destination by pinned id (e.g. \"then deliver the summary with builtin__outbound_deliver to chat:team-dm\" — never a description like \"my DM\" that a fire would have to look up). From the web app with no external destination named, there is no delivery step to write: the fire's final reply IS the delivery — it lands in the routine's own run thread automatically — so make output_instructions describe that reply and write no delivery step. Only when the user explicitly asks to be notified in the browser or on their devices does the catalog's browser-push target apply: pin its target id like any other destination. When the user names an external destination (\"send me this in my messaging app\", \"post it to the team channel\"), that IS a delivery step even from the web app: pin its target id the same way — reaching the user or anyone else on an external surface always goes through builtin__outbound_deliver with a pinned target id, never through integration messaging tools, which act as the user toward other people. Several destinations mean one delivery step each; a fire that makes no delivery call delivers nothing externally.";
+const TRIGGER_CREATE_DESCRIPTION: &str = "Create a scheduled routine from a structured execution contract. Describe the full task each fire performs in execution_contract.goal, written for a future run with no memory of this conversation, and make completion observable with explicit success criteria, output instructions, and no-result text. Derive execution_contract.policy.result_delivery from the user's wording: use suppress_when_nothing_to_report when the user says to notify only on a match, change, or actionable result; otherwise use deliver. A scheduled fire runs as the routine's owning user and may use the linked integration capabilities available to the owning user, subject to the user's current connection and permission settings. Write requested integration reads or user-authorized actions into execution_contract.goal explicitly. Where results go: a bare \"send me\" or \"notify me\" means the surface the user is asking from — never ask which channel. From a channel conversation, default to the channel this conversation is on: pick its target id from builtin__outbound_delivery_targets_list while the user is present and write delivery as an explicit goal step naming the destination by pinned id (e.g. \"then deliver the summary with builtin__outbound_deliver to chat:team-dm\" — never a description like \"my DM\" that a fire would have to look up). From the web app with no external destination named, there is no delivery step to write: the fire's final reply IS the delivery — it lands in the routine's own run thread automatically — so make output_instructions describe that reply and write no delivery step. Only when the user explicitly asks to be notified in the browser or on their devices does the catalog's browser-push target apply: pin its target id like any other destination. When the user names an external destination (\"send me this in my messaging app\", \"post it to the team channel\"), that IS a delivery step even from the web app: pin its target id the same way — reaching the user or anyone else on an external surface always goes through builtin__outbound_deliver with a pinned target id, never through integration messaging tools, which act as the user toward other people. Several destinations mean one delivery step each; a fire that makes no delivery call delivers nothing externally.";
 
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
@@ -424,36 +424,37 @@ async fn create_trigger(
     input: Value,
     now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
-    let input: TriggerCreateInput = TriggerCreateInput::deserialize(&input)
+    let parsed_input: TriggerCreateInput = TriggerCreateInput::deserialize(&input)
         .map_err(|error| trigger_create_shape_error(&input, error))?;
-    let schedule_kind = input.schedule.kind();
-    let schedule = input
+    require_explicit_result_delivery(&input)?;
+    let schedule_kind = parsed_input.schedule.kind();
+    let schedule = parsed_input
         .schedule
         .into_schedule()
         .map_err(|error| trigger_schedule_error(schedule_kind, error))?;
     let next_run_at = next_run_at_for_schedule(&schedule, now)
         .map_err(|error| trigger_next_run_error(schedule_kind, error))?;
-    input
+    parsed_input
         .execution_contract
         .validate()
         .map_err(trigger_record_error)?;
-    reject_forbidden_scheduled_capabilities(&input.execution_contract)?;
+    reject_forbidden_scheduled_capabilities(&parsed_input.execution_contract)?;
     create_hook
-        .validate_execution_policy(scope, &input.execution_contract.policy)
+        .validate_execution_policy(scope, &parsed_input.execution_contract.policy)
         .await
         .map_err(trigger_record_error)?;
-    let prompt = input.execution_contract.render_prompt();
+    let prompt = parsed_input.execution_contract.render_prompt();
     let record = TriggerRecord {
         trigger_id: TriggerId::new(),
         tenant_id: scope.tenant_id.clone(),
         creator_user_id: scope.user_id.clone(),
         agent_id: scope.agent_id.clone(),
         project_id: scope.project_id.clone(),
-        name: input.name,
+        name: parsed_input.name,
         source: TriggerSourceKind::Schedule,
         schedule,
         prompt,
-        execution_spec: Some(input.execution_contract),
+        execution_spec: Some(parsed_input.execution_contract),
         // Retired stored routing (spec §8): a routine delivers externally only
         // by calling `builtin.outbound_deliver` from its own prompt, so nothing
         // here ever seals a delivery route again. The field survives only to
@@ -489,6 +490,26 @@ async fn create_trigger(
     Ok(json!({
         "trigger": trigger_output(&record, &[], None),
     }))
+}
+
+fn require_explicit_result_delivery(input: &Value) -> Result<(), FirstPartyCapabilityError> {
+    let selection = input
+        .get("execution_contract")
+        .and_then(Value::as_object)
+        .and_then(|contract| contract.get("policy"))
+        .and_then(Value::as_object)
+        .and_then(|policy| policy.get("result_delivery"));
+    match selection {
+        Some(Value::String(_)) => Ok(()),
+        Some(_) => Err(invalid_trigger_input(vec![type_mismatch(
+            "execution_contract.policy.result_delivery",
+            "deliver or suppress_when_nothing_to_report",
+        )])),
+        None => Err(invalid_trigger_input(vec![
+            missing_required("execution_contract.policy.result_delivery")
+                .expected("deliver or suppress_when_nothing_to_report"),
+        ])),
+    }
 }
 
 fn reject_forbidden_scheduled_capabilities(
@@ -741,7 +762,17 @@ fn classify_trigger_create_shape(input: &Value) -> Vec<DispatchInputIssue> {
         None | Some(Value::Null) => {
             issues.push(missing_required("execution_contract").expected("object"));
         }
-        Some(Value::Object(_)) => {}
+        Some(Value::Object(contract)) => {
+            if let Some(Value::Object(policy)) = contract.get("policy")
+                && let Some(result_delivery) = policy.get("result_delivery")
+                && !result_delivery.is_string()
+            {
+                issues.push(type_mismatch(
+                    "execution_contract.policy.result_delivery",
+                    "deliver or suppress_when_nothing_to_report",
+                ));
+            }
+        }
         Some(_) => issues.push(type_mismatch("execution_contract", "object")),
     }
 

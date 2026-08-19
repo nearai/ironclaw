@@ -39,13 +39,20 @@ This crate is a product/API route surface, not a host runtime:
   `ProtectedRouteMount`. Which workflow gets which port, the builder order, the
   shared projection streamer, and "no LLM config means `/v1/models` stays
   fail-closed at 501" are this surface's own rules and belong to its owner.
-  Composition builds the port implementations (they name `ironclaw_threads` /
-  `ironclaw_turns` / `ironclaw_event_streams`, all on this crate's forbidden
-  list) and hands them over; it no longer knows the builder order.
+  Composition builds the port implementations (they name `ironclaw_turns` /
+  `ironclaw_event_streams`, on this crate's forbidden list) and hands them
+  over; it no longer knows the builder order.
 - Chat, Responses, and streaming paths route through the channel-neutral
   `ProductSurface` plus projection-reader/streamer ports rather than
   recreating v1 `/v1/chat/completions` LLM proxy behavior.
 - Do not execute client-supplied OpenAI tools as Reborn capabilities.
+- **BoundaryRule** forbids `ironclaw_turns`, `ironclaw_event_streams`, and
+  runtime/lane crates — which is why the projection adapters live in
+  composition and arrive as ports. `ironclaw_threads` is the one domain
+  carve-in: the prepared lane speaks the accept door's seed vocabulary and
+  runs the door's own `validate_prepared_seed_content` pre-reservation (one
+  authoritative validator, no mirrored bound); thread services still arrive
+  as ports, never a direct import.
 
 ## Opaque Refs and Idempotency
 
@@ -80,6 +87,13 @@ host wiring for `ironclaw serve` — since 2026-08-05 by filling in
 injected `OpenAiChatCompletionsWorkflow` handles Chat Completions create and
 optional projection-backed SSE streaming:
 
+- Every non-streaming request without declared client tools takes the
+  prepared-context door (`prepared_turn.rs`): the lane decision, message
+  mapping, and door validation all run BEFORE the idempotency reservation, so
+  a body the door would refuse never burns the caller's key. Requests that
+  declare live client tools, or that set `stream: true`, stay on the
+  conversation lane. The prepared-turn port is a required constructor
+  dependency of `OpenAiChatCompletionsWorkflow` — production always wires it.
 - `POST /v1/chat/completions` parses the OpenAI-compatible DTO, reserves an
   opaque `chatcmpl-*` ref with actor-scoped idempotency, and submits the user
   message through the channel-neutral `ProductSurface` service.

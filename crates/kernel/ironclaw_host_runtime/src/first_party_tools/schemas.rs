@@ -973,12 +973,18 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                                 "required_skills": {
                                     "type": "array", "maxItems": 8,
                                     "items": { "type": "string" }
+                                },
+                                "result_delivery": {
+                                    "type": "string",
+                                    "enum": ["deliver", "suppress_when_nothing_to_report"],
+                                    "description": "Derive this from the user's wording. Use suppress_when_nothing_to_report when the user asks to be notified only on a match, change, or actionable result; otherwise use deliver."
                                 }
                             },
+                            "required": ["result_delivery"],
                             "additionalProperties": false
                         }
                     },
-                    "required": ["version", "goal", "success_criteria", "output_instructions", "no_result_text"],
+                    "required": ["version", "goal", "success_criteria", "output_instructions", "no_result_text", "policy"],
                     "additionalProperties": false
                 },
                 "schedule": {
@@ -1222,6 +1228,28 @@ mod tests {
         assert_eq!(
             schema["required"],
             serde_json::json!(["name", "execution_contract", "schedule"])
+        );
+        assert_eq!(
+            schema["properties"]["execution_contract"]["required"],
+            serde_json::json!([
+                "version",
+                "goal",
+                "success_criteria",
+                "output_instructions",
+                "no_result_text",
+                "policy"
+            ])
+        );
+        assert_eq!(
+            schema["properties"]["execution_contract"]["properties"]["policy"]["required"],
+            serde_json::json!(["result_delivery"])
+        );
+        assert!(
+            schema["properties"]["execution_contract"]["properties"]["policy"]["properties"]
+                ["result_delivery"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("otherwise use deliver")),
+            "neutral wording must have the safe delivery fallback"
         );
         let goal_description =
             schema["properties"]["execution_contract"]["properties"]["goal"]["description"]

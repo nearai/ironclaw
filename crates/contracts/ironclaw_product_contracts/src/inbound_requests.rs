@@ -93,6 +93,38 @@ pub struct ProductSubmitTurnRequest {
     pub model: Option<String>,
 }
 
+/// Maximum UTF-8 bytes accepted for the client-owned generation action key.
+///
+/// The key identifies a caller retry of one generation request; it never
+/// authorizes a caller to choose a generation or bypass the durable lease.
+pub const SUGGESTIONS_CLIENT_ACTION_ID_MAX_BYTES: usize = 256;
+
+/// Request to begin or observe one idempotent suggestion generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RebornSuggestionsGenerateRequest {
+    pub client_action_id: String,
+}
+
+/// Empty input for the read-only suggestions list view.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RebornSuggestionsListRequest {}
+
+/// Product-surface request to start one persisted suggestion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RebornSuggestionStartRequest {
+    pub suggestion_id: String,
+}
+
+/// Product-surface request to soft-dismiss one persisted suggestion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RebornSuggestionDismissRequest {
+    pub suggestion_id: String,
+}
+
 /// Browser body for WebUI cancel-run mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ProductCancelRunRequest {

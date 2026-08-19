@@ -3,15 +3,14 @@ use std::collections::BTreeSet;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use ironclaw_host_api::decision::RuntimeCredentialAuthRequirement;
+use ironclaw_host_api::{decision::RuntimeCredentialAuthRequirement, output::OutputContract};
 
 use crate::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, CapabilityActivityId, EventCursor,
-    GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
-    RetryTurnRequest, RetryTurnResponse, SourceBindingRef, SubmitChildRunRequest,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActiveRunRefState, TurnAdmissionPolicy,
-    TurnCheckpointId, TurnError, TurnGateRef, TurnId, TurnLeaseToken, TurnRunId, TurnRunProfile,
-    TurnRunState, TurnRunnerId, TurnScope, TurnStatus, TurnTimestamp,
+    GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse,
+    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActiveRunRefState,
+    TurnAdmissionPolicy, TurnCheckpointId, TurnError, TurnGateRef, TurnId, TurnLeaseToken,
+    TurnRunId, TurnRunProfile, TurnRunState, TurnRunnerId, TurnScope, TurnStatus, TurnTimestamp,
 };
 use ironclaw_loop_contracts::{LoopModelRouteSnapshot, RunProfileResolver};
 
@@ -148,10 +147,13 @@ pub struct TurnRunRecord {
     pub turn_id: TurnId,
     pub scope: TurnScope,
     pub accepted_message_ref: AcceptedMessageRef,
-    pub source_binding_ref: SourceBindingRef,
-    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub status: TurnStatus,
     pub profile: TurnRunProfile,
+    /// Immutable terminal output contract admitted for this run. Legacy
+    /// records without the field deserialize as the assistant-message
+    /// contract.
+    #[serde(default, skip_serializing_if = "OutputContract::is_assistant_message")]
+    pub output_contract: OutputContract,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_model_route: Option<LoopModelRouteSnapshot>,
     /// Cumulative provider-reported token usage for this run's model calls,
@@ -159,6 +161,8 @@ pub struct TurnRunRecord {
     /// `resolved_model_route`; `None` when no usage was reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_usage: Option<ironclaw_loop_contracts::LoopModelUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_outcome: Option<crate::TurnExecutionOutcome>,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<TurnGateRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -206,8 +210,8 @@ pub struct SpawnTreeReservation {
 #[cfg(test)]
 mod tests {
     use crate::{
-        AcceptedMessageRef, EventCursor, GateResumeDisposition, ReplyTargetBindingRef,
-        SourceBindingRef, TurnRunId, TurnRunRecord, TurnScope, TurnStatus,
+        AcceptedMessageRef, EventCursor, GateResumeDisposition, TurnRunId, TurnRunRecord,
+        TurnScope, TurnStatus,
     };
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
 
@@ -234,12 +238,12 @@ mod tests {
             turn_id: crate::TurnId::new(),
             scope,
             accepted_message_ref: AcceptedMessageRef::new("accepted-store-test").unwrap(),
-            source_binding_ref: SourceBindingRef::new("source-store-test").unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-store-test").unwrap(),
             status: TurnStatus::Completed,
             profile,
+            output_contract: Default::default(),
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: None,
             checkpoint_id: None,
             gate_ref: None,
             blocked_activity_id: None,
@@ -307,6 +311,35 @@ mod tests {
             deserialized2.resume_disposition,
             Some(GateResumeDisposition::Denied),
             "resume_disposition must be Some(Denied) when legacy key auth_resume_disposition is present"
+        );
+    }
+
+    #[test]
+    fn legacy_turn_run_record_defaults_execution_outcome_to_none() {
+        let record = minimal_turn_run_record();
+        let mut json = serde_json::to_value(&record).expect("serialize turn run record");
+        let object = json
+            .as_object_mut()
+            .expect("turn run record must serialize to an object");
+        object.remove("execution_outcome");
+
+        let decoded: TurnRunRecord =
+            serde_json::from_value(json).expect("deserialize legacy turn run record");
+
+        assert_eq!(decoded.execution_outcome, None);
+    }
+
+    #[test]
+    fn legacy_turn_run_record_without_output_contract_defaults_to_assistant_message() {
+        let record = minimal_turn_run_record();
+        let mut wire = serde_json::to_value(record).expect("serialize run record");
+        wire.as_object_mut()
+            .expect("run record wire object")
+            .remove("output_contract");
+        let restored: TurnRunRecord = serde_json::from_value(wire).expect("restore run record");
+        assert_eq!(
+            restored.output_contract,
+            ironclaw_host_api::output::OutputContract::AssistantMessage
         );
     }
 }

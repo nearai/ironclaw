@@ -7,8 +7,8 @@ use ironclaw_auth::{
 };
 use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnStatus};
 use ironclaw_turns::{
-    GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
-    TurnCoordinator, TurnError, TurnErrorCategory,
+    GateResumeDisposition, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnError,
+    TurnErrorCategory,
 };
 
 use super::types::is_pending_auth_status;
@@ -167,14 +167,6 @@ impl DefaultAuthInteractionService {
         run_id: TurnRunId,
         resume_disposition: Option<GateResumeDisposition>,
     ) -> Result<ResolveAuthInteractionResponse, ProductSurfaceFailure> {
-        let state = self
-            .turn_coordinator
-            .get_run_state(GetRunStateRequest {
-                scope: request.scope.clone(),
-                run_id,
-            })
-            .await
-            .map_err(map_auth_resume_error)?;
         let response = self
             .turn_coordinator
             .resume_turn(ResumeTurnRequest {
@@ -183,8 +175,6 @@ impl DefaultAuthInteractionService {
                 run_id,
                 gate_resolution_ref: request.gate_ref,
                 precondition: ResumeTurnPrecondition::BlockedAuthGate,
-                source_binding_ref: state.source_binding_ref,
-                reply_target_binding_ref: state.reply_target_binding_ref,
                 idempotency_key: request.idempotency_key,
                 resume_disposition,
             })

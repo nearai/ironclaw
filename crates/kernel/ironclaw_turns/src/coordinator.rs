@@ -56,13 +56,20 @@ fn trace_coordinator_latency_error<E: ?Sized>(
 }
 
 use crate::{
-    AdmissionRejection, AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort, CancelRunRequest,
-    CancelRunResponse, EventCursor, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
-    RetryTurnRequest, RetryTurnResponse, SubmitChildRunRequest, SubmitTurnRequest,
-    SubmitTurnResponse, TurnCapacityResource, TurnError, TurnRunId, TurnRunState, TurnScope,
+    AdmissionRejection, AdmissionRejectionReason, AgentTurnRuntimePort,
+    AgentTurnSpawnTreeRuntimePort, CancelRunRequest, CancelRunResponse, EventCursor,
+    GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse,
+    RunProfileId, RunProfileRequest, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
+    TurnCapacityResource, TurnError, TurnOriginKind, TurnRunId, TurnRunState, TurnScope,
     TurnStatus, process_projection::AgentTurnProcessRuntime,
 };
-use ironclaw_loop_contracts::{InMemoryRunProfileResolver, RunProfileResolver};
+use ironclaw_host_api::prepared_context::{
+    PreparedContextSource, PreparedTurnDeclarations, TurnLimits,
+};
+use ironclaw_loop_contracts::{
+    InMemoryRunProfileResolver, ResolvedRunProfile, RunProfileResolutionError,
+    RunProfileResolutionRequest, RunProfileResolver,
+};
 
 pub trait TurnAdmissionPolicy: Send + Sync {
     fn check_submit(&self, request: &SubmitTurnRequest) -> Result<(), AdmissionRejection>;
@@ -160,6 +167,11 @@ pub struct DefaultTurnCoordinator<S: ?Sized> {
     run_profile_resolver: Arc<dyn RunProfileResolver>,
     wake_notifier: Arc<dyn TurnRunWakeNotifier>,
     process_runtime: Option<AgentTurnProcessRuntime>,
+    // Admission probe for prepared contexts. A submission carrying
+    // no binding refs must point at a prepared context (the probe answers
+    // with its journaled declarations) or it is rejected fail-closed — the
+    // guard against a conversation workflow silently losing its reply route.
+    prepared_context_source: Option<Arc<dyn PreparedContextSource>>,
     // Per-coordinator binding of run ids handed out by `prepare_turn` to the
     // scope they were prepared under. `submit_turn` consumes the reservation
     // when `requested_run_id` is set and rejects cross-scope submission so a
@@ -178,8 +190,16 @@ where
             run_profile_resolver: Arc::new(InMemoryRunProfileResolver::default()),
             wake_notifier: Arc::new(NoopTurnRunWakeNotifier),
             process_runtime: None,
+            prepared_context_source: None,
             prepared_run_id_scopes: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Wire the prepared context probe. Without it, every
+    /// submission with `None` binding refs is rejected at admission.
+    pub fn with_prepared_context_source(mut self, source: Arc<dyn PreparedContextSource>) -> Self {
+        self.prepared_context_source = Some(source);
+        self
     }
 
     pub fn with_admission_policy(mut self, policy: Arc<dyn TurnAdmissionPolicy>) -> Self {
@@ -217,6 +237,138 @@ where
         Ok(())
     }
 
+    /// Unbound-profile derivation (unbound-turn design §4.2): admission
+    /// derives the run profile from what the submitted thread holds. The
+    /// coordinator probes the thread's prepared-context record for submissions
+    /// that need unbound derivation. Explicit ordinary profiles and scheduled
+    /// triggers have an independent admission path and do not depend on this
+    /// optional source. A prepared declaration is the accepted turn's
+    /// immutable output contract and must not be lost regardless of the
+    /// resolved profile.
+    /// Prepared threads resolve the ordinary `unbound_default` profile when
+    /// no profile was supplied, regardless of output representation, and
+    /// their declared limits narrow the resolved budget. An explicit
+    /// `unbound_*` hint must match the prepared thread's derived profile
+    /// (fail-closed); other explicit profiles remain valid trusted product
+    /// paths.
+    async fn derive_unbound_submission(
+        &self,
+        mut request: SubmitTurnRequest,
+    ) -> Result<(SubmitTurnRequest, Option<PreparedTurnDeclarations>), TurnError> {
+        if let Some(output_contract) = &request.output_contract {
+            output_contract
+                .validate()
+                .map_err(|error| TurnError::InvalidRequest {
+                    reason: error.to_string(),
+                })?;
+        }
+        if request.parent_run_id.is_some() {
+            return Ok((request, None));
+        }
+        let hint_is_unbound = request
+            .requested_run_profile
+            .as_ref()
+            .is_some_and(|hint| RunProfileId::from_request(hint).is_unbound());
+        // Prepared-context lookup is authoritative for unbound admission, but
+        // it remains useful as a best-effort source of the immutable output
+        // contract on trusted profile paths. Explicit ordinary profiles and
+        // scheduled triggers must not become unavailable merely because the
+        // optional prepared-context store is absent or temporarily unhealthy.
+        let has_explicit_non_unbound_profile = request
+            .requested_run_profile
+            .as_ref()
+            .is_some_and(|hint| !RunProfileId::from_request(hint).is_unbound());
+        let is_scheduled_trigger = request
+            .product_context
+            .as_ref()
+            .is_some_and(|context| context.origin == TurnOriginKind::ScheduledTrigger);
+        let trusted_profile_path =
+            has_explicit_non_unbound_profile || (is_scheduled_trigger && !hint_is_unbound);
+        let Some(source) = &self.prepared_context_source else {
+            if hint_is_unbound {
+                // An explicit unbound hint without a wired probe cannot be
+                // validated against a prepared context: fail closed.
+                return Err(profile_rejected());
+            }
+            return Ok((request, None));
+        };
+        let declarations = match source
+            .read_declarations(
+                &request.scope,
+                &request.actor,
+                &request.accepted_message_ref,
+            )
+            .await
+        {
+            Ok(Some(declarations)) => declarations,
+            Ok(None) => {
+                if hint_is_unbound {
+                    // Unbound profiles exist only for prepared threads.
+                    return Err(profile_rejected());
+                }
+                return Ok((request, None));
+            }
+            Err(error) => {
+                // debug!, not warn!: background diagnostics stay off the REPL.
+                debug!(%error, "prepared-context read failed during admission");
+                if trusted_profile_path {
+                    return Ok((request, None));
+                }
+                return Err(TurnError::AdmissionRejected(AdmissionRejection::new(
+                    AdmissionRejectionReason::Unavailable,
+                )));
+            }
+        };
+        declarations
+            .output
+            .validate()
+            .map_err(|error| TurnError::InvalidRequest {
+                reason: error.to_string(),
+            })?;
+        // Output representation is a host-owned immutable contract, not a
+        // profile selector. Every new unbound submission uses the ordinary
+        // unbounded profile; legacy callers that explicitly name a profile
+        // are still handled by the explicit-profile branch above.
+        let derived = RunProfileId::unbound_default();
+        if let Some(caller_contract) = &request.output_contract
+            && caller_contract != &declarations.output
+        {
+            return Err(profile_rejected());
+        }
+        request.output_contract = Some(declarations.output.clone());
+        if trusted_profile_path {
+            // A trusted profile remains authoritative for the runtime lane;
+            // only carry the prepared declaration's immutable output contract
+            // (and its narrowing limits) across admission.
+            return Ok((request, Some(declarations)));
+        }
+        match &request.requested_run_profile {
+            None => {
+                request.requested_run_profile = Some(
+                    RunProfileRequest::new(derived.as_str())
+                        .map_err(|reason| TurnError::InvalidRequest { reason })?,
+                );
+            }
+            Some(hint) if hint.as_str() == derived.as_str() => {}
+            Some(hint)
+                if hint.as_str() == RunProfileId::unbound_structured().as_str()
+                    && declarations.output.is_structured_output() =>
+            {
+                // `unbound_structured` selected the retired synthetic result
+                // tool. Preserve compatibility for callers that still send
+                // the hint, but normalize execution onto the ordinary
+                // unbounded family: the immutable output contract now drives
+                // the host-owned post-loop finalizer independently of family.
+                request.requested_run_profile = Some(
+                    RunProfileRequest::new(derived.as_str())
+                        .map_err(|reason| TurnError::InvalidRequest { reason })?,
+                );
+            }
+            Some(_) => return Err(profile_rejected()),
+        }
+        Ok((request, Some(declarations)))
+    }
+
     fn consume_prepared_run_id(&self, run_id: TurnRunId) -> Option<TurnScope> {
         let mut prepared = match self.prepared_run_id_scopes.lock() {
             Ok(prepared) => prepared,
@@ -224,6 +376,49 @@ where
         };
         prepared.remove(&run_id)
     }
+}
+
+/// Per-submit resolver decorator that clamps the resolved profile's budget
+/// ceilings by the declared narrowing-only limits (unbound-turn design
+/// §4.2: limits narrow profile ceilings, never widen them).
+struct DeclaredLimitsNarrowingResolver<'a> {
+    inner: &'a dyn RunProfileResolver,
+    limits: TurnLimits,
+}
+
+#[async_trait]
+impl RunProfileResolver for DeclaredLimitsNarrowingResolver<'_> {
+    async fn resolve_run_profile(
+        &self,
+        request: RunProfileResolutionRequest,
+    ) -> Result<ResolvedRunProfile, RunProfileResolutionError> {
+        let mut resolved = self.inner.resolve_run_profile(request).await?;
+        if let Some(cap) = self.limits.max_model_calls {
+            resolved.resource_budget_policy.max_model_calls =
+                resolved.resource_budget_policy.max_model_calls.min(cap);
+        }
+        if let Some(cap) = self.limits.max_capability_invocations {
+            resolved.resource_budget_policy.max_capability_invocations = resolved
+                .resource_budget_policy
+                .max_capability_invocations
+                .min(cap);
+        }
+        if let Some(cap) = self.limits.max_wall_clock_seconds {
+            resolved.resource_budget_policy.max_wall_clock_seconds = Some(
+                resolved
+                    .resource_budget_policy
+                    .max_wall_clock_seconds
+                    .map_or(cap, |ceiling| ceiling.min(cap)),
+            );
+        }
+        Ok(resolved)
+    }
+}
+
+fn profile_rejected() -> TurnError {
+    TurnError::AdmissionRejected(AdmissionRejection::new(
+        AdmissionRejectionReason::ProfileRejected,
+    ))
 }
 
 fn wake_from(
@@ -320,24 +515,27 @@ where
         {
             return Err(TurnError::Unauthorized);
         }
+        let (request, declared_limits) = self.derive_unbound_submission(request).await?;
+        let narrowing_resolver = declared_limits
+            .filter(|declarations| !declarations.limits.is_unlimited())
+            .map(|declarations| DeclaredLimitsNarrowingResolver {
+                inner: self.run_profile_resolver.as_ref(),
+                limits: declarations.limits,
+            });
+        let resolver: &dyn RunProfileResolver = match &narrowing_resolver {
+            Some(narrowing) => narrowing,
+            None => self.run_profile_resolver.as_ref(),
+        };
         let scope = request.scope.clone();
         let response = match &self.process_runtime {
             Some(runtime) => {
                 runtime
-                    .submit_turn(
-                        request,
-                        self.admission_policy.as_ref(),
-                        self.run_profile_resolver.as_ref(),
-                    )
+                    .submit_turn(request, self.admission_policy.as_ref(), resolver)
                     .await
             }
             None => {
                 self.store
-                    .submit_turn(
-                        request,
-                        self.admission_policy.as_ref(),
-                        self.run_profile_resolver.as_ref(),
-                    )
+                    .submit_turn(request, self.admission_policy.as_ref(), resolver)
                     .await
             }
         };
@@ -619,5 +817,72 @@ where
         request: SubmitChildRunRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
         self.as_ref().submit_child_run(request).await
+    }
+}
+
+#[cfg(test)]
+mod declared_limits_tests {
+    use super::*;
+    use ironclaw_loop_contracts::{InMemoryRunProfileResolver, RunProfileResolutionRequest};
+
+    #[tokio::test]
+    async fn declared_limits_narrow_profile_ceilings_and_never_widen_them() {
+        let inner = InMemoryRunProfileResolver::default();
+        let baseline = inner
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("baseline profile");
+        let ceiling_calls = baseline.resource_budget_policy.max_model_calls;
+        let ceiling_invocations = baseline.resource_budget_policy.max_capability_invocations;
+        assert_eq!(
+            baseline.resource_budget_policy.max_wall_clock_seconds, None,
+            "the interactive profile declares no wall-clock ceiling"
+        );
+
+        // Narrowing: every declared limit below the ceiling binds; a
+        // wall-clock declaration binds even with no profile ceiling.
+        let resolver = DeclaredLimitsNarrowingResolver {
+            inner: &inner,
+            limits: TurnLimits {
+                max_model_calls: Some(ceiling_calls - 1),
+                max_capability_invocations: Some(ceiling_invocations + 1_000),
+                max_wall_clock_seconds: Some(60),
+            },
+        };
+        let narrowed = resolver
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("narrowed profile");
+        assert_eq!(
+            narrowed.resource_budget_policy.max_model_calls,
+            ceiling_calls - 1
+        );
+        assert_eq!(
+            narrowed.resource_budget_policy.max_capability_invocations, ceiling_invocations,
+            "a declared limit above the profile ceiling must not widen it"
+        );
+        assert_eq!(
+            narrowed.resource_budget_policy.max_wall_clock_seconds,
+            Some(60)
+        );
+
+        // A profile wall-clock ceiling is only ever shortened.
+        let resolver = DeclaredLimitsNarrowingResolver {
+            inner: &resolver,
+            limits: TurnLimits {
+                max_model_calls: None,
+                max_capability_invocations: None,
+                max_wall_clock_seconds: Some(3_600),
+            },
+        };
+        let twice_narrowed = resolver
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("twice-narrowed profile");
+        assert_eq!(
+            twice_narrowed.resource_budget_policy.max_wall_clock_seconds,
+            Some(60),
+            "a larger declared wall clock must not extend the narrowed ceiling"
+        );
     }
 }

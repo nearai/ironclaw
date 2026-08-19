@@ -135,6 +135,23 @@ the `tier_specific_installers_are_documented_as_loader_contract` test in
   `ironclaw_prompt_envelope` crate, which this crate already depends on).
 - A hook that demonstrates protocol violation (timeout, panic, malformed
   decision) gets its slot poisoned for the rest of the current turn run.
+- **The tier-specific installer *names* are load-bearing. Do not collapse the
+  trust-class x hook-point installers into one generic,
+  trust-class-parameterized installer.**
+  `composition_crate_installs_installed_tier_only_through_registrar`
+  (`crates/app/ironclaw_architecture_tests/tests/reborn_composition_boundaries.rs`)
+  is a *source-text* scan, not a type check: it asserts that
+  `ironclaw_composition` contains none of `install_installed_*`,
+  `install_observer(`, `insert_binding(`, or `HookTrustClass::Installed`.
+  Rename or delete one of those names and the assertion passes **vacuously** —
+  the registrar-only invariant stops being enforced with every test still
+  green. The test's own doc comment names the generic installer as the
+  evasion it exists to forbid. The `arch-exempt: too_many_args, needs
+  HookInstallContext aggregation, plan #4088` waivers in `dispatch/mod.rs`
+  apply **only** to the two already-generic installers (`install_observer`,
+  `install_event_triggered`), whose names the scan still matches after
+  aggregation — they are not license to flatten the tier-specific ones.
+  Re-verify: `cargo test -p ironclaw_architecture_tests --test reborn_composition_boundaries composition_crate_installs_installed_tier_only_through_registrar`
 
 ## Module layout
 

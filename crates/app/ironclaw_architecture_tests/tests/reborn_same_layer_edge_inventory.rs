@@ -636,6 +636,18 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         decided_in: "WS6",
     },
     SameLayerEdge {
+        // The prepared-context accept door seeds caller-supplied
+        // `AgentMessage` lists (and their tool-history parts) as transcript
+        // rows: `ironclaw_threads` consumes the canonical message vocabulary
+        // from its owner instead of minting a mirror DTO (unbound-turns
+        // design §4.4; mirror-DTO ban).
+        crate_name: "ironclaw_threads",
+        dependency_name: "ironclaw_llm",
+        layer: "substrates",
+        owner: "domains/",
+        decided_in: "unbound-turns (PR #7633)",
+    },
+    SameLayerEdge {
         crate_name: "ironclaw_triggers",
         dependency_name: "ironclaw_libsql_runtime",
         layer: "substrates",
@@ -728,7 +740,7 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
 /// `ironclaw_first_party_extension_ports` into `ironclaw_loop_host` removed the
 /// `loops` pair the two of them formed. No edge was re-plumbed and none was
 /// added: the crate's five workspace dependencies were already `loop_host`'s.
-const SAME_LAYER_EDGE_BASELINE: usize = 71;
+const SAME_LAYER_EDGE_BASELINE: usize = 72;
 
 /// Sanity floors for the metadata walk. A gate that scans nothing must never
 /// read as success; these are deliberately far below the live values (✎ **65**

@@ -456,19 +456,27 @@ impl LoopCapabilityPort for SyntheticCapabilityPort {
                 .register_synthetic_provider_tool_call(tool_call, activity_id)
                 .await;
         }
-        self.inner
-            .register_provider_tool_call(RegisterProviderToolCallRequest {
-                tool_call,
-                activity_id,
-            })
-            .await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(
+            self.inner
+                .register_provider_tool_call(RegisterProviderToolCallRequest {
+                    tool_call,
+                    activity_id,
+                }),
+        )
+        .await
     }
 
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let mut surface = self.inner.visible_capabilities(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let mut surface = Box::pin(self.inner.visible_capabilities(request)).await?;
         for capability_id in self.capabilities_by_id.keys() {
             if surface
                 .descriptors
@@ -502,7 +510,10 @@ impl LoopCapabilityPort for SyntheticCapabilityPort {
         request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         let Some(capability) = self.capabilities_by_id.get(&request.capability_id) else {
-            return self.inner.invoke_capability(request).await;
+            // Chain-boxing: each port delegation is boxed so the stacked
+            // decorator chain never compiles into a single oversized poll
+            // frame (see reborn_integration_model_recovery stack-overflow).
+            return Box::pin(self.inner.invoke_capability(request)).await;
         };
         let handler = Arc::clone(&capability.handler);
         if request.surface_version != self.current_surface_version()? {
@@ -597,7 +608,10 @@ impl LoopCapabilityPort for SyntheticCapabilityPort {
         let mut resolutions = Vec::new();
         let mut stopped_on_suspension = false;
         for invocation in request.invocations {
-            let resolution = self.invoke_capability(invocation).await?;
+            // Chain-boxing: each port delegation is boxed so the stacked
+            // decorator chain never compiles into a single oversized poll
+            // frame (see reborn_integration_model_recovery stack-overflow).
+            let resolution = Box::pin(self.invoke_capability(invocation)).await?;
             // `parks()` is the batch-stop predicate (gates + suspensions), the
             // Resolution-side successor to `CapabilityOutcome::is_suspension`.
             let parks = resolution.parks();

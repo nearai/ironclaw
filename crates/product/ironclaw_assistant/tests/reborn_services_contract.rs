@@ -23,6 +23,9 @@ use ironclaw_approvals::{
     ToolPermissionOverrideKey,
 };
 use ironclaw_assistant::EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID;
+use ironclaw_assistant::inspector_store::{
+    DiagnosticStoreError, DiagnosticStoreLimits, DiagnosticStorePort, InMemoryDiagnosticStore,
+};
 use ironclaw_assistant::{
     ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW, ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW,
     ADMIN_THREAD_SCRAPE_THREADS_VIEW, ADMIN_USER_DELETE_CAPABILITY_ID,
@@ -62,7 +65,7 @@ use ironclaw_assistant::{
     ProductCapabilityInvoker, ProductNewCommandInput, ProductNewCommandOutput,
     ProductStatusCommandInput, ProductSurfaceFailure, ProjectCaller, ProjectFilesystemReader,
     ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat,
-    RUN_ARTIFACT_VIEW, RebornAccountTracesResponse, RebornAddMemberRequest,
+    RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountTracesResponse, RebornAddMemberRequest,
     RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
     RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRequest,
     RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
@@ -126,8 +129,8 @@ use ironclaw_host_api::product_adapter::{
     ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_host_api::turn::{
-    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
-    SanitizedFailure, SourceBindingRef, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope,
+    AcceptedMessageRef, CapabilityActivityId, EventCursor, ReplyTargetBindingRef, RunProfileId,
+    RunProfileVersion, SanitizedFailure, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope,
     TurnStatus,
 };
 use ironclaw_host_api::{
@@ -153,6 +156,11 @@ use ironclaw_product_contracts::inbound_requests::{
     ProductCancelRunRequest, ProductCreateThreadRequest, ProductListAutomationsRequest,
     ProductListThreadsRequest, ProductRenameAutomationRequest, ProductResolveGateRequest,
     ProductRetryRunRequest, ProductSetupExtensionRequest, ProductSubmitTurnRequest,
+};
+use ironclaw_product_contracts::inspector::{
+    BoundedDiagnosticText, DiagnosticActivityEvent, DiagnosticCursor, DiagnosticModelCallId,
+    DiagnosticScope, DiagnosticSnapshot, DiagnosticUpdateBatch, InspectorModelCallStatus,
+    ModelCallDiagnostic, PromptDiagnostic, ToolExecutionDiagnostic,
 };
 use ironclaw_product_contracts::ironhub::{
     IRONHUB_DELIVER_INSTALL_COMMAND_ID, IronhubInstallDeliveryRequest,
@@ -591,14 +599,6 @@ impl FakeTurnCoordinator {
         self.run_state_requests.lock().expect("lock").len()
     }
 
-    fn last_resumption_source_binding_ref(&self) -> Option<String> {
-        self.resumptions
-            .lock()
-            .expect("lock")
-            .last()
-            .map(|request| request.source_binding_ref.as_str().to_string())
-    }
-
     fn last_resumption_precondition(&self) -> Option<ResumeTurnPrecondition> {
         self.resumptions
             .lock()
@@ -689,7 +689,6 @@ impl TurnCoordinator for FakeTurnCoordinator {
             resolved_run_profile_version: RunProfileVersion::new(1),
             event_cursor: EventCursor(7),
             accepted_message_ref: request.accepted_message_ref,
-            reply_target_binding_ref: request.reply_target_binding_ref,
         })
     }
 
@@ -759,14 +758,13 @@ impl TurnCoordinator for FakeTurnCoordinator {
             run_id,
             status,
             accepted_message_ref: AcceptedMessageRef::new("msg:replayed").expect("valid ref"),
-            source_binding_ref: SourceBindingRef::new("webui-src:replayed").expect("valid ref"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("webui-reply:replayed")
-                .expect("valid ref"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
+            output_contract: ironclaw_host_api::output::OutputContract::AssistantMessage,
             allow_steering: true,
             resolved_model_route: self.run_state_model_route.lock().expect("lock").clone(),
             model_usage: *self.run_state_usage.lock().expect("lock"),
+            execution_outcome: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref,
@@ -834,7 +832,6 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
             resolved_run_profile_version: RunProfileVersion::new(1),
             event_cursor: EventCursor(23),
             accepted_message_ref: request.accepted_message_ref,
-            reply_target_binding_ref: request.reply_target_binding_ref,
         })
     }
 
@@ -864,15 +861,13 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
             run_id: request.run_id,
             status: TurnStatus::Queued,
             accepted_message_ref: AcceptedMessageRef::new("msg:blocked-submit").expect("valid ref"),
-            source_binding_ref: SourceBindingRef::new("webui-src:blocked-submit")
-                .expect("valid ref"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("webui-reply:blocked-submit")
-                .expect("valid ref"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
+            output_contract: ironclaw_host_api::output::OutputContract::AssistantMessage,
             allow_steering: true,
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
@@ -5510,18 +5505,6 @@ async fn retry_run_uses_turn_service_and_stable_response() {
         retry.scope,
         caller().turn_scope(ThreadId::new("thread-alpha").expect("thread"))
     );
-    assert!(
-        retry
-            .source_binding_ref
-            .as_str()
-            .contains("webui-retry-src")
-    );
-    assert!(
-        retry
-            .reply_target_binding_ref
-            .as_str()
-            .contains("webui-retry-reply")
-    );
     assert_eq!(retry.idempotency_key.as_str(), "retry-1");
 }
 
@@ -5663,12 +5646,6 @@ async fn approved_gate_resolution_resumes_turn() {
     assert_eq!(
         coordinator.last_resumption_precondition(),
         Some(ResumeTurnPrecondition::AnyBlockedGate)
-    );
-    assert!(
-        coordinator
-            .last_resumption_source_binding_ref()
-            .expect("resume source binding")
-            .contains("gate-alpha")
     );
 }
 
@@ -8666,6 +8643,123 @@ async fn run_artifact_selects_one_owned_run_and_queries_only_its_scoped_logs() {
         Some(run_id.to_string().as_str())
     );
     assert_eq!(requests[0].limit, Some(500));
+
+    // The diagnostic store was never populated for this run: the export must
+    // still succeed, say so honestly, and keep the durable timestamp floor.
+    assert!(!artifact.timings.available);
+    assert_eq!(
+        artifact.timings.unavailable_reason.as_deref(),
+        Some("run_not_resident")
+    );
+    assert!(artifact.timings.iterations.is_empty());
+    assert!(
+        artifact
+            .messages
+            .iter()
+            .any(|message| message.created_at.is_some()),
+        "durable message timestamps must survive an absent diagnostic store"
+    );
+    assert_eq!(artifact.schema, RUN_ARTIFACT_SCHEMA);
+}
+
+/// A diagnostic store whose every method fails, standing in for a backend
+/// outage. The single guarantee under test: a user filing a bug report must
+/// always get a file, so a diagnostic-store failure must never fail the
+/// artifact export.
+#[derive(Default)]
+struct FailingDiagnosticStore;
+
+impl DiagnosticStorePort for FailingDiagnosticStore {
+    fn record_activity(
+        &self,
+        _scope: DiagnosticScope,
+        _event: DiagnosticActivityEvent,
+    ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
+        Err(DiagnosticStoreError::StateUnavailable)
+    }
+
+    fn snapshot(
+        &self,
+        _scope: &DiagnosticScope,
+    ) -> Result<Option<DiagnosticSnapshot>, DiagnosticStoreError> {
+        Err(DiagnosticStoreError::StateUnavailable)
+    }
+
+    fn prompt(
+        &self,
+        _scope: &DiagnosticScope,
+    ) -> Result<Option<PromptDiagnostic>, DiagnosticStoreError> {
+        Err(DiagnosticStoreError::StateUnavailable)
+    }
+
+    fn tool_execution(
+        &self,
+        _scope: &DiagnosticScope,
+        _activity_id: CapabilityActivityId,
+    ) -> Result<Option<ToolExecutionDiagnostic>, DiagnosticStoreError> {
+        Err(DiagnosticStoreError::StateUnavailable)
+    }
+
+    fn updates_after(
+        &self,
+        _scope: &DiagnosticScope,
+        _after: Option<DiagnosticCursor>,
+    ) -> Result<DiagnosticUpdateBatch, DiagnosticStoreError> {
+        Err(DiagnosticStoreError::StateUnavailable)
+    }
+}
+
+#[tokio::test]
+async fn run_artifact_reports_diagnostic_store_failure_without_failing_the_export() {
+    let owner = caller();
+    let thread_scope = thread_scope_for(&owner);
+    let thread_id = ThreadId::new("thread-artifact-store-failure").expect("thread id");
+    let run_id = TurnRunId::parse(&run_id_string()).expect("run id");
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: owner.user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+    seed_submitted_message(
+        &thread_service,
+        &thread_scope,
+        &thread_id,
+        &run_id,
+        "diagnostic store is down",
+    )
+    .await;
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_diagnostic_store(Arc::new(FailingDiagnosticStore));
+
+    let page = services
+        .query(
+            owner,
+            RebornViewQuery {
+                view_id: RUN_ARTIFACT_VIEW.id.to_string(),
+                params: serde_json::to_value(RebornRunArtifactRequest {
+                    thread_id: thread_id.to_string(),
+                    run_id: run_id.to_string(),
+                })
+                .expect("artifact params"),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("artifact export must succeed even when the diagnostic store errors");
+    let artifact: RebornRunArtifact =
+        serde_json::from_value(page.payload).expect("artifact payload");
+
+    assert!(!artifact.timings.available);
+    assert_eq!(
+        artifact.timings.unavailable_reason.as_deref(),
+        Some("diagnostic_store_unavailable")
+    );
 }
 
 #[tokio::test]
@@ -8792,6 +8886,120 @@ async fn thread_artifact_includes_all_owned_runs_and_queries_thread_scoped_logs(
     );
     assert_eq!(requests[0].run_id, None);
     assert_eq!(requests[0].limit, Some(500));
+}
+
+fn diagnostic_model_call(status: InspectorModelCallStatus) -> ModelCallDiagnostic {
+    ModelCallDiagnostic {
+        call_id: DiagnosticModelCallId::new(),
+        iteration: 1,
+        requested_model: BoundedDiagnosticText::label("test-model"),
+        effective_model: None,
+        started_at: Utc::now(),
+        completed_at: Some(Utc::now()),
+        duration_ms: Some(1),
+        status,
+        usage: None,
+        failure_summary: None,
+    }
+}
+
+/// A thread with two runs must expose one timing entry per run. The exact
+/// per-run wall-clock projection is pinned with deterministic timestamps in
+/// the `thread_artifact` unit test; this route test proves both entries survive
+/// the caller-owned export path.
+#[tokio::test]
+async fn thread_artifact_per_run_timings_do_not_reach_into_another_runs_activity() {
+    let owner = caller();
+    let thread_scope = thread_scope_for(&owner);
+    let thread_id = ThreadId::new("thread-multi-run-timings").expect("thread id");
+    let run_a = TurnRunId::parse(&run_id_string()).expect("run id");
+    let run_b = TurnRunId::new();
+    let run_c = TurnRunId::new();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: owner.user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+
+    seed_submitted_message(&thread_service, &thread_scope, &thread_id, &run_a, "run a").await;
+    seed_submitted_message(&thread_service, &thread_scope, &thread_id, &run_b, "run b").await;
+    seed_submitted_message(&thread_service, &thread_scope, &thread_id, &run_c, "run c").await;
+
+    let diagnostic_store =
+        InMemoryDiagnosticStore::new(DiagnosticStoreLimits::default()).expect("diagnostic store");
+    diagnostic_store
+        .record_model_call(
+            DiagnosticScope::new(
+                owner.tenant_id.clone(),
+                owner.user_id.clone(),
+                thread_id.clone(),
+                run_a,
+            ),
+            diagnostic_model_call(InspectorModelCallStatus::Succeeded),
+        )
+        .expect("run a model call recorded");
+    diagnostic_store
+        .record_model_call(
+            DiagnosticScope::new(
+                owner.tenant_id.clone(),
+                owner.user_id.clone(),
+                thread_id.clone(),
+                run_b,
+            ),
+            diagnostic_model_call(InspectorModelCallStatus::Succeeded),
+        )
+        .expect("run b model call recorded");
+
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_diagnostic_store(Arc::new(diagnostic_store));
+
+    let page = services
+        .query(
+            owner,
+            RebornViewQuery {
+                view_id: THREAD_ARTIFACT_VIEW.id.to_string(),
+                params: serde_json::to_value(RebornThreadArtifactRequest {
+                    thread_id: thread_id.to_string(),
+                })
+                .expect("artifact params"),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("thread artifact");
+    let artifact: RebornThreadArtifact =
+        serde_json::from_value(page.payload).expect("artifact payload");
+
+    assert_eq!(artifact.timings_by_run.len(), 3);
+    let run_a_timing = artifact
+        .timings_by_run
+        .iter()
+        .find(|entry| entry.run_id == run_a.to_string())
+        .expect("run a timing entry");
+    assert!(run_a_timing.timings.available);
+    assert!(run_a_timing.timings.totals.wall_clock_ms.is_some());
+    let run_b_timing = artifact
+        .timings_by_run
+        .iter()
+        .find(|entry| entry.run_id == run_b.to_string())
+        .expect("run b timing entry");
+    assert!(run_b_timing.timings.available);
+    let run_c_timing = artifact
+        .timings_by_run
+        .iter()
+        .find(|entry| entry.run_id == run_c.to_string())
+        .expect("run c timing entry");
+    assert!(!run_c_timing.timings.available);
+    assert_eq!(
+        run_c_timing.timings.unavailable_reason.as_deref(),
+        Some("run_not_resident")
+    );
 }
 
 #[tokio::test]

@@ -6,6 +6,7 @@ import {
   STATE_LABELS,
   STATE_TONES,
   authAccountNeedsReconnect,
+  authAccountNeedsScopeUpdate,
   authAccountReasonLabelKey,
   channelConnection,
   channelSurface,
@@ -254,4 +255,46 @@ test("authAccountReasonLabelKey maps every §6.3 last_error to a distinct i18n k
   // expiry copy rather than throwing or rendering `undefined`.
   assert.equal(authAccountReasonLabelKey({ state: "expired" }), "extensions.accountExpired");
   assert.equal(authAccountReasonLabelKey(null), "extensions.accountExpired");
+});
+
+// ---------------------------------------------------------------------------
+// #7660 — outdated-but-working grants offer an update, never setup_needed
+// ---------------------------------------------------------------------------
+
+function withAccount(account) {
+  return {
+    surfaces: [{ kind: "channel", inbound: true, outbound: true }],
+    auth_accounts: [{ vendor: "slack", accounts: [account] }],
+  };
+}
+
+test("a connected account with missing recipe scopes needs a scope update", () => {
+  assert.equal(
+    authAccountNeedsScopeUpdate(
+      withAccount({
+        account_id: "slack",
+        label: "Slack",
+        state: "connected",
+        missing_recipe_scopes: ["reactions:write"],
+        is_default: true,
+      }),
+    ),
+    true,
+  );
+});
+
+test("fully granted, absent, or broken accounts do not ask for a scope update", () => {
+  for (const account of [
+    { state: "connected", missing_recipe_scopes: [], is_default: true },
+    { state: "connected", is_default: true },
+    { state: "disconnected", missing_recipe_scopes: ["x"], last_error: "grant_revoked", is_default: true },
+    { state: "expired", missing_recipe_scopes: ["x"], is_default: true },
+  ]) {
+    assert.equal(
+      authAccountNeedsScopeUpdate(withAccount({ account_id: "slack", label: "Slack", ...account })),
+      false,
+      JSON.stringify(account),
+    );
+  }
+  assert.equal(authAccountNeedsScopeUpdate({ surfaces: [], auth_accounts: [] }), false);
 });

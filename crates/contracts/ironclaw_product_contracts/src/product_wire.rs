@@ -406,6 +406,56 @@ pub enum RebornSubmitTurnResponse {
     },
 }
 
+/// One active suggestion projected for any product surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSuggestion {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub suggested_prompt: String,
+    pub icon: String,
+    pub sources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+}
+
+/// The durable generation phase projected to product surfaces. The lease
+/// owner, storage errors, and model details remain internal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornSuggestionGenerationStatus {
+    Empty,
+    Generating,
+    Ready,
+    Failed,
+}
+
+/// One caller-scoped suggestion snapshot and its durable generation status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSuggestionsResponse {
+    pub status: RebornSuggestionGenerationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_seconds: Option<u32>,
+    pub suggestions: Vec<RebornSuggestion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSuggestionStartResponse {
+    pub suggestion_id: String,
+    pub thread_id: String,
+    pub run_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSuggestionDismissResponse {
+    pub suggestion_id: String,
+    pub dismissed: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornTimelineRequest {
     pub thread_id: String,

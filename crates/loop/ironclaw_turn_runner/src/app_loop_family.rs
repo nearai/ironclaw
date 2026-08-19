@@ -27,6 +27,8 @@ pub fn build_loop_family_registry_with_overrides(
     LoopFamilyRegistry::with_families(vec![
         Arc::new(default_family),
         Arc::new(families::subagent()),
+        Arc::new(families::unbound_default()),
+        Arc::new(families::unbound_structured()),
     ])
 }
 
@@ -42,12 +44,14 @@ mod tests {
 
         assert!(registry.get(&LoopFamilyId::DEFAULT).is_some());
         assert!(registry.get(&LoopFamilyId::SUBAGENT).is_some());
+        assert!(registry.get(&LoopFamilyId::UNBOUND_DEFAULT).is_some());
+        assert!(registry.get(&LoopFamilyId::UNBOUND_STRUCTURED).is_some());
         assert!(
             registry
                 .get(&LoopFamilyId::new("unknown").expect("valid test id"))
                 .is_none()
         );
-        assert_eq!(registry.ids().count(), 2);
+        assert_eq!(registry.ids().count(), 4);
     }
 
     #[test]

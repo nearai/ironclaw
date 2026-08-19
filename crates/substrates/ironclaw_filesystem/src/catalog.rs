@@ -384,6 +384,18 @@ impl RootFilesystem for CompositeRootFilesystem {
         self.matching_mount(path)?.backend.list_dir(path).await
     }
 
+    async fn list_dir_page(
+        &self,
+        path: &VirtualPath,
+        after: Option<&str>,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .list_dir_page(path, after, max_entries)
+            .await
+    }
+
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         self.matching_mount(path)?.backend.stat(path).await
     }

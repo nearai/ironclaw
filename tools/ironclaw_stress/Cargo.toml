@@ -2,6 +2,7 @@
 name = "ironclaw_stress"
 version = "0.1.0"
 edition = "2024"
+default-run = "ironclaw_stress"
 rust-version = "1.92"
 description = "Stress suite for IronClaw infrastructure bottleneck discovery"
 authors = ["NEAR AI <support@near.ai>"]
@@ -14,6 +15,7 @@ publish = false
 layer = "app"
 
 [dependencies]
+async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 deadpool-postgres = "0.14"
@@ -40,3 +42,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 rig = { package = "rig-core", version = "0.33" }
+ironclaw_auth = { path = "../../crates/domains/ironclaw_auth" }
+ironclaw_composition = { path = "../../crates/app/ironclaw_composition", features = ["test-support"] }
+ironclaw_libsql_runtime = { path = "../../crates/substrates/ironclaw_libsql_runtime" }
+ironclaw_triggers = { path = "../../crates/domains/ironclaw_triggers" }
+secrecy = "0.10"
+tempfile = "3"
