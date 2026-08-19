@@ -945,6 +945,13 @@ impl AgentTurnRuntimePort for StaticAgentTurnRuntime {
 
 #[async_trait]
 impl AgentTurnSpawnTreeRuntimePort for StaticAgentTurnRuntime {
+    async fn recent_runs_for_thread(
+        &self,
+        _scope: &TurnScope,
+        _limit: u32,
+    ) -> Result<Vec<TurnRunRecord>, TurnError> {
+        Ok(Vec::new())
+    }
     async fn submit_child_turn(
         &self,
         _request: ironclaw_turns::SubmitChildRunRequest,

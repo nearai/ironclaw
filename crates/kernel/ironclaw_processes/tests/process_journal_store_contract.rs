@@ -4154,3 +4154,98 @@ fn in_memory_backed_processes_filesystem() -> std::sync::Arc<ScopedFilesystem<In
         mounts,
     ))
 }
+
+/// The derived activation-streak caps read a bounded, newest-first window of a
+/// thread's own agent-turn runs. Two properties are load-bearing and both are
+/// asserted here: ordering must be newest-first (an ascending read returns the
+/// wrong end of history, so a saturated streak would look empty), and the limit
+/// must bound *agent-turn* rows specifically — a thread's scope also holds
+/// non-agent-turn processes, so a naive LIMIT over the scope index can be
+/// filled entirely by rows the cap does not count.
+#[tokio::test]
+async fn recent_agent_turn_snapshots_are_newest_first_and_bounded_by_agent_turn_rows() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    let scope = scope();
+
+    // Interleave agent-turn runs with internal processes in the same scope so
+    // a kind-blind limit would come back short (or empty).
+    let mut agent_turn_ids = Vec::new();
+    for _ in 0..5 {
+        let agent_turn = ProcessId::new();
+        submit_agent_turn_process(&store, &scope, agent_turn).await;
+        agent_turn_ids.push(agent_turn);
+        submit_internal_process(&store, &scope, ProcessId::new()).await;
+    }
+
+    let recent = store
+        .recent_agent_turn_snapshots(&scope, 3)
+        .await
+        .expect("bounded recent read");
+
+    assert_eq!(
+        recent.len(),
+        3,
+        "the limit must bound agent-turn rows, not rows of any kind"
+    );
+    assert!(
+        recent
+            .iter()
+            .all(|snapshot| snapshot.process_kind == ProcessKind::AgentTurn),
+        "non-agent-turn processes in the same scope must never be returned"
+    );
+
+    let returned: Vec<_> = recent.iter().map(|snapshot| snapshot.process_id).collect();
+    let expected: Vec<_> = agent_turn_ids.iter().rev().take(3).copied().collect();
+    assert_eq!(
+        returned, expected,
+        "must return the newest agent-turn processes, newest first"
+    );
+}
+
+/// A limit larger than the history returns everything without error — the
+/// young-thread case the streak cap reads as "streak not established".
+#[tokio::test]
+async fn recent_agent_turn_snapshots_returns_a_short_window_for_a_young_thread() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    let scope = scope();
+
+    submit_agent_turn_process(&store, &scope, ProcessId::new()).await;
+    submit_agent_turn_process(&store, &scope, ProcessId::new()).await;
+
+    let recent = store
+        .recent_agent_turn_snapshots(&scope, 16)
+        .await
+        .expect("bounded recent read");
+
+    assert_eq!(recent.len(), 2);
+}
+
+async fn submit_agent_turn_process<F>(
+    store: &ProcessJournalStore<F>,
+    scope: &ResourceScope,
+    process_id: ProcessId,
+) -> ironclaw_processes::JournaledProcessSnapshot
+where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    store
+        .submit_process(SubmitProcessRequest {
+            process_id,
+            process_kind: ProcessKind::AgentTurn,
+            scope: scope.clone(),
+            exclusive_within_scope: false,
+            operation_id: None,
+            owner_user_id: Some(scope.user_id.clone()),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("agent-turn process submits")
+}

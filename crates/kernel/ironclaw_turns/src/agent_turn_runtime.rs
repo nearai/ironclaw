@@ -91,6 +91,18 @@ pub trait AgentTurnSpawnTreeRuntimePort: AgentTurnRuntimePort {
         run_id: TurnRunId,
     ) -> Result<Vec<TurnRunRecord>, TurnError>;
 
+    /// The newest `limit` agent-turn runs on this exact thread scope, newest
+    /// first.
+    ///
+    /// Bounded by construction: the derived activation-streak caps read a
+    /// fixed window of recent runs instead of keeping a stored counter, so
+    /// this must never enumerate a thread's whole history.
+    async fn recent_runs_for_thread(
+        &self,
+        scope: &TurnScope,
+        limit: u32,
+    ) -> Result<Vec<TurnRunRecord>, TurnError>;
+
     /// Return a run record only when it belongs to the supplied exact scope.
     async fn get_run_record(
         &self,

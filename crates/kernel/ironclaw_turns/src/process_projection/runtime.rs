@@ -690,6 +690,19 @@ impl crate::AgentTurnSpawnTreeRuntimePort for AgentTurnProcessRuntime {
         .await
     }
 
+    async fn recent_runs_for_thread(
+        &self,
+        scope: &TurnScope,
+        limit: u32,
+    ) -> Result<Vec<TurnRunRecord>, TurnError> {
+        self.snapshots
+            .recent_agent_turn_snapshots(&scope.to_resource_scope(), limit)
+            .await?
+            .into_iter()
+            .map(turn_run_record_from_process_snapshot)
+            .collect()
+    }
+
     async fn children_of(
         &self,
         scope: &TurnScope,
