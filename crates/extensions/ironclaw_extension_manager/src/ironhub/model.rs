@@ -97,7 +97,8 @@ pub(crate) struct IronHubToolEntry {
     #[serde(default)]
     pub(crate) provenance: IronHubProvenance,
     pub(crate) wasm: IronHubArtifact,
-    pub(crate) capabilities: IronHubArtifact,
+    #[serde(default)]
+    pub(crate) capabilities: Option<IronHubArtifact>,
     /// The extension manifest the registry published for this tool.
     ///
     /// Optional so a catalog predating published manifests still deserializes

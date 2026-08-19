@@ -256,7 +256,7 @@ async fn install_rejects_catalog_tools_that_predate_published_extension_manifest
             description: "stale catalog entry".to_string(),
             provenance: IronHubProvenance::Official,
             wasm: artifact.clone(),
-            capabilities: artifact,
+            capabilities: Some(artifact),
             manifest: None,
             schemas: std::collections::BTreeMap::new(),
             prompts: std::collections::BTreeMap::new(),
@@ -775,7 +775,7 @@ fn catalog_validation_covers_published_tool_assets_and_origin_boundaries() {
         description: "fixture".to_string(),
         provenance: IronHubProvenance::Official,
         wasm: artifact("https://hub.ironclaw.com/fixture.wasm"),
-        capabilities: artifact("https://hub.ironclaw.com/capabilities.json"),
+        capabilities: Some(artifact("https://hub.ironclaw.com/capabilities.json")),
         manifest: Some(artifact("https://hub.ironclaw.com/manifest.toml")),
         schemas: std::collections::BTreeMap::from([(
             "schemas/input.json".to_string(),

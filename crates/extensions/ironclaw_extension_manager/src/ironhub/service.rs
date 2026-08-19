@@ -375,13 +375,17 @@ impl IronHubService {
                 let wasm = self
                     .download_verified(&entry.wasm, MAX_WASM_BYTES, private_origin.as_ref())
                     .await?;
-                let capabilities = self
-                    .download_verified(
-                        &entry.capabilities,
-                        MAX_METADATA_BYTES,
-                        private_origin.as_ref(),
-                    )
-                    .await?;
+                let capabilities = match &entry.capabilities {
+                    Some(artifact) => Some(
+                        self.download_verified(
+                            artifact,
+                            MAX_METADATA_BYTES,
+                            private_origin.as_ref(),
+                        )
+                        .await?,
+                    ),
+                    None => None,
+                };
                 let mut schemas = Vec::with_capacity(entry.schemas.len());
                 for (path, artifact) in &entry.schemas {
                     let content = self
@@ -648,7 +652,7 @@ impl IronHubService {
             url: url.to_string(),
             headers: Vec::new(),
             body: Vec::new(),
-            network_policy: network_policy_for_url_from_origin(url, max_bytes, origin)?,
+            network_policy: network_policy_for_url_from_origin(url, origin)?,
             credential_injections: Vec::new(),
             response_body_limit: Some(max_bytes),
             save_body_to: None,

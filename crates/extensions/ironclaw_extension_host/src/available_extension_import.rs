@@ -6,7 +6,10 @@ use ironclaw_extension_registry::{
     ExtensionManifestRecord, ExtensionPackage, ExtensionRuntimeV2, ManifestSource,
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
-use ironclaw_host_api::{ids::ExtensionId, path::VirtualPath, runtime::RuntimeKind};
+use ironclaw_host_api::{
+    ids::ExtensionId, messaging::resolve_standard_schema_ref, path::VirtualPath,
+    runtime::RuntimeKind,
+};
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::package_lifecycle::{
     LifecycleExtensionOnboarding, LifecyclePackageKind, LifecyclePackageRef,
@@ -394,9 +397,15 @@ fn manifest_declared_asset_paths(
         declared.push(module.clone());
     }
     for capability in &manifest.capabilities {
-        declared.push(capability.input_schema_ref.as_str().to_string());
+        let input_schema_ref = capability.input_schema_ref.as_str();
+        if resolve_standard_schema_ref(input_schema_ref).is_none() {
+            declared.push(input_schema_ref.to_string());
+        }
         if let Some(output_schema_ref) = &capability.output_schema_ref {
-            declared.push(output_schema_ref.as_str().to_string());
+            let output_schema_ref = output_schema_ref.as_str();
+            if resolve_standard_schema_ref(output_schema_ref).is_none() {
+                declared.push(output_schema_ref.to_string());
+            }
         }
         if let Some(prompt_doc_ref) = &capability.prompt_doc_ref {
             declared.push(prompt_doc_ref.as_str().to_string());

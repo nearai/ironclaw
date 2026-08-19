@@ -14,8 +14,12 @@ pub(super) fn map_ironhub_link_error(error: IronhubLinkError) -> ProductSurfaceE
         | IronhubLinkError::Replay => {
             ProductSurfaceError::from_status(ProductSurfaceErrorCode::Forbidden, 403, false)
         }
-        IronhubLinkError::Install { .. } => ProductSurfaceError::internal_invariant(),
-        IronhubLinkError::InvalidInput { .. } => {
+        IronhubLinkError::Install { reason } => {
+            tracing::error!(%reason, "ironhub link install failed");
+            ProductSurfaceError::internal_invariant()
+        }
+        IronhubLinkError::InvalidInput { reason } => {
+            tracing::debug!(%reason, "ironhub link request rejected");
             ProductSurfaceError::validation("input", ProductSurfaceValidationCode::InvalidValue)
         }
         IronhubLinkError::Unavailable => ProductSurfaceError::service_unavailable(false),

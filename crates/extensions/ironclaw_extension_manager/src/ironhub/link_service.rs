@@ -540,9 +540,12 @@ fn map_install_error(error: IronHubCommandError) -> IronhubLinkError {
             reason: "runtime HTTP egress is unavailable".to_string(),
         },
         IronHubCommandError::Install { reason } => IronhubLinkError::Install { reason },
-        IronHubCommandError::Product(_) => IronhubLinkError::Install {
-            reason: "extension lifecycle failed".to_string(),
-        },
+        IronHubCommandError::Product(failure) => {
+            tracing::error!(%failure, "ironhub install failed in extension lifecycle");
+            IronhubLinkError::Install {
+                reason: "extension lifecycle failed".to_string(),
+            }
+        }
     }
 }
 

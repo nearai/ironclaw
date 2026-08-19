@@ -208,10 +208,12 @@ pub(crate) fn compact_skill_summary(entry: &IronHubSkillEntry) -> IronHubEntrySu
 }
 
 pub(crate) fn tool_artifact_digest(entry: &IronHubToolEntry) -> String {
-    let mut digest_material = format!(
-        "wasm:{}\0capabilities:{}\0",
-        entry.wasm.sha256, entry.capabilities.sha256
-    );
+    let mut digest_material = format!("wasm:{}\0", entry.wasm.sha256);
+    if let Some(capabilities) = &entry.capabilities {
+        digest_material.push_str("capabilities:");
+        digest_material.push_str(&capabilities.sha256);
+        digest_material.push('\0');
+    }
     if let Some(manifest) = &entry.manifest {
         digest_material.push_str("manifest:");
         digest_material.push_str(&manifest.sha256);
@@ -304,7 +306,9 @@ fn validate_manifest_artifacts(
     for entry in &manifest.tools {
         validate_hub_name(&entry.name)?;
         validate_artifact_for_origin(&entry.wasm, MAX_WASM_BYTES, origin)?;
-        validate_artifact_for_origin(&entry.capabilities, MAX_METADATA_BYTES, origin)?;
+        if let Some(capabilities) = &entry.capabilities {
+            validate_artifact_for_origin(capabilities, MAX_METADATA_BYTES, origin)?;
+        }
         if let Some(extension_manifest) = &entry.manifest {
             validate_artifact_for_origin(extension_manifest, MAX_METADATA_BYTES, origin)?;
         }
@@ -453,9 +457,10 @@ fn validate_artifact_url_for_origin(
     Ok(())
 }
 
+const MAX_ARTIFACT_REQUEST_BYTES: u64 = 8 * 1024;
+
 pub(crate) fn network_policy_for_url_from_origin(
     value: &str,
-    max_bytes: u64,
     origin: Option<&CatalogOrigin>,
 ) -> Result<NetworkPolicy, IronHubCommandError> {
     validate_artifact_url_for_origin("download", "url", value, origin)?;
@@ -471,7 +476,7 @@ pub(crate) fn network_policy_for_url_from_origin(
             port: parsed.port(),
         }],
         deny_private_ip_ranges: true,
-        max_egress_bytes: Some(max_bytes),
+        max_egress_bytes: Some(MAX_ARTIFACT_REQUEST_BYTES),
     })
 }
 
