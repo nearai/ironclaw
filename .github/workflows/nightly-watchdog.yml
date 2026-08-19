@@ -28,6 +28,7 @@ jobs:
   check-nightly:
     name: Check ${{ matrix.workflow }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:

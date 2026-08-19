@@ -84,6 +84,7 @@ jobs:
   changes:
     name: Detect Reborn test scope
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       plan_mode: ${{ steps.plan.outputs.plan_mode }}
       run_crate_tests: ${{ steps.plan.outputs.run_crate_tests }}
@@ -1135,6 +1136,7 @@ jobs:
   reborn-tests:
     name: Tests (Reborn)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: always()
     needs:
       - changes

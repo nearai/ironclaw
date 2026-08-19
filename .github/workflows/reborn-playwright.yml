@@ -16,6 +16,7 @@ jobs:
   matrix-config:
     name: Configure Reborn Playwright matrix
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
     steps:
@@ -165,6 +166,7 @@ jobs:
   reborn-playwright:
     name: Reborn Playwright
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: always()
     needs: [test]
     steps:

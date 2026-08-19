@@ -88,6 +88,7 @@ jobs:
   changes:
     name: Detect Reborn E2E scope
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       has_e2e_scope: ${{ steps.non_diff.outputs.has_e2e_scope || steps.diff.outputs.has_e2e_scope }}
     steps:
@@ -639,6 +640,7 @@ jobs:
   reborn-e2e:
     name: Reborn E2E
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: always()
     needs:
       - changes
