@@ -475,7 +475,11 @@ jobs:
 
       - name: Install Playwright browser
         if: matrix.kind == 'browser'
-        run: playwright install --with-deps chromium
+        # `playwright install --with-deps` shells out to apt as root, so it
+        # inherits the same stall-forever failure as the mold/clang step. The
+        # cache above covers only the browser tarball -- a cache hit still runs
+        # the apt transaction -- so bound the whole thing.
+        run: timeout --signal=INT --kill-after=30s 8m playwright install --with-deps chromium
 
       - name: Checkout pinned Emulate fork
         if: matrix.kind == 'provider'
