@@ -115,7 +115,7 @@ where
             let timings = self.artifact_timings(
                 &caller,
                 &thread_id,
-                &run_id,
+                run_id,
                 origin,
                 run_messages.iter().copied(),
             );
