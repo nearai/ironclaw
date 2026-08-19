@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React from "react";
 import {
+  archiveNotification,
   listThreads,
   listNotifications,
   markAllNotificationsRead,
@@ -35,6 +36,49 @@ function notificationOptions(options) {
 
 function notificationQueryData(value) {
   return value;
+}
+
+/* Optimistic cache transform shared by mark-read and archive: a read record
+ * stays in the list, an archived one leaves it, and both drop out of the badge
+ * only when they were still unread — so a repeated or concurrent call cannot
+ * drive the count below the real one. */
+function inboxCacheAfter(current, notificationId, archive) {
+  const notifications = current?.inbox?.notifications || [];
+  const unreadCount = Number(current?.inbox?.unread_count || 0);
+  const wasUnread = notifications.some(
+    (notification) => notification.id === notificationId && !notification.read_at,
+  );
+  return {
+    ...current,
+    inbox: {
+      ...current?.inbox,
+      unread_count: wasUnread ? Math.max(0, unreadCount - 1) : unreadCount,
+      notifications: archive
+        ? notifications.filter((notification) => notification.id !== notificationId)
+        : notifications.map((notification) =>
+            notification.id === notificationId && !notification.read_at
+              ? { ...notification, read_at: new Date().toISOString() }
+              : notification,
+          ),
+    },
+  };
+}
+
+function optimisticHandlers(queryClient, queryKey, archive) {
+  return {
+    onMutate: async (notificationId) => {
+      await queryClient.cancelQueries({ queryKey });
+      const previous = notificationQueryData(queryClient.getQueryData(queryKey));
+      queryClient.setQueryData(queryKey, (value) =>
+        inboxCacheAfter(notificationQueryData(value), notificationId, archive),
+      );
+      return { previous };
+    },
+    onError: (_error, _notificationId, context) => {
+      if (context?.previous) queryClient.setQueryData(queryKey, context.previous);
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey }),
+  };
 }
 
 export function useNotifications(options = {}) {
@@ -135,42 +179,17 @@ export function useNotifications(options = {}) {
 
   const markRead = useMutation({
     mutationFn: markNotificationRead,
-    onMutate: async (notificationId) => {
-      await queryClient.cancelQueries({ queryKey });
-      const previous = notificationQueryData(queryClient.getQueryData(queryKey));
-      queryClient.setQueryData(queryKey, (value) => {
-        const current = notificationQueryData(value);
-        const notifications = current?.inbox?.notifications || [];
-        const unreadCount = Number(current?.inbox?.unread_count || 0);
-        // Decrement only for a record that is still unread, so a repeated or
-        // concurrent mark-read cannot drive the badge below the real count.
-        const wasUnread = notifications.some(
-          (notification) => notification.id === notificationId && !notification.read_at,
-        );
-        return {
-          ...current,
-          inbox: {
-            ...current?.inbox,
-            unread_count: wasUnread ? Math.max(0, unreadCount - 1) : unreadCount,
-            notifications: notifications.map((notification) =>
-              notification.id === notificationId && !notification.read_at
-                ? { ...notification, read_at: new Date().toISOString() }
-                : notification,
-            ),
-          },
-        };
-      });
-      return { previous };
-    },
-    onError: (_error, _notificationId, context) => {
-      if (context?.previous) queryClient.setQueryData(queryKey, context.previous);
-    },
-    onSettled: () => queryClient.invalidateQueries({ queryKey }),
+    ...optimisticHandlers(queryClient, queryKey, false),
   });
 
   const markAllReadMutation = useMutation({
     mutationFn: markAllNotificationsRead,
     onSuccess: () => queryClient.invalidateQueries({ queryKey }),
+  });
+
+  const archiveMutation = useMutation({
+    mutationFn: archiveNotification,
+    ...optimisticHandlers(queryClient, queryKey, true),
   });
 
   const markCompatibilitySeen = React.useCallback(
@@ -194,6 +213,18 @@ export function useNotifications(options = {}) {
       }
     },
     [markCompatibilitySeen, markRead, messages, scope, unreadIds],
+  );
+
+  const archiveMessage = React.useCallback(
+    (messageId) => {
+      // Only durable records exist server-side. The compatibility rows are
+      // derived from threads needing approval, so there is nothing to archive
+      // and the request would 404.
+      const message = messages.find((candidate) => candidate.id === messageId);
+      if (!message?.durable) return;
+      archiveMutation.mutate(messageId);
+    },
+    [archiveMutation, messages],
   );
 
   const prepareMessageOpen = React.useCallback(
@@ -260,7 +291,12 @@ export function useNotifications(options = {}) {
     unreadCount,
     hasUnread: unreadCount > 0,
     isLoading: query.isLoading,
-    error: query.error || markRead.error || markAllReadMutation.error || null,
+    error:
+      query.error ||
+      markRead.error ||
+      markAllReadMutation.error ||
+      archiveMutation.error ||
+      null,
     refetch: query.refetch,
     dismissMessage,
     prepareMessageOpen,
@@ -268,5 +304,6 @@ export function useNotifications(options = {}) {
     acknowledgeRenderedNotification,
     markAllRead,
     isMarkingAllRead: markAllReadMutation.isPending,
+    archiveMessage,
   };
 }

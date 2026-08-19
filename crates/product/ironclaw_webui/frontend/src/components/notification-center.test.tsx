@@ -97,3 +97,59 @@ test("opening a row delegates acknowledgement policy before navigation", async (
   assert.equal(prepareMessageOpen.mock.calls[0]?.[0], message);
   assert.deepEqual(navigate.mock.calls[0], ["/chat/thread-1"]);
 });
+
+test("archive is offered for durable rows only and does not open the thread", async () => {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  roots.push(root);
+
+  const archiveMessage = vi.fn();
+  const prepareMessageOpen = vi.fn();
+  const messages = [
+    {
+      id: "notification-1",
+      title: "Approval required",
+      body: "A run is waiting",
+      href: "/chat/thread-1",
+      durable: true,
+    },
+    {
+      id: "approval:thread-legacy",
+      title: "Legacy approval",
+      body: "From the compatibility read",
+      href: "/chat/thread-legacy",
+      durable: false,
+    },
+  ];
+
+  await act(async () => {
+    root.render(
+      <NotificationCenter
+        state={{ messages, archiveMessage, prepareMessageOpen, unreadIds: new Set() }}
+      />,
+    );
+  });
+  await act(async () => {
+    container
+      .querySelector<HTMLButtonElement>("[data-testid='notification-bell']")
+      ?.click();
+  });
+
+  const archiveButtons = [
+    ...document.querySelectorAll<HTMLButtonElement>("[data-testid='notification-archive']"),
+  ];
+  assert.equal(
+    archiveButtons.length,
+    1,
+    "only the durable row has a server-side record to archive",
+  );
+
+  await act(async () => archiveButtons[0].click());
+  assert.deepEqual(archiveMessage.mock.calls, [["notification-1"]]);
+  assert.equal(
+    prepareMessageOpen.mock.calls.length,
+    0,
+    "archiving must not also navigate into the thread",
+  );
+});

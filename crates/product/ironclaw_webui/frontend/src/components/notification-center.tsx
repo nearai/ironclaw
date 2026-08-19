@@ -6,21 +6,25 @@ import React from "react";
 import { useT } from "../lib/i18n";
 import { cn } from "../utils/cn";
 
-function NotificationRow({ message, unread, onOpen }) {
+function NotificationRow({ message, unread, onOpen, onArchive }) {
   const t = useT();
+  // The row and the archive control are siblings, never nested buttons: a
+  // button inside a button is invalid and would make the archive click also
+  // open the thread.
   return (
-    <button
-      type="button"
-      disabled={!message.href}
-      onClick={message.href ? () => onOpen(message) : undefined}
-      data-testid="notification-row"
-      className={cn(
-        "grid w-full grid-cols-[2rem_minmax(0,1fr)] gap-3 border-b border-[var(--v2-panel-border)] px-4 py-3 text-left last:border-0",
-        message.href
-          ? "hover:bg-[var(--v2-surface-soft)]"
-          : "cursor-default opacity-80"
-      )}
-    >
+    <div className="flex items-start gap-1 border-b border-[var(--v2-panel-border)] px-4 py-3 last:border-0">
+      <button
+        type="button"
+        disabled={!message.href}
+        onClick={message.href ? () => onOpen(message) : undefined}
+        data-testid="notification-row"
+        className={cn(
+          "grid min-w-0 flex-1 grid-cols-[2rem_minmax(0,1fr)] gap-3 rounded-[8px] text-left",
+          message.href
+            ? "hover:bg-[var(--v2-surface-soft)]"
+            : "cursor-default opacity-80"
+        )}
+      >
       <span
         className="grid h-8 w-8 place-items-center rounded-[8px] bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
       >
@@ -49,7 +53,22 @@ function NotificationRow({ message, unread, onOpen }) {
           (<span className="shrink-0">{message.timeLabel}</span>)}
         </span>
       </span>
-    </button>
+      </button>
+      {message.durable && onArchive &&
+      (<button
+        type="button"
+        data-testid="notification-archive"
+        onClick={() => onArchive(message.id)}
+        aria-label={t("common.dismiss")}
+        title={t("common.dismiss")}
+        className={cn(
+          "grid h-7 w-7 shrink-0 place-items-center rounded-[8px]",
+          "text-[var(--v2-text-faint)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
+        )}
+      >
+        <Icon name="check" className="h-4 w-4" />
+      </button>)}
+    </div>
   );
 }
 
@@ -66,6 +85,7 @@ export function NotificationCenter({ state }) {
   const dismissMessage = state?.dismissMessage;
   const prepareMessageOpen = state?.prepareMessageOpen;
   const markAllRead = state?.markAllRead;
+  const archiveMessage = state?.archiveMessage;
   const isMarkingAllRead = state?.isMarkingAllRead || false;
   const isLoading = state?.isLoading || false;
   const error = state?.error || null;
@@ -216,6 +236,7 @@ export function NotificationCenter({ state }) {
                       message={message}
                       unread={unreadIds.has(message.id)}
                       onOpen={openMessage}
+                      onArchive={archiveMessage}
                     />
                   ))}
             </div>

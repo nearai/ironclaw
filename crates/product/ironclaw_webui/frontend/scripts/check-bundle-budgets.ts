@@ -104,6 +104,22 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // eager `en.ts` fallback pack (the restore pill's own markup is lazy —
 // `oobe-restore-pill.tsx` loads only after the drawer is dismissed). Measured
 // /chat closure 222.5 KB gzip; 223.0 KB restores ~0.5 KB of explicit headroom.
+// retained about 1.6 KB of explicit headroom.
+//
+// The server-backed notification center consumed nearly all of that: the
+// inbox hook, its presenters and the panel are eager parts of the gateway
+// layout's header, so they land in the /chat closure and moved the measured
+// total to 221.9 KB. Wiring the archive control (the durable inbox exposes
+// archive at every backend layer, and without a caller a recipient's records
+// only ever accumulate toward the fail-closed retention cap) added the last
+// 0.2 KB. Weight was removed first rather than budgeted around: the
+// mark-read and archive mutations now share one optimistic cache transform
+// (`inboxCacheAfter`/`optimisticHandlers` in `hooks/useNotifications.ts`)
+// instead of carrying two near-identical `onMutate` blocks, and the control
+// reuses the existing `common.dismiss` label rather than minting a
+// `notifications.archive` key in the eagerly loaded `en.ts` fallback pack.
+// What remains is the control's own necessary weight. 223.0 KB restores
+// about 0.9 KB of headroom over the measured 222.1 KB.
 const CHAT_GZIP_BUDGET = 223_000;
 const CHUNK_RAW_BUDGET = 500_000;
 

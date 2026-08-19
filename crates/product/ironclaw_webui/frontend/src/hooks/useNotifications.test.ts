@@ -95,12 +95,16 @@ function instantiate({
   const inboxCalls = [];
   const threadCalls = [];
   const seenCalls = [];
+  const archiveCalls = [];
+  const optimisticWrites = [];
   let storedState = { initialized: true, seenIds: new Set() };
   const react = createReactStub();
   const queryClient = {
     cancelQueries: async () => {},
     getQueryData: () => data,
-    setQueryData: () => {},
+    setQueryData: (_key, updater) => {
+      optimisticWrites.push(typeof updater === "function" ? updater(data) : updater);
+    },
     invalidateQueries: () => {},
   };
   let mutationIndex = 0;
@@ -115,10 +119,17 @@ function instantiate({
       queryOptions = options;
       return { data, isLoading: false, error: null, refetch: () => {} };
     },
-    useMutation: ({ mutationFn }) => {
+    useMutation: ({ mutationFn, onMutate }) => {
       mutationIndex += 1;
       return {
-        mutate: (value) => mutationFn(value),
+        // `onMutate` runs first so the optimistic cache write is exercised,
+        // and `mutationFn` still fires synchronously so callers can assert the
+        // request without flushing. The optimistic write itself lands a
+        // microtask later, after `onMutate` awaits `cancelQueries`.
+        mutate: (value) => {
+          onMutate?.(value);
+          return mutationFn(value);
+        },
         isPending: mutationsPending,
         error: null,
         mutationIndex,
@@ -136,6 +147,7 @@ function instantiate({
     },
     markNotificationRead: async (id) => readCalls.push(id),
     markAllNotificationsRead: async () => allReadCalls.push(true),
+    archiveNotification: async (id) => archiveCalls.push(id),
     notificationMessages: (notifications) => (notifications || []).map((notification) => ({
       id: notification.id,
       type: notification.kind,
@@ -185,6 +197,8 @@ function instantiate({
     inboxCalls,
     threadCalls,
     seenCalls,
+    archiveCalls,
+    optimisticWrites,
   };
 }
 
@@ -327,6 +341,66 @@ test("marks durable and compatibility notifications through their owning state",
   assert.deepEqual(JSON.parse(JSON.stringify(fallback.seenCalls)), [
     { ids: ["approval:thread-fallback"], scope: "tenant:user" },
   ]);
+});
+
+test("archives a durable notification and drops it from the cached inbox", async () => {
+  const harness = instantiate({
+    data: {
+      inbox: { notifications: [notification(), notification("notification-2")], unread_count: 2 },
+      approvalThreads: { threads: [] },
+    },
+  });
+
+  harness.hook.archiveMessage("notification-1");
+  await flushAsyncWork();
+
+  assert.deepEqual(harness.archiveCalls, ["notification-1"]);
+  const optimistic = harness.optimisticWrites.at(-1);
+  assert.deepEqual(
+    optimistic.inbox.notifications.map((record) => record.id),
+    ["notification-2"],
+    "the archived record leaves the cached list immediately",
+  );
+  assert.equal(
+    optimistic.inbox.unread_count,
+    1,
+    "archiving an unread record also drops it from the badge",
+  );
+});
+
+test("archiving a read record leaves the unread badge alone", async () => {
+  const harness = instantiate({
+    data: {
+      inbox: {
+        notifications: [notification("notification-1", "thread-1", "2026-08-19T00:00:00Z")],
+        unread_count: 0,
+      },
+      approvalThreads: { threads: [] },
+    },
+  });
+
+  harness.hook.archiveMessage("notification-1");
+  await flushAsyncWork();
+
+  assert.deepEqual(harness.archiveCalls, ["notification-1"]);
+  assert.equal(harness.optimisticWrites.at(-1).inbox.unread_count, 0);
+});
+
+test("a compatibility notification is never archived through the server", () => {
+  const harness = instantiate({
+    data: {
+      inbox: { notifications: [], unread_count: 0 },
+      approvalThreads: { threads: [{ id: "thread-fallback" }] },
+    },
+  });
+
+  harness.hook.archiveMessage("approval:thread-fallback");
+
+  assert.deepEqual(
+    harness.archiveCalls,
+    [],
+    "a legacy approval row has no durable record, so archiving it would 404",
+  );
 });
 
 test("does not mark a notification merely because its thread route is active", () => {
