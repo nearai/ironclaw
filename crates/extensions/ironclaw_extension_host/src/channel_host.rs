@@ -79,18 +79,34 @@ const CONNECT_QUERY_VALUE: &percent_encoding::AsciiSet = &percent_encoding::NON_
     .remove(b'~');
 
 /// The channel's `connect_required` copy, with a one-click connect link
-/// appended when the strategy is OAuth and the deployment configured a public
-/// web origin (#7681). `/chat?connect=<extension>` is an authenticated route,
-/// so the link rides the WebUI's existing login round-trip unchanged. The
-/// other strategies carry their own `connection.deep_link_template`.
+/// appended when three things hold: the strategy is OAuth, the deployment
+/// configured a public web origin, and the channel's own reply adapter
+/// declares that it delivers an ephemeral reply privately (#7681).
+/// `/chat?connect=<extension>` is an authenticated route, so the link rides
+/// the WebUI's existing login round-trip unchanged. The other strategies
+/// carry their own `connection.deep_link_template`.
+///
+/// The privacy condition is the fail-closed half. This notice is the one a
+/// shared conversation shows an unlinked sender, and it is kept out of the
+/// room only by an `OutboundVisibility::EphemeralTo` request, which
+/// [`ChannelReply`](ironclaw_extension_contracts::channel_adapter::ChannelReply)
+/// documents as a hint: an adapter that cannot honor it posts publicly
+/// instead. Appending a setup link on strategy alone would therefore broadcast
+/// it to every member of the conversation the first time an OAuth-strategy
+/// channel without ephemeral support ships. Adapters that have not declared
+/// the capability keep the static, link-free manifest copy.
 fn connect_required_notice(
     connection: &ChannelConnectionDescriptor,
     extension_id: &str,
     base_url: Option<&str>,
+    supports_private_delivery: bool,
 ) -> String {
     let text = &connection.notices.connect_required;
     match base_url {
-        Some(base) if connection.strategy == ChannelConnectionStrategy::OAuth => {
+        Some(base)
+            if supports_private_delivery
+                && connection.strategy == ChannelConnectionStrategy::OAuth =>
+        {
             let base = base.trim_end_matches('/');
             let extension_id =
                 percent_encoding::utf8_percent_encode(extension_id, CONNECT_QUERY_VALUE);
@@ -98,6 +114,19 @@ fn connect_required_notice(
         }
         _ => text.clone(),
     }
+}
+
+/// Whether a channel's bound reply adapter delivers an
+/// [`OutboundVisibility::EphemeralTo`](ironclaw_extension_contracts::channel_adapter::OutboundVisibility)
+/// reply privately. A channel with no reply half emits nothing source-routed,
+/// so it cannot deliver a notice privately either.
+fn surfaces_support_private_delivery(
+    surfaces: &ironclaw_extension_contracts::channel_adapter::ChannelSurfaces,
+) -> bool {
+    surfaces
+        .reply
+        .as_ref()
+        .is_some_and(|reply| reply.supports_private_delivery())
 }
 
 /// The default admission resolver, or `None` (= reject every shared
@@ -358,6 +387,17 @@ impl HostedChannelSource {
             Self::Deployment(binding) => binding.resolved.as_ref(),
             Self::Active(active) => active.resolved.as_ref(),
         }
+    }
+
+    /// Whether this channel's bound reply adapter delivers an ephemeral reply
+    /// privately. Read from the adapter itself rather than the manifest: the
+    /// manifest declares which surfaces exist, the implementation declares
+    /// what it can actually do with them.
+    fn supports_private_delivery(&self) -> bool {
+        surfaces_support_private_delivery(match self {
+            Self::Deployment(binding) => &binding.surfaces,
+            Self::Active(active) => &active.channel,
+        })
     }
 
     fn same_source(&self, other: &Self) -> bool {
@@ -908,6 +948,7 @@ impl GenericChannelHostAssembly {
                             connection,
                             source.extension_id(),
                             self.deps.connect_link_base_url.as_deref(),
+                            source.supports_private_delivery(),
                         ),
                         paired: connection.notices.paired.clone(),
                         already_paired_same_user: connection
@@ -1308,26 +1349,28 @@ mod tests {
     }
 
     /// #7681: the one-click link is appended only for an OAuth-strategy channel
-    /// on a deployment that configured a public web origin. Every other
-    /// combination must return the manifest copy verbatim — a relative or
-    /// vendor-mismatched link would be posted into a customer conversation.
+    /// on a deployment that configured a public web origin, and only when the
+    /// channel's reply adapter delivers ephemeral replies privately. Every
+    /// other combination must return the manifest copy verbatim — a relative,
+    /// vendor-mismatched, or room-visible link would be posted into a customer
+    /// conversation.
     #[test]
     fn connect_notice_appends_the_link_only_for_oauth_with_a_base_url() {
         let oauth = connection_descriptor(ChannelConnectionStrategy::OAuth);
 
         assert_eq!(
-            connect_required_notice(&oauth, "slack", Some("https://app.example.com")),
+            connect_required_notice(&oauth, "slack", Some("https://app.example.com"), true),
             "Connect your account. Or connect directly: https://app.example.com/chat?connect=slack"
         );
         // A trailing slash on the configured origin must not produce `//chat`.
         assert_eq!(
-            connect_required_notice(&oauth, "slack", Some("https://app.example.com/")),
+            connect_required_notice(&oauth, "slack", Some("https://app.example.com/"), true),
             "Connect your account. Or connect directly: https://app.example.com/chat?connect=slack"
         );
         // Unset origin ships dark: the notice stays link-free rather than
         // advertising an unreachable relative path.
         assert_eq!(
-            connect_required_notice(&oauth, "slack", None),
+            connect_required_notice(&oauth, "slack", None, true),
             oauth.notices.connect_required
         );
         // A non-OAuth strategy carries its own deep link, so no link leaks
@@ -1339,11 +1382,75 @@ mod tests {
         ] {
             let other = connection_descriptor(strategy);
             assert_eq!(
-                connect_required_notice(&other, "slack", Some("https://app.example.com")),
+                connect_required_notice(&other, "slack", Some("https://app.example.com"), true),
                 other.notices.connect_required,
                 "{strategy:?} must return the manifest copy verbatim"
             );
         }
+    }
+
+    /// The fail-closed half: privacy for this notice comes from an
+    /// `EphemeralTo` request the adapter may ignore, so an OAuth-strategy
+    /// channel whose reply adapter has NOT declared private delivery must not
+    /// carry a setup link — publishing it would show every member of a shared
+    /// conversation the link meant for one unlinked sender.
+    #[test]
+    fn connect_notice_withholds_the_link_when_the_adapter_cannot_deliver_privately() {
+        let oauth = connection_descriptor(ChannelConnectionStrategy::OAuth);
+        assert_eq!(
+            connect_required_notice(&oauth, "slack", Some("https://app.example.com"), false),
+            oauth.notices.connect_required
+        );
+    }
+
+    /// The gate input itself: the link decision reads what the bound reply
+    /// adapter declares, so an adapter that never opted in (the default, e.g.
+    /// Telegram's `sendMessage`-only reply) reports `false` and a channel with
+    /// no reply half at all reports `false` too.
+    #[test]
+    fn private_delivery_support_is_read_from_the_bound_reply_adapter() {
+        use ironclaw_extension_contracts::channel_adapter::{
+            ChannelError, ChannelReply, ChannelSurfaces, DeliveryReport, OutboundEnvelope,
+        };
+        use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
+
+        struct PublicOnlyReply;
+        #[async_trait::async_trait]
+        impl ChannelReply for PublicOnlyReply {
+            async fn send_reply(
+                &self,
+                _envelope: OutboundEnvelope,
+                _egress: &dyn RestrictedEgress,
+            ) -> Result<DeliveryReport, ChannelError> {
+                Ok(DeliveryReport::default())
+            }
+        }
+
+        struct EphemeralReply;
+        #[async_trait::async_trait]
+        impl ChannelReply for EphemeralReply {
+            async fn send_reply(
+                &self,
+                _envelope: OutboundEnvelope,
+                _egress: &dyn RestrictedEgress,
+            ) -> Result<DeliveryReport, ChannelError> {
+                Ok(DeliveryReport::default())
+            }
+
+            fn supports_private_delivery(&self) -> bool {
+                true
+            }
+        }
+
+        assert!(!surfaces_support_private_delivery(
+            &ChannelSurfaces::default()
+        ));
+        assert!(!surfaces_support_private_delivery(
+            &ChannelSurfaces::default().with_reply(Arc::new(PublicOnlyReply))
+        ));
+        assert!(surfaces_support_private_delivery(
+            &ChannelSurfaces::default().with_reply(Arc::new(EphemeralReply))
+        ));
     }
 
     /// The extension id comes from a durable record, so it is percent-encoded:
@@ -1352,7 +1459,12 @@ mod tests {
     fn connect_notice_percent_encodes_the_extension_id() {
         let oauth = connection_descriptor(ChannelConnectionStrategy::OAuth);
         assert_eq!(
-            connect_required_notice(&oauth, "sl ack&evil=1", Some("https://app.example.com")),
+            connect_required_notice(
+                &oauth,
+                "sl ack&evil=1",
+                Some("https://app.example.com"),
+                true
+            ),
             "Connect your account. Or connect directly: \
              https://app.example.com/chat?connect=sl%20ack%26evil%3D1"
         );

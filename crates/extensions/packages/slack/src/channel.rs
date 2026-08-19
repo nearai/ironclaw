@@ -270,6 +270,12 @@ impl ChannelReply for SlackChannelAdapter {
     ) -> Result<DeliveryReport, ChannelError> {
         self.send(envelope, egress).await
     }
+
+    /// Slack routes an `EphemeralTo` text reply to `chat.postEphemeral`, which
+    /// the workspace shows to that one user only (#7681).
+    fn supports_private_delivery(&self) -> bool {
+        true
+    }
 }
 
 #[async_trait]

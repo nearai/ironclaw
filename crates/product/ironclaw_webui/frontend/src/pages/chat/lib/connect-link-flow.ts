@@ -77,7 +77,14 @@ export async function startConnectLinkOauth({ extensionName, popup, t }) {
   // which makes `setup/oauth/start` fail closed (`require_installed_extension`
   // -> 409). Install is idempotent, so an already-installed extension costs one
   // no-op call rather than a pre-flight inventory read.
-  await installExtension(packageRef);
+  // A rejected install is reported in the response, not as a throw, so read
+  // the backend's own verdict before continuing: without this the flow would
+  // walk on to setup and OAuth start for an extension that was never
+  // installed, and surface the resulting 409 as an OAuth failure.
+  const installation = await installExtension(packageRef);
+  if (installation?.success === false) {
+    throw new Error(installation.message || t("extensions.installFailed"));
+  }
   const setup = await fetchExtensionSetup(packageRef);
   const secret = (setup?.secrets || []).find(
     (item) => (item?.setup?.kind || "manual_token") === "oauth",

@@ -351,6 +351,29 @@ test("a blocked popup fails the connect click before any install", async () => {
   assert.equal(api.installExtension.mock.calls.length, 0);
 });
 
+// A rejected install answers with `{ success: false }` rather than throwing, so
+// the flow has to read the backend's verdict: continuing would start OAuth for
+// an extension that was never installed (`tool-evidence.md` — UI success must
+// follow backend evidence).
+test("an install the backend rejects stops before setup and oauth start", async () => {
+  const popup = fakePopup();
+  window.open = vi.fn(() => popup);
+  popup.close = () => {
+    popup.closed = true;
+  };
+  api.installExtension.mockResolvedValue({ success: false, message: "install refused" });
+
+  renderAt("/chat?connect=slack");
+  await flush();
+
+  await act(async () => {
+    await assert.rejects(() => latest.startConnectLinkOAuth(), /install refused/);
+  });
+  assert.equal(api.fetchExtensionSetup.mock.calls.length, 0);
+  assert.equal(api.startExtensionOauth.mock.calls.length, 0);
+  assert.equal(popup.closed, true, "no about:blank window is left open");
+});
+
 test("a failed install closes the placeholder popup instead of leaking it", async () => {
   const popup = fakePopup();
   window.open = vi.fn(() => popup);
