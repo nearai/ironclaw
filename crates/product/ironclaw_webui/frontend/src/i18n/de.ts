@@ -129,12 +129,10 @@ registerPack("de", {
 
   // Chat — thread sidebar
   "chat.conversations": "Unterhaltungen",
-  "chat.threads": "{count} Threads",
   "chat.newThread": "Neu",
   "chat.creating": "Erstellen",
   "chat.selectConversation": "Unterhaltung auswählen",
   "chat.noConversations": "Noch keine Unterhaltungen. Starte einen Thread über die Composer‑Vorschläge.",
-  "chat.turns": "{count} Turns",
 
   // Chat — connection
   "connection.connected": "Verbunden",

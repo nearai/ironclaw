@@ -129,12 +129,10 @@ registerPack("hi", {
 
   // Chat — thread sidebar
   "chat.conversations": "वार्तालाप",
-  "chat.threads": "{count} थ्रेड्स",
   "chat.newThread": "नया",
   "chat.creating": "बन रहा है",
   "chat.selectConversation": "वार्तालाप चुनें",
   "chat.noConversations": "अभी कोई वार्तालाप नहीं। composer सुझावों से थ्रेड शुरू करें।",
-  "chat.turns": "{count} टर्न",
 
   // Chat — connection
   "connection.connected": "कनेक्टेड",

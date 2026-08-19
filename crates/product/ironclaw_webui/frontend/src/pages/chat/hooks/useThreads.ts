@@ -114,7 +114,7 @@ export function useThreads() {
   }, [nextCursor]);
 
   // Normalize v2 SessionThreadRecord → fork's expected shape:
-  // - v2 carries `thread_id`; fork's thread-sidebar reads `thread.id`
+  // - v2 carries `thread_id`; SidebarThreads reads `thread.id`
   // - v2 has no `state`/`turn_count` fields (those are v1 metadata).
   //   Fill safe defaults so the UI's "Processing" pip and turn count
   //   never spuriously render.

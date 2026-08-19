@@ -129,12 +129,10 @@ registerPack("ar", {
 
   // Chat — thread sidebar
   "chat.conversations": "المحادثات",
-  "chat.threads": "{count} خيوط",
   "chat.newThread": "جديد",
   "chat.creating": "جارٍ الإنشاء",
   "chat.selectConversation": "اختر محادثة",
   "chat.noConversations": "لا توجد محادثات بعد. ابدأ خيطًا من اقتراحات المُحرِّر.",
-  "chat.turns": "{count} أدوار",
 
   // Chat — connection
   "connection.connected": "متصل",

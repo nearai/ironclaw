@@ -129,12 +129,10 @@ registerPack("uk", {
 
   // Chat — thread sidebar
   "chat.conversations": "Розмови",
-  "chat.threads": "{count} тредів",
   "chat.newThread": "Нова",
   "chat.creating": "Створення",
   "chat.selectConversation": "Оберіть розмову",
   "chat.noConversations": "Поки що немає розмов. Почніть тред із підказок композитора.",
-  "chat.turns": "{count} ходів",
 
   // Chat — connection
   "connection.connected": "Підключено",

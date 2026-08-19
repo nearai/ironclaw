@@ -129,12 +129,10 @@ registerPack("ja", {
 
   // Chat — thread sidebar
   "chat.conversations": "会話",
-  "chat.threads": "{count} スレッド",
   "chat.newThread": "新規",
   "chat.creating": "作成中",
   "chat.selectConversation": "会話を選択",
   "chat.noConversations": "まだ会話がありません。コンポーザーの提案からスレッドを開始してください。",
-  "chat.turns": "{count} ターン",
 
   // Chat — connection
   "connection.connected": "接続済み",
