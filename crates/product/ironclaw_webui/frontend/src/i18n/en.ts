@@ -61,6 +61,7 @@ registerPack("en", {
   "notifications.approval.title": "Approval required",
   "notifications.approval.body": "A run is waiting for your approval.",
   "notifications.approval.detail": "Needs your approval",
+  "notifications.approval.untitled": "Untitled thread",
   "notifications.authentication.title": "Authentication required",
   "notifications.authentication.body": "A run needs an account connection to continue.",
   "notifications.authentication.detail": "Open the thread to connect",
