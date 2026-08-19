@@ -572,7 +572,11 @@ async fn stopped_user_container_restarts_and_image_mismatch_recycles_it() {
     );
     assert!(replacement.output.contains("RECYCLED"));
     assert_ne!(replacement_container.id, initial_container.id);
-    assert_eq!(replacement_container.image, mismatch_image);
+    assert_eq!(
+        replacement_container.labels.get(LABEL_IMAGE),
+        Some(&replacement_container.image),
+        "container config and compatibility label use one immutable image id"
+    );
     assert_ne!(
         replacement_container.labels.get(LABEL_IMAGE),
         initial_container.labels.get(LABEL_IMAGE),
