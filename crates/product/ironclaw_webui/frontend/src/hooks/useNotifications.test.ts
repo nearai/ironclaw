@@ -87,6 +87,7 @@ function instantiate({
   activeThreadId = null,
   inboxError = null,
   approvalError = null,
+  mutationsPending = false,
 } = {}) {
   let queryOptions;
   const readCalls = [];
@@ -118,7 +119,7 @@ function instantiate({
       mutationIndex += 1;
       return {
         mutate: (value) => mutationFn(value),
-        isPending: false,
+        isPending: mutationsPending,
         error: null,
         mutationIndex,
       };
@@ -365,6 +366,36 @@ test("marks a run completion only after its matching final reply rendered", () =
   });
   assert.deepEqual(harness.readCalls, []);
 
+  pending.acknowledgeRenderedNotification({
+    threadId: "thread-1",
+    turnRunId: "run-1",
+  });
+  assert.deepEqual(harness.readCalls, ["notification-completed"]);
+});
+
+test("acknowledges a rendered completion while an earlier mark-read is in flight", () => {
+  // The final reply renders once per run, so an acknowledgement skipped here
+  // never gets another trigger and the completion stays unread forever.
+  const harness = instantiate({
+    data: {
+      inbox: {
+        notifications: [
+          notification(
+            "notification-completed",
+            "thread-1",
+            null,
+            "run_completed",
+            "run-1",
+          ),
+        ],
+        unread_count: 1,
+      },
+    },
+    activeThreadId: "thread-1",
+    mutationsPending: true,
+  });
+  harness.hook.prepareMessageOpen(harness.hook.messages[0]);
+  const pending = harness.render();
   pending.acknowledgeRenderedNotification({
     threadId: "thread-1",
     turnRunId: "run-1",

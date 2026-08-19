@@ -48,7 +48,10 @@ export function useNotifications(options = {}) {
   const tenantId = profile?.tenant_id || null;
   const userId = profile?.user_id || null;
   const scope = tenantId && userId ? `${tenantId}:${userId}` : null;
-  const queryKey = ["notifications", "inbox", tenantId, userId];
+  const queryKey = React.useMemo(
+    () => ["notifications", "inbox", tenantId, userId],
+    [tenantId, userId],
+  );
 
   const query = useQuery({
     queryKey,
@@ -137,12 +140,19 @@ export function useNotifications(options = {}) {
       const previous = notificationQueryData(queryClient.getQueryData(queryKey));
       queryClient.setQueryData(queryKey, (value) => {
         const current = notificationQueryData(value);
+        const notifications = current?.inbox?.notifications || [];
+        const unreadCount = Number(current?.inbox?.unread_count || 0);
+        // Decrement only for a record that is still unread, so a repeated or
+        // concurrent mark-read cannot drive the badge below the real count.
+        const wasUnread = notifications.some(
+          (notification) => notification.id === notificationId && !notification.read_at,
+        );
         return {
           ...current,
           inbox: {
             ...current?.inbox,
-            unread_count: Math.max(0, Number(current?.inbox?.unread_count || 0) - 1),
-            notifications: (current?.inbox?.notifications || []).map((notification) =>
+            unread_count: wasUnread ? Math.max(0, unreadCount - 1) : unreadCount,
+            notifications: notifications.map((notification) =>
               notification.id === notificationId && !notification.read_at
                 ? { ...notification, read_at: new Date().toISOString() }
                 : notification,
@@ -211,12 +221,11 @@ export function useNotifications(options = {}) {
   const acknowledgeRenderedNotification = React.useCallback(
     ({ threadId, turnRunId }) => {
       const pending = pendingRenderedNotification;
-      if (
-        !pending ||
-        pending.threadId !== threadId ||
-        pending.turnRunId !== turnRunId ||
-        markRead.isPending
-      ) {
+      // No `markRead.isPending` guard: the final reply renders once per run,
+      // so skipping here would strand the completion notification unread with
+      // nothing left to re-trigger it. Clearing `pending` below already stops
+      // a second acknowledgement for the same record.
+      if (!pending || pending.threadId !== threadId || pending.turnRunId !== turnRunId) {
         return;
       }
       setPendingRenderedNotification(null);
