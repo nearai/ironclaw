@@ -234,7 +234,7 @@ fn structured_error_for(failure: RawSlackFailure) -> GuestFailure {
 /// Make a Slack API call and return the parsed JSON value, surfacing HTTP
 /// and Slack (`ok: false`) failures as the RAW [`RawSlackFailure`] shape —
 /// before taxonomy mapping. Shared by [`slack_api_call`] (which maps every
-/// failure to the host's structured guest-error JSON) and `send_message`
+/// failure to the host's typed [`GuestFailure`]) and `send_message`
 /// (which additionally needs the RAW vendor code to decide whether to retry
 /// without `as_user`).
 fn slack_api_call_raw(
@@ -275,7 +275,7 @@ fn slack_api_call_raw(
             ),
         );
         // Slack signals rate limiting at the HTTP layer (429 + Retry-After);
-        // the host's structured error shape carries only {code, kind}, so the
+        // this typed `GuestFailure` path leaves `retry_after_ms` unset, so the
         // Retry-After value cannot ride along.
         if response.status == 429 {
             return Err(RawSlackFailure::RateLimited);
@@ -301,7 +301,7 @@ fn slack_api_call_raw(
     Ok(parsed)
 }
 
-/// [`slack_api_call_raw`], mapped to the host's structured guest-error JSON
+/// [`slack_api_call_raw`], mapped to the host's typed [`GuestFailure`]
 /// — the call every op except `send_message`'s first attempt uses.
 fn slack_api_call(
     method: &str,
