@@ -239,6 +239,17 @@ pub(crate) struct BlockedActionableMarker {
     pub(crate) gate_ref: Option<String>,
 }
 
+/// The inbox kind a blocked run maps to. Shared by the session watcher and the
+/// triggered watcher so a gate cannot be published under one kind and resolved
+/// under another.
+pub(crate) fn blocked_status_notification_kind(status: TurnStatus) -> Option<NotificationKind> {
+    match status {
+        TurnStatus::BlockedApproval => Some(NotificationKind::ApprovalRequired),
+        TurnStatus::BlockedAuth => Some(NotificationKind::AuthenticationRequired),
+        _ => None,
+    }
+}
+
 pub(crate) fn blocked_actionable_marker(state: &TurnRunState) -> Option<BlockedActionableMarker> {
     match state.status {
         TurnStatus::BlockedApproval | TurnStatus::BlockedAuth => Some(BlockedActionableMarker {
@@ -473,8 +484,14 @@ impl RunDeliveryServices {
         let Some(inbox) = self.notification_inbox.as_ref() else {
             return;
         };
-        let Ok(notification_id) = run_notification_inbox_id(run_id, kind, lifecycle_ref) else {
-            return;
+        let notification_id = match run_notification_inbox_id(run_id, kind, lifecycle_ref) {
+            Ok(id) => id,
+            Err(error) => {
+                // An unbuildable id means this gate's record can never be
+                // retired, so it is reported rather than passed over.
+                tracing::warn!(%error, %run_id, "invalid durable Inbox notification id");
+                return;
+            }
         };
         let result = inbox
             .resolve(NotificationMutationRequest {

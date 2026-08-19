@@ -578,7 +578,7 @@ impl RunDeliveryObserver {
             let next_blocked_marker = blocked_actionable_marker(&actionable_state);
             if let Some(previous) = delivered_blocked_marker.as_ref()
                 && Some(previous) != next_blocked_marker.as_ref()
-                && let Some(kind) = inbox_kind_for_blocked_status(previous.status)
+                && let Some(kind) = super::blocked_status_notification_kind(previous.status)
             {
                 self.services
                     .resolve_inbox_notification(
@@ -1591,14 +1591,6 @@ fn inbox_kind_for_event(event_kind: RunNotificationEventKind) -> Option<Notifica
         RunNotificationEventKind::ApprovalNeeded => Some(NotificationKind::ApprovalRequired),
         RunNotificationEventKind::AuthRequired => Some(NotificationKind::AuthenticationRequired),
         RunNotificationEventKind::RunBlocked => Some(NotificationKind::RunBlocked),
-        _ => None,
-    }
-}
-
-fn inbox_kind_for_blocked_status(status: TurnStatus) -> Option<NotificationKind> {
-    match status {
-        TurnStatus::BlockedApproval => Some(NotificationKind::ApprovalRequired),
-        TurnStatus::BlockedAuth => Some(NotificationKind::AuthenticationRequired),
         _ => None,
     }
 }

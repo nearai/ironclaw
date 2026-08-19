@@ -805,7 +805,7 @@ async fn notify_background_run(
         let trigger_label = prompts::triggered_label_from_prompt(&prompt);
         if let Some(previous) = delivered_blocked_marker.as_ref()
             && blocked_actionable_marker(&state).as_ref() != Some(previous)
-            && let Some(kind) = inbox_kind_for_triggered_gate_status(previous.status)
+            && let Some(kind) = super::blocked_status_notification_kind(previous.status)
         {
             services
                 .resolve_inbox_notification(
@@ -817,7 +817,7 @@ async fn notify_background_run(
                 )
                 .await;
         }
-        if let Some(kind) = inbox_kind_for_triggered_gate_status(state.status) {
+        if let Some(kind) = super::blocked_status_notification_kind(state.status) {
             services
                 .publish_inbox_notification(
                     &creator_user_id,
@@ -956,14 +956,6 @@ async fn notify_background_run(
         let outcome = TriggeredRunDeliveryOutcomeKind::Delivered;
         record_triggered_run_outcome(delivery_store, run_id, outcome).await;
         return outcome;
-    }
-}
-
-fn inbox_kind_for_triggered_gate_status(status: TurnStatus) -> Option<NotificationKind> {
-    match status {
-        TurnStatus::BlockedApproval => Some(NotificationKind::ApprovalRequired),
-        TurnStatus::BlockedAuth => Some(NotificationKind::AuthenticationRequired),
-        _ => None,
     }
 }
 
