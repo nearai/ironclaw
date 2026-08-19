@@ -16,16 +16,22 @@ pages/          ← feature views (routed)          e.g. ChatPage, SettingsPage
 
 ## Primitives
 
-| File | Exports | What it is |
-|------|---------|------------|
-| `button.tsx` | `Button` | Buttons/links. `variant` primary·secondary·outline·ghost·danger, `size` sm·md·lg·icon·icon-sm, `loading`, `fullWidth`, `as`. |
-| `switch.tsx` | `Switch` | Controlled toggle (`role="switch"`, `checked` + `onChange`). |
+This table is a **map of the folder**, not an API reference: it says which file
+owns which concern, so you know where to look. The canonical source of truth
+for props, variants, and sizes is each component's own TypeScript signature —
+and the live, interactive version is its Storybook entry (controls + docs).
+Don't restate prop values here; they drift.
+
+| File | Exports | Concern |
+|------|---------|---------|
+| `button.tsx` | `Button` | Buttons and button-styled links. |
+| `switch.tsx` | `Switch` | Controlled toggle (`role="switch"`). |
 | `input.tsx` | `Input`, `Textarea`, `Select`, `Label`, `FormField` | Form controls + labelled field wrapper with hint/error. |
 | `select-menu.tsx` | `SelectMenu` | Custom popover select (richer than native `Select`). |
 | `badge.tsx` | `Badge`, `StatusPill` | Small status chip with tone + optional dot. |
 | `card.tsx` | `Card`, `CardHeader`, `CardBody`, `CardFooter`, `CardLabel` | Panel surface + composable sections. |
 | `spinner.tsx` | `Spinner` | The single loading spinner (used by `Button loading`). |
-| `icons.tsx` | `Icon` | Inline SVG icon set. |
+| `icons.tsx` | `Icon`, `iconNames` | Inline SVG icon set + its canonical name list. |
 | `modal.tsx` | `Modal`, `ModalHeader`, `ModalBody`, `ModalFooter` | Dialog/overlay. |
 | `confirm-dialog.tsx` | `ConfirmDialog` | Confirm/cancel prompt built on `Modal`. |
 | `primitives.tsx` | `Panel`, `StatCard`, `FlowList`, `EmptyPanel`, `SectionHeader`, `SubLabel`, `cx` | Higher-level composites built on `Card`/`Badge` (+ back-compat re-exports `StatusPill`, `Panel`). |

@@ -38,7 +38,7 @@ export const TextareaField: Story = {
 export const SelectField: Story = {
   render: () => (
     <div className="max-w-sm">
-      <Select defaultValue="anthropic">
+      <Select aria-label="Model provider" defaultValue="anthropic">
         <option value="anthropic">Anthropic</option>
         <option value="openai">OpenAI</option>
         <option value="ollama">Ollama</option>

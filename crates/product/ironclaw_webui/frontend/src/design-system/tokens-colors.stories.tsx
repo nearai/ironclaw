@@ -32,11 +32,14 @@ const GROUPS: { group: string; tokens: string[] }[] = [
   },
 ];
 
-function Swatch({ token }: { token: string }) {
+function Swatch({ token, theme }: { token: string; theme: string }) {
   const [resolved, setResolved] = useState("");
+  // Re-read the computed value whenever the token OR the toolbar theme changes;
+  // `data-theme` swaps the whole token set, so the displayed hex must refresh
+  // with it (the swatch background uses `var(--token)` and recolors on its own).
   useEffect(() => {
     setResolved(getComputedStyle(document.documentElement).getPropertyValue(token).trim());
-  }, [token]);
+  }, [token, theme]);
   return (
     <div className="flex items-center gap-3 rounded-[12px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-3">
       <span
@@ -61,20 +64,23 @@ export default meta;
 type Story = StoryObj;
 
 export const Colors: Story = {
-  render: () => (
-    <div className="flex flex-col gap-6">
-      {GROUPS.map(({ group, tokens }) => (
-        <section key={group}>
-          <h3 className="mb-3 font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">
-            {group}
-          </h3>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {tokens.map((token) => (
-              <Swatch key={token} token={token} />
-            ))}
-          </div>
-        </section>
-      ))}
-    </div>
-  ),
+  render: (_args, { globals }) => {
+    const theme = globals.theme === "light" ? "light" : "dark";
+    return (
+      <div className="flex flex-col gap-6">
+        {GROUPS.map(({ group, tokens }) => (
+          <section key={group}>
+            <h3 className="mb-3 font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">
+              {group}
+            </h3>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {tokens.map((token) => (
+                <Swatch key={token} token={token} theme={theme} />
+              ))}
+            </div>
+          </section>
+        ))}
+      </div>
+    );
+  },
 };

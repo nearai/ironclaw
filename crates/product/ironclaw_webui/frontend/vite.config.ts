@@ -73,6 +73,23 @@ export default defineConfig({
       },
       {
         extends: true,
+        // `extends: true` inherits the top-level `server.proxy`, which forwards
+        // `/assets` to the dev backend on :3000. In the story suite there is no
+        // backend, so a Sidebar/GatewayLayout render requesting
+        // `/assets/logo.png` would hit ECONNREFUSED and paint a broken logo even
+        // while tests pass. A project-level `proxy: {}` cannot clear it (Vite
+        // *merges* proxy records, so an empty object is a no-op), so override
+        // the `/assets` entry with a `bypass` that always returns the request
+        // URL — never proxied, served straight from `public/` (the real logo
+        // ships at public/assets/logo.png). Stories must never reach a backend.
+        server: {
+          proxy: {
+            "/assets": {
+              target: "http://127.0.0.1:3000",
+              bypass: (req) => req.url,
+            },
+          },
+        },
         // Pre-bundle the deps the stories pull in so Vitest's browser Vite
         // server does not discover them mid-run, re-optimize, and reload —
         // that reload fails in-flight story modules and stalls the suite.

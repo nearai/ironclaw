@@ -20,7 +20,19 @@ const emptyNotifications = () => ({
 const meta = {
   title: "Components/PageHeader",
   component: PageHeader,
-  decorators: [withRouter("/chat/t1")],
+  decorators: [
+    // PageHeader's sidebar-toggle button carries `aria-controls="gateway-sidebar"`,
+    // whose target lives in GatewayLayout. In this isolated story that element
+    // is absent, so render a hidden stand-in with the same id to keep the ARIA
+    // reference valid (real app resolves it against the live sidebar).
+    (Story) => (
+      <>
+        <div id="gateway-sidebar" hidden />
+        <Story />
+      </>
+    ),
+    withRouter("/chat/t1"),
+  ],
   args: {
     threadsState: THREADS_STATE,
     notificationsState: emptyNotifications(),

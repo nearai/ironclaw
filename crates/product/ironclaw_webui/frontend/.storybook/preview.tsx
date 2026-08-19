@@ -67,10 +67,25 @@ const preview: Preview = {
     },
 
     a11y: {
-      // 'todo' - show a11y violations in the test UI only
-      // 'error' - fail CI on a11y violations
-      // 'off' - skip a11y checks entirely
-      test: "todo",
+      // 'error' - accessibility violations fail `pnpm test:storybook`.
+      // 'todo'  - show violations in the test UI only (does not fail).
+      // 'off'   - skip a11y checks entirely.
+      // The catalog holds itself to the accessibility bar, so violations are a
+      // hard failure; add a narrow, documented per-story exclusion only for a
+      // genuine known exception.
+      test: "error",
+      config: {
+        // KNOWN EXCEPTION — color-contrast is disabled catalog-wide because the
+        // current `--v2-*` token palette has documented AA shortfalls on the
+        // faint/muted text tokens (e.g. --v2-text-faint at 11px lands at ~4.47
+        // vs the 4.5 threshold). Fixing that means changing token *values*,
+        // which is Phase 3 (theme/reskin) of the design-system epic, not the
+        // Phase 1 Storybook wiring. Every OTHER a11y rule is enforced as a hard
+        // error so new regressions (missing names, invalid ARIA, roles) fail
+        // the suite today; Phase 3 re-enables this rule once the palette meets
+        // AA. See docs/internal/reborn/design-system/.
+        rules: [{ id: "color-contrast", enabled: false }],
+      },
     },
   },
 };

@@ -2,17 +2,11 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { useState } from "react";
 import { expect } from "storybook/test";
 
-import { SelectMenu } from "./select-menu";
+import { SelectMenu, type SelectMenuOption } from "./select-menu";
 
-// SelectMenu gained strict types on main; mirror its tone union here.
-type Option = {
-  value: string;
-  label?: string;
-  disabled?: boolean;
-  tone?: "neutral" | "positive" | "warning" | "danger" | "info" | "accent";
-};
-
-const OPTIONS: Option[] = [
+// Use the component's own option contract so OPTIONS can never drift from the
+// tone/shape SelectMenu accepts.
+const OPTIONS: SelectMenuOption[] = [
   { value: "anthropic", label: "Anthropic", tone: "accent" },
   { value: "openai", label: "OpenAI", tone: "positive" },
   { value: "ollama", label: "Ollama", tone: "neutral" },

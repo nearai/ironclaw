@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Button } from "./button";
 import { Modal, ModalBody, ModalFooter } from "./modal";
@@ -13,6 +13,9 @@ type ModalDemoProps = {
 /** Modal requires `open`; this demo owns the state and a trigger button. */
 function ModalDemo({ open: initialOpen = false, size = "md", withFooter = true }: ModalDemoProps) {
   const [open, setOpen] = useState(initialOpen);
+  // Re-sync when the `open` control changes in the Storybook toolbar; otherwise
+  // the demo would only ever reflect the initial arg from first mount.
+  useEffect(() => setOpen(initialOpen), [initialOpen]);
   return (
     <>
       <Button onClick={() => setOpen(true)}>Open modal</Button>

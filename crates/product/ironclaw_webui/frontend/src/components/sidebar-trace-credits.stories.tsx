@@ -5,7 +5,18 @@ import { SidebarTraceCredits } from "./sidebar-trace-credits";
 
 // SidebarTraceCredits reads the shared ["trace-credits"] query and renders only
 // when enrolled. Seeding the cache renders its loaded state with no network.
-const ENROLLED = {
+// The production trace-credits API (`fetchTraceCredits`) is untyped JS, so this
+// local shape is the story's typed mirror of the fields the component reads —
+// giving `setQueryData` a checked value instead of `unknown`.
+type TraceCredits = {
+  enrolled: boolean;
+  final_credit?: number;
+  submissions_accepted?: number;
+  submissions_submitted?: number;
+  manual_review_hold_count?: number;
+};
+
+const ENROLLED: TraceCredits = {
   enrolled: true,
   final_credit: 12.5,
   submissions_accepted: 8,
@@ -13,7 +24,7 @@ const ENROLLED = {
   manual_review_hold_count: 0,
 };
 
-const seed = (credits: unknown) =>
+const seed = (credits: TraceCredits) =>
   withQueryClient((client) => client.setQueryData(["trace-credits"], credits));
 
 const meta = {
