@@ -121,7 +121,7 @@ impl std::str::FromStr for DeploymentMode {
 /// - `Yolo` variants intentionally reduce approvals **inside their authority
 ///   boundary**; they are never a path to broader authority. `LocalYolo`
 ///   stays on the local machine, `HostedYoloTenantScoped` stays inside the
-///   tenant sandbox, `EnterpriseYoloDedicated` stays inside org-dedicated
+///   user sandbox, `EnterpriseYoloDedicated` stays inside org-dedicated
 ///   infrastructure.
 /// - `Sandboxed` is the general safe helper-process mode.
 /// - `Experiment` is for disposable package-install/test/benchmark flows.
@@ -151,7 +151,7 @@ pub enum RuntimeProfile {
     /// Hosted developer mode inside the tenant boundary. Tenant workspace
     /// read/write, tenant-scoped sandbox, brokered network/secrets.
     HostedDev,
-    /// Reduced approvals **inside** the tenant sandbox. Never a path to
+    /// Reduced approvals **inside** the user sandbox. Never a path to
     /// provider-host authority.
     HostedYoloTenantScoped,
 
@@ -405,7 +405,7 @@ impl std::fmt::Display for FilesystemBackendKind {
 ///
 /// `None` disables process effects entirely. `LocalHost` runs on the
 /// provider host — only valid for local single-user deployments.
-/// `TenantSandbox` and `OrgDedicatedRunner` keep process effects inside
+/// `UserSandbox` and `OrgDedicatedRunner` keep process effects inside
 /// the matching authority boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -421,8 +421,9 @@ pub enum ProcessBackendKind {
     SmolVm,
     /// Provider-host shell. Local single-user only.
     LocalHost,
-    /// Tenant-scoped sandbox process.
-    TenantSandbox,
+    /// Per-user sandbox process within the authenticated tenant boundary.
+    #[serde(alias = "tenant_sandbox")]
+    UserSandbox,
     /// Single-organization dedicated runner.
     OrgDedicatedRunner,
 }
@@ -435,7 +436,7 @@ impl ProcessBackendKind {
             Self::Srt => "srt",
             Self::SmolVm => "smol_vm",
             Self::LocalHost => "local_host",
-            Self::TenantSandbox => "tenant_sandbox",
+            Self::UserSandbox => "user_sandbox",
             Self::OrgDedicatedRunner => "org_dedicated_runner",
         }
     }
@@ -826,7 +827,7 @@ mod tests {
             requested_profile: RuntimeProfile::LocalHost,
             resolved_profile: RuntimeProfile::HostedSafe,
             filesystem_backend: FilesystemBackendKind::TenantWorkspace,
-            process_backend: ProcessBackendKind::TenantSandbox,
+            process_backend: ProcessBackendKind::UserSandbox,
             network_mode: NetworkMode::Brokered,
             secret_mode: SecretMode::TenantBroker,
             approval_policy: ApprovalPolicy::AskWrites,
@@ -855,7 +856,7 @@ mod tests {
             ProcessBackendKind::Srt,
             ProcessBackendKind::SmolVm,
             ProcessBackendKind::LocalHost,
-            ProcessBackendKind::TenantSandbox,
+            ProcessBackendKind::UserSandbox,
             ProcessBackendKind::OrgDedicatedRunner,
         ] {
             let json = serde_json::to_string(&proc).unwrap();
@@ -906,5 +907,12 @@ mod tests {
             let parsed: AuditMode = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, au);
         }
+    }
+
+    #[test]
+    fn legacy_tenant_sandbox_deserializes_to_canonical_user_sandbox() {
+        let parsed: ProcessBackendKind = serde_json::from_str(r#""tenant_sandbox""#).unwrap();
+        assert_eq!(parsed, ProcessBackendKind::UserSandbox);
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), r#""user_sandbox""#);
     }
 }

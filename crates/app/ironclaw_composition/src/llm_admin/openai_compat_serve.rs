@@ -1,9 +1,18 @@
 // arch-exempt: large_file, §4.4.1 mechanical inline of the redundant local-root filesystem alias -> CompositeRootFilesystem (no logic change), plan #6168
 //! Reborn host composition for OpenAI-compatible API routes.
 //!
-//! The route crate owns DTOs and HTTP handlers, but the Reborn host owns the
-//! authority-bearing wiring: authenticated callers, ProductSurface, durable
-//! idempotency/ref stores, and projection reads.
+//! What is left here after the WS6 OpenAI-compat eviction (2026-08-05) is the
+//! half that cannot leave: the **port implementations** that reach runtime
+//! services. Every adapter below names `ironclaw_threads`, `ironclaw_turns` or
+//! `ironclaw_event_streams` — all three on `ironclaw_openai_compat`'s own armed
+//! `BoundaryRule` forbidden list, which is exactly the shape that rule exists
+//! to require: the owner crate declares the port, the host implements it.
+//!
+//! The **assembly** moved to `ironclaw_openai_compat::mount`. This module now
+//! builds the runtime-backed adapters, fills in `OpenAiCompatRouteMountPorts`,
+//! and hands them over; the route crate owns the builder order, the shared
+//! projection streamer, the `/v1/models` catalog, and the fail-closed rule for
+//! a deployment with no LLM config.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,11 +20,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
 use ironclaw_assistant::{
-    ProductInboundAck, ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
-    ProductProjectionState, ProjectionCursor, ProjectionReadRequest, ProjectionSubscriptionRequest,
+    RebornTimelineRequest, TIMELINE_VIEW, UnboundTurnError, UnboundTurnService,
+    UnboundTurnSubmission,
 };
-use ironclaw_assistant::{RebornTimelineRequest, TIMELINE_VIEW};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::turn::{IdempotencyKey, TurnGateRef, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_host_api::{
@@ -26,31 +35,30 @@ use ironclaw_loop_contracts::LoopModelUsage;
 use ironclaw_openai_compat::OpenAiCompatRefStore;
 use ironclaw_openai_compat::{
     OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
-    OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow,
-    OpenAiChatProjectionStreamRequest, OpenAiCompatActorScope, OpenAiCompatErrorKind,
-    OpenAiCompatHttpError, OpenAiCompatProjectionStreamer, OpenAiCompatRefStorePort,
-    OpenAiCompatResourceBinding, OpenAiCompatResourceMapping, OpenAiCompatRouterState,
-    OpenAiResponseErrorObject, OpenAiResponseId, OpenAiResponseObject, OpenAiResponseOutputItem,
-    OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
-    OpenAiResponseProjectionStreamRequest, OpenAiResponseReadRequest, OpenAiResponseStatus,
-    OpenAiResponseUsage, OpenAiResponseWaitRequest, OpenAiResponsesMessageRole,
-    OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow, openai_compat_router_with_state,
-    openai_compat_routes,
+    OpenAiChatCompletionProjectionRequest, OpenAiCompatActorScope, OpenAiCompatErrorKind,
+    OpenAiCompatHttpError, OpenAiCompatRefStorePort, OpenAiCompatResourceBinding,
+    OpenAiCompatResourceMapping, OpenAiCompatRouteMountPorts, OpenAiResponseErrorObject,
+    OpenAiResponseId, OpenAiResponseObject, OpenAiResponseOutputItem,
+    OpenAiResponseOutputItemStatus, OpenAiResponseProjection, OpenAiResponseReadRequest,
+    OpenAiResponseStatus, OpenAiResponseUsage, OpenAiResponseWaitRequest,
+    OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader, openai_compat_route_mount,
+    product_surface_caller_from_openai_scope,
 };
 use ironclaw_openai_compat::{OpenAiCompatCost, OpenAiResponseInputTokensDetails};
 use ironclaw_openai_compat::{
     OpenAiCompatExternalToolResume, OpenAiCompatExternalToolResumeRequest,
     OpenAiCompatExternalToolSpec, OpenAiCompatExternalToolStore, OpenAiCompatTurnRunRef,
 };
-use ironclaw_openai_compat::{OpenAiCompatModelCatalog, OpenAiCompatModelEntry};
-use ironclaw_product_contracts::operator_llm::{
-    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot,
+use ironclaw_product_contracts::inbound::ProductInboundAck;
+use ironclaw_product_contracts::outbound::{
+    ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem, ProductProjectionState,
+    ProjectionCursor,
 };
 use ironclaw_product_contracts::projection::ProjectionStream;
-use ironclaw_product_contracts::surface::{
-    BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
-    ProductSurfaceStreamRequest,
+use ironclaw_product_contracts::projection::{
+    ProjectionReadRequest, ProjectionSubscriptionRequest,
 };
+use ironclaw_product_contracts::surface::{BoundProductSurface, ProductSurface};
 use ironclaw_threads::{
     FinalizedAssistantMessageByRunRequest, LoadContextMessagesRequest, MessageKind, MessageStatus,
     ProviderToolCallReferenceEnvelope, SessionThreadError, SessionThreadService,
@@ -88,8 +96,21 @@ pub async fn build_openai_compat_route_mount(
     ));
     let projection_stream = runtime.product_event_stream();
     let product_surface = runtime.product_surface(Some(projection_stream.clone()))?;
+    // The prepared-context door shared by structured-output / tool-history
+    // chat requests: same thread service and coordinator the runtime's own
+    // turn path uses, scoped to the deployment's default agent/project axes
+    // with the authenticated caller threaded through as the thread owner.
+    let prepared_turn_gateway = Arc::new(OpenAiCompatPreparedTurnGateway {
+        service: Arc::new(UnboundTurnService::new(
+            runtime.product_thread_service(),
+            runtime.product_turn_coordinator(),
+            _default_agent_id.clone(),
+            _default_project_id.clone(),
+        )),
+    });
     let chat_projection_reader = Arc::new(OpenAiChatCompletionThreadProjectionReader::new(
         product_surface.clone(),
+        Arc::clone(&prepared_turn_gateway),
     ));
     // The external-tool catalog is the run-scoped seam shared with the loop
     // host: the host records parked calls + completes them from submitted
@@ -104,223 +125,42 @@ pub async fn build_openai_compat_route_mount(
         )
         .with_turn_coordinator(runtime.product_turn_coordinator()),
     );
-    let projection_streamer = Arc::new(OpenAiCompatRuntimeProjectionStreamer::new(
-        product_surface.clone(),
-    ));
-    let chat_workflow = Arc::new(
-        OpenAiChatCompletionsWorkflow::new(
-            product_surface.clone(),
-            ref_store.clone(),
-            chat_projection_reader,
-        )
-        .with_projection_streamer(projection_streamer.clone()),
-    );
-    let external_tool_store: Arc<dyn OpenAiCompatExternalToolStore> =
-        Arc::new(OpenAiCompatRuntimeExternalToolStore {
+    // Composition supplies the ports; the route crate owns the builder order,
+    // the projection streamer, and the `/v1/models` catalog (WS6 eviction).
+    Ok(openai_compat_route_mount(OpenAiCompatRouteMountPorts {
+        product_surface,
+        ref_store,
+        chat_projection_reader,
+        responses_projection_reader,
+        external_tool_store: Arc::new(OpenAiCompatRuntimeExternalToolStore {
             catalog: external_tool_catalog,
-        });
-    let external_tool_resume: Arc<dyn OpenAiCompatExternalToolResume> =
-        Arc::new(OpenAiCompatRuntimeExternalToolResume {
+        }),
+        external_tool_resume: Arc::new(OpenAiCompatRuntimeExternalToolResume {
             coordinator: runtime.product_turn_coordinator(),
-        });
-    let responses_workflow = Arc::new(
-        OpenAiResponsesWorkflow::new(product_surface, ref_store, responses_projection_reader)
-            .with_projection_streamer(projection_streamer)
-            .with_external_tools(external_tool_store, external_tool_resume),
-    );
-    let router_state = OpenAiCompatRouterState::with_chat_completions(chat_workflow)
-        .with_responses_workflow(responses_workflow);
-    // `GET /v1/models` lists the deployment's configured models from the same
-    // LLM-config source the operator WebUI uses. Wired only when the root LLM
-    // provider is compiled in; otherwise the route stays fail-closed (501).
-    let router_state = match crate::product_surface::build_llm_config_service(runtime) {
-        Some(llm_config) => {
-            let catalog: Arc<dyn OpenAiCompatModelCatalog> =
-                Arc::new(LlmConfigModelCatalog::new(llm_config));
-            router_state.with_models_catalog(catalog)
-        }
-        None => router_state,
-    };
-    Ok(ProtectedRouteMount::new(
-        openai_compat_router_with_state(router_state),
-        openai_compat_routes(),
-    ))
-}
-
-/// Maps an [`LlmConfigSnapshot`] to the OpenAI-compatible `/v1/models` listing.
-///
-/// The active selection (if any) is listed first, then every configured
-/// provider's active or default model, de-duplicated by model id while
-/// preserving order. Each entry's `owned_by` is the provider id.
-fn model_entries_from_snapshot(snapshot: &LlmConfigSnapshot) -> Vec<OpenAiCompatModelEntry> {
-    let mut candidates: Vec<(String, String)> = Vec::new();
-    if let Some(active) = &snapshot.active
-        && let Some(model) = &active.model
-    {
-        candidates.push((model.clone(), active.provider_id.clone()));
-    }
-    for provider in &snapshot.providers {
-        let model = provider
-            .active_model
-            .clone()
-            .unwrap_or_else(|| provider.default_model.clone());
-        candidates.push((model, provider.id.clone()));
-    }
-    let mut seen = std::collections::HashSet::new();
-    candidates
-        .into_iter()
-        .filter(|(id, _)| !id.is_empty() && seen.insert(id.clone()))
-        .map(|(id, owner)| OpenAiCompatModelEntry::new(id).with_owner(owner))
-        .collect()
-}
-
-/// [`OpenAiCompatModelCatalog`] backed by the runtime's operator LLM-config
-/// service. Lists the deployment's configured models for `GET /v1/models`.
-struct LlmConfigModelCatalog {
-    llm_config: Arc<dyn LlmConfigService>,
-}
-
-impl LlmConfigModelCatalog {
-    fn new(llm_config: Arc<dyn LlmConfigService>) -> Self {
-        Self { llm_config }
-    }
-}
-
-#[async_trait]
-impl OpenAiCompatModelCatalog for LlmConfigModelCatalog {
-    async fn list_models(
-        &self,
-        caller: &ironclaw_openai_compat::OpenAiCompatAuthenticatedCaller,
-    ) -> Result<Vec<OpenAiCompatModelEntry>, OpenAiCompatHttpError> {
-        // The route authenticated the caller; carry its tenant/user scope into
-        // the LLM-config read so the snapshot is scoped to the same identity.
-        let product_caller = ProductSurfaceCaller::new(
-            caller.scope().tenant_id().clone(),
-            caller.scope().user_id().clone(),
-            caller.scope().agent_id().cloned(),
-            caller.scope().project_id().cloned(),
-        );
-        let snapshot = self
-            .llm_config
-            .snapshot(product_caller)
-            .await
-            .map_err(map_llm_config_error_to_openai)?;
-        Ok(model_entries_from_snapshot(&snapshot))
-    }
-}
-
-fn map_llm_config_error_to_openai(error: LlmConfigServiceError) -> OpenAiCompatHttpError {
-    match error {
-        LlmConfigServiceError::InvalidRequest { .. } => {
-            OpenAiCompatHttpError::invalid_request(None)
-        }
-        LlmConfigServiceError::NotFound => OpenAiCompatHttpError::not_found(None),
-        LlmConfigServiceError::Unavailable => OpenAiCompatHttpError::from_kind(
-            503,
-            true,
-            OpenAiCompatErrorKind::ServiceUnavailable,
-            None,
-        ),
-        LlmConfigServiceError::Internal => OpenAiCompatHttpError::internal(),
-    }
-}
-
-fn product_surface_caller_from_openai_scope(
-    scope: &OpenAiCompatActorScope,
-) -> ProductSurfaceCaller {
-    ProductSurfaceCaller::new(
-        scope.tenant_id().clone(),
-        scope.user_id().clone(),
-        scope.agent_id().cloned(),
-        scope.project_id().cloned(),
-    )
-}
-
-struct OpenAiCompatRuntimeProjectionStreamer {
-    product_surface: Arc<dyn ProductSurface>,
-}
-
-impl OpenAiCompatRuntimeProjectionStreamer {
-    fn new(product_surface: Arc<dyn ProductSurface>) -> Self {
-        Self { product_surface }
-    }
-}
-
-#[async_trait]
-impl OpenAiCompatProjectionStreamer for OpenAiCompatRuntimeProjectionStreamer {
-    async fn drain_chat(
-        &self,
-        request: OpenAiChatProjectionStreamRequest,
-    ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
-        let surface = BoundProductSurface::new(
-            Arc::clone(&self.product_surface),
-            product_surface_caller_from_openai_scope(&request.actor_scope),
-        );
-        let response = surface
-            .stream_events(ProductSurfaceStreamRequest {
-                stream_id: Some(
-                    request
-                        .projection_subscription
-                        .scope
-                        .thread_id
-                        .as_str()
-                        .to_string(),
-                ),
-                after_cursor: request
-                    .after_cursor
-                    .map(|cursor| cursor.as_str().to_string()),
-            })
-            .await?;
-        decode_product_outbound_events(response.events)
-    }
-
-    async fn drain_response(
-        &self,
-        request: OpenAiResponseProjectionStreamRequest,
-    ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
-        let surface = BoundProductSurface::new(
-            Arc::clone(&self.product_surface),
-            product_surface_caller_from_openai_scope(&request.actor_scope),
-        );
-        let response = surface
-            .stream_events(ProductSurfaceStreamRequest {
-                stream_id: Some(
-                    request
-                        .projection_subscription
-                        .scope
-                        .thread_id
-                        .as_str()
-                        .to_string(),
-                ),
-                after_cursor: request
-                    .after_cursor
-                    .map(|cursor| cursor.as_str().to_string()),
-            })
-            .await?;
-        decode_product_outbound_events(response.events)
-    }
-}
-
-fn decode_product_outbound_events(
-    events: Vec<serde_json::Value>,
-) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
-    events
-        .into_iter()
-        .map(serde_json::from_value)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| ProductSurfaceError::internal_from(error).into())
+        }),
+        llm_config: crate::product_surface::build_llm_config_service(runtime),
+        prepared_turn_port: prepared_turn_gateway,
+    }))
 }
 
 struct OpenAiChatCompletionThreadProjectionReader {
     product_surface: Arc<dyn ProductSurface>,
     poll_interval: Duration,
+    /// Prepared-lane resolver: unbound runs live on stamped-hidden threads the
+    /// caller-scoped timeline projection never surfaces, so their outcome is
+    /// read from run state + the unbound thread directly.
+    prepared_lane: Arc<OpenAiCompatPreparedTurnGateway>,
 }
 
 impl OpenAiChatCompletionThreadProjectionReader {
-    fn new(product_surface: Arc<dyn ProductSurface>) -> Self {
+    fn new(
+        product_surface: Arc<dyn ProductSurface>,
+        prepared_lane: Arc<OpenAiCompatPreparedTurnGateway>,
+    ) -> Self {
         Self {
             product_surface,
             poll_interval: OPENAI_COMPAT_PROJECTION_POLL_INTERVAL,
+            prepared_lane,
         }
     }
 }
@@ -337,6 +177,12 @@ impl OpenAiChatCompletionProjectionReader for OpenAiChatCompletionThreadProjecti
             } => submitted_run_id.to_string(),
             _ => return Err(OpenAiCompatHttpError::internal()),
         };
+        if request.prepared {
+            return self
+                .prepared_lane
+                .wait_for_unbound_completion(&request, self.poll_interval)
+                .await;
+        }
         loop {
             let surface = BoundProductSurface::new(
                 Arc::clone(&self.product_surface),
@@ -364,6 +210,98 @@ impl OpenAiChatCompletionProjectionReader for OpenAiChatCompletionThreadProjecti
                 None => tokio::time::sleep(self.poll_interval).await,
             }
         }
+    }
+}
+
+/// Thin adapter over the assistant-owned prepared-turn service: composition
+/// owns only the wire-DTO mapping and error translation; accept/submit and
+/// terminal read-back behavior live in
+/// `ironclaw_assistant::UnboundTurnService`.
+struct OpenAiCompatPreparedTurnGateway {
+    service: Arc<UnboundTurnService>,
+}
+
+impl OpenAiCompatPreparedTurnGateway {
+    async fn wait_for_unbound_completion(
+        &self,
+        request: &OpenAiChatCompletionProjectionRequest,
+        poll_interval: Duration,
+    ) -> Result<OpenAiChatCompletionProjection, OpenAiCompatHttpError> {
+        let ProductInboundAck::Accepted {
+            submitted_run_id, ..
+        } = &request.accepted_ack
+        else {
+            return Err(OpenAiCompatHttpError::internal());
+        };
+        let outcome = self
+            .service
+            .wait_for_completion(
+                request.public_id.as_str(),
+                &product_surface_caller_from_openai_scope(&request.actor_scope),
+                *submitted_run_id,
+                poll_interval,
+            )
+            .await
+            .map_err(map_prepared_turn_error)?;
+        let mut projection = OpenAiChatCompletionProjection::text(outcome.text);
+        // Run evidence: report the model that actually ran and the
+        // provider-reported usage (unbound-turns design §4.3).
+        projection.effective_model = outcome.effective_model;
+        projection.usage = outcome
+            .model_usage
+            .map(|usage| chat_usage_from_model_usage(&usage));
+        Ok(projection)
+    }
+}
+
+fn map_prepared_turn_error(error: UnboundTurnError) -> OpenAiCompatHttpError {
+    match error {
+        UnboundTurnError::InvalidRequest { reason } => {
+            OpenAiCompatHttpError::invalid_request(Some(reason))
+        }
+        UnboundTurnError::Unavailable => OpenAiCompatHttpError::from_kind(
+            503,
+            true,
+            OpenAiCompatErrorKind::ServiceUnavailable,
+            None,
+        ),
+        UnboundTurnError::RunFailed { category } => {
+            OpenAiCompatHttpError::from_kind(502, false, OpenAiCompatErrorKind::Internal, category)
+        }
+        UnboundTurnError::RunCancelled => OpenAiCompatHttpError::from_kind(
+            409,
+            false,
+            OpenAiCompatErrorKind::Conflict,
+            Some("the run was cancelled".to_string()),
+        ),
+        UnboundTurnError::Internal { reason } => {
+            // Operator diagnostics; the wire stays a bare 500.
+            tracing::debug!(%reason, "unbound turn internal error");
+            OpenAiCompatHttpError::internal()
+        }
+    }
+}
+
+#[async_trait]
+impl ironclaw_openai_compat::OpenAiCompatPreparedTurnPort for OpenAiCompatPreparedTurnGateway {
+    async fn accept_and_submit(
+        &self,
+        request: ironclaw_openai_compat::OpenAiCompatPreparedTurnRequest,
+    ) -> Result<ProductInboundAck, OpenAiCompatHttpError> {
+        let idempotency_key = format!("openai-chat:{}", request.public_id);
+        self.service
+            .accept_and_submit(UnboundTurnSubmission {
+                caller: product_surface_caller_from_openai_scope(&request.scope),
+                public_id: request.public_id,
+                system_prompt: request.system_prompt,
+                messages: request.messages,
+                tools: Vec::new(),
+                output: request.output,
+                requested_model: request.requested_model,
+                idempotency_key,
+            })
+            .await
+            .map_err(map_prepared_turn_error)
     }
 }
 
@@ -776,7 +714,7 @@ fn map_thread_read_error(error: SessionThreadError) -> OpenAiCompatHttpError {
         }
         error => {
             tracing::warn!(
-                target = "ironclaw::reborn::openai_compat",
+                target: "ironclaw::reborn::openai_compat",
                 error = %error,
                 "failed to read thread projection for OpenAI-compatible response"
             );
@@ -1316,8 +1254,6 @@ impl OpenAiCompatExternalToolResume for OpenAiCompatRuntimeExternalToolResume {
                 actor,
                 run_id,
                 gate_resolution_ref: gate_ref,
-                source_binding_ref: state.source_binding_ref.clone(),
-                reply_target_binding_ref: state.reply_target_binding_ref.clone(),
                 idempotency_key,
                 precondition: ResumeTurnPrecondition::BlockedExternalToolGate,
                 resume_disposition: None,
@@ -1396,17 +1332,43 @@ fn response_object(
     }
 }
 
+/// Total prompt/input tokens including cache-creation writes. `cache_read` is
+/// already a subset of `LoopModelUsage::input_tokens` and must NOT be added
+/// again; `cache_creation` is a separate write-side count that OpenAI folds
+/// into the reported input/prompt total. Shared chokepoint for both
+/// OpenAI-compatible usage shapes (Responses `input_tokens` and Chat
+/// Completions `prompt_tokens`) so this accounting has exactly one
+/// definition.
+fn total_prompt_tokens_with_cache_creation(usage: &LoopModelUsage) -> u32 {
+    usage
+        .input_tokens
+        .saturating_add(usage.cache_creation_input_tokens)
+}
+
+/// Build the Chat Completions `usage` object from a run's cumulative token
+/// totals (unbound-turns prepared-chat lane, §4.3). Mirrors
+/// `response_usage_from_model_usage`'s cache-creation accounting through the
+/// shared `total_prompt_tokens_with_cache_creation` chokepoint so the two
+/// OpenAI-compatible wire shapes never drift.
+fn chat_usage_from_model_usage(usage: &LoopModelUsage) -> ironclaw_openai_compat::OpenAiUsage {
+    let prompt_tokens = total_prompt_tokens_with_cache_creation(usage);
+    ironclaw_openai_compat::OpenAiUsage {
+        prompt_tokens,
+        completion_tokens: usage.output_tokens,
+        total_tokens: prompt_tokens.saturating_add(usage.output_tokens),
+        prompt_tokens_details: (usage.cache_read_input_tokens > 0).then_some(
+            ironclaw_openai_compat::OpenAiPromptTokensDetails {
+                cached_tokens: usage.cache_read_input_tokens,
+            },
+        ),
+        cost: None,
+    }
+}
+
 /// Build the OpenAI-compatible `usage` object from a run's cumulative token
 /// totals, pricing it for the given effective model.
 fn response_usage_from_model_usage(usage: &LoopModelUsage, model: &str) -> OpenAiResponseUsage {
-    // OpenAI reports total input (including cache) as `input_tokens`, with the
-    // cached subset broken out under `input_tokens_details`. `cache_read` is
-    // already a subset of `LoopModelUsage::input_tokens`, so it must NOT be
-    // added again; `cache_creation` is a separate write-side count and is
-    // added on top.
-    let total_input = usage
-        .input_tokens
-        .saturating_add(usage.cache_creation_input_tokens);
+    let total_input = total_prompt_tokens_with_cache_creation(usage);
     OpenAiResponseUsage {
         input_tokens: total_input,
         output_tokens: usage.output_tokens,

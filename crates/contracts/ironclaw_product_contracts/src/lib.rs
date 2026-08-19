@@ -9,7 +9,7 @@
 //! nothing, delivers nothing, and speaks no HTTP. `ironclaw_assistant` owns the
 //! `ProductSurface` implementation and the frozen inventory of concrete
 //! commands, views, and capabilities; this crate owns only their shapes. See
-//! `docs/reborn/target-architecture/PROPOSAL.md` §6.1.3 and
+//! `docs/internal/reborn/target-architecture/PROPOSAL.md` §6.1.3 and
 //! `families/contracts.md`.
 //!
 //! Admission test for a type here (the contracts-family four-part test):
@@ -19,7 +19,7 @@
 //! engine, or workflow.
 //!
 //! Two rules this crate is enforced against, both in
-//! `crates/ironclaw_architecture_tests/tests/`:
+//! `crates/app/ironclaw_architecture_tests/tests/`:
 //!
 //! - **Contracts purity** (§11.2.3, `reborn_dependency_boundaries.rs`): the
 //!   only internal dependencies are `ironclaw_host_api` and
@@ -46,9 +46,11 @@ pub mod descriptors;
 pub mod error;
 pub mod inbound;
 pub mod inbound_requests;
+pub mod inspector;
 pub mod interaction_commands;
 pub mod ironhub;
 pub mod lifecycle_service;
+pub mod notification_setup;
 pub mod operator_llm;
 pub mod operator_secrets;
 pub mod operator_service;
@@ -56,9 +58,12 @@ pub mod operator_tools;
 pub mod outbound;
 pub mod package_lifecycle;
 pub mod product_wire;
+pub mod project_service;
 pub mod projection;
 pub mod prompt_source;
-pub mod subject_route;
+pub mod session_ingress;
+pub mod shared_admission;
+pub mod suggestions;
 pub mod surface;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

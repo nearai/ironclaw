@@ -62,6 +62,17 @@ use parity_qa_support::model_replay::{
 use serde_json::{Value, json};
 use tokio::sync::Mutex as TokioMutex;
 
+fn execution_contract(goal: impl Into<String>) -> Value {
+    json!({
+        "version": 1,
+        "goal": goal.into(),
+        "success_criteria": ["Complete the requested routine task"],
+        "output_instructions": "Return a concise result",
+        "no_result_text": "No result",
+        "policy": { "result_delivery": "deliver" }
+    })
+}
+
 struct RoutineCreationCase {
     room: &'static str,
     event_id: &'static str,
@@ -83,7 +94,7 @@ async fn run_routine_creation(case: RoutineCreationCase) {
                 "call_qa_trigger_create",
                 json!({
                     "name": case.trigger_name,
-                    "prompt": case.prompt,
+                    "execution_contract": execution_contract(case.prompt),
                     "schedule": {
                         "kind": "cron",
                         "expression": case.cron,
@@ -283,6 +294,7 @@ async fn build_qa_fire_runtime(
     .expect("local-yolo runtime input")
     .with_local_runtime_confirmed_host_home_root(host_home_root);
     let input = RebornRuntimeInput::from_build_input(input)
+        .with_tool_disclosure(ironclaw_loop_host::ToolDisclosureMode::Off)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: QA_TENANT.to_string(),
             agent_id: QA_AGENT.to_string(),
@@ -330,7 +342,7 @@ async fn reborn_qa_routine_created_by_tool_fires_and_runs_routine_prompt() {
         &runtime,
         json!({
             "name": "Deployment health watcher",
-            "prompt": QA_ROUTINE_PROMPT,
+            "execution_contract": execution_contract(QA_ROUTINE_PROMPT),
             "schedule": {
                 "kind": "cron",
                 "expression": "*/5 * * * *",
@@ -486,7 +498,7 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
         &runtime,
         json!({
             "name": "Deployment health watcher action",
-            "prompt": QA_ROUTINE_PROMPT,
+            "execution_contract": execution_contract(QA_ROUTINE_PROMPT),
             "schedule": {
                 "kind": "cron",
                 "expression": "*/5 * * * *",
@@ -568,7 +580,7 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
     // `detail.preview` so the model does not need a follow-up `result_read`
     // call; the marker here is well under the cap. Mirrors
     // `assert_standalone_result_reference` in
-    // `crates/ironclaw_composition/src/runtime.rs`.
+    // `crates/app/ironclaw_composition/src/runtime.rs`.
     assert!(
         tool_result.content.contains(QA_DM_ACTION_MARKER),
         "a result under the first-look preview cap should appear inline in model replay: {}",

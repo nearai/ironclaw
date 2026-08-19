@@ -27,7 +27,7 @@ run() {
 # (scripts/ci/lib/crate_tree.py) rather than a literal `crates/ironclaw_webui`
 # path, so the target-architecture family move (PROPOSAL §5) cannot leave the
 # frontend prep/test stages pointed at a directory that no longer exists
-# (docs/reborn/target-architecture/CHECKLIST.md WS10). Memoized: called from
+# (docs/internal/reborn/target-architecture/CHECKLIST.md WS10). Memoized: called from
 # both prepare_frontend_dependencies and run_frontend_tests.
 resolve_webui_frontend_dir() {
   if [[ -n "${webui_frontend_dir}" ]]; then

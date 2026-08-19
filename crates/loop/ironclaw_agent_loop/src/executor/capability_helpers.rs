@@ -1,18 +1,21 @@
 use std::collections::{HashMap, HashSet};
 
-use ironclaw_host_api::turn::LoopResultRef;
+use ironclaw_host_api::turn::{LoopResultRef, TurnOriginKind};
 use ironclaw_host_api::{
     dispatch::DispatchInputIssueCode,
+    execution_policy::ResultDeliveryPolicy,
     ids::CapabilityId,
+    prepared_context::STRUCTURED_RESULT_CAPABILITY_ID,
     result_meta::{CapabilityRecoveryHint, FailureKind, ModelDiagnostic, SameCallRetryConstraint},
 };
 use ironclaw_loop_contracts::{
     AgentLoopDriverHost, AppendCapabilityResultRef, CapabilityApprovalResume, CapabilityAuthResume,
     CapabilityCallCandidate, CapabilityDescriptorView, CapabilityFailure, CapabilityFailureDetail,
-    CapabilityInputIssue, CapabilityInputRepair, CapabilityResultMessage, CapabilitySurfaceVersion,
-    LoopRequest, ModelVisibleToolObservation, ObservationTrust, ProviderToolCall,
-    ProviderToolCallReference, RegisterProviderToolCallRequest, ToolObservationDetail,
-    ToolObservationStatus, ToolRecoveryObservation, VisibleCapabilitySurface,
+    CapabilityInputIssue, CapabilityInputRepair, CapabilityResultIntrinsicOutcome,
+    CapabilityResultMessage, CapabilitySurfaceVersion, LoopRequest, ModelVisibleToolObservation,
+    ObservationTrust, ProviderToolCall, ProviderToolCallReference, RegisterProviderToolCallRequest,
+    ToolObservationDetail, ToolObservationStatus, ToolRecoveryObservation,
+    VisibleCapabilitySurface,
 };
 
 use crate::{
@@ -20,7 +23,7 @@ use crate::{
         CapabilityCallSignature, LoopExecutionState, PendingApprovalResume, PendingAuthResume,
         PendingExternalToolResume,
     },
-    strategies::{CapabilityCallSummary, CapabilityErrorSummary, CapabilityFilter, GateKind},
+    strategies::{CapabilityErrorSummary, CapabilityFilter, GateKind},
 };
 
 use super::{AgentLoopExecutorError, capability_host_error};
@@ -191,21 +194,6 @@ impl<'a> CapabilitySurfaceIndex<'a> {
     }
 }
 
-pub(super) fn capability_summary(
-    surface: &CapabilitySurfaceIndex<'_>,
-    call: &CapabilityCallCandidate,
-) -> CapabilityCallSummary {
-    let concurrency_hint = surface
-        .descriptors
-        .get(&call.capability_id)
-        .map(|descriptor| descriptor.concurrency_hint)
-        .unwrap_or(ironclaw_loop_contracts::ConcurrencyHint::Exclusive);
-    CapabilityCallSummary {
-        name: call.capability_id.clone(),
-        concurrency_hint,
-    }
-}
-
 pub(super) fn capability_is_visible(
     surface: &CapabilitySurfaceIndex<'_>,
     call: &CapabilityCallCandidate,
@@ -278,6 +266,7 @@ pub(super) async fn append_capability_result_ref(
             .model_observation
             .clone()
             .or_else(|| model_visible_capability_success_observation(call, result)),
+        intrinsic_outcome: completed_result_intrinsic_outcome(host, call, result),
     })
     .await
     .map_err(capability_host_error)?;
@@ -359,11 +348,32 @@ async fn append_capability_safe_summary_ref_with_observation(
         safe_summary,
         provider_call: provider_tool_call_reference(call),
         model_observation,
+        intrinsic_outcome: None,
     })
     .await
     .map_err(capability_host_error)?;
     state.result_refs.push(result_ref);
     Ok(())
+}
+
+fn completed_result_intrinsic_outcome(
+    host: &(dyn AgentLoopDriverHost + Send + Sync),
+    call: &CapabilityCallCandidate,
+    result: &CapabilityResultMessage,
+) -> Option<CapabilityResultIntrinsicOutcome> {
+    let suppression_enabled = host
+        .run_context()
+        .product_context
+        .as_ref()
+        .filter(|context| context.origin == TurnOriginKind::ScheduledTrigger)
+        .and_then(|context| context.execution_policy.as_ref())
+        .is_some_and(|policy| {
+            policy.result_delivery == ResultDeliveryPolicy::SuppressWhenNothingToReport
+        });
+    (suppression_enabled
+        && result.terminate_hint
+        && call.capability_id.as_str() == STRUCTURED_RESULT_CAPABILITY_ID)
+        .then_some(CapabilityResultIntrinsicOutcome::NothingToReport)
 }
 
 pub(super) fn model_visible_capability_failure_observation(
@@ -632,7 +642,7 @@ pub(super) fn clear_matching_pending_auth_resume(
     if state
         .pending_auth_resume
         .as_ref()
-        .is_some_and(|resume| resume.capability_id == call.capability_id)
+        .is_some_and(|resume| resume.activity_id == call.activity_id)
     {
         state.pending_auth_resume = None;
     }
@@ -645,7 +655,7 @@ pub(super) fn clear_matching_pending_external_tool_resume(
     if state
         .pending_external_tool_resume
         .as_ref()
-        .is_some_and(|resume| resume.capability_id == call.capability_id)
+        .is_some_and(|resume| resume.activity_id == call.activity_id)
     {
         state.pending_external_tool_resume = None;
     }
@@ -850,7 +860,7 @@ mod tests {
     fn capability_is_visible_authorizes_disclosed_but_unadvertised_callable_tool() {
         use ironclaw_host_api::runtime::RuntimeKind;
         use ironclaw_loop_contracts::{
-            CapabilityDescriptorView, CapabilityInputRef, ConcurrencyHint, VisibleCapabilitySurface,
+            CapabilityDescriptorView, CapabilityInputRef, VisibleCapabilitySurface,
         };
 
         let version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
@@ -864,7 +874,6 @@ mod tests {
             safe_name: "tool_search".to_string(),
             safe_description: "search".to_string(),
             description_trust: Default::default(),
-            concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: serde_json::json!({"type": "object"}),
         };
         let candidate = |cap: &CapabilityId| CapabilityCallCandidate {

@@ -1,7 +1,7 @@
 //! Concrete-name specificity gate for the unified extension runtime.
 // arch-exempt: large_file, unified extension specificity ratchet stays centralized, plan #6175
 //!
-//! Goal (docs/reborn/extension-runtime/overview.md §1): no generic crate
+//! Goal (docs/internal/reborn/extension-runtime/overview.md §1): no generic crate
 //! contains a concrete product name, vendor id, or vendor API host. The
 //! forbidden vocabulary is **derived from the bundled package inventory**
 //! (`crates/extensions/packages/` plus the test fixture
@@ -71,7 +71,8 @@ use serde_json::Value;
 // ~215 literals below without a lockstep edit. On today's tree resolution is
 // the identity - pinned by `reborn_crate_inventory.rs`.
 use ratchet_support::{
-    crate_dir, crate_directories, crate_path, try_resolve_crate_relative, workspace_root,
+    crate_dir, crate_directories, crate_path, strip_line_anchored_cfg_test_items,
+    try_resolve_crate_relative, workspace_root,
 };
 
 /// Resolve a listed path through the crate inventory, falling back to the
@@ -115,7 +116,21 @@ fn resolve_listed_path(root: &Path, logical: &str) -> String {
 /// Excluding these two restores exactly the pre-move term set: before WS2 the
 /// inventory was the twelve extension packages plus the fixtures, and it still
 /// is.
-const NON_VENDOR_PROVIDER_PACKAGE_DIRS: &[&str] = &["memory-native", "mem0"];
+///
+/// `web-app` joined 2026-08-08 as the browser-notification channel (then
+/// named `web-push`; renamed by the unified-channel-model train 2026-08-10 —
+/// the retired spelling is pinned at zero in generic code by
+/// `reborn_web_push_vocabulary_retired.rs`): the id names the product's own
+/// web surface, not a vendor, and the package is first-party deployment
+/// infrastructure. Its Web Push protocol mechanics (RFC 8030/8291/8292) live
+/// in the `ironclaw_web_app` domain crate the same way the provider-neutral
+/// memory contract lives in `ironclaw_memory`, so composition wiring, the
+/// product wire DTOs, and the domain crate legitimately name it. Its
+/// manifest's egress hosts (the push services browsers mint endpoints on)
+/// are likewise protocol infrastructure, not vendor vocabulary — and generic
+/// code does not hardcode them anyway: the enrollment allowlist is read from
+/// the resolved manifest at composition.
+const NON_VENDOR_PROVIDER_PACKAGE_DIRS: &[&str] = &["memory-native", "mem0", "web-app"];
 
 /// Directories whose `*/manifest.toml` files form the package inventory the
 /// forbidden vocabulary derives from.
@@ -353,11 +368,6 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
          the leak-scanner carve-out domain (#5965)",
     ),
     (
-        "crates/ironclaw_loop_contracts/src/prompt_text.rs",
-        "github",
-        "credential-prefix redaction (github_pat_)",
-    ),
-    (
         "crates/ironclaw_auth/src/lib.rs",
         "gmail",
         "auth-engine OAuth provider-id vocabulary (persisted provider ids), not the extensions vendor",
@@ -548,6 +558,52 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "trace payload-redaction safety classifier keyed off tool-name keywords \
          (issue-tracker profile); a safety denylist, not extension routing",
     ),
+    // Manifest inline-secret guard (`looks_like_inline_secret`,
+    // `ironclaw_extension_registry::host_api::product_adapter`): the vendor
+    // token *prefixes* a manifest field value is rejected for carrying.
+    //
+    // **Carved, not allowlisted, and CHECKLIST WS5's "slack/telegram token
+    // heuristics → the packages that own them" clause is REFUTED by the same
+    // measurement.** Two independent reasons, both mechanical:
+    //
+    // 1. It is a **superset of the bundled inventory**, exactly like the
+    //    trace-redaction classifier above. Of the eleven prefixes it carries,
+    //    five belong to no installed package at all — `sk-` (OpenAI/Anthropic
+    //    API keys), AWS `AKIA`/`ASIA`, JWTs (`eyJ…`), PEM private-key headers,
+    //    and URI userinfo — so sourcing the set from the packages would
+    //    *shrink* it and stop rejecting inline secrets the guard catches today.
+    //    A guard that only knows the vendors currently installed is a guard
+    //    that fails open on the next one.
+    // 2. The move is **layer-illegal in the named direction**.
+    //    `ironclaw_extension_registry` is `layer = "substrates"` and
+    //    `crates/extensions/packages/{slack,telegram}` are `layer = "products"`,
+    //    so `registry → package` is upward and needs a
+    //    `LAYER_MATRIX_EXCEPTION` the ratchet forbids. The only legal shape is
+    //    inversion — a package registers its prefixes with the parser — and
+    //    that is strictly worse here: the guard runs while parsing an
+    //    *arbitrary* manifest, including before any package is loaded, so a
+    //    registration-sourced list is unpopulated exactly when it matters.
+    //
+    // Pinned by `inline_secret_guard_is_a_safety_denylist_not_package_inventory`
+    // in `crates/extensions/ironclaw_extension_registry/tests/product_adapter_manifest_ingestion.rs`.
+    (
+        "crates/ironclaw_extension_registry/src/host_api/product_adapter.rs",
+        "github",
+        "manifest inline-secret guard token prefixes (`ghp_`/`gho_`/…); a safety \
+         denylist that is a superset of the package inventory, not extension routing",
+    ),
+    (
+        "crates/ironclaw_extension_registry/src/host_api/product_adapter.rs",
+        "slack",
+        "manifest inline-secret guard token prefixes (`xoxb-`/`xoxp-`/…); a safety \
+         denylist that is a superset of the package inventory, not extension routing",
+    ),
+    (
+        "crates/ironclaw_extension_registry/src/host_api/product_adapter.rs",
+        "telegram",
+        "manifest inline-secret guard bot-token shape (`looks_like_telegram_token`); a \
+         safety denylist that is a superset of the package inventory, not extension routing",
+    ),
     (
         "crates/ironclaw_webui/frontend/src/i18n/",
         "google",
@@ -638,10 +694,13 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
 /// structural reason, mirroring `reborn_retired_taxonomy.rs`: the one-time
 /// forward data migrations name what they fold forward.
 const SANCTIONED_PATHS: &[&str] = &[
-    "extension_host/extension_installation_store.rs",
     // One-release legacy webhook-path aliases (MIG-5): the compatibility
     // table names the concrete legacy paths it forwards; each entry carries
     // its own removal note.
+    // (A second fragment, `extension_host/extension_installation_store.rs`,
+    // sat here after #6430 deleted that file — matching nothing. Unlike the
+    // taxonomy twin, this list has no staleness check, so keep it pruned by
+    // hand when the named files go away.)
     "product_auth/durable/",
 ];
 
@@ -903,45 +962,6 @@ fn is_test_source_path(path: &Path) -> bool {
         || name.contains(".spec.")
 }
 
-/// Remove `#[cfg(test)]` items (inline `mod tests { … }` blocks and
-/// `mod tests;` declarations) before matching: tests may name concrete
-/// products (overview §8). Line-based brace counting — the same heuristic
-/// `scripts/pre-commit-safety.sh` uses for its test-stripping.
-fn strip_cfg_test_blocks(source: &str) -> String {
-    let mut kept = String::with_capacity(source.len());
-    let mut lines = source.lines().peekable();
-    while let Some(line) = lines.next() {
-        if !line.trim_start().starts_with("#[cfg(test)]") {
-            kept.push_str(line);
-            kept.push('\n');
-            continue;
-        }
-        // Skip attribute lines, then the annotated item.
-        let mut depth: i64 = 0;
-        let mut opened = false;
-        for skipped in lines.by_ref() {
-            let trimmed = skipped.trim_start();
-            if !opened && trimmed.starts_with("#[") {
-                continue;
-            }
-            depth += skipped.matches('{').count() as i64;
-            depth -= skipped.matches('}').count() as i64;
-            if !opened {
-                if skipped.contains('{') {
-                    opened = true;
-                } else if trimmed.ends_with(';') {
-                    // `mod tests;` — single-line item, nothing else to skip.
-                    break;
-                }
-            }
-            if opened && depth <= 0 {
-                break;
-            }
-        }
-    }
-    kept
-}
-
 /// Mask non-extension references before matching:
 ///
 /// - GitHub *repository URLs* (issue/PR citations, upstream repo links) so
@@ -990,7 +1010,7 @@ fn scan_file(path: &Path, kind: FileKind, terms: &BTreeSet<String>) -> Vec<Strin
         return Vec::new();
     };
     let contents = match kind {
-        FileKind::Rust => strip_cfg_test_blocks(&contents),
+        FileKind::Rust => strip_line_anchored_cfg_test_items(&contents),
         FileKind::Frontend | FileKind::Toml => contents,
     };
     let haystack = mask_non_extension_references(&contents).to_ascii_lowercase();
@@ -1048,6 +1068,21 @@ fn collect_workspace_hits(root: &Path, terms: &BTreeSet<String>) -> BTreeSet<(St
     for scan_root in generic_scan_roots(&metadata, root) {
         let src = scan_root.crate_dir.join("src");
         scan_dir(root, &src, terms, &mut hits);
+        // `build.rs` is generic-crate code that ships in the build, and it sat
+        // outside every scan root: a vendor name there was invisible to this
+        // gate (proven by sabotage, 2026-08-13).
+        let build_script = scan_root.crate_dir.join("build.rs");
+        if build_script.is_file() {
+            let matched = scan_file(&build_script, FileKind::Rust, terms);
+            if !matched.is_empty() {
+                let relative = build_script
+                    .strip_prefix(root)
+                    .unwrap_or(&build_script)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                hits.entry(relative).or_default().extend(matched);
+            }
+        }
         let manifest = scan_root.crate_dir.join("Cargo.toml");
         if manifest.exists() {
             let matched = scan_file(&manifest, FileKind::Toml, terms);
@@ -1069,10 +1104,18 @@ fn collect_workspace_hits(root: &Path, terms: &BTreeSet<String>) -> BTreeSet<(St
     assert!(
         frontend.is_dir(),
         "WebUI frontend scan root {} does not exist; the SPA would go unscanned while this \
-         gate still reported success (docs/reborn/target-architecture/CHECKLIST.md WS10)",
+         gate still reported success (docs/internal/reborn/target-architecture/CHECKLIST.md WS10)",
         frontend.display()
     );
     scan_dir(root, &frontend, terms, &mut hits);
+
+    // The frontend's own build/CI scripts are generic-crate code too, and were
+    // the second hole the same sabotage pass found. Absent by choice in some
+    // checkouts, so this one is scanned when present rather than asserted.
+    let frontend_scripts = crate_path(root, "crates/ironclaw_webui/frontend/scripts");
+    if frontend_scripts.is_dir() {
+        scan_dir(root, &frontend_scripts, terms, &mut hits);
+    }
 
     // Resolved through the inventory: these fragments are matched against
     // paths discovered on disk, so a crate that moved makes every fragment
@@ -1161,25 +1204,12 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_webui/frontend/src/pages/chat/components/auth-oauth-card.tsx",
         "github",
     ),
-    // The inline-secret guard's vendor token prefixes. Repointed (not added)
-    // when CHECKLIST WS5's `product` narrows row moved `adapter_registry` to
-    // `ironclaw_extension_registry::host_api::product_adapter`; the guard stayed with
-    // the raw-TOML parse stage, so the entries moved file and nothing else.
-    // The schema half that went to `ironclaw_extension_contracts` carries no
-    // vendor name — its fixtures were rewritten generically rather than carved,
-    // the same disposition PROPOSAL §6.1.3 records for `ProductConversationRouteKey`.
-    (
-        "crates/ironclaw_extension_registry/src/host_api/product_adapter.rs",
-        "github",
-    ),
-    (
-        "crates/ironclaw_extension_registry/src/host_api/product_adapter.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_extension_registry/src/host_api/product_adapter.rs",
-        "telegram",
-    ),
+    // The inline-secret guard's vendor token prefixes moved OUT of this list
+    // 2026-08-05 and into `PATH_TERM_COLLISIONS`, where the trace-redaction
+    // classifier already sits. They are a safety denylist, not extension
+    // routing, and CHECKLIST WS5's "slack/telegram token heuristics → the
+    // packages that own them" clause is refuted rather than owed — see the
+    // carve-out's own reason text for the measurement.
     (
         "crates/ironclaw_host_api/src/product_adapter/identity.rs",
         "slack",
@@ -1210,9 +1240,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_assistant/Cargo.toml", "telegram"),
     // `conversation_binding.rs` was carved for a vendor example in
     // `ProductConversationRouteKey`'s doc. WS2.2 moved that type to
-    // `ironclaw_product_contracts::subject_route`, where a vendor name is
-    // forbidden outright, so the example was rewritten generically rather than
-    // re-carved. The entry is deleted, not repointed — the allowlist shrinks.
+    // `ironclaw_product_contracts::subject_route` (today's
+    // `shared_admission`, after the subject retirement), where a vendor name
+    // is forbidden outright, so the example was rewritten generically rather
+    // than re-carved. The entry is deleted, not repointed — the allowlist
+    // shrinks.
     ("crates/ironclaw_assistant/src/lib.rs", "telegram"),
     // WS5 port inversion: these three wire-DTO sites moved to the contracts
     // crate with their code (`NearAiAuthProvider`'s OAuth identity providers and
@@ -1262,10 +1294,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     (
         "crates/ironclaw_host_runtime/src/services/wasm_execution.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_turn_runner/src/loop_driver_host.rs",
         "slack",
     ),
     ("crates/ironclaw_loop_host/src/tool_disclosure.rs", "google"),
@@ -1404,11 +1432,12 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_outbound/src/delivered_gate_routes.rs",
         "slack",
     ),
-    ("crates/ironclaw_projects/src/lib.rs", "github"),
-    (
-        "crates/ironclaw_composition/src/automation/trigger_poller.rs",
-        "slack",
-    ),
+    // ✎ 2026-08-05: was `crates/ironclaw_projects/src/lib.rs`. The crate merged
+    // into `ironclaw_identity` as its `projects` module (WS10 / PROPOSAL
+    // §12.10), so the same doc-comment hit moved with the file. A 1-for-1
+    // repoint: the count is unchanged and this stays a `lane-4: doc-str` row
+    // awaiting the owner's reword-or-leave call, not a new debt.
+    ("crates/domains/ironclaw_identity/src/projects.rs", "github"),
     (
         "crates/ironclaw_assistant/src/blocked_auth_resume.rs",
         "google",
@@ -1498,26 +1527,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // localized pairing copy). Consumed by the generic descriptor-driven
     // pairing seam (extension-runtime P2), which moves product copy and
     // routing onto manifest-declared account-setup descriptors.
-    (
-        "crates/ironclaw_webui/frontend/src/components/telegram-setup-panel.tsx",
-        "telegram",
-    ),
-    (
-        "crates/ironclaw_webui/frontend/src/lib/channel-setup-api.ts",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_webui/frontend/src/lib/channel-setup-api.ts",
-        "telegram",
-    ),
-    (
-        "crates/ironclaw_webui/frontend/src/lib/telegram-setup-api.ts",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_webui/frontend/src/lib/telegram-setup-api.ts",
-        "telegram",
-    ),
     ("crates/ironclaw_webui/frontend/src/i18n/ar.ts", "slack"),
     ("crates/ironclaw_webui/frontend/src/i18n/ar.ts", "telegram"),
     ("crates/ironclaw_webui/frontend/src/i18n/de.ts", "slack"),
@@ -1662,7 +1671,30 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// only entries either side removed, and this branch's renames repoint entries
 /// in place without adding any. So the union is the batch's number, not ours —
 /// which is exactly why it is measured rather than reasoned.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 122;
+///
+/// **122 → 119, 2026-08-05 (WS5 `product` narrows, token-heuristics clause).**
+/// The three `ironclaw_extension_registry/src/host_api/product_adapter.rs`
+/// rows left the allowlist and became `PATH_TERM_COLLISIONS` carve-outs with
+/// reasons. That is a re-classification, not a payment: allowlist entries are
+/// *debt* — vendor names that ought to leave — and the measurement on that row
+/// showed these three never can, because the guard they belong to is a safety
+/// denylist that is a superset of the package inventory and the move its clause
+/// named is layer-illegal besides. Keeping them in the debt column would have
+/// left a permanent entry the shrink ratchet can never retire; the carve-out
+/// list is where the trace-redaction classifier already records the identical
+/// disposition. Net vendor-name surface is unchanged: three rows moved list,
+/// zero terms appeared or vanished.
+///
+/// **119 → 118, 2026-08-06 (channel-generic trigger settlement delivery).**
+/// The trigger-poller bridge now describes its owner as the channel delivery
+/// hook instead of naming one concrete extension. The stale `slack` exception
+/// was removed after the specificity scan proved the production file no
+/// longer contains that vendor term.
+// 118 -> 117 (2026-08-09, ephemeral-per-ping remodel): the
+// `loop_driver_host.rs`/"slack" carve-out was retired when the channel-context
+// forwarding it described was reworked, so its now-stale allowlist entry was
+// deleted — the ratchet only ever shrinks.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 112;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///
@@ -1862,7 +1894,7 @@ fn concrete_extension_crates_link_only_from_the_binary_and_tests() {
         !resolved_concrete.is_empty(),
         "no concrete extension package resolved to a manifest, so the registration guard \
          checked nothing. CONCRETE_EXTENSION_CRATES is {CONCRETE_EXTENSION_CRATES:?} \
-         (docs/reborn/target-architecture/CHECKLIST.md WS10)."
+         (docs/internal/reborn/target-architecture/CHECKLIST.md WS10)."
     );
 
     let mut violations = Vec::new();

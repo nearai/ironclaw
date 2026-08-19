@@ -49,6 +49,7 @@ fn serde_contracts_are_validated_snake_case_and_redacted() {
             ownership: CredentialOwnership::UserReusable,
             owner_extension: None,
             granted_extensions: Vec::new(),
+            scopes: Vec::new(),
             secret_handle_count: 2,
         }],
     };

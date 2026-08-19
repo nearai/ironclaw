@@ -2,10 +2,12 @@
 
 use ironclaw_assistant::{
     CommandAudience, LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef,
-    LifecycleProductAction, ProductCommand, ProductModelCommand, declared_command_help_text,
-    product_command_descriptors, required_audience, validate_declared_product_command,
+    LifecycleProductAction, ProductCommand, ProductModelCommand, ProductStopInvocation,
+    declared_command_help_text, product_command_descriptors, required_audience,
+    validate_declared_product_command,
 };
-use ironclaw_assistant::{InboundCommandPayload, ProductRejectionKind, ProductTriggerReason};
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_product_contracts::inbound::{InboundCommandPayload, ProductRejectionKind};
 
 #[test]
 fn command_payload_maps_to_typed_model_command_without_v1_parser() {
@@ -21,6 +23,42 @@ fn command_payload_maps_to_typed_model_command_without_v1_parser() {
             }
         }
     );
+}
+
+#[test]
+fn model_command_maps_user_preference_actions() {
+    let use_model =
+        InboundCommandPayload::new("model", "use gpt-5-mini", ProductTriggerReason::BotCommand)
+            .expect("valid command");
+    let follow_default =
+        InboundCommandPayload::new("model", "default", ProductTriggerReason::BotCommand)
+            .expect("valid command");
+
+    assert_eq!(
+        ProductCommand::from_payload(&use_model).expect("parse preference command"),
+        ProductCommand::Model {
+            action: ProductModelCommand::Use {
+                model: "gpt-5-mini".to_string(),
+            }
+        }
+    );
+    assert_eq!(
+        ProductCommand::from_payload(&follow_default).expect("parse default command"),
+        ProductCommand::Model {
+            action: ProductModelCommand::Default,
+        }
+    );
+}
+
+#[test]
+fn model_preference_commands_reject_missing_or_extra_arguments() {
+    for arguments in ["use", "use model-a extra", "default extra"] {
+        let payload =
+            InboundCommandPayload::new("model", arguments, ProductTriggerReason::BotCommand)
+                .expect("valid command");
+        let rejection = ProductCommand::from_payload(&payload).expect_err("invalid command");
+        assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
+    }
 }
 
 #[test]
@@ -147,6 +185,39 @@ fn command_payload_maps_all_declared_commands_and_unknown_fallback() {
             command.descriptor().map(|descriptor| descriptor.name),
             expected_descriptor
         );
+    }
+}
+
+#[test]
+fn new_stop_and_interrupt_are_explicit_user_commands() {
+    let cases = [
+        ("new", ProductCommand::New),
+        (
+            "stop",
+            ProductCommand::Stop {
+                invocation: ProductStopInvocation::Stop,
+            },
+        ),
+        (
+            "interrupt",
+            ProductCommand::Stop {
+                invocation: ProductStopInvocation::Interrupt,
+            },
+        ),
+    ];
+
+    for (name, expected) in cases {
+        let payload = InboundCommandPayload::new(name, "", ProductTriggerReason::DirectChat)
+            .expect("valid command payload");
+        let command = ProductCommand::from_payload(&payload).expect("parse control command");
+        assert_eq!(command, expected);
+        assert_eq!(command.name(), name);
+        assert_eq!(required_audience(&command), CommandAudience::User);
+        assert_eq!(
+            command.descriptor().map(|descriptor| descriptor.name),
+            Some(name)
+        );
+        assert!(validate_declared_product_command(name).is_ok());
     }
 }
 
@@ -449,7 +520,7 @@ fn declared_command_help_is_scoped_and_fail_closed() {
 fn listing_audience_is_user_for_model_and_status_and_admin_for_lifecycle() {
     for descriptor in product_command_descriptors() {
         let expected = match descriptor.name {
-            "model" | "status" => CommandAudience::User,
+            "model" | "status" | "new" | "stop" | "interrupt" => CommandAudience::User,
             _ => CommandAudience::Admin, // the lifecycle family
         };
         assert_eq!(
@@ -466,6 +537,12 @@ fn execution_audience_is_per_action() {
         ProductCommand::Status,
         ProductCommand::Model {
             action: ProductModelCommand::Status,
+        },
+        ProductCommand::Model {
+            action: ProductModelCommand::Use { model: "m".into() },
+        },
+        ProductCommand::Model {
+            action: ProductModelCommand::Default,
         },
         ProductCommand::Unknown {
             name: "nope".into(),

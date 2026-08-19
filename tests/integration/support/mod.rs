@@ -3,6 +3,7 @@ pub mod builder;
 pub mod capability_backend;
 pub mod comm_context;
 pub mod config;
+pub mod db_write_measurement;
 pub mod doubles;
 pub mod extension_surface;
 pub mod filesystem;

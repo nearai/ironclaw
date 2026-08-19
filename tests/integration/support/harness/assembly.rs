@@ -90,6 +90,26 @@ pub(crate) fn standalone_host_runtime_with_registry_and_runtime_http_egress(
     egress: Arc<RecordingRuntimeHttpEgress>,
     process_port: Option<Arc<dyn RuntimeProcessPort>>,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
+    let filesystem =
+        standalone_root_filesystem(storage_root, StandaloneRootMounts::core_builtins())?;
+    standalone_host_runtime_over_filesystem_with_registry_and_runtime_http_egress(
+        filesystem,
+        registry,
+        egress,
+        process_port,
+    )
+}
+
+/// Build the core first-party runtime over a caller-owned filesystem. The
+/// memory integration group uses this seam so tool dispatch and proactive
+/// retrieval share the exact production-shaped libSQL composite instead of
+/// silently writing to the core-builtins harness's separate in-memory mount.
+pub(crate) fn standalone_host_runtime_over_filesystem_with_registry_and_runtime_http_egress(
+    filesystem: Arc<CompositeRootFilesystem>,
+    registry: ExtensionRegistry,
+    egress: Arc<RecordingRuntimeHttpEgress>,
+    process_port: Option<Arc<dyn RuntimeProcessPort>>,
+) -> HarnessResult<Arc<dyn HostRuntime>> {
     // Mirror the production rule (`factory.rs`): the bound memory provider's
     // guarded tool handler is registered exactly when its package is in the
     // registry — `without_memory_package` (the Disabled-binding shape) gets
@@ -105,7 +125,7 @@ pub(crate) fn standalone_host_runtime_with_registry_and_runtime_http_egress(
     }
     let mut services = HostRuntimeServices::new(
         Arc::new(registry),
-        standalone_root_filesystem(storage_root, StandaloneRootMounts::core_builtins())?,
+        filesystem,
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -177,6 +197,16 @@ struct NoopTestTriggerCreateHook;
 
 #[async_trait::async_trait]
 impl TriggerCreateHook for NoopTestTriggerCreateHook {
+    async fn validate_execution_policy(
+        &self,
+        _scope: &ironclaw_host_api::resource::ResourceScope,
+        _policy: &ironclaw_host_api::execution_policy::TurnExecutionPolicy,
+    ) -> Result<(), ironclaw_triggers::TriggerError> {
+        // Never exercised (see the struct doc): only `builtin.trigger_list`
+        // is ever routed to this runtime.
+        Ok(())
+    }
+
     async fn after_trigger_persisted(
         &self,
         _record: &ironclaw_triggers::TriggerRecord,

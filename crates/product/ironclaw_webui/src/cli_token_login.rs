@@ -255,7 +255,7 @@ async fn login_handler(
         Ok(bearer) => bearer,
         Err(err) => {
             tracing::error!(
-                target = "ironclaw::reborn::webui_ingress::cli_token_login",
+                target: "ironclaw::reborn::webui_ingress::cli_token_login",
                 error = %err,
                 "session store create_session failed",
             );

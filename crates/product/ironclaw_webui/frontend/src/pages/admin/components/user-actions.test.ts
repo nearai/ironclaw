@@ -170,6 +170,7 @@ function loadUsersView(harness) {
 
 function loadDetailModule(harness) {
   function ConfirmDialog() {}
+  function ThreadScrapingPanel() {}
   const module = runVmModuleForTest(
     "./user-detail.tsx",
     ["UserDetail", "UserDetailView"],
@@ -184,11 +185,10 @@ function loadDetailModule(harness) {
       SelectMenu: function SelectMenu() {},
       useAdminUserDetail: () => ({}),
       useAdminUsers: () => baseAdminState(),
-      useUsage: () => ({}),
       UserSecretsPanel: function UserSecretsPanel() {},
+      ThreadScrapingPanel,
       formatRelativeTime: () => "never",
       formatCost: () => "$0",
-      formatTokenCount: () => "0",
       truncateId: (id) => id,
       statusTone: () => "muted",
       roleTone: () => "muted",
@@ -201,7 +201,7 @@ function loadDetailModule(harness) {
     },
     import.meta.url,
   );
-  return { ...module, ConfirmDialog };
+  return { ...module, ConfirmDialog, ThreadScrapingPanel };
 }
 
 function loadDetailView(harness) {
@@ -216,6 +216,25 @@ test("user detail view is keyed by user id so local state resets between users",
 
   assert.equal(rendered.type.name, "UserDetailView");
   assert.equal(rendered.props.key, "user-2");
+  assert.equal(rendered.props.threadScrapingEnabled, false);
+  assert.equal(
+    UserDetail({ userId: "user-2", onBack: () => {}, threadScrapingEnabled: true })
+      .props.threadScrapingEnabled,
+    true,
+  );
+});
+
+test("user detail exposes thread scraping only when the deployment gate is enabled", () => {
+  const harness = createReactHarness();
+  const { UserDetailView: View, ThreadScrapingPanel } = loadDetailModule(harness);
+  const props = {
+    onBack: () => {},
+    userQuery: { isLoading: false, error: null, data: baseAdminState().users[0] },
+    adminState: baseAdminState(),
+  };
+
+  assert.equal(findByType(harness.render(View, props), ThreadScrapingPanel), null);
+  assert.ok(findByType(harness.render(View, { ...props, threadScrapingEnabled: true }), ThreadScrapingPanel));
 });
 
 test("users list shows activate and role failures and disables actions while pending", () => {
@@ -410,7 +429,6 @@ test("admin confirmations ignore repeated submissions while requests are in flig
   const detailProps = {
     onBack: () => {},
     userQuery: { isLoading: false, error: null, data: baseAdminState().users[0] },
-    usageQuery: { data: { usage: [] } },
     adminState: deleteState,
   };
   rendered = deleteHarness.render(UserDetailView, detailProps);
@@ -439,7 +457,6 @@ test("opening and cancelling delete preserves unrelated action errors", () => {
   const props = {
     onBack: () => {},
     userQuery: { isLoading: false, error: null, data: baseAdminState().users[0] },
-    usageQuery: { data: { usage: [] } },
     adminState,
   };
 
@@ -469,7 +486,6 @@ test("user detail surfaces status and role failures", () => {
   const props = (adminState) => ({
     onBack: () => {},
     userQuery: { isLoading: false, error: null, data: baseAdminState().users[0] },
-    usageQuery: { data: { usage: [] } },
     adminState,
   });
 
@@ -497,7 +513,6 @@ test("delete failure keeps the dialog open and does not navigate away", async ()
   const props = {
     onBack: () => { backCalls += 1; },
     userQuery: { isLoading: false, error: null, data: baseAdminState().users[0] },
-    usageQuery: { data: { usage: [] } },
     adminState,
   };
 

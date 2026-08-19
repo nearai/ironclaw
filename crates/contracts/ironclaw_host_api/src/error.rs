@@ -36,6 +36,8 @@ pub enum HostApiError {
     InvalidModelDiagnostic { reason: String },
     #[error("invalid host remediation: {reason}")]
     InvalidHostRemediation { reason: String },
+    #[error("invalid output contract: {reason}")]
+    InvalidOutputContract { reason: String },
     #[error("host API invariant violation: {reason}")]
     InvariantViolation { reason: String },
 }
@@ -122,6 +124,12 @@ impl HostApiError {
     pub(crate) fn invalid_host_remediation(reason: impl Into<String>) -> Self {
         // pub-api-exempt: crate-internal, called by host_remediation::validate_host_remediation
         Self::InvalidHostRemediation {
+            reason: reason.into(),
+        }
+    }
+
+    pub(crate) fn invalid_output_contract(reason: impl Into<String>) -> Self {
+        Self::InvalidOutputContract {
             reason: reason.into(),
         }
     }

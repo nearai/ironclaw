@@ -426,7 +426,7 @@ where
         // Defense-in-depth: tag the entry with the tenant id so admin-tier
         // queries can filter by tenant and a path-rewriting bug surfaces as a
         // query-time mismatch rather than silent cross-tenant leakage. See
-        // docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md.
+        // docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md.
         let entry = Entry::bytes(body)
             .with_content_type(ContentType::json())
             .with_indexed(
@@ -1635,7 +1635,7 @@ fn is_not_found(error: &FilesystemError) -> bool {
 // every lease/index write is belt-and-suspenders so an admin-tier query
 // can filter explicitly by tenant, and a path-rewriting bug surfaces as
 // a query-time mismatch rather than silent cross-tenant leakage. See
-// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+// `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
 
 /// Index key projected on every lease and lease-index entry. Production
 /// reads never go through this key directly — path-prefix scoping

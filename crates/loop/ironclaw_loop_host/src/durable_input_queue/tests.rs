@@ -58,6 +58,27 @@ fn origin() -> LoopInputCursorToken {
     LoopInputCursorToken::origin()
 }
 
+#[test]
+fn legacy_queue_document_without_consumed_ring_still_loads() {
+    let model: RunQueueModel = serde_json::from_value(serde_json::json!({
+        "next_sequence": 1,
+        "entries": [],
+        "acked_watermark": 0,
+        "acked_above": [],
+        "pending_submit_flips": [],
+        "closed": false,
+        "pending_reject_flips": []
+    }))
+    .expect("legacy queue document remains compatible");
+    assert!(
+        model
+            .scan_after(0, 1)
+            .expect("legacy model remains usable")
+            .inputs
+            .is_empty()
+    );
+}
+
 /// The two production backends behind one conformance bound: both shells wrap
 /// the same `RunQueueModel`, and these parameterized tests prove the shells
 /// preserve its behavior identically (the dual-backend parity rule in
@@ -124,6 +145,115 @@ async fn durable_queue_survives_store_reconstruction() {
     assert_eq!(batch.inputs[0].cursor, envelope.cursor);
 }
 
+#[tokio::test]
+async fn durable_consumed_dedup_survives_store_reconstruction() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let scope = ghost_scope();
+    let thread = thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-iq".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let accepted = thread_service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-iq".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("consumed before restart"),
+        })
+        .await
+        .unwrap();
+    let run_id = TurnRunId::new();
+    let turn_id = TurnId::new();
+    let input = steering(&format!("msg:{}", accepted.message_id));
+    thread_service
+        .mark_message_queued(
+            &scope,
+            &thread.thread_id,
+            accepted.message_id,
+            run_id.to_string(),
+        )
+        .await
+        .unwrap();
+
+    let first = {
+        let queue = FilesystemHostInputQueue::new(
+            make_fs(Arc::clone(&backend)),
+            owner_scope(),
+            Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
+        );
+        let envelope = queue
+            .enqueue_queued_message(EnqueueQueuedMessageRequest {
+                run_id,
+                turn_id,
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                message_id: accepted.message_id,
+                input: input.clone(),
+            })
+            .await
+            .expect("enqueue before restart");
+        queue
+            .ack_consumed(run_id, vec![envelope.ack_token.clone()])
+            .await
+            .expect("consume before restart");
+        envelope
+    };
+
+    // A reconstructed queue must load the consumed-message tombstone from the
+    // durable document rather than treating the replay as a fresh input.
+    let queue = FilesystemHostInputQueue::new(
+        make_fs(Arc::clone(&backend)),
+        owner_scope(),
+        Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
+    );
+    let replay = queue
+        .enqueue_queued_message(EnqueueQueuedMessageRequest {
+            run_id,
+            turn_id,
+            scope,
+            thread_id: thread.thread_id,
+            message_id: accepted.message_id,
+            input,
+        })
+        .await
+        .expect("replay after restart dedups");
+    assert_eq!(replay.ack_token, first.ack_token);
+    assert!(
+        queue
+            .next_after(run_id, origin(), 8)
+            .await
+            .expect("poll after replay")
+            .inputs
+            .is_empty(),
+        "a consumed replay must not become deliverable after reconstruction"
+    );
+    assert!(
+        queue
+            .reject_unconsumed(run_id)
+            .await
+            .expect("terminal reconciliation")
+            .is_empty()
+    );
+    assert!(
+        make_fs(backend)
+            .get(&owner_scope(), &queue_path(run_id).expect("queue path"))
+            .await
+            .expect("read queue document after reconciliation")
+            .is_none(),
+        "terminal reconciliation must reclaim a document containing only consumed tombstones"
+    );
+}
+
 async fn conformance_enqueue_poll_ack<Q: ConformanceQueue>(
     queue: Q,
     thread_service: Arc<InMemorySessionThreadService>,
@@ -162,15 +292,17 @@ async fn conformance_enqueue_poll_ack<Q: ConformanceQueue>(
         .await
         .unwrap();
 
-    queue
-        .enqueue_queued_message(EnqueueQueuedMessageRequest {
-            run_id,
-            turn_id: TurnId::new(),
-            scope: scope.clone(),
-            thread_id: thread.thread_id.clone(),
-            message_id: accepted.message_id,
-            input: steering(&format!("msg:{}", accepted.message_id)),
-        })
+    let input = steering(&format!("msg:{}", accepted.message_id));
+    let enqueue_request = || EnqueueQueuedMessageRequest {
+        run_id,
+        turn_id: TurnId::new(),
+        scope: scope.clone(),
+        thread_id: thread.thread_id.clone(),
+        message_id: accepted.message_id,
+        input: input.clone(),
+    };
+    let first = queue
+        .enqueue_queued_message(enqueue_request())
         .await
         .expect("enqueue");
 
@@ -185,15 +317,27 @@ async fn conformance_enqueue_poll_ack<Q: ConformanceQueue>(
     // Status durably flipped to Submitted...
     let history = thread_service
         .list_thread_history(ThreadHistoryRequest {
-            scope,
-            thread_id: thread.thread_id,
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
         })
         .await
         .unwrap();
     assert_eq!(history.messages[0].status, MessageStatus::Submitted);
+    // A retry can race with the successful Queued -> Submitted flip after it
+    // has already classified the row as Queued. The queue remains the final
+    // idempotency boundary: replaying the same message after consumption must
+    // return its original identity without minting a deliverable entry.
+    let replay = queue
+        .enqueue_queued_message(enqueue_request())
+        .await
+        .expect("consumed replay dedups");
+    assert_eq!(
+        replay.ack_token, first.ack_token,
+        "a consumed replay must retain the original queue identity"
+    );
     // ...and the consumed input is not redelivered.
     let after = queue
-        .next_after(run_id, batch.next_cursor, 8)
+        .next_after(run_id, origin(), 8)
         .await
         .expect("poll after ack");
     assert!(after.inputs.is_empty());
@@ -714,6 +858,91 @@ async fn conformance_enqueue_bounds_per_run_capacity<Q: ConformanceQueue>(queue:
     assert_eq!(retry.ack_token, batch.inputs[0].ack_token);
 }
 
+/// Successful consumption uses a separate bounded replay window rather than
+/// occupying live capacity. Drive more successful messages than the live
+/// ceiling, then verify the newest consumed identity still dedups.
+async fn conformance_consumed_dedup_does_not_exhaust_capacity<Q: ConformanceQueue>(
+    queue: Q,
+    thread_service: Arc<InMemorySessionThreadService>,
+) {
+    let scope = ghost_scope();
+    let thread = thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-iq".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let run_id = TurnRunId::new();
+    let mut newest = None;
+
+    for index in 0..=crate::input_queue::MAX_QUEUED_INPUTS_PER_RUN {
+        let accepted = thread_service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-iq".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: None,
+                content: MessageContent::text(format!("successful steering {index}")),
+            })
+            .await
+            .unwrap();
+        thread_service
+            .mark_message_queued(
+                &scope,
+                &thread.thread_id,
+                accepted.message_id,
+                run_id.to_string(),
+            )
+            .await
+            .unwrap();
+        let input = steering(&format!("msg:{}", accepted.message_id));
+        let envelope = queue
+            .enqueue_queued_message(EnqueueQueuedMessageRequest {
+                run_id,
+                turn_id: TurnId::new(),
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                message_id: accepted.message_id,
+                input: input.clone(),
+            })
+            .await
+            .expect("successful consumptions must not exhaust live capacity");
+        queue
+            .ack_consumed(run_id, vec![envelope.ack_token.clone()])
+            .await
+            .expect("consume queued input");
+        newest = Some((accepted.message_id, input, envelope.ack_token));
+    }
+
+    let (message_id, input, original_ack) = newest.expect("at least one input consumed");
+    let replay = queue
+        .enqueue_queued_message(EnqueueQueuedMessageRequest {
+            run_id,
+            turn_id: TurnId::new(),
+            scope,
+            thread_id: thread.thread_id,
+            message_id,
+            input,
+        })
+        .await
+        .expect("newest consumed input remains deduplicated");
+    assert_eq!(replay.ack_token, original_ack);
+    assert!(
+        queue
+            .next_after(run_id, origin(), 1)
+            .await
+            .expect("poll after consumed replay")
+            .inputs
+            .is_empty()
+    );
+}
+
 #[tokio::test]
 async fn durable_enqueue_bounds_per_run_capacity() {
     conformance_enqueue_bounds_per_run_capacity(durable_queue(Arc::new(
@@ -728,6 +957,20 @@ async fn in_memory_enqueue_bounds_per_run_capacity() {
         InMemorySessionThreadService::default(),
     )))
     .await;
+}
+
+#[tokio::test]
+async fn durable_consumed_dedup_does_not_exhaust_capacity() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let queue = durable_queue(Arc::clone(&thread_service));
+    conformance_consumed_dedup_does_not_exhaust_capacity(queue, thread_service).await;
+}
+
+#[tokio::test]
+async fn in_memory_consumed_dedup_does_not_exhaust_capacity() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let queue = in_memory_queue(Arc::clone(&thread_service));
+    conformance_consumed_dedup_does_not_exhaust_capacity(queue, thread_service).await;
 }
 
 /// Terminal reconciliation settles and STAYS settled: the rows flip to

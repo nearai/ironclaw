@@ -316,6 +316,25 @@ impl RunProfileId {
         Self::from_trusted_static("scheduled_trigger")
     }
 
+    /// Runs over a prepared unbound thread with an ordinary
+    /// assistant-message output contract.
+    pub fn unbound_default() -> Self {
+        Self::from_trusted_static("unbound_default")
+    }
+
+    /// Runs over a prepared unbound thread whose journaled output contract
+    /// is a JSON schema; the loop family enforces strict schema validation on
+    /// the terminal output.
+    pub fn unbound_structured() -> Self {
+        Self::from_trusted_static("unbound_structured")
+    }
+
+    /// True for both unbound profile ids. Admission uses this to derive the
+    /// concurrency class; readers must keep treating unknown ids as opaque.
+    pub fn is_unbound(&self) -> bool {
+        self == &Self::unbound_default() || self == &Self::unbound_structured()
+    }
+
     pub fn is_interactive_default(&self) -> bool {
         self == &Self::interactive_default()
     }
@@ -535,6 +554,7 @@ const MODEL_INVALID_OUTPUT_DETAIL_MAX_BYTES: usize = 512;
 #[serde(rename_all = "snake_case")]
 pub enum ModelInvalidOutputDetailReason {
     EmptyAssistantResponse,
+    UnattendedQuestionEndingResponse,
     TextualToolCallSyntax,
     OutsideCapabilitySurface,
     ToolUseFinishWithoutToolCalls,
@@ -551,6 +571,9 @@ impl ModelInvalidOutputDetailReason {
     pub fn safe_summary(self) -> &'static str {
         match self {
             Self::EmptyAssistantResponse => "model returned an empty assistant response",
+            Self::UnattendedQuestionEndingResponse => {
+                "scheduled run ended by requesting user input"
+            }
             Self::TextualToolCallSyntax => {
                 "model returned textual tool-call syntax instead of structured tool calls"
             }
@@ -572,6 +595,7 @@ impl ModelInvalidOutputDetailReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::EmptyAssistantResponse => "empty_assistant_response",
+            Self::UnattendedQuestionEndingResponse => "unattended_question_ending_response",
             Self::TextualToolCallSyntax => "textual_tool_call_syntax",
             Self::OutsideCapabilitySurface => "outside_capability_surface",
             Self::ToolUseFinishWithoutToolCalls => "tool_use_finish_without_tool_calls",
@@ -600,6 +624,9 @@ impl ModelInvalidOutputDetailReason {
         }
         match safe_summary {
             "model returned an empty assistant response" => Some(Self::EmptyAssistantResponse),
+            "scheduled run ended by requesting user input" => {
+                Some(Self::UnattendedQuestionEndingResponse)
+            }
             "model returned textual tool-call syntax instead of structured tool calls" => {
                 Some(Self::TextualToolCallSyntax)
             }
@@ -855,6 +882,18 @@ pub enum TurnStatus {
     RecoveryRequired,
 }
 
+/// Durable semantic outcome of a successfully completed turn execution.
+///
+/// This is deliberately separate from transport delivery status. Legacy and
+/// nonterminal rows may omit it; new trusted completion settlements persist
+/// one of these values before any result-delivery observer acts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnExecutionOutcome {
+    ResultAvailable,
+    NothingToReport,
+}
+
 impl TurnStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
@@ -1071,6 +1110,15 @@ pub struct ProductTurnContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_channel: Option<RunOriginAdapter>,
     pub owner: TurnOwner,
+    /// Recent vendor-side conversation history fetched host-side at channel
+    /// ingress for shared-channel triggers (UNTRUSTED third-party text,
+    /// advisory only). Persisted with the run so a resume re-renders the same
+    /// prompt context; `None` for every non-channel origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_context: Option<String>,
+    /// Host-sealed restrictions for unattended execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_policy: Option<crate::execution_policy::TurnExecutionPolicy>,
 }
 
 impl ProductTurnContext {
@@ -1097,7 +1145,16 @@ impl ProductTurnContext {
             adapter,
             source_channel,
             owner,
+            channel_context: None,
+            execution_policy: None,
         }
+    }
+
+    /// Attach host-fetched channel conversation context. See
+    /// [`ProductTurnContext::channel_context`].
+    pub fn with_channel_context(mut self, channel_context: Option<String>) -> Self {
+        self.channel_context = channel_context.filter(|context| !context.is_empty());
+        self
     }
 }
 
@@ -1121,7 +1178,6 @@ pub enum SubmitTurnResponse {
         resolved_run_profile_version: RunProfileVersion,
         event_cursor: EventCursor,
         accepted_message_ref: AcceptedMessageRef,
-        reply_target_binding_ref: ReplyTargetBindingRef,
     },
 }
 
@@ -1253,6 +1309,7 @@ mod tests {
 
         for reason in [
             Reason::EmptyAssistantResponse,
+            Reason::UnattendedQuestionEndingResponse,
             Reason::TextualToolCallSyntax,
             Reason::OutsideCapabilitySurface,
             Reason::ToolUseFinishWithoutToolCalls,
@@ -1436,6 +1493,44 @@ mod tests {
             back.source_channel.as_ref().map(RunOriginAdapter::as_str),
             Some("telegram")
         );
+    }
+
+    #[test]
+    fn product_turn_context_channel_context_round_trips_and_old_json_still_loads() {
+        let ctx = ProductTurnContext::new(
+            TurnOriginKind::Inbound,
+            Some(TurnSurfaceType::Channel),
+            Some(RunOriginAdapter::new("slack").unwrap()),
+            TurnOwner::Personal {
+                user: crate::ids::UserId::new("u1").unwrap(),
+            },
+        )
+        .with_channel_context(Some("<@U1>: hello\n<@U2>: hi bot".to_string()));
+        let json = serde_json::to_string(&ctx).unwrap();
+        let back: ProductTurnContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(ctx, back);
+        assert_eq!(
+            back.channel_context.as_deref(),
+            Some("<@U1>: hello\n<@U2>: hi bot")
+        );
+
+        // Persisted run records predating the field must still deserialize
+        // (default None), and None must not serialize a key at all.
+        let old_json = r#"{
+                "origin": "inbound",
+                "owner": {"kind": "personal", "user": "u1"}
+            }"#;
+        let old: ProductTurnContext = serde_json::from_str(old_json).expect("old JSON loads");
+        assert!(old.channel_context.is_none());
+        let none_json = serde_json::to_string(&old).unwrap();
+        assert!(
+            !none_json.contains("channel_context"),
+            "absent context must stay absent on the wire: {none_json}"
+        );
+
+        // The builder normalizes empty context to absent.
+        let cleared = old.clone().with_channel_context(Some(String::new()));
+        assert!(cleared.channel_context.is_none());
     }
 
     #[test]

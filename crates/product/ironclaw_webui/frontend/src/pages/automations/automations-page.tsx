@@ -1,18 +1,21 @@
 import React from "react";
 import { useT } from "../../lib/i18n";
-import { AutomationDeliveryDefaultsPanel } from "./components/automation-delivery-defaults-panel";
 import { AutomationsList } from "./components/automations-list";
 import { AutomationsSummaryStrip } from "./components/automations-summary-strip";
+import { NotificationChannelsPanel } from "./components/notification-channels-panel";
 import { useAutomations } from "./hooks/useAutomations";
-import { useOutboundDeliveryDefaults } from "./hooks/useOutboundDeliveryDefaults";
+import { useNotificationChannels } from "./hooks/useNotificationChannels";
 
 export function AutomationsPage() {
   const t = useT();
   const [filter, setFilter] = React.useState("all");
   const [selectedAutomationId, setSelectedAutomationId] = React.useState(null);
-  const includeCompleted = filter === "completed";
+  const includeCompleted = filter === "completed" || filter === "failures";
+  // The hook fetches the lean scheduled list first and a completed-inclusive
+  // summary in parallel. Switching to either historical filter then reuses
+  // that full query while keepPreviousData preserves the visible rows.
   const automationsState = useAutomations(includeCompleted);
-  const deliveryState = useOutboundDeliveryDefaults();
+  const channelsState = useNotificationChannels();
 
   // A local refetch can resolve almost instantly, leaving the spinner to flash
   // imperceptibly. Hold a minimum spin window so a manual refresh always reads
@@ -65,6 +68,15 @@ export function AutomationsPage() {
               {t("automations.error.loadFailed")}
             </div>
           )}
+          {!automationsState.error && automationsState.summaryError &&
+          (
+            <div
+              role="status"
+              className="rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+            >
+              {t("automations.error.loadFailed")}
+            </div>
+          )}
           {showErrorOnly
             ? null
             : (
@@ -89,7 +101,7 @@ export function AutomationsPage() {
                   activeFilter={filter}
                   onSelectFilter={setFilter}
                 />
-                <AutomationDeliveryDefaultsPanel deliveryState={deliveryState} />
+                <NotificationChannelsPanel channelsState={channelsState} />
 
                 {automationsState.isLoading
                   ? (

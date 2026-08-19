@@ -32,9 +32,20 @@
 //! durable Reborn store sits behind — so substrate choice, tenant scoping,
 //! and host ownership stay centralized in the filesystem layer rather than
 //! this crate holding a raw database handle.
+//!
+//! # The [`projects`] module
+//!
+//! The crate's second principal-scoped record family: the Project entity, its
+//! membership ACL, and the `ProjectRepository` contract, merged in from the
+//! former standalone `ironclaw_projects` crate (PROPOSAL §6.4.11 / §12.10,
+//! decided 2026-07-30). It rides the same control-plane `ScopedFilesystem`
+//! mount and names the same two workspace crates this one is pinned to, so it
+//! adds no dependency and no new layer reach; see the module doc for what
+//! deliberately stayed in `ironclaw_assistant`.
 
 mod identity_store;
 mod key;
+pub mod projects;
 mod user_directory;
 
 pub use identity_store::RebornIdentityStore;

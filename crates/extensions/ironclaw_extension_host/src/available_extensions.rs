@@ -14,6 +14,7 @@ use ironclaw_host_api::product_adapter::{ProductCapabilityFlag, ProductSurfaceKi
 use ironclaw_host_api::{
     host_port::HostPortCatalog,
     ids::{CapabilityId, ExtensionId, VendorId},
+    messaging::STANDARD_SCHEMA_REF_PREFIX,
     path::VirtualPath,
 };
 // Imported from the contract that owns it. `ironclaw_assistant` only re-exports
@@ -73,7 +74,7 @@ impl HostManagedCredentialExtension {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AvailableExtensionAsset {
     pub path: String,
     pub content: AvailableExtensionAssetContent,
@@ -83,12 +84,12 @@ pub struct AvailableExtensionAsset {
 /// remove -> reinstall re-materializes from the entry alone (a `Filesystem`
 /// path-pointer variant existed before that invariant and dangled after
 /// `remove` deleted the extension dir).
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AvailableExtensionAssetContent {
     Bytes(Vec<u8>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AvailableExtensionPackage {
     pub package_ref: LifecyclePackageRef,
     pub manifest_toml: String,
@@ -118,9 +119,8 @@ pub struct AvailableExtensionPackage {
     /// [`CapabilitySurfaceKind::Channel`]. Cached at construction like
     /// `surface_kinds`.
     pub channel_directions: Option<LifecycleChannelDirections>,
-    /// The channel surface's declared `[channel.presentation]` (markdown +
-    /// message cap), cached at construction like `channel_directions`. Fed into
-    /// prompt construction via the lifecycle summary (OUT-11).
+    /// How the model should format output for this channel. Cached at
+    /// construction like `channel_directions` and fed into prompt construction.
     pub channel_presentation: Option<ironclaw_extension_contracts::channel::ChannelPresentation>,
     pub assets: Vec<AvailableExtensionAsset>,
     /// Bespoke onboarding copy carried down from a migrated inventory bundle
@@ -231,6 +231,7 @@ fn channel_connection_strategy(
         ChannelConnectionStrategy::WebGeneratedCode => {
             RebornChannelConnectStrategy::WebGeneratedCode
         }
+        ChannelConnectionStrategy::DeviceLink => RebornChannelConnectStrategy::DeviceLink,
         ChannelConnectionStrategy::OAuth => RebornChannelConnectStrategy::OAuth,
     }
 }
@@ -477,6 +478,72 @@ impl AvailableExtensionCatalog {
                 self.packages.push(package);
             }
         }
+    }
+
+    /// Refresh runtime-derived package data after hosted discovery while
+    /// retaining the catalog metadata injected by the original loader.
+    pub(crate) fn refresh_resolved_manifest(
+        &mut self,
+        record: &ExtensionManifestRecord,
+    ) -> Result<bool, ProductOperationFailure> {
+        let Some(refreshed) = self.refreshed_resolved_manifest(record)? else {
+            return Ok(false);
+        };
+        self.extend(Self::from_packages(vec![refreshed]));
+        Ok(true)
+    }
+
+    /// Build a replacement catalog entry without mutating the catalog, so a
+    /// caller can complete other fallible synchronization before committing
+    /// the refresh.
+    pub(crate) fn refreshed_resolved_manifest(
+        &self,
+        record: &ExtensionManifestRecord,
+    ) -> Result<Option<AvailableExtensionPackage>, ProductOperationFailure> {
+        let extension_id = &record.resolved().id;
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id.as_str())?;
+        let Some(existing) = self.resolve_optional(&package_ref)? else {
+            return Ok(None);
+        };
+        if existing.source != record.manifest().source {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} changed manifest source during runtime discovery",
+                    extension_id.as_str()
+                ),
+            });
+        }
+        let manifest: ironclaw_extension_registry::ExtensionManifest =
+            record.manifest().clone().try_into().map_err(|error| {
+                ProductOperationFailure::InvalidBindingRequest {
+                    reason: format!(
+                        "extension {} discovered an invalid manifest: {error}",
+                        extension_id.as_str()
+                    ),
+                }
+            })?;
+        let mut package = crate::generic_host::rebuild_package_from_resolved(
+            manifest,
+            record.resolved(),
+            extension_id.as_str(),
+        )
+        .map_err(|reason| ProductOperationFailure::InvalidBindingRequest { reason })?;
+        // Discovery changes only runtime-derived descriptors. Retain the
+        // loader-computed digest that pins trust to the bundled manifest bytes.
+        package.manifest_digest = existing.package.manifest_digest.clone();
+        let surface_kinds = surface_kinds_from_manifest_record(record, extension_id.as_str())?;
+        let channel_directions =
+            channel_directions_from_manifest_record(record, extension_id.as_str())?;
+        let channel_presentation = channel_presentation_from_manifest_record(record);
+        let mut refreshed = existing.as_ref().clone();
+        refreshed.manifest_toml = record.raw_toml().to_string();
+        refreshed.resolved_manifest = Arc::new(record.resolved().clone());
+        refreshed.package = package;
+        refreshed.surface_kinds = surface_kinds;
+        refreshed.channel_directions = channel_directions;
+        refreshed.channel_presentation = channel_presentation;
+        Ok(Some(refreshed))
     }
 
     pub(crate) fn remove(
@@ -841,8 +908,10 @@ fn bundled_extension_package(
 
 /// Fail catalog construction before a package can be installed when its
 /// manifest points at a static file the bundle does not carry. Dynamic hosted
-/// MCP schemas are inlined at discovery time and are the only intentional
-/// non-file references.
+/// MCP schemas (inlined at discovery time) and standardized-messaging-framework
+/// `standard_op` bindings (host-resolved from the compiled-in
+/// `ironclaw_host_api::messaging` registry, never a package asset — spec §6/§7.1)
+/// are the only intentional non-file references.
 fn validate_bundled_package_assets(
     label: &str,
     package: &ExtensionPackage,
@@ -856,6 +925,10 @@ fn validate_bundled_package_assets(
             && path
                 .strip_prefix(&dynamic_schema_prefix)
                 .is_some_and(|suffix| !suffix.is_empty())
+    };
+    let is_standard_op_schema_ref = |field: &str, path: &str| {
+        matches!(field, "input_schema_ref" | "output_schema_ref")
+            && path.starts_with(STANDARD_SCHEMA_REF_PREFIX)
     };
     let require_asset = |field: &str, path: &str| {
         if has_asset(path) {
@@ -894,7 +967,7 @@ fn validate_bundled_package_assets(
         ];
         for (field, path) in refs {
             let Some(path) = path else { continue };
-            if is_inline_dynamic_schema_ref(field, path) {
+            if is_inline_dynamic_schema_ref(field, path) || is_standard_op_schema_ref(field, path) {
                 continue;
             }
             require_asset(
@@ -934,8 +1007,8 @@ fn channel_directions_from_manifest_record(
     // Manifest v3: the resolved channel descriptor declares its directions.
     if let Some(channel) = &record.resolved().channel {
         return Ok(Some(LifecycleChannelDirections {
-            inbound: channel.inbound,
-            outbound: channel.outbound,
+            inbound: channel.supports_inbound(),
+            outbound: channel.supports_outbound(),
         }));
     }
     // Manifest v2: derive from the product-adapter section capability flags.
@@ -961,10 +1034,8 @@ fn channel_directions_from_manifest_record(
     Ok(directions)
 }
 
-/// The channel surface's declared `[channel.presentation]` (markdown support +
-/// message length cap). Only manifest v3 declares presentation via the resolved
-/// channel descriptor; v2 channels have none. Cached at construction like
-/// `channel_directions` and fed into prompt construction (OUT-11).
+/// The channel surface's presentation facts. Only manifest v3 declares a
+/// channel descriptor; v2 channels have none.
 fn channel_presentation_from_manifest_record(
     record: &ExtensionManifestRecord,
 ) -> Option<ironclaw_extension_contracts::channel::ChannelPresentation> {
@@ -1328,13 +1399,17 @@ mod tests {
             }
 
             // Hosted-MCP inline schemas under this package's exact dynamic
-            // prefix ship no package asset; every other ref remains static.
+            // prefix ship no package asset; standard_op bindings resolve
+            // from the compiled-in `ironclaw_host_api::messaging` registry,
+            // also never a package asset (spec §6/§7.1); every other ref
+            // remains static.
             let dynamic_schema_prefix = format!("schemas/{extension_id}/dynamic/");
             let is_dynamic_schema_ref = |schema_ref: &str| {
-                crate::is_hosted_http_mcp_package(&package.package)
+                (crate::is_hosted_http_mcp_package(&package.package)
                     && schema_ref
                         .strip_prefix(&dynamic_schema_prefix)
-                        .is_some_and(|suffix| !suffix.is_empty())
+                        .is_some_and(|suffix| !suffix.is_empty()))
+                    || schema_ref.starts_with(STANDARD_SCHEMA_REF_PREFIX)
             };
 
             for capability in &package.package.manifest.capabilities {
@@ -1867,27 +1942,42 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
         assert_eq!(requirement.name, "slack_user_token");
         assert_eq!(requirement.provider, "slack");
         assert!(requirement.required);
-        assert!(matches!(
-            &requirement.setup,
-            LifecycleExtensionCredentialSetup::OAuth { scopes }
-                if scopes.iter().cloned().collect::<BTreeSet<_>>()
-                    == [
-                        "channels:history",
-                        "channels:read",
-                        "chat:write",
-                        "groups:history",
-                        "groups:read",
-                        "im:history",
-                        "im:read",
-                        "mpim:history",
-                        "mpim:read",
-                        "search:read",
-                        "users:read",
-                    ]
-                    .into_iter()
-                    .map(String::from)
-                    .collect::<BTreeSet<_>>()
-        ));
+        // This is the exact set the user is asked to consent to at connect
+        // time, so it is pinned rather than merely sampled. `assert_eq!` on
+        // the sorted set, not `assert!(matches!(...))`: a mismatch has to
+        // print WHICH scope moved, or the next person to widen the grant gets
+        // a bare "assertion failed" and no delta.
+        let LifecycleExtensionCredentialSetup::OAuth { scopes } = &requirement.setup else {
+            panic!("slack projects an OAuth setup, got {:?}", requirement.setup);
+        };
+        assert_eq!(
+            scopes.iter().cloned().collect::<BTreeSet<_>>(),
+            [
+                // Reads: history and metadata for conversations and people.
+                "channels:history",
+                "channels:read",
+                "groups:history",
+                "groups:read",
+                "im:history",
+                "im:read",
+                "mpim:history",
+                "mpim:read",
+                "search:read",
+                "users:read",
+                // Writes, one per acting-as-the-user operation family:
+                // send/edit/delete, the reaction pair (read included, because
+                // removing "my reactions" has to see them first), and
+                // opening a DM.
+                "chat:write",
+                "reactions:read",
+                "reactions:write",
+                "im:write",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<BTreeSet<_>>(),
+            "the Slack connect grant is the union of every tool's scopes"
+        );
     }
 
     #[test]
@@ -2145,15 +2235,7 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
             .channel_presentation
             .as_ref()
             .expect("slack declares [channel.presentation]");
-        assert!(
-            presentation.supports_markdown,
-            "slack declares supports_markdown = true"
-        );
-        assert_eq!(
-            presentation.max_message_chars,
-            Some(40_000),
-            "slack declares max_message_chars = 40000"
-        );
+        assert!(presentation.supports_markdown, "slack declares markdown");
         assert_eq!(
             presentation.command_prefix.as_deref(),
             Some("/ironclaw "),
@@ -2175,13 +2257,13 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                 .as_ref()
                 .expect("slack channel descriptor")
                 .commands,
-            ["model", "status"],
-            "shipping Slack exposes exactly the model and status commands"
+            ["model", "status", "new", "stop", "interrupt"],
+            "shipping Slack exposes exactly the model, status, new, stop, and interrupt commands"
         );
     }
 
     #[test]
-    fn bundled_telegram_package_declares_model_and_status_commands() {
+    fn bundled_telegram_package_declares_the_full_command_roster() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram").unwrap();
@@ -2194,8 +2276,8 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                 .as_ref()
                 .expect("telegram channel descriptor")
                 .commands,
-            ["model", "status"],
-            "shipping Telegram exposes exactly the model and status commands"
+            ["model", "status", "new", "stop", "interrupt"],
+            "shipping Telegram exposes exactly the model, status, new, stop, and interrupt commands"
         );
         assert_eq!(
             package
@@ -2308,6 +2390,30 @@ handle = "web_token"
         // gmail migrated to the inventory; its digest (still sha256-token) is
         // asserted through the trust policy in
         // `factory::tests::builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory`.
+    }
+
+    #[test]
+    fn refreshing_bundled_runtime_descriptors_preserves_manifest_digest() {
+        let mut catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").unwrap();
+        let original = catalog.resolve(&package_ref).unwrap();
+        let original_digest = original
+            .package
+            .manifest_digest()
+            .expect("bundled manifest digest");
+        let record = ExtensionManifestRecord::from_resolved(
+            original.manifest_toml.clone(),
+            original.source,
+            original.resolved_manifest.as_ref().clone(),
+            None,
+        )
+        .expect("bundled manifest record");
+
+        assert!(catalog.refresh_resolved_manifest(&record).unwrap());
+
+        let refreshed = catalog.resolve(&package_ref).unwrap();
+        assert_eq!(refreshed.package.manifest_digest(), Some(original_digest));
     }
 
     #[test]

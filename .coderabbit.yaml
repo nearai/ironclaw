@@ -39,7 +39,7 @@ reviews:
     - "!README.zh-CN.md"
     - "!docs/zh/**"
     - "!docs/images/**"
-    - "!docs/architecture-video/package-lock.json"
+    - "!docs/internal/architecture-video/package-lock.json"
     - "!tests/test-pages/**" # saved web pages (linguist-generated)
     - "!tests/fixtures/**" # recorded LLM/gateway traces
     - "!tests/snapshots/**" # insta snapshots — the replay gate owns these
@@ -107,7 +107,8 @@ reviews:
         keep ironclaw_hooks_postgres / ironclaw_hooks_libsql in parity via hooks_parity).
         Multi-step DB operations must be wrapped in a transaction. Driver types
         (tokio_postgres::, libsql::) must not leak outside the allowed modules
-        (scripts/check-boundaries.sh).
+        (enforced by reborn_persistence_driver_boundary in
+        crates/app/ironclaw_architecture_tests).
     - path: "**/*.wit"
       instructions: |
         Hand-written WIT contracts define the trusted/untrusted WASM ABI. Interface changes

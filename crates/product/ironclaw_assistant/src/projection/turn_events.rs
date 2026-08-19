@@ -5,17 +5,17 @@ use std::{
 };
 
 use crate::is_approval_gate_ref;
-use crate::{
-    ApprovalPromptContextView, AuthPromptContextView, GatePromptView, ProductAdapterError,
-    ProductGateKind, ProductOutboundPayload, ProductProjectionItem, ProductProjectionState,
-    ProductSurfaceRejectionKind, RedactedString,
-};
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
 use ironclaw_approvals::ApprovalRequestStorePort;
+use ironclaw_extension_contracts::auth_prompt::AuthPromptContextView;
 use ironclaw_host_api::ids::{InvocationId, UserId};
+use ironclaw_host_api::product_adapter::{
+    ProductAdapterError, ProductSurfaceRejectionKind, RedactedString,
+};
 use ironclaw_host_api::turn::{
-    ModelInvalidOutputDetailReason, SanitizedFailure, TurnGateRef, TurnRunId, TurnScope, TurnStatus,
+    ModelInvalidOutputDetailReason, SanitizedFailure, TurnGateRef, TurnRunId, TurnScope,
+    TurnStatus, TurnThreadOwner,
 };
 use ironclaw_loop_contracts::{
     SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest, SystemInferenceTaskId,
@@ -25,6 +25,11 @@ use ironclaw_product_contracts::approval_prompt::{
     approval_prompt_context_for_request, approval_prompt_lookup_scope,
     approval_request_id_from_gate_ref,
 };
+use ironclaw_product_contracts::outbound::{
+    ApprovalPromptContextView, GatePromptView, ProductGateKind, ProductOutboundPayload,
+    ProductProjectionItem, ProductProjectionState,
+};
+use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadService, ThreadScope};
 use ironclaw_turns::{
     GetRunStateRequest, TurnBlockedGateKind, TurnCoordinator, TurnError, TurnEventKind,
     TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
@@ -168,6 +173,7 @@ impl TurnEventBridge {
         scope: &TurnScope,
         after: Option<TurnEventProjectionCursor>,
         auth_challenges: Option<&dyn AuthChallengeProvider>,
+        thread_service: Option<&dyn SessionThreadService>,
     ) -> Result<TurnEventDrain, ProductAdapterError> {
         let Self::Enabled {
             service,
@@ -223,18 +229,16 @@ impl TurnEventBridge {
                 Err(error) => return Err(map_turn_event_projection_error(error)),
             };
             next_cursor = Some(page.next_cursor.clone());
-            payloads.extend(
-                turn_event_payloads_for_page(
-                    caller_user_id,
-                    coordinator.as_ref(),
-                    failure_explainer.as_ref(),
-                    failure_explanation_cache,
-                    auth_challenges,
-                    approval_requests.as_deref(),
-                    page.entries,
-                )
-                .await?,
-            );
+            let context = TurnEventPayloadContext {
+                caller_user_id,
+                coordinator: coordinator.as_ref(),
+                failure_explainer: failure_explainer.as_ref(),
+                failure_explanation_cache,
+                auth_challenges,
+                approval_requests: approval_requests.as_deref(),
+                thread_service,
+            };
+            payloads.extend(turn_event_payloads_for_page(context, page.entries).await?);
             if !page.truncated || after_cursor.as_ref() == Some(&page.next_cursor) {
                 break;
             }
@@ -247,29 +251,25 @@ impl TurnEventBridge {
     }
 }
 
+#[derive(Clone, Copy)]
+struct TurnEventPayloadContext<'a> {
+    caller_user_id: &'a UserId,
+    coordinator: &'a dyn TurnCoordinator,
+    failure_explainer: &'a dyn FailureExplanationProvider,
+    failure_explanation_cache: &'a Arc<Mutex<FailureExplanationCache>>,
+    auth_challenges: Option<&'a dyn AuthChallengeProvider>,
+    approval_requests: Option<&'a dyn ApprovalRequestStorePort>,
+    thread_service: Option<&'a dyn SessionThreadService>,
+}
+
 async fn turn_event_payloads_for_page(
-    caller_user_id: &ironclaw_host_api::ids::UserId,
-    coordinator: &dyn TurnCoordinator,
-    failure_explainer: &dyn FailureExplanationProvider,
-    failure_explanation_cache: &Arc<Mutex<FailureExplanationCache>>,
-    auth_challenges: Option<&dyn AuthChallengeProvider>,
-    approval_requests: Option<&dyn ApprovalRequestStorePort>,
+    context: TurnEventPayloadContext<'_>,
     events: Vec<TurnLifecycleEvent>,
 ) -> Result<Vec<TurnEventPayload>, ProductAdapterError> {
     let futures = events.into_iter().map(|event| {
         let cursor = TurnEventProjectionCursor::for_scope(event.scope.clone(), event.cursor);
         async move {
-            turn_event_payloads(
-                caller_user_id,
-                coordinator,
-                failure_explainer,
-                failure_explanation_cache,
-                auth_challenges,
-                approval_requests,
-                &event,
-            )
-            .await
-            .map(|payloads| {
+            turn_event_payloads(context, &event).await.map(|payloads| {
                 payloads
                     .into_iter()
                     .map(|payload| TurnEventPayload {
@@ -290,21 +290,16 @@ async fn turn_event_payloads_for_page(
 }
 
 async fn turn_event_payloads(
-    caller_user_id: &ironclaw_host_api::ids::UserId,
-    coordinator: &dyn TurnCoordinator,
-    failure_explainer: &dyn FailureExplanationProvider,
-    failure_explanation_cache: &Arc<Mutex<FailureExplanationCache>>,
-    auth_challenges: Option<&dyn AuthChallengeProvider>,
-    approval_requests: Option<&dyn ApprovalRequestStorePort>,
+    context: TurnEventPayloadContext<'_>,
     event: &TurnLifecycleEvent,
 ) -> Result<Vec<ProductOutboundPayload>, ProductAdapterError> {
     let mut payloads = Vec::new();
     let blocked_prompt = if matches!(event.kind, TurnEventKind::Blocked) {
         blocked_prompt_payload(
-            caller_user_id,
-            coordinator,
-            auth_challenges,
-            approval_requests,
+            context.caller_user_id,
+            context.coordinator,
+            context.auth_challenges,
+            context.approval_requests,
             event,
         )
         .await?
@@ -312,17 +307,88 @@ async fn turn_event_payloads(
         None
     };
     if projects_run_status(&event.kind) {
-        let failure_details =
-            failure_details_for_turn_event(failure_explainer, failure_explanation_cache, event)
-                .await;
+        let failure_details = failure_details_for_turn_event(
+            context.failure_explainer,
+            context.failure_explanation_cache,
+            event,
+        )
+        .await;
+        let finalized_reply =
+            finalized_reply_projection_item(context.caller_user_id, context.thread_service, event)
+                .await?;
         payloads.push(ProductOutboundPayload::ProjectionUpdate {
-            state: turn_event_projection_state(event, failure_details, blocked_prompt.as_ref())?,
+            state: turn_event_projection_state(
+                event,
+                failure_details,
+                blocked_prompt.as_ref(),
+                finalized_reply,
+            )?,
         });
     }
     if let Some(prompt) = blocked_prompt {
         payloads.push(prompt);
     }
     Ok(payloads)
+}
+
+/// Load the canonical finalized transcript row for a completed run. Embedding
+/// it in the same durable turn-event projection state as `completed` gives
+/// stream delivery one restart- and replica-safe proof; live text deltas remain
+/// presentation updates and cannot satisfy that proof on their own.
+async fn finalized_reply_projection_item(
+    caller_user_id: &UserId,
+    thread_service: Option<&dyn SessionThreadService>,
+    event: &TurnLifecycleEvent,
+) -> Result<Option<ProductProjectionItem>, ProductAdapterError> {
+    if event.status != TurnStatus::Completed || !matches!(event.kind, TurnEventKind::Completed) {
+        return Ok(None);
+    }
+    let Some(thread_service) = thread_service else {
+        return Ok(None);
+    };
+    let Some(agent_id) = event.scope.agent_id.clone() else {
+        return Ok(None);
+    };
+    let owner_user_id = match &event.scope.thread_owner {
+        TurnThreadOwner::ActorFallback => Some(caller_user_id.clone()),
+        TurnThreadOwner::ExplicitUser { owner_user_id } => Some(owner_user_id.clone()),
+        TurnThreadOwner::Ownerless => None,
+    };
+    let message = thread_service
+        .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+            scope: ThreadScope {
+                tenant_id: event.scope.tenant_id.clone(),
+                agent_id,
+                project_id: event.scope.project_id.clone(),
+                owner_user_id,
+                mission_id: None,
+            },
+            thread_id: event.scope.thread_id.clone(),
+            turn_run_id: event.run_id.to_string(),
+        })
+        .await
+        .map_err(|error| {
+            tracing::debug!(
+                %error,
+                run_id = %event.run_id,
+                "finalized assistant message lookup failed during WebUI projection"
+            );
+            ProductAdapterError::SurfaceTransient {
+                reason: RedactedString::new("finalized assistant message lookup failed"),
+            }
+        })?;
+    let Some(message) = message else {
+        return Ok(None);
+    };
+    let Some(body) = message.content else {
+        return Ok(None);
+    };
+    Ok(Some(ProductProjectionItem::Text {
+        id: message.message_id.to_string(),
+        run_id: Some(event.run_id),
+        body,
+        finalized: true,
+    }))
 }
 
 #[async_trait]
@@ -429,7 +495,7 @@ async fn blocked_prompt_payload(
             },
             auth_challenges)
             .await?;
-            Ok(Some(ProductOutboundPayload::AuthPrompt(view)))
+            Ok(Some(ProductOutboundPayload::AuthPrompt(Box::new(view))))
         }
         TurnStatus::BlockedApproval => Ok(Some(
             approval_gate_prompt(
@@ -595,6 +661,7 @@ fn turn_event_projection_state(
     event: &TurnLifecycleEvent,
     failure_details: FailureProjectionDetails,
     blocked_prompt: Option<&ProductOutboundPayload>,
+    finalized_reply: Option<ProductProjectionItem>,
 ) -> Result<ProductProjectionState, ProductAdapterError> {
     let mut items = vec![ProductProjectionItem::RunStatus {
         run_id: event.run_id,
@@ -604,6 +671,9 @@ fn turn_event_projection_state(
         retryable: event.retryable,
     }];
     if let Some(item) = gate_projection_item(event, blocked_prompt)? {
+        items.push(item);
+    }
+    if let Some(item) = finalized_reply {
         items.push(item);
     }
     ProductProjectionState::new(event.scope.thread_id.to_string(), items)
@@ -856,10 +926,12 @@ fn failure_explanation_request(input: &FailureExplanationInput) -> Option<System
             system_prompt: failure_explanation_system_prompt().to_string(),
         },
         input_text: failure_explanation_user_prompt(input),
+        context_messages: Vec::new(),
         max_input_tokens: FAILURE_EXPLANATION_MAX_INPUT_TOKENS,
         deadline_ms: FAILURE_EXPLANATION_TIMEOUT
             .as_millis()
             .min(u128::from(u64::MAX)) as u64,
+        output_contract: None,
     })
 }
 

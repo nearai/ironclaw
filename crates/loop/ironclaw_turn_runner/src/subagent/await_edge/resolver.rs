@@ -360,22 +360,13 @@ where
             parent_run_context,
             tree_root_run_id: metadata.tree_root_run_id,
             gate_ref,
-            source_binding_ref: ironclaw_host_api::turn::SourceBindingRef::new(format!(
-                "subagent-source:{parent_run_id}:{}",
-                event.run_id
-            ))
-            .map_err(|reason| TurnError::InvalidRequest { reason })?,
-            reply_target_binding_ref: ironclaw_host_api::turn::ReplyTargetBindingRef::new(format!(
-                "subagent-reply:{parent_run_id}:{}",
-                event.run_id
-            ))
-            .map_err(|reason| TurnError::InvalidRequest { reason })?,
             subagent_kind: metadata.subagent_kind,
             spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).map_err(
                 |reason| TurnError::InvalidRequest {
                     reason: reason.to_string(),
                 },
             )?,
+            spawn_provider_call_id: metadata.spawn_provider_call_id,
             result_ref: metadata.result_ref,
             mode: metadata.mode,
             state: AwaitEdgeState::Open,
@@ -480,6 +471,7 @@ where
                 thread_id: edge.parent_thread_id.clone(),
                 turn_run_id: parent_run_id.to_string(),
                 result_ref: edge.result_ref.as_str().to_string(),
+                provider_call_id: edge.spawn_provider_call_id.clone(),
                 safe_summary,
             })
             .await
@@ -527,8 +519,6 @@ where
                 actor,
                 run_id: parent_run_id,
                 gate_resolution_ref: edge.gate_ref.clone(),
-                source_binding_ref: edge.source_binding_ref.clone(),
-                reply_target_binding_ref: edge.reply_target_binding_ref.clone(),
                 idempotency_key: IdempotencyKey::new(format!(
                     "subagent-resume:{parent_run_id}:{child_run_id}"
                 ))
@@ -937,16 +927,12 @@ mod tests {
             ),
             accepted_message_ref: ironclaw_host_api::turn::AcceptedMessageRef::new("msg:child")
                 .unwrap(),
-            source_binding_ref: ironclaw_host_api::turn::SourceBindingRef::new("source:child")
-                .unwrap(),
-            reply_target_binding_ref: ironclaw_host_api::turn::ReplyTargetBindingRef::new(
-                "reply:child",
-            )
-            .unwrap(),
             status: TurnStatus::Completed,
             profile: ironclaw_turns::TurnRunProfile::from_resolved(resolved_run_profile),
+            output_contract: Default::default(),
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: None,
             checkpoint_id: None,
             gate_ref: None,
             blocked_activity_id: None,
@@ -1057,6 +1043,7 @@ mod tests {
             mode: ironclaw_loop_host::SpawnSubagentMode::Blocking,
             result_ref: ironclaw_host_api::turn::LoopResultRef::new("result:subagent.recon-t1")
                 .unwrap(),
+            spawn_provider_call_id: Some("spawn-call-recon-t1".to_string()),
             handoff: None,
             parent_run_context: parent_context.clone(),
             gate_ref: metadata_gate_ref.clone(),
@@ -1137,6 +1124,7 @@ mod tests {
             mode: ironclaw_loop_host::SpawnSubagentMode::Blocking,
             result_ref: ironclaw_host_api::turn::LoopResultRef::new("result:subagent.recon-t2")
                 .unwrap(),
+            spawn_provider_call_id: None,
             handoff: None,
             parent_run_context: parent_context,
             gate_ref: TurnGateRef::new("gate:subagent-t2").unwrap(),
@@ -1283,6 +1271,7 @@ mod tests {
             mode: ironclaw_loop_host::SpawnSubagentMode::Blocking,
             result_ref: ironclaw_host_api::turn::LoopResultRef::new("result:subagent.recon-t4")
                 .unwrap(),
+            spawn_provider_call_id: None,
             handoff: None,
             parent_run_context: tampered_context,
             gate_ref: TurnGateRef::new("gate:subagent-t4").unwrap(),
@@ -1441,7 +1430,7 @@ mod tests {
     #[tokio::test]
     async fn mixed_status_group_updates_each_result_resumes_once_and_consumes_every_edge() {
         use chrono::Utc;
-        use ironclaw_host_api::ids::ProcessId;
+        use ironclaw_host_api::ids::{ProcessId, ProviderToolName};
         use ironclaw_loop_host::{AwaitedChildSetRecord, SpawnSubagentMode, SubagentKindId};
         use ironclaw_processes::{
             ProcessDependencyPort, ProcessDependencySubmission, ProcessJournalStore, ProcessKind,
@@ -1449,8 +1438,9 @@ mod tests {
         };
         use ironclaw_threads::{
             AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
-            EnsureThreadRequest, MessageContent, SessionThreadService, ThreadHistoryRequest,
-            ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+            EnsureThreadRequest, MessageContent, ProviderToolCallReferenceEnvelope,
+            SessionThreadService, ThreadHistoryRequest, ThreadScope, ToolResultReferenceEnvelope,
+            ToolResultSafeSummary,
         };
 
         let process_store = Arc::new(ProcessJournalStore::new(recon_scoped_fs()));
@@ -1566,6 +1556,7 @@ mod tests {
             let result_ref =
                 ironclaw_host_api::turn::LoopResultRef::new(format!("result:drain-{label}"))
                     .expect("result ref");
+            let spawn_provider_call_id = format!("spawn-call-{label}");
             thread_service
                 .ensure_thread(EnsureThreadRequest {
                     scope: parent_thread_scope.clone(),
@@ -1587,13 +1578,27 @@ mod tests {
                 .expect("append child final output");
             thread_service
                 .append_tool_result_reference(AppendToolResultReferenceRequest {
+                    intrinsic_outcome: None,
                     scope: parent_thread_scope.clone(),
                     thread_id: parent_thread_id.clone(),
                     turn_run_id: parent_run_id.to_string(),
                     result_ref: result_ref.as_str().to_string(),
                     safe_summary: ToolResultSafeSummary::new("subagent still running")
                         .expect("initial summary"),
-                    provider_call: None,
+                    provider_call: Some(ProviderToolCallReferenceEnvelope {
+                        provider_id: "test-provider".to_string(),
+                        provider_model_id: "test-model".to_string(),
+                        provider_turn_id: "test-turn".to_string(),
+                        provider_call_id: spawn_provider_call_id.clone(),
+                        provider_tool_name: ProviderToolName::new("spawn_subagent")
+                            .expect("provider tool name"),
+                        capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+                            .expect("capability"),
+                        arguments: serde_json::json!({"task": label}),
+                        response_reasoning: None,
+                        reasoning: None,
+                        signature: None,
+                    }),
                     model_observation: None,
                 })
                 .await
@@ -1606,17 +1611,10 @@ mod tests {
                 child_scope: child_scope.clone(),
                 child_run_id,
                 child_thread_id: child_thread_id.clone(),
-                source_binding_ref: ironclaw_host_api::turn::SourceBindingRef::new(format!(
-                    "source:drain-{label}"
-                ))
-                .expect("source"),
-                reply_target_binding_ref: ironclaw_host_api::turn::ReplyTargetBindingRef::new(
-                    format!("reply:drain-{label}"),
-                )
-                .expect("reply"),
                 subagent_kind: SubagentKindId::new("general").expect("kind"),
                 spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
                     .expect("capability"),
+                spawn_provider_call_id: Some(spawn_provider_call_id),
                 result_ref: result_ref.clone(),
                 mode: SpawnSubagentMode::Blocking,
             };

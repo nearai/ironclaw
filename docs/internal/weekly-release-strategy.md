@@ -38,7 +38,16 @@ owner, and deployment approver can synchronize on a predictable window.
    `.github/workflows/ironclaw-release.yml`; a tag without that namespace never
    invokes the publisher. The release owner creates that tag with the
    `Cut Ironclaw Release` workflow, supplying the exact approved commit SHA and
-   matching Cargo version.
+   matching Cargo version. **Land the `docs/changelog.mdx` entry for the
+   target stable version on `main` before the Monday cut** so the candidate
+   inherits it — the cut workflow refuses a stable (non-rc) tag whose
+   candidate commit has no `description="vX.Y.Z"` changelog entry
+   (`scripts/ci/cut_ironclaw_release.py`). The entry must live on `main`,
+   not only the release branch: the branch freezes and is never merged
+   back, so an entry written only there would vanish from next week's
+   candidate and the live changelog would silently drop this release. If
+   the cut already happened without it, add the entry on the release branch
+   *and* cherry-pick it to `main`.
 4. Freeze the release branch after the cut. Do not add features, merge `main`
    into it, or rebase it. The approximately 30 PRs per day that continue landing
    on `main` are for the next release.
@@ -47,6 +56,11 @@ owner, and deployment approver can synchronize on a predictable window.
    same commit, so confirm the recorded artifact digest matches the approved
    candidate before promotion. If a future promotion step can reuse the approved
    artifact without rebuilding, prefer it and record which path was used.
+6. A stable tag automatically repoints the `docs-live` branch at the released
+   commit (`publish-docs-live` in `.github/workflows/ironclaw-release.yml`),
+   which redeploys the public docs site. After promotion, verify the Mintlify
+   deployment reflects the release (see "Docs publication" below). Prerelease
+   tags never move `docs-live`.
 
 ## Test and promotion gates
 
@@ -126,3 +140,59 @@ Only the release owner may authorize a waiver, and the release record must
 document each approval, any waiver authority and its rationale, and rollback
 readiness evidence. Missing a preferred Wednesday scope does not qualify as an
 emergency.
+
+## Docs publication
+
+The public Mintlify docs site deploys from the **`docs-live` branch**, not
+`main`, so the site always describes the latest stable release instead of
+unreleased `main` behavior (issue #7317). The moving parts:
+
+- **Automatic repoint.** The `publish-docs-live` job in
+  `.github/workflows/ironclaw-release.yml` force-updates
+  `refs/heads/docs-live` to the released commit on every **stable** tag —
+  a pointer update, not a merge; successive stable tags need not be
+  ancestor-related, and the branch's content is always exactly the tagged
+  tree. The job bootstraps the branch if it does not exist yet, and moves
+  it only when its own tag is the **newest** stable `ironclaw-v*` tag — so
+  re-running an older release's workflow (routine after a flaky artifact
+  upload) cannot silently revert the live site.
+- **One-time, out-of-repo configuration.** In the Mintlify dashboard
+  (Settings → Git → deployment branch), point the docs deployment at
+  `docs-live`. This is the single manual configuration this pipeline cannot
+  verify from CI; the post-promotion check below is the compensating
+  control.
+- **Post-promotion check (Wednesday).** After the stable tag lands, confirm
+  the deployed site reflects the release — the changelog page is the quick
+  probe, since its newest entry is the version just shipped.
+- **Branch protection (recommended, with a caveat).** If you restrict who
+  can push to `docs-live`, the rule **must allow force pushes** for the
+  Actions actor (a ruleset with the force-push restriction left off, or a
+  bypass for `github-actions`): the repoint is a forced ref update by
+  design, and protection that blocks force pushes 422s the automation it
+  is meant to guard. Anything pushed to the branch manually is overwritten
+  at the next stable release by design.
+- **Emergency manual repoint.** If the automation is unavailable and the
+  site must move now:
+  `git push origin +ironclaw-vX.Y.Z^{commit}:refs/heads/docs-live`.
+- **Docs hotfix (wrong page live mid-week).** Fix the live site without
+  waiting for the next stable release by publishing the *tagged tree plus
+  the fix* — never `main`, which would republish unreleased behavior:
+
+  ```bash
+  git checkout -b docs-hotfix ironclaw-vX.Y.Z   # current stable tag
+  # fix the page(s), commit
+  git push origin +docs-hotfix:refs/heads/docs-live
+  ```
+
+  Land the same fix on `main` too, or the next stable release republishes
+  the wrong page.
+- **Changelog gate.** `scripts/ci/cut_ironclaw_release.py` refuses to create
+  a stable tag when the candidate's `docs/changelog.mdx` lacks the
+  release's `<Update description="vX.Y.Z">` entry (the tag's exact
+  attribute — an rc-labeled entry, prose mention, or lookalike attribute
+  does not satisfy it); rc tags are exempt. Land the entry
+  on `main` before the Monday cut (Candidate and artifact rules, step 3).
+- **Older releases.** Every tag preserves its docs tree
+  (`https://github.com/nearai/ironclaw/tree/ironclaw-vX.Y.Z/docs`); the
+  public changelog page links this instead of the site carrying versioned
+  page sets.

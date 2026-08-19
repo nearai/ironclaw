@@ -49,8 +49,9 @@ impl CodingEditLocks {
 /// scope + resolved virtual path. `write_file` and `apply_patch` on an
 /// existing file require a recorded entry (read-before-edit) whose
 /// fingerprint still matches the file's current bytes (mid-air collision
-/// detection); a successful edit refreshes the entry so chained edits keep
-/// working. The registry is bounded; eviction and process restarts fail
+/// detection); a successful text edit refreshes the entry so chained text
+/// edits keep working. Structured document edits require a fresh read because
+/// their addresses can shift. The registry is bounded; eviction and process restarts fail
 /// safe — a missing entry only forces a fresh `read_file` before editing.
 const MAX_READ_STATE_ENTRIES: usize = 8192;
 
@@ -58,8 +59,16 @@ type ReadStateKey = (CodingReadScopeKey, String);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ReadRepresentation {
+    /// The bytes on disk decoded as text. The only representation that may
+    /// authorize a raw `write_file` overwrite.
     RawText,
+    /// Text derived from a binary document by extraction. Lossy and not
+    /// byte-addressable, so it authorizes no write at all.
     ExtractedText,
+    /// The addressable structural view of an OOXML document (paragraph ids,
+    /// cell references, slide indexes). Authorizes `document_edit`, whose
+    /// typed operations name exactly those addresses.
+    Structured,
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -210,7 +210,7 @@ default_owner  = "reborn-cli"
 # id = "red-team"
 
 [runner]
-heartbeat_interval_secs = 5
+heartbeat_interval_secs = 15
 poll_interval_ms        = 200
 
 [skills]
@@ -303,7 +303,7 @@ mod tests {
     // `reborn_provider_catalog_is_owned_by_its_crate`. It asserted these
     // consts against the catalog by embedding it from five directories up —
     // a repo-root reach-in. The catalog is now `ironclaw_llm`'s own asset
-    // (`crates/ironclaw_llm/assets/providers.json`, CHECKLIST WS6), so the
+    // (`crates/domains/ironclaw_llm/assets/providers.json`, CHECKLIST WS6), so the
     // same `include_str!` would have become a *cross-crate* reach-in — the
     // category §11.2.7's scanner turns into a hard failure. A cross-crate
     // consistency rule belongs in the cross-crate suite, which reads both
@@ -332,6 +332,14 @@ mod tests {
         assert!(
             config_file.default_llm_slot().is_none(),
             "de-seeded stub must carry no `[llm.default]` slot at all: {config_text}"
+        );
+        assert_eq!(
+            config_file
+                .runner
+                .as_ref()
+                .and_then(|runner| runner.heartbeat_interval_secs),
+            Some(15),
+            "new configs must ship the conservative 15-second runner heartbeat"
         );
 
         // A pre-existing LLM env var in the ambient test environment would make

@@ -142,6 +142,27 @@ function renderChatInput({
       maxFileBytes: 1024,
       maxTotalBytes: 2048,
     }),
+    useFilePicker: ({ accept, multiple = false, disabled = false, onSelect }) => {
+      const ref = context.React.useRef(null);
+      return [
+        () => {
+          if (!disabled) ref.current?.click();
+        },
+        {
+          ref,
+          type: "file",
+          accept,
+          multiple,
+          disabled,
+          hidden: true,
+          onChange: (event) => {
+            const files = Array.from(event.currentTarget.files || []);
+            event.currentTarget.value = "";
+            if (!disabled && files.length > 0) onSelect(files);
+          },
+        },
+      ];
+    },
     NEW_DRAFT_KEY: "__new__",
     clearDraft: () => {},
     clearStagedAttachments: () => {},
@@ -594,7 +615,7 @@ test("ChatInput keeps Enter blocked when submit becomes disabled during send", a
 
   // Re-render in production would update submitDisabledRef before the original
   // async send closure reaches finally.
-  const submitDisabledRef = refs[5];
+  const submitDisabledRef = refs[4];
   submitDisabledRef.current = true;
   resolveSend();
   await flushAsyncHandlers();
@@ -724,6 +745,27 @@ function renderChatInputStateful({ getDraftByKey = {} } = {}) {
       maxFileBytes: 1024,
       maxTotalBytes: 2048,
     }),
+    useFilePicker: ({ accept, multiple = false, disabled = false, onSelect }) => {
+      const ref = context.React.useRef(null);
+      return [
+        () => {
+          if (!disabled) ref.current?.click();
+        },
+        {
+          ref,
+          type: "file",
+          accept,
+          multiple,
+          disabled,
+          hidden: true,
+          onChange: (event) => {
+            const files = Array.from(event.currentTarget.files || []);
+            event.currentTarget.value = "";
+            if (!disabled && files.length > 0) onSelect(files);
+          },
+        },
+      ];
+    },
     NEW_DRAFT_KEY: "__new__",
     clearDraft: () => {},
     clearStagedAttachments: () => {},
@@ -1350,6 +1392,34 @@ test("ChatInput command-menu shows an intentional empty state for a bare prefix 
     (node) => node.props?.["data-testid"] === "chat-command-menu-count",
   );
   assert.equal(extractText(count), "0/3");
+});
+
+test("ChatInput command-menu stays closed when no commands are available", () => {
+  const { tree } = renderChatInput({
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "/status",
+    commands: [],
+  });
+
+  assert.equal(
+    findNode(tree, (node) => node.props?.["data-testid"] === "chat-command-menu-empty"),
+    null,
+  );
+  assert.equal(
+    findNode(tree, (node) => node.props?.["data-testid"] === "chat-command-menu-count"),
+    null,
+  );
+
+  let prevented = false;
+  templateProps(findTextarea(tree)).onKeyDown({
+    key: "Escape",
+    preventDefault: () => {
+      prevented = true;
+    },
+  });
+  assert.equal(prevented, false);
 });
 
 test("ChatInput command-menu renders nothing for plain text that isn't a bare command prefix", () => {

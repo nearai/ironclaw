@@ -321,6 +321,7 @@ mod tests {
                 hard_ceiling: None,
             }),
             origin_gate_matrix: None,
+            standard_op: None,
         }
     }
 

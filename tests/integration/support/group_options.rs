@@ -1,8 +1,9 @@
 //! Runtime-wiring setters for [`RebornIntegrationGroupBuilder`] — `storage`,
 //! `safety_context`, `with_turn_event_sink`, `with_trace_capture`,
 //! `with_tool_disclosure_bridged`, `with_tool_disclosure_off`,
-//! `with_narrowed_capability_allow_set_for_bridged_test`, `budget_accounting`,
-//! `communication_context_provider`, `hook_dispatcher_builder_factory`.
+//! `with_narrowed_capability_surface_policy_for_bridged_test`,
+//! `budget_accounting`, `communication_context_provider`,
+//! `hook_dispatcher_builder_factory`.
 //! Private child module of `group.rs` (owns the struct + `build_base`/
 //! `into_group`), so it reaches the builder's private fields at module-
 //! private visibility instead of widening them to `pub(crate)`. New builder
@@ -16,9 +17,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_host_api::{capability_surface::CapabilitySurfacePolicy, ids::CapabilityId};
 use ironclaw_loop_contracts::{CommunicationContextProvider, InstructionSafetyContext};
-use ironclaw_loop_host::CapabilityAllowSet;
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_turn_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_turns::InMemoryTurnEventSink;
@@ -85,12 +85,25 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
+    /// Use production's durable loop-milestone event adapter and event store
+    /// over the same RootFilesystem as the group's turn workload.
+    pub fn with_durable_milestone_event_store_for_test(mut self) -> Self {
+        self.durable_milestone_event_store = true;
+        self
+    }
+
     /// Force `ToolDisclosureMode::Bridged` into the group's ONE planned
     /// runtime config (enabler (b)), regardless of `REBORN_TOOL_DISCLOSURE` —
     /// avoids the shared-process env-var race `apply_hermetic_env()` already
     /// guards against (see `ToolDisclosureMode::from_env`). Defaults to `Off`.
     pub fn with_tool_disclosure_bridged(mut self) -> Self {
         self.tool_disclosure = ToolDisclosureMode::Bridged;
+        self
+    }
+
+    /// Select an exact disclosure comparison arm without mutating process env.
+    pub fn with_tool_disclosure_mode(mut self, mode: ToolDisclosureMode) -> Self {
+        self.tool_disclosure = mode;
         self
     }
 
@@ -109,23 +122,36 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
-    /// #5647 RED-pin seam: override the Bridged-mode `CapabilityAllowSet`
-    /// (default forces `All`) so a test can reproduce a narrowed profile atop
-    /// bridged deferral; requires `.with_tool_disclosure_bridged()` too — `into_group` fails fast otherwise.
+    /// #5647 RED-pin seam: override the Bridged-mode `CapabilitySurfacePolicy`
+    /// (default uses `CapabilitySurfacePolicy::allow_all()`) so a test can
+    /// reproduce a narrowed profile atop bridged deferral; requires
+    /// `.with_tool_disclosure_bridged()` too — `into_group` fails fast otherwise.
     /// Mirrors the production resolve-once wiring in
-    /// `crates/ironclaw_turn_runner/src/runtime.rs`:
+    /// `crates/loop/ironclaw_turn_runner/src/runtime.rs`:
     /// `RuntimeProfiledCapabilityPortFactory::create_capability_port` shares the
-    /// resolved allow-set between `ToolDisclosureCapabilityDecorator` and the
+    /// resolved policy between `ToolDisclosureCapabilityDecorator` and the
     /// capability-surface filter before `RebornLoopDriverHostFactory::create_host`
-    /// in `crates/ironclaw_turn_runner/src/loop_driver_host.rs` calls
+    /// in `crates/loop/ironclaw_turn_runner/src/loop_driver_host.rs` calls
     /// `build_text_only_host_with_capabilities`. The explicit
     /// `build_text_only_host_with_profiled_capabilities` form is for test
     /// construction.
-    pub fn with_narrowed_capability_allow_set_for_bridged_test(
-        mut self,
+    pub fn with_narrowed_capability_surface_policy_for_bridged_test(
+        self,
         ids: impl IntoIterator<Item = CapabilityId>,
     ) -> Self {
-        self.narrowed_bridged_allow_set = Some(CapabilityAllowSet::allowlist(ids));
+        self.with_capability_surface_policy_for_bridged_test(CapabilitySurfacePolicy::allow_only(
+            ids,
+        ))
+    }
+
+    /// Override every dimension of the Bridged-mode capability surface policy.
+    /// This is the full-policy counterpart to the capability-id-only helper
+    /// above and exercises the same production resolve-once wiring.
+    pub fn with_capability_surface_policy_for_bridged_test(
+        mut self,
+        policy: CapabilitySurfacePolicy,
+    ) -> Self {
+        self.narrowed_bridged_policy = Some(policy);
         self
     }
 
@@ -190,6 +216,13 @@ impl RebornIntegrationGroupBuilder {
     /// behavior byte-identical.
     pub fn with_lease_recovery_interval_for_test(mut self, interval: Duration) -> Self {
         self.lease_recovery_interval_override = Some(interval);
+        self
+    }
+
+    /// Override the scheduler heartbeat interval for a deterministic measured
+    /// workload while preserving the production scheduler and process journal.
+    pub fn with_runner_heartbeat_interval_for_test(mut self, interval: Duration) -> Self {
+        self.runner_heartbeat_interval_override = Some(interval);
         self
     }
 

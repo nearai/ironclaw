@@ -10,7 +10,7 @@ use ironclaw_host_runtime::HostProcessPort;
 
 use crate::RebornBuildError;
 use crate::runtime_mounts::{
-    WorkspaceMountPolicy, scoped_skill_context_mount_view, workspace_mount_view,
+    WorkspaceMountPolicy, db_backed_skill_context_mount_view, workspace_mount_view,
 };
 
 pub(crate) type WorkspaceFilesystems = (
@@ -81,9 +81,12 @@ impl HostAccessAssembly {
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         })?;
+        // Database-backed, matching the writer. A disk-backed view here is nearai/ironclaw#7168:
+        // every production-shaped build writes skills to the database, so a reader on
+        // `/projects/...` never sees an installed skill again.
         let skill_filesystem = Arc::new(ScopedFilesystem::new(
             Arc::clone(&filesystem),
-            scoped_skill_context_mount_view,
+            db_backed_skill_context_mount_view,
         ));
         let workspace_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
             filesystem,
@@ -103,6 +106,7 @@ pub(crate) fn build_host_access(
     workspace_root: Option<PathBuf>,
     host_home_root: Option<PathBuf>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
+    workspace_scoped_per_caller: bool,
 ) -> Result<HostAccessAssembly, RebornBuildError> {
     initialize_directory(&storage_root, "storage root")?;
     initialize_directory(
@@ -139,6 +143,7 @@ pub(crate) fn build_host_access(
         runtime_policy.as_ref(),
         &workspace_root,
         host_home_root.as_ref(),
+        workspace_scoped_per_caller,
     );
 
     Ok(HostAccessAssembly {
@@ -215,6 +220,7 @@ fn process_port_for_policy(
     runtime_policy: Option<&EffectiveRuntimePolicy>,
     workspace_root: &Path,
     host_home_root: Option<&HostHomeRoot>,
+    workspace_scoped_per_caller: bool,
 ) -> Option<HostProcessPort> {
     let runtime_policy = runtime_policy?;
     if runtime_policy.process_backend != ProcessBackendKind::LocalHost {
@@ -225,7 +231,10 @@ fn process_port_for_policy(
     } else {
         HostProcessPort::new()
     }
-    .with_workdir_alias("/workspace", workspace_root);
+    .with_workdir_alias("/workspace", workspace_root)
+    // Same scoping the file tools apply. Without it `/workspace` names `<root>` here and
+    // `<root>/tenants/<t>/users/<u>` there, so a file written by one is unreachable by the other.
+    .with_workspace_scoped_per_caller(workspace_scoped_per_caller);
     if let Some(host_home_root) = host_home_root {
         process_port =
             process_port.with_workdir_alias("/host", host_home_root.canonical_root().to_path_buf());

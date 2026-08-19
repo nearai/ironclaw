@@ -22,9 +22,11 @@ use ironclaw_product_contracts::lifecycle_service::{
     LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
 };
 use ironclaw_product_contracts::operator_llm::{
-    ActiveModelReader, CodexLoginStart, LlmConfigService, LlmConfigSnapshot, LlmModelsResult,
-    LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, UpsertLlmProviderRequest,
+    ActiveModelReader, CodexLoginStart, LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID,
+    LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID, LlmConfigService, LlmConfigServiceError,
+    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest,
+    NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult, USER_MODEL_CATALOG_VIEW,
+    USER_MODEL_PREFERENCE_VIEW, UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference,
 };
 use ironclaw_product_contracts::operator_service::{
     OperatorLogsService, OperatorServiceLifecycleService, OperatorStatusService,
@@ -33,13 +35,13 @@ use ironclaw_product_contracts::operator_service::{
 use ironclaw_product_contracts::operator_tools::{
     RebornOperatorToolCatalog, RebornOperatorToolInfo,
 };
+pub use ironclaw_product_contracts::product_wire::{
+    RebornAdminThreadScrapeArtifactRequest, RebornAdminThreadScrapeListRequest,
+    RebornAdminThreadScrapeRunArtifactRequest,
+};
 use ironclaw_product_contracts::projection::ProjectionStream;
 use ironclaw_product_contracts::views::{RebornViewPage, RebornViewProvider, RebornViewQuery};
 
-use crate::{
-    ProductAdapterError, ProductSurfaceRejectionKind, ProjectionCursor,
-    ProjectionSubscriptionRequest,
-};
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::future::try_join_all;
@@ -48,6 +50,7 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, ChannelConnectionService, CredentialAccountId,
     CredentialAccountProjection, CredentialAccountUpdateBinding, ProviderScope,
 };
+use ironclaw_host_api::product_adapter::{ProductAdapterError, ProductSurfaceRejectionKind};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, IdempotencyKey, SanitizedCancelReason, TurnActor, TurnGateRef, TurnRunId,
     TurnScope, TurnStatus,
@@ -65,19 +68,24 @@ use ironclaw_host_api::{
     scope::Principal,
 };
 use ironclaw_loop_host::{HostInputEnqueuePort, RejectingInputEnqueue};
+use ironclaw_product_contracts::outbound::ProjectionCursor;
+use ironclaw_product_contracts::projection::ProjectionSubscriptionRequest;
+use ironclaw_product_contracts::suggestions::{
+    SUGGESTION_DISMISS_COMMAND_ID, SUGGESTION_START_COMMAND_ID, SUGGESTIONS_GENERATE_COMMAND_ID,
+    SUGGESTIONS_LIST_VIEW,
+};
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     ProductSurfaceValidationCode,
 };
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
-    MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+    EnsureThreadRequest, SessionThreadError, SessionThreadRecord, SessionThreadService,
+    ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
 use ironclaw_triggers::{AutomationName, AutomationNameError};
 use ironclaw_turns::{
     GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest, RetryTurnRequest,
-    SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError,
+    TurnCoordinator, TurnError,
 };
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Serialize, de::DeserializeOwned};
@@ -90,26 +98,31 @@ use crate::{
     AuthInteractionRejectionKind, AuthInteractionService, CommandAudience, CommandResultField,
     CommandResultView, DecodeInboundAttachments, IntoProductInboundCommand,
     ListPendingApprovalsRequest, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
-    PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand,
+    PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_NEW_COMMAND_OPERATION_ID,
+    PRODUCT_STATUS_COMMAND_OPERATION_ID, PRODUCT_STOP_COMMAND_OPERATION_ID, ProductCommand,
     ProductCommandDescriptor, ProductInboundCommand, ProductLifecycleCommandInput,
-    ProductModelCommand, ProductModelCommandInput, ProductRejectionKind, ProductStatusCommandInput,
-    ProductSurfaceFailure, ProductTriggerReason, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, UnsupportedLifecycleProductService,
+    ProductModelCommand, ProductModelCommandInput, ProductNewCommandInput, ProductNewCommandOutput,
+    ProductStatusCommandInput, ProductStopCommandInput, ProductStopInvocation,
+    ProductSurfaceFailure, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
+    UnsupportedLifecycleProductService,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
-    binding_ref::{
-        DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_reply_target_binding_ref,
-        bounded_source_binding_ref,
-    },
     declared_command_help_text, is_approval_gate_ref, is_auth_gate_ref,
-    parse_product_slash_command, product_command_descriptors, required_audience,
-    thread_metadata_is_automation_trigger,
+    policy::{BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest},
+    product_command_descriptors, required_audience, thread_metadata_is_automation_trigger,
+};
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_product_contracts::inbound::{
+    ProductRejection, ProductRejectionKind, parse_product_slash_command,
 };
 use ironclaw_product_contracts::inbound_requests::{
     ProductCancelRunRequest, ProductCreateThreadRequest, ProductGateResolution,
     ProductListAutomationsRequest, ProductListThreadsRequest, ProductRenameAutomationRequest,
     ProductResolveGateRequest, ProductRetryRunRequest, ProductSubmitTurnRequest,
+};
+use ironclaw_product_contracts::inspector::{
+    INSPECTOR_PROMPT_VIEW, INSPECTOR_SNAPSHOT_VIEW, INSPECTOR_TOOL_VIEW, INSPECTOR_UPDATES_VIEW,
 };
 
 mod admin_configuration;
@@ -120,10 +133,12 @@ mod extension_onboarding;
 mod extension_setup_credentials;
 mod extensions;
 mod fs_browse;
+mod inspector;
 mod ironhub_link;
 mod lifecycle_setup;
 mod llm_config;
 mod log_views;
+mod notification_setup;
 mod operator_command_views;
 mod operator_config_views;
 mod outbound_delivery_capability_surface;
@@ -133,12 +148,24 @@ mod product_capability_handlers;
 mod product_commands;
 mod project_fs;
 mod projects;
-mod run_artifact;
+// pub(crate): lib.rs re-exports `reborn_services::run_artifact::timings`
+// directly, which needs this segment of the path visible crate-wide; the
+// module's own contents stay unexported except through that re-export.
+pub(crate) mod run_artifact;
 mod thread_artifact;
+mod timings_source;
 mod trace_credits;
 mod types;
 mod views;
 
+// Crate-internal seam for the runtime communication context (#7247): the
+// model-facing prompt slice reuses the extensions card's per-caller auth
+// verdict instead of re-deriving "connected for this caller" a second way.
+pub(crate) use extensions::{CallerExtensionAuth, caller_extension_auth};
+
+use crate::conversation_binding::SessionLaneRejectingBindingResolver;
+use crate::inbound_turn::{DefaultInboundTurnService, SessionSkillActivationPorts};
+use crate::workflow::DefaultProductSurface;
 pub use admin_configuration::{
     ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID,
     ADMIN_CONFIGURATION_VIEW, RebornAdminConfigurationField, RebornAdminConfigurationGroup,
@@ -155,6 +182,9 @@ pub use admin_users::{
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
     RebornAdminUserSecretsListResponse,
 };
+use ironclaw_host_api::product_adapter::identity::{AdapterInstallationId, ProductAdapterId};
+use ironclaw_product_contracts::inbound::ProductInboundAck;
+use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
 pub use ironclaw_product_contracts::surface::{
     ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
@@ -167,9 +197,9 @@ pub use trace_credits::{
 
 use approval_settings::{
     AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingKey, AutoApproveSettingStorePort,
-    PersistentApprovalAction, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
-    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
+    CapabilityPermissionOverrideStorePort, PersistentApprovalAction, PersistentApprovalPolicyError,
+    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort,
+    ToolPermissionOverride, ToolPermissionOverrideInput, ToolPermissionOverrideKey,
     ToolPermissionState, permission_mode_allows_persistent_approval,
 };
 pub use extensions::{EXTENSION_REGISTRY_VIEW, EXTENSIONS_VIEW};
@@ -200,34 +230,44 @@ pub use ironclaw_product_contracts::product_wire::{
     RebornExtensionSetupField, RebornExtensionSetupSecret, RebornExtensionSurface,
     RebornGetRunStateRequest, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
     RebornListAutomationsResponse, RebornLogEntry, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornNotificationChannel, RebornNotificationChannelsResponse,
+    RebornNotificationSetupMutationRequest, RebornNotificationSetupRequest,
+    RebornNotificationSetupStatusResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
     RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
     RebornOperatorSetupStatus, RebornOperatorSetupStep, RebornOperatorSetupStepStatus,
     RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
-    RebornOperatorStatusState, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
+    RebornOperatorStatusState, RebornOperatorSurfaceStatus,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetChannel,
     RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornProductCommandInfo, RebornProductCommandListResponse,
-    RebornRenameAutomationProductRequest, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornRetryRunResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTraceHoldAuthorizeProductRequest, SettingsToolPermissionState,
+    RebornOutboundDeliveryTargetSummary, RebornProductCommandInfo,
+    RebornProductCommandListResponse, RebornRenameAutomationProductRequest,
+    RebornResolveGateResponse, RebornResumeGateResponse, RebornRetryRunResponse,
+    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
+    RebornServiceLifecycleState, RebornSetNotificationChannelsRequest,
+    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
+    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTraceHoldAuthorizeProductRequest,
+    SettingsToolPermissionState,
 };
+// A product-tier port gets exactly one import path (§11.2.4), so this is a
+// private `use` and never a `pub use` — callers name the contracts crate.
+use ironclaw_product_contracts::project_service::{ProjectService, ProjectServiceError};
 pub use lifecycle_setup::EXTENSION_SETUP_VIEW;
 pub use llm_config::LLM_CONFIG_VIEW;
 pub use log_views::{LOGS_VIEW, OPERATOR_LOGS_VIEW};
+pub use notification_setup::{
+    ChannelNotificationSetupService, DeliveryClientBootstrap, DeliveryClientBootstrapError,
+    NoDeliveryClientBootstrap, RegistrationChannelNotificationSetupService,
+    UnsupportedChannelNotificationSetupService,
+};
 pub use operator_command_views::{
     OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
 };
@@ -235,45 +275,56 @@ pub use operator_config_views::{
     OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW,
 };
 pub use outbound_delivery_capability_surface::{
-    OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION,
-    OUTBOUND_DELIVERY_TARGET_SET_PROVIDER_TOOL_NAME, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
-    OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION, OUTBOUND_DELIVERY_TARGETS_LIST_PROVIDER_TOOL_NAME,
-    OutboundDeliveryCapabilityInputError, OutboundDeliveryTargetSetInput,
+    NOTIFICATION_CHANNELS_SET_MAX_ITEMS, NotificationChannelsSetInput,
+    OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION,
+    OUTBOUND_DELIVERY_TARGETS_LIST_PROVIDER_TOOL_NAME,
+    OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID,
+    OUTBOUND_NOTIFICATION_CHANNELS_SET_DESCRIPTION,
+    OUTBOUND_NOTIFICATION_CHANNELS_SET_PROVIDER_TOOL_NAME, OutboundDeliveryCapabilityInputError,
     OutboundDeliveryTargetsListInput, list_outbound_delivery_targets_for_model,
-    outbound_delivery_synthetic_provider, outbound_delivery_target_set_input_schema,
-    outbound_delivery_target_set_operator_tool_info, outbound_delivery_targets_list_input_schema,
-    parse_outbound_delivery_target_set_input, parse_outbound_delivery_targets_list_input,
-    set_outbound_delivery_target_for_model,
+    notification_channels_set_input_schema, notification_channels_set_operator_tool_info,
+    outbound_delivery_synthetic_provider, outbound_delivery_targets_list_input_schema,
+    parse_notification_channels_set_input, parse_outbound_delivery_targets_list_input,
+    set_notification_channels_for_model,
 };
 pub use outbound_preferences::RebornOutboundPreferencesService;
-pub use outbound_views::{OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_VIEW};
+pub use outbound_views::{NOTIFICATION_CHANNELS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW};
 pub use project_fs::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
     ProjectFsStat, RebornProjectFsListRequest, RebornProjectFsListResponse,
     RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
 };
 pub use projects::{
-    ProjectCaller, ProjectService, ProjectServiceError, RebornAddMemberRequest,
-    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornGetProjectRequest,
-    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
-    RebornListProjectsResponse, RebornProjectInfo, RebornProjectMemberInfo,
-    RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
-    RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    ProjectCaller, RebornAddMemberRequest, RebornCreateProjectRequest, RebornDeleteProjectRequest,
+    RebornGetProjectRequest, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornProjectInfo,
+    RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
+    RebornProjectState, RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest,
 };
 pub use run_artifact::{
     RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornRunArtifact, RebornRunArtifactRequest,
     RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall,
 };
 pub use thread_artifact::{
-    RebornThreadArtifact, RebornThreadArtifactRequest, THREAD_ARTIFACT_MAX_MESSAGES,
-    THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW,
+    RebornThreadArtifact, RebornThreadArtifactRequest, RunArtifactRunTimings,
+    THREAD_ARTIFACT_MAX_MESSAGES, THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW,
 };
 pub use types::{
     RebornAuthAccount, RebornCreateThreadResponse, RebornExecuteProductCommandResponse,
     RebornExtensionInfo, RebornExtensionListResponse, RebornGetRunStateResponse,
-    RebornListThreadsResponse, RebornTimelineResponse, RebornVendorAuthAccounts,
+    RebornListThreadsResponse, RebornProductCommandEffect, RebornTimelineResponse,
+    RebornVendorAuthAccounts,
 };
 pub use views::UnavailableRebornViewProvider;
+// The notification-setup descriptors live in
+// `ironclaw_product_contracts::notification_setup` (transport/product
+// boundary: transports consume the boundary crate). One import path, no
+// re-export (§11.2.4).
+use ironclaw_product_contracts::notification_setup::{
+    NOTIFICATION_SETUP_DISABLE_COMMAND_ID, NOTIFICATION_SETUP_ENABLE_COMMAND_ID,
+    NOTIFICATION_SETUP_STATUS_VIEW,
+};
 
 type SkillActivationRecorder =
     dyn Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), ProductSurfaceError> + Send + Sync;
@@ -293,9 +344,6 @@ pub const OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY: ProductCapabilityDescr
 pub const OPERATOR_SETUP_RUN_CAPABILITY_ID: &str = "builtin.operator_setup_run";
 pub const OPERATOR_SETUP_RUN_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(OPERATOR_SETUP_RUN_CAPABILITY_ID);
-pub const OUTBOUND_PREFERENCES_SET_CAPABILITY_ID: &str = "builtin.outbound_preferences_set";
-pub const OUTBOUND_PREFERENCES_SET_CAPABILITY: ProductCapabilityDescriptor =
-    ProductCapabilityDescriptor::api_only(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID);
 pub const LLM_PROVIDER_UPSERT_CAPABILITY_ID: &str = "builtin.llm_provider_upsert";
 pub const LLM_PROVIDER_UPSERT_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(LLM_PROVIDER_UPSERT_CAPABILITY_ID);
@@ -426,6 +474,16 @@ pub const TRACE_HOLD_AUTHORIZE_COMMAND: ProductSurfaceCommandDescriptor<
     RebornTraceHoldAuthorizeProductRequest,
     RebornTraceHoldAuthorizeResponse,
 > = ProductSurfaceCommandDescriptor::new(TRACE_HOLD_AUTHORIZE_COMMAND_ID);
+/// WebUI-facing full-replace notification-channels write. See
+/// `outbound_views::RebornServices::set_notification_channels`'s doc comment
+/// for why this is a product command (webui-only, no approval gate) rather
+/// than a composition-registered capability like the sibling model-callable
+/// `builtin.notification_channels_set` tool.
+pub const NOTIFICATION_CHANNELS_SET_COMMAND_ID: &str = "outbound.notification_channels_set";
+pub const NOTIFICATION_CHANNELS_SET_COMMAND: ProductSurfaceCommandDescriptor<
+    RebornSetNotificationChannelsRequest,
+    RebornNotificationChannelsResponse,
+> = ProductSurfaceCommandDescriptor::new(NOTIFICATION_CHANNELS_SET_COMMAND_ID);
 pub const OPERATOR_CONFIG_SET_KEY_COMMAND_ID: &str = "operator.config.set_key";
 pub const OPERATOR_CONFIG_SET_KEY_COMMAND: ProductSurfaceCommandDescriptor<
     RebornOperatorConfigSetProductRequest,
@@ -541,6 +599,18 @@ pub const ADMIN_USER_SECRETS_VIEW: ProductView<
     RebornAdminUserRequest,
     RebornAdminUserSecretsListResponse,
 > = ProductView::unpaginated("admin_user_secrets");
+pub const ADMIN_THREAD_SCRAPE_THREADS_VIEW: ProductView<
+    RebornAdminThreadScrapeListRequest,
+    RebornListThreadsResponse,
+> = ProductView::paginated("admin_thread_scrape_threads");
+pub const ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW: ProductView<
+    RebornAdminThreadScrapeArtifactRequest,
+    RebornThreadArtifact,
+> = ProductView::unpaginated("admin_thread_scrape_artifact");
+pub const ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW: ProductView<
+    RebornAdminThreadScrapeRunArtifactRequest,
+    RebornRunArtifact,
+> = ProductView::unpaginated("admin_thread_scrape_run_artifact");
 pub const SKILL_INSTALL_CAPABILITY_ID: &str = "builtin.skill_install";
 pub const SKILL_INSTALL_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(SKILL_INSTALL_CAPABILITY_ID);
@@ -566,7 +636,7 @@ pub const SKILL_CONTENT_VIEW: ProductView<serde_json::Value, RebornSkillContentR
 
 #[derive(Clone)]
 struct RebornOperatorApprovalConfig {
-    overrides: Arc<dyn ToolPermissionOverrideStorePort>,
+    overrides: Arc<dyn CapabilityPermissionOverrideStorePort>,
     auto_approve: Arc<dyn AutoApproveSettingStorePort>,
     persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
     tool_catalog: Arc<dyn RebornOperatorToolCatalog>,
@@ -624,6 +694,49 @@ fn model_command_view(title: &str, snapshot: &LlmConfigSnapshot) -> CommandResul
     }
 }
 
+fn user_model_preference_command_view(
+    title: &str,
+    catalog: &UserModelCatalog,
+    preference: &UserModelPreference,
+) -> CommandResultView {
+    let mut lines = Vec::new();
+    if catalog.selection_enabled {
+        lines.push(format!("Available models: {}", catalog.models.join(", ")));
+        lines.push("Use `/model use <model>` or `/model default`.".to_string());
+    } else {
+        lines.push("User model selection is not configured for this workspace.".to_string());
+    }
+    let (preferred, effective) = match preference.model.as_deref() {
+        Some(model)
+            if catalog.selection_enabled
+                && catalog.models.iter().any(|available| available == model) =>
+        {
+            (model.to_string(), model.to_string())
+        }
+        Some(model) => {
+            lines.push(
+                "Your saved preference is no longer available. Use `/model default`.".to_string(),
+            );
+            (format!("{model} (unavailable)"), "unavailable".to_string())
+        }
+        None => (
+            "workspace default".to_string(),
+            catalog
+                .workspace_default
+                .clone()
+                .unwrap_or_else(|| "not configured".to_string()),
+        ),
+    };
+    CommandResultView {
+        title: title.to_string(),
+        fields: vec![
+            command_result_field("Preference", preferred),
+            command_result_field("Effective model", effective),
+        ],
+        lines,
+    }
+}
+
 fn describe_turn_status(status: TurnStatus) -> (&'static str, Option<&'static str>) {
     match status {
         TurnStatus::Queued => ("queued", None),
@@ -649,6 +762,28 @@ fn idle_status_command_view() -> CommandResultView {
         title: "Status".to_string(),
         fields: vec![command_result_field("State", "idle")],
         lines: vec!["No assistant activity in this conversation yet.".to_string()],
+    }
+}
+
+fn nothing_to_stop_command_view() -> CommandResultView {
+    CommandResultView {
+        title: "Nothing to stop".to_string(),
+        fields: vec![command_result_field("State", "idle")],
+        lines: vec!["There is no active run in this conversation.".to_string()],
+    }
+}
+
+/// The one `/new` success copy, shared by the channel preflight
+/// (`execute_product_new_command`) and the WebUI execute door so the two
+/// renderings cannot drift.
+fn new_conversation_started_view() -> CommandResultView {
+    CommandResultView {
+        title: "New conversation".to_string(),
+        fields: Vec::new(),
+        lines: vec![
+            "Started a fresh conversation. The previous conversation is still available in history."
+                .to_string(),
+        ],
     }
 }
 
@@ -789,29 +924,6 @@ impl SkillsProductService for UnsupportedSkillsProductService {}
 
 #[async_trait]
 pub trait OutboundPreferencesProductService: Send + Sync {
-    /// Return the authenticated caller's scoped outbound preferences.
-    ///
-    /// Real implementations must scope stored preferences by the caller's
-    /// tenant/user identity. The Phase 1 unsupported implementation returns an
-    /// empty projection so read callers can treat "not configured yet" as a
-    /// stable state while mutation and target inventory remain fail-closed.
-    async fn get_outbound_preferences(
-        &self,
-        caller: ProductSurfaceCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError>;
-
-    /// Persist the caller's scoped outbound delivery preferences.
-    ///
-    /// Implementations must scope writes by the caller's tenant/user identity.
-    /// `RebornServices` installs `UnsupportedOutboundPreferencesProductService`
-    /// by default, which keeps Phase 1 mutation attempts fail-closed with a
-    /// non-retryable service-unavailable response until a real service is wired.
-    async fn set_outbound_preferences(
-        &self,
-        caller: ProductSurfaceCaller,
-        request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError>;
-
     /// List delivery targets available to the authenticated caller.
     ///
     /// Implementations must scope target inventory by the caller's tenant/user
@@ -823,6 +935,41 @@ pub trait OutboundPreferencesProductService: Send + Sync {
         &self,
         caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError>;
+
+    /// Persist the caller's scoped notification-channel target list — a full
+    /// replace of the current set (spec §7). An empty list means notifications
+    /// stay in the web app only.
+    ///
+    /// Implementations must scope writes by the caller's tenant/user identity,
+    /// validate each id through the caller-scoped target registry, dedup
+    /// preserving order, and cap at `NOTIFICATION_TARGETS_CAP`. Defaults to a
+    /// non-retryable service-unavailable response so the pre-existing
+    /// implementors of this trait that predate notification channels do not
+    /// need to opt in explicitly.
+    async fn set_notification_channels(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: RebornSetNotificationChannelsRequest,
+    ) -> Result<RebornNotificationChannelsResponse, ProductSurfaceError> {
+        let _ = (caller, request);
+        Err(outbound_preferences_unavailable())
+    }
+
+    /// Return the authenticated caller's scoped notification-channel targets,
+    /// resolved to channel options. Stored ids that no longer resolve are
+    /// omitted rather than erroring (see
+    /// [`RebornNotificationChannelsResponse`]).
+    ///
+    /// Implementations must scope reads by the caller's tenant/user identity.
+    /// Defaults to an empty projection, so "not configured yet" is a stable
+    /// read state.
+    async fn get_notification_channels(
+        &self,
+        caller: ProductSurfaceCaller,
+    ) -> Result<RebornNotificationChannelsResponse, ProductSurfaceError> {
+        let _ = caller;
+        Ok(RebornNotificationChannelsResponse::default())
+    }
 }
 
 #[derive(Debug)]
@@ -836,26 +983,26 @@ impl UnsupportedOutboundPreferencesProductService {
 
 #[async_trait]
 impl OutboundPreferencesProductService for UnsupportedOutboundPreferencesProductService {
-    async fn get_outbound_preferences(
-        &self,
-        _caller: ProductSurfaceCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-        Ok(RebornOutboundPreferencesResponse::default())
-    }
-
-    async fn set_outbound_preferences(
-        &self,
-        _caller: ProductSurfaceCaller,
-        _request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
-        Err(outbound_preferences_unavailable())
-    }
-
     async fn list_outbound_delivery_targets(
         &self,
         _caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError> {
         Err(outbound_preferences_unavailable())
+    }
+
+    async fn set_notification_channels(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: RebornSetNotificationChannelsRequest,
+    ) -> Result<RebornNotificationChannelsResponse, ProductSurfaceError> {
+        Err(outbound_preferences_unavailable())
+    }
+
+    async fn get_notification_channels(
+        &self,
+        _caller: ProductSurfaceCaller,
+    ) -> Result<RebornNotificationChannelsResponse, ProductSurfaceError> {
+        Ok(RebornNotificationChannelsResponse::default())
     }
 }
 
@@ -1384,6 +1531,10 @@ fn product_view_requires_operator_config(view_id: &str) -> bool {
             || id == OPERATOR_SETUP_VIEW.id
             || id == OPERATOR_DIAGNOSTICS_VIEW.id
             || id == OPERATOR_STATUS_VIEW.id
+            || id == INSPECTOR_SNAPSHOT_VIEW.id
+            || id == INSPECTOR_PROMPT_VIEW.id
+            || id == INSPECTOR_TOOL_VIEW.id
+            || id == INSPECTOR_UPDATES_VIEW.id
     )
 }
 
@@ -2123,6 +2274,73 @@ impl ProductCapabilityInvoker for UnavailableProductCapabilityInvoker {
     }
 }
 
+/// Session-only projection of tenant model selection onto the existing
+/// before-inbound policy seam. The workflow invokes this after both replay
+/// checks and before attachment landing or message acceptance.
+struct SessionModelSelectionPolicy {
+    llm_config: Option<Arc<dyn LlmConfigService>>,
+}
+
+#[async_trait]
+impl BeforeInboundPolicy for SessionModelSelectionPolicy {
+    async fn check_user_message(
+        &self,
+        request: BeforeInboundPolicyRequest,
+    ) -> Result<BeforeInboundPolicyOutcome, ProductSurfaceFailure> {
+        let Some(llm_config) = self.llm_config.as_ref() else {
+            return Ok(BeforeInboundPolicyOutcome::Allow);
+        };
+        let Some(caller) = request.session_caller else {
+            return Err(ProductSurfaceFailure::BeforeInboundPolicyFailed {
+                reason: "session model policy received a webhook message".to_string(),
+                permanent: true,
+            });
+        };
+        let requested_model = request.user_message.requested_model.clone();
+        match llm_config
+            .resolve_user_model(caller, requested_model.clone())
+            .await
+        {
+            Ok(resolved_model) if resolved_model == requested_model => {
+                Ok(BeforeInboundPolicyOutcome::Allow)
+            }
+            Ok(resolved_model) => {
+                let mut user_message = request.user_message;
+                user_message.requested_model = resolved_model;
+                Ok(BeforeInboundPolicyOutcome::RewriteUserMessage(user_message))
+            }
+            Err(LlmConfigServiceError::InvalidRequest { reason, .. }) => {
+                Ok(BeforeInboundPolicyOutcome::Reject(
+                    ProductRejection::permanent(ProductRejectionKind::InvalidRequest, reason),
+                ))
+            }
+            Err(LlmConfigServiceError::NotFound) => Ok(BeforeInboundPolicyOutcome::Reject(
+                ProductRejection::permanent(
+                    ProductRejectionKind::InvalidRequest,
+                    "requested model is unavailable",
+                ),
+            )),
+            Err(LlmConfigServiceError::Unavailable) => {
+                Err(ProductSurfaceFailure::BeforeInboundPolicyFailed {
+                    reason: "model selection policy is unavailable".to_string(),
+                    permanent: false,
+                })
+            }
+            Err(LlmConfigServiceError::Internal) => {
+                // A backend fault is not a policy verdict: `permanent: true`
+                // would settle Rejected(PolicyDenied) in the durable session
+                // idempotency ledger, poisoning this client_action_id even
+                // after the backend recovers. Fail transient so the caller
+                // can retry the same action.
+                Err(ProductSurfaceFailure::BeforeInboundPolicyFailed {
+                    reason: "model selection policy failed".to_string(),
+                    permanent: false,
+                })
+            }
+        }
+    }
+}
+
 /// Default service implementation composed at the WebUI boundary.
 #[derive(Clone)]
 pub struct RebornServices<
@@ -2146,6 +2364,14 @@ pub struct RebornServices<
     channel_connection_service: Arc<dyn ChannelConnectionService>,
     channel_config_service: Option<Arc<dyn ChannelConfigProductService>>,
     outbound_preferences_service: Arc<dyn OutboundPreferencesProductService>,
+    notification_setup_service: Arc<dyn ChannelNotificationSetupService>,
+    session_inbound_ledger: Arc<dyn crate::ledger::IdempotencyLedger>,
+    /// The session lane's product surface, built once. Every input is an
+    /// immutable builder-wired `Arc`, so rebuilding it per `submit_turn`
+    /// only allocated — on the browser's primary send path.
+    session_inbound_surface: Arc<std::sync::OnceLock<Arc<DefaultProductSurface>>>,
+    session_channels:
+        Option<Arc<dyn ironclaw_product_contracts::session_ingress::SessionChannelDirectory>>,
     operator_status: Arc<dyn OperatorStatusService>,
     operator_logs: Arc<dyn OperatorLogsService>,
     operator_service_lifecycle: Arc<dyn OperatorServiceLifecycleService>,
@@ -2160,7 +2386,18 @@ pub struct RebornServices<
     // arch-exempt: optional_arc, genuinely optional — the active-model reader is wired only when the runtime has an LLM reload handle; runtimes built without one, and tests, run without it (mirrors the sibling optional llm_config field), plan #5985
     active_model_reader: Option<Arc<dyn ActiveModelReader>>,
     operator_approval_config: Option<RebornOperatorApprovalConfig>,
+    diagnostic_store: Arc<dyn crate::inspector_store::DiagnosticStorePort>,
+    pub(crate) suggestions: Option<SuggestionsServices>,
     thread_operation_locks: Arc<ThreadOperationLocks>,
+}
+
+/// The suggestion surface needs both durable state and the canonical unbound
+/// submission path. Keep them as one optional capability so a partially wired
+/// surface cannot be represented by the composition root.
+#[derive(Clone)]
+pub(crate) struct SuggestionsServices {
+    pub(crate) store: Arc<dyn crate::suggestions_store::SuggestionsStore>,
+    pub(crate) unbound: Arc<crate::unbound_turn::UnboundTurnService>,
 }
 
 impl RebornServices<UnavailableProductCapabilityInvoker, UnavailableRebornViewProvider> {
@@ -2228,6 +2465,12 @@ where
             outbound_preferences_service: Arc::new(
                 UnsupportedOutboundPreferencesProductService::new_static(),
             ),
+            notification_setup_service: Arc::new(UnsupportedChannelNotificationSetupService),
+            session_inbound_ledger: Arc::new(
+                crate::in_memory_ledger::InMemoryIdempotencyLedger::new(),
+            ),
+            session_inbound_surface: Arc::new(std::sync::OnceLock::new()),
+            session_channels: None,
             operator_status: Arc::new(UnsupportedOperatorStatusService),
             operator_logs: Arc::new(UnsupportedOperatorLogsService),
             operator_service_lifecycle: Arc::new(UnsupportedOperatorServiceLifecycleService),
@@ -2241,12 +2484,33 @@ where
             ironhub_link: None,
             active_model_reader: None,
             operator_approval_config: None,
+            diagnostic_store: Arc::new(crate::inspector_store::InMemoryDiagnosticStore::default()),
+            suggestions: None,
             thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
+    /// Override the process-local diagnostic store used by the operator
+    /// inspector. Capture adapters and this read surface must share one store.
+    pub fn with_diagnostic_store(
+        mut self,
+        diagnostic_store: Arc<dyn crate::inspector_store::DiagnosticStorePort>,
+    ) -> Self {
+        self.diagnostic_store = diagnostic_store;
+        self
+    }
+
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
         self.event_stream = Some(event_stream);
+        self
+    }
+
+    pub fn with_suggestions(
+        mut self,
+        store: Arc<dyn crate::suggestions_store::SuggestionsStore>,
+        unbound: Arc<crate::unbound_turn::UnboundTurnService>,
+    ) -> Self {
+        self.suggestions = Some(SuggestionsServices { store, unbound });
         self
     }
 
@@ -2347,7 +2611,7 @@ where
 
     pub fn with_operator_approval_config(
         mut self,
-        overrides: Arc<dyn ToolPermissionOverrideStorePort>,
+        overrides: Arc<dyn CapabilityPermissionOverrideStorePort>,
         auto_approve: Arc<dyn AutoApproveSettingStorePort>,
         persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
         tool_catalog: Arc<dyn RebornOperatorToolCatalog>,
@@ -2398,6 +2662,14 @@ where
         outbound_preferences_service: Arc<dyn OutboundPreferencesProductService>,
     ) -> Self {
         self.outbound_preferences_service = outbound_preferences_service;
+        self
+    }
+
+    pub fn with_notification_setup_service(
+        mut self,
+        notification_setup_service: Arc<dyn ChannelNotificationSetupService>,
+    ) -> Self {
+        self.notification_setup_service = notification_setup_service;
         self
     }
 
@@ -2646,6 +2918,29 @@ where
         self
     }
 
+    /// Wire the deployment's session-channel directory so channel-
+    /// parameterized session submissions can be validated. Without it, a
+    /// submission naming an extension fails closed as service-unavailable.
+    /// Submissions without an extension identity are always rejected.
+    pub fn with_session_channel_directory(
+        mut self,
+        directory: Arc<dyn ironclaw_product_contracts::session_ingress::SessionChannelDirectory>,
+    ) -> Self {
+        self.session_channels = Some(directory);
+        self
+    }
+
+    /// Swap the session-lane inbound idempotency ledger. Production wires the
+    /// durable filesystem ledger (`build_session_inbound_ledger`); the default
+    /// is process-local, for standalone/tests only.
+    pub fn with_session_inbound_ledger(
+        mut self,
+        ledger: Arc<dyn crate::ledger::IdempotencyLedger>,
+    ) -> Self {
+        self.session_inbound_ledger = ledger;
+        self
+    }
+
     pub fn with_skill_activation_recorder<F>(mut self, recorder: F) -> Self
     where
         F: Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), ProductSurfaceError>
@@ -2673,34 +2968,11 @@ where
         self
     }
 
-    fn record_skill_activation_message(
-        &self,
-        scope: &TurnScope,
-        accepted_message_ref: &AcceptedMessageRef,
-        content: &str,
-    ) -> Result<(), ProductSurfaceError> {
-        if let Some(recorder) = &self.skill_activation_recorder {
-            recorder(scope, accepted_message_ref, content)?;
-        }
-        Ok(())
-    }
-
-    fn clear_skill_activation_message(
-        &self,
-        scope: &TurnScope,
-        accepted_message_ref: &AcceptedMessageRef,
-    ) -> Result<(), ProductSurfaceError> {
-        if let Some(clearer) = &self.skill_activation_clearer {
-            clearer(scope, accepted_message_ref)?;
-        }
-        Ok(())
-    }
-
     /// Authorize the caller for admin operations. An env-bearer operator is an
     /// implicit owner; otherwise the caller's persisted role must be admin or
     /// owner. The role is read from the directory on EVERY call (never cached),
     /// so a demoted admin loses access immediately — see
-    /// `product_surface/CLAUDE.md` ("No caching. Caching the authz result is
+    /// this crate's `AGENTS.md` ("No caching. Caching the authz result is
     /// explicitly forbidden").
     async fn authorize_admin(
         &self,
@@ -2743,6 +3015,30 @@ where
             .ok_or_else(|| {
                 ProductSurfaceError::from_status(ProductSurfaceErrorCode::NotFound, 404, false)
             })
+    }
+
+    /// Mint the admin->target scope transition for one thread-scrape request.
+    ///
+    /// Revalidates the caller as an active admin and the target as an
+    /// existing same-tenant user (absence maps to a sanitized 404), then
+    /// returns a `ProductSurfaceCaller` scoped to the *target* user so the
+    /// downstream artifact builders read that user's threads through the
+    /// caller-owned redaction and ownership gates. Never caches the admin
+    /// decision: the revalidation runs per request.
+    async fn thread_scrape_subject(
+        &self,
+        caller: &ProductSurfaceCaller,
+        user_id: UserId,
+    ) -> Result<ProductSurfaceCaller, ProductSurfaceError> {
+        self.authorize_admin(caller).await?;
+        self.require_admin_target(&caller.tenant_id, &user_id)
+            .await?;
+        Ok(ProductSurfaceCaller::new(
+            caller.tenant_id.clone(),
+            user_id,
+            caller.agent_id.clone(),
+            caller.project_id.clone(),
+        ))
     }
 
     /// Reject a mutation that would strand the tenant without an admin.
@@ -2874,8 +3170,41 @@ where
     ) -> Result<CommandResultView, ProductSurfaceError> {
         match action {
             ProductModelCommand::Status => {
-                let snapshot = self.build_llm_config_view(caller).await?;
-                Ok(model_command_view("Model", &snapshot))
+                let catalog = self.build_user_model_catalog_view(caller.clone()).await?;
+                let preference = self.build_user_model_preference_view(caller).await?;
+                Ok(user_model_preference_command_view(
+                    "Model",
+                    &catalog,
+                    &preference,
+                ))
+            }
+            ProductModelCommand::Use { model } => {
+                self.invoke_user_model_preference_set(
+                    caller.clone(),
+                    serde_json::json!({ "model": model }),
+                )
+                .await?;
+                let catalog = self.build_user_model_catalog_view(caller.clone()).await?;
+                let preference = self.build_user_model_preference_view(caller).await?;
+                Ok(user_model_preference_command_view(
+                    "Model preference updated",
+                    &catalog,
+                    &preference,
+                ))
+            }
+            ProductModelCommand::Default => {
+                self.invoke_user_model_preference_set(
+                    caller.clone(),
+                    serde_json::json!({ "model": null }),
+                )
+                .await?;
+                let catalog = self.build_user_model_catalog_view(caller.clone()).await?;
+                let preference = self.build_user_model_preference_view(caller).await?;
+                Ok(user_model_preference_command_view(
+                    "Model preference updated",
+                    &catalog,
+                    &preference,
+                ))
             }
             ProductModelCommand::Set { model } => {
                 let snapshot = self.build_llm_config_view(caller.clone()).await?;
@@ -2914,35 +3243,12 @@ where
         caller: ProductSurfaceCaller,
         input: ProductStatusCommandInput,
     ) -> Result<CommandResultView, ProductSurfaceError> {
-        let thread_id = parse_thread_id_field("thread_id", input.thread_id)?;
-        let scope = caller.turn_scope(thread_id.clone());
-        let history = match self
-            .resolve_thread_history_for_caller(caller.clone(), &scope)
-            .await
-        {
-            Ok((_thread_scope, history)) => history,
-            Err(error) if error.code == ProductSurfaceErrorCode::NotFound => {
-                return Ok(idle_status_command_view());
-            }
-            Err(error) => return Err(error),
-        };
-        let latest_run = history
-            .messages
-            .iter()
-            .rev()
-            .find_map(|message| message.turn_run_id.clone());
-        let Some(run_id) = latest_run else {
+        let Some(state) = self
+            .latest_product_command_run_state(caller, &input.thread_id)
+            .await?
+        else {
             return Ok(idle_status_command_view());
         };
-        let state = self
-            .get_run_state(
-                caller,
-                RebornGetRunStateRequest {
-                    thread_id: thread_id.to_string(),
-                    run_id,
-                },
-            )
-            .await?;
         let (state_label, detail) = describe_turn_status(state.status);
         let mut fields = vec![command_result_field("State", state_label)];
         fields.push(command_result_field("Run", state.run_id.to_string()));
@@ -2958,6 +3264,137 @@ where
             fields,
             lines,
         })
+    }
+
+    async fn execute_webui_new_command(
+        &self,
+        caller: ProductSurfaceCaller,
+        current_thread_id: String,
+    ) -> Result<RebornCreateThreadResponse, ProductSurfaceError> {
+        let thread_id = parse_thread_id_field("thread_id", current_thread_id)?;
+        let scope = caller.turn_scope(thread_id);
+        self.resolve_thread_history_for_caller(caller.clone(), &scope)
+            .await?;
+        self.create_thread(
+            caller,
+            ProductCreateThreadRequest {
+                client_action_id: Some(format!("product-new-{}", Uuid::new_v4())),
+                requested_thread_id: None,
+                project_id: None,
+            },
+        )
+        .await
+    }
+
+    async fn execute_product_new_command(
+        &self,
+        caller: ProductSurfaceCaller,
+        input: ProductNewCommandInput,
+    ) -> Result<ProductNewCommandOutput, ProductSurfaceError> {
+        let active = self
+            .latest_product_command_run_state(caller, &input.thread_id)
+            .await?
+            .is_some_and(|state| !state.status.is_terminal());
+        if active {
+            return Ok(ProductNewCommandOutput {
+                can_reset: false,
+                result: CommandResultView {
+                    title: "Conversation still running".to_string(),
+                    fields: vec![command_result_field("State", "working")],
+                    lines: vec!["Use /stop first, then try /new again.".to_string()],
+                },
+            });
+        }
+        Ok(ProductNewCommandOutput {
+            can_reset: true,
+            result: new_conversation_started_view(),
+        })
+    }
+
+    async fn execute_product_stop_command(
+        &self,
+        caller: ProductSurfaceCaller,
+        input: ProductStopCommandInput,
+    ) -> Result<CommandResultView, ProductSurfaceError> {
+        let Some(state) = self
+            .latest_product_command_run_state(caller.clone(), &input.thread_id)
+            .await?
+        else {
+            return Ok(nothing_to_stop_command_view());
+        };
+        if state.status.is_terminal() {
+            return Ok(nothing_to_stop_command_view());
+        }
+        let response = self
+            .cancel_run(
+                caller,
+                ProductCancelRunRequest {
+                    client_action_id: Some(format!(
+                        "product-{}-{}",
+                        input.invocation.command_name(),
+                        Uuid::new_v4()
+                    )),
+                    thread_id: Some(input.thread_id),
+                    run_id: Some(state.run_id.to_string()),
+                    reason: Some("user_requested".to_string()),
+                },
+            )
+            .await?;
+        let state_label = match response.status {
+            TurnStatus::Cancelled => "cancelled",
+            TurnStatus::CancelRequested => "cancelling",
+            status if status.is_terminal() => "idle",
+            _ => "working",
+        };
+        Ok(CommandResultView {
+            title: format!(
+                "{} requested",
+                if input.invocation == ProductStopInvocation::Stop {
+                    "Stop"
+                } else {
+                    "Interrupt"
+                }
+            ),
+            fields: vec![
+                command_result_field("State", state_label),
+                command_result_field("Run", response.run_id.to_string()),
+            ],
+            lines: Vec::new(),
+        })
+    }
+
+    async fn latest_product_command_run_state(
+        &self,
+        caller: ProductSurfaceCaller,
+        thread_id: &str,
+    ) -> Result<Option<RebornGetRunStateResponse>, ProductSurfaceError> {
+        let thread_id = parse_thread_id_field("thread_id", thread_id.to_string())?;
+        let scope = caller.turn_scope(thread_id.clone());
+        let history = match self
+            .resolve_thread_history_for_caller(caller.clone(), &scope)
+            .await
+        {
+            Ok((_thread_scope, history)) => history,
+            Err(error) if error.code == ProductSurfaceErrorCode::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let Some(run_id) = history
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| message.turn_run_id.clone())
+        else {
+            return Ok(None);
+        };
+        self.get_run_state(
+            caller,
+            RebornGetRunStateRequest {
+                thread_id: thread_id.to_string(),
+                run_id,
+            },
+        )
+        .await
+        .map(Some)
     }
 
     pub async fn list_admin_users(
@@ -3007,6 +3444,124 @@ where
             .require_admin_target(&caller.tenant_id, &user_id)
             .await?;
         Ok(RebornAdminUserResponse { user })
+    }
+
+    pub async fn list_admin_thread_scrape_threads(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: RebornAdminThreadScrapeListRequest,
+    ) -> Result<RebornListThreadsResponse, ProductSurfaceError> {
+        let admin_user_id = caller.user_id.clone();
+        let target_user_id = request.user_id.clone();
+        let result = async {
+            let subject = self.thread_scrape_subject(&caller, request.user_id).await?;
+            self.build_threads_view(
+                subject,
+                ProductListThreadsRequest {
+                    limit: request.limit,
+                    cursor: request.cursor,
+                    candidate_thread_id: None,
+                    needs_approval: false,
+                },
+            )
+            .await
+        }
+        .await;
+        let outcome = if result.is_ok() { "success" } else { "failure" };
+        // debug! + the audit target, not info!: the operator-log buffer
+        // captures INFO+ and would otherwise re-embed these audit fields
+        // (including the admin's identity) into the scraped user's own
+        // artifact export. Security-boundary diagnostics are debug-level per
+        // TracingSecurityAuditSink; a durable audit sink is composition wiring.
+        tracing::debug!(
+            target: "ironclaw::thread_scrape_audit",
+            action = "threads_listed",
+            outcome,
+            admin_user_id = %admin_user_id,
+            target_user_id = %target_user_id,
+            "thread scraping"
+        );
+        result
+    }
+
+    pub async fn build_admin_thread_scrape_artifact(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: RebornAdminThreadScrapeArtifactRequest,
+    ) -> Result<RebornThreadArtifact, ProductSurfaceError> {
+        let admin_user_id = caller.user_id.clone();
+        let target_user_id = request.user_id.clone();
+        // Validate the id before it can reach any audit emission: a raw path
+        // segment Display-formatted into the audit line would let a caller
+        // forge audit entries (e.g. embedded newlines). Only validated
+        // ThreadIds (newline-free by construction) are ever logged.
+        let thread_id = parse_thread_id_field("thread_id", request.thread_id.clone())?;
+        let result = async {
+            let subject = self.thread_scrape_subject(&caller, request.user_id).await?;
+            self.build_thread_artifact(
+                subject,
+                RebornThreadArtifactRequest {
+                    thread_id: thread_id.to_string(),
+                },
+            )
+            .await
+        }
+        .await;
+        let outcome = if result.is_ok() { "success" } else { "failure" };
+        // debug!, not info!: see threads_listed — the operator-log buffer
+        // captures INFO+ and would leak these audit fields (admin identity,
+        // target thread) into the scraped user's artifact export.
+        tracing::debug!(
+            target: "ironclaw::thread_scrape_audit",
+            action = "thread_artifact_exported",
+            outcome,
+            admin_user_id = %admin_user_id,
+            target_user_id = %target_user_id,
+            thread_id = %thread_id,
+            "thread scraping"
+        );
+        result
+    }
+
+    pub async fn build_admin_thread_scrape_run_artifact(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: RebornAdminThreadScrapeRunArtifactRequest,
+    ) -> Result<RebornRunArtifact, ProductSurfaceError> {
+        let admin_user_id = caller.user_id.clone();
+        let target_user_id = request.user_id.clone();
+        // Validate ids before any audit emission (see thread_artifact_exported):
+        // only validated ThreadId/TurnRunId values are ever Display-formatted
+        // into the audit trail, so path-segment injection cannot forge lines.
+        let thread_id = parse_thread_id_field("thread_id", request.thread_id.clone())?;
+        let run_id = parse_run_id_field("run_id", request.run_id.clone())?;
+        let result = async {
+            let subject = self.thread_scrape_subject(&caller, request.user_id).await?;
+            self.build_run_artifact(
+                subject,
+                RebornRunArtifactRequest {
+                    thread_id: thread_id.to_string(),
+                    run_id: run_id.to_string(),
+                },
+            )
+            .await
+        }
+        .await;
+        let outcome = if result.is_ok() { "success" } else { "failure" };
+        // debug!, not info!: see threads_listed — the operator-log buffer
+        // captures INFO+ and would leak these audit fields into the scraped
+        // user's artifact export.
+        tracing::debug!(
+            target: "ironclaw::thread_scrape_audit",
+            action = "run_artifact_exported",
+            outcome,
+            admin_user_id = %admin_user_id,
+            target_user_id = %target_user_id,
+            thread_id = %thread_id,
+            run_id = %run_id,
+            "thread scraping"
+        );
+        result
     }
 
     pub async fn create_admin_user(
@@ -3294,7 +3849,7 @@ where
         let caller = self
             .authorize_create_thread_project(caller, request.project_id.clone())
             .await?;
-        let command = request.into_command(caller)?;
+        let command = request.into_command(caller.clone())?;
         let ProductInboundCommand::CreateThread {
             caller,
             client_action_id,
@@ -3332,6 +3887,14 @@ where
         Ok(RebornCreateThreadResponse { thread })
     }
 
+    /// Submit one session user message through the unified inbound core.
+    ///
+    /// This is the authenticated-session lane of the same admission pipeline
+    /// webhook channels ride: durable idempotency ledger → owned-thread
+    /// binding → `TurnCoordinator::submit_turn`. The caller owns the thread
+    /// (never created implicitly), `client_action_id` replay is preserved —
+    /// including messages accepted under the legacy binding-id schemes — and
+    /// the response wire shape is unchanged.
     pub async fn submit_turn(
         &self,
         caller: ProductSurfaceCaller,
@@ -3340,311 +3903,218 @@ where
         // Decode + budget inline attachment bytes before the request is
         // consumed into the (bytes-free, serializable) command.
         let attachments = request.decode_attachments()?;
-        let command = request.into_command(caller)?;
+        let command = request.into_command(caller.clone())?;
         let ProductInboundCommand::SendMessage {
             scope,
             actor,
             client_action_id,
             content,
             requested_model,
+            extension_id,
         } = command
         else {
             return Err(ProductSurfaceError::internal_invariant());
         };
-
-        let (scope, thread_scope) = self.resolve_webui_thread_metadata(scope, &actor).await?;
+        // A channel-parameterized submission must name a deployment channel
+        // whose declared entrypoint is the authenticated session — fail
+        // closed (404, indistinguishable from an absent route) otherwise. An
+        // unparameterized submission is the legacy API lane
+        // (`ProductSubmitTurnRequest::extension_id`): OpenAI-compatible
+        // clients cannot learn a channel id, so they submit under the
+        // built-in surface identity. That id stays out of the parameterized
+        // route — naming it there still 404s below unless a manifest channel
+        // claims it.
+        let session_surface = match &extension_id {
+            Some(extension_id) => {
+                let Some(directory) = &self.session_channels else {
+                    return Err(ProductSurfaceError::service_unavailable(false));
+                };
+                if !directory.is_session_channel(extension_id) {
+                    return Err(ProductSurfaceError::not_found());
+                }
+                extension_id.as_str()
+            }
+            None => SESSION_SURFACE_ADAPTER_ID,
+        };
+        let thread_id = scope.thread_id.clone();
+        // Serialize with thread deletion (delete_thread holds the same
+        // per-thread lock across its active-run probe + delete).
         let _thread_operation_guard = self.lock_thread_operation(&scope).await;
-        let source_binding_id = webui_source_binding_id(&scope, &actor);
-        let external_event_id = client_action_id.as_str().to_string();
 
-        let handoff = if let Some((replay, replay_source_binding_id)) = replay_webui_send_message(
-            &*self.thread_service,
-            &thread_scope,
-            &scope,
-            &actor,
-            &external_event_id,
-        )
-        .await?
-        {
-            if replay.thread_id != scope.thread_id {
-                return Err(ProductSurfaceError::from_status_kind(
-                    ProductSurfaceErrorCode::Conflict,
-                    ProductSurfaceErrorKind::Duplicate,
-                    409,
-                    false,
-                ));
-            }
-            match replay.status {
-                MessageStatus::Submitted => {
-                    let run_id = parse_replay_run_id(replay.turn_run_id)?;
-                    let state = self
-                        .turn_coordinator
-                        .get_run_state(GetRunStateRequest {
-                            scope: scope.clone(),
-                            run_id,
-                        })
-                        .await
-                        .map_err(map_turn_error)?;
-                    return Ok(RebornSubmitTurnResponse::AlreadySubmitted {
-                        thread_id: replay.thread_id,
-                        accepted_message_ref: accepted_message_ref(replay.message_id.to_string())?,
-                        run_id,
-                        status: state.status,
-                        event_cursor: state.event_cursor,
-                    });
-                }
-                MessageStatus::RejectedBusy => {
-                    // Idempotent re-rejection: the original busy rejection was
-                    // lost before it reached the client.  The blocking run may
-                    // already be finished, so we cannot recover its run-id or
-                    // cursor.  Return a RejectedBusy with None run metadata so
-                    // the client knows to resend rather than treating this as
-                    // a new submission.  Fabricating a run-id or status here
-                    // would give the client a reference it cannot query.
-                    return Ok(RebornSubmitTurnResponse::RejectedBusy {
-                        thread_id: replay.thread_id,
-                        accepted_message_ref: accepted_message_ref(replay.message_id.to_string())?,
-                        active_run_id: None,
-                        status: None,
-                        event_cursor: None,
-                        notice: NOTICE_BUSY_GENERIC.to_string(),
-                    });
-                }
-                MessageStatus::Queued => {
-                    // Crash-orphan recovery: re-enqueue idempotently before
-                    // replaying `DeferredBusy` (see `steering.rs`); a queued
-                    // replay whose run is gone settles as `RejectedBusy`.
-                    let run_id = parse_replay_run_id(replay.turn_run_id)?;
-                    let accepted_ref = accepted_message_ref(replay.message_id.to_string())?;
-                    match crate::steering::readmit_queued_steering(
-                        &*self.turn_coordinator,
-                        self.input_enqueue.as_ref(),
-                        &*self.thread_service,
-                        crate::steering::SteeringAdmissionRequest {
-                            turn_scope: scope.clone(),
-                            thread_scope: thread_scope.clone(),
-                            message_id: replay.message_id,
-                            accepted_message_ref: accepted_ref.clone(),
-                            active_run_id: run_id,
-                        },
-                    )
-                    .await
-                    {
-                        Ok(crate::steering::SteeringAdmission::Deferred { run }) => {
-                            return Ok(RebornSubmitTurnResponse::DeferredBusy {
-                                thread_id: replay.thread_id,
-                                accepted_message_ref: accepted_ref,
-                                active_run_id: run_id,
-                                status: run.status,
-                                event_cursor: run.event_cursor,
-                                notice: rejected_busy_notice(run.status),
-                            });
-                        }
-                        Ok(crate::steering::SteeringAdmission::Rejected) => {
-                            return Ok(RebornSubmitTurnResponse::RejectedBusy {
-                                thread_id: replay.thread_id,
-                                accepted_message_ref: accepted_ref,
-                                active_run_id: Some(run_id),
-                                status: None,
-                                event_cursor: None,
-                                notice: NOTICE_BUSY_GENERIC.to_string(),
-                            });
-                        }
-                        Err(error) => {
-                            return Err(steering_admission_error(
-                                error,
-                                &replay.thread_id,
-                                replay.message_id,
-                                run_id,
-                            ));
-                        }
-                    }
-                }
-                MessageStatus::Accepted | MessageStatus::DeferredBusy => AcceptedWebUiMessage {
-                    thread_id: replay.thread_id,
-                    message_id: replay.message_id,
-                    actor_id: actor.user_id.as_str().to_string(),
-                    source_binding_id: replay
-                        .source_binding_id
-                        .unwrap_or_else(|| replay_source_binding_id.clone()),
-                    reply_target_binding_id: replay
-                        .reply_target_binding_id
-                        .unwrap_or(replay_source_binding_id),
-                },
-                _ => {
-                    return Err(ProductSurfaceError::from_status(
-                        ProductSurfaceErrorCode::Conflict,
-                        409,
-                        false,
-                    ));
-                }
-            }
-        } else {
-            // Land attachment bytes (if any) into project storage before the
-            // message is accepted, recording each as a transcript reference.
-            // The stable per-message external_event_id is the path's message
-            // segment, so a same-day retry re-lands at the same path; the lander
-            // also partitions by UTC day, so a retry that crosses midnight UTC
-            // lands under the new day's directory (the earlier bytes are left
-            // addressable but unreferenced). Idempotency is enforced at message
-            // acceptance, not by the storage path.
-            let message_content = if attachments.is_empty() {
-                MessageContent::text(content.clone())
-            } else {
-                let lander = self
-                    .inbound_attachments
-                    .as_ref()
-                    .ok_or_else(|| ProductSurfaceError::service_unavailable(false))?;
-                let refs = lander
-                    .land(&thread_scope, &external_event_id, attachments)
-                    .await?;
-                MessageContent::with_attachments(content.clone(), refs)
-            };
-            let accepted = self
-                .thread_service
-                .accept_inbound_message(AcceptInboundMessageRequest {
-                    scope: thread_scope.clone(),
-                    thread_id: scope.thread_id.clone(),
-                    actor_id: actor.user_id.as_str().to_string(),
-                    source_binding_id: Some(source_binding_id.clone()),
-                    reply_target_binding_id: Some(source_binding_id.clone()),
-                    external_event_id: Some(external_event_id),
-                    content: message_content,
-                })
-                .await
-                .map_err(map_thread_error)?;
-            AcceptedWebUiMessage {
-                thread_id: accepted.thread_id,
-                message_id: accepted.message_id,
-                actor_id: actor.user_id.as_str().to_string(),
-                source_binding_id: source_binding_id.clone(),
-                reply_target_binding_id: source_binding_id.clone(),
-            }
-        };
-
-        let accepted_message_ref = accepted_message_ref(handoff.message_id.to_string())?;
-        let source_binding_ref =
-            webui_source_binding_ref_from_raw("webui-src", &handoff.source_binding_id)?;
-        let reply_target_binding_ref = webui_reply_target_binding_ref_from_raw(
-            "webui-reply",
-            &handoff.reply_target_binding_id,
-        )?;
-        let product_context =
-            ironclaw_turns::product_context::resolve_web_ui(scope.product_owner(&actor));
-        let submit = SubmitTurnRequest {
+        let session_caller = ProductSurfaceCaller::new(
+            scope.tenant_id.clone(),
+            actor.user_id.clone(),
+            scope.agent_id.clone(),
+            scope.project_id.clone(),
+        );
+        let neutral = session_inbound_request(
+            session_surface,
+            session_caller,
+            &thread_id,
+            &client_action_id,
+            content,
             requested_model,
-            scope: scope.clone(),
-            actor,
-            accepted_message_ref: accepted_message_ref.clone(),
-            source_binding_ref,
-            reply_target_binding_ref,
-            requested_run_profile: None,
-            idempotency_key: client_action_id.clone(),
-            received_at: Utc::now(),
-            requested_run_id: None,
-            parent_run_id: None,
-            subagent_depth: 0,
-            spawn_tree_root_run_id: None,
-            product_context: Some(product_context),
+            attachments,
+        )?;
+        let core = self.session_inbound_core();
+        let outcome = core.admit_channel_inbound(neutral).await;
+        self.session_submit_response(&scope, &thread_id, outcome)
+            .await
+    }
+
+    /// The session-lane inbound core: the same `DefaultProductSurface`
+    /// implementation webhook channels run, constructed over this service's
+    /// own ports plus the durable session idempotency ledger. The surface is
+    /// memoized once after all builder-wired ports have been attached.
+    fn session_inbound_core(&self) -> Arc<DefaultProductSurface> {
+        Arc::clone(
+            self.session_inbound_surface
+                .get_or_init(|| Arc::new(self.build_session_inbound_core())),
+        )
+    }
+
+    /// Compose the session lane's surface. Called once per service instance
+    /// through [`Self::session_inbound_core`]'s memoization.
+    fn build_session_inbound_core(&self) -> DefaultProductSurface {
+        let mut inbound = DefaultInboundTurnService::new(
+            SessionLaneRejectingBindingResolver,
+            Arc::clone(&self.thread_service),
+            Arc::clone(&self.turn_coordinator),
+            Arc::clone(&self.input_enqueue),
+        );
+        if let Some(lander) = &self.inbound_attachments {
+            inbound = inbound.with_inbound_attachments(Arc::clone(lander));
+        }
+        if let Some(recorder) = &self.skill_activation_recorder {
+            let clearer: Arc<SkillActivationClearer> = match &self.skill_activation_clearer {
+                Some(clearer) => Arc::clone(clearer),
+                None => Arc::new(|_: &TurnScope, _: &AcceptedMessageRef| Ok(())),
+            };
+            inbound = inbound.with_session_skill_activation(SessionSkillActivationPorts {
+                recorder: Arc::clone(recorder),
+                clearer,
+            });
+        }
+        DefaultProductSurface::new(
+            Arc::new(inbound),
+            Arc::clone(&self.session_inbound_ledger),
+            Arc::new(SessionLaneRejectingBindingResolver),
+        )
+        .with_before_inbound_policy(Arc::new(SessionModelSelectionPolicy {
+            llm_config: self.llm_config.clone(),
+        }))
+    }
+
+    async fn session_submit_response(
+        &self,
+        scope: &TurnScope,
+        thread_id: &ThreadId,
+        outcome: ChannelInboundSurfaceOutcome,
+    ) -> Result<RebornSubmitTurnResponse, ProductSurfaceError> {
+        let ack = match outcome {
+            ChannelInboundSurfaceOutcome::Admitted(admission) => admission.ack,
+            ChannelInboundSurfaceOutcome::Invalid(error) => return Err(map_adapter_error(error)),
+            ChannelInboundSurfaceOutcome::Rejected(rejected) => {
+                return Err(map_adapter_error(rejected.error));
+            }
         };
-
-        self.record_skill_activation_message(&scope, &accepted_message_ref, &content)?;
-        match self.turn_coordinator.submit_turn(submit).await {
-            Ok(SubmitTurnResponse::Accepted {
-                turn_id,
-                run_id,
-                status,
-                resolved_run_profile_id,
-                resolved_run_profile_version,
-                event_cursor,
+        // A ledger replay wraps the settled outcome; unwrap to the prior ack
+        // and render it AS a replay — never as a fresh submission, whatever
+        // metadata the stored ack carries.
+        let mut ack = ack;
+        let mut replayed = false;
+        while let ProductInboundAck::Duplicate { prior } = ack {
+            ack = *prior;
+            replayed = true;
+        }
+        match ack {
+            ProductInboundAck::Accepted {
+                accepted_message_ref,
+                submitted_run_id,
+                submission: Some(submission),
+            } if !replayed => Ok(RebornSubmitTurnResponse::Submitted {
+                thread_id: thread_id.clone(),
+                accepted_message_ref,
+                turn_id: submission.turn_id,
+                run_id: submitted_run_id,
+                status: submission.status,
+                resolved_run_profile_id: submission.resolved_run_profile_id,
+                resolved_run_profile_version: submission.resolved_run_profile_version,
+                event_cursor: submission.event_cursor,
+            }),
+            ProductInboundAck::Accepted {
+                accepted_message_ref,
+                submitted_run_id,
                 ..
-            }) => {
-                tracing::debug!(
-                    thread_id = ?scope.thread_id,
-                    run_id = %run_id,
-                    "webui submit_turn accepted: turn run enqueued"
-                );
-                mark_message_submitted_or_replay(
-                    &*self.thread_service,
-                    &thread_scope,
-                    &handoff,
-                    &client_action_id,
-                    turn_id.to_string(),
-                    run_id.to_string(),
-                )
-                .await?;
-
-                Ok(RebornSubmitTurnResponse::Submitted {
-                    thread_id: handoff.thread_id,
+            } => {
+                // A replayed submission reports the run's CURRENT state, the
+                // same read the dedicated browser path always performed.
+                let state = self
+                    .turn_coordinator
+                    .get_run_state(GetRunStateRequest {
+                        scope: scope.clone(),
+                        run_id: submitted_run_id,
+                    })
+                    .await
+                    .map_err(map_turn_error)?;
+                Ok(RebornSubmitTurnResponse::AlreadySubmitted {
+                    thread_id: thread_id.clone(),
                     accepted_message_ref,
-                    turn_id: turn_id.to_string(),
-                    run_id,
-                    status,
-                    resolved_run_profile_id: resolved_run_profile_id.as_str().to_string(),
-                    resolved_run_profile_version: resolved_run_profile_version.as_u64(),
-                    event_cursor,
+                    run_id: submitted_run_id,
+                    status: state.status,
+                    event_cursor: state.event_cursor,
                 })
             }
-            Err(TurnError::ThreadBusy(busy)) => {
-                tracing::debug!(
-                    thread_id = ?scope.thread_id,
-                    active_run_id = ?busy.active_run_id,
-                    "webui submit_turn deferred: thread busy with an active run"
-                );
-                self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
-                match crate::steering::admit_busy_steering(
-                    &*self.turn_coordinator,
-                    self.input_enqueue.as_ref(),
-                    &*self.thread_service,
-                    crate::steering::SteeringAdmissionRequest {
-                        turn_scope: scope.clone(),
-                        thread_scope: thread_scope.clone(),
-                        message_id: handoff.message_id,
-                        accepted_message_ref: accepted_message_ref.clone(),
-                        active_run_id: busy.active_run_id,
-                    },
-                )
-                .await
-                {
-                    Ok(crate::steering::SteeringAdmission::Deferred { run }) => {
-                        let notice = rejected_busy_notice(run.status);
-                        Ok(RebornSubmitTurnResponse::DeferredBusy {
-                            thread_id: handoff.thread_id,
-                            accepted_message_ref,
-                            active_run_id: busy.active_run_id,
-                            status: run.status,
-                            event_cursor: run.event_cursor,
-                            notice,
-                        })
-                    }
-                    Ok(crate::steering::SteeringAdmission::Rejected) => {
-                        let notice = rejected_busy_notice(busy.status);
-                        Ok(RebornSubmitTurnResponse::RejectedBusy {
-                            thread_id: handoff.thread_id,
-                            accepted_message_ref,
-                            active_run_id: Some(busy.active_run_id),
-                            status: Some(busy.status),
-                            event_cursor: Some(busy.event_cursor),
-                            notice,
-                        })
-                    }
-                    Err(error) => Err(steering_admission_error(
-                        error,
-                        &handoff.thread_id,
-                        handoff.message_id,
-                        busy.active_run_id,
-                    )),
-                }
+            ProductInboundAck::RejectedBusy {
+                accepted_message_ref,
+                active_run_id,
+                busy,
+            } => {
+                // A ledger-replayed busy rejection reports no run metadata:
+                // the original blocking run may already be gone, and handing
+                // the client a stale reference invites dead lookups. Fresh
+                // rejections keep the decision-time snapshot.
+                let (active_run_id, busy) = if replayed {
+                    (None, None)
+                } else {
+                    (active_run_id, busy)
+                };
+                let notice = busy
+                    .as_deref()
+                    .map(|snapshot| rejected_busy_notice(snapshot.status))
+                    .unwrap_or_else(|| NOTICE_BUSY_GENERIC.to_string());
+                Ok(RebornSubmitTurnResponse::RejectedBusy {
+                    thread_id: thread_id.clone(),
+                    accepted_message_ref,
+                    active_run_id,
+                    status: busy.as_deref().map(|snapshot| snapshot.status),
+                    event_cursor: busy.as_deref().map(|snapshot| snapshot.event_cursor),
+                    notice,
+                })
             }
-            Err(error) => {
-                tracing::debug!(
-                    thread_id = ?scope.thread_id,
-                    error = ?error,
-                    "webui submit_turn rejected by coordinator; no run enqueued"
-                );
-                self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
-                Err(map_turn_error(error))
+            ProductInboundAck::DeferredBusy {
+                accepted_message_ref,
+                active_run_id,
+                busy,
+            } => {
+                let Some(busy) = busy else {
+                    // A deferred decision always carries the queued run's
+                    // snapshot; its absence is a core invariant violation.
+                    return Err(ProductSurfaceError::internal_invariant());
+                };
+                Ok(RebornSubmitTurnResponse::DeferredBusy {
+                    thread_id: thread_id.clone(),
+                    accepted_message_ref,
+                    active_run_id,
+                    status: busy.status,
+                    event_cursor: busy.event_cursor,
+                    notice: rejected_busy_notice(busy.status),
+                })
             }
+            ProductInboundAck::Rejected(rejection) => Err(session_rejection_error(&rejection)),
+            ProductInboundAck::CommandResult { .. }
+            | ProductInboundAck::NoOp
+            | ProductInboundAck::Duplicate { .. } => Err(ProductSurfaceError::internal_invariant()),
         }
     }
 
@@ -3706,6 +4176,47 @@ where
                 .await;
         }
         match query.view_id.as_str() {
+            id if id == INSPECTOR_SNAPSHOT_VIEW.id => {
+                let request = serde_json::from_value(query.params).map_err(|_| {
+                    ProductSurfaceError::validation(
+                        "input",
+                        ProductSurfaceValidationCode::InvalidValue,
+                    )
+                })?;
+                inspector::snapshot(self.diagnostic_store.as_ref(), caller, request)
+            }
+            id if id == INSPECTOR_PROMPT_VIEW.id => {
+                let request = serde_json::from_value(query.params).map_err(|_| {
+                    ProductSurfaceError::validation(
+                        "input",
+                        ProductSurfaceValidationCode::InvalidValue,
+                    )
+                })?;
+                inspector::prompt(self.diagnostic_store.as_ref(), caller, request)
+            }
+            id if id == INSPECTOR_TOOL_VIEW.id => {
+                let request = serde_json::from_value(query.params).map_err(|_| {
+                    ProductSurfaceError::validation(
+                        "input",
+                        ProductSurfaceValidationCode::InvalidValue,
+                    )
+                })?;
+                inspector::tool(self.diagnostic_store.as_ref(), caller, request)
+            }
+            id if id == INSPECTOR_UPDATES_VIEW.id => {
+                let request = serde_json::from_value(query.params).map_err(|_| {
+                    ProductSurfaceError::validation(
+                        "input",
+                        ProductSurfaceValidationCode::InvalidValue,
+                    )
+                })?;
+                inspector::updates(
+                    self.diagnostic_store.as_ref(),
+                    caller,
+                    request,
+                    query.cursor,
+                )
+            }
             id if id == LOGS_VIEW.id => {
                 let request = serde_json::from_value(query.params)
                     .map_err(ProductSurfaceError::internal_from)?;
@@ -3730,6 +4241,16 @@ where
                 let response = self.build_llm_config_view(caller).await?;
                 views::view_page(response)
             }
+            id if id == USER_MODEL_CATALOG_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_user_model_catalog_view(caller).await?;
+                views::view_page(response)
+            }
+            id if id == USER_MODEL_PREFERENCE_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_user_model_preference_view(caller).await?;
+                views::view_page(response)
+            }
             id if id == THREADS_VIEW.id => {
                 let mut request: ProductListThreadsRequest =
                     serde_json::from_value(query.params)
@@ -3745,14 +4266,27 @@ where
                 let response = self.build_automations_view(caller, request).await?;
                 views::view_page(response)
             }
-            id if id == OUTBOUND_PREFERENCES_VIEW.id => {
-                views::parse_empty_view_params(query.params)?;
-                let response = self.build_outbound_preferences_view(caller).await?;
-                views::view_page(response)
-            }
             id if id == OUTBOUND_DELIVERY_TARGETS_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
                 let response = self.build_outbound_delivery_targets_view(caller).await?;
+                views::view_page(response)
+            }
+            id if id == NOTIFICATION_CHANNELS_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_notification_channels_view(caller).await?;
+                views::view_page(response)
+            }
+            id if id == NOTIFICATION_SETUP_STATUS_VIEW.id => {
+                let request = serde_json::from_value(query.params).map_err(|_| {
+                    ProductSurfaceError::validation(
+                        "input",
+                        ProductSurfaceValidationCode::InvalidValue,
+                    )
+                })?;
+                let response = self
+                    .notification_setup_service
+                    .status(caller, request)
+                    .await?;
                 views::view_page(response)
             }
             id if id == TRACE_CREDITS_VIEW.id => {
@@ -3788,6 +4322,11 @@ where
                     .map_err(ProductSurfaceError::internal_from)?;
                 request.cursor = query.cursor.or(request.cursor);
                 let response = self.get_timeline(caller, request).await?;
+                views::view_page(response)
+            }
+            id if id == SUGGESTIONS_LIST_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.list_suggestions(caller).await?;
                 views::view_page(response)
             }
             id if id == PROJECT_FS_LIST_VIEW.id => {
@@ -3859,6 +4398,33 @@ where
                     .await?;
                 views::view_page(response)
             }
+            id if id == ADMIN_THREAD_SCRAPE_THREADS_VIEW.id => {
+                let mut request: RebornAdminThreadScrapeListRequest =
+                    serde_json::from_value(query.params)
+                        .map_err(ProductSurfaceError::internal_from)?;
+                request.cursor = query.cursor.or(request.cursor);
+                let response = self
+                    .list_admin_thread_scrape_threads(caller, request)
+                    .await?;
+                let next_cursor = response.next_cursor.clone();
+                views::view_page_with_cursor(response, next_cursor)
+            }
+            id if id == ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(ProductSurfaceError::internal_from)?;
+                let artifact = self
+                    .build_admin_thread_scrape_artifact(caller, request)
+                    .await?;
+                views::view_page(artifact)
+            }
+            id if id == ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(ProductSurfaceError::internal_from)?;
+                let artifact = self
+                    .build_admin_thread_scrape_run_artifact(caller, request)
+                    .await?;
+                views::view_page(artifact)
+            }
             id if id == OPERATOR_CONFIG_LIST_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
                 let response = self.build_operator_config_list_view(caller).await?;
@@ -3885,6 +4451,7 @@ where
                     Arc::clone(&self.lifecycle_service),
                     self.extension_credentials.clone(),
                     Arc::clone(&self.channel_connection_service),
+                    self.session_channels.clone(),
                     caller,
                 )
                 .await?;
@@ -3892,9 +4459,12 @@ where
             }
             id if id == EXTENSION_REGISTRY_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
-                let response =
-                    extensions::list_extension_registry(self.lifecycle_service.as_ref(), caller)
-                        .await?;
+                let response = extensions::list_extension_registry(
+                    self.lifecycle_service.as_ref(),
+                    self.session_channels.as_deref(),
+                    caller,
+                )
+                .await?;
                 views::view_page(response)
             }
             id if id == EXTENSION_SETUP_VIEW.id => {
@@ -4412,21 +4982,12 @@ where
         // (the failed run is terminal) and then deletes the thread while
         // `retry_turn` enqueues a replacement run against it.
         let _thread_operation_guard = self.lock_thread_operation(&access.scope).await;
-        let binding_id = webui_retry_binding_id(&access.scope, run_id, &client_action_id);
         let response = self
             .turn_coordinator
             .retry_turn(RetryTurnRequest {
                 scope: access.scope,
                 actor: access.run_actor,
                 run_id,
-                source_binding_ref: webui_source_binding_ref_from_raw(
-                    "webui-retry-src",
-                    &binding_id,
-                )?,
-                reply_target_binding_ref: webui_reply_target_binding_ref_from_raw(
-                    "webui-retry-reply",
-                    &binding_id,
-                )?,
                 idempotency_key: client_action_id,
             })
             .await
@@ -5348,128 +5909,6 @@ fn operator_surface_unavailable() -> ProductSurfaceError {
     ProductSurfaceError::service_unavailable(false)
 }
 
-struct AcceptedWebUiMessage {
-    thread_id: ThreadId,
-    message_id: ThreadMessageId,
-    actor_id: String,
-    source_binding_id: String,
-    reply_target_binding_id: String,
-}
-
-async fn mark_message_submitted_or_replay(
-    thread_service: &dyn SessionThreadService,
-    thread_scope: &ThreadScope,
-    handoff: &AcceptedWebUiMessage,
-    client_action_id: &IdempotencyKey,
-    turn_id: String,
-    run_id: String,
-) -> Result<(), ProductSurfaceError> {
-    match thread_service
-        .mark_message_submitted(
-            thread_scope,
-            &handoff.thread_id,
-            handoff.message_id,
-            turn_id,
-            run_id.clone(),
-        )
-        .await
-    {
-        Ok(_) => Ok(()),
-        Err(error) => {
-            reconcile_terminal_duplicate(
-                thread_service,
-                thread_scope,
-                handoff,
-                client_action_id,
-                |replay| {
-                    replay.status == MessageStatus::Submitted && replay.turn_run_id == Some(run_id)
-                },
-                error,
-            )
-            .await
-        }
-    }
-}
-
-async fn reconcile_terminal_duplicate(
-    thread_service: &dyn SessionThreadService,
-    thread_scope: &ThreadScope,
-    handoff: &AcceptedWebUiMessage,
-    client_action_id: &IdempotencyKey,
-    matches_replay: impl FnOnce(&AcceptedInboundMessageReplay) -> bool,
-    original_error: SessionThreadError,
-) -> Result<(), ProductSurfaceError> {
-    let replay = thread_service
-        .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
-            scope: thread_scope.clone(),
-            actor_id: handoff.actor_id.clone(),
-            source_binding_id: handoff.source_binding_id.clone(),
-            external_event_id: client_action_id.as_str().to_string(),
-        })
-        .await
-        .map_err(map_thread_error)?;
-    match replay {
-        Some(replay)
-            if replay.thread_id == handoff.thread_id
-                && replay.message_id == handoff.message_id
-                && matches_replay(&replay) =>
-        {
-            Ok(())
-        }
-        _ => Err(map_thread_error(original_error)),
-    }
-}
-
-async fn replay_webui_send_message(
-    thread_service: &dyn SessionThreadService,
-    thread_scope: &ThreadScope,
-    scope: &TurnScope,
-    actor: &TurnActor,
-    external_event_id: &str,
-) -> Result<Option<(AcceptedInboundMessageReplay, String)>, ProductSurfaceError> {
-    let source_binding_id = webui_source_binding_id(scope, actor);
-    if let Some(replay) = replay_accepted_message(
-        thread_service,
-        thread_scope,
-        actor,
-        &source_binding_id,
-        external_event_id,
-    )
-    .await?
-    {
-        return Ok(Some((replay, source_binding_id)));
-    }
-
-    let legacy_source_binding_id = legacy_webui_source_binding_id(scope, actor);
-    replay_accepted_message(
-        thread_service,
-        thread_scope,
-        actor,
-        &legacy_source_binding_id,
-        external_event_id,
-    )
-    .await
-    .map(|replay| replay.map(|replay| (replay, legacy_source_binding_id)))
-}
-
-async fn replay_accepted_message(
-    thread_service: &dyn SessionThreadService,
-    thread_scope: &ThreadScope,
-    actor: &TurnActor,
-    source_binding_id: &str,
-    external_event_id: &str,
-) -> Result<Option<AcceptedInboundMessageReplay>, ProductSurfaceError> {
-    thread_service
-        .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
-            scope: thread_scope.clone(),
-            actor_id: actor.user_id.as_str().to_string(),
-            source_binding_id: source_binding_id.to_string(),
-            external_event_id: external_event_id.to_string(),
-        })
-        .await
-        .map_err(map_thread_error)
-}
-
 struct ResolvedThreadAccess {
     scope: TurnScope,
     run_actor: TurnActor,
@@ -5856,27 +6295,6 @@ where
     /// Ownership probe for `submit_turn` and `delete_thread` — these only
     /// operate on session-owned threads (not trigger threads), so the probe
     /// is user-scoped with no automation fallback.
-    async fn resolve_webui_thread_metadata(
-        &self,
-        scope: TurnScope,
-        actor: &TurnActor,
-    ) -> Result<(TurnScope, ThreadScope), ProductSurfaceError> {
-        let thread_scope = thread_scope_from_turn_scope(&scope, Some(actor.user_id.clone()))?;
-        // `read_thread` is the metadata-only probe; production backends
-        // override it to skip the message/summary load entirely. The
-        // ownership semantics (UnknownThread / ThreadScopeMismatch
-        // collapse to NotFound) must match `list_thread_history`'s
-        // path, which `map_ownership_probe_error` guarantees.
-        self.thread_service
-            .read_thread(ThreadHistoryRequest {
-                scope: thread_scope.clone(),
-                thread_id: scope.thread_id.clone(),
-            })
-            .await
-            .map_err(map_ownership_probe_error)?;
-        Ok((scope, thread_scope))
-    }
-
     async fn resolve_approval_gate(
         &self,
         scope: TurnScope,
@@ -6017,7 +6435,6 @@ where
                 if always {
                     return Err(persistent_approval_unavailable());
                 }
-                let binding_id = webui_gate_binding_id(&scope, &gate_ref_string(&gate_ref));
                 let response = self
                     .turn_coordinator
                     .resume_turn(ResumeTurnRequest {
@@ -6026,14 +6443,6 @@ where
                         run_id,
                         gate_resolution_ref: gate_ref,
                         precondition: ResumeTurnPrecondition::AnyBlockedGate,
-                        source_binding_ref: webui_source_binding_ref_from_raw(
-                            "webui-gate-src",
-                            &binding_id,
-                        )?,
-                        reply_target_binding_ref: webui_reply_target_binding_ref_from_raw(
-                            "webui-gate-reply",
-                            &binding_id,
-                        )?,
                         idempotency_key: client_action_id,
                         resume_disposition: None,
                     })
@@ -6315,113 +6724,102 @@ fn parse_run_id_field(
 }
 
 fn parse_persisted_turn_run_id(value: &str) -> Result<TurnRunId, ProductSurfaceError> {
-    TurnRunId::parse(value).map_err(|_| ProductSurfaceError::internal_invariant())
+    TurnRunId::parse(value).map_err(ProductSurfaceError::internal_from)
 }
 
-fn accepted_message_ref(message_id: String) -> Result<AcceptedMessageRef, ProductSurfaceError> {
-    AcceptedMessageRef::new(format!("msg:{message_id}")).map_err(|_| {
-        ProductSurfaceError::from_status(ProductSurfaceErrorCode::Internal, 500, false)
+/// Transport identity stamped on session-lane submissions that did not name
+/// a channel extension (the OpenAI-compatible API transports). Not a channel
+/// name: `webui` is the product transport itself, the same constant the turn
+/// kernel uses for the WebUi source channel — and not route-addressable, the
+/// parameterized session route resolves only manifest-declared channels.
+const SESSION_SURFACE_ADAPTER_ID: &str =
+    ironclaw_product_contracts::session_ingress::BUILTIN_SESSION_SURFACE_ID;
+/// External-actor ref kind for session callers in admission fingerprints.
+const SESSION_ACTOR_KIND: &str = "session_user";
+
+/// Build the neutral inbound-surface request for one session submission.
+fn session_inbound_request(
+    session_surface: &str,
+    caller: ProductSurfaceCaller,
+    thread_id: &ThreadId,
+    client_action_id: &IdempotencyKey,
+    content: String,
+    requested_model: Option<String>,
+    attachments: Vec<ironclaw_host_api::attachment::InboundAttachment>,
+) -> Result<ChannelInboundSurfaceRequest, ProductSurfaceError> {
+    let adapter_id =
+        ProductAdapterId::new(session_surface).map_err(ProductSurfaceError::internal_from)?;
+    let source_channel =
+        ironclaw_product_contracts::inbound::ProductSourceChannel::new(session_surface)
+            .map_err(ProductSurfaceError::internal_from)?;
+    let installation_id = AdapterInstallationId::new(caller.tenant_id.as_str())
+        .map_err(ProductSurfaceError::internal_from)?;
+    // Session and webhook ingress converge on the same complete attachment
+    // type. Provider descriptors and download handles never cross this edge.
+    let message = ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage {
+        actor: ironclaw_extension_contracts::external::ExternalActorRef::new(
+            SESSION_ACTOR_KIND,
+            caller.user_id.as_str(),
+            Option::<String>::None,
+        )
+        .map_err(ProductSurfaceError::internal_from)?,
+        conversation: ironclaw_extension_contracts::external::ExternalConversationRef::new(
+            None,
+            thread_id.as_str(),
+            None,
+            None,
+        )
+        .map_err(ProductSurfaceError::internal_from)?,
+        event_id: ironclaw_extension_contracts::external::ExternalEventId::new(
+            client_action_id.as_str(),
+        )
+        .map_err(ProductSurfaceError::internal_from)?,
+        text: content,
+        trigger: ironclaw_extension_contracts::channel_adapter::ProductTriggerReason::DirectChat,
+        attachments,
+        conversation_context: None,
+        reply_context: None,
+    };
+    Ok(ChannelInboundSurfaceRequest {
+        context: ironclaw_product_contracts::inbound::TrustedInboundContext::from_session_caller(
+            adapter_id,
+            source_channel,
+            installation_id,
+            Utc::now(),
+            caller,
+            thread_id.clone(),
+        ),
+        message,
+        classification: None,
+        requested_model,
     })
 }
 
-/// Map a fatal steering-admission failure into this surface's sanitized
-/// error. Classification already happened in the gateway; this is pure
-/// error-shape translation plus server-side diagnosis.
-fn steering_admission_error(
-    error: crate::steering::SteeringAdmissionError,
-    thread_id: &ThreadId,
-    message_id: ThreadMessageId,
-    run_id: TurnRunId,
+/// Render a settled workflow rejection replayed for a session submission.
+fn session_rejection_error(
+    rejection: &ironclaw_product_contracts::inbound::ProductRejection,
 ) -> ProductSurfaceError {
-    use crate::steering::SteeringAdmissionError;
-    match error {
-        SteeringAdmissionError::InvalidMessageRef(reason) => {
-            tracing::debug!(%reason, %thread_id, %message_id, %run_id, "invalid steering message ref");
-            ProductSurfaceError::internal_invariant()
+    use ironclaw_product_contracts::inbound::ProductRejectionKind;
+    let retryable = rejection.disposition()
+        == ironclaw_product_contracts::inbound::ProductRejectionDisposition::Retryable;
+    match rejection.kind {
+        ProductRejectionKind::InvalidRequest => ProductSurfaceError::from_status(
+            ProductSurfaceErrorCode::InvalidRequest,
+            400,
+            retryable,
+        ),
+        ProductRejectionKind::AccessDenied
+        | ProductRejectionKind::UnknownInstallation
+        | ProductRejectionKind::PolicyDenied => {
+            ProductSurfaceError::from_status(ProductSurfaceErrorCode::Forbidden, 403, retryable)
         }
-        SteeringAdmissionError::RunState(error) => map_turn_error(error),
-        SteeringAdmissionError::MarkQueued(error)
-        | SteeringAdmissionError::SettleRejected(error) => map_thread_error(error),
-        SteeringAdmissionError::Enqueue(error) => {
-            // Carry the cause to the server log; the user-facing surface stays
-            // the sanitized retryable 503 (error-handling.md).
-            tracing::debug!(%error, %thread_id, %message_id, %run_id, "steering enqueue failed for busy run");
-            ProductSurfaceError::service_unavailable(true)
+        ProductRejectionKind::BindingRequired => {
+            ProductSurfaceError::from_status(ProductSurfaceErrorCode::NotFound, 404, retryable)
+        }
+        ProductRejectionKind::AmbiguousResolution | ProductRejectionKind::StaleGate => {
+            ProductSurfaceError::from_status(ProductSurfaceErrorCode::Conflict, 409, retryable)
         }
     }
-}
-
-fn parse_replay_run_id(value: Option<String>) -> Result<TurnRunId, ProductSurfaceError> {
-    crate::steering::parse_stored_run_id(value.as_deref()).map_err(|reason| {
-        tracing::debug!(%reason, "stored replay turn_run_id could not be parsed");
-        ProductSurfaceError::from_status_kind(
-            ProductSurfaceErrorCode::Conflict,
-            ProductSurfaceErrorKind::ReplayUnavailable,
-            409,
-            false,
-        )
-    })
-}
-
-fn webui_source_binding_ref_from_raw(
-    prefix: &str,
-    raw: &str,
-) -> Result<ironclaw_host_api::turn::SourceBindingRef, ProductSurfaceError> {
-    bounded_source_binding_ref(prefix, raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(|_| {
-        ProductSurfaceError::from_status(ProductSurfaceErrorCode::Internal, 500, false)
-    })
-}
-
-fn webui_reply_target_binding_ref_from_raw(
-    prefix: &str,
-    raw: &str,
-) -> Result<ironclaw_host_api::turn::ReplyTargetBindingRef, ProductSurfaceError> {
-    bounded_reply_target_binding_ref(prefix, raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(|_| {
-        ProductSurfaceError::from_status(ProductSurfaceErrorCode::Internal, 500, false)
-    })
-}
-
-fn webui_source_binding_id(scope: &TurnScope, actor: &TurnActor) -> String {
-    // WebUI retries are scoped to the authenticated caller context, not the
-    // thread id. When the caller is not project-bound, we encode that
-    // explicitly rather than collapsing onto an empty string.
-    format!(
-        "{}{}{}{}{}{}",
-        segment("surface", "webui"),
-        segment("tenant", scope.tenant_id.as_str()),
-        segment(
-            "agent",
-            scope.agent_id.as_ref().map(AgentId::as_str).unwrap_or("")
-        ),
-        segment(
-            "project_scope",
-            if scope.project_id.is_some() {
-                "bound"
-            } else {
-                "none"
-            }
-        ),
-        scope
-            .project_id
-            .as_ref()
-            .map(|project_id| segment("project", project_id.as_str()))
-            .unwrap_or_default(),
-        segment("actor", actor.user_id.as_str())
-    )
-}
-
-fn legacy_webui_source_binding_id(scope: &TurnScope, actor: &TurnActor) -> String {
-    format!(
-        "{}{}{}{}{}",
-        segment("surface", "webui"),
-        segment("tenant", scope.tenant_id.as_str()),
-        segment(
-            "agent",
-            scope.agent_id.as_ref().map(AgentId::as_str).unwrap_or("")
-        ),
-        segment("thread", scope.thread_id.as_str()),
-        segment("actor", actor.user_id.as_str())
-    )
 }
 
 fn thread_operation_key(scope: &TurnScope) -> String {
@@ -6623,35 +7021,6 @@ fn cap_summary_artifacts(
     artifacts
 }
 
-fn webui_gate_binding_id(scope: &TurnScope, gate_ref: &str) -> String {
-    format!(
-        "{}{}{}{}",
-        segment("surface", "webui"),
-        segment("tenant", scope.tenant_id.as_str()),
-        segment("thread", scope.thread_id.as_str()),
-        segment("gate", gate_ref)
-    )
-}
-
-fn webui_retry_binding_id(
-    scope: &TurnScope,
-    run_id: TurnRunId,
-    client_action_id: &IdempotencyKey,
-) -> String {
-    format!(
-        "{}{}{}{}{}",
-        segment("surface", "webui"),
-        segment("tenant", scope.tenant_id.as_str()),
-        segment("thread", scope.thread_id.as_str()),
-        segment("failed_run", run_id.as_uuid().to_string().as_str()),
-        segment("action", client_action_id.as_str())
-    )
-}
-
-fn gate_ref_string(gate_ref: &ironclaw_host_api::turn::TurnGateRef) -> String {
-    gate_ref.as_str().to_string()
-}
-
 fn persistent_approval_unavailable() -> ProductSurfaceError {
     ProductSurfaceError::from_status_kind(
         ProductSurfaceErrorCode::Unavailable,
@@ -6718,21 +7087,28 @@ fn map_thread_error(error: SessionThreadError) -> ProductSurfaceError {
         }
         SessionThreadError::ThreadScopeMismatch { .. }
         | SessionThreadError::IdempotentReplayActorMismatch { .. }
+        | SessionThreadError::StructuredFinalizationConflict { .. }
+        | SessionThreadError::StructuredFinalizationPublishMismatch { .. }
         | SessionThreadError::InvalidMessageTransition { .. }
         | SessionThreadError::MessageNotDraft { .. }
         | SessionThreadError::InvalidSummaryRange { .. }
         | SessionThreadError::OverlappingSummaryRange { .. } => {
             ProductSurfaceError::from_status(ProductSurfaceErrorCode::Conflict, 409, false)
         }
-        SessionThreadError::InvalidAttachment(_) => ProductSurfaceError::from_status_kind(
-            ProductSurfaceErrorCode::InvalidRequest,
-            ProductSurfaceErrorKind::Validation,
-            400,
-            false,
-        ),
+        SessionThreadError::InvalidAttachment(_)
+        | SessionThreadError::InvalidPreparedContext { .. }
+        | SessionThreadError::PreparedContextKeyMismatch { .. } => {
+            ProductSurfaceError::from_status_kind(
+                ProductSurfaceErrorCode::InvalidRequest,
+                ProductSurfaceErrorKind::Validation,
+                400,
+                false,
+            )
+        }
         SessionThreadError::GeneratedThreadId(_)
         | SessionThreadError::Serialization(_)
         | SessionThreadError::Deserialization(_)
+        | SessionThreadError::InvalidStructuredFinalization { .. }
         | SessionThreadError::InvalidMessageTimestamp { .. }
         | SessionThreadError::Backend(_) => ProductSurfaceError::service_unavailable(true),
     }
@@ -6910,6 +7286,10 @@ fn kind_for_surface_rejection(kind: ProductSurfaceRejectionKind) -> ProductSurfa
         ProductSurfaceRejectionKind::Conflict | ProductSurfaceRejectionKind::Ambiguous => {
             ProductSurfaceErrorKind::Conflict
         }
+        ProductSurfaceRejectionKind::DuplicateAction => ProductSurfaceErrorKind::Duplicate,
+        ProductSurfaceRejectionKind::ReplayUnavailable => {
+            ProductSurfaceErrorKind::ReplayUnavailable
+        }
     }
 }
 
@@ -6919,7 +7299,7 @@ fn create_thread_metadata_json(
     serde_json::to_string(&serde_json::json!({
         "client_action_id": client_action_id.as_str(),
     }))
-    .map_err(|_| ProductSurfaceError::internal_invariant())
+    .map_err(ProductSurfaceError::internal_from)
 }
 
 fn validate_log_query_modes(tail: bool, follow: bool) -> Result<(), ProductSurfaceError> {
@@ -7052,6 +7432,18 @@ fn generated_thread_id(
 mod tests {
     use super::*;
 
+    #[test]
+    fn inspector_views_require_operator_config() {
+        for view in [
+            INSPECTOR_SNAPSHOT_VIEW.id,
+            INSPECTOR_PROMPT_VIEW.id,
+            INSPECTOR_TOOL_VIEW.id,
+            INSPECTOR_UPDATES_VIEW.id,
+        ] {
+            assert!(product_view_requires_operator_config(view));
+        }
+    }
+
     /// The WebUI settings/tools request enum must use the exact wire strings
     /// the operator-config storage parser accepts and the entry writer emits.
     /// This pins the type link so the request vocabulary cannot drift from
@@ -7146,5 +7538,22 @@ mod tests {
             !unavailable.retryable,
             "false-arg sentinel is non-retryable"
         );
+    }
+
+    #[test]
+    fn structured_finalization_errors_map_to_stable_product_statuses() {
+        let conflict = map_thread_error(SessionThreadError::StructuredFinalizationConflict {
+            turn_run_id: TurnRunId::new(),
+        });
+        assert_eq!(conflict.code, ProductSurfaceErrorCode::Conflict);
+        assert_eq!(conflict.status_code, 409);
+        assert!(!conflict.retryable);
+
+        let invalid = map_thread_error(SessionThreadError::InvalidStructuredFinalization {
+            reason: "malformed JSON".to_string(),
+        });
+        assert_eq!(invalid.code, ProductSurfaceErrorCode::Unavailable);
+        assert_eq!(invalid.status_code, 503);
+        assert!(invalid.retryable);
     }
 }

@@ -16,10 +16,11 @@ use ironclaw_product_contracts::surface::{
 
 use crate::{
     LifecycleExtensionCredentialRequirement, LifecyclePackageKind, LifecyclePackageRef,
-    LifecycleProductAction, LifecycleProductResponse, ProductSetupExtensionRequest,
-    ProductSurfaceFailure, RebornExtensionCredentialSetup, RebornExtensionSetupField,
-    RebornExtensionSetupSecret, RebornSetupExtensionResponse, lifecycle_product_surface_error,
+    LifecycleProductAction, LifecycleProductResponse, ProductSurfaceFailure,
+    RebornExtensionCredentialSetup, RebornExtensionSetupField, RebornExtensionSetupSecret,
+    RebornSetupExtensionResponse, lifecycle_product_surface_error,
 };
+use ironclaw_product_contracts::inbound_requests::ProductSetupExtensionRequest;
 
 use super::{
     ExtensionCredentialSetupService,
@@ -670,6 +671,7 @@ mod tests {
                     ownership: ironclaw_auth::CredentialOwnership::UserReusable,
                     owner_extension: None,
                     granted_extensions: Vec::new(),
+                    scopes: Vec::new(),
                     secret_handle_count: 1,
                 }))
             } else {

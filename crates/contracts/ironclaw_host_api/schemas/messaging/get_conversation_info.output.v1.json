@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Standard messaging get_conversation_info output",
+  "type": "object",
+  "required": ["conversation", "kind"],
+  "properties": {
+    "conversation": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Conversation ref for this extension, from list_conversations / open_dm / get_conversation_info or an earlier result. Never invented; never valid on another extension."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["dm", "group_dm", "channel", "other"],
+      "description": "Conversation kind: dm, group_dm, channel, or other."
+    },
+    "display_name": { "type": "string" },
+    "is_member": { "type": "boolean" },
+    "counterpart": {
+      "type": "object",
+      "required": ["user_ref"],
+      "properties": {
+        "user_ref": { "type": "string", "minLength": 1 },
+        "display_name": { "type": "string" }
+      },
+      "additionalProperties": false,
+      "description": "The other participant, for a dm conversation."
+    },
+    "vendor": { "type": "object" }
+  },
+  "additionalProperties": false
+}

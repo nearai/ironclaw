@@ -202,6 +202,18 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
         "compaction_unavailable" => {
             "The run failed because context compaction was unavailable. Retry with a shorter request or start a new thread."
         }
+        "gate_not_supported" => {
+            "The run stopped because it needed an approval, sign-in, or resource this run profile cannot surface. Run it from an interactive surface or adjust permissions first."
+        }
+        "wall_clock_limit" => {
+            "The run stopped because it reached its time limit. Retry with a narrower request or a higher time limit."
+        }
+        "model_call_limit" => {
+            "The run stopped because it used up its model-call budget. Retry with a narrower request or a higher budget."
+        }
+        "capability_invocation_limit" => {
+            "The run stopped because it used up its tool-call budget. Retry with a narrower request or a higher budget."
+        }
         "driver_protocol_violation" => {
             "The run produced an invalid result and stopped before replying. Retry the run, and contact support if it keeps happening."
         }
@@ -282,6 +294,9 @@ impl ModelInvalidOutputFailureSummary for ModelInvalidOutputDetailReason {
         match self {
             Self::EmptyAssistantResponse => {
                 "The run failed because the model returned an empty assistant response. Retry the run or choose a different model."
+            }
+            Self::UnattendedQuestionEndingResponse => {
+                "The scheduled run failed because the model ended by asking for input when no user was present. Make the automation prompt self-contained or choose a different model."
             }
             Self::TextualToolCallSyntax => {
                 "The run failed because the model returned a tool call as text instead of structured tool-call data. Retry the run or choose a different model."
@@ -374,6 +389,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unattended_question_detail_has_scheduled_run_guidance() {
+        assert_eq!(
+            reborn_failure_summary_for_category_and_detail(
+                Some("invalid_model_output"),
+                Some(ModelInvalidOutputDetailReason::UnattendedQuestionEndingResponse),
+            ),
+            "The scheduled run failed because the model ended by asking for input when no user was present. Make the automation prompt self-contained or choose a different model."
+        );
+    }
+
     // The scheduler emits `scheduler_heartbeat_failed` / `scheduler_executor_panic`
     // (see `ironclaw_turn_runner::turn_scheduler`), not the previously-matched
     // `heartbeat_failed` / `driver_panic`. These two assertions pin the live
@@ -448,6 +474,10 @@ mod tests {
             "policy_denied",
             "compaction_unavailable",
             "driver_protocol_violation",
+            "gate_not_supported",
+            "wall_clock_limit",
+            "model_call_limit",
+            "capability_invocation_limit",
         ] {
             let summary = reborn_failure_summary_for_category(Some(category));
             assert_ne!(

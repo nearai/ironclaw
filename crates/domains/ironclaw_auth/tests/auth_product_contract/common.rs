@@ -110,6 +110,23 @@ pub fn account_request(
     }
 }
 
+/// The sanctioned shape a device link mints: extension-owned by exactly one
+/// extension, no grants (PROPOSAL §4.5). `bump_link_revision` refuses anything
+/// else, so this is the only fixture that can become a linked device.
+pub fn linked_device_account_request(
+    owner: AuthProductScope,
+    label_value: &str,
+    owner_extension: &ExtensionId,
+) -> NewCredentialAccount {
+    NewCredentialAccount::for_linked_device(
+        owner,
+        provider(),
+        label(label_value),
+        owner_extension.clone(),
+        SecretHandle::new("linked-device-session").expect("valid secret handle"),
+    )
+}
+
 pub fn account_ids(accounts: &[CredentialAccountProjection]) -> Vec<CredentialAccountId> {
     let mut ids = accounts
         .iter()

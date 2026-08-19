@@ -4,7 +4,7 @@
 //! `crate::webui_v2::webui_v2_routes()` returns an
 //! [`IngressRouteDescriptor`] per route, each carrying a
 //! [`RateLimitPolicy`] (mutation 60/60, read 120/60, stream 30/60 in
-//! the current beta). The v2 crate's CLAUDE.md explicitly designates
+//! the current beta). The v2 crate's CONTRACT.md explicitly designates
 //! enforcement of these policies as a host-composition responsibility;
 //! this module is that enforcement.
 //!
@@ -56,7 +56,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::{Method, StatusCode};
+use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use ironclaw_host_api::ingress::{IngressRouteDescriptor, RateLimitPolicy, RateLimitScope};
@@ -266,7 +266,7 @@ fn request_counter_key(
         RateLimitScope::PerCaller => {
             let Some(caller) = request.extensions().get::<ProductSurfaceCaller>() else {
                 tracing::debug!(
-                    target = "ironclaw::reborn::webui_rate_limit",
+                    target: "ironclaw::reborn::webui_rate_limit",
                     route_id = %route.route_id,
                     "per-caller rate-limit reached without an authenticated caller — \
                      auth middleware must run first",
@@ -279,7 +279,7 @@ fn request_counter_key(
         RateLimitScope::PerIp => {
             let Some(connect_info) = request.extensions().get::<ConnectInfo<SocketAddr>>() else {
                 tracing::debug!(
-                    target = "ironclaw::reborn::webui_rate_limit",
+                    target: "ironclaw::reborn::webui_rate_limit",
                     route_id = %route.route_id,
                     "per-ip rate-limit reached without host-provided ConnectInfo — \
                      host ingress must inject transport peer addresses",
@@ -291,7 +291,7 @@ fn request_counter_key(
         RateLimitScope::Global => "global".to_string(),
         RateLimitScope::PerTenant => {
             tracing::debug!(
-                target = "ironclaw::reborn::webui_rate_limit",
+                target: "ironclaw::reborn::webui_rate_limit",
                 route_id = %route.route_id,
                 scope = ?scope,
                 "unsupported rate-limit scope reached runtime after composition",
@@ -407,12 +407,12 @@ pub(crate) async fn enforce_rate_limit(
     let window_seconds = window.as_secs().max(1);
 
     let shard_idx = shard_index(&key.bucket_key);
-    let charged_generation = {
+    let (charged_generation, retry_after_seconds) = {
         let mut guard = match state.shards[shard_idx].lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
                 tracing::debug!(
-                    target = "ironclaw::reborn::webui_rate_limit",
+                    target: "ironclaw::reborn::webui_rate_limit",
                     "rate-limit LRU mutex poisoned — recovering",
                 );
                 poisoned.into_inner()
@@ -435,21 +435,26 @@ pub(crate) async fn enforce_rate_limit(
             window_entry.window_start = now;
             window_entry.remaining = max_requests.saturating_sub(1);
             window_entry.generation = state.next_generation.fetch_add(1, Ordering::Relaxed);
-            Some(window_entry.generation)
+            (Some(window_entry.generation), 0)
         } else if window_entry.remaining == 0 {
-            None
+            let elapsed = now.saturating_sub(window_entry.window_start);
+            (None, window_seconds.saturating_sub(elapsed).max(1))
         } else {
             window_entry.remaining -= 1;
-            Some(window_entry.generation)
+            (Some(window_entry.generation), 0)
         }
     };
 
     let Some(charged_generation) = charged_generation else {
-        return (
+        let mut response = (
             StatusCode::TOO_MANY_REQUESTS,
             "Rate limit exceeded. Try again shortly.",
         )
             .into_response();
+        if let Ok(value) = HeaderValue::from_str(&retry_after_seconds.to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+        return response;
     };
 
     let mut response = next.run(request).await;
@@ -495,7 +500,7 @@ fn refund_charge(
         Ok(guard) => guard,
         Err(poisoned) => {
             tracing::debug!(
-                target = "ironclaw::reborn::webui_rate_limit",
+                target: "ironclaw::reborn::webui_rate_limit",
                 "rate-limit LRU mutex poisoned during refund — recovering",
             );
             poisoned.into_inner()

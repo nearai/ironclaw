@@ -37,7 +37,7 @@ mod support;
 
 use std::time::Duration;
 
-use ironclaw_assistant::ProductInboundAck;
+use ironclaw_product_contracts::inbound::ProductInboundAck;
 use ironclaw_turns::{TurnRunId, TurnStatus};
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
@@ -602,6 +602,7 @@ mod invariant_checker {
             accepted_message_ref: AcceptedMessageRef::new(message)
                 .expect("sabotage message ref is valid"),
             submitted_run_id: TurnRunId::new(),
+            submission: None,
         };
         accepted_and_busy_run(
             ack("message:sabotage-a"),
@@ -791,16 +792,8 @@ async fn generated_actions_on_one_actor_never_disturb_another() {
         // Each actor's gate is scoped to its own owner, so auto-approve has to
         // be disabled per owner rather than globally — otherwise the run
         // dispatches straight through and never parks.
-        let owner_a = a
-            .binding
-            .subject_user_id
-            .as_ref()
-            .expect("actor A binding has a subject user id");
-        let owner_b = b
-            .binding
-            .subject_user_id
-            .as_ref()
-            .expect("actor B binding has a subject user id");
+        let owner_a = &a.binding.actor_user_id;
+        let owner_b = &b.binding.actor_user_id;
         assert_ne!(owner_a, owner_b, "the two actors must be distinct owners");
         group
             .disable_auto_approve_for_owner(owner_a)

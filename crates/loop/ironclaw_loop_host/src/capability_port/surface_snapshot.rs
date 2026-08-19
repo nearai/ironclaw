@@ -8,7 +8,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptionTrust,
-    CapabilityDescriptorView, ConcurrencyHint, ProviderToolCall, ProviderToolDefinition,
+    CapabilityDescriptorView, ProviderToolCall, ProviderToolDefinition,
 };
 
 use crate::capability_info::{self, CapabilityInfoEntry};
@@ -54,7 +54,6 @@ pub(super) struct PreparedSurfaceCapabilityCall {
     pub(super) capability_id: CapabilityId,
     pub(super) normalized_arguments: serde_json::Value,
     pub(super) effective_capability_ids: Vec<CapabilityId>,
-    pub(super) capability_info_target_missing: bool,
 }
 
 impl SurfaceSnapshot {
@@ -238,7 +237,6 @@ impl RuntimeSurfaceCapabilitySnapshot {
             capability_id: capability_id.clone(),
             normalized_arguments,
             effective_capability_ids: vec![capability_id.clone()],
-            capability_info_target_missing: false,
         })
     }
 }
@@ -258,7 +256,6 @@ impl SyntheticSurfaceCapabilitySnapshot {
                     safe_name: self.provider_tool_name.as_str().to_string(),
                     safe_description: self.safe_description.clone(),
                     description_trust: Default::default(),
-                    concurrency_hint: ConcurrencyHint::SafeForParallel,
                     parameters_schema: self.parameters_schema.clone(),
                 })
             }
@@ -299,26 +296,21 @@ impl SyntheticSurfaceCapabilitySnapshot {
                 super::validate_provider_arguments(&normalized_arguments)?;
                 let mut effective_capability_ids = Vec::with_capacity(2);
                 effective_capability_ids.push(capability_id.clone());
-                let capability_info_target_missing =
-                    match capability_info::requested_name(&normalized_arguments) {
-                        Ok(requested_name) => {
-                            if let Some(target) = snapshot.capability_info(requested_name) {
-                                effective_capability_ids.push(target.capability_id.clone());
-                                false
-                            } else {
-                                true
-                            }
+                match capability_info::requested_name(&normalized_arguments) {
+                    Ok(requested_name) => {
+                        if let Some(target) = snapshot.capability_info(requested_name) {
+                            effective_capability_ids.push(target.capability_id.clone());
                         }
-                        Err(error) if error.kind == AgentLoopHostErrorKind::InvalidInvocation => {
-                            false
-                        }
-                        Err(error) => return Err(error),
-                    };
+                    }
+                    // silent-ok: invalid capability_info inputs remain stageable so invoke
+                    // can return the intended recoverable model-visible failure.
+                    Err(error) if error.kind == AgentLoopHostErrorKind::InvalidInvocation => {}
+                    Err(error) => return Err(error),
+                }
                 Ok(PreparedSurfaceCapabilityCall {
                     capability_id: capability_id.clone(),
                     normalized_arguments,
                     effective_capability_ids,
-                    capability_info_target_missing,
                 })
             }
         }

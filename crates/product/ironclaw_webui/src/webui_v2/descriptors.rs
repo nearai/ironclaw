@@ -8,6 +8,8 @@
 
 // arch-exempt: large_file, one descriptor function per WebUI v2 route mirrors the handler/router split tracked for this whole module family, plan #5985
 
+// arch-exempt: large_file, this is the 1:1 descriptor counterpart to the handler table's own large_file exemption — both stay flat until the same WebUI route split lands, plan #5985
+
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
     IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
@@ -29,7 +31,7 @@ use run_action_descriptors::{
 pub const WEBUI_V2_ROUTE_CREATE_THREAD: &str = "webui.v2.create_thread";
 pub const WEBUI_V2_ROUTE_DELETE_THREAD: &str = "webui.v2.delete_thread";
 pub const WEBUI_V2_ROUTE_GET_SESSION: &str = "webui.v2.get_session";
-pub const WEBUI_V2_ROUTE_SEND_MESSAGE: &str = "webui.v2.send_message";
+pub const WEBUI_V2_ROUTE_SESSION_CHANNEL_MESSAGE: &str = "webui.v2.session_channel_message";
 pub const WEBUI_V2_ROUTE_LIST_THREADS: &str = "webui.v2.list_threads";
 pub const WEBUI_V2_ROUTE_GET_TIMELINE: &str = "webui.v2.get_timeline";
 pub const WEBUI_V2_ROUTE_GET_RUN_ARTIFACT: &str = "webui.v2.get_run_artifact";
@@ -44,14 +46,21 @@ pub const WEBUI_V2_ROUTE_PAUSE_AUTOMATION: &str = "webui.v2.pause_automation";
 pub const WEBUI_V2_ROUTE_RESUME_AUTOMATION: &str = "webui.v2.resume_automation";
 pub const WEBUI_V2_ROUTE_RENAME_AUTOMATION: &str = "webui.v2.rename_automation";
 pub const WEBUI_V2_ROUTE_DELETE_AUTOMATION: &str = "webui.v2.delete_automation";
+pub const WEBUI_V2_ROUTE_SUGGESTIONS_LIST: &str = "webui.v2.suggestions.list";
+pub const WEBUI_V2_ROUTE_SUGGESTIONS_GENERATE: &str = "webui.v2.suggestions.generate";
+pub const WEBUI_V2_ROUTE_SUGGESTION_START: &str = "webui.v2.suggestions.start";
+pub const WEBUI_V2_ROUTE_SUGGESTION_DISMISS: &str = "webui.v2.suggestions.dismiss";
 pub const WEBUI_V2_ROUTE_TRACE_CREDITS: &str = "webui.v2.trace_credits";
 pub const WEBUI_V2_ROUTE_TRACE_ACCOUNT_TRACES: &str = "webui.v2.trace_account_traces";
 pub const WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE: &str = "webui.v2.authorize_trace_hold";
 pub const WEBUI_V2_ROUTE_TRACE_ACCOUNT_LOGIN_LINK: &str = "webui.v2.trace_account_login_link";
-pub const WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES: &str = "webui.v2.get_outbound_preferences";
-pub const WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES: &str = "webui.v2.set_outbound_preferences";
 pub const WEBUI_V2_ROUTE_LIST_OUTBOUND_DELIVERY_TARGETS: &str =
     "webui.v2.list_outbound_delivery_targets";
+pub const WEBUI_V2_ROUTE_GET_NOTIFICATION_CHANNELS: &str = "webui.v2.get_notification_channels";
+pub const WEBUI_V2_ROUTE_SET_NOTIFICATION_CHANNELS: &str = "webui.v2.set_notification_channels";
+pub const WEBUI_V2_ROUTE_NOTIFICATION_SETUP_STATUS: &str = "webui.v2.notification_setup_status";
+pub const WEBUI_V2_ROUTE_NOTIFICATION_SETUP_ENABLE: &str = "webui.v2.notification_setup_enable";
+pub const WEBUI_V2_ROUTE_NOTIFICATION_SETUP_DISABLE: &str = "webui.v2.notification_setup_disable";
 pub const WEBUI_V2_ROUTE_LIST_EXTENSIONS: &str = "webui.v2.list_extensions";
 pub const WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY: &str = "webui.v2.list_extension_registry";
 pub const WEBUI_V2_ROUTE_INSTALL_EXTENSION: &str = "webui.v2.install_extension";
@@ -79,6 +88,10 @@ pub const WEBUI_V2_ROUTE_GET_LLM_CONFIG: &str = "webui.v2.get_llm_config";
 pub const WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER: &str = "webui.v2.upsert_llm_provider";
 pub const WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER: &str = "webui.v2.delete_llm_provider";
 pub const WEBUI_V2_ROUTE_SET_ACTIVE_LLM: &str = "webui.v2.set_active_llm";
+pub const WEBUI_V2_ROUTE_GET_USER_MODEL_CATALOG: &str = "webui.v2.get_user_model_catalog";
+pub const WEBUI_V2_ROUTE_SET_USER_MODEL_POLICY: &str = "webui.v2.set_user_model_policy";
+pub const WEBUI_V2_ROUTE_GET_USER_MODEL_PREFERENCE: &str = "webui.v2.get_user_model_preference";
+pub const WEBUI_V2_ROUTE_SET_USER_MODEL_PREFERENCE: &str = "webui.v2.set_user_model_preference";
 pub const WEBUI_V2_ROUTE_TEST_LLM_CONNECTION: &str = "webui.v2.test_llm_connection";
 pub const WEBUI_V2_ROUTE_LIST_LLM_MODELS: &str = "webui.v2.list_llm_models";
 pub const WEBUI_V2_ROUTE_START_NEARAI_LOGIN: &str = "webui.v2.start_nearai_login";
@@ -95,6 +108,10 @@ pub const WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS: &str = "webui.v2.operator.diagnos
 pub const WEBUI_V2_ROUTE_OPERATOR_STATUS: &str = "webui.v2.operator.status";
 pub const WEBUI_V2_ROUTE_OPERATOR_LOGS: &str = "webui.v2.operator.logs";
 pub const WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE: &str = "webui.v2.operator.service_lifecycle";
+pub const WEBUI_V2_ROUTE_INSPECTOR_SNAPSHOT: &str = "webui.v2.operator.inspector_snapshot";
+pub const WEBUI_V2_ROUTE_INSPECTOR_PROMPT: &str = "webui.v2.operator.inspector_prompt";
+pub const WEBUI_V2_ROUTE_INSPECTOR_TOOL: &str = "webui.v2.operator.inspector_tool";
+pub const WEBUI_V2_ROUTE_INSPECTOR_UPDATES: &str = "webui.v2.operator.inspector_updates";
 pub const WEBUI_V2_ROUTE_OPERATOR_LIST_EXTENSION_CONFIGURATION: &str =
     "webui.v2.operator.list_extension_configuration";
 pub const WEBUI_V2_ROUTE_OPERATOR_REPLACE_EXTENSION_CONFIGURATION: &str =
@@ -126,12 +143,19 @@ pub const WEBUI_V2_ROUTE_ADMIN_SET_USER_ROLE: &str = "webui.v2.admin.set_user_ro
 pub const WEBUI_V2_ROUTE_ADMIN_LIST_USER_SECRETS: &str = "webui.v2.admin.list_user_secrets";
 pub const WEBUI_V2_ROUTE_ADMIN_PUT_USER_SECRET: &str = "webui.v2.admin.put_user_secret";
 pub const WEBUI_V2_ROUTE_ADMIN_DELETE_USER_SECRET: &str = "webui.v2.admin.delete_user_secret";
+pub const WEBUI_V2_ROUTE_ADMIN_LIST_THREAD_SCRAPE_THREADS: &str =
+    "webui.v2.admin.thread_scrape.list_threads";
+pub const WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_ARTIFACT: &str =
+    "webui.v2.admin.thread_scrape.get_thread_artifact";
+pub const WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_RUN_ARTIFACT: &str =
+    "webui.v2.admin.thread_scrape.get_run_artifact";
 
 pub const WEBUI_V2_PATTERN_CREATE_THREAD: &str = "/api/webchat/v2/threads";
 pub const WEBUI_V2_PATTERN_LIST_THREADS: &str = "/api/webchat/v2/threads";
 pub const WEBUI_V2_PATTERN_DELETE_THREAD: &str = "/api/webchat/v2/threads/{thread_id}";
 pub const WEBUI_V2_PATTERN_GET_SESSION: &str = "/api/webchat/v2/session";
-pub const WEBUI_V2_PATTERN_SEND_MESSAGE: &str = "/api/webchat/v2/threads/{thread_id}/messages";
+pub const WEBUI_V2_PATTERN_SESSION_CHANNEL_MESSAGE: &str =
+    "/api/webchat/v2/channels/{extension_id}/messages";
 pub const WEBUI_V2_PATTERN_GET_TIMELINE: &str = "/api/webchat/v2/threads/{thread_id}/timeline";
 pub const WEBUI_V2_PATTERN_GET_RUN_ARTIFACT: &str =
     "/api/webchat/v2/threads/{thread_id}/runs/{run_id}/artifact";
@@ -152,14 +176,26 @@ pub const WEBUI_V2_PATTERN_RESUME_AUTOMATION: &str =
 // Intentional dual-method resource path: POST renames an automation and DELETE
 // removes it. Keep the route ids separate so host policy/audit stays action-specific.
 pub const WEBUI_V2_PATTERN_AUTOMATION_DETAIL: &str = "/api/webchat/v2/automations/{automation_id}";
+pub const WEBUI_V2_PATTERN_SUGGESTIONS_LIST: &str = "/api/webchat/v2/suggestions";
+pub const WEBUI_V2_PATTERN_SUGGESTIONS_GENERATE: &str = "/api/webchat/v2/suggestions/generate";
+pub const WEBUI_V2_PATTERN_SUGGESTION_DETAIL: &str = "/api/webchat/v2/suggestions/{suggestion_id}";
+pub const WEBUI_V2_PATTERN_SUGGESTION_START: &str =
+    "/api/webchat/v2/suggestions/{suggestion_id}/start";
 pub const WEBUI_V2_PATTERN_TRACE_CREDITS: &str = "/api/webchat/v2/traces/credit";
 pub const WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES: &str = "/api/webchat/v2/traces/account";
 pub const WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE: &str =
     "/api/webchat/v2/traces/holds/{submission_id}/authorize";
 pub const WEBUI_V2_PATTERN_TRACE_ACCOUNT_LOGIN_LINK: &str =
     "/api/webchat/v2/traces/account-login-link";
-pub const WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES: &str = "/api/webchat/v2/outbound/preferences";
 pub const WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS: &str = "/api/webchat/v2/outbound/targets";
+pub const WEBUI_V2_PATTERN_NOTIFICATION_CHANNELS: &str =
+    "/api/webchat/v2/outbound/notification-channels";
+pub const WEBUI_V2_PATTERN_NOTIFICATION_SETUP_STATUS: &str =
+    "/api/webchat/v2/channels/{extension_id}/notifications";
+pub const WEBUI_V2_PATTERN_NOTIFICATION_SETUP_ENABLE: &str =
+    "/api/webchat/v2/channels/{extension_id}/notifications/enable";
+pub const WEBUI_V2_PATTERN_NOTIFICATION_SETUP_DISABLE: &str =
+    "/api/webchat/v2/channels/{extension_id}/notifications/disable";
 pub const WEBUI_V2_PATTERN_ADMIN_USERS: &str = "/api/webchat/v2/admin/users";
 pub const WEBUI_V2_PATTERN_ADMIN_USER: &str = "/api/webchat/v2/admin/users/{user_id}";
 pub const WEBUI_V2_PATTERN_ADMIN_USER_STATUS: &str = "/api/webchat/v2/admin/users/{user_id}/status";
@@ -168,6 +204,11 @@ pub const WEBUI_V2_PATTERN_ADMIN_USER_SECRETS: &str =
     "/api/webchat/v2/admin/users/{user_id}/secrets";
 pub const WEBUI_V2_PATTERN_ADMIN_USER_SECRET: &str =
     "/api/webchat/v2/admin/users/{user_id}/secrets/{handle}";
+pub const WEBUI_V2_PATTERN_ADMIN_THREAD_SCRAPE_THREADS: &str =
+    "/api/webchat/v2/admin/users/{user_id}/thread-scrape/threads";
+pub const WEBUI_V2_PATTERN_ADMIN_THREAD_SCRAPE_ARTIFACT: &str =
+    "/api/webchat/v2/admin/users/{user_id}/thread-scrape/threads/{thread_id}/artifact";
+pub const WEBUI_V2_PATTERN_ADMIN_THREAD_SCRAPE_RUN_ARTIFACT: &str = "/api/webchat/v2/admin/users/{user_id}/thread-scrape/threads/{thread_id}/runs/{run_id}/artifact";
 pub const WEBUI_V2_PATTERN_LIST_EXTENSIONS: &str = "/api/webchat/v2/extensions";
 pub const WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY: &str = "/api/webchat/v2/extensions/registry";
 pub const WEBUI_V2_PATTERN_INSTALL_EXTENSION: &str = "/api/webchat/v2/extensions/install";
@@ -194,6 +235,9 @@ pub const WEBUI_V2_PATTERN_UPSERT_LLM_PROVIDER: &str = "/api/webchat/v2/llm/prov
 pub const WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER: &str =
     "/api/webchat/v2/llm/providers/{provider_id}/delete";
 pub const WEBUI_V2_PATTERN_SET_ACTIVE_LLM: &str = "/api/webchat/v2/llm/active";
+pub const WEBUI_V2_PATTERN_USER_MODEL_CATALOG: &str = "/api/webchat/v2/llm/models";
+pub const WEBUI_V2_PATTERN_USER_MODEL_POLICY: &str = "/api/webchat/v2/llm/model-policy";
+pub const WEBUI_V2_PATTERN_USER_MODEL_PREFERENCE: &str = "/api/webchat/v2/llm/model-preference";
 pub const WEBUI_V2_PATTERN_TEST_LLM_CONNECTION: &str = "/api/webchat/v2/llm/test-connection";
 pub const WEBUI_V2_PATTERN_LIST_LLM_MODELS: &str = "/api/webchat/v2/llm/list-models";
 pub const WEBUI_V2_PATTERN_START_NEARAI_LOGIN: &str = "/api/webchat/v2/llm/nearai/login";
@@ -208,6 +252,14 @@ pub const WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS: &str = "/api/webchat/v2/operato
 pub const WEBUI_V2_PATTERN_OPERATOR_STATUS: &str = "/api/webchat/v2/operator/status";
 pub const WEBUI_V2_PATTERN_OPERATOR_LOGS: &str = "/api/webchat/v2/operator/logs";
 pub const WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE: &str = "/api/webchat/v2/operator/service";
+pub const WEBUI_V2_PATTERN_INSPECTOR_SNAPSHOT: &str =
+    "/api/webchat/v2/operator/inspector/threads/{thread_id}/runs/{run_id}";
+pub const WEBUI_V2_PATTERN_INSPECTOR_PROMPT: &str =
+    "/api/webchat/v2/operator/inspector/threads/{thread_id}/runs/{run_id}/prompt";
+pub const WEBUI_V2_PATTERN_INSPECTOR_TOOL: &str =
+    "/api/webchat/v2/operator/inspector/threads/{thread_id}/runs/{run_id}/tools/{activity_id}";
+pub const WEBUI_V2_PATTERN_INSPECTOR_UPDATES: &str =
+    "/api/webchat/v2/operator/inspector/threads/{thread_id}/runs/{run_id}/events";
 pub const WEBUI_V2_PATTERN_OPERATOR_EXTENSION_CONFIGURATION: &str =
     "/api/webchat/v2/operator/extension-configuration";
 pub const WEBUI_V2_PATTERN_OPERATOR_EXTENSION_CONFIGURATION_GROUP: &str =
@@ -237,7 +289,7 @@ pub const WEBUI_V2_PATTERN_PROJECT_MEMBER_DETAIL: &str =
 /// unless composition explicitly opts in through
 /// [`webui_v2_routes_with_regression_artifact_export`].
 pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
-    webui_v2_routes_with_regression_artifact_export(false)
+    webui_v2_routes_with_artifact_flags(false, false)
 }
 
 /// Return the canonical descriptor set for the selected artifact-export
@@ -249,11 +301,26 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
 pub fn webui_v2_routes_with_regression_artifact_export(
     regression_artifact_export_enabled: bool,
 ) -> Vec<IngressRouteDescriptor> {
+    webui_v2_routes_with_artifact_flags(regression_artifact_export_enabled, false)
+}
+
+/// Combined artifact-surface policy: QA-only caller-owned exports plus the
+/// independently gated admin cross-user thread scraping.
+///
+/// The two flags are deliberately separate: enabling QA self-export must
+/// never silently mount tenant-wide admin transcript access. The same two
+/// captured deployment flags must feed this table and
+/// [`crate::webui_v2::WebUiV2State`] so host middleware never advertises a
+/// route the inner router does not mount.
+pub fn webui_v2_routes_with_artifact_flags(
+    regression_artifact_export_enabled: bool,
+    admin_thread_scrape_enabled: bool,
+) -> Vec<IngressRouteDescriptor> {
     let mut routes = vec![
         get_session_descriptor(),
         create_thread_descriptor(),
         delete_thread_descriptor(),
-        send_message_descriptor(),
+        session_channel_message_descriptor(),
         list_threads_descriptor(),
         get_timeline_descriptor(),
         logs_descriptor(),
@@ -270,13 +337,20 @@ pub fn webui_v2_routes_with_regression_artifact_export(
         resume_automation_descriptor(),
         rename_automation_descriptor(),
         delete_automation_descriptor(),
+        suggestions_list_descriptor(),
+        suggestions_generate_descriptor(),
+        suggestion_start_descriptor(),
+        suggestion_dismiss_descriptor(),
         trace_credits_descriptor(),
         trace_account_traces_descriptor(),
         trace_account_login_link_descriptor(),
         authorize_trace_hold_descriptor(),
-        get_outbound_preferences_descriptor(),
-        set_outbound_preferences_descriptor(),
         list_outbound_delivery_targets_descriptor(),
+        get_notification_channels_descriptor(),
+        set_notification_channels_descriptor(),
+        notification_setup_status_descriptor(),
+        notification_setup_enable_descriptor(),
+        notification_setup_disable_descriptor(),
         list_extensions_descriptor(),
         list_extension_registry_descriptor(),
         install_extension_descriptor(),
@@ -301,6 +375,10 @@ pub fn webui_v2_routes_with_regression_artifact_export(
         upsert_llm_provider_descriptor(),
         delete_llm_provider_descriptor(),
         set_active_llm_descriptor(),
+        get_user_model_catalog_descriptor(),
+        get_user_model_preference_descriptor(),
+        set_user_model_preference_descriptor(),
+        set_user_model_policy_descriptor(),
         test_llm_connection_descriptor(),
         list_llm_models_descriptor(),
         start_nearai_login_descriptor(),
@@ -316,6 +394,10 @@ pub fn webui_v2_routes_with_regression_artifact_export(
         operator_status_descriptor(),
         operator_logs_descriptor(),
         operator_service_lifecycle_descriptor(),
+        inspector_snapshot_descriptor(),
+        inspector_prompt_descriptor(),
+        inspector_tool_descriptor(),
+        inspector_updates_descriptor(),
         operator_list_extension_configuration_descriptor(),
         operator_replace_extension_configuration_descriptor(),
         list_project_files_descriptor(),
@@ -349,6 +431,11 @@ pub fn webui_v2_routes_with_regression_artifact_export(
         routes.push(get_run_artifact_descriptor());
         routes.push(get_thread_artifact_descriptor());
     }
+    if admin_thread_scrape_enabled {
+        routes.push(admin_list_thread_scrape_threads_descriptor());
+        routes.push(admin_get_thread_scrape_artifact_descriptor());
+        routes.push(admin_get_thread_scrape_run_artifact_descriptor());
+    }
     routes
 }
 
@@ -360,6 +447,7 @@ pub fn is_webui_v2_operator_webui_config_route_id(route_id: &str) -> bool {
             | WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER
             | WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER
             | WEBUI_V2_ROUTE_SET_ACTIVE_LLM
+            | WEBUI_V2_ROUTE_SET_USER_MODEL_POLICY
             | WEBUI_V2_ROUTE_TEST_LLM_CONNECTION
             | WEBUI_V2_ROUTE_LIST_LLM_MODELS
             | WEBUI_V2_ROUTE_START_NEARAI_LOGIN
@@ -377,6 +465,10 @@ pub fn is_webui_v2_operator_webui_config_route_id(route_id: &str) -> bool {
             | WEBUI_V2_ROUTE_OPERATOR_STATUS
             | WEBUI_V2_ROUTE_OPERATOR_LOGS
             | WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE
+            | WEBUI_V2_ROUTE_INSPECTOR_SNAPSHOT
+            | WEBUI_V2_ROUTE_INSPECTOR_PROMPT
+            | WEBUI_V2_ROUTE_INSPECTOR_TOOL
+            | WEBUI_V2_ROUTE_INSPECTOR_UPDATES
             | WEBUI_V2_ROUTE_OPERATOR_LIST_EXTENSION_CONFIGURATION
             | WEBUI_V2_ROUTE_OPERATOR_REPLACE_EXTENSION_CONFIGURATION
             // The zip-upload import route is admin-only (#5499): classifying
@@ -416,11 +508,11 @@ fn create_thread_descriptor() -> IngressRouteDescriptor {
     )
 }
 
-fn send_message_descriptor() -> IngressRouteDescriptor {
+fn session_channel_message_descriptor() -> IngressRouteDescriptor {
     descriptor(
-        WEBUI_V2_ROUTE_SEND_MESSAGE,
+        WEBUI_V2_ROUTE_SESSION_CHANNEL_MESSAGE,
         NetworkMethod::Post,
-        WEBUI_V2_PATTERN_SEND_MESSAGE,
+        WEBUI_V2_PATTERN_SESSION_CHANNEL_MESSAGE,
         mutation_policy(
             // Message bodies carry user text plus optional base64-encoded inline
             // attachments. 14 MiB matches the gateway-wide body budget and covers
@@ -570,6 +662,48 @@ fn admin_delete_user_secret_descriptor() -> IngressRouteDescriptor {
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
+fn admin_list_thread_scrape_threads_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_ADMIN_LIST_THREAD_SCRAPE_THREADS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_ADMIN_THREAD_SCRAPE_THREADS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn admin_get_thread_scrape_artifact_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_ARTIFACT,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_ADMIN_THREAD_SCRAPE_ARTIFACT,
+        read_policy(
+            thread_artifact_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn admin_get_thread_scrape_run_artifact_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_RUN_ARTIFACT,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_ADMIN_THREAD_SCRAPE_RUN_ARTIFACT,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+            StreamingMode::None,
         ),
     )
 }
@@ -1010,6 +1144,63 @@ fn delete_automation_descriptor() -> IngressRouteDescriptor {
     )
 }
 
+fn suggestions_list_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SUGGESTIONS_LIST,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_SUGGESTIONS_LIST,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn suggestions_generate_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SUGGESTIONS_GENERATE,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SUGGESTIONS_GENERATE,
+        mutation_policy(
+            body_limit_kib(4),
+            // Each accepted request can launch a provider-backed agent run.
+            rate_limit_per_caller(10, 60),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
+fn suggestion_start_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SUGGESTION_START,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SUGGESTION_START,
+        mutation_policy(
+            BodyLimitPolicy::NoBody,
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
+fn suggestion_dismiss_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SUGGESTION_DISMISS,
+        NetworkMethod::Delete,
+        WEBUI_V2_PATTERN_SUGGESTION_DETAIL,
+        mutation_policy(
+            BodyLimitPolicy::NoBody,
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
 fn trace_credits_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_TRACE_CREDITS,
@@ -1070,34 +1261,6 @@ fn trace_account_login_link_descriptor() -> IngressRouteDescriptor {
     )
 }
 
-fn get_outbound_preferences_descriptor() -> IngressRouteDescriptor {
-    descriptor(
-        WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES,
-        NetworkMethod::Get,
-        WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES,
-        read_policy(
-            read_rate_limit(),
-            AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductSurface,
-            StreamingMode::None,
-        ),
-    )
-}
-
-fn set_outbound_preferences_descriptor() -> IngressRouteDescriptor {
-    descriptor(
-        WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES,
-        NetworkMethod::Post,
-        WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES,
-        mutation_policy(
-            body_limit_kib(4),
-            mutation_rate_limit(),
-            AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductSurface,
-        ),
-    )
-}
-
 fn list_outbound_delivery_targets_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_LIST_OUTBOUND_DELIVERY_TARGETS,
@@ -1108,6 +1271,79 @@ fn list_outbound_delivery_targets_descriptor() -> IngressRouteDescriptor {
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProductSurface,
             StreamingMode::None,
+        ),
+    )
+}
+
+fn get_notification_channels_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_GET_NOTIFICATION_CHANNELS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_NOTIFICATION_CHANNELS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn set_notification_channels_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SET_NOTIFICATION_CHANNELS,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_NOTIFICATION_CHANNELS,
+        mutation_policy(
+            body_limit_kib(8),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
+fn notification_setup_status_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_NOTIFICATION_SETUP_STATUS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_NOTIFICATION_SETUP_STATUS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn notification_setup_enable_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_NOTIFICATION_SETUP_ENABLE,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_NOTIFICATION_SETUP_ENABLE,
+        mutation_policy(
+            // The largest setup payload today is a web-app subscription: a
+            // ~1 KiB endpoint URL plus two short base64url keys; 8 KiB leaves
+            // defensive headroom for any channel's opaque payload.
+            body_limit_kib(8),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
+fn notification_setup_disable_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_NOTIFICATION_SETUP_DISABLE,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_NOTIFICATION_SETUP_DISABLE,
+        mutation_policy(
+            body_limit_kib(8),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1450,6 +1686,62 @@ fn set_active_llm_descriptor() -> IngressRouteDescriptor {
     )
 }
 
+fn get_user_model_catalog_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_GET_USER_MODEL_CATALOG,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_USER_MODEL_CATALOG,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn get_user_model_preference_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_GET_USER_MODEL_PREFERENCE,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_USER_MODEL_PREFERENCE,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn set_user_model_preference_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SET_USER_MODEL_PREFERENCE,
+        NetworkMethod::Put,
+        WEBUI_V2_PATTERN_USER_MODEL_PREFERENCE,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
+fn set_user_model_policy_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SET_USER_MODEL_POLICY,
+        NetworkMethod::Put,
+        WEBUI_V2_PATTERN_USER_MODEL_POLICY,
+        mutation_policy(
+            body_limit_kib(64),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
 fn test_llm_connection_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_TEST_LLM_CONNECTION,
@@ -1646,6 +1938,58 @@ fn operator_logs_descriptor() -> IngressRouteDescriptor {
     )
 }
 
+fn inspector_snapshot_descriptor() -> IngressRouteDescriptor {
+    inspector_read_descriptor(
+        WEBUI_V2_ROUTE_INSPECTOR_SNAPSHOT,
+        WEBUI_V2_PATTERN_INSPECTOR_SNAPSHOT,
+    )
+}
+
+fn inspector_prompt_descriptor() -> IngressRouteDescriptor {
+    inspector_read_descriptor(
+        WEBUI_V2_ROUTE_INSPECTOR_PROMPT,
+        WEBUI_V2_PATTERN_INSPECTOR_PROMPT,
+    )
+}
+
+fn inspector_tool_descriptor() -> IngressRouteDescriptor {
+    inspector_read_descriptor(
+        WEBUI_V2_ROUTE_INSPECTOR_TOOL,
+        WEBUI_V2_PATTERN_INSPECTOR_TOOL,
+    )
+}
+
+fn inspector_read_descriptor(
+    route_id: &'static str,
+    pattern: &'static str,
+) -> IngressRouteDescriptor {
+    descriptor(
+        route_id,
+        NetworkMethod::Get,
+        pattern,
+        read_policy(
+            rate_limit_per_caller(30, 60),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn inspector_updates_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_INSPECTOR_UPDATES,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_INSPECTOR_UPDATES,
+        read_policy(
+            rate_limit_per_caller(12, 60),
+            AuditTraceClass::StreamingSubscription,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::Sse,
+        ),
+    )
+}
+
 fn logs_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_LOGS,
@@ -1811,18 +2155,15 @@ fn stream_rate_limit() -> RateLimitPolicy {
     // request-rate window here is just for burst protection against
     // reconnect storms.
     //
-    // Set to 30/60s — the SSE route additionally accepts `?token=…`
-    // because `EventSource` can't set headers, which leaks the
-    // bearer into browser history, server access logs, and proxy
-    // logs. Keeping the request rate higher than necessary widens
-    // the replay surface for a logged token, so the budget is capped
-    // at 2x a worst-case exponential-backoff reconnect cycle (≈ 1,
-    // 2, 4, 8, 16, 32s per minute = 6 opens) rather than parity with
-    // the mutation budget. The WS route doesn't carry the same
-    // URL-token risk (headers + `WebSocketOriginPolicy::SameOriginRequired`),
-    // but the lower limit costs it nothing — the same reconnect-storm
-    // math applies, the same concurrency cap is the real load gate,
-    // and using one helper for both keeps the descriptors aligned.
+    // Set to 30/60s. The SPA's one-owner reconnect policy opens at most
+    // seven streams per minute for one continuously failing tab (1, 2, 4,
+    // 8, 16, then 30-second bounded backoff). Three legitimate tabs therefore
+    // stay below this budget with headroom for reload and network transitions.
+    // The route also retains the `?token=…` compatibility escape hatch, so a
+    // materially higher budget would widen the replay surface for a token
+    // captured from browser history or proxy logs. The concurrency cap remains
+    // the primary bound on healthy long-lived streams; this request-rate window
+    // bounds churn from broken or hostile clients.
     rate_limit_per_caller(30, 60)
 }
 

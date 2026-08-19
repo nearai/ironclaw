@@ -107,7 +107,7 @@ fn process_backend_kind_round_trips_serde_for_every_variant() {
         ProcessBackendKind::Srt,
         ProcessBackendKind::SmolVm,
         ProcessBackendKind::LocalHost,
-        ProcessBackendKind::TenantSandbox,
+        ProcessBackendKind::UserSandbox,
         ProcessBackendKind::OrgDedicatedRunner,
     ];
     assert_eq!(

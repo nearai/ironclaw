@@ -31,6 +31,35 @@ use ironclaw_product_contracts::account_setup::AccountConnectionStatusSource;
 use ironclaw_product_contracts::admin_users::AdminUserService;
 use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;
 
+/// The deployment's public web app origin — the SAME variable that already
+/// builds Reborn's OAuth callback URLs (resolved for that purpose by
+/// `ironclaw_cli`'s `webui_public_base_url_from_env`). Reused deliberately
+/// rather than introducing a second "what is our public host" setting: a
+/// deployment whose OAuth callbacks work is exactly one whose connect link
+/// resolves. Unset (the local-dev default, where Reborn falls back to the
+/// bound listener address) keeps the notice at its static, link-free text
+/// rather than advertising an unreachable loopback URL into a channel.
+const CONNECT_LINK_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
+
+/// Interpret `IRONCLAW_REBORN_WEBUI_BASE_URL` exactly as the OAuth path does
+/// (`ironclaw_cli::commands::serve_sso`'s `non_empty_env` + `normalize_base_url`):
+/// trim whitespace, strip trailing slashes, and treat a value that is empty
+/// afterwards as unset. Without the blank filter, `IRONCLAW_REBORN_WEBUI_BASE_URL=`
+/// in a deployment's `.env` resolves to `Some("")` and the notice advertises the
+/// relative path `/chat?connect=<extension>` into a customer conversation. The OAuth
+/// consumer *fails startup* on a blank value; this consumer has a working
+/// link-free fallback, so it ships dark instead — the two agree on what the
+/// variable means, and differ only in what an unusable value costs.
+fn connect_link_base_url_from_env() -> Option<String> {
+    let raw = std::env::var(CONNECT_LINK_BASE_URL_ENV).ok()?; // silent-ok: optional public-origin env read; unset keeps the notice link-free
+    normalize_connect_link_base_url(&raw)
+}
+
+fn normalize_connect_link_base_url(raw: &str) -> Option<String> {
+    let normalized = raw.trim().trim_end_matches('/');
+    (!normalized.is_empty()).then(|| normalized.to_string())
+}
+
 pub(crate) struct BackendExtensionHostAssemblyInput {
     pub(crate) binder: ExtensionLaneToolBinder,
     pub(crate) native_factories: Vec<Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
@@ -44,6 +73,16 @@ pub(crate) struct BackendExtensionHostAssemblyInput {
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     pub(crate) filesystem: Arc<CompositeRootFilesystem>,
     pub(crate) outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+    /// Linked-account custody over the auth domain's credential service, and
+    /// the per-extension resolver factory built beside it. `None` composes
+    /// fail-closed custody (a deployment without product auth).
+    pub(crate) linked_sessions: Option<Arc<ironclaw_extension_host::LinkedSessionStore>>,
+    pub(crate) linked_accounts: Option<Arc<dyn ironclaw_extension_host::LinkedAccountResolution>>,
+    /// Host-owned per-user delivery registrations, handed to the coordinator
+    /// so a channel with zero of them resolves to "no target" before any
+    /// adapter call (design §8).
+    pub(crate) delivery_registrations:
+        Arc<dyn ironclaw_product_contracts::delivery::DeliveryRegistrationService>,
 }
 
 pub(crate) struct BackendExtensionHostAssembly {
@@ -67,6 +106,7 @@ pub(crate) async fn build_backend_extension_host(
         channel_bindings,
         installation_store,
         admin_configuration_resolver,
+        delivery_registrations,
         resource_governor,
         reserved_capability_ids,
         host_runtime_http_egress,
@@ -74,6 +114,8 @@ pub(crate) async fn build_backend_extension_host(
         deployment_channels,
         filesystem,
         outbound_state,
+        linked_sessions,
+        linked_accounts,
     } = input;
 
     let channel_egress_credentials = Arc::new(
@@ -113,7 +155,7 @@ pub(crate) async fn build_backend_extension_host(
             native_factories,
             channel_adapters: channel_bindings
                 .iter()
-                .map(|binding| (binding.extension_id.clone(), Arc::clone(&binding.adapter)))
+                .map(|binding| (binding.extension_id.clone(), binding.surfaces.clone()))
                 .collect(),
             installation_store: Arc::clone(&installation_store),
             boot_installations,
@@ -124,6 +166,16 @@ pub(crate) async fn build_backend_extension_host(
                 std::time::Duration::from_secs(30),
             ),
             channel_egress_transport: channel_egress_transport.clone(),
+            // A deployment without product auth composes no custody; the
+            // fail-closed shapes are chosen here, at the boundary, so the
+            // host's own dependency struct stays honest about what
+            // production always supplies.
+            linked_sessions: linked_sessions
+                .unwrap_or_else(ironclaw_extension_host::LinkedSessionStore::unavailable),
+            linked_accounts: linked_accounts.unwrap_or_else(|| {
+                Arc::new(ironclaw_extension_host::UnavailableLinkedAccountResolution)
+            }),
+            admin_secrets: Some(Arc::clone(&admin_configuration_resolver)),
         },
     )
     .await;
@@ -163,6 +215,7 @@ pub(crate) async fn build_backend_extension_host(
                 Arc::new(ironclaw_extension_host::IngressReplyContextSource::new(
                     Arc::clone(&ingress.reply_context),
                 )),
+                Arc::clone(&delivery_registrations),
                 ironclaw_assistant::DeliveryRetryPolicy::default(),
             ));
             (Some(coordinator), Some(resolver))
@@ -343,6 +396,7 @@ pub(crate) struct ChannelHostAssemblyWiring {
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) turn_coordinator: Arc<dyn TurnCoordinator>,
     pub(crate) input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
+    pub(crate) llm_config: Option<Arc<ironclaw_operator::RebornLlmConfigService>>,
     pub(crate) approval_interaction: Option<Arc<dyn ApprovalInteractionService>>,
     pub(crate) auth_interaction: Option<Arc<dyn AuthInteractionService>>,
     pub(crate) identity: ironclaw_extension_host::channel_host::ChannelHostIdentity,
@@ -357,6 +411,7 @@ pub(crate) struct RuntimeExtensionHostAssemblyWiring<'a> {
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) turn_coordinator: Arc<dyn TurnCoordinator>,
     pub(crate) input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
+    pub(crate) llm_config: Option<Arc<ironclaw_operator::RebornLlmConfigService>>,
     pub(crate) approval_interaction: Arc<dyn ApprovalInteractionService>,
     pub(crate) auth_interaction: Arc<dyn AuthInteractionService>,
     pub(crate) thread_scope: &'a ThreadScope,
@@ -380,7 +435,13 @@ pub(crate) struct ChannelHostAssemblySource {
     /// Durable outcome record for proactive (trigger-fired) deliveries; the
     /// workflow factory wires it into every per-extension triggered driver.
     pub(crate) triggered_delivery_store: Arc<dyn ironclaw_outbound::TriggeredRunDeliveryStore>,
+    /// The owner-scoped outbound target catalog the background-run notifier
+    /// resolves stored notification-channel ids through at fire time.
+    pub(crate) outbound_delivery_targets:
+        Arc<dyn ironclaw_outbound::OutboundDeliveryTargetProvider>,
     pub(crate) identity_lookup: Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
+    pub(crate) dm_targets:
+        Arc<ironclaw_extension_host::channel_dm_targets::FilesystemChannelDmTargetStore>,
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     pub(crate) channel_config: Arc<ironclaw_extension_host::ChannelConfigService>,
     pub(crate) channel_pairing:
@@ -417,8 +478,11 @@ fn channel_host_source(services: &RebornRuntimeStores) -> Option<ChannelHostAsse
         delivered_gate_routes: Arc::clone(&services.delivered_gate_routes),
         outbound_preferences: Arc::clone(&services.outbound_preferences),
         triggered_delivery_store: Arc::clone(&services.triggered_run_delivery),
+        outbound_delivery_targets: Arc::clone(&services.outbound_delivery_targets)
+            as Arc<dyn ironclaw_outbound::OutboundDeliveryTargetProvider>,
         identity_lookup: Arc::clone(&services.channel_identity_store)
             as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
+        dm_targets: Arc::clone(&services.channel_dm_target_store),
         deployment_channels: Arc::clone(&services.deployment_channels),
         channel_config: Arc::clone(&services.channel_config_service),
         channel_pairing: services.channel_pairing.clone(),
@@ -466,6 +530,7 @@ pub(crate) fn start_channel_host(
         thread_service,
         turn_coordinator,
         input_enqueue,
+        llm_config,
         approval_interaction,
         auth_interaction,
         identity,
@@ -486,7 +551,9 @@ pub(crate) fn start_channel_host(
         delivered_gate_routes,
         outbound_preferences,
         triggered_delivery_store,
+        outbound_delivery_targets,
         identity_lookup,
+        dm_targets,
         deployment_channels,
         channel_config,
         channel_pairing,
@@ -497,6 +564,7 @@ pub(crate) fn start_channel_host(
             outbound_store: Arc::clone(outbound_state),
             route_store: Arc::clone(delivered_gate_routes),
             communication_preferences: Arc::clone(outbound_preferences),
+            delivery_targets: Arc::clone(outbound_delivery_targets),
             project_filesystem: Arc::clone(project_filesystem),
             approval_context,
             blocked_auth_prompts,
@@ -512,6 +580,7 @@ pub(crate) fn start_channel_host(
             turn_coordinator,
             inbound_attachments: Arc::clone(inbound_attachments),
             input_enqueue,
+            llm_config: llm_config.map(|service| service as _),
             approval_interaction,
             auth_interaction,
             identity: ironclaw_assistant::ChannelWorkflowIdentity {
@@ -534,8 +603,10 @@ pub(crate) fn start_channel_host(
             as Arc<dyn ironclaw_product_contracts::channel_workflow::ChannelWorkflowFactory>,
         identity,
         identity_lookup,
+        dm_targets: Some(Arc::clone(dm_targets)),
         channel_pairing: channel_pairing.clone(),
         admin_users,
+        connect_link_base_url: connect_link_base_url_from_env(),
     });
     StartedChannelHost {
         assembly,
@@ -553,6 +624,7 @@ pub(crate) async fn build_runtime_channel_host(
         approval_interaction,
         auth_interaction,
         input_enqueue,
+        llm_config,
         thread_scope,
         actor_user_id,
         auth_challenges,
@@ -585,6 +657,7 @@ pub(crate) async fn build_runtime_channel_host(
             thread_service,
             turn_coordinator,
             input_enqueue,
+            llm_config,
             approval_interaction: Some(approval_interaction),
             auth_interaction: Some(auth_interaction),
             identity,
@@ -603,7 +676,7 @@ pub(crate) async fn build_runtime_channel_host(
                 &binding.extension_id,
                 ironclaw_extension_host::channel_host::ChannelExtras {
                     preference_target_codec: binding.preference_target_codec.clone(),
-                    subject_route_resolver: None,
+                    shared_admission: None,
                     storage_roots: None,
                 },
             )
@@ -618,6 +691,8 @@ pub(crate) async fn build_runtime_channel_host(
                     assembly: Arc::clone(&assembly),
                     channel_config: Arc::clone(&local_runtime.channel_config_service),
                     dm_targets: local_runtime.channel_dm_target_store.clone(),
+                    identity_lookup: Arc::clone(&local_runtime.channel_identity_store)
+                        as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
                     identity: ironclaw_extension_host::channel_outbound_targets::ChannelOutboundTargetIdentity {
                         tenant_id: thread_scope.tenant_id.clone(),
                         agent_id: thread_scope.agent_id.clone(),
@@ -637,4 +712,30 @@ pub(crate) fn start_channel_host_from_stores(
 ) -> Option<Arc<ironclaw_extension_host::channel_host::GenericChannelHostAssembly>> {
     let source = channel_host_source(services)?;
     Some(start_channel_host(&source, wiring).assembly)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_connect_link_base_url;
+
+    /// #7682: a blank or whitespace-only `IRONCLAW_REBORN_WEBUI_BASE_URL`
+    /// (`IRONCLAW_REBORN_WEBUI_BASE_URL=` in a deployment `.env`) must resolve
+    /// to `None`, not `Some("")` — the latter appends the relative link
+    /// "Or connect directly: /chat?connect=<extension>" to a notice posted into a
+    /// customer conversation. Normalization matches the OAuth consumer's.
+    #[test]
+    fn connect_link_base_url_normalization_matches_the_oauth_consumer() {
+        assert_eq!(normalize_connect_link_base_url(""), None);
+        assert_eq!(normalize_connect_link_base_url("   "), None);
+        assert_eq!(normalize_connect_link_base_url("/"), None);
+        assert_eq!(normalize_connect_link_base_url(" / "), None);
+        assert_eq!(
+            normalize_connect_link_base_url(" https://app.example.com/ "),
+            Some("https://app.example.com".to_string())
+        );
+        assert_eq!(
+            normalize_connect_link_base_url("https://app.example.com"),
+            Some("https://app.example.com".to_string())
+        );
+    }
 }

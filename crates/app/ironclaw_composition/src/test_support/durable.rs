@@ -69,7 +69,7 @@ pub async fn open_standalone_approval_settings_stores_for_test(
     storage_root: &std::path::Path,
 ) -> Result<
     (
-        std::sync::Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+        std::sync::Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>,
         std::sync::Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>,
         std::sync::Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,
     ),

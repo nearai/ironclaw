@@ -1,14 +1,17 @@
 use chrono::Utc;
 use ironclaw_assistant::{
-    AuthPromptView, CapabilityActivityStatusView, CapabilityActivityView,
-    CapabilityDisplayPreviewView, FinalReplyView, GatePromptView, ProductOutboundPayload,
-    ProductProjectionItem, ProductProjectionState, ProductWorkSummaryPhase, ProgressKind,
-    ProgressUpdateView, ProjectionCursor, RebornCancelRunResponse, RebornGetRunStateResponse,
-    RebornSubmitTurnResponse,
+    RebornCancelRunResponse, RebornGetRunStateResponse, RebornSubmitTurnResponse,
 };
+use ironclaw_extension_contracts::auth_prompt::AuthPromptView;
 use ironclaw_host_api::{
     ids::{CapabilityId, ExtensionId, InvocationId, ThreadId},
     runtime::RuntimeKind,
+};
+use ironclaw_product_contracts::outbound::{
+    CapabilityActivityStatusView, CapabilityActivityView, CapabilityDisplayPreviewView,
+    FinalReplyView, GatePromptView, ProductOutboundPayload, ProductProjectionItem,
+    ProductProjectionState, ProductWorkSummaryPhase, ProgressKind, ProgressUpdateView,
+    ProjectionCursor,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, EventCursor, RunProfileId, RunProfileVersion, SanitizedFailure, TurnRunId,
@@ -110,6 +113,7 @@ fn auth_prompt() -> AuthPromptView {
         expires_at: None,
         connection: None,
         pairing: None,
+        device_link: None,
     }
 }
 
@@ -161,6 +165,7 @@ fn projection_state() -> ProductProjectionState {
                 id: "message-1".to_string(),
                 run_id: None,
                 body: "hello".to_string(),
+                finalized: false,
             },
             ProductProjectionItem::RunStatus {
                 run_id: run_id(),
@@ -255,7 +260,7 @@ fn webchat_v2_event_schema_has_stable_wire_names() {
         ),
         (
             WebChatV2Event::AuthRequired {
-                prompt: auth_prompt(),
+                prompt: Box::new(auth_prompt()),
             },
             "auth_required",
         ),
@@ -354,7 +359,7 @@ fn outbound_payload_mapping_covers_every_browser_event_variant() {
         ),
         (ProductOutboundPayload::GatePrompt(gate_prompt()), "gate"),
         (
-            ProductOutboundPayload::AuthPrompt(auth_prompt()),
+            ProductOutboundPayload::AuthPrompt(Box::new(auth_prompt())),
             "auth_required",
         ),
         (

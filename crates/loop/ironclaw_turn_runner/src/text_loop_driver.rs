@@ -82,7 +82,9 @@ impl AgentLoopDriver for TextOnlyModelReplyDriver {
                 surface_version: prompt_bundle.surface_version,
                 model_preference: None,
                 fallback_index: 0,
+                iteration: 0,
                 capability_view: None,
+                tool_choice: None,
             })
             .await
             .map_err(|error| map_host_error(HostStage::Model, error))?;
@@ -274,6 +276,10 @@ fn loop_failure_kind_name(kind: LoopFailureKind) -> &'static str {
         LoopFailureKind::InterruptedUnexpectedly => "interrupted_unexpectedly",
         LoopFailureKind::NoProgressDetected => "no_progress_detected",
         LoopFailureKind::PolicyDenied => "policy_denied",
+        LoopFailureKind::GateNotSupported => "gate_not_supported",
+        LoopFailureKind::WallClockLimit => "wall_clock_limit",
+        LoopFailureKind::ModelCallLimit => "model_call_limit",
+        LoopFailureKind::CapabilityInvocationLimit => "capability_invocation_limit",
         // LoopFailureKind is `#[non_exhaustive]`; fail closed if a new variant
         // lands in `ironclaw_turns` ahead of this matcher being updated.
         _ => "driver_bug",

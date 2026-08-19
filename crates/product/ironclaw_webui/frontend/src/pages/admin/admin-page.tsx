@@ -14,9 +14,8 @@ const AdminConfigurationTab = React.lazy(() =>
   }))
 );
 
-export function AdminPage() {
-  // Users and Configuration are the shipped admin tabs in this port;
-  // dashboard/usage analytics stay out of the production bundle.
+export function AdminPage({ threadScrapingEnabled = false }) {
+  // Users and Configuration are the shipped admin tabs in this port.
   const { tab = "users" } = useParams();
   const navigate = useNavigate();
   const [selectedUserId, setSelectedUserId] = React.useState(null);
@@ -35,7 +34,11 @@ export function AdminPage() {
 
   const tabContent = {
     users: selectedUserId
-      ? (<UserDetail userId={selectedUserId} onBack={handleBack} />)
+      ? (<UserDetail
+          userId={selectedUserId}
+          onBack={handleBack}
+          threadScrapingEnabled={threadScrapingEnabled}
+        />)
       : (<AdminUsersTab
           onSelectUser={handleSelectUser}
         />),

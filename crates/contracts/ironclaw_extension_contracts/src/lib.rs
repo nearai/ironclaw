@@ -9,7 +9,7 @@
 //! constructors. It parses no manifests, stores no installations, routes no
 //! ingress, and executes no lifecycle. Those live above it, in
 //! `ironclaw_extension_registry` (records) and `ironclaw_extension_host`
-//! (execution). See `docs/reborn/target-architecture/PROPOSAL.md` §6.1.2 and
+//! (execution). See `docs/internal/reborn/target-architecture/PROPOSAL.md` §6.1.2 and
 //! `families/contracts.md`.
 //!
 //! **Security role (§6.1.2, §12.1a):** this crate is the host↔extension
@@ -26,7 +26,7 @@
 //! policy engine, or workflow.
 //!
 //! Two rules this crate is enforced against, both in
-//! `crates/ironclaw_architecture_tests/tests/`:
+//! `crates/app/ironclaw_architecture_tests/tests/`:
 //!
 //! - **Contracts purity** (§11.2.3, `reborn_dependency_boundaries.rs`): the
 //!   only internal dependency is `ironclaw_host_api`; no framework, driver, or
@@ -42,11 +42,13 @@ pub mod auth_prompt;
 pub mod channel;
 pub mod channel_adapter;
 pub mod channel_identity;
+pub mod device_link;
 pub mod egress;
 pub mod extension;
 pub mod external;
 pub mod hosted_mcp;
 pub mod lifecycle_id;
+pub mod linked_session;
 pub mod memory;
 pub mod preference_target;
 pub mod product_adapter_section;

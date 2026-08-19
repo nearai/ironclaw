@@ -129,7 +129,7 @@ where
     })
 }
 
-fn query_param_is_credential(name: &str) -> bool {
+pub(crate) fn query_param_is_credential(name: &str) -> bool {
     let lower = name.to_lowercase();
 
     if AUTH_QUERY_EXACT.contains(&lower.as_str()) {

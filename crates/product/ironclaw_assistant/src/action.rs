@@ -4,10 +4,12 @@
 //! workflow service. It is keyed by tenant + installation + external event fingerprint
 //! so that retried/duplicated webhook deliveries are idempotent.
 
-use crate::{ProductInboundAck, ProductInboundPayload, ProductRejectionKind};
 use chrono::{DateTime, Utc};
 use ironclaw_product_contracts::action::{
     ActionFingerprintKey, AuthRequestRef, LinkedThreadActionId, ProductActionId, ProductCommandName,
+};
+use ironclaw_product_contracts::inbound::{
+    ProductInboundAck, ProductInboundPayload, ProductRejectionKind,
 };
 use ironclaw_turns::{LoopGateRef, TurnRunId};
 use serde::{Deserialize, Serialize};
@@ -143,10 +145,12 @@ impl ProductInboundAction {
 
 #[cfg(test)]
 mod tests {
-    use crate::{ProductInboundAck, ProductRejection, ProductRejectionKind};
     use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalEventId};
     use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
     use ironclaw_product_contracts::action::SourceBindingKey;
+    use ironclaw_product_contracts::inbound::{
+        ProductInboundAck, ProductRejection, ProductRejectionKind,
+    };
 
     use super::*;
 

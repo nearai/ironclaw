@@ -159,8 +159,29 @@ export async function apiFetch(path, options = {}) {
 
 // --- Threads ---
 
-export function fetchSession() {
-  return apiFetch(`${V2_BASE}/session`);
+// The deployment's authenticated-session channel, learned from
+// `GET /session` (`session_channel_extension_id`). The send path plugs it
+// into the generic session-inbound route; the frontend never hardcodes a
+// channel name. Absent until the session loads — sends fail closed with a
+// clear error rather than guessing a channel.
+let sessionChannelExtensionId = "";
+
+export function setSessionChannelExtensionId(extensionId) {
+  sessionChannelExtensionId = extensionId || "";
+}
+
+/** The deployment's authenticated-session channel id (empty until the
+ * session loads). Generic UI keys per-channel affordances — the session
+ * message route, this browser's notification enrollment — off this value
+ * instead of any hardcoded channel name. */
+export function getSessionChannelExtensionId() {
+  return sessionChannelExtensionId;
+}
+
+export async function fetchSession() {
+  const session = await apiFetch(`${V2_BASE}/session`);
+  setSessionChannelExtensionId(session?.session_channel_extension_id);
+  return session;
 }
 
 export function createThread({ clientActionId: clientId, requestedThreadId, projectId } = {}) {
@@ -371,24 +392,77 @@ export function removeProjectMember({ projectId, userId } = {}) {
   });
 }
 
-// --- Outbound delivery preferences ---
-
-export function getOutboundPreferences() {
-  return apiFetch(`${V2_BASE}/outbound/preferences`);
-}
+// --- Outbound delivery targets + notification channels ---
 
 export function listOutboundDeliveryTargets() {
   return apiFetch(`${V2_BASE}/outbound/targets`);
 }
 
-export function setOutboundPreferences({ finalReplyTargetId, clientActionId: clientId } = {}) {
-  return apiFetch(`${V2_BASE}/outbound/preferences`, {
+export function getNotificationChannels() {
+  return apiFetch(`${V2_BASE}/outbound/notification-channels`);
+}
+
+// `target_ids` is the sole canonical wire name for this full-replace body —
+// no aliases (see CLAUDE.md's wire-contract naming rule).
+//
+// No `targetIds ?? []` default. `RebornSetNotificationChannelsRequest`
+// deliberately omits `#[serde(default)]` on `target_ids` so an omitted field
+// is a 400, never an implicit clear-all — and a client-side default would
+// defeat exactly that guard, because the backend accepts `[]` as a valid,
+// *intentional* full replace. A caller that forgot the argument would wipe
+// every stored notification channel. Fail fast instead, the way the other
+// mutations here reject a missing required argument.
+export function setNotificationChannels({ targetIds } = {}) {
+  if (!Array.isArray(targetIds)) {
+    return Promise.reject(
+      new TypeError("targetIds must be an array of target ids (pass [] to clear)"),
+    );
+  }
+  return apiFetch(`${V2_BASE}/outbound/notification-channels`, {
     method: "POST",
-    body: JSON.stringify({
-      client_action_id: clientId || clientActionId(),
-      final_reply_target_id: finalReplyTargetId ?? null,
-    }),
+    body: JSON.stringify({ target_ids: targetIds }),
   });
+}
+
+// --- Notification setup (generic per-channel enrollment) ---
+//
+// One status/enable/disable surface for every channel, keyed by extension id.
+// The `payload` bodies and the status `detail` are channel-opaque documents
+// only the channel's own client interprets — nothing here names a channel.
+
+export function getNotificationSetupStatus({ extensionId } = {}) {
+  if (!extensionId) {
+    return Promise.reject(new Error("extensionId is required"));
+  }
+  return apiFetch(
+    `${V2_BASE}/channels/${encodeURIComponent(extensionId)}/notifications`,
+  );
+}
+
+export function enableNotificationSetup({ extensionId, payload } = {}) {
+  if (!extensionId) {
+    return Promise.reject(new Error("extensionId is required"));
+  }
+  return apiFetch(
+    `${V2_BASE}/channels/${encodeURIComponent(extensionId)}/notifications/enable`,
+    {
+      method: "POST",
+      body: JSON.stringify({ payload }),
+    },
+  );
+}
+
+export function disableNotificationSetup({ extensionId, payload } = {}) {
+  if (!extensionId) {
+    return Promise.reject(new Error("extensionId is required"));
+  }
+  return apiFetch(
+    `${V2_BASE}/channels/${encodeURIComponent(extensionId)}/notifications/disable`,
+    {
+      method: "POST",
+      body: JSON.stringify({ payload }),
+    },
+  );
 }
 
 // --- Operator logs ---
@@ -466,15 +540,21 @@ export function sendMessage({
   attachments = [],
   clientActionId: clientId,
 }) {
+  if (!sessionChannelExtensionId) {
+    return Promise.reject(
+      new Error("no session channel is configured for this deployment"),
+    );
+  }
   const body = {
     client_action_id: clientId || clientActionId(),
+    thread_id: threadId,
     content,
   };
   if (attachments.length > 0) {
     body.attachments = attachments;
   }
   return apiFetch(
-    `${V2_BASE}/threads/${encodeURIComponent(threadId)}/messages`,
+    `${V2_BASE}/channels/${encodeURIComponent(sessionChannelExtensionId)}/messages`,
     {
       method: "POST",
       body: JSON.stringify(body),

@@ -7,7 +7,10 @@ use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     approval::{canonical_json_v1, sha256_digest_token},
     capability::{CapabilityDescriptionTrust, CapabilityDescriptor, CapabilityGrant, EffectKind},
+    capability_surface::CapabilityIdScope,
     decision::Decision,
+    ids::CapabilityId,
+    messaging::{STANDARD_SCHEMA_REF_PREFIX, resolve_standard_schema_ref},
     resource::ResourceEstimate,
     runtime::RuntimeKind,
     runtime_policy::EffectiveRuntimePolicy,
@@ -25,82 +28,7 @@ use crate::{
 };
 use ironclaw_runtime_policy::plan_capability;
 
-const ALL_RUNTIME_KINDS: &[RuntimeKind] = &[
-    RuntimeKind::Wasm,
-    RuntimeKind::Mcp,
-    RuntimeKind::Script,
-    RuntimeKind::Sandbox,
-    RuntimeKind::FirstParty,
-    RuntimeKind::System,
-];
-
-const ALL_EFFECT_KINDS: &[EffectKind] = &[
-    EffectKind::ReadFilesystem,
-    EffectKind::WriteFilesystem,
-    EffectKind::DeleteFilesystem,
-    EffectKind::Network,
-    EffectKind::UseSecret,
-    EffectKind::ExecuteCode,
-    EffectKind::SpawnProcess,
-    EffectKind::DispatchCapability,
-    EffectKind::ModifyExtension,
-    EffectKind::ModifyApproval,
-    EffectKind::ModifyBudget,
-    EffectKind::ExternalWrite,
-    EffectKind::Financial,
-];
 const VISIBLE_CAPABILITY_AUTHORIZATION_CONCURRENCY: usize = 16;
-
-/// Visibility-only policy applied before authorization estimates are rendered.
-///
-/// This is a narrowing surface policy, not an authority source. A runtime/effect
-/// listed here can still be omitted by missing grants, missing provider trust,
-/// denied trust ceilings, or an authorizer denial. A runtime/effect absent here
-/// is omitted before the authorizer is consulted.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CapabilitySurfacePolicy {
-    /// Runtime kinds that may appear on this projection.
-    ///
-    /// Empty means allow none. Order and duplicates do not affect filtering or
-    /// surface-version fingerprinting.
-    pub allowed_runtimes: Vec<RuntimeKind>,
-    /// Effect ceiling for visible descriptors.
-    ///
-    /// This is strict subset semantics: every effect declared by a capability
-    /// must appear in this list or the capability is omitted. Empty means allow
-    /// none. Order and duplicates do not affect filtering or surface-version
-    /// fingerprinting.
-    pub allowed_effects: Vec<EffectKind>,
-    /// Whether capabilities that require approval may be rendered as askable.
-    ///
-    /// This is informational only. It does not issue approval leases or widen
-    /// direct invocation authority.
-    pub include_requires_approval: bool,
-    /// Maximum visible capabilities returned after filtering, in registry
-    /// order. `Some(0)` returns an empty surface without authorizer calls.
-    pub max_capabilities: Option<usize>,
-}
-
-impl CapabilitySurfacePolicy {
-    pub fn allow_all() -> Self {
-        Self {
-            allowed_runtimes: ALL_RUNTIME_KINDS.to_vec(),
-            allowed_effects: ALL_EFFECT_KINDS.to_vec(),
-            include_requires_approval: true,
-            max_capabilities: None,
-        }
-    }
-
-    fn allows_runtime(&self, runtime: RuntimeKind) -> bool {
-        self.allowed_runtimes.contains(&runtime)
-    }
-
-    fn allows_effects(&self, effects: &[EffectKind]) -> bool {
-        effects
-            .iter()
-            .all(|effect| self.allowed_effects.contains(effect))
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VisibleCapabilityAccess {
@@ -122,8 +50,9 @@ pub struct VisibleCapability {
     /// Redacted declarative capability descriptor from the extension registry.
     pub descriptor: CapabilityDescriptor,
     /// Provenance-backed trust for the model-visible description. Unknown
-    /// sources remain untrusted; only registry-installed packages cross the
-    /// signature/digest-verifying catalog boundary.
+    /// sources remain untrusted; registry-installed packages cross the
+    /// signature/digest-verifying catalog boundary, and host-bundled
+    /// packages are compiled or shipped with the binary itself.
     pub description_trust: CapabilityDescriptionTrust,
     /// Current visibility status for this context and policy.
     pub access: VisibleCapabilityAccess,
@@ -177,6 +106,7 @@ impl<'a> CapabilityCatalog<'a> {
                 break;
             }
             if !self.is_model_visible(descriptor)
+                || !request.policy.permits_capability_id(&descriptor.id)
                 || !request.policy.allows_runtime(descriptor.runtime)
                 || !request.policy.allows_effects(&descriptor.effects)
             {
@@ -217,6 +147,7 @@ impl<'a> CapabilityCatalog<'a> {
             .capabilities()
             .filter(|descriptor| {
                 self.is_model_visible(descriptor)
+                    && request.policy.permits_capability_id(&descriptor.id)
                     && request.policy.allows_runtime(descriptor.runtime)
                     && request.policy.allows_effects(&descriptor.effects)
                     && plan_capability(descriptor, self.runtime_policy).is_ok()
@@ -318,13 +249,21 @@ impl<'a> CapabilityCatalog<'a> {
             .get_extension(&descriptor.provider)
             .map(|package| package.manifest.source)
         {
-            Some(ManifestSource::RegistryInstalled) => CapabilityDescriptionTrust::VerifiedCatalog,
-            Some(
-                ManifestSource::HostBundled
-                | ManifestSource::InstalledLocal
-                | ManifestSource::UserRegistered,
-            )
-            | None => CapabilityDescriptionTrust::Untrusted,
+            // Host-bundled manifests are compiled or shipped with the binary —
+            // the only source eligible for effective FirstParty/System trust
+            // (`ManifestSource` docs) — so their repo-authored descriptions
+            // cross the verified boundary exactly like signature/digest-
+            // verified catalog installs. Leaving them untrusted routes
+            // compiled-in text through the strict prompt-text denylist, which
+            // silently omitted `builtin.extension_register_hosted_mcp` from
+            // every model prompt ("browser authorization-code flow" matched
+            // the "authorization" credential pattern).
+            Some(ManifestSource::HostBundled | ManifestSource::RegistryInstalled) => {
+                CapabilityDescriptionTrust::VerifiedCatalog
+            }
+            Some(ManifestSource::InstalledLocal | ManifestSource::UserRegistered) | None => {
+                CapabilityDescriptionTrust::Untrusted
+            }
         }
     }
 
@@ -385,6 +324,32 @@ impl<'a> CapabilityCatalog<'a> {
                         descriptor.id, reference
                     ))
                 })?;
+            return Ok(descriptor);
+        }
+
+        // A standard-bound tool's schema lives in the compiled-in messaging
+        // registry (`ironclaw_host_api::messaging`), the same always-on lane
+        // as builtin/native-memory above — but gated on the ref itself, not
+        // on `descriptor.provider`, since any extension can bind a
+        // `standard_op`. Must run before the package-asset read below: a
+        // `standard:` ref can never exist on a package's filesystem root, so
+        // falling through would hit the filesystem for a path that can never
+        // resolve there instead of failing closed with the ref named.
+        if let Some(schema_ref) = reference.as_deref()
+            && schema_ref.starts_with(STANDARD_SCHEMA_REF_PREFIX)
+        {
+            let schema = resolve_standard_schema_ref(schema_ref).ok_or_else(|| {
+                HostRuntimeError::invalid_request(format!(
+                    "capability {} references unknown standard schema {schema_ref}",
+                    descriptor.id
+                ))
+            })?;
+            descriptor.parameters_schema = serde_json::from_str(schema).map_err(|error| {
+                HostRuntimeError::invalid_request(format!(
+                    "capability {} standard schema {schema_ref} must contain valid JSON: {error}",
+                    descriptor.id
+                ))
+            })?;
             return Ok(descriptor);
         }
 
@@ -484,6 +449,7 @@ fn surface_version(
         "surface_kind": request.surface_kind.as_str(),
         "context": context_payload,
         "policy": {
+            "capability_ids": canonical_capability_id_scope(&request.policy.capability_ids),
             "allowed_runtimes": canonical_runtime_kinds(&request.policy.allowed_runtimes),
             "allowed_effects": canonical_effect_kinds(&request.policy.allowed_effects),
             "include_requires_approval": request.policy.include_requires_approval,
@@ -496,6 +462,19 @@ fn surface_version(
     let bytes = serde_json::to_vec(&canonical)
         .map_err(|error| HostRuntimeError::invalid_request(error.to_string()))?;
     CapabilitySurfaceVersion::new(sha256_digest_token(&bytes))
+}
+
+fn canonical_capability_id_scope(scope: &CapabilityIdScope) -> Value {
+    match scope {
+        CapabilityIdScope::Only(ids) => json!({
+            "kind": "only",
+            "ids": ids.iter().map(CapabilityId::as_str).collect::<Vec<_>>(),
+        }),
+        CapabilityIdScope::AllExcept(ids) => json!({
+            "kind": "all_except",
+            "ids": ids.iter().map(CapabilityId::as_str).collect::<Vec<_>>(),
+        }),
+    }
 }
 
 fn context_version_payload(request: &VisibleCapabilityRequest) -> Result<Value, HostRuntimeError> {
@@ -636,6 +615,7 @@ mod tests {
     use ironclaw_authorization::GrantAuthorizer;
     use ironclaw_host_api::{
         capability::PermissionMode,
+        capability_surface::CapabilitySurfacePolicy,
         ids::{CapabilityId, ExtensionId},
         runtime::TrustClass,
         runtime_policy::{
@@ -686,6 +666,7 @@ mod tests {
             max_egress_bytes: None,
             resource_profile: None,
             origin_gate_matrix: None,
+            standard_op: None,
         };
         let registry = ExtensionRegistry::new();
         let runtime_policy = test_runtime_policy();
@@ -728,6 +709,7 @@ mod tests {
             max_egress_bytes: None,
             resource_profile: None,
             origin_gate_matrix: None,
+            standard_op: None,
         };
         let registry = ExtensionRegistry::new();
         let runtime_policy = test_runtime_policy();
@@ -744,6 +726,91 @@ mod tests {
         assert!(
             matches!(error, HostRuntimeError::InvalidRequest { ref reason }
                 if reason.contains("must publish from an input schema ref")),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    /// Standard-bound descriptors resolve from the compiled-in messaging
+    /// registry regardless of which extension owns them, and never touch the
+    /// filesystem/package root: this `CapabilityCatalog` has an empty
+    /// registry and no `.with_filesystem(...)` call, so a fallthrough to the
+    /// package-asset path would fail rather than resolve.
+    #[tokio::test]
+    async fn standard_messaging_schema_ref_resolves_from_registry() {
+        let descriptor = CapabilityDescriptor {
+            id: CapabilityId::new("zeta.send_message").unwrap(),
+            provider: ExtensionId::new("zeta").unwrap(),
+            runtime: RuntimeKind::Wasm,
+            trust_ceiling: TrustClass::UserTrusted,
+            description: "send a standard message".to_string(),
+            parameters_schema: json!({"$ref": "standard:messaging/send_message.input.v1"}),
+            effects: vec![EffectKind::Network],
+            default_permission: PermissionMode::Allow,
+            runtime_credentials: Vec::new(),
+            network_targets: Vec::new(),
+            max_egress_bytes: None,
+            resource_profile: None,
+            origin_gate_matrix: None,
+            standard_op: None,
+        };
+        let registry = ExtensionRegistry::new();
+        let runtime_policy = test_runtime_policy();
+        let surface_version = CapabilitySurfaceVersion::new("surface-v1").unwrap();
+        let authorizer = GrantAuthorizer;
+        let catalog =
+            CapabilityCatalog::new(&registry, &authorizer, &surface_version, &runtime_policy);
+
+        let resolved = catalog
+            .surface_descriptor(&descriptor)
+            .await
+            .expect("standard schema ref resolves without a filesystem or package root");
+
+        let properties = resolved
+            .parameters_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .expect("resolved schema has properties");
+        assert!(properties.contains_key("conversation"));
+        assert!(properties.contains_key("text"));
+    }
+
+    /// An unresolvable `standard:` ref (typo, reserved op) must fail closed
+    /// the same way a missing package-asset schema does today — never a
+    /// silent fallthrough to the package-asset path, which can never find a
+    /// `standard:` ref on disk.
+    #[tokio::test]
+    async fn unknown_standard_ref_fails_closed() {
+        let descriptor = CapabilityDescriptor {
+            id: CapabilityId::new("zeta.bogus").unwrap(),
+            provider: ExtensionId::new("zeta").unwrap(),
+            runtime: RuntimeKind::Wasm,
+            trust_ceiling: TrustClass::UserTrusted,
+            description: "bogus standard-bound descriptor".to_string(),
+            parameters_schema: json!({"$ref": "standard:messaging/bogus.input.v1"}),
+            effects: vec![EffectKind::Network],
+            default_permission: PermissionMode::Allow,
+            runtime_credentials: Vec::new(),
+            network_targets: Vec::new(),
+            max_egress_bytes: None,
+            resource_profile: None,
+            origin_gate_matrix: None,
+            standard_op: None,
+        };
+        let registry = ExtensionRegistry::new();
+        let runtime_policy = test_runtime_policy();
+        let surface_version = CapabilitySurfaceVersion::new("surface-v1").unwrap();
+        let authorizer = GrantAuthorizer;
+        let catalog =
+            CapabilityCatalog::new(&registry, &authorizer, &surface_version, &runtime_policy);
+
+        let error = catalog
+            .surface_descriptor(&descriptor)
+            .await
+            .expect_err("unresolvable standard ref must fail closed, not fall through");
+
+        assert!(
+            matches!(error, HostRuntimeError::InvalidRequest { ref reason }
+                if reason.contains("standard:messaging/bogus.input.v1")),
             "unexpected error: {error:?}"
         );
     }

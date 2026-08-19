@@ -6,26 +6,10 @@ import argparse
 import json
 import re
 import subprocess
-import sys
 from collections.abc import Callable
 from pathlib import Path
 
 import tomllib
-
-# This script is invoked from a "release-tools" checkout while it judges a
-# separate "candidate" checkout (see .github/workflows/cut-ironclaw-release.yml
-# and _manifest_version below), so — like scripts/ci/regression-test-check.py —
-# an import failure must say which file is missing rather than dump a
-# traceback with no actionable next step.
-sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
-try:
-    from crate_tree import CrateTreeError, crate_directory  # noqa: E402
-except ImportError as error:  # pragma: no cover - deployment error, not logic
-    raise SystemExit(
-        "cut_ironclaw_release: cannot import scripts/ci/lib/crate_tree.py "
-        f"({error}). The candidate's crate manifest is resolved through the "
-        "crate inventory and this script will not run without it."
-    ) from error
 
 NUMERIC_IDENTIFIER = r"(?:0|[1-9][0-9]*)"
 PRERELEASE_IDENTIFIER = r"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
@@ -37,6 +21,7 @@ VERSION_PATTERN = re.compile(
 )
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 MAX_ANNOTATED_TAG_DEPTH = 8
+SHIPPING_PACKAGE_NAME = "ironclaw"
 
 
 class ReleaseTagError(RuntimeError):
@@ -155,6 +140,36 @@ class GitHubTags:
             raise ReleaseTagError(f"failed to create {tag}: {result.stderr.strip()}")
 
 
+def ensure_stable_changelog_entry(candidate_root: Path, version: str) -> None:
+    """Refuse a stable cut whose candidate `docs/changelog.mdx` has no
+    `<Update description="vX.Y.Z">` entry. Prerelease cuts are exempt;
+    malformed versions are left for `ensure_release_tag` to reject.
+    """
+    if VERSION_PATTERN.fullmatch(version) is None or "-" in version:
+        return
+    changelog = candidate_root / "docs" / "changelog.mdx"
+    try:
+        text = changelog.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ReleaseTagError(
+            f"stable release {version} requires docs/changelog.mdx in the "
+            f"candidate checkout, which cannot be read: {error}"
+        ) from error
+    # Must be the attribute of a real <Update> tag: prose mentions,
+    # rc-labeled entries, and lookalike attributes on other elements
+    # (data-description=…) must not satisfy the stable gate.
+    entry = re.compile(rf'<Update\b[^>]*\sdescription="v{re.escape(version)}"')
+    if entry.search(text) is None:
+        raise ReleaseTagError(
+            f"docs/changelog.mdx has no entry for v{version}. Land an "
+            f'<Update description="v{version}"> entry on main before the '
+            "Monday cut so the candidate inherits it; if the branch is "
+            "already cut, add the entry there and cherry-pick it to main so "
+            "the next candidate keeps it "
+            "(docs/internal/weekly-release-strategy.md, Monday checklist)."
+        )
+
+
 def _checked_out_sha(candidate_root: Path) -> str:
     return subprocess.run(
         ["git", "rev-parse", "HEAD^{commit}"],
@@ -166,22 +181,75 @@ def _checked_out_sha(candidate_root: Path) -> str:
 
 
 def _manifest_version(candidate_root: Path) -> str:
-    # Resolved by crate NAME through the shared inventory
-    # (scripts/ci/lib/crate_tree.py) against the CANDIDATE checkout, not a
-    # literal `crates/ironclaw_cli` path — the target-architecture
-    # family move (PROPOSAL §5) would otherwise make this raise FileNotFoundError
-    # (or, worse, silently resolve nothing) once the candidate commit has moved
-    # past the flat layout (docs/reborn/target-architecture/CHECKLIST.md WS10).
+    # Resolve the shipping Cargo PACKAGE through Cargo's authoritative
+    # workspace membership. Directory names are not a stable release contract:
+    # supported release branches use `ironclaw_reborn_cli`, while main uses
+    # `app/ironclaw_cli` after the target-architecture move. A filesystem scan
+    # is insufficient because it can include manifests cargo-dist will ignore.
+    candidate_root = candidate_root.resolve()
     try:
-        crate_dir = crate_directory("ironclaw_cli", candidate_root)
-    except CrateTreeError as error:
+        metadata_result = subprocess.run(
+            ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+            cwd=candidate_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
         raise ReleaseTagError(
-            "cannot resolve the ironclaw_cli crate in the candidate "
-            f"checkout: {error}"
+            f"cannot inventory Cargo workspace in the candidate checkout: {error}"
         ) from error
-    manifest = candidate_root / crate_dir / "Cargo.toml"
-    with manifest.open("rb") as manifest_file:
-        return str(tomllib.load(manifest_file)["package"]["version"])
+    if metadata_result.returncode != 0:
+        raise ReleaseTagError(
+            "cannot inventory Cargo workspace in the candidate checkout: "
+            f"{metadata_result.stderr.strip()}"
+        )
+    try:
+        metadata = json.loads(metadata_result.stdout)
+        workspace_members = set(metadata["workspace_members"])
+        packages = metadata["packages"]
+    except (json.JSONDecodeError, KeyError, TypeError) as error:
+        raise ReleaseTagError(
+            f"cargo metadata returned an invalid workspace inventory: {error}"
+        ) from error
+    if not isinstance(packages, list):
+        raise ReleaseTagError("cargo metadata returned a non-list package inventory")
+
+    matches: list[tuple[Path, dict[str, object]]] = []
+    for metadata_package in packages:
+        if (
+            not isinstance(metadata_package, dict)
+            or metadata_package.get("id") not in workspace_members
+        ):
+            continue
+        manifest_path = metadata_package.get("manifest_path")
+        if not isinstance(manifest_path, str):
+            raise ReleaseTagError("candidate workspace package has no manifest path")
+        manifest = Path(manifest_path)
+        try:
+            with manifest.open("rb") as manifest_file:
+                document = tomllib.load(manifest_file)
+        except (OSError, tomllib.TOMLDecodeError) as error:
+            raise ReleaseTagError(
+                f"cannot read candidate manifest {manifest}: {error}"
+            ) from error
+        package = document.get("package")
+        if isinstance(package, dict) and package.get("name") == SHIPPING_PACKAGE_NAME:
+            matches.append((manifest, package))
+
+    if len(matches) != 1:
+        paths = [str(manifest.relative_to(candidate_root)) for manifest, _ in matches]
+        raise ReleaseTagError(
+            "expected exactly one candidate workspace package named "
+            f"{SHIPPING_PACKAGE_NAME!r}, "
+            f"found {len(matches)}: {paths}"
+        )
+
+    manifest, package = matches[0]
+    version = package.get("version")
+    if not isinstance(version, str):
+        raise ReleaseTagError(f"candidate package manifest {manifest} has no version")
+    return version
 
 
 def main() -> int:
@@ -192,6 +260,7 @@ def main() -> int:
     parser.add_argument("--repository", required=True)
     args = parser.parse_args()
 
+    ensure_stable_changelog_entry(args.candidate_root, args.version)
     tags = GitHubTags(args.repository)
     message = ensure_release_tag(
         requested_version=args.version,

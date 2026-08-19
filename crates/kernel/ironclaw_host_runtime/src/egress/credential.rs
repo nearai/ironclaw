@@ -1,3 +1,4 @@
+use base64::Engine;
 use ironclaw_host_api::{
     http::{
         RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
@@ -9,7 +10,10 @@ use ironclaw_host_api::{
 use ironclaw_network::is_rfc3986_unreserved_segment;
 use ironclaw_safety::redaction_values_for_secret;
 use ironclaw_secrets::{SecretMaterial, SecretStoreError, SecretStorePort};
-use secrecy::{ExposeSecret, zeroize::Zeroize};
+use secrecy::{
+    ExposeSecret,
+    zeroize::{Zeroize, Zeroizing},
+};
 use std::sync::LazyLock;
 
 use crate::obligations::RuntimeSecretInjectionStore;
@@ -163,14 +167,21 @@ where
         // consume raw bytes, but the cache itself never holds a non-zeroizing
         // copy.
         let plaintext = value.expose_secret();
-        if let Err(error) =
-            apply_credential_injection(request, &mut parsed_url, &injection.target, plaintext)
-        {
-            restore_staged_secrets(secret_injections, request, &mut credential_materials);
-            request.credential_injections = credential_injections;
-            return Err(error);
-        }
+        let derived_redaction_values = match apply_credential_injection(
+            request,
+            &mut parsed_url,
+            &injection.target,
+            plaintext,
+        ) {
+            Ok(values) => values,
+            Err(error) => {
+                restore_staged_secrets(secret_injections, request, &mut credential_materials);
+                request.credential_injections = credential_injections;
+                return Err(error);
+            }
+        };
         redaction_values.extend(redaction_values_for_secret(plaintext));
+        redaction_values.extend(derived_redaction_values);
     }
     if let Some(url) = parsed_url {
         request.url = url.to_string();
@@ -378,12 +389,45 @@ fn apply_credential_injection(
     parsed_url: &mut Option<url::Url>,
     target: &RuntimeCredentialTarget,
     value: &str,
-) -> Result<(), RuntimeHttpEgressError> {
+) -> Result<Vec<String>, RuntimeHttpEgressError> {
     target
         .validate_declaration()
         .map_err(|_| RuntimeHttpEgressError::Credential {
             reason: "credential injection target is invalid".to_string(),
         })?;
+    // Every injection kind attaches a secret to the outbound request, so every
+    // one of them needs TLS — this used to be checked for `PathPlaceholder`
+    // alone, leaving `Header`, `QueryParam` and `BodyJsonPointer` free to put a
+    // bearer token on a plaintext `http://` URL (#7144). Transport
+    // confidentiality rested entirely on upstream validators; the manifest
+    // audience gate does reject non-https for WASM/MCP, but
+    // `host_port::stage_credentials` performs no audience match at all, so
+    // nothing guaranteed it here. This is the point that attaches the
+    // credential, so this is where it fails closed.
+    //
+    // One exception, ruled 2026-08-05 (PROPOSAL §12.13 D-R): a **literal
+    // loopback host**, decided by the same `is_loopback_host` predicate that
+    // `validate_trace_commons_ingest_url` and the Trace Commons onboarding
+    // invite already trust for exactly this class of call. Local-first
+    // standalone deployments run credentialed services on `127.0.0.1` (the
+    // Trace Commons agent path mints its login link through this chokepoint),
+    // and traffic that never leaves the host has no interception surface for
+    // TLS to defend against. The carve-out is literal loopback only — the
+    // predicate does no DNS resolution, so a hostname that merely *resolves*
+    // to loopback does not qualify — and the extension's declared egress
+    // allowlist still bounds which hosts a credential can reach at all.
+    {
+        let url = parsed_request_url(&request.url, parsed_url)?;
+        let literal_loopback = url
+            .host_str()
+            .is_some_and(ironclaw_trace_commons::onboarding::invite::is_loopback_host);
+        if url.scheme() != "https" && !literal_loopback {
+            return Err(RuntimeHttpEgressError::Credential {
+                reason: "credential injection requires HTTPS (or a literal loopback host)"
+                    .to_string(),
+            });
+        }
+    }
     match target {
         RuntimeCredentialTarget::Header { name, prefix } => {
             let injected = match prefix {
@@ -395,7 +439,21 @@ fn apply_credential_injection(
                     reason: "credential injection header value is invalid".to_string(),
                 });
             }
-            request.headers.push((name.clone(), injected));
+            push_injected_header(request, name, injected)?;
+        }
+        RuntimeCredentialTarget::Basic { username } => {
+            if value.chars().any(char::is_control) {
+                return Err(RuntimeHttpEgressError::Credential {
+                    reason: "credential injection basic secret is invalid".to_string(),
+                });
+            }
+            let joined = Zeroizing::new(format!("{username}:{value}"));
+            let encoded = base64::engine::general_purpose::STANDARD.encode(joined.as_bytes());
+            let authorization = format!("Basic {encoded}");
+            push_injected_header(request, "Authorization", authorization.clone())?;
+            let mut derived_redaction_values = redaction_values_for_secret(&encoded);
+            derived_redaction_values.extend(redaction_values_for_secret(&authorization));
+            return Ok(derived_redaction_values);
         }
         RuntimeCredentialTarget::QueryParam { name } => {
             let url = parsed_request_url(&request.url, parsed_url)?;
@@ -408,11 +466,6 @@ fn apply_credential_injection(
                 });
             }
             let url = parsed_request_url(&request.url, parsed_url)?;
-            if url.scheme() != "https" {
-                return Err(RuntimeHttpEgressError::Credential {
-                    reason: "credential injection path placeholder requires HTTPS".to_string(),
-                });
-            }
             let Some(_) = url.path_segments() else {
                 return Err(RuntimeHttpEgressError::Credential {
                     reason: "credential injection target URL has no path segments".to_string(),
@@ -500,7 +553,47 @@ fn apply_credential_injection(
                     reason: "credential injection body did not re-serialize".to_string(),
                 })?;
         }
+        RuntimeCredentialTarget::VapidAuthorization => {
+            let now_unix_seconds = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .map_err(|_| RuntimeHttpEgressError::Credential {
+                    reason: "system clock is before the Unix epoch".to_string(),
+                })?;
+            let url = parsed_request_url(&request.url, parsed_url)?;
+            let header_value =
+                super::vapid::vapid_authorization_header(value, url, now_unix_seconds).map_err(
+                    |error| RuntimeHttpEgressError::Credential {
+                        reason: error.sanitized_reason().to_string(),
+                    },
+                )?;
+            push_injected_header(request, "authorization", header_value.clone())?;
+            return Ok(redaction_values_for_secret(&header_value));
+        }
     }
+    Ok(Vec::new())
+}
+
+/// Push an injected header, rejecting the request when a header with the same
+/// name (case-insensitive) already exists — either supplied by the caller or
+/// injected by an earlier credential. A proxy or origin may select either of
+/// two colliding `Authorization` fields, so the request could execute under a
+/// different identity than the credential the caller approved.
+fn push_injected_header(
+    request: &mut RuntimeHttpEgressRequest,
+    name: &str,
+    value: String,
+) -> Result<(), RuntimeHttpEgressError> {
+    if request
+        .headers
+        .iter()
+        .any(|(existing, _)| existing.eq_ignore_ascii_case(name))
+    {
+        return Err(RuntimeHttpEgressError::Credential {
+            reason: format!("credential injection header '{name}' duplicates an existing header"),
+        });
+    }
+    request.headers.push((name.to_string(), value));
     Ok(())
 }
 
@@ -842,6 +935,42 @@ mod tests {
         ) -> Result<SecretMetadata, SecretStoreError> {
             Self::yield_to_tokio().await;
             self.inner.put(scope, handle, material, expires_at).await
+        }
+
+        async fn put_versioned(
+            &self,
+            scope: ResourceScope,
+            handle: SecretHandle,
+            material: SecretMaterial,
+            expires_at: Option<Timestamp>,
+            expected: ironclaw_secrets::SecretCasExpectation,
+        ) -> Result<ironclaw_secrets::SecretCasWriteOutcome, SecretStoreError> {
+            Self::yield_to_tokio().await;
+            self.inner
+                .put_versioned(scope, handle, material, expires_at, expected)
+                .await
+        }
+
+        async fn read_versioned(
+            &self,
+            scope: &ResourceScope,
+            handle: &SecretHandle,
+        ) -> Result<Option<ironclaw_secrets::VersionedSecretMaterial>, SecretStoreError> {
+            Self::yield_to_tokio().await;
+            self.inner.read_versioned(scope, handle).await
+        }
+
+        async fn put_if_absent(
+            &self,
+            scope: ResourceScope,
+            handle: SecretHandle,
+            material: SecretMaterial,
+            expires_at: Option<Timestamp>,
+        ) -> Result<bool, SecretStoreError> {
+            Self::yield_to_tokio().await;
+            self.inner
+                .put_if_absent(scope, handle, material, expires_at)
+                .await
         }
 
         async fn metadata(

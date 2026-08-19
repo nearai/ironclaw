@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     marker::PhantomData,
     panic::AssertUnwindSafe,
     sync::{Arc, Mutex, MutexGuard},
@@ -33,12 +33,14 @@ use super::{
     WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost,
     WitToolRuntime, WitToolRuntimeConfig, plan_capability, runtime_http_egress,
 };
+use crate::obligations::RuntimeSecretInjectionStore;
 use crate::{
     FirstPartyCapabilityError,
     latency::{
         RuntimeLatencyFields, RuntimeLatencyMetrics, started_at as latency_started_at,
         trace_runtime_error, trace_runtime_ok,
     },
+    services::wasm_secrets::StagedWasmHostSecrets,
 };
 
 /// Per-invocation execution request handed to a runtime lane.
@@ -482,10 +484,26 @@ where
     }
 }
 
+/// Upper bound on reservations awaiting a retried release.
+///
+/// A release fails only when the governor's backend is unavailable, which is
+/// also when reservations pile up fastest — the queue is bounded so a wedged
+/// backend cannot grow it without limit. Dropping the oldest entry costs one
+/// leaked hold, the same outcome as before the queue existed.
+const MAX_DEFERRED_RESERVATION_RELEASES: usize = 64;
+
 #[derive(Clone)]
 pub(super) struct FirstPartyRuntimeAdapter {
     registry: Arc<FirstPartyCapabilityRegistry>,
     invocation_services: Arc<dyn InvocationServicesResolver>,
+    /// Reservations whose release failed and must be retried.
+    ///
+    /// A failed release used to be logged and forgotten, leaking the hold
+    /// permanently — the durable `Reserve` delta replays as `Active` after
+    /// restart and nothing reclaims it (issue #7714). Retrying on the next
+    /// dispatch reuses the lifecycle seam this adapter already has instead of
+    /// adding a background task.
+    deferred_releases: Arc<Mutex<VecDeque<ResourceReservationId>>>,
 }
 
 impl FirstPartyRuntimeAdapter {
@@ -496,6 +514,80 @@ impl FirstPartyRuntimeAdapter {
         Self {
             registry,
             invocation_services,
+            deferred_releases: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
+    /// Queues a reservation whose release failed, dropping the oldest entry
+    /// when the queue is full.
+    fn defer_release(&self, reservation_id: ResourceReservationId) {
+        let Ok(mut deferred) = self.deferred_releases.lock() else {
+            tracing::debug!(
+                reservation_id = %reservation_id,
+                "deferred reservation release queue poisoned; reservation leaked"
+            );
+            return;
+        };
+        deferred.push_back(reservation_id);
+        while deferred.len() > MAX_DEFERRED_RESERVATION_RELEASES {
+            if let Some(dropped) = deferred.pop_front() {
+                tracing::debug!(
+                    reservation_id = %dropped,
+                    queue_capacity = MAX_DEFERRED_RESERVATION_RELEASES,
+                    "deferred reservation release queue full; oldest reservation dropped"
+                );
+            }
+        }
+    }
+
+    /// Releases a prepared reservation, queueing it for retry when the
+    /// release fails.
+    ///
+    /// Every cleanup path that abandons a prepared reservation must go through
+    /// here. Logging the failure and continuing leaves the reservation held
+    /// with nothing to reclaim it, which is the permanent capacity leak in
+    /// issue #7714.
+    fn release_or_defer<G>(&self, governor: &G, reservation_id: ResourceReservationId)
+    where
+        G: ResourceGovernor + ?Sized,
+    {
+        if let Err(error) = governor.release(reservation_id) {
+            tracing::warn!(
+                reservation_id = %reservation_id,
+                error = %error,
+                "failed to release prepared first-party reservation; deferring retry"
+            );
+            self.defer_release(reservation_id);
+        }
+    }
+
+    /// Retries every queued release once, re-queueing the ones that fail again.
+    fn retry_deferred_releases<G>(&self, governor: &G)
+    where
+        G: ResourceGovernor,
+    {
+        let pending = match self.deferred_releases.lock() {
+            Ok(mut deferred) => std::mem::take(&mut *deferred),
+            Err(_) => {
+                tracing::debug!("deferred reservation release queue poisoned; skipping retry");
+                return;
+            }
+        };
+        for reservation_id in pending {
+            match governor.release(reservation_id) {
+                Ok(_) => tracing::debug!(
+                    reservation_id = %reservation_id,
+                    "released deferred first-party resource reservation"
+                ),
+                Err(error) => {
+                    tracing::debug!(
+                        reservation_id = %reservation_id,
+                        error = %error,
+                        "deferred first-party resource reservation release failed again"
+                    );
+                    self.defer_release(reservation_id);
+                }
+            }
         }
     }
 }
@@ -522,16 +614,13 @@ where
         let dispatch_started_at = latency_started_at();
         let used_prepared_reservation = request.resource_reservation.is_some();
         tracing::debug!("first-party runtime adapter dispatch started");
+        // Reservations whose release failed on an earlier dispatch get their
+        // retry here, on the same governor that holds them.
+        self.retry_deferred_releases(request.governor);
         let lookup_started_at = latency_started_at();
         let Some(handler) = self.registry.get(request.capability_id) else {
-            if let Some(reservation) = request.resource_reservation
-                && let Err(error) = request.governor.release(reservation.id)
-            {
-                tracing::warn!(
-                    reservation_id = %reservation.id,
-                    error = %error,
-                    "failed to release prepared resource reservation after missing first-party handler"
-                );
+            if let Some(reservation) = request.resource_reservation {
+                self.release_or_defer(request.governor, reservation.id);
             }
             tracing::debug!("first-party runtime adapter missing handler");
             trace_first_party_stage_and_dispatch_error(
@@ -565,7 +654,7 @@ where
                     "first-party runtime adapter policy planning failed"
                 );
                 if let Some(reservation) = &request.resource_reservation {
-                    release_first_party_reservation(request.governor, reservation.id);
+                    self.release_or_defer(request.governor, reservation.id);
                 }
                 trace_first_party_stage_and_dispatch_error(
                     "plan_capability",
@@ -609,7 +698,7 @@ where
                     "first-party runtime adapter service resolution failed"
                 );
                 if let Some(reservation) = &request.resource_reservation {
-                    release_first_party_reservation(request.governor, reservation.id);
+                    self.release_or_defer(request.governor, reservation.id);
                 }
                 trace_first_party_stage_and_dispatch_error(
                     "resolve_services",
@@ -857,6 +946,7 @@ where
                         error = %release_error,
                         "failed to release first-party resource reservation after reconcile failure"
                     );
+                    self.defer_release(reconcile_id);
                 }
                 trace_first_party_stage_and_dispatch_error(
                     "reconcile_resources",
@@ -902,6 +992,7 @@ pub(super) struct WasmRuntimeAdapter {
     network_policy_store: Arc<NetworkObligationPolicyStore>,
     runtime_http_egress: SharedRuntimeHttpEgress,
     credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
+    secret_injections: Arc<RuntimeSecretInjectionStore>,
     prepared: Mutex<HashMap<String, Arc<PreparedWitTool>>>,
 }
 
@@ -912,6 +1003,7 @@ impl WasmRuntimeAdapter {
         network_policy_store: Arc<NetworkObligationPolicyStore>,
         runtime_http_egress: SharedRuntimeHttpEgress,
         credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
+        secret_injections: Arc<RuntimeSecretInjectionStore>,
     ) -> Self {
         Self {
             runtime,
@@ -919,6 +1011,7 @@ impl WasmRuntimeAdapter {
             network_policy_store,
             runtime_http_egress,
             credential_provider,
+            secret_injections,
             prepared: Mutex::new(HashMap::new()),
         }
     }
@@ -929,6 +1022,7 @@ impl WasmRuntimeAdapter {
         network_policy_store: Arc<NetworkObligationPolicyStore>,
         runtime_http_egress: SharedRuntimeHttpEgress,
         credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
+        secret_injections: Arc<RuntimeSecretInjectionStore>,
     ) -> Result<Self, WasmError> {
         Ok(Self::new(
             WitToolRuntime::new(config)?,
@@ -936,6 +1030,7 @@ impl WasmRuntimeAdapter {
             network_policy_store,
             runtime_http_egress,
             credential_provider,
+            secret_injections,
         ))
     }
 
@@ -949,16 +1044,32 @@ impl WasmRuntimeAdapter {
     }
 
     fn host_for_scope(&self, scope: &ResourceScope, capability_id: &CapabilityId) -> WitToolHost {
+        // Per-invocation `secret-exists` backing: every host variant below
+        // (denied HTTP or policy-routed) must answer the credential probe from
+        // the staged injection store, or third-party guests that gate on it
+        // abort with an opaque failure before issuing any request.
+        let secrets = StagedWasmHostSecrets::new(
+            Arc::clone(&self.secret_injections),
+            scope.clone(),
+            capability_id.clone(),
+        );
         let egress = runtime_http_egress(&self.runtime_http_egress);
         let Some(policy) = self.network_policy_store.get(scope, capability_id) else {
             return if egress.is_some() {
-                self.host.clone().with_http(Arc::new(DenyWasmHostHttp))
+                self.host
+                    .clone()
+                    .with_http(Arc::new(DenyWasmHostHttp))
+                    .with_secrets(Arc::new(secrets))
             } else {
-                self.host.clone()
+                self.host.clone().with_secrets(Arc::new(secrets))
             };
         };
         let Some(egress) = egress else {
-            return self.host.clone().with_http(Arc::new(DenyWasmHostHttp));
+            return self
+                .host
+                .clone()
+                .with_http(Arc::new(DenyWasmHostHttp))
+                .with_secrets(Arc::new(secrets));
         };
         let mut adapter =
             WasmRuntimeHttpAdapter::new(egress, scope.clone(), capability_id.clone(), policy)
@@ -968,7 +1079,10 @@ impl WasmRuntimeAdapter {
         if let Some(provider) = &self.credential_provider {
             adapter = adapter.with_credential_provider(Arc::clone(provider));
         }
-        self.host.clone().with_http(Arc::new(adapter))
+        self.host
+            .clone()
+            .with_http(Arc::new(adapter))
+            .with_secrets(Arc::new(secrets))
     }
 }
 
@@ -1057,19 +1171,6 @@ struct NetworkPolicyDiscarder {
 impl WasmRuntimePolicyDiscarder for NetworkPolicyDiscarder {
     fn discard(&self, scope: &ResourceScope, capability_id: &CapabilityId) {
         self.store.discard_for_capability(scope, capability_id);
-    }
-}
-
-fn release_first_party_reservation<G>(governor: &G, reservation_id: ResourceReservationId)
-where
-    G: ResourceGovernor + ?Sized,
-{
-    if let Err(error) = governor.release(reservation_id) {
-        tracing::warn!(
-            reservation_id = %reservation_id,
-            error = %error,
-            "failed to release prepared first-party reservation"
-        );
     }
 }
 

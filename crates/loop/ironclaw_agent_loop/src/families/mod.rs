@@ -8,11 +8,16 @@ use crate::strategies::{
 };
 
 mod subagent;
+mod unbound;
 
 pub use subagent::{SUBAGENT_FAMILY_DIGEST, subagent};
+pub use unbound::{
+    UNBOUND_DEFAULT_FAMILY_DIGEST, UNBOUND_STRUCTURED_FAMILY_DIGEST, unbound_default,
+    unbound_structured,
+};
 
-/// Replay-relevant fingerprint of the default family composition, with the
-/// two override-able knobs substituted in.
+/// Replay-relevant fingerprint of the default family composition, with its
+/// override-able knobs substituted in.
 ///
 /// [`DEFAULT_FAMILY_DIGEST`] is the BLAKE3-256 of this fingerprint at the
 /// production defaults; override-built families hash the same fingerprint
@@ -21,7 +26,7 @@ pub use subagent::{SUBAGENT_FAMILY_DIGEST, subagent};
 /// (see `family.rs` component-identity contract).
 fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts: u32) -> String {
     format!(
-        "ironclaw_agent_loop.default_family.v2:\
+        "ironclaw_agent_loop.default_family.v3:\
         family_id=default;\
         identity=component_identity_v1;\
         planner=DefaultPlanner;\
@@ -30,11 +35,11 @@ fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts:
         compaction:ActiveTaskPreservingCompactionStrategy(context_limit=128000,reserve=20000,preserve_tail=8000,min_compacted=3,min_tail=3,deadline_ms=30000,ineffective_trip_limit=3),\
         capability:DefaultCapabilityStrategy(all),\
         model:DefaultModelStrategy(primary_or_fallback_index),\
-        batch:DefaultBatchPolicyStrategy(exclusive_sequential),\
+        batch:model_emitted_calls(bounded_fanout=4),\
         gate:DefaultGateHandlingStrategy(block),\
         recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts={model_availability_attempts},availability=retry_then_observe,stale_request=iteration_retry_then_observe,output_truncated=observe_then_continue,unauthorized=user_visible_terminal,checkpoint_rejected=abort,transcript_write_failed=user_visible_terminal),\
         reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),\
-        stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3,rejected_reply=invalid_model_output),\
+        stop:DefaultStopConditionStrategy(consecutive_repeat=3,advisory_only,rejected_reply=invalid_model_output),\
         drain:DefaultInputDrainStrategy(steering=true,followup=true),\
         budget:DefaultBudgetStrategy(iteration_limit={iteration_limit},wall_clock_limit=none)"
     )
@@ -46,8 +51,8 @@ fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts:
 /// Update this digest when the default family composition, planner behavior, or
 /// identity schema changes in a replay-relevant way.
 pub const DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0xca, 0xbb, 0x66, 0x61, 0xe4, 0xfd, 0xb4, 0x81, 0x12, 0x15, 0xc9, 0xde, 0x1d, 0x18, 0x68, 0xc3,
-    0x58, 0xf7, 0x9e, 0x51, 0xa7, 0x91, 0xd5, 0x75, 0xde, 0xe3, 0x7f, 0x96, 0x25, 0xbc, 0xf1, 0xda,
+    0x0a, 0x79, 0x29, 0xd2, 0x34, 0x55, 0x76, 0xc1, 0x57, 0x86, 0x5c, 0x02, 0xc2, 0xf8, 0x73, 0x4a,
+    0x7f, 0xd6, 0x49, 0xf2, 0x25, 0xa3, 0x77, 0x07, 0xab, 0xb3, 0x12, 0xda, 0xc4, 0x9f, 0xf5, 0x90,
 ]);
 
 /// The default loop family: the text-tool-use baseline.
@@ -67,8 +72,8 @@ pub fn default_with_iteration_limit(iteration_limit: u32) -> LoopFamily {
     default_with_overrides(FamilyOverrides::default().set_iteration_limit(iteration_limit))
 }
 
-/// Optional overrides for the default family's replay-relevant knobs. `None`
-/// keeps the production default for that knob.
+/// Optional overrides for the default family's replay-relevant knobs.
+/// Unset values preserve the production defaults.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FamilyOverrides {
     /// Hard iteration ceiling; defaults to [`DEFAULT_ITERATION_BACKSTOP`].
@@ -90,8 +95,7 @@ impl FamilyOverrides {
     }
 }
 
-/// The default loop family with optional iteration-limit and model
-/// availability-retry overrides.
+/// The default loop family with optional budget and recovery overrides.
 ///
 /// The availability override shrinks (or deepens) how long the loop rides out
 /// provider outages before aborting — test harnesses that script provider
@@ -101,7 +105,7 @@ impl FamilyOverrides {
 /// Overrides are replay-relevant configuration, so an overridden composition
 /// carries a configuration-specific [`ComponentIdentity`] digest derived from
 /// the resolved values; only the pure-default composition keeps the static
-/// [`DEFAULT_FAMILY_DIGEST`], so existing replay identities are unchanged.
+/// [`DEFAULT_FAMILY_DIGEST`].
 pub fn default_with_overrides(overrides: FamilyOverrides) -> LoopFamily {
     if overrides == FamilyOverrides::default() {
         return default();

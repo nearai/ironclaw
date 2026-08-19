@@ -316,7 +316,7 @@ impl ServeCommand {
             );
         } else {
             tracing::warn!(
-                target = "ironclaw::reborn::cli::serve",
+                target: "ironclaw::reborn::cli::serve",
                 %listen_addr,
                 "product-auth OAuth is not configured because the WebChat v2 listener origin is not a stable loopback HTTP origin"
             );
@@ -385,7 +385,7 @@ impl ServeCommand {
         // see the same signal.
         if !host.is_loopback() {
             tracing::warn!(
-                target = "ironclaw::reborn::cli::serve",
+                target: "ironclaw::reborn::cli::serve",
                 %host,
                 "binding WebChat v2 listener on a non-loopback interface",
             );
@@ -570,6 +570,12 @@ impl ServeCommand {
             if let Some(project_id) = default_project_id.clone() {
                 serve_config = serve_config.with_default_project_id(project_id);
             }
+            let session_channel_extension_id = runtime.session_channel_extension_id();
+            warn_if_session_channel_unresolved(session_channel_extension_id.is_some());
+            if let Some(extension_id) = session_channel_extension_id {
+                serve_config =
+                    serve_config.with_session_channel_extension_id(extension_id.to_string());
+            }
             {
                 serve_config = serve_config.with_protected_route_mount(openai_compat_mount);
             }
@@ -704,7 +710,7 @@ async fn start_hosted_single_tenant_startup_listener(
     match bound_rx.await {
         Ok(bound) => {
             tracing::info!(
-                target = "ironclaw::reborn::cli::serve",
+                target: "ironclaw::reborn::cli::serve",
                 %bound,
                 "hosted single-tenant WebChat v2 startup listener is serving healthchecks before runtime assembly"
             );
@@ -758,7 +764,7 @@ fn webui_shutdown_signal() -> tokio::sync::oneshot::Receiver<()> {
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
         tracing::info!(
-            target = "ironclaw::reborn::cli::serve",
+            target: "ironclaw::reborn::cli::serve",
             "shutdown signal (SIGTERM/SIGINT) received; signalling WebChat v2 graceful shutdown",
         );
         let _ = shutdown_tx.send(());
@@ -948,6 +954,15 @@ fn reject_retired_config_sections(
         tracing::warn!(target: "ironclaw::reborn::cli::serve", "{notice}");
     }
     Ok(())
+}
+
+fn warn_if_session_channel_unresolved(resolved: bool) {
+    if !resolved {
+        tracing::warn!(
+            target: "ironclaw::reborn::cli::serve",
+            "no session channel extension resolved; the generic session-channel route will be unavailable"
+        );
+    }
 }
 
 fn resolve_webui_default_agent(
@@ -1887,6 +1902,57 @@ slack_user_id = "U123"
         assert!(
             effective,
             "serve must scope workspace writes whenever it can mint a non-operator caller"
+        );
+    }
+
+    #[test]
+    fn unresolved_session_channel_warns_the_operator() {
+        use std::fmt;
+        use std::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+
+        #[derive(Default)]
+        struct MessageVisitor(Option<String>);
+
+        impl Visit for MessageVisitor {
+            fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = Some(format!("{value:?}"));
+                }
+            }
+        }
+
+        #[derive(Default, Clone)]
+        struct CaptureMessages(Arc<Mutex<Vec<(String, String)>>>);
+
+        impl<S: tracing::Subscriber> Layer<S> for CaptureMessages {
+            fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+                let mut visitor = MessageVisitor::default();
+                event.record(&mut visitor);
+                if let Some(message) = visitor.0 {
+                    self.0
+                        .lock()
+                        .expect("capture lock")
+                        .push((event.metadata().target().to_string(), message));
+                }
+            }
+        }
+
+        let captured = CaptureMessages::default();
+        let subscriber = tracing_subscriber::registry::Registry::default().with(captured.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            warn_if_session_channel_unresolved(false);
+        });
+
+        let messages = captured.0.lock().expect("capture lock").clone();
+        assert!(
+            messages.iter().any(|(target, message)| {
+                target == "ironclaw::reborn::cli::serve"
+                    && message.contains("no session channel extension resolved")
+            }),
+            "startup must visibly warn when composition cannot resolve a session channel; \
+             observed events: {messages:?}"
         );
     }
 }

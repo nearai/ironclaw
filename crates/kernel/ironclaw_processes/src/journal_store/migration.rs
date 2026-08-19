@@ -256,6 +256,9 @@ fn legacy_turn_snapshot(
         status,
         suspension,
         checkpoint_ref,
+        // Legacy turn rows predate the recorded checkpoint kind; unknown
+        // reads as side-effecting, so recovery keeps failing these closed.
+        checkpoint_kind: None,
         input_ref: None,
         failure,
         journal_cursor,
@@ -288,8 +291,6 @@ fn legacy_turn_metadata(
     }
     for name in [
         "accepted_message_ref",
-        "source_binding_ref",
-        "reply_target_binding_ref",
         "resolved_model_route",
         "model_usage",
         "subagent_depth",
@@ -623,6 +624,7 @@ fn legacy_capability_snapshot(
         status,
         suspension,
         checkpoint_ref: None,
+        checkpoint_kind: None,
         input_ref: None,
         failure: None,
         journal_cursor: ProcessJournalCursor(0),

@@ -1,8 +1,8 @@
-use crate::ProductSurfaceRejectionKind;
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowRecord, AuthFlowStatus,
     AuthProductScope, CredentialAccountId, CredentialAccountStatus, Timestamp,
 };
+use ironclaw_host_api::product_adapter::ProductSurfaceRejectionKind;
 use ironclaw_host_api::turn::{IdempotencyKey, TurnActor, TurnGateRef};
 use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 use ironclaw_turns::{CancelRunResponse, ResumeTurnResponse};
@@ -97,10 +97,9 @@ pub struct AuthInteractionScope {
 
 impl AuthInteractionScope {
     pub fn from_turn(scope: &TurnScope, actor: &TurnActor) -> Self {
-        let user_id = scope
-            .explicit_owner_user_id()
-            .cloned()
-            .unwrap_or_else(|| actor.user_id.clone());
+        // The auth-flow scope is the run's single user (the actor), matching
+        // the create/cancel sides.
+        let user_id = actor.user_id.clone();
         Self {
             tenant_id: scope.tenant_id.clone(),
             user_id,
@@ -173,6 +172,17 @@ impl AuthInteractionStatus {
             AuthFlowStatus::AwaitingUser => Some(Self::AwaitingUser),
             AuthFlowStatus::CallbackReceived => Some(Self::CallbackReceived),
             AuthFlowStatus::Completing => Some(Self::Completing),
+            // TODO(design): `AwaitingVendor` is non-terminal but has no
+            // chat-serviceable projection today. It is mapped to `None` — the
+            // device-link flow does not appear as a pending *chat* auth
+            // interaction — which matches the position already taken in
+            // `run_delivery/prompts.rs` (`auth_prompt_is_serviceable` returns
+            // false for `DeviceLink`: "completed in the web app or not at
+            // all"). If the product decides the chat list should show an
+            // in-progress link (read-only, pointing at the web app), this
+            // needs an `AuthInteractionStatus::AwaitingVendor` variant plus a
+            // wire-contract decision; do not add one implicitly.
+            AuthFlowStatus::AwaitingVendor => None,
             AuthFlowStatus::Completed
             | AuthFlowStatus::Failed
             | AuthFlowStatus::Expired
@@ -182,8 +192,8 @@ impl AuthInteractionStatus {
 }
 
 impl AuthInteractionChallengeView {
-    fn from_challenge(challenge: &AuthChallenge) -> Self {
-        match challenge {
+    fn from_challenge(challenge: &AuthChallenge) -> Option<Self> {
+        Some(match challenge {
             AuthChallenge::OAuthUrl { expires_at, .. } => Self::OAuthRedirectRequired {
                 expires_at: *expires_at,
             },
@@ -219,7 +229,15 @@ impl AuthInteractionChallengeView {
                 account_id: *account_id,
                 provider: provider.clone(),
             },
-        }
+            // TODO(design): a device-link step has no redacted chat-surface
+            // projection. Two of its steps carry secrets (login code, cloud
+            // password) and the frame is a multi-round card the web app owns,
+            // so nothing is emitted here rather than inventing a truncated
+            // view. If chat should ever *display* (not service) an in-flight
+            // link, add an explicit `AuthInteractionChallengeView` variant and
+            // decide which fields are safe — do not widen this mapping ad hoc.
+            AuthChallenge::DeviceLinkStep { .. } => return None,
+        })
     }
 }
 
@@ -323,7 +341,7 @@ impl AuthGateRecord {
                 .flow
                 .challenge
                 .as_ref()
-                .map(AuthInteractionChallengeView::from_challenge),
+                .and_then(AuthInteractionChallengeView::from_challenge),
             expires_at: self.flow.expires_at,
         })
     }
@@ -378,10 +396,14 @@ mod tests {
 
     use super::*;
 
+    /// A run's auth flow is created, resolved, and cancelled under the same
+    /// user (the run's actor), so it owns the OAuth flow backing its own
+    /// blocked run and `from_turn` keys the interaction scope by that user.
+    /// Owner == actor since the ephemeral-per-ping remodel.
     #[test]
-    fn auth_interaction_scope_from_turn_uses_scope_owner_over_actor() {
+    fn auth_interaction_scope_from_turn_keys_by_the_run_user() {
         let actor = TurnActor::new(UserId::new("user:actor").unwrap());
-        let owner_user_id = UserId::new("user:subject").unwrap();
+        let owner_user_id = actor.user_id.clone();
         let thread_id = ThreadId::new("thread:shared").unwrap();
         let scope = TurnScope::new_with_owner(
             TenantId::new("tenant:shared").unwrap(),
@@ -393,7 +415,10 @@ mod tests {
 
         let interaction_scope = AuthInteractionScope::from_turn(&scope, &actor);
 
-        assert_eq!(interaction_scope.user_id, owner_user_id);
+        assert_eq!(
+            interaction_scope.user_id, actor.user_id,
+            "a run's auth flow is keyed by its user"
+        );
         assert_eq!(interaction_scope.thread_id, thread_id);
         assert_eq!(
             interaction_scope.agent_id.as_ref().map(AgentId::as_str),

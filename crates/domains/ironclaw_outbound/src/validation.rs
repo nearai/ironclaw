@@ -2,11 +2,11 @@ use std::collections::HashSet;
 
 use ironclaw_host_api::turn::ReplyTargetBindingRef;
 
+use crate::NOTIFICATION_TARGETS_CAP;
 use crate::{
-    AdvanceSubscriptionCursorRequest, CommunicationPreferenceRecord, DeliveryDefaultScope,
-    DeliveryFailureKind, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
-    OutboundDeliveryStatus, OutboundError, ProjectionSubscriptionRecord, ThreadNotificationPolicy,
-    UpdateDeliveryStatusRequest,
+    CommunicationPreferenceRecord, DeliveryDefaultScope, DeliveryFailureKind,
+    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryStatus, OutboundError,
+    ProjectionSubscriptionRecord, ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
 };
 
 const MAX_NOTIFICATION_TARGETS: usize = 32;
@@ -96,20 +96,6 @@ pub(crate) fn validate_subscription_cursor_progression(
     }
 }
 
-pub(crate) fn validate_advance_request(
-    record: &ProjectionSubscriptionRecord,
-    request: &AdvanceSubscriptionCursorRequest,
-) -> Result<(), OutboundError> {
-    if record.subscription_id != request.subscription_id
-        || record.actor != request.actor
-        || record.thread_id != request.thread_id
-        || record.scope != request.cursor.scope
-    {
-        return Err(OutboundError::SubscriptionScopeMismatch);
-    }
-    validate_subscription_cursor_progression(record.cursor.as_ref(), Some(&request.cursor))
-}
-
 pub(crate) fn validate_delivery_attempt(
     attempt: &OutboundDeliveryAttempt,
 ) -> Result<(), OutboundError> {
@@ -150,6 +136,7 @@ fn validate_delivery_status(
             OutboundDeliveryStatus::Prepared
             | OutboundDeliveryStatus::Sending
             | OutboundDeliveryStatus::Pending
+            | OutboundDeliveryStatus::NoTarget
             | OutboundDeliveryStatus::Delivered
             | OutboundDeliveryStatus::Unknown,
             None,
@@ -159,6 +146,7 @@ fn validate_delivery_status(
             OutboundDeliveryStatus::Prepared
             | OutboundDeliveryStatus::Sending
             | OutboundDeliveryStatus::Pending
+            | OutboundDeliveryStatus::NoTarget
             | OutboundDeliveryStatus::Delivered
             | OutboundDeliveryStatus::Unknown,
             Some(_),
@@ -192,6 +180,11 @@ pub(crate) fn validate_delivery_identity(
 pub(crate) fn validate_communication_preference(
     record: &CommunicationPreferenceRecord,
 ) -> Result<(), OutboundError> {
+    if record.notification_targets.len() > NOTIFICATION_TARGETS_CAP {
+        return Err(OutboundError::InvalidRequest {
+            reason: "communication preference has too many notification targets",
+        });
+    }
     match &record.scope {
         DeliveryDefaultScope::Personal { tenant_id, user_id } => {
             if tenant_id.as_str().is_empty() {

@@ -25,6 +25,7 @@
 #![warn(unreachable_pub)]
 
 use async_trait::async_trait;
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
     dispatch::{CapabilityDisplayOutputPreview, DispatchFailureDetail},
@@ -60,6 +61,7 @@ mod process_output;
 mod process_port;
 mod production;
 mod services;
+mod standard_op_output;
 mod surface;
 mod user_profile_source;
 mod wasm_credentials;
@@ -87,12 +89,12 @@ pub use first_party::{
 };
 pub use first_party_tools::{
     APPLY_PATCH_CAPABILITY_ID, ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
-    BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
-    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, JSON_CAPABILITY_ID,
-    LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID,
-    MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MemoryToolProfile,
-    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, NativeMemoryToolHandler,
-    OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID,
+    BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools, DOCUMENT_EDIT_CAPABILITY_ID,
+    ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTML_TO_PDF_CAPABILITY_ID,
+    HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
+    MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
+    MEMORY_WRITE_CAPABILITY_ID, MemoryToolProfile, NATIVE_MEMORY_FIRST_PARTY_PROVIDER,
+    NativeMemoryToolHandler, OUTBOUND_DELIVER_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID,
     READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
     SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID,
@@ -109,7 +111,7 @@ pub use first_party_tools::{
     ensure_memory_mount, finish_memory_tool_result, map_memory_service_error,
     memory_invocation_for_request, memory_tool_profiles, normalize_memory_tool_input,
     register_memory_tool_handler, register_native_memory_tools,
-    register_outbound_delivery_first_party_handler, register_reply_attachment_first_party_handler,
+    register_outbound_deliver_first_party_handler, register_reply_attachment_first_party_handler,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use first_party_tools::{
@@ -129,7 +131,7 @@ pub use post_edit_check::{
     POST_EDIT_CHECK_ENV, POST_EDIT_CHECK_TIMEOUT_ENV, PostEditCheckConfig,
     PostEditCheckConfigError, PostEditCheckService,
 };
-pub use process_port::{HostProcessPort, RuntimeProcessPort, TenantSandboxProcessPort};
+pub use process_port::{HostProcessPort, RuntimeProcessPort, UserSandboxProcessPort};
 pub use production::DefaultHostRuntime;
 // The sandbox lane (`sandbox_process`) moved to `ironclaw_sandbox` with the
 // WS3 merge; its Docker/CA cone is a runtimes-layer concern, and nothing
@@ -146,7 +148,7 @@ pub use services::{
     ProductionWiringIssue, ProductionWiringIssueKind, ProductionWiringReport,
     RegisteredRuntimeHealth,
 };
-pub use surface::{CapabilitySurfacePolicy, VisibleCapability, VisibleCapabilityAccess};
+pub use surface::{VisibleCapability, VisibleCapabilityAccess};
 /// Stable, validated idempotency key supplied by upper turn/loop services.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IdempotencyKey(String);
@@ -452,6 +454,17 @@ pub struct RuntimeCapabilityFailure {
     /// seam (`runtime_failure_diagnostic_detail`) re-scrubs and injection-
     /// fences it before it reaches the model.
     model_visible_cause: Option<String>,
+    /// Whether the failed capability is bound to a standard messaging WRITE
+    /// op (`descriptor.standard_op.map(|op| op.is_write()) == Some(true)`).
+    /// Read only by [`RuntimeCapabilityFailure::disposition`]'s retry
+    /// carve-out (pre-merge amendment W1): retrying a write blind risks a
+    /// duplicate side effect the model cannot see or undo (e.g. a message
+    /// sent twice), so a write's retryable-kind failure must never resolve to
+    /// `RetrySameCall` — the model decides whether to retry a write, not the
+    /// host. Deliberately excluded from `Debug`/`PartialEq`, mirroring
+    /// `model_visible_cause`: a construction-time policy input, not part of
+    /// the failure's public identity.
+    is_standard_write: bool,
 }
 
 impl fmt::Debug for RuntimeCapabilityFailure {
@@ -618,11 +631,20 @@ impl RuntimeCapabilityFailure {
             message,
             detail: None,
             model_visible_cause: None,
+            is_standard_write: false,
         }
     }
 
     pub fn with_detail(mut self, detail: DispatchFailureDetail) -> Self {
         self.detail = Some(detail);
+        self
+    }
+
+    /// Marks this failure as originating from a capability bound to a
+    /// standard messaging write op. See the field doc for why this changes
+    /// [`Self::disposition`]'s outcome.
+    pub fn with_is_standard_write(mut self, is_standard_write: bool) -> Self {
+        self.is_standard_write = is_standard_write;
         self
     }
 
@@ -650,7 +672,7 @@ impl RuntimeCapabilityFailure {
     }
 
     pub fn disposition(&self) -> CapabilityFailureDisposition {
-        capability_failure_disposition(self.kind)
+        capability_failure_disposition(self.kind, self.is_standard_write)
     }
 }
 
@@ -684,7 +706,24 @@ fn bounded_runtime_failure_summary(summary: &str) -> String {
 /// than burning retry budget. Security
 /// isolation failures must use a separate quarantine path instead of this
 /// generic failure disposition.
-pub fn capability_failure_disposition(kind: FailureKind) -> CapabilityFailureDisposition {
+///
+/// `is_standard_write` carves out one exception to the retryable-kind rule
+/// (pre-merge amendment W1): a capability bound to a standard messaging write
+/// op (`StandardMessagingOp::is_write() == true`) must never receive
+/// `RetrySameCall`, however transient/backend/network the failure kind looks.
+/// A same-call retry after a write dispatch of unknown outcome risks a
+/// duplicate side effect the model cannot see or undo (e.g. a message sent
+/// twice) — the model decides whether to retry a write, not the host. Read
+/// ops and bespoke tools (`is_standard_write == false`) keep today's
+/// retry-by-kind behavior unchanged.
+pub fn capability_failure_disposition(
+    kind: FailureKind,
+    is_standard_write: bool,
+) -> CapabilityFailureDisposition {
+    if is_standard_write && matches!(kind.fate(), FailureFate::Retry) {
+        return CapabilityFailureDisposition::ModelVisibleToolError;
+    }
+
     match kind.fate() {
         FailureFate::Retry => CapabilityFailureDisposition::RetrySameCall,
         FailureFate::ModelVisible | FailureFate::Park | FailureFate::Terminal => {

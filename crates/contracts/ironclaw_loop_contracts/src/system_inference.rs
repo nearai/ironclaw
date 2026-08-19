@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use ironclaw_host_api::output::OutputContract;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -112,6 +113,10 @@ pub enum SystemTaskKind {
     Compaction,
     GoalRefresh,
     FailureExplanation,
+    /// A host-owned final inference that formats an ordinary loop candidate
+    /// according to the run's immutable output contract. This remains a
+    /// system task so it cannot re-enter the agent loop or expose tools.
+    StructuredOutputFinalization,
 }
 
 /// Origin metadata for the system prompt used by a system inference task.
@@ -133,6 +138,27 @@ pub struct SystemInferenceIdentity {
     pub system_prompt: String,
 }
 
+/// One role-preserving message supplied to a host-owned inference task.
+/// Unlike the assistant-loop prompt bundle, these messages are already
+/// materialized under the canonical context policy and cannot carry tools.
+/// A `Tool` message carries the canonical serialized tool-result observation;
+/// the provider adapter may render it as untrusted user context because this
+/// task has no provider tool-call round to pair with a result id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemInferenceContextMessage {
+    pub role: SystemInferenceContextRole,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemInferenceContextRole {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
 /// Request to run bounded, host-owned inference outside the assistant loop.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemInferenceRequest {
@@ -142,10 +168,21 @@ pub struct SystemInferenceRequest {
     pub identity: SystemInferenceIdentity,
     /// Sanitized user-side task input.
     pub input_text: String,
+    /// Optional canonical conversation context for host-owned calls that need
+    /// role-preserving prior user/tool/assistant material.  Empty preserves
+    /// the historical system-prompt + input shape used by compaction.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_messages: Vec<SystemInferenceContextMessage>,
     /// Preflight token ceiling for `input_text`.
     pub max_input_tokens: u64,
     /// Wall-clock deadline for the underlying model call.
     pub deadline_ms: u64,
+    /// Optional immutable output contract for this host-owned inference.
+    /// `None` preserves the ordinary text behavior used by compaction and
+    /// failure explanations. Only the JSON-schema variant is valid for the
+    /// structured-output finalization task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_contract: Option<OutputContract>,
 }
 
 /// Successful system inference result.
@@ -157,6 +194,11 @@ pub struct SystemInferenceResponse {
     pub output_text: String,
     /// Elapsed model-call time in milliseconds.
     pub elapsed_ms: u64,
+    /// Provider-reported usage for this logical model request. This is kept
+    /// separate from the ordinary loop call so the host can aggregate it
+    /// without changing agent-loop accounting semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<super::host::LoopModelUsage>,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq, Serialize, Deserialize)]

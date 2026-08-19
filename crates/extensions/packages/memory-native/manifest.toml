@@ -22,6 +22,12 @@ service = "native_memory_provider"
 # and loop-start profile reads.
 [memory]
 lifecycle = ["read_long_term", "read_short_term", "record_interaction", "profile_read"]
+# Memory guidance for the model, appended to the system prompt while this
+# provider is bound. It names this provider's own tools and describes this
+# provider's own recall behavior — the standing `memory` document served at the
+# head of `read_long_term` — so it ships with the manifest that declares them
+# rather than living in the loop tier.
+guidance_doc = "prompts/memory-guidance.md"
 
 # read/write model tools + native-only search/tree conveniences. All four are
 # routed to the bound MemoryService by the host; their input/output schemas are
@@ -47,7 +53,7 @@ prompt_doc_ref = "prompts/memory-native/read.md"
 
 [[tools]]
 id = "ironclaw.memory.write"
-description = "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use ironclaw.memory.profile_set instead."
+description = "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope. Use this to save a durable user preference, fact, decision, or correction so it stays available in future conversations (target \"memory\", append mode). For structured user facts (timezone, locale, location), use ironclaw.memory.profile_set instead."
 effects = ["read_filesystem", "write_filesystem"]
 default_permission = "allow"
 visibility = "model"

@@ -5,7 +5,9 @@ use crate::LifecycleProductAction;
 pub(super) enum ProductCommandHandler {
     ProductLifecycleCommand,
     ProductModelCommand,
+    ProductNewCommand,
     ProductStatusCommand,
+    ProductStopCommand,
     ProductCommandList,
     ProductCommandExecute,
     CreateThread,
@@ -33,6 +35,12 @@ pub(super) enum ProductCommandHandler {
     AutomationResume,
     AutomationRename,
     AutomationDelete,
+    NotificationChannelsSet,
+    NotificationSetupEnable,
+    NotificationSetupDisable,
+    SuggestionsGenerate,
+    SuggestionStart,
+    SuggestionDismiss,
 }
 
 impl ProductCommandHandler {
@@ -40,7 +48,9 @@ impl ProductCommandHandler {
         match capability.as_str() {
             PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID => Some(Self::ProductLifecycleCommand),
             PRODUCT_MODEL_COMMAND_OPERATION_ID => Some(Self::ProductModelCommand),
+            PRODUCT_NEW_COMMAND_OPERATION_ID => Some(Self::ProductNewCommand),
             PRODUCT_STATUS_COMMAND_OPERATION_ID => Some(Self::ProductStatusCommand),
+            PRODUCT_STOP_COMMAND_OPERATION_ID => Some(Self::ProductStopCommand),
             PRODUCT_COMMAND_LIST_COMMAND_ID => Some(Self::ProductCommandList),
             PRODUCT_COMMAND_EXECUTE_COMMAND_ID => Some(Self::ProductCommandExecute),
             CREATE_THREAD_COMMAND_ID => Some(Self::CreateThread),
@@ -68,6 +78,12 @@ impl ProductCommandHandler {
             AUTOMATION_RESUME_COMMAND_ID => Some(Self::AutomationResume),
             AUTOMATION_RENAME_COMMAND_ID => Some(Self::AutomationRename),
             AUTOMATION_DELETE_COMMAND_ID => Some(Self::AutomationDelete),
+            NOTIFICATION_CHANNELS_SET_COMMAND_ID => Some(Self::NotificationChannelsSet),
+            NOTIFICATION_SETUP_ENABLE_COMMAND_ID => Some(Self::NotificationSetupEnable),
+            NOTIFICATION_SETUP_DISABLE_COMMAND_ID => Some(Self::NotificationSetupDisable),
+            SUGGESTIONS_GENERATE_COMMAND_ID => Some(Self::SuggestionsGenerate),
+            SUGGESTION_START_COMMAND_ID => Some(Self::SuggestionStart),
+            SUGGESTION_DISMISS_COMMAND_ID => Some(Self::SuggestionDismiss),
             _ => None,
         }
     }
@@ -115,11 +131,27 @@ impl ProductCommandHandler {
                         .await?,
                 )
             }
+            Self::ProductNewCommand => {
+                let request: ProductNewCommandInput = product_command_input(input)?;
+                command_output(
+                    services
+                        .execute_product_new_command(caller, request)
+                        .await?,
+                )
+            }
             Self::ProductStatusCommand => {
                 let request: ProductStatusCommandInput = product_command_input(input)?;
                 command_output(
                     services
                         .execute_product_status_command(caller, request)
+                        .await?,
+                )
+            }
+            Self::ProductStopCommand => {
+                let request: ProductStopCommandInput = product_command_input(input)?;
+                command_output(
+                    services
+                        .execute_product_stop_command(caller, request)
                         .await?,
                 )
             }
@@ -286,6 +318,43 @@ impl ProductCommandHandler {
                         .await?,
                 )
             }
+            Self::NotificationChannelsSet => {
+                let request: RebornSetNotificationChannelsRequest = product_command_input(input)?;
+                command_output(services.set_notification_channels(caller, request).await?)
+            }
+            Self::NotificationSetupEnable => {
+                let request: RebornNotificationSetupMutationRequest = product_command_input(input)?;
+                command_output(
+                    services
+                        .notification_setup_service
+                        .enable(caller, request)
+                        .await?,
+                )
+            }
+            Self::NotificationSetupDisable => {
+                let request: RebornNotificationSetupMutationRequest = product_command_input(input)?;
+                command_output(
+                    services
+                        .notification_setup_service
+                        .disable(caller, request)
+                        .await?,
+                )
+            }
+            Self::SuggestionsGenerate => command_output(
+                services
+                    .generate_suggestions(caller, product_command_input(input)?)
+                    .await?,
+            ),
+            Self::SuggestionStart => command_output(
+                services
+                    .start_suggestion(caller, product_command_input(input)?)
+                    .await?,
+            ),
+            Self::SuggestionDismiss => command_output(
+                services
+                    .dismiss_suggestion(caller, product_command_input(input)?)
+                    .await?,
+            ),
         }
     }
 }
@@ -300,6 +369,8 @@ pub(super) enum ProductCapabilityHandler {
     LlmProviderUpsert,
     LlmProviderDelete,
     LlmActiveSet,
+    LlmUserModelPolicySet,
+    LlmUserModelPreferenceSet,
     ExtensionRegisterHostedMcp,
     ExtensionImport,
     ExtensionSetupSubmit,
@@ -328,6 +399,8 @@ impl ProductCapabilityHandler {
             LLM_PROVIDER_UPSERT_CAPABILITY_ID => Some(Self::LlmProviderUpsert),
             LLM_PROVIDER_DELETE_CAPABILITY_ID => Some(Self::LlmProviderDelete),
             LLM_ACTIVE_SET_CAPABILITY_ID => Some(Self::LlmActiveSet),
+            LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID => Some(Self::LlmUserModelPolicySet),
+            LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID => Some(Self::LlmUserModelPreferenceSet),
             EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID => Some(Self::ExtensionRegisterHostedMcp),
             EXTENSION_IMPORT_CAPABILITY_ID => Some(Self::ExtensionImport),
             EXTENSION_SETUP_SUBMIT_CAPABILITY_ID => Some(Self::ExtensionSetupSubmit),
@@ -357,6 +430,8 @@ impl ProductCapabilityHandler {
             Self::LlmProviderUpsert => "llm provider updated",
             Self::LlmProviderDelete => "llm provider deleted",
             Self::LlmActiveSet => "llm active provider updated",
+            Self::LlmUserModelPolicySet => "user model policy updated",
+            Self::LlmUserModelPreferenceSet => "user model preference updated",
             Self::ExtensionRegisterHostedMcp => "hosted MCP registration accepted",
             Self::ExtensionImport => "extension imported",
             Self::ExtensionSetupSubmit => "extension setup updated",
@@ -397,6 +472,14 @@ impl ProductCapabilityHandler {
             }
             Self::LlmProviderDelete => services.invoke_llm_provider_delete(caller, input).await,
             Self::LlmActiveSet => services.invoke_llm_active_set(caller, input).await,
+            Self::LlmUserModelPolicySet => {
+                services.invoke_user_model_policy_set(caller, input).await
+            }
+            Self::LlmUserModelPreferenceSet => {
+                services
+                    .invoke_user_model_preference_set(caller, input)
+                    .await
+            }
             Self::ExtensionRegisterHostedMcp => {
                 let request: ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest =
                     product_command_input(input)?;
@@ -587,6 +670,8 @@ mod tests {
             LLM_PROVIDER_UPSERT_CAPABILITY_ID,
             LLM_PROVIDER_DELETE_CAPABILITY_ID,
             LLM_ACTIVE_SET_CAPABILITY_ID,
+            LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID,
+            LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID,
             EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
             EXTENSION_IMPORT_CAPABILITY_ID,
             EXTENSION_SETUP_SUBMIT_CAPABILITY_ID,
@@ -627,8 +712,16 @@ mod tests {
                 ProductCommandHandler::ProductModelCommand,
             ),
             (
+                PRODUCT_NEW_COMMAND_OPERATION_ID,
+                ProductCommandHandler::ProductNewCommand,
+            ),
+            (
                 PRODUCT_STATUS_COMMAND_OPERATION_ID,
                 ProductCommandHandler::ProductStatusCommand,
+            ),
+            (
+                PRODUCT_STOP_COMMAND_OPERATION_ID,
+                ProductCommandHandler::ProductStopCommand,
             ),
             (
                 PRODUCT_COMMAND_LIST_COMMAND_ID,
@@ -718,6 +811,18 @@ mod tests {
             (
                 AUTOMATION_DELETE_COMMAND_ID,
                 ProductCommandHandler::AutomationDelete,
+            ),
+            (
+                SUGGESTIONS_GENERATE_COMMAND_ID,
+                ProductCommandHandler::SuggestionsGenerate,
+            ),
+            (
+                SUGGESTION_START_COMMAND_ID,
+                ProductCommandHandler::SuggestionStart,
+            ),
+            (
+                SUGGESTION_DISMISS_COMMAND_ID,
+                ProductCommandHandler::SuggestionDismiss,
             ),
         ] {
             let capability = CapabilityId::new(id).expect("valid capability id");

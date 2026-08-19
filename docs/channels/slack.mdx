@@ -42,23 +42,19 @@ ironclaw serve
 
 </Step>
 
-<Step title="Connect the channel">
+<Step title="Enter the deployment configuration (operator, once per instance)">
 
-In the [web interface](/using/webui), open **Extensions**, switch to the **Channels** tab,
-and scroll to the **bottom of the Built-in section**. Use **Configure** on the Slack card
-and provide the app id, bot token, and signing secret. They are written to the encrypted
-secret store.
-
-<Warning>
-Extensions opens on the **Registry** tab, which is not where channels are connected, and
-the Slack card sits below the web and terminal rows on the Channels tab. If you can't find
-it, you're probably on the wrong tab or haven't scrolled.
-</Warning>
+In the [web interface](/using/webui), open **Admin → Configuration** and fill in the
+**Slack deployment configuration** card — the bot token, signing secret, workspace
+(team) ID, app ID, and the other fields the card lists. They are written to the
+encrypted secret store.
 
 <Note>
-Asking the agent to "connect Slack" will not work. It can install and use Slack *tools*
-once the channel is connected, but making the connection is an operator action that stays
-in the web interface. The agent may reply that it can't help.
+The agent can't do this operator step for you — registering the app credentials stays in
+the web interface. Once it's done, though, asking the agent to "connect Slack" does work
+for the personal half: it installs and activates the extension, opens the in-chat
+connection panel if your personal OAuth is missing, and confirms when your account is
+already connected.
 </Note>
 
 </Step>
@@ -184,6 +180,7 @@ that the steps above describe.
         "files:write",
         "groups:history",
         "mpim:history",
+        "reactions:write",
         "commands"
       ]
     },
@@ -233,13 +230,15 @@ under **Extensions** — the tokens go straight into the encrypted secret store.
 
 There is no key that turns Slack on. The webhook route is always mounted, and it starts
 accepting events once the Slack extension is installed and its signing secret is
-registered. Until then it answers `503`.
+registered. Until then it answers `503`. There is no `IRONCLAW_REBORN_SLACK_ENABLED`
+environment variable either — the gate it fed was removed in #6116.
 
 <Note>
 An older configuration file may still carry a `[slack]` section. Nothing reads it. A
 leftover setup field — `api_app_id`, `team_id`, `bot_token_env`, `signing_secret_env`,
 `channel_routes`, and the rest — now stops startup with a pointer to the web interface
-instead of being quietly ignored, so delete the section.
+instead of being quietly ignored, so delete the section. `[slack].enabled` is accepted
+but inert, so an older install keeps booting.
 </Note>
 
 ---
@@ -271,8 +270,9 @@ it through the setup flow, then restart the server.
 </Accordion>
 
 <Accordion title="I can't find where to configure Slack">
-Open **Extensions**, switch from **Registry** to the **Channels** tab, and scroll to the
-bottom of the Built-in section. The Slack card is below the web and terminal channel rows.
+The instance-wide credentials live under **Admin → Configuration**, on the **Slack
+deployment configuration** card. The **Extensions** page handles the personal half —
+installing the extension and connecting your own Slack account.
 </Accordion>
 
 </AccordionGroup>

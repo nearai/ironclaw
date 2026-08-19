@@ -1,3 +1,4 @@
+// arch-exempt: large_file, missing dedicated host API credential-contract fixture module; Basic credential wire-contract coverage stays with the existing host API credential fixtures, plan #4088
 use std::path::PathBuf;
 
 use ironclaw_host_api::{
@@ -30,6 +31,7 @@ use ironclaw_host_api::{
         ResourceReservationId, SecretHandle, SystemServiceId, TenantId, UserId, VendorId,
     },
     ingress::{IngressPolicy, IngressRouteDescriptor},
+    messaging::StandardMessagingOp,
     mount::{MountGrant, MountPermissions, MountView},
     path::{HostPath, MountAlias, ScopedPath, VirtualPath},
     resource::{
@@ -39,9 +41,49 @@ use ironclaw_host_api::{
     runtime::{RuntimeKind, TrustClass},
     scope::{ExecutionContext, Principal},
     trust::{PackageIdentity, PackageSource, RequestedTrustClass},
+    turn::TurnExecutionOutcome,
 };
 use rust_decimal_macros::dec;
 use serde_json::json;
+
+#[test]
+fn turn_execution_outcome_round_trips_with_stable_wire_values() {
+    for (outcome, wire) in [
+        (TurnExecutionOutcome::ResultAvailable, "result_available"),
+        (TurnExecutionOutcome::NothingToReport, "nothing_to_report"),
+    ] {
+        assert_eq!(serde_json::to_value(outcome).unwrap(), json!(wire));
+        assert_eq!(
+            serde_json::from_value::<TurnExecutionOutcome>(json!(wire)).unwrap(),
+            outcome
+        );
+    }
+}
+
+#[test]
+fn search_messages_accepts_portable_sort_modes() {
+    let contract = StandardMessagingOp::SearchMessages
+        .contract()
+        .expect("search_messages has a contract");
+    let schema: serde_json::Value =
+        serde_json::from_str(contract.input_schema).expect("schema parses");
+    let validator = jsonschema::options()
+        .should_validate_formats(true)
+        .build(&schema)
+        .expect("schema compiles");
+
+    for sort in ["relevance", "timestamp"] {
+        assert!(
+            validator.is_valid(&json!({"query": "from:me", "sort": sort})),
+            "search_messages must accept the canonical {sort} sort mode",
+        );
+    }
+    assert!(
+        validator.is_valid(&json!({"query": "from:me"})),
+        "search_messages must preserve provider-default ordering when sort is omitted",
+    );
+    assert!(!validator.is_valid(&json!({"query": "from:me", "sort": "newest"})));
+}
 
 #[test]
 fn dispatch_input_issue_code_wire_strings_cover_all_variants() {
@@ -116,6 +158,23 @@ fn runtime_credential_targets_validate_declaration_shape() {
             "{invalid:?} should be rejected"
         );
     }
+    assert!(
+        RuntimeCredentialTarget::Basic {
+            username: "api-user".to_string(),
+        }
+        .validate_declaration()
+        .is_ok()
+    );
+    for invalid in ["", " ", "user:name", "user\nname", "user\0name"] {
+        assert!(
+            RuntimeCredentialTarget::Basic {
+                username: invalid.to_string(),
+            }
+            .validate_declaration()
+            .is_err(),
+            "{invalid:?} should be rejected"
+        );
+    }
 }
 
 #[test]
@@ -178,6 +237,23 @@ fn runtime_credential_target_serializes_path_placeholder() {
     let wire = json!({
         "type": "path_placeholder",
         "placeholder": "__credential__"
+    });
+
+    assert_eq!(serde_json::to_value(&target).unwrap(), wire);
+    assert_eq!(
+        serde_json::from_value::<RuntimeCredentialTarget>(wire).unwrap(),
+        target
+    );
+}
+
+#[test]
+fn runtime_basic_credential_target_round_trips_on_the_wire() {
+    let target = RuntimeCredentialTarget::Basic {
+        username: "api-user".to_string(),
+    };
+    let wire = json!({
+        "type": "basic",
+        "username": "api-user"
     });
 
     assert_eq!(serde_json::to_value(&target).unwrap(), wire);
@@ -1574,12 +1650,79 @@ fn capability_profile_schema_refs_are_relative_repository_paths() {
         "schemas/memory/with:colon.json",
         "c:/win/schema.json",
         "schemas/memory/contains space.json",
+        // The host-owned namespace is never accepted from the generic string
+        // constructor, including otherwise valid canonical refs.
+        "standard:messaging/send_message.input.v1",
+        "standard:messaging/edit_message.output.v1",
+        "standard:messaging/send_message.output.v2",
+        "evil:messaging/x.json",
+        "standard:",
+        "standard:messaging/../../x",
+        "standard:messaging/a:b.json",
+        "standard:messaging/",
     ] {
         assert!(
             CapabilityProfileSchemaRef::new(invalid).is_err(),
             "{invalid:?} should be rejected"
         );
     }
+
+    assert_eq!(
+        CapabilityProfileSchemaRef::standard_messaging_input(
+            ironclaw_host_api::messaging::StandardMessagingOp::SendMessage,
+        )
+        .expect("typed standard input ref")
+        .as_str(),
+        "standard:messaging/send_message.input.v1"
+    );
+    assert!(
+        CapabilityProfileSchemaRef::standard_messaging_output(
+            ironclaw_host_api::messaging::StandardMessagingOp::ForwardMessage,
+        )
+        .is_err(),
+        "reserved operations have no constructible canonical schema ref"
+    );
+
+    // A minted output ref carries the op's CURRENT schema version, not a
+    // hardcoded `.v1`: `send_message` graduated to `.v2` (the `sent_unverified`
+    // evidence branch), every other op is still on `.v1`.
+    for (op, expected) in [
+        (
+            ironclaw_host_api::messaging::StandardMessagingOp::SendMessage,
+            "standard:messaging/send_message.output.v2",
+        ),
+        (
+            ironclaw_host_api::messaging::StandardMessagingOp::EditMessage,
+            "standard:messaging/edit_message.output.v1",
+        ),
+    ] {
+        assert_eq!(
+            CapabilityProfileSchemaRef::standard_messaging_output(op)
+                .expect("typed standard output ref")
+                .as_str(),
+            expected
+        );
+    }
+
+    // Resolved extension records persisted before the graduation still pin
+    // `.v1`, and that ref must keep deserializing forever — a published schema
+    // version is served for as long as any binding names it.
+    for persisted in [
+        "standard:messaging/send_message.output.v1",
+        "standard:messaging/send_message.output.v2",
+    ] {
+        let parsed: CapabilityProfileSchemaRef =
+            serde_json::from_value(serde_json::json!(persisted))
+                .unwrap_or_else(|error| panic!("{persisted} must stay loadable: {error}"));
+        assert_eq!(parsed.as_str(), persisted);
+    }
+    assert!(
+        serde_json::from_value::<CapabilityProfileSchemaRef>(serde_json::json!(
+            "standard:messaging/edit_message.output.v2"
+        ))
+        .is_err(),
+        "a version an op never published must not deserialize"
+    );
 }
 
 fn sample_context_with_agent(agent: Option<&str>) -> ExecutionContext {

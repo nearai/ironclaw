@@ -26,7 +26,7 @@ const TRIGGER_COLUMNS: &str = "\
     trigger_id, tenant_id, creator_user_id, agent_id, project_id, \
     name, source, schedule_expression, schedule_timezone, schedule_kind, prompt, \
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
-    active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target";
+    active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target, execution_spec_json";
 const RENAME_SCOPED_TRIGGER_SQL: &str = "\
     UPDATE trigger_records
        SET name = ?6
@@ -38,7 +38,7 @@ const RENAME_SCOPED_TRIGGER_SQL: &str = "\
      RETURNING trigger_id, tenant_id, creator_user_id, agent_id, project_id,
        name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
        state, next_run_at, last_run_at, last_fired_slot, last_status,
-       active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target";
+       active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target, execution_spec_json";
 const TRIGGER_ID_COL: usize = 0;
 const TENANT_ID_COL: usize = 1;
 const CREATOR_USER_ID_COL: usize = 2;
@@ -60,6 +60,7 @@ const ACTIVE_RUN_REF_COL: usize = 17;
 const CREATED_AT_COL: usize = 18;
 const SCHEDULE_AT_COL: usize = 19;
 const DELIVERY_TARGET_COL: usize = 20;
+const EXECUTION_SPEC_JSON_COL: usize = 21;
 const TRIGGER_RUN_COLUMNS: &str = "\
     tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at";
 const RUN_TENANT_ID_COL: usize = 0;
@@ -264,6 +265,18 @@ impl LibSqlTriggerRepository {
                     return Err(backend_error("add delivery_target column", error));
                 }
             }
+            if let Err(error) = conn
+                .execute(
+                    &format!("ALTER TABLE {TRIGGER_TABLE} ADD COLUMN execution_spec_json TEXT"),
+                    (),
+                )
+                .await
+            {
+                let msg = error.to_string();
+                if !msg.contains("duplicate column") && !msg.contains("already exists") {
+                    return Err(backend_error("add execution_spec_json column", error));
+                }
+            }
             // Drop the legacy `completion_policy` column on tables created before the
             // schedule-derived rework. Completion is now derived from the schedule
             // (`Once` / exhausted cron), so the column is no longer written; leaving it
@@ -376,6 +389,42 @@ impl TriggerRepository for LibSqlTriggerRepository {
         let conn = self.write_connection().await?;
         write_record(&conn, &record).await?;
         Ok(())
+    }
+
+    async fn migrate_legacy_delivery_target(
+        &self,
+        expected: &TriggerRecord,
+        migrated_prompt: String,
+    ) -> Result<bool, TriggerError> {
+        let mut migrated = expected.clone();
+        migrated.prompt = migrated_prompt;
+        migrated.delivery_target = None;
+        migrated.validate()?;
+        let Some(expected_target) = expected.delivery_target.as_ref() else {
+            return Ok(false);
+        };
+        let conn = self.write_connection().await?;
+        let updated = conn
+            .execute(
+                &format!(
+                    "UPDATE {TRIGGER_TABLE}
+                     SET prompt = ?1, delivery_target = NULL
+                     WHERE tenant_id = ?2
+                       AND trigger_id = ?3
+                       AND prompt = ?4
+                       AND delivery_target = ?5"
+                ),
+                params![
+                    migrated.prompt,
+                    expected.tenant_id.as_str(),
+                    expected.trigger_id.to_string(),
+                    expected.prompt.as_str(),
+                    expected_target.as_str(),
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("migrate legacy trigger delivery target", error))?;
+        Ok(updated == 1)
     }
 
     async fn get_trigger(
@@ -569,38 +618,45 @@ impl TriggerRepository for LibSqlTriggerRepository {
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         crate::validate_user_settable_trigger_state(new_state)?;
         let conn = self.write_connection().await?;
-        let agent_id = agent_id.as_ref().map(AgentId::as_str);
-        let project_id = project_id.as_ref().map(ProjectId::as_str);
-        let mut rows = conn
+        let transaction = begin_immediate(&conn, "begin scoped trigger state update").await?;
+        let Some(current) = fetch_record(&transaction, &tenant_id, trigger_id).await? else {
+            return Ok(None);
+        };
+        if current.creator_user_id != creator_user_id
+            || current.agent_id != agent_id
+            || current.project_id != project_id
+            || current.state == TriggerState::Completed
+        {
+            return Ok(None);
+        }
+        let next_run_at = crate::next_run_at_for_state_transition(&current, new_state, Utc::now())?;
+        let mut rows = transaction
             .query(
                 &format!(
                     "UPDATE {TRIGGER_TABLE}
-                     SET state = ?6
+                     SET state = ?3,
+                         next_run_at = ?4
                      WHERE tenant_id = ?1
-                       AND creator_user_id = ?2
-                       AND agent_id IS ?3
-                       AND project_id IS ?4
-                       AND trigger_id = ?5
-                       AND state <> ?7
+                       AND trigger_id = ?2
                      RETURNING {TRIGGER_COLUMNS}"
                 ),
                 params![
                     tenant_id.as_str(),
-                    creator_user_id.as_str(),
-                    agent_id,
-                    project_id,
                     trigger_id.to_string(),
                     crate::state_text_codec(new_state),
-                    crate::state_text_codec(TriggerState::Completed),
+                    fmt_ts(&next_run_at),
                 ],
             )
             .await
             .map_err(|error| backend_error("set scoped trigger state", error))?;
-        match rows.next().await {
-            Ok(Some(row)) => Ok(Some(row_to_record(&row)?)),
-            Ok(None) => Ok(None),
-            Err(error) => Err(backend_error("read scoped trigger state row", error)),
-        }
+        let record = match rows.next().await {
+            Ok(Some(row)) => Some(row_to_record(&row)?),
+            Ok(None) => None,
+            Err(error) => return Err(backend_error("read scoped trigger state row", error)),
+        };
+        drop(rows);
+        commit(transaction, "commit scoped trigger state update").await?;
+        Ok(record)
     }
 
     async fn rename_scoped_trigger(
@@ -791,6 +847,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 ),
             )
             .await?;
+            prune_run_history(&transaction, &request.tenant_id, request.trigger_id).await?;
             Ok(Some(record))
         }
         .await;
@@ -1363,7 +1420,13 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
         .map(|value| parse_turn_run_id(&value))
         .transpose()?;
     let delivery_target = optional_text(row, DELIVERY_TARGET_COL, "delivery_target")?
-        .map(crate::parse_trigger_delivery_target_id)
+        .map(crate::decode_legacy_delivery_target)
+        .transpose()?;
+    let execution_spec = optional_text(row, EXECUTION_SPEC_JSON_COL, "execution_spec_json")?
+        .map(|value| {
+            serde_json::from_str(&value)
+                .map_err(|error| invalid_record("execution_spec_json", error.to_string()))
+        })
         .transpose()?;
 
     let record = TriggerRecord {
@@ -1376,6 +1439,7 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
         source: crate::parse_source_kind_codec(&required_text(row, SOURCE_COL, "source")?)?,
         schedule,
         prompt: required_text(row, PROMPT_COL, "prompt")?,
+        execution_spec,
         delivery_target,
         state: crate::parse_state_codec(&required_text(row, STATE_COL, "state")?)?,
         next_run_at: parse_timestamp(
@@ -1455,14 +1519,21 @@ async fn write_record(
     record: &TriggerRecord,
 ) -> Result<(), TriggerError> {
     let (schedule_kind, schedule_expression, schedule_at) = record.schedule.to_storage();
+    let execution_spec_json = record
+        .execution_spec
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| invalid_record("execution_spec_json", error.to_string()))?;
     conn.execute(
         &format!(
             "INSERT INTO {TRIGGER_TABLE} (
                 trigger_id, tenant_id, creator_user_id, agent_id, project_id,
                 name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
                 state, next_run_at, last_run_at, last_fired_slot, last_status,
-                active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+                active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target,
+                execution_spec_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
             ON CONFLICT (tenant_id, trigger_id) DO UPDATE SET
                 creator_user_id = excluded.creator_user_id,
                 agent_id = excluded.agent_id,
@@ -1481,7 +1552,8 @@ async fn write_record(
                 active_fire_slot = excluded.active_fire_slot,
                 active_run_ref = excluded.active_run_ref,
                 schedule_at = excluded.schedule_at,
-                delivery_target = excluded.delivery_target"
+                delivery_target = excluded.delivery_target,
+                execution_spec_json = excluded.execution_spec_json"
         ),
         libsql::params_from_iter([
             libsql::Value::Text(record.trigger_id.to_string()),
@@ -1504,7 +1576,14 @@ async fn write_record(
             record.active_run_ref.as_ref().map_or(libsql::Value::Null, |v| libsql::Value::Text(v.to_string())),
             libsql::Value::Text(fmt_ts(&record.created_at)),
             schedule_at.map_or(libsql::Value::Null, libsql::Value::Text),
+            // Retired routing column: no create path produces a non-null value
+            // any more. The binding stays because composition's boot migration
+            // clears pre-removal rows by upserting the record with
+            // `delivery_target: None` — dropping the write would strand those
+            // values forever and make the migration re-append its prompt step
+            // on every boot.
             record.delivery_target.as_ref().map_or(libsql::Value::Null, |v| libsql::Value::Text(v.as_str().to_string())),
+            execution_spec_json.map_or(libsql::Value::Null, libsql::Value::Text),
         ]),
     )
     .await
@@ -1739,7 +1818,6 @@ async fn upsert_run_history(
     )
     .await
     .map_err(|error| backend_error("upsert trigger run history", error))?;
-    prune_run_history(conn, &run.tenant_id, run.trigger_id).await?;
     Ok(())
 }
 fn trigger_ids_json_array(trigger_ids: &[TriggerId]) -> String {
@@ -1787,6 +1865,8 @@ async fn complete_run_history(
     )
     .await
     .map_err(|error| backend_error("complete trigger run history", error))?;
+    // Completion normally updates the claim row, but recovery may insert a
+    // missing row. Keep pruning on that conservative compatibility path.
     prune_run_history(conn, tenant_id, trigger_id).await?;
     Ok(())
 }

@@ -3,7 +3,7 @@ use thiserror::Error;
 use crate::cursor::EventCursor;
 
 /// Event sink and durable-log error variants.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum EventError {
     #[error("event serialization failed: {reason}")]
     Serialize { reason: String },

@@ -50,6 +50,29 @@ impl TriggerRepository for InMemoryTriggerRepository {
         Ok(())
     }
 
+    async fn migrate_legacy_delivery_target(
+        &self,
+        expected: &TriggerRecord,
+        migrated_prompt: String,
+    ) -> Result<bool, TriggerError> {
+        let mut migrated = expected.clone();
+        migrated.prompt = migrated_prompt;
+        migrated.delivery_target = None;
+        migrated.validate()?;
+
+        let mut state = self.lock_state()?;
+        let key = TriggerRepositoryKey::new(&expected.tenant_id, expected.trigger_id);
+        let Some(record) = state.records.get_mut(&key) else {
+            return Ok(false);
+        };
+        if record.prompt != expected.prompt || record.delivery_target != expected.delivery_target {
+            return Ok(false);
+        }
+        record.prompt = migrated.prompt;
+        record.delivery_target = None;
+        Ok(true)
+    }
+
     async fn get_trigger(
         &self,
         tenant_id: TenantId,
@@ -160,6 +183,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
         {
             return Ok(None);
         }
+        record.next_run_at = next_run_at_for_state_transition(record, new_state, Utc::now())?;
         record.state = new_state;
         Ok(Some(record.clone()))
     }
@@ -554,6 +578,8 @@ impl TriggerRepository for InMemoryTriggerRepository {
                 run.completed_at = Some(completed_at);
                 run
             });
+        // Recovery may synthesize a completion row when the Running row is
+        // missing, so this edge can still increase cardinality and must prune.
         prune_run_history_locked(&mut state, &request.tenant_id, request.trigger_id);
         Ok(Some(record))
     }
@@ -690,7 +716,6 @@ impl InMemoryTriggerRepository {
         );
         run.thread_id = preserved_thread_id;
         state.runs.insert(key, run);
-        prune_run_history_locked(&mut state, tenant_id, trigger_id);
         Ok(())
     }
 
@@ -728,6 +753,8 @@ impl InMemoryTriggerRepository {
                 run.completed_at = Some(completed_at);
                 run
             });
+        // Terminal recovery can insert a missing history row; retain strict
+        // retention on that conservative fallback.
         prune_run_history_locked(&mut state, tenant_id, trigger_id);
         Ok(())
     }

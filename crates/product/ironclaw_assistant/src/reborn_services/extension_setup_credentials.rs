@@ -8,9 +8,10 @@ use serde::Deserialize;
 
 use crate::{
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
-    LifecycleProductPayload, LifecycleProductResponse, ProductSetupExtensionRequest,
-    RebornExtensionCredentialSetup, RebornExtensionSetupSecret,
+    LifecycleProductPayload, LifecycleProductResponse, RebornExtensionCredentialSetup,
+    RebornExtensionSetupSecret,
 };
+use ironclaw_product_contracts::inbound_requests::ProductSetupExtensionRequest;
 
 use super::{
     ExtensionCredentialSetupService, ExtensionCredentialSubmitRequest,
@@ -221,6 +222,7 @@ fn setup_projection(
             }
         }
         LifecycleExtensionCredentialSetup::Pairing => RebornExtensionCredentialSetup::Pairing,
+        LifecycleExtensionCredentialSetup::DeviceLink => RebornExtensionCredentialSetup::DeviceLink,
     }
 }
 

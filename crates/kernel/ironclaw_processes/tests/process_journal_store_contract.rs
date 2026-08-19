@@ -4,7 +4,7 @@ use chrono::Utc;
 use ironclaw_filesystem::{
     CasExpectation, DiskFilesystem, Entry, Fault, FaultInjecting, FaultKind, FilesystemError,
     FilesystemOperation, Filter, InMemoryBackend, IndexKey, LibSqlRootFilesystem, Page,
-    ScopedFilesystem,
+    PostgresRootFilesystem, RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
     ids::{AgentId, InvocationId, ProcessId, ProjectId, TenantId, ThreadId, UserId},
@@ -21,20 +21,20 @@ use ironclaw_processes::{
     OpenProcessDependencyRequest, ProcessCheckpointId, ProcessCheckpointPayload,
     ProcessCheckpointPort, ProcessCheckpointRef, ProcessConcurrencyClass, ProcessConcurrencyLimits,
     ProcessControlPort, ProcessDependencyPort, ProcessDependencyQuery, ProcessDependencyState,
-    ProcessDependencySubmission, ProcessFailureRecovery, ProcessGateOwnerMatch, ProcessGateQuery,
-    ProcessGateQuerySource, ProcessGateScopeMatch, ProcessInputPayload, ProcessInputPort,
-    ProcessInputRef, ProcessInputSubmission, ProcessJournalCommit, ProcessJournalCommitObserver,
+    ProcessDependencySubmission, ProcessFailureRecovery, ProcessGateQuery, ProcessGateQuerySource,
+    ProcessGateScopeMatch, ProcessInputPayload, ProcessInputPort, ProcessInputRef,
+    ProcessInputSubmission, ProcessJournalCommit, ProcessJournalCommitObserver,
     ProcessJournalCursor, ProcessJournalEntry, ProcessJournalError, ProcessJournalKind,
     ProcessJournalObserverRegistry, ProcessJournalSource, ProcessJournalStore,
     ProcessJournalStoreError, ProcessKind, ProcessLeaseRequest, ProcessLeaseToken,
     ProcessLifecycleLookupBatchRequest, ProcessLifecycleLookupRequest,
     ProcessLifecycleLookupResult, ProcessLifecycleLookupSource, ProcessLifecycleStatus,
     ProcessOperationId, ProcessSnapshotSource, ProcessStateTransitionRequest,
-    ProcessSubmissionPort, ProcessSuspension, ProcessSuspensionKind, ProcessTerminalEvidence,
-    ProcessTransitionPort, ProcessTreePort, ProcessWorkerId, PruneReleasedProcessRequest,
-    RecordProcessCheckpointRequest, ReleaseProcessTreeRequest, ReserveProcessTreeRequest,
-    ResumeProcessRequest, SettleProcessDependencyRequest, StopProcessRequest, SubmitProcessRequest,
-    SuspendProcessRequest,
+    ProcessSubmissionEdge, ProcessSubmissionPort, ProcessSuspension, ProcessSuspensionKind,
+    ProcessTerminalEvidence, ProcessTransitionPort, ProcessTreePort, ProcessWorkerId,
+    PruneReleasedProcessRequest, RecordProcessCheckpointRequest, ReleaseProcessTreeRequest,
+    ReserveProcessTreeRequest, ResumeProcessRequest, SettleProcessDependencyRequest,
+    StopProcessRequest, SubmitProcessAtEdgeRequest, SubmitProcessRequest, SuspendProcessRequest,
 };
 use serde_json::json;
 use std::{
@@ -473,6 +473,7 @@ async fn each_process_lifecycle_event_is_an_individual_libsql_row() {
                 .expect("bounded payload"),
             created_at: Utc::now(),
             link_to_process: true,
+            kind: None,
             metadata: json!({"schema": "agent-loop-v1"}),
         })
         .await
@@ -520,6 +521,144 @@ async fn each_process_lifecycle_event_is_an_individual_libsql_row() {
         .expect("count row exists");
     let count: i64 = row.get(0).expect("read count");
     assert_eq!(count, 32);
+}
+
+#[tokio::test]
+async fn edge_submission_survives_libsql_restart() {
+    let storage = tempfile::tempdir().expect("temporary process journal database");
+    let database = Arc::new(
+        libsql::Builder::new_local(storage.path().join("edge-submission.db"))
+            .build()
+            .await
+            .expect("build libsql database"),
+    );
+    let backend =
+        Arc::new(LibSqlRootFilesystem::new(database).expect("create libSQL filesystem runtime"));
+    backend
+        .run_migrations()
+        .await
+        .expect("migrate libSQL filesystem");
+    assert_edge_submission_survives_restart(
+        backend,
+        format!("libsql-edge-{}", uuid::Uuid::new_v4()),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn edge_submission_survives_postgres_restart() {
+    let Some(backend) = postgres_backend().await else {
+        eprintln!(
+            "skipping process edge-submission Postgres contract: \
+             IRONCLAW_FILESYSTEM_POSTGRES_URL / DATABASE_URL unavailable"
+        );
+        return;
+    };
+    assert_edge_submission_survives_restart(
+        Arc::new(backend),
+        format!("postgres-edge-{}", uuid::Uuid::new_v4()),
+    )
+    .await;
+}
+
+async fn assert_edge_submission_survives_restart<F>(backend: Arc<F>, fixture: String)
+where
+    F: RootFilesystem + 'static,
+{
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        backend,
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/processes").expect("mount alias"),
+            VirtualPath::new(format!("/engine/process-edge/{fixture}")).expect("virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view"),
+    ));
+    let request_scope = scope();
+    let process_id = ProcessId::new();
+    let request = SubmitProcessAtEdgeRequest {
+        submission: SubmitProcessRequest {
+            process_id,
+            process_kind: ProcessKind::CapabilityInvocationState,
+            scope: request_scope.clone(),
+            exclusive_within_scope: false,
+            operation_id: Some(ProcessOperationId::from_trusted("durable-edge")),
+            owner_user_id: Some(request_scope.user_id.clone()),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at: Utc::now(),
+            metadata: json!({"record_type": "capability_run"}),
+        },
+        edge: ProcessSubmissionEdge::Completed,
+    };
+    ProcessJournalStore::new(Arc::clone(&filesystem))
+        .submit_process_at_edge(request.clone())
+        .await
+        .expect("submit terminal edge");
+
+    let restarted = ProcessJournalStore::new(filesystem);
+    let loaded = restarted
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: request_scope.clone(),
+            process_id,
+        })
+        .await
+        .expect("load edge after restart");
+    assert_eq!(loaded.status, ProcessLifecycleStatus::Completed);
+    assert_eq!(loaded.metadata, request.submission.metadata);
+    restarted
+        .submit_process_at_edge(request)
+        .await
+        .expect("replay edge after restart");
+    let page = restarted
+        .read_process_journal_after(&request_scope, None, None, 16)
+        .await
+        .expect("read edge journal after restart");
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].kind, ProcessJournalKind::Completed);
+}
+
+fn postgres_test_url() -> Option<String> {
+    let primary = std::env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL");
+    match primary {
+        Ok(url) => Some(url),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("IRONCLAW_FILESYSTEM_POSTGRES_URL is configured but not valid UTF-8")
+        }
+        Err(std::env::VarError::NotPresent) => match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(url),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                panic!("DATABASE_URL is configured but not valid UTF-8")
+            }
+            Err(std::env::VarError::NotPresent) => None,
+        },
+    }
+}
+
+async fn postgres_backend() -> Option<PostgresRootFilesystem> {
+    if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
+        return None;
+    }
+    let url = postgres_test_url()?;
+    let config = url
+        .parse::<tokio_postgres::Config>()
+        .expect("parse configured PostgreSQL test URL");
+    let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+    let pool = deadpool_postgres::Pool::builder(manager)
+        .max_size(4)
+        .build()
+        .expect("build PostgreSQL test pool");
+    let backend = PostgresRootFilesystem::new(pool);
+    backend
+        .run_migrations()
+        .await
+        .expect("migrate configured PostgreSQL filesystem");
+    Some(backend)
 }
 
 #[tokio::test]
@@ -724,6 +863,7 @@ async fn explicit_legacy_materialized_state_imports_before_row_native_commands()
         status: ProcessLifecycleStatus::Queued,
         suspension: None,
         checkpoint_ref: None,
+        checkpoint_kind: None,
         input_ref: None,
         failure: None,
         journal_cursor: cursor,
@@ -1531,6 +1671,7 @@ async fn process_checkpoint_records_are_durable_scoped_and_idempotent() {
             .expect("bounded payload"),
         created_at: Utc::now(),
         link_to_process: true,
+        kind: None,
         metadata: json!({"schema": "agent-loop-v1"}),
     };
 
@@ -1556,6 +1697,7 @@ async fn process_checkpoint_records_are_durable_scoped_and_idempotent() {
                 .expect("bounded payload"),
             created_at: Utc::now(),
             link_to_process: false,
+            kind: None,
             metadata: json!({"kind": "final"}),
         })
         .await
@@ -2983,12 +3125,7 @@ async fn process_journal_store_owns_lifecycle_and_gate_projection() {
             checkpoint_ref: None,
             input: None,
             created_at: Utc::now(),
-            metadata: json!({
-                "agent_turn": {
-                    "source_binding_ref": "source:journal-contract",
-                    "reply_target_binding_ref": "reply:journal-contract"
-                }
-            }),
+            metadata: json!({ "agent_turn": {} }),
         })
         .await
         .expect("submit process");
@@ -3014,10 +3151,40 @@ async fn process_journal_store_owns_lifecycle_and_gate_projection() {
         worker_id: claim.worker_id.clone(),
         lease_token: claim.lease_token.clone(),
     };
-    store
+    let first_heartbeat_cursor = store
         .heartbeat_process(lease.clone())
         .await
-        .expect("heartbeat process");
+        .expect("first heartbeat process");
+    let second_heartbeat_cursor = store
+        .heartbeat_process(lease.clone())
+        .await
+        .expect("second heartbeat process");
+    assert_eq!(
+        first_heartbeat_cursor, claim.state.journal_cursor,
+        "heartbeats must update lease health without advancing the journal cursor"
+    );
+    assert_eq!(
+        second_heartbeat_cursor, claim.state.journal_cursor,
+        "repeated heartbeats must not reserve journal cursors"
+    );
+
+    let heartbeat_snapshot = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: scope.clone(),
+            process_id,
+        })
+        .await
+        .expect("heartbeat-updated process snapshot");
+    let claimed_lease = claim.state.lease.as_ref().expect("claimed lease");
+    let heartbeat_lease = heartbeat_snapshot.lease.as_ref().expect("heartbeat lease");
+    assert!(
+        heartbeat_lease.last_heartbeat_at >= claimed_lease.last_heartbeat_at,
+        "heartbeat must refresh last_heartbeat_at"
+    );
+    assert!(
+        heartbeat_lease.lease_expires_at >= claimed_lease.lease_expires_at,
+        "heartbeat must refresh lease_expires_at"
+    );
 
     let gate_ref = TurnGateRef::new("gate:journal-contract").expect("gate ref");
     store
@@ -3065,7 +3232,6 @@ async fn process_journal_store_owns_lifecycle_and_gate_projection() {
             scope_match: None,
             owner_user_id: Some(owner),
             gate_ref: Some(gate_ref.clone()),
-            owner_match: Some(ProcessGateOwnerMatch::Explicit),
             include_historical: false,
         })
         .await
@@ -3073,14 +3239,6 @@ async fn process_journal_store_owns_lifecycle_and_gate_projection() {
     assert_eq!(gates.len(), 1);
     assert_eq!(gates[0].process_id, process_id);
     assert_eq!(gates[0].suspension.gate_ref.as_ref(), Some(&gate_ref));
-    assert_eq!(
-        gates[0].resume_source_ref.as_deref(),
-        Some("source:journal-contract")
-    );
-    assert_eq!(
-        gates[0].reply_target_ref.as_deref(),
-        Some("reply:journal-contract")
-    );
 
     let mut owner_scope = scope.clone();
     owner_scope.project_id = None;
@@ -3092,13 +3250,39 @@ async fn process_journal_store_owns_lifecycle_and_gate_projection() {
             scope_match: Some(ProcessGateScopeMatch::Owner),
             owner_user_id: gates[0].owner_user_id.clone(),
             gate_ref: None,
-            owner_match: Some(ProcessGateOwnerMatch::Explicit),
             include_historical: false,
         })
         .await
         .expect("query gates across the explicit owner's projects");
     assert_eq!(owner_gates.len(), 1);
     assert_eq!(owner_gates[0].process_id, process_id);
+
+    // Owner-isolation guard (sabotage test for the retired `ProcessGateOwnerMatch`
+    // and its `ProcessGateScopeMatch::Owner` successor): the same-tenant owner
+    // broadening MUST still confine to the requesting user. A query rooted at an
+    // UNRELATED owner returns nothing even with the `owner_user_id` filter left
+    // open — so a future edit that drops the `scope.user_id` equality check on the
+    // `Owner` branch fails HERE instead of leaking another user's authorization
+    // gates.
+    let mut unrelated_owner_scope = scope.clone();
+    unrelated_owner_scope.user_id = UserId::new("user-unrelated-owner").expect("user");
+    unrelated_owner_scope.project_id = None;
+    unrelated_owner_scope.thread_id = None;
+    let unrelated_gates = store
+        .query_process_gates(ProcessGateQuery {
+            scope: unrelated_owner_scope,
+            gate_kind: ProcessSuspensionKind::Authorization,
+            scope_match: Some(ProcessGateScopeMatch::Owner),
+            owner_user_id: None,
+            gate_ref: None,
+            include_historical: false,
+        })
+        .await
+        .expect("query gates for an unrelated owner");
+    assert!(
+        unrelated_gates.is_empty(),
+        "owner-scope gate queries must not leak across owners: {unrelated_gates:?}"
+    );
 
     let snapshot = store
         .get_process_snapshot(GetProcessSnapshotRequest {
@@ -3113,9 +3297,27 @@ async fn process_journal_store_owns_lifecycle_and_gate_projection() {
         .read_process_journal_after(&scope, None, Some(ProcessJournalCursor(0)), 10)
         .await
         .expect("journal page");
-    assert_eq!(page.entries.len(), 4);
+    assert_eq!(page.entries.len(), 3);
     assert_eq!(page.entries[0].status, ProcessLifecycleStatus::Queued);
-    assert_eq!(page.entries[3].status, ProcessLifecycleStatus::Suspended);
+    assert_eq!(page.entries[2].status, ProcessLifecycleStatus::Suspended);
+    assert!(
+        page.entries
+            .iter()
+            .all(|entry| entry.kind != ProcessJournalKind::Heartbeat),
+        "lease-only heartbeats must not append journal entries"
+    );
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|entry| entry.cursor)
+            .collect::<Vec<_>>(),
+        vec![
+            ProcessJournalCursor(1),
+            ProcessJournalCursor(2),
+            ProcessJournalCursor(3)
+        ],
+        "heartbeats must not leave cursor-reservation gaps"
+    );
 }
 
 #[tokio::test]
@@ -3295,6 +3497,124 @@ async fn expired_leases_cancel_requested_work_and_requeue_safe_crashes() {
     assert_eq!(cancelled.status, ProcessLifecycleStatus::Cancelled);
     assert!(requeued.lease.is_none());
     assert!(cancelled.lease.is_none());
+}
+
+/// A run parked at a checkpoint that replays no side effect is recoverable
+/// work, not a dead run — but only once the lease has been expired long enough
+/// that a still-live worker would have renewed it. The recorded checkpoint kind
+/// is what makes that judgement possible, so it has to survive a store reopen.
+#[tokio::test]
+async fn expired_before_model_checkpoint_is_requeued_after_the_grace_window() {
+    const LEASE_TTL: Duration = Duration::from_secs(60);
+    let filesystem = in_memory_backed_processes_filesystem();
+    let mut store =
+        ProcessJournalStore::new(Arc::clone(&filesystem)).with_lease_duration(LEASE_TTL);
+    let scope = scope();
+    let process_id = ProcessId::new();
+    submit_internal_process(&store, &scope, process_id).await;
+    let claim = store
+        .claim_next_processes(ClaimProcessesRequest {
+            worker_id: ProcessWorkerId::from_trusted("grace-worker"),
+            scope_filter: Some(scope.clone()),
+            process_id_filter: Some(process_id),
+            process_kind_filter: Some(ProcessKind::Internal),
+            max_processes: 1,
+        })
+        .await
+        .expect("claim process")
+        .pop()
+        .expect("claimed process");
+    let expires_at = claim
+        .state
+        .lease
+        .as_ref()
+        .and_then(|lease| lease.lease_expires_at)
+        .expect("claimed process carries a lease expiry");
+    store
+        .record_process_checkpoint(RecordProcessCheckpointRequest {
+            checkpoint_id: ProcessCheckpointId::from_trusted("grace-checkpoint"),
+            process_id,
+            scope: scope.clone(),
+            state_ref: ProcessCheckpointRef::from_trusted("grace-state"),
+            payload: ProcessCheckpointPayload::new(b"state".to_vec()).expect("checkpoint payload"),
+            created_at: Utc::now(),
+            link_to_process: true,
+            kind: Some(ironclaw_processes::ProcessCheckpointKind::BeforeModel),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("record before-model checkpoint");
+
+    // Reopen: the kind must come back from durable state, not process memory.
+    drop(store);
+    store = ProcessJournalStore::new(Arc::clone(&filesystem)).with_lease_duration(LEASE_TTL);
+    let reopened = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: scope.clone(),
+            process_id,
+        })
+        .await
+        .expect("load reopened process");
+    assert_eq!(
+        reopened.checkpoint_kind,
+        Some(ironclaw_processes::ProcessCheckpointKind::BeforeModel),
+        "the recorded checkpoint kind must survive a store reopen"
+    );
+
+    // Strictly past expiry — the sweep does select this process as expired — but
+    // well inside the grace window: a worker starved of heartbeats may still be
+    // running, so the grace hold must leave the process alone. `now` sits past
+    // `expires_at` (not on the boundary), so this asserts the grace-window hold
+    // itself, not the inclusive-vs-strict expiry comparison.
+    let held = store
+        .recover_expired_process_leases(ironclaw_processes::RecoverExpiredProcessLeasesRequest {
+            now: expires_at + chrono::Duration::seconds(1),
+            scope_filter: Some(scope.clone()),
+            process_kind_filter: Some(ProcessKind::Internal),
+        })
+        .await
+        .expect("sweep inside the grace window");
+    assert!(
+        held.recovered.is_empty(),
+        "a checkpointed process inside the grace window must not be recovered"
+    );
+    let still_running = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: scope.clone(),
+            process_id,
+        })
+        .await
+        .expect("in-grace snapshot");
+    assert_eq!(still_running.status, ProcessLifecycleStatus::Running);
+    assert!(still_running.lease.is_some());
+    assert!(still_running.failure.is_none());
+
+    // A full lease TTL later, the worker is not coming back: requeue for resume.
+    let recovered = store
+        .recover_expired_process_leases(ironclaw_processes::RecoverExpiredProcessLeasesRequest {
+            now: expires_at + chrono::Duration::from_std(LEASE_TTL).expect("grace window"),
+            scope_filter: Some(scope.clone()),
+            process_kind_filter: Some(ProcessKind::Internal),
+        })
+        .await
+        .expect("sweep past the grace window");
+    assert_eq!(recovered.recovered.len(), 1);
+    let requeued = store
+        .get_process_snapshot(GetProcessSnapshotRequest { scope, process_id })
+        .await
+        .expect("requeued snapshot");
+    assert_eq!(requeued.status, ProcessLifecycleStatus::Queued);
+    assert!(requeued.failure.is_none());
+    assert!(requeued.lease.is_none());
+    assert_eq!(
+        requeued.checkpoint_ref.as_ref().map(|r| r.as_str()),
+        Some("grace-checkpoint"),
+        "the resume point must survive requeue — it is what the runner resumes from"
+    );
+    assert_eq!(
+        requeued.crash_reclaim_count, 1,
+        "checkpointed requeue shares the bounded crash-reclaim budget"
+    );
 }
 
 #[tokio::test]

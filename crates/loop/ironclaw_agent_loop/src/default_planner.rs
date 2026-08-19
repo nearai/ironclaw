@@ -10,9 +10,8 @@ use crate::families::DEFAULT_FAMILY_DIGEST;
 use crate::family::{ComponentIdentity, LoopFamilyId};
 use crate::planner::{AgentLoopPlanner, AgentLoopPlannerInternal};
 use crate::strategies::{
-    ActiveTaskPreservingCompactionStrategy, BatchPolicyStrategy, BudgetStrategy,
-    CapabilityStrategy, CompactionStrategy, ContextStrategy, DefaultBatchPolicyStrategy,
-    DefaultBudgetStrategy, DefaultCapabilityStrategy, DefaultContextStrategy,
+    ActiveTaskPreservingCompactionStrategy, BudgetStrategy, CapabilityStrategy, CompactionStrategy,
+    ContextStrategy, DefaultBudgetStrategy, DefaultCapabilityStrategy, DefaultContextStrategy,
     DefaultGateHandlingStrategy, DefaultInputDrainStrategy, DefaultModelStrategy,
     DefaultRecoveryStrategy, DefaultReplyAdmissionStrategy, DefaultStopConditionStrategy,
     GateHandlingStrategy, InputDrainStrategy, ModelStrategy, RecoveryStrategy,
@@ -29,7 +28,6 @@ pub(crate) struct DefaultPlanner {
     compaction: Arc<dyn CompactionStrategy>,
     capability: Arc<dyn CapabilityStrategy>,
     model: Arc<dyn ModelStrategy>,
-    batch: Arc<dyn BatchPolicyStrategy>,
     gate: Arc<dyn GateHandlingStrategy>,
     recovery: Arc<dyn RecoveryStrategy>,
     reply_admission: Arc<dyn ReplyAdmissionStrategy>,
@@ -63,7 +61,6 @@ impl DefaultPlanner {
             compaction: slots.compaction,
             capability: slots.capability,
             model: slots.model,
-            batch: slots.batch,
             gate: slots.gate,
             recovery: slots.recovery,
             reply_admission: slots.reply_admission,
@@ -100,11 +97,6 @@ impl DefaultPlanner {
 
     pub(crate) fn with_model(mut self, strategy: Arc<dyn ModelStrategy>) -> Self {
         self.model = strategy;
-        self
-    }
-
-    pub(crate) fn with_batch(mut self, strategy: Arc<dyn BatchPolicyStrategy>) -> Self {
-        self.batch = strategy;
         self
     }
 
@@ -169,10 +161,6 @@ impl AgentLoopPlannerInternal for DefaultPlanner {
         &*self.model
     }
 
-    fn batch(&self) -> &dyn BatchPolicyStrategy {
-        &*self.batch
-    }
-
     fn gate(&self) -> &dyn GateHandlingStrategy {
         &*self.gate
     }
@@ -207,7 +195,6 @@ pub(crate) struct DefaultStrategySlots {
     compaction: Arc<dyn CompactionStrategy>,
     capability: Arc<dyn CapabilityStrategy>,
     model: Arc<dyn ModelStrategy>,
-    batch: Arc<dyn BatchPolicyStrategy>,
     gate: Arc<dyn GateHandlingStrategy>,
     recovery: Arc<dyn RecoveryStrategy>,
     reply_admission: Arc<dyn ReplyAdmissionStrategy>,
@@ -223,7 +210,6 @@ impl Default for DefaultStrategySlots {
             compaction: Arc::new(ActiveTaskPreservingCompactionStrategy::default()),
             capability: Arc::new(DefaultCapabilityStrategy),
             model: Arc::new(DefaultModelStrategy),
-            batch: Arc::new(DefaultBatchPolicyStrategy),
             gate: Arc::new(DefaultGateHandlingStrategy),
             recovery: Arc::new(DefaultRecoveryStrategy::default()),
             reply_admission: Arc::new(DefaultReplyAdmissionStrategy),
@@ -253,8 +239,8 @@ mod tests {
         CompactionPromptSnapshot, IndexedMessageKind, LoopExecutionState, MessageIndexEntry,
     };
     use crate::strategies::{
-        ActiveTaskPreservingCompactionStrategy, BatchPolicy, CapabilityFilter, CompactionDecision,
-        ContextPlan, ContextStrategy, DefaultCompactionStrategy,
+        ActiveTaskPreservingCompactionStrategy, CapabilityFilter, CompactionDecision, ContextPlan,
+        ContextStrategy, DefaultCompactionStrategy,
     };
 
     use super::*;
@@ -328,8 +314,6 @@ mod tests {
             planner.budget().iteration_limit(&state),
             crate::strategies::DEFAULT_ITERATION_BACKSTOP
         );
-        assert_eq!(planner.batch().policy(&state, &[]), BatchPolicy::Parallel);
-
         let filter = planner.capability().filter(&state).await;
         assert_eq!(filter, CapabilityFilter::All);
     }
@@ -454,11 +438,13 @@ mod tests {
                 max_checkpoint_bytes: 64 * 1024,
                 require_final_checkpoint: false,
                 allow_no_reply_completion: false,
+                before_model_checkpoint_interval: 1,
             },
             resource_budget_policy: ResourceBudgetPolicy {
                 tier: ResourceBudgetTier::new("default_planner_test_tier").expect("valid"),
                 max_model_calls: 32,
                 max_capability_invocations: 64,
+                max_wall_clock_seconds: None,
             },
             personal_context_policy: ironclaw_loop_contracts::PersonalContextPolicy::Excluded,
             runtime_constraints: RuntimeProfileConstraints {

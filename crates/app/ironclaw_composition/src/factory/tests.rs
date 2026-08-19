@@ -20,10 +20,16 @@ use ironclaw_host_api::{
     },
     mount::{MountGrant, MountPermissions},
     path::{MountAlias, ScopedPath, VirtualPath},
+    product_adapter::AdapterInstallationId as ChannelAdapterInstallationId,
     resource::{ResourceEstimate, ResourceScope, ResourceUsage},
     result_meta::FailureKind,
     runtime::{RuntimeKind, TrustClass},
     scope::{ExecutionContext, Principal},
+    user_identity::{
+        RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
+        RebornUserIdentityBindingStore, RebornUserIdentityLookup,
+        installation_scoped_provider_user_id,
+    },
 };
 use ironclaw_host_api::{
     capability::{RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource},
@@ -40,7 +46,10 @@ use ironclaw_host_runtime::{RuntimeCredentialAccountRequest, RuntimeCredentialAc
 use rust_decimal_macros::dec;
 use secrecy::ExposeSecret;
 
-use crate::builtin_capability_policy::{BuiltinApprovalPolicyAction, BuiltinCapabilityPolicyError};
+use crate::builtin_capability_policy::{
+    BuiltinApprovalPolicyAction, BuiltinCapabilityPolicyError, CapabilityMountProfile,
+    CapabilityNetworkProfile,
+};
 use crate::{
     RebornReadinessDiagnostic, RebornReadinessState, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
 };
@@ -54,6 +63,70 @@ fn libsql_build_resource_governor_guard_requires_singleton_authority() {
         Err(RebornBuildError::InvalidConfig { reason })
             if reason.contains("libSQL FilesystemResourceGovernor uses process-local tallies")
     ));
+}
+
+#[tokio::test]
+async fn production_backend_projects_user_sandbox_shell_constraints() {
+    let dir = tempfile::tempdir().expect("sandbox production root");
+    let database_path = dir.path().join("reborn.db");
+    let database = Arc::new(
+        libsql::Builder::new_local(database_path.display().to_string())
+            .build()
+            .await
+            .expect("build sandbox production database"),
+    );
+    let runtime =
+        Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(database).expect("libSQL runtime"));
+    let railway_binding = crate::sandbox::build_railway_user_sandbox_binding(
+        "sandbox-policy-project".to_string(),
+        "sandbox-policy-environment".to_string(),
+        None,
+        None,
+        None,
+    )
+    .expect("valid Railway fixture config");
+    let services = build_runtime_substrate(
+        crate::test_support::libsql_host_bindings_from_runtime_for_test(
+            RebornCompositionProfile::Production,
+            "sandbox-policy-owner",
+            runtime,
+            database_path.display().to_string(),
+            test_secret_master_key(),
+        )
+        .with_production_trust_policy(Arc::new(
+            builtin_first_party_trust_policy().expect("builtin trust policy"),
+        ))
+        .with_runtime_policy(EffectiveRuntimePolicy {
+            deployment: ironclaw_host_api::runtime_policy::DeploymentMode::HostedMultiTenant,
+            requested_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
+            resolved_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
+            filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+            process_backend: ProcessBackendKind::UserSandbox,
+            network_mode: ironclaw_host_api::runtime_policy::NetworkMode::Brokered,
+            secret_mode: SecretMode::TenantBroker,
+            approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
+            audit_mode: ironclaw_host_api::runtime_policy::AuditMode::Standard,
+        })
+        .with_runtime_process_binding(railway_binding),
+    )
+    .await
+    .expect("production-shaped sandbox services build");
+    let shell = services
+        .capability_policy_for_test()
+        .grants
+        .iter()
+        .find(|grant| grant.capability.as_str() == "builtin.shell")
+        .expect("shell grant");
+
+    for effect in [EffectKind::ReadFilesystem, EffectKind::WriteFilesystem] {
+        assert!(!shell.effects.contains(&effect));
+    }
+    assert!(shell.effects.contains(&EffectKind::Network));
+    assert_eq!(shell.mounts, CapabilityMountProfile::Ambient);
+    assert_eq!(
+        shell.network,
+        CapabilityNetworkProfile::SandboxDirectPreview
+    );
 }
 
 #[tokio::test]
@@ -342,109 +415,6 @@ impl ConversationActorPairingService for FailingConversationActorPairingService 
     }
 }
 
-/// Per-trigger delivery targets validate against the SAME registry the
-/// outbound target surface publishes from: an id a provider resolves for
-/// the caller is accepted; an unknown id (or an empty registry) fails
-/// closed as `DeliveryTargetInvalid`.
-#[tokio::test]
-async fn trigger_delivery_target_validation_resolves_through_the_outbound_registry() {
-    use crate::outbound::{
-        DeliveryTargetCapabilities, MutableOutboundDeliveryTargetRegistry,
-        OutboundDeliveryTargetEntry, OutboundDeliveryTargetId, OutboundDeliveryTargetOwner,
-        OutboundDeliveryTargetProvider, OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
-    };
-    use ironclaw_outbound::OutboundError;
-
-    struct OneTargetProvider {
-        entry: OutboundDeliveryTargetEntry,
-    }
-
-    #[async_trait::async_trait]
-    impl OutboundDeliveryTargetProvider for OneTargetProvider {
-        async fn list_outbound_delivery_targets(
-            &self,
-            caller: &OutboundDeliveryTargetScope,
-        ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
-            // Fixture available to whichever caller asks: claim the querying
-            // caller as owner so it survives the registry caller-scoping filter.
-            Ok(vec![OutboundDeliveryTargetEntry {
-                summary: self.entry.summary.clone(),
-                capabilities: self.entry.capabilities.clone(),
-                destination: self.entry.destination.clone(),
-                owner: OutboundDeliveryTargetOwner::for_scope(caller),
-            }])
-        }
-    }
-
-    let scope = ironclaw_host_api::resource::ResourceScope {
-        tenant_id: TenantId::new("registry-validation-tenant").expect("tenant"),
-        user_id: UserId::new("registry-validation-user").expect("user"),
-        agent_id: None,
-        project_id: None,
-        mission_id: None,
-        thread_id: None,
-        invocation_id: ironclaw_host_api::ids::InvocationId::new(),
-    };
-    let target = ironclaw_triggers::TriggerDeliveryTargetId::new("slack:personal-dm:T1:me")
-        .expect("target id");
-
-    let registry = MutableOutboundDeliveryTargetRegistry::default();
-    // Empty registry → fail closed.
-    let rejected = validate_trigger_delivery_target_against_registry(&registry, &scope, &target)
-        .await
-        .expect_err("empty registry must reject");
-    assert!(matches!(
-        rejected,
-        TriggerError::InvalidRecord {
-            kind: ironclaw_triggers::TriggerRecordValidationKind::DeliveryTargetInvalid,
-            ..
-        }
-    ));
-
-    // Registered provider that resolves the id for the caller → accept.
-    let entry = OutboundDeliveryTargetEntry {
-        summary: OutboundDeliveryTargetSummary::new(
-            OutboundDeliveryTargetId::new("slack:personal-dm:T1:me").expect("id"),
-            "slack",
-            "Slack DM".to_string(),
-            None,
-        )
-        .expect("summary"),
-        capabilities: DeliveryTargetCapabilities {
-            final_replies: true,
-            progress: false,
-            gate_prompts: true,
-            auth_prompts: true,
-            modalities: Vec::new(),
-        },
-        destination: ironclaw_outbound::RunFinalReplyDestination::External {
-            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
-                "reply:registry-validation",
-            )
-            .expect("binding ref"),
-        },
-        // Overwritten with the querying caller by `OneTargetProvider::list`;
-        // set to the scope identity here for clarity.
-        owner: OutboundDeliveryTargetOwner::new(
-            TenantId::new("registry-validation-tenant").expect("tenant"),
-            UserId::new("registry-validation-user").expect("user"),
-        ),
-    };
-    registry
-        .register_provider("test", Arc::new(OneTargetProvider { entry }))
-        .expect("register");
-    validate_trigger_delivery_target_against_registry(&registry, &scope, &target)
-        .await
-        .expect("registered target must validate");
-
-    // A different id still fails closed.
-    let other = ironclaw_triggers::TriggerDeliveryTargetId::new("slack:personal-dm:T1:other")
-        .expect("target id");
-    validate_trigger_delivery_target_against_registry(&registry, &scope, &other)
-        .await
-        .expect_err("unknown target must reject");
-}
-
 fn trigger_record_for_pairing_test() -> TriggerRecord {
     TriggerRecord {
         trigger_id: ironclaw_triggers::TriggerId::new(),
@@ -457,6 +427,7 @@ fn trigger_record_for_pairing_test() -> TriggerRecord {
         schedule: ironclaw_triggers::TriggerSchedule::cron("* * * * *")
             .expect("valid cron expression"),
         prompt: "pairing test prompt".to_string(),
+        execution_spec: None,
         delivery_target: None,
         state: ironclaw_triggers::TriggerState::Scheduled,
         next_run_at: chrono::Utc::now(),
@@ -539,20 +510,16 @@ async fn durable_trigger_conversation_services_propagates_init_error() {
 #[tokio::test]
 async fn local_runtime_trigger_create_hook_maps_conversation_init_error_to_backend() {
     let standalone_root = tempfile::tempdir().expect("tempdir");
-    let services = build_runtime_substrate(crate::deployment::local_filesystem_build_input(
+    let _services = build_runtime_substrate(crate::deployment::local_filesystem_build_input(
         "pairing-owner",
         standalone_root.path().join("standalone"),
     ))
     .await
     .expect("standalone services build");
-    let turn_state = Arc::new(services.processes.agent_turn_runtime());
     let hook = TriggerCreatorPairingHook {
-        outbound_delivery_targets: Arc::clone(&services.outbound_delivery_targets),
-        source_reply_target: Arc::new(std::sync::RwLock::new(Arc::new(
-            TurnStateTriggerSourceReplyTarget::new(turn_state),
-        ))),
         scoped_filesystem: failing_trigger_conversation_filesystem(),
         conversations: tokio::sync::OnceCell::new(),
+        execution_preflight: tokio::sync::OnceCell::new(),
     };
     let record = trigger_record_for_pairing_test();
 
@@ -1330,7 +1297,7 @@ async fn standalone_gsuite_installs_activates_and_dispatches_through_host_runtim
                     capability: &gmail_capability,
                 },
                 crate::factory::test_support::workspace_mounts_for_test(runtime_surfaces),
-                runtime_surfaces.skill_mounts_for_test(),
+                &crate::factory::test_support::skill_mounts_for_test(&gmail_scope),
                 runtime_surfaces.memory_mounts_for_test(),
                 runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
             ),
@@ -1565,6 +1532,427 @@ fn runtime_owner_scope_uses_configured_runtime_identity_for_turn_state() {
     assert_eq!(scope.agent_id, Some(identity.agent_id));
 }
 
+/// The process journal must reach the same rows over a different connection.
+/// If the mount set drifted, a deployment's journal would silently move and every
+/// in-flight run would become invisible; if the handle were shared, the heartbeat
+/// would go back to queueing behind data-plane traffic.
+#[tokio::test]
+async fn process_journal_filesystem_is_a_separate_handle_over_the_same_tenant_root() {
+    let data_plane_backend = Arc::new(InMemoryBackend::new());
+    let journal_backend = Arc::new(InMemoryBackend::new());
+    let data_plane = crate::filesystem_assembly::process_journal_root_filesystem(Arc::clone(
+        &data_plane_backend,
+    ))
+    .expect("data-plane composite");
+    let journal =
+        crate::filesystem_assembly::process_journal_root_filesystem(Arc::clone(&journal_backend))
+            .expect("journal composite");
+
+    let journal_roots: Vec<String> = journal
+        .mounts()
+        .await
+        .expect("journal mounts")
+        .into_iter()
+        .map(|descriptor| descriptor.virtual_root.as_str().to_owned())
+        .collect();
+    let data_plane_roots: Vec<String> = data_plane
+        .mounts()
+        .await
+        .expect("data-plane mounts")
+        .into_iter()
+        .map(|descriptor| descriptor.virtual_root.as_str().to_owned())
+        .collect();
+    assert_eq!(
+        journal_roots, data_plane_roots,
+        "the journal must resolve the same virtual roots, or its rows move"
+    );
+    assert!(
+        journal_roots.iter().any(|root| root == "/tenants"),
+        "process rows live under /tenants; got {journal_roots:?}"
+    );
+    assert!(
+        !Arc::ptr_eq(&data_plane, &journal),
+        "the journal must not be handed the data-plane filesystem"
+    );
+
+    // Both handles resolve a process-row path; in production they address the
+    // same database rows over different connection pools.
+    let path =
+        ironclaw_host_api::path::VirtualPath::new("/tenants/probe/processes").expect("probe path");
+    for (label, filesystem) in [("journal", &journal), ("data plane", &data_plane)] {
+        filesystem
+            .put(
+                &path,
+                ironclaw_filesystem::Entry::bytes(b"probe".to_vec()),
+                ironclaw_filesystem::CasExpectation::Any,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{label} handle must serve process-row paths: {error}"));
+        assert!(
+            filesystem
+                .get(&path)
+                .await
+                .unwrap_or_else(|error| panic!("{label} read: {error}"))
+                .is_some(),
+            "{label} handle must read back its own write"
+        );
+    }
+}
+
+/// A backend whose index declaration fails, so the process journal's startup
+/// migration fails the way a broken or restrictive database makes it fail.
+struct IndexRefusingBackend;
+
+const REFUSED_INDEX_REASON: &str = "index declaration refused by the test backend";
+
+#[async_trait::async_trait]
+impl RootFilesystem for IndexRefusingBackend {
+    async fn ensure_index(
+        &self,
+        path: &ironclaw_host_api::path::VirtualPath,
+        _spec: &ironclaw_filesystem::IndexSpec,
+    ) -> Result<(), FilesystemError> {
+        Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: ironclaw_filesystem::FilesystemOperation::EnsureIndex,
+            reason: REFUSED_INDEX_REASON.to_string(),
+        })
+    }
+
+    async fn list_dir(
+        &self,
+        _path: &ironclaw_host_api::path::VirtualPath,
+    ) -> Result<Vec<ironclaw_filesystem::DirEntry>, FilesystemError> {
+        Ok(Vec::new())
+    }
+
+    async fn stat(
+        &self,
+        path: &ironclaw_host_api::path::VirtualPath,
+    ) -> Result<ironclaw_filesystem::FileStat, FilesystemError> {
+        Err(FilesystemError::NotFound {
+            path: path.clone(),
+            operation: ironclaw_filesystem::FilesystemOperation::Stat,
+        })
+    }
+}
+
+/// Startup migration failure must keep its cause reachable.
+///
+/// Both production substrate paths migrate the process journal and let `?`
+/// convert the failure, so this drives the real migration against a refusing
+/// backend and applies the same conversion. Flattening the store error into a
+/// `reason` string (as both call sites once did) leaves an operator holding
+/// "process journal startup migration failed" with no way to tell an
+/// unreachable database from a rejected index. Both boundaries are checked:
+/// composition's error and the build error it converts into.
+#[tokio::test]
+async fn process_journal_startup_migration_failure_keeps_its_cause() {
+    let store = ProcessJournalStore::new(crate::wrap_process_journal_scoped(Arc::new(
+        IndexRefusingBackend,
+    )));
+
+    let store_error = store
+        .migrate_legacy_journal()
+        .await
+        .expect_err("an index-refusing backend must fail the startup migration");
+    let error = crate::RebornCompositionError::from(store_error);
+
+    assert!(
+        matches!(
+            error,
+            crate::RebornCompositionError::ProcessJournalMigration(..)
+        ),
+        "startup migration failure must be its own variant, not a flattened config error: {error}"
+    );
+    assert!(
+        error_chain(&error).contains(REFUSED_INDEX_REASON),
+        "the backend cause must survive the composition boundary: {}",
+        error_chain(&error)
+    );
+
+    let build_error = RebornBuildError::from(error);
+    assert!(
+        error_chain(&build_error).contains(REFUSED_INDEX_REASON),
+        "the cause must also survive conversion into the build error: {}",
+        error_chain(&build_error)
+    );
+}
+
+/// Render an error and every source under it, for cause-chain assertions.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut rendered = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        rendered.push_str(&format!(" <- {cause}"));
+        source = cause.source();
+    }
+    rendered
+}
+
+/// The libSQL leg of the same split (nearai/ironclaw#7714). libSQL admits one
+/// writer process-wide, so the governor's delta journal and the process journal
+/// used to queue behind every event and message write and time out on a healthy
+/// database. Their lane must therefore (a) resolve the same virtual roots to the
+/// same rows as the data plane, and (b) be admitted while the data-plane writer
+/// slot is held — the timing-free way to state "not the same write lane".
+#[tokio::test]
+async fn libsql_journal_lane_is_a_separate_write_lane_over_the_same_rows() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = Arc::new(
+        libsql::Builder::new_local(directory.path().join("journal-lane.db"))
+            .build()
+            .await
+            .expect("database"),
+    );
+    let runtime = Arc::new(
+        ironclaw_libsql_runtime::LibSqlRuntime::new(Arc::clone(&database)).expect("runtime"),
+    );
+    let data_plane_backend = Arc::new(ironclaw_filesystem::LibSqlRootFilesystem::from_runtime(
+        Arc::clone(&runtime),
+    ));
+    data_plane_backend
+        .run_migrations()
+        .await
+        .expect("libsql migrations");
+    let data_plane = crate::filesystem_assembly::process_journal_root_filesystem(Arc::clone(
+        &data_plane_backend,
+    ))
+    .expect("data-plane composite");
+    let journal_lane = crate::filesystem_assembly::libsql_journal_lane_filesystem(
+        runtime.as_ref(),
+        crate::filesystem_assembly::process_journal_root_filesystem,
+    )
+    .expect("journal lane composite");
+
+    let mount_roots = |filesystem: &Arc<ironclaw_filesystem::CompositeRootFilesystem>| {
+        let filesystem = Arc::clone(filesystem);
+        async move {
+            filesystem
+                .mounts()
+                .await
+                .expect("mounts")
+                .into_iter()
+                .map(|descriptor| descriptor.virtual_root.as_str().to_owned())
+                .collect::<Vec<_>>()
+        }
+    };
+    let lane_roots = mount_roots(&journal_lane).await;
+    assert_eq!(
+        lane_roots,
+        mount_roots(&data_plane).await,
+        "the journal lane must resolve the same virtual roots, or its rows move"
+    );
+    assert!(
+        lane_roots.iter().any(|root| root == "/tenants"),
+        "governor and process rows live under /tenants; got {lane_roots:?}"
+    );
+
+    // Bulk data-plane traffic occupies the sole data-plane writer for the whole
+    // journal write, the way a per-turn write burst does in production.
+    let data_plane_writer = runtime.write().await.expect("data-plane writer");
+    let path = VirtualPath::new("/tenants/probe/users/probe/resources").expect("probe path");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        journal_lane.put(
+            &path,
+            ironclaw_filesystem::Entry::bytes(b"delta".to_vec()),
+            ironclaw_filesystem::CasExpectation::Any,
+        ),
+    )
+    .await
+    .expect("journal lane must not queue behind the data-plane writer")
+    .expect("journal write");
+    drop(data_plane_writer);
+
+    let entry = data_plane
+        .get(&path)
+        .await
+        .expect("data-plane read")
+        .expect("journal row must be visible to the data plane");
+    assert_eq!(
+        entry.entry.body.as_slice(),
+        b"delta".as_slice(),
+        "the lane must address the same rows the data plane reads"
+    );
+}
+
+/// The caller-level Postgres leg of the pool split (Docker/testcontainers;
+/// skipped when unavailable, like the other Postgres composition tests). The
+/// two InMemory-backend handles above cannot prove that two pool-backed
+/// handles reach the same rows — this drives the real production seam:
+/// `open_postgres_pools_from_source` over connection config, a journal store
+/// over the dedicated pool, a read of the same row over the data-plane pool,
+/// and a heartbeat that stays available while the data-plane pool is fully
+/// checked out.
+#[tokio::test]
+async fn postgres_process_journal_writes_are_visible_over_the_data_plane_and_survive_pool_exhaustion()
+ {
+    use ironclaw_processes::{ProcessJournalSource, ProcessSubmissionPort, ProcessTransitionPort};
+    let Some((_container, database_url)) = start_postgres_container_or_skip().await else {
+        return;
+    };
+    let pools = open_postgres_pools_from_source(PostgresPoolSource::Config(
+        crate::input::PostgresConnectionConfig {
+            url: ironclaw_secrets::SecretMaterial::from(database_url),
+            pool_max_size: 2,
+            tls_options: Default::default(),
+        },
+    ))
+    .expect("production pool opening must succeed");
+    let journal_pool = pools
+        .process_journal
+        .expect("the config path must open a dedicated journal pool");
+
+    // The data-plane filesystem migrates the shared database, exactly as
+    // `build_postgres_production` does; the journal pool never runs migrations
+    // itself and must address the same rows.
+    let data_plane_database = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
+        pools.data_plane.clone(),
+    ));
+    data_plane_database
+        .run_migrations()
+        .await
+        .expect("data-plane migrations");
+    let data_plane_filesystem =
+        production_database_root_filesystem(data_plane_database, "pool-isolation-test")
+            .expect("data-plane composite");
+    let journal_filesystem = crate::filesystem_assembly::process_journal_root_filesystem(Arc::new(
+        ironclaw_filesystem::PostgresRootFilesystem::new(journal_pool),
+    ))
+    .expect("journal composite");
+    assert!(
+        !Arc::ptr_eq(&data_plane_filesystem, &journal_filesystem),
+        "the journal must not be handed the data-plane filesystem"
+    );
+
+    let journal_store = ironclaw_processes::ProcessJournalStore::new(
+        crate::wrap_process_journal_scoped(Arc::clone(&journal_filesystem)),
+    );
+
+    // A process journal row written through the dedicated pool must be visible
+    // through the data-plane pool: the pools split connections, not rows.
+    let scope = ironclaw_host_api::resource::ResourceScope::local_default(
+        UserId::new("pool-isolation-user").expect("user id"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+    let process_id = ironclaw_host_api::ids::ProcessId::new();
+    journal_store
+        .submit_process(ironclaw_processes::SubmitProcessRequest {
+            process_id,
+            process_kind: ironclaw_processes::ProcessKind::Internal,
+            scope: scope.clone(),
+            exclusive_within_scope: false,
+            operation_id: None,
+            owner_user_id: Some(scope.user_id.clone()),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at: chrono::Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("journal submit over the dedicated pool");
+    let data_plane_store = ironclaw_processes::ProcessJournalStore::new(crate::wrap_scoped(
+        Arc::clone(&data_plane_filesystem),
+    ));
+    let read_back = data_plane_store
+        .get_process_snapshot(ironclaw_processes::GetProcessSnapshotRequest {
+            scope: scope.clone(),
+            process_id,
+        })
+        .await
+        .expect("the journal row must be visible over the data-plane pool");
+
+    // Claim through the journal pool, then exhaust every data-plane connection
+    // and prove the journal heartbeat checkout is still available — the exact
+    // starvation the pool split exists to prevent.
+    let claim = journal_store
+        .claim_next_processes(ironclaw_processes::ClaimProcessesRequest {
+            worker_id: ironclaw_processes::ProcessWorkerId::from_trusted("pool-isolation-worker"),
+            scope_filter: Some(scope.clone()),
+            process_id_filter: Some(process_id),
+            process_kind_filter: Some(ironclaw_processes::ProcessKind::Internal),
+            max_processes: 1,
+        })
+        .await
+        .expect("journal claim")
+        .pop()
+        .expect("claimed process");
+    let claimed_cursor = claim.state.journal_cursor;
+    assert_eq!(read_back.process_id, process_id);
+
+    let held_a = pools.data_plane.get().await.expect("data-plane checkout a");
+    let held_b = pools.data_plane.get().await.expect("data-plane checkout b");
+    let heartbeat = journal_store
+        .heartbeat_process(ironclaw_processes::ProcessLeaseRequest {
+            process_id,
+            worker_id: claim.worker_id,
+            lease_token: claim.lease_token,
+        })
+        .await
+        .expect("the journal heartbeat must not queue behind an exhausted data-plane pool");
+    let _ = (held_a, held_b);
+    assert_eq!(
+        heartbeat, claimed_cursor,
+        "heartbeat preserves the claimed journal cursor"
+    );
+}
+
+/// Start a Postgres testcontainer, or skip (return `None`) when
+/// Docker/testcontainers is unavailable — the same convention as the crate's
+/// other Postgres composition tests.
+async fn start_postgres_container_or_skip() -> Option<(
+    testcontainers_modules::testcontainers::ContainerAsync<
+        testcontainers_modules::postgres::Postgres,
+    >,
+    String,
+)> {
+    use testcontainers_modules::testcontainers::{ImageExt, runners::AsyncRunner};
+
+    let image = testcontainers_modules::postgres::Postgres::default()
+        .with_db_name("ironclaw_test")
+        .with_user("postgres")
+        .with_password("postgres")
+        .with_tag("16-alpine");
+    let container = match image.start().await {
+        Ok(container) => container,
+        Err(error) => {
+            eprintln!(
+                "skipping Postgres pool-isolation test: docker/testcontainers unavailable ({error})"
+            );
+            return None;
+        }
+    };
+    let host = match container.get_host().await {
+        Ok(host) => host,
+        Err(error) => {
+            eprintln!(
+                "skipping Postgres pool-isolation test: could not resolve container host ({error})"
+            );
+            return None;
+        }
+    };
+    let port = match container.get_host_port_ipv4(5432).await {
+        Ok(port) => port,
+        Err(error) => {
+            eprintln!(
+                "skipping Postgres pool-isolation test: could not resolve container port ({error})"
+            );
+            return None;
+        }
+    };
+    Some((
+        container,
+        format!("postgres://postgres:postgres@{host}:{port}/ironclaw_test"),
+    ))
+}
+
 #[tokio::test]
 async fn production_database_root_filesystem_mounts_canonical_runtime_roots() {
     let filesystem =
@@ -1653,14 +2041,11 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
     );
     let submit = ironclaw_turns::SubmitTurnRequest {
         requested_model: None,
+        output_contract: None,
         scope,
         actor: ironclaw_turns::TurnActor::new(owner),
         accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("configured-message-ref")
             .expect("message ref"),
-        source_binding_ref: ironclaw_turns::SourceBindingRef::new("source-web")
-            .expect("source binding"),
-        reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new("reply-web")
-            .expect("reply binding"),
         requested_run_profile: Some(
             ironclaw_turns::RunProfileRequest::new("default").expect("run profile"),
         ),
@@ -1745,14 +2130,11 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
     );
     let submit = ironclaw_turns::SubmitTurnRequest {
         requested_model: None,
+        output_contract: None,
         scope,
         actor: ironclaw_turns::TurnActor::new(owner),
         accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("default-message-ref")
             .expect("message ref"),
-        source_binding_ref: ironclaw_turns::SourceBindingRef::new("source-web")
-            .expect("source binding"),
-        reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new("reply-web")
-            .expect("reply binding"),
         requested_run_profile: Some(
             ironclaw_turns::RunProfileRequest::new("default").expect("run profile"),
         ),
@@ -2329,10 +2711,23 @@ async fn standalone_skill_management_invokes_through_first_party_runtime() {
     .expect("skill install succeeds");
     assert_eq!(install_output["installed"], true);
     assert_eq!(install_output["name"], "runtime-sentinel");
+    // The skill must land in the DB-backed virtual filesystem, which is where discovery, Settings,
+    // and the agent's own later sessions all read. Asserting the host disk is what let writers and
+    // readers disagree about the tree skills live in (nearai/ironclaw#7168).
     assert!(
-        storage_root
+        crate::filesystem_assembly::database_file_bytes(
+            &storage_root,
+            "/tenants/default/users/standalone-test-user/skills/runtime-sentinel/SKILL.md",
+        )
+        .await
+        .is_some(),
+        "skill_install must write into the database-backed skill tree"
+    );
+    assert!(
+        !storage_root
             .join("tenants/default/users/standalone-test-user/skills/runtime-sentinel/SKILL.md")
-            .exists()
+            .exists(),
+        "nothing may be left on the host disk: a skill written there is invisible to discovery"
     );
 
     let list_output = invoke_json(
@@ -2379,11 +2774,15 @@ async fn standalone_skill_management_invokes_through_first_party_runtime() {
     assert_eq!(auto_activate_output["updated"], true);
     assert_eq!(auto_activate_output["name"], "runtime-sentinel");
     assert_eq!(auto_activate_output["auto_activate"], false);
-    let updated_skill = std::fs::read_to_string(
-        storage_root
-            .join("tenants/default/users/standalone-test-user/skills/runtime-sentinel/SKILL.md"),
+    let updated_skill = String::from_utf8(
+        crate::filesystem_assembly::database_file_bytes(
+            &storage_root,
+            "/tenants/default/users/standalone-test-user/skills/runtime-sentinel/SKILL.md",
+        )
+        .await
+        .expect("updated skill is readable from the database-backed skill tree"),
     )
-    .expect("updated skill");
+    .expect("skill md is utf-8");
     assert!(updated_skill.contains("auto_activate: false"));
 
     let remove_output = invoke_json(
@@ -2396,9 +2795,13 @@ async fn standalone_skill_management_invokes_through_first_party_runtime() {
     .expect("skill remove succeeds");
     assert_eq!(remove_output["removed"], true);
     assert!(
-        !storage_root
-            .join("tenants/default/users/standalone-test-user/skills/runtime-sentinel/SKILL.md")
-            .exists()
+        crate::filesystem_assembly::database_file_bytes(
+            &storage_root,
+            "/tenants/default/users/standalone-test-user/skills/runtime-sentinel/SKILL.md",
+        )
+        .await
+        .is_none(),
+        "remove must delete from the database-backed skill tree, the one discovery reads"
     );
 }
 
@@ -2823,7 +3226,8 @@ fn skill_mounts() -> MountView {
         ironclaw_host_api::ids::InvocationId::new(),
     )
     .expect("valid resource scope");
-    crate::runtime_mounts::scoped_skill_management_mount_view(&scope).expect("valid skill mounts")
+    crate::runtime_mounts::db_backed_skill_management_mount_view(&scope)
+        .expect("valid skill mounts")
 }
 
 fn workspace_mounts() -> MountView {
@@ -3309,6 +3713,30 @@ fn pairing_account_setup_descriptor(extension_id: &str) -> ExtensionAccountSetup
     }
 }
 
+#[test]
+fn device_link_channel_manifest_declares_product_account_setup_without_pairing_metadata() {
+    let descriptors = super::manifest_channel_account_setup_descriptors(&[Arc::new(
+        ironclaw_extension_host::test_support::device_link_channel_manifest(),
+    )]);
+
+    assert_eq!(
+        descriptors.len(),
+        1,
+        "the device-link channel needs one setup descriptor"
+    );
+    let descriptor = &descriptors[0];
+    assert_eq!(
+        descriptor.auth_requirement.setup,
+        RuntimeCredentialAccountSetup::DeviceLink,
+    );
+    assert_eq!(
+        descriptor.connection_requirement.strategy,
+        ironclaw_assistant::RebornChannelConnectStrategy::DeviceLink,
+    );
+    assert_eq!(descriptor.pairing_deep_link_template, None);
+    assert!(descriptor.inbound_code_prefixes.is_empty());
+}
+
 /// Live-repro regression (demo-stack defect): removing an installed channel
 /// extension through the lifecycle port with an authenticated actor must
 /// actually delete the caller's durable membership — and must be POSSIBLE in
@@ -3336,6 +3764,57 @@ async fn telegram_remove_with_authenticated_actor_deletes_the_membership() {
         .install(telegram_ref.clone(), &caller)
         .await
         .expect("install telegram");
+    let activation_requirements = extension_management
+        .activation_credential_requirements(&telegram_ref, &caller)
+        .await
+        .expect("read Telegram activation requirements");
+    assert!(
+        activation_requirements.is_empty(),
+        "Telegram's channel device link gates admission and personal tools, not adapter activation: {activation_requirements:?}"
+    );
+
+    let installation = extension_management
+        .installation_store_for_test()
+        .list_installations()
+        .await
+        .expect("list installations")
+        .into_iter()
+        .find(|installation| installation.extension_id().as_str() == "telegram")
+        .expect("Telegram installation");
+    let installation_id =
+        ChannelAdapterInstallationId::new(installation.installation_id().as_str())
+            .expect("adapter installation id");
+    let external_actor = "U-REMOVE";
+    let provider_user_id = installation_scoped_provider_user_id(&installation_id, external_actor);
+    services
+        .channel_identity_store
+        .bind_user_identity(RebornUserIdentityBinding {
+            provider: RebornIdentityProviderId::new("telegram").expect("provider"),
+            provider_user_id: RebornIdentityProviderUserId::new(&provider_user_id)
+                .expect("provider user"),
+            user_id: caller.clone(),
+        })
+        .await
+        .expect("seed linked channel identity");
+    services
+        .channel_dm_target_store
+        .upsert(
+            "telegram",
+            &caller,
+            external_actor.to_string(),
+            serde_json::json!({"chat_id": "qa-only"}),
+        )
+        .await
+        .expect("seed DM target");
+
+    assert!(
+        services
+            .channel_pairing
+            .as_ref()
+            .and_then(|registry| registry.get("telegram"))
+            .is_none(),
+        "a device-link channel must not receive a generated-code pairing service"
+    );
 
     let removal_scope =
         default_runtime_owner_scope(caller.clone()).expect("telegram removal scope");
@@ -3369,5 +3848,23 @@ async fn telegram_remove_with_authenticated_actor_deletes_the_membership() {
             .first()
             .is_some_and(|extension| extension.install_scope.is_none()),
         "removed telegram must have no visible membership for its former member: {extensions:?}",
+    );
+    assert_eq!(
+        services
+            .channel_identity_store
+            .resolve_user_identity("telegram", &provider_user_id)
+            .await
+            .expect("resolve after removal"),
+        None,
+        "removal must delete the linked Telegram channel identity"
+    );
+    assert!(
+        services
+            .channel_dm_target_store
+            .load("telegram", &caller)
+            .await
+            .expect("load target after removal")
+            .is_none(),
+        "removal must delete the caller's Telegram DM delivery target"
     );
 }

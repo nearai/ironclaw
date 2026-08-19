@@ -1,6 +1,7 @@
 pub(crate) mod attachment;
 pub(crate) mod coding_read;
 pub(crate) mod core_builtin;
+pub(crate) mod device_link;
 pub(crate) mod extension;
 pub(crate) mod file;
 pub(crate) mod github;
@@ -10,6 +11,7 @@ pub(crate) mod process;
 pub(crate) mod profile;
 pub(crate) mod project;
 pub(crate) mod qa_smoke;
+pub(crate) mod sandbox_shell;
 pub(crate) mod skill;
 pub(crate) mod trace_commons;
 pub(crate) mod trigger;

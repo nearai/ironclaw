@@ -4,10 +4,6 @@ use super::turn_events::{
 };
 use super::*;
 
-use crate::{
-    CapabilityActivityStatusView, ProductGateKind, ProductOutboundEnvelope, ProductOutboundPayload,
-    ProductProjectionItem,
-};
 use async_trait::async_trait;
 use ironclaw_approvals::{ApprovalRecord, ApprovalRequestStorePort, ApprovalStoreError};
 use ironclaw_event_log::{InMemoryDurableEventLog, RuntimeEvent};
@@ -15,8 +11,7 @@ use ironclaw_event_projections::{
     CapabilityActivityProjection, ProjectionSnapshot, ThreadTimeline,
 };
 use ironclaw_host_api::turn::{
-    AcceptedMessageRef, RunProfileId, RunProfileVersion, SourceBindingRef, TurnGateRef, TurnRunId,
-    TurnStatus,
+    AcceptedMessageRef, RunProfileId, RunProfileVersion, TurnGateRef, TurnRunId, TurnStatus,
 };
 use ironclaw_host_api::{
     action::{Action, NetworkMethod, NetworkScheme, NetworkTarget},
@@ -33,6 +28,10 @@ use ironclaw_host_api::{
 use ironclaw_loop_contracts::{
     LoopSafeSummary, SystemInferenceError, SystemInferencePort, SystemInferenceRequest,
     SystemInferenceResponse, SystemInferenceTaskId, SystemTaskKind,
+};
+use ironclaw_product_contracts::outbound::{
+    CapabilityActivityStatusView, ProductGateKind, ProductOutboundEnvelope, ProductOutboundPayload,
+    ProductProjectionItem,
 };
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, EventCursor as TurnEventCursor, GetRunStateRequest,
@@ -393,6 +392,7 @@ impl SystemInferencePort for SlowSystemInference {
             task_id: request.task_id,
             output_text: "too late".to_string(),
             elapsed_ms: 2000,
+            usage: None,
         })
     }
 }
@@ -454,13 +454,13 @@ fn turn_run_state(
         run_id,
         status: TurnStatus::BlockedAuth,
         accepted_message_ref: AcceptedMessageRef::new("message:auth-required").unwrap(),
-        source_binding_ref: SourceBindingRef::new("source:auth-required").unwrap(),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply:auth-required").unwrap(),
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
+        output_contract: Default::default(),
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref: Some(TurnGateRef::new("gate:auth-required").unwrap()),

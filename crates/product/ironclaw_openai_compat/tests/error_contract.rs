@@ -1,4 +1,4 @@
-use ironclaw_assistant::{
+use ironclaw_host_api::product_adapter::{
     ProductAdapterError, ProductSurfaceRejectionKind, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_openai_compat::{

@@ -21,7 +21,7 @@ import tomllib
 # `crates/{package}/` watch-path root stop matching the day that lands. This
 # gate then raises `GateError` on every entry and blocks CI — loudly, unlike the
 # silent members of its family, but blocking all the same.
-# See docs/reborn/target-architecture/CHECKLIST.md WS10 and #6963.
+# See docs/internal/reborn/target-architecture/CHECKLIST.md WS10 and #6963.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
 from crate_tree import (  # noqa: E402
     CrateTreeError,

@@ -4,9 +4,11 @@
 //! command payloads so command parsing does not depend on v1 agent routing or on
 //! the product surface that produced the command.
 
-use crate::{InboundCommandPayload, ProductRejection, ProductRejectionKind};
 use ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest;
 use ironclaw_host_api::error::HostApiError;
+use ironclaw_product_contracts::inbound::{
+    InboundCommandPayload, ProductRejection, ProductRejectionKind,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -18,7 +20,9 @@ use crate::lifecycle::{
 
 pub const PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID: &str = "product.lifecycle.command";
 pub const PRODUCT_MODEL_COMMAND_OPERATION_ID: &str = "product.model.command";
+pub const PRODUCT_NEW_COMMAND_OPERATION_ID: &str = "product.new.command";
 pub const PRODUCT_STATUS_COMMAND_OPERATION_ID: &str = "product.status.command";
+pub const PRODUCT_STOP_COMMAND_OPERATION_ID: &str = "product.stop.command";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,6 +45,27 @@ pub struct ProductModelCommandInput {
 pub struct ProductStatusCommandInput {
     /// Filled from the resolved conversation binding, never external input.
     pub thread_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductNewCommandInput {
+    /// Filled from the resolved conversation binding, never external input.
+    pub thread_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductNewCommandOutput {
+    /// False when the bound thread still has a non-terminal run. Channel
+    /// workflows must leave the binding untouched in that case.
+    pub can_reset: bool,
+    pub result: CommandResultView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductStopCommandInput {
+    /// Filled from the resolved conversation binding, never external input.
+    pub thread_id: String,
+    pub invocation: ProductStopInvocation,
 }
 
 /// Channel-neutral presentational result for product commands.
@@ -81,8 +106,8 @@ const COMMAND_SPECS: &[ProductCommandSpec] = &[
             name: "model",
             audience: CommandAudience::User,
             title: "Model",
-            description: "Show or switch the active LLM provider and model",
-            usage: "/model [<model> | set-provider <provider> [--model <model>]]",
+            description: "Show or choose your preferred LLM model",
+            usage: "/model [use <model> | default]",
         },
         parse: parse_model_command,
     },
@@ -95,6 +120,36 @@ const COMMAND_SPECS: &[ProductCommandSpec] = &[
             usage: "/status",
         },
         parse: parse_status_command,
+    },
+    ProductCommandSpec {
+        descriptor: ProductCommandDescriptor {
+            name: "new",
+            audience: CommandAudience::User,
+            title: "New conversation",
+            description: "Start a fresh conversation without deleting the current one",
+            usage: "/new",
+        },
+        parse: parse_new_command,
+    },
+    ProductCommandSpec {
+        descriptor: ProductCommandDescriptor {
+            name: "stop",
+            audience: CommandAudience::User,
+            title: "Stop",
+            description: "Stop the active run in this conversation",
+            usage: "/stop",
+        },
+        parse: parse_stop_command,
+    },
+    ProductCommandSpec {
+        descriptor: ProductCommandDescriptor {
+            name: "interrupt",
+            audience: CommandAudience::User,
+            title: "Interrupt",
+            description: "Interrupt the active run in this conversation",
+            usage: "/interrupt",
+        },
+        parse: parse_interrupt_command,
     },
 ];
 
@@ -188,14 +243,36 @@ pub fn render_command_result_text(view: &CommandResultView) -> String {
 pub enum ProductCommand {
     Lifecycle { action: LifecycleProductAction },
     Model { action: ProductModelCommand },
+    New,
     Status,
+    Stop { invocation: ProductStopInvocation },
     Unknown { name: String, arguments: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductStopInvocation {
+    Stop,
+    Interrupt,
+}
+
+impl ProductStopInvocation {
+    pub fn command_name(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::Interrupt => "interrupt",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ProductModelCommand {
     Status,
+    Use {
+        model: String,
+    },
+    Default,
     Set {
         model: String,
     },
@@ -223,7 +300,9 @@ impl ProductCommand {
         match self {
             Self::Lifecycle { action } => action.command_name(),
             Self::Model { .. } => "model",
+            Self::New => "new",
             Self::Status => "status",
+            Self::Stop { invocation } => invocation.command_name(),
             Self::Unknown { name, .. } => name.as_str(),
         }
     }
@@ -233,17 +312,23 @@ impl ProductCommand {
     }
 }
 
-/// Execution audience, action-aware: `/model` bare is a user-safe read while
-/// its `set`/`set-provider` actions mutate operator-wide LLM configuration.
+/// Execution audience, action-aware: `/model`, `/model use`, and
+/// `/model default` are caller-scoped while the legacy direct-model and
+/// `set-provider` actions mutate operator-wide LLM configuration.
 /// `Unknown` is `User` — it never executes (admission rejects undeclared
 /// tokens before the audience step) and must not hide behind the admin gate.
 pub fn required_audience(command: &ProductCommand) -> CommandAudience {
     match command {
         ProductCommand::Model {
-            action: ProductModelCommand::Status,
+            action:
+                ProductModelCommand::Status
+                | ProductModelCommand::Use { .. }
+                | ProductModelCommand::Default,
         } => CommandAudience::User,
         ProductCommand::Model { .. } => CommandAudience::Admin,
+        ProductCommand::New => CommandAudience::User,
         ProductCommand::Status => CommandAudience::User,
+        ProductCommand::Stop { .. } => CommandAudience::User,
         ProductCommand::Lifecycle { .. } => CommandAudience::Admin,
         ProductCommand::Unknown { .. } => CommandAudience::User,
     }
@@ -262,6 +347,27 @@ fn parse_model_command(payload: &InboundCommandPayload) -> ProductCommandParseRe
             action: ProductModelCommand::Status,
         });
     };
+    if first == "use" {
+        let Some(model) = args.next() else {
+            return invalid_lifecycle_command("model use requires a model name");
+        };
+        if args.next().is_some() {
+            return invalid_lifecycle_command("model use accepts exactly one model name");
+        }
+        return Ok(ProductCommand::Model {
+            action: ProductModelCommand::Use {
+                model: model.to_string(),
+            },
+        });
+    }
+    if first == "default" {
+        if args.next().is_some() {
+            return invalid_lifecycle_command("model default accepts no arguments");
+        }
+        return Ok(ProductCommand::Model {
+            action: ProductModelCommand::Default,
+        });
+    }
     match ModelCommandHead::parse(first)? {
         ModelCommandHead::SetProvider => {
             let Some(provider) = args.next() else {
@@ -304,6 +410,22 @@ impl<'a> ModelCommandHead<'a> {
 
 fn parse_status_command(_payload: &InboundCommandPayload) -> ProductCommandParseResult {
     Ok(ProductCommand::Status)
+}
+
+fn parse_new_command(_payload: &InboundCommandPayload) -> ProductCommandParseResult {
+    Ok(ProductCommand::New)
+}
+
+fn parse_stop_command(_payload: &InboundCommandPayload) -> ProductCommandParseResult {
+    Ok(ProductCommand::Stop {
+        invocation: ProductStopInvocation::Stop,
+    })
+}
+
+fn parse_interrupt_command(_payload: &InboundCommandPayload) -> ProductCommandParseResult {
+    Ok(ProductCommand::Stop {
+        invocation: ProductStopInvocation::Interrupt,
+    })
 }
 
 fn parse_model_option(args: &[&str]) -> Result<Option<String>, ProductRejection> {

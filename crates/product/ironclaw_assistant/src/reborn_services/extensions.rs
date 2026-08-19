@@ -32,7 +32,7 @@ use crate::{
 use super::{
     ExtensionCredentialSetupService,
     extension_credentials::{
-        ExtensionCredentialReadiness, credential_scope, readiness_for_requirements,
+        ExtensionCredentialReadiness, credential_scope, presence_readiness_and_missing_scopes,
     },
     extension_onboarding,
     lifecycle_setup::validation_error,
@@ -50,6 +50,9 @@ pub(super) async fn list_extensions(
     service: Arc<dyn LifecycleProductService>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
     channel_connection_service: Arc<dyn ChannelConnectionService>,
+    session_channels: Option<
+        Arc<dyn ironclaw_product_contracts::session_ingress::SessionChannelDirectory>,
+    >,
     caller: ProductSurfaceCaller,
 ) -> Result<RebornExtensionListResponse, ProductSurfaceError> {
     let context = lifecycle_surface_context(caller.clone());
@@ -59,7 +62,18 @@ pub(super) async fn list_extensions(
         LifecycleProductAction::ExtensionList,
     )
     .await?;
-    let installed = lifecycle_installed_extensions(&lifecycle);
+    // The deployment's own session channel (the surface this UI itself
+    // fronts) is host infrastructure, not a browse-and-install integration,
+    // so keep it out of the install UI while it stays a working notification
+    // channel. Classified through the session-channel directory — the same
+    // manifest-derived fact the session-inbound route keys on — never by a
+    // hardcoded id.
+    let installed = lifecycle_installed_extensions(&lifecycle)
+        .into_iter()
+        .filter(|extension| {
+            !is_builtin_host_surface(session_channels.as_deref(), &extension.summary)
+        })
+        .collect::<Vec<_>>();
     let connections = channel_connection_service
         .caller_channel_connections(caller.clone())
         .await?;
@@ -87,6 +101,9 @@ pub(super) async fn list_extensions(
 
 pub(super) async fn list_extension_registry(
     service: &dyn LifecycleProductService,
+    session_channels: Option<
+        &dyn ironclaw_product_contracts::session_ingress::SessionChannelDirectory,
+    >,
     caller: ProductSurfaceCaller,
 ) -> Result<RebornExtensionRegistryResponse, ProductSurfaceError> {
     let context = lifecycle_surface_context(caller);
@@ -119,6 +136,7 @@ pub(super) async fn list_extension_registry(
     Ok(RebornExtensionRegistryResponse {
         entries: registry_entries
             .iter()
+            .filter(|extension| !is_builtin_host_surface(session_channels, &extension.summary))
             .cloned()
             .map(|extension| registry_entry(extension.summary, &installed_ids))
             .collect(),
@@ -198,6 +216,7 @@ async fn lifecycle_extension_infos(
                 )
                 .await?;
                 Ok::<_, ProductSurfaceError>((installed, readiness))
+                // tuple: (readiness, missing_recipe_scopes)
             }
         })
         .buffered(EXTENSION_READINESS_CONCURRENCY)
@@ -205,16 +224,38 @@ async fn lifecycle_extension_infos(
         .await?;
     Ok(resolved
         .into_iter()
-        .map(|(installed, readiness)| {
+        .map(|(installed, (readiness, missing_recipe_scopes))| {
             extension_info(
                 installed,
                 readiness,
+                missing_recipe_scopes,
                 &connections,
                 &account_states,
                 &activation_errors,
             )
         })
         .collect())
+}
+
+/// The host's own built-in surface — always present, not a browse-and-install
+/// integration — is hidden from the install catalog even though it backs a
+/// channel. Classified through the [`SessionChannelDirectory`]: the
+/// deployment's authenticated-session channel IS the surface this product
+/// serves, a manifest-derived fact (`[channel.ingress.verification] kind =
+/// "authenticated_session"`) rather than a hardcoded extension id — generic
+/// code never names a channel. An absent directory hides nothing: catalog
+/// visibility fails OPEN because hiding an installable integration is the
+/// costlier mistake.
+///
+/// [`SessionChannelDirectory`]: ironclaw_product_contracts::session_ingress::SessionChannelDirectory
+fn is_builtin_host_surface(
+    session_channels: Option<
+        &dyn ironclaw_product_contracts::session_ingress::SessionChannelDirectory,
+    >,
+    summary: &LifecycleExtensionSummary,
+) -> bool {
+    session_channels
+        .is_some_and(|directory| directory.is_session_channel(summary.package_ref.id.as_str()))
 }
 
 fn registry_entry(
@@ -240,11 +281,11 @@ async fn credential_readiness_for_extension(
     extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
     caller: &ProductSurfaceCaller,
     installed: &LifecycleInstalledExtensionSummary,
-) -> Result<ExtensionCredentialReadiness, ProductSurfaceError> {
+) -> Result<(ExtensionCredentialReadiness, Vec<String>), ProductSurfaceError> {
     let extension_id = ExtensionId::new(installed.summary.package_ref.id.as_str())
         .map_err(|_| ProductSurfaceError::internal_invariant())?;
     let scope = credential_scope(caller, &installed.summary.package_ref);
-    readiness_for_requirements(
+    presence_readiness_and_missing_scopes(
         extension_credentials,
         scope,
         &extension_id,
@@ -253,24 +294,37 @@ async fn credential_readiness_for_extension(
     .await
 }
 
-fn extension_info(
-    installed: LifecycleInstalledExtensionSummary,
-    readiness: ExtensionCredentialReadiness,
+/// The caller's channel-connection verdict for one lifecycle summary — shared
+/// by the extensions card (`extension_info`) and the model-facing
+/// communication context so the two can never diverge on what "connected for
+/// this caller" means.
+pub(crate) struct CallerChannelConnection {
+    /// The caller's projected §6.3 vendor account, when the channel binds one.
+    pub(crate) projected_account: Option<(AuthAccountState, Option<AuthAccountLastError>)>,
+    /// A channel surface the calling user has not personally connected — via
+    /// the vendor's OAuth or a pairing/proof-code binding. Always `false` for
+    /// non-channel extensions and channels that need no personal connection.
+    pub(crate) channel_unconnected: bool,
+}
+
+/// Compute [`CallerChannelConnection`] from the caller's per-channel
+/// connection and auth-account maps.
+///
+/// Absence of a connection signal is NOT consent: a pairing/OAuth channel
+/// with no binding row reads as unconnected (`connected != Some(true)`),
+/// because the generic connections map is populated per discovered channel
+/// and a missing entry means "no proof this caller connected", not
+/// "connected".
+pub(crate) fn caller_channel_connection(
+    summary: &LifecycleExtensionSummary,
     connections: &HashMap<ExtensionId, bool>,
     account_states: &HashMap<ExtensionId, ChannelAuthAccountState>,
-    activation_errors: &HashMap<ExtensionId, String>,
-) -> RebornExtensionInfo {
-    let phase = installed.phase;
-    let onboarding =
-        extension_onboarding::for_installed_with_credential_status(&installed, readiness);
-    let install_scope = installed.install_scope;
-    let summary = installed.summary;
-    let has_external_channel_surface = has_external_channel_surface(&summary);
-    let runtime = summary.runtime_kind.runtime_wire_name().to_string();
-    // All three per-extension maps are keyed by `ExtensionId`; a package id that
-    // is not valid extension vocabulary cannot be a key in any of them, so it
-    // reports no connection, no account state, and no activation error rather
-    // than being looked up as a string that could never have matched.
+) -> CallerChannelConnection {
+    let has_external_channel_surface = has_external_channel_surface(summary);
+    // Maps are keyed by `ExtensionId`; a package id that is not valid
+    // extension vocabulary cannot be a key, so it reports no connection and no
+    // account state rather than being looked up as a string that could never
+    // have matched.
     let extension_id = ExtensionId::new(summary.package_ref.id.as_str()).ok();
     let connected = if has_external_channel_surface {
         extension_id
@@ -281,21 +335,8 @@ fn extension_info(
         None
     };
     let account_state = extension_id.as_ref().and_then(|id| account_states.get(id));
-    // Redacted activation error for this extension (host installation record's
-    // typed `last_error`), threaded onto the card slot the frontend already
-    // renders. `None` when the service surfaces no failure for this extension.
-    let activation_error = extension_id
-        .as_ref()
-        .and_then(|id| activation_errors.get(id).cloned());
-    // A channel extension the calling user has not personally connected — via
-    // the vendor's OAuth or a pairing/proof-code binding — is not ready for
-    // that caller, whatever the host record says. Absence of a connection
-    // signal is NOT consent: a pairing/OAuth channel with no binding row reads
-    // as unconnected (`connected != Some(true)`), because the generic
-    // connections map is populated per discovered channel and a missing entry
-    // means "no proof this caller connected", not "connected".
-    let requires_personal_account = channel_requires_personal_account(&summary);
-    let requires_personal_binding = channel_requires_personal_binding(&summary);
+    let requires_personal_account = channel_requires_personal_account(summary);
+    let requires_personal_binding = channel_requires_personal_binding(summary);
     let projected_account = if requires_personal_account || requires_personal_binding {
         projected_channel_account(
             connected,
@@ -310,7 +351,122 @@ fn extension_info(
                 && projected_account
                     .as_ref()
                     .is_some_and(|(state, _)| *state != AuthAccountState::Connected)));
-    let auth_accounts = vendor_auth_accounts(&summary, projected_account);
+    CallerChannelConnection {
+        projected_account,
+        channel_unconnected,
+    }
+}
+
+/// Per-caller authentication verdict for one installed extension, composed
+/// from the same primitives the extensions card projects into
+/// `installation_state` (`caller_public_state`): required-credential
+/// readiness plus, for channel surfaces, the caller's personal
+/// connection/binding proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallerExtensionAuth {
+    /// Every required credential is configured for this caller and any
+    /// personal channel connection is proven. Includes extensions that
+    /// require nothing per-caller.
+    Authenticated,
+    /// The caller is missing a required credential or has not personally
+    /// connected a channel surface that needs it.
+    Unauthenticated,
+    /// The verdict cannot be established: a needed readiness/connection port
+    /// is unavailable or a lookup failed. Callers must claim nothing.
+    Unknown,
+}
+
+/// The caller's per-channel connection + auth-account maps, borrowed
+/// together (as returned by `ChannelConnectionService`'s two lookups).
+pub(crate) type CallerChannelMaps<'a> = (
+    &'a HashMap<ExtensionId, bool>,
+    &'a HashMap<ExtensionId, ChannelAuthAccountState>,
+);
+
+/// Compute the caller's auth verdict for one installed extension.
+///
+/// `channel_connections` carries the caller's per-channel connection and
+/// auth-account maps; `None` means connection data is unavailable, which is
+/// distinct from empty maps ("no connections"). Fail-closed: absence of proof
+/// where proof is required yields `Unauthenticated`; inability to check
+/// yields `Unknown`, never a fabricated positive.
+pub(crate) async fn caller_extension_auth(
+    extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
+    channel_connections: Option<CallerChannelMaps<'_>>,
+    caller: &ProductSurfaceCaller,
+    installed: &LifecycleInstalledExtensionSummary,
+) -> CallerExtensionAuth {
+    let readiness =
+        match credential_readiness_for_extension(extension_credentials, caller, installed).await {
+            Ok((readiness, _missing_recipe_scopes)) => readiness,
+            Err(error) => {
+                tracing::debug!(
+                    extension = %installed.summary.package_ref.id.as_str(),
+                    status_code = error.status_code,
+                    "credential readiness lookup failed; extension auth verdict is unknown"
+                );
+                return CallerExtensionAuth::Unknown;
+            }
+        };
+    let summary = &installed.summary;
+    let needs_personal_channel_proof = has_external_channel_surface(summary)
+        && (channel_requires_personal_account(summary)
+            || channel_requires_personal_binding(summary));
+    let channel_unconnected = if needs_personal_channel_proof {
+        match channel_connections {
+            Some((connections, account_states)) => {
+                caller_channel_connection(summary, connections, account_states).channel_unconnected
+            }
+            // Proof is required but no connection data exists to prove it —
+            // the verdict is unknowable, not "connected".
+            None => return CallerExtensionAuth::Unknown,
+        }
+    } else {
+        false
+    };
+    match readiness {
+        ExtensionCredentialReadiness::Unknown => CallerExtensionAuth::Unknown,
+        ExtensionCredentialReadiness::MissingRequired => CallerExtensionAuth::Unauthenticated,
+        ExtensionCredentialReadiness::Configured | ExtensionCredentialReadiness::NotRequired => {
+            if channel_unconnected {
+                CallerExtensionAuth::Unauthenticated
+            } else {
+                CallerExtensionAuth::Authenticated
+            }
+        }
+    }
+}
+
+fn extension_info(
+    installed: LifecycleInstalledExtensionSummary,
+    readiness: ExtensionCredentialReadiness,
+    missing_recipe_scopes: Vec<String>,
+    connections: &HashMap<ExtensionId, bool>,
+    account_states: &HashMap<ExtensionId, ChannelAuthAccountState>,
+    activation_errors: &HashMap<ExtensionId, String>,
+) -> RebornExtensionInfo {
+    let phase = installed.phase;
+    let onboarding =
+        extension_onboarding::for_installed_with_credential_status(&installed, readiness);
+    let install_scope = installed.install_scope;
+    let summary = installed.summary;
+    let runtime = summary.runtime_kind.runtime_wire_name().to_string();
+    // The per-extension maps are keyed by `ExtensionId`; a package id that is
+    // not valid extension vocabulary cannot be a key in any of them, so it
+    // reports no connection, no account state, and no activation error rather
+    // than being looked up as a string that could never have matched.
+    let extension_id = ExtensionId::new(summary.package_ref.id.as_str()).ok();
+    // Redacted activation error for this extension (host installation record's
+    // typed `last_error`), threaded onto the card slot the frontend already
+    // renders. `None` when the service surfaces no failure for this extension.
+    let activation_error = extension_id
+        .as_ref()
+        .and_then(|id| activation_errors.get(id).cloned());
+    let CallerChannelConnection {
+        projected_account,
+        channel_unconnected,
+    } = caller_channel_connection(&summary, connections, account_states);
+    let auth_accounts = vendor_auth_accounts(&summary, projected_account, missing_recipe_scopes);
     let resolved_account_id = auth_accounts
         .first()
         .and_then(|vendor| vendor.accounts.first())
@@ -391,7 +547,11 @@ fn channel_requires_personal_account(summary: &LifecycleExtensionSummary) -> boo
             .channel_connection
             .as_ref()
             .is_some_and(|connection| {
-                connection.strategy == crate::RebornChannelConnectStrategy::OAuth
+                matches!(
+                    connection.strategy,
+                    crate::RebornChannelConnectStrategy::OAuth
+                        | crate::RebornChannelConnectStrategy::DeviceLink
+                )
             })
 }
 
@@ -413,6 +573,7 @@ fn channel_requires_personal_binding(summary: &LifecycleExtensionSummary) -> boo
                 // an extension is not connected for them until they do.
                 crate::RebornChannelConnectStrategy::WebGeneratedCode
                 | crate::RebornChannelConnectStrategy::OAuth
+                | crate::RebornChannelConnectStrategy::DeviceLink
                 | crate::RebornChannelConnectStrategy::InboundProofCode
                 | crate::RebornChannelConnectStrategy::QrCode => true,
                 // Operator-configured for the whole tenant; there is no
@@ -474,6 +635,7 @@ fn channel_auth_vendor(summary: &LifecycleExtensionSummary) -> String {
 fn vendor_auth_accounts(
     summary: &LifecycleExtensionSummary,
     projected_account: Option<(AuthAccountState, Option<AuthAccountLastError>)>,
+    missing_recipe_scopes: Vec<String>,
 ) -> Vec<RebornVendorAuthAccounts> {
     let Some((state, last_error)) = projected_account else {
         return Vec::new();
@@ -488,6 +650,10 @@ fn vendor_auth_accounts(
             label: summary.name.clone(),
             state,
             last_error,
+            // Recipe scopes the live grant does not hold (#7660): the card
+            // renders these as an "update access" affordance on a healthy
+            // connection, never as setup_needed.
+            missing_recipe_scopes,
             is_default: true,
         }],
     }]
@@ -620,6 +786,7 @@ mod tests {
             Arc::new(service),
             Some(credentials_service),
             no_channel_connections(),
+            None,
             caller.clone(),
         )
         .await
@@ -672,6 +839,7 @@ mod tests {
                 Arc::new(service),
                 Some(credentials),
                 no_channel_connections(),
+                None,
                 caller(),
             )
             .await
@@ -684,6 +852,88 @@ mod tests {
                 "{account_status:?} personal auth must prevent active projection"
             );
         }
+    }
+
+    fn summary_with_oauth_ceiling(scopes: &[&str]) -> LifecycleExtensionSummary {
+        let mut summary = summary_with_onboarding();
+        summary.credential_requirements = vec![LifecycleExtensionCredentialRequirement {
+            name: "fixture_oauth".to_string(),
+            provider: "fixture".to_string(),
+            required: true,
+            setup: LifecycleExtensionCredentialSetup::OAuth {
+                scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
+            },
+        }];
+        summary
+    }
+
+    /// #7660: a configured account whose grant predates a recipe widening is
+    /// a WORKING connection, not an unfinished one. The card must stay
+    /// `active` and surface the delta as `missing_recipe_scopes` — flipping
+    /// the whole extension back to `setup_needed` contradicts the runtime
+    /// (whose per-tool gate handles the newly-scoped tools) and every other
+    /// signal the user sees.
+    #[tokio::test]
+    async fn scope_subset_account_stays_active_and_reports_the_recipe_delta() {
+        let service = ListingService {
+            extension: LifecycleInstalledExtensionSummary {
+                summary: summary_with_oauth_ceiling(&[
+                    "read:things",
+                    "write:things",
+                    "react:things",
+                ]),
+                phase: InstallationState::Active,
+                install_scope: None,
+            },
+        };
+        let credentials = Arc::new(RecordingCredentials::with_configured_scopes(&[
+            "read:things",
+            "write:things",
+        ]));
+        let credentials_service: Arc<dyn ExtensionCredentialSetupService> = credentials.clone();
+
+        let response = list_extensions(
+            Arc::new(service),
+            Some(credentials_service),
+            no_channel_connections(),
+            None,
+            caller(),
+        )
+        .await
+        .expect("list extensions");
+        let extension = response.extensions.first().expect("one extension");
+
+        assert_eq!(
+            extension.installation_state,
+            LifecyclePublicState::Active,
+            "an outdated-but-working grant must not read as setup_needed"
+        );
+        let requests = credentials.status_requests.lock().expect("lock");
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.provider_scopes.is_empty()),
+            "readiness asks the presence question, never the recipe ceiling"
+        );
+    }
+
+    /// The wire half of #7660: the channel vendor account carries the delta.
+    #[test]
+    fn channel_vendor_account_carries_the_missing_recipe_scopes() {
+        let summary = summary_with_onboarding();
+        let accounts = vendor_auth_accounts(
+            &summary,
+            Some((AuthAccountState::Connected, None)),
+            vec!["react:things".to_string()],
+        );
+        assert_eq!(
+            accounts
+                .first()
+                .and_then(|vendor| vendor.accounts.first())
+                .map(|account| account.missing_recipe_scopes.clone()),
+            Some(vec!["react:things".to_string()]),
+            "the widened-scope delta rides the wire for the update-access affordance"
+        );
     }
 
     #[tokio::test]
@@ -701,6 +951,7 @@ mod tests {
             Arc::new(service),
             Some(Arc::new(credentials)),
             no_channel_connections(),
+            None,
             caller(),
         )
         .await
@@ -730,6 +981,7 @@ mod tests {
             Arc::new(service),
             Some(credentials_service),
             no_channel_connections(),
+            None,
             caller(),
         )
         .await
@@ -762,6 +1014,7 @@ mod tests {
             Arc::new(service),
             Some(credentials_service),
             no_channel_connections(),
+            None,
             caller(),
         )
         .await
@@ -848,9 +1101,15 @@ mod tests {
             },
         };
 
-        let response = list_extensions(Arc::new(service), None, no_channel_connections(), caller())
-            .await
-            .expect("list extensions");
+        let response = list_extensions(
+            Arc::new(service),
+            None,
+            no_channel_connections(),
+            None,
+            caller(),
+        )
+        .await
+        .expect("list extensions");
         let extension = response.extensions.first().expect("one extension");
 
         assert!(
@@ -887,6 +1146,7 @@ mod tests {
                 }),
                 None,
                 channel_connections(&[("fixture", false)]),
+                None,
                 caller(),
             )
             .await
@@ -934,6 +1194,7 @@ mod tests {
                 }),
                 None,
                 no_channel_connections(),
+                None,
                 caller(),
             )
             .await
@@ -960,6 +1221,7 @@ mod tests {
                 }),
                 None,
                 channel_connections(&[("fixture", true)]),
+                None,
                 caller(),
             )
             .await
@@ -1020,7 +1282,7 @@ mod tests {
             calls: Mutex::new(Vec::new()),
         };
 
-        let response = list_extension_registry(&service, caller.clone())
+        let response = list_extension_registry(&service, None, caller.clone())
             .await
             .expect("registry response");
 
@@ -1076,6 +1338,7 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingCredentials {
+        account_scopes: Vec<String>,
         status_requests: Mutex<Vec<ExtensionCredentialStatusRequest>>,
         account_status: Option<CredentialAccountStatus>,
     }
@@ -1084,6 +1347,14 @@ mod tests {
         fn with_account_status(account_status: CredentialAccountStatus) -> Self {
             Self {
                 account_status: Some(account_status),
+                ..Self::default()
+            }
+        }
+
+        fn with_configured_scopes(scopes: &[&str]) -> Self {
+            Self {
+                account_status: Some(CredentialAccountStatus::Configured),
+                account_scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
                 ..Self::default()
             }
         }
@@ -1106,6 +1377,14 @@ mod tests {
                     ownership: CredentialOwnership::UserReusable,
                     owner_extension: None,
                     granted_extensions: Vec::new(),
+                    scopes: self
+                        .account_scopes
+                        .iter()
+                        .map(|scope| {
+                            ironclaw_auth::ProviderScope::new(scope.clone())
+                                .expect("valid provider scope")
+                        })
+                        .collect(),
                     secret_handle_count: 1,
                 });
             self.status_requests.lock().expect("lock").push(request);

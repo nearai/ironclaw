@@ -1,4 +1,4 @@
-//! The sub-owner map in `CLAUDE.md` is a contract, not a comment.
+//! The sub-owner map in `CONTRACT.md` is a contract, not a comment.
 //!
 //! PROPOSAL §6.4.13 asks this crate for "internal module charters for its
 //! sub-owners". A charter that nobody checks rots within a release: files get
@@ -47,18 +47,18 @@ fn source_files() -> Vec<String> {
 /// A file listed under two sub-owners keeps both entries so the caller can
 /// report the ambiguity rather than silently taking the last one.
 fn charter_assignments() -> BTreeMap<String, Vec<String>> {
-    let doc = std::fs::read_to_string(crate_root().join("CLAUDE.md")).expect("read CLAUDE.md");
+    let doc = std::fs::read_to_string(crate_root().join("CONTRACT.md")).expect("read CONTRACT.md");
     let section = doc
         .split("## Sub-owner map")
         .nth(1)
-        .expect("CLAUDE.md must contain a '## Sub-owner map' section");
+        .expect("CONTRACT.md must contain a '## Sub-owner map' section");
     // Stop at the next top-level heading so neighbouring tables are not read.
     let section = section.split("\n## ").next().unwrap_or(section);
     parse_sub_owner_table(section)
 }
 
 /// The table parser, split out from the file read so a fixture can exercise
-/// separator shapes the checked-in `CLAUDE.md` does not currently use.
+/// separator shapes the checked-in `CONTRACT.md` does not currently use.
 fn parse_sub_owner_table(section: &str) -> BTreeMap<String, Vec<String>> {
     let mut assignments: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut saw_row = false;
@@ -117,7 +117,7 @@ fn every_source_file_has_exactly_one_sub_owner() {
         .collect();
     assert!(
         unassigned.is_empty(),
-        "{} source file(s) have no sub-owner in CLAUDE.md's '## Sub-owner map'.\n\
+        "{} source file(s) have no sub-owner in CONTRACT.md's '## Sub-owner map'.\n\
          Add each to the row of the concern it belongs to (see PROPOSAL §6.4.13):\n{}",
         unassigned.len(),
         unassigned
@@ -166,7 +166,7 @@ fn every_source_file_has_exactly_one_sub_owner() {
 /// `saw_row` goes true, so the zero-rows shape guard stays quiet and the gate
 /// reports `:---` as a stale entry instead of diagnosing anything real.
 ///
-/// The checked-in `CLAUDE.md` uses `|---|`, so without this fixture a
+/// The checked-in `CONTRACT.md` uses `|---|`, so without this fixture a
 /// reversion of the `trim_matches(':')` fix would still pass.
 #[test]
 fn an_aligned_separator_row_is_not_parsed_as_data() {

@@ -23,7 +23,7 @@
 //! This binary owns `IRONCLAW_BASE_DIR`: trace policy/queue paths resolve
 //! through `ironclaw_common`'s process-wide `LazyLock`, so the tempdir env
 //! var is set as the FIRST action, before any read (same pattern as
-//! `crates/ironclaw_host_runtime/tests/trace_commons_dispatch_e2e.rs`).
+//! `crates/kernel/ironclaw_host_runtime/tests/trace_commons_dispatch_e2e.rs`).
 //! Keep this suite a single sequenced `#[tokio::test]`: enrollment state is
 //! process-global (per scope), so concurrent tests in this binary would race.
 
@@ -153,12 +153,7 @@ async fn completed_turn_queues_trace_contribution_for_enrolled_scope() {
         .expect("first thread builds");
     let control_scope = trace_scope_key(
         first.binding.tenant_id.as_str(),
-        first
-            .binding
-            .subject_user_id
-            .as_ref()
-            .expect("resolved binding has a subject user id")
-            .as_str(),
+        first.binding.actor_user_id.as_str(),
     );
     assert_ne!(
         control_scope, scope,

@@ -401,11 +401,13 @@ fn fixture_with(
     deep_link_template: Option<&str>,
     template_values: BTreeMap<String, String>,
 ) -> Fixture {
+    // Mirrors the bundled Telegram manifest: `/start` (vendor deep-link
+    // convention, the only suggested wording) plus the `/pair` alias.
     fixture_with_prefixes(
         installation,
         deep_link_template,
         template_values,
-        &["/start"],
+        &["/start", "/pair"],
     )
 }
 
@@ -469,8 +471,6 @@ fn pairing_admission_for(
     actor_id: &str,
 ) -> InboundAdmission {
     InboundAdmission {
-        channel_adapter: Arc::new(crate::test_support::FakeChannelAdapter::default()),
-        channel_egress: None,
         extension_id: EXT.to_string(),
         installation_id: installation_id.to_string(),
         message: direct_message(&format!("/start {}", code.as_str()), actor_id),
@@ -1156,12 +1156,13 @@ fn direct_message(text: &str, actor_id: &str) -> NormalizedInboundMessage {
         text: text.to_string(),
         trigger: ProductTriggerReason::DirectChat,
         attachments: Vec::new(),
+        conversation_context: None,
         reply_context: None,
     }
 }
 
 #[tokio::test]
-async fn interceptor_services_manifest_declared_start_messages_only() {
+async fn interceptor_services_manifest_declared_code_prefixes_only() {
     let fixture = fixture();
     let issue = fixture
         .service
@@ -1184,10 +1185,10 @@ async fn interceptor_services_manifest_declared_start_messages_only() {
         fixture.service.intercept(&install(), &group).await,
         ChannelPairingInterception::NotHandled
     );
-    // `/pair` remains ordinary text because Telegram declares only `/start`.
-    let pair = direct_message(&format!("/pair {}", issue.code.as_str()), "u-1");
+    // An undeclared command remains ordinary text.
+    let link = direct_message(&format!("/link {}", issue.code.as_str()), "u-1");
     assert_eq!(
-        fixture.service.intercept(&install(), &pair).await,
+        fixture.service.intercept(&install(), &link).await,
         ChannelPairingInterception::NotHandled
     );
 
@@ -1207,6 +1208,21 @@ async fn interceptor_services_manifest_declared_start_messages_only() {
             .await
             .expect("lookup"),
         Some(user("alice"))
+    );
+
+    // The `/pair` alias is equally declared: a bound sender re-sending a
+    // fresh code through it is serviced as the idempotent repair path.
+    let repair = fixture
+        .service
+        .issue_or_rotate(&user("alice"))
+        .await
+        .expect("re-mint");
+    let pair = direct_message(&format!("/pair {}", repair.code.as_str()), "u-1");
+    assert_eq!(
+        fixture.service.intercept(&install(), &pair).await,
+        ChannelPairingInterception::Consumed(ChannelPairingConsumeOutcome::AlreadyPairedSameUser {
+            user_id: user("alice"),
+        })
     );
 }
 

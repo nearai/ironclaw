@@ -11,17 +11,18 @@ use crate::{
     ApprovalInteractionActionView, ApprovalInteractionScope, ApprovalInteractionService,
     AutomationListRequest, AutomationProductService, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, PendingApprovalInteractionView, ProductAgentBoundCaller,
-    ProductListThreadsRequest, ProductSurfaceFailure, RebornAutomationHoldReason,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornListThreadsResponse, RebornServices,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse, THREADS_VIEW,
-    approval_gate_ref, automation_trigger_thread_metadata_json,
+    ProductSurfaceFailure, RebornAutomationHoldReason, RebornAutomationRecentRunStatus,
+    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornListThreadsResponse, RebornServices, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, THREADS_VIEW, approval_gate_ref,
+    automation_trigger_thread_metadata_json,
 };
 use async_trait::async_trait;
 use ironclaw_host_api::{
     Timestamp,
     ids::{AgentId, ApprovalRequestId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
 };
+use ironclaw_product_contracts::inbound_requests::ProductListThreadsRequest;
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
@@ -115,6 +116,7 @@ fn make_record(
             timezone: "UTC".to_string(),
         },
         prompt: "run the daily task".to_string(),
+        execution_spec: None,
         delivery_target: None,
         state,
         next_run_at: now(),
@@ -822,7 +824,7 @@ async fn automation_service_maps_trigger_run_status_and_last_status() {
 }
 
 // Resolver tests (resolve_run_thread_scope_*) live in
-// `crates/ironclaw_composition/src/automation_resolver_tests.rs`
+// `crates/product/ironclaw_assistant/src/automation_product_service/tests/resolver_tests.rs`
 // to keep this file under the project's 800-900 line file-size target.
 
 #[tokio::test]

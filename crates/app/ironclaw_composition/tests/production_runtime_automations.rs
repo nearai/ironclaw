@@ -15,9 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_assistant::{
-    AUTOMATIONS_VIEW, ProductListAutomationsRequest, RebornListAutomationsResponse,
-};
+use ironclaw_assistant::{AUTOMATIONS_VIEW, RebornListAutomationsResponse};
 use ironclaw_composition::{
     RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornRuntimeProcessBinding, build_reborn_runtime,
@@ -32,7 +30,8 @@ use ironclaw_host_api::{
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
     },
 };
-use ironclaw_host_runtime::TenantSandboxProcessPort;
+use ironclaw_host_runtime::UserSandboxProcessPort;
+use ironclaw_product_contracts::inbound_requests::ProductListAutomationsRequest;
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_product_contracts::views::RebornViewPage;
 
@@ -92,14 +91,14 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
             requested_profile: RuntimeProfile::SecureDefault,
             resolved_profile: RuntimeProfile::SecureDefault,
             filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-            process_backend: ProcessBackendKind::TenantSandbox,
+            process_backend: ProcessBackendKind::UserSandbox,
             network_mode: NetworkMode::Deny,
             secret_mode: SecretMode::BrokeredHandles,
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::Standard,
         })
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-            TenantSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
+        .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(Arc::new(
+            UserSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
         ))),
     )
     .with_identity(RebornRuntimeIdentity {

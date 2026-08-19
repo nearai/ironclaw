@@ -13,10 +13,10 @@ use super::{
     RebornEventStoreError, RebornEventStores, RebornProfile, ResourceGovernor, RootFilesystem,
     RunProfileResolver, RuntimeBackendHealth, RuntimeCredentialAccountResolver, RuntimeHttpEgress,
     RuntimeKind, RuntimeProcessPort, ScopedFilesystem, ScriptExecutor, SecretMode, SecretStorePort,
-    SecurityAuditSink, SharedSecretStore, TenantSandboxProcessPort, TrustPolicy,
-    TurnRunWakeNotifier, WasmError, WasmRuntimeAdapter, WasmRuntimeCredentialProvider,
-    WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig, build_reborn_event_stores,
-    production_wiring_report, set_runtime_http_egress, set_tool_call_http_egress,
+    SecurityAuditSink, SharedSecretStore, TrustPolicy, TurnRunWakeNotifier, UserSandboxProcessPort,
+    WasmError, WasmRuntimeAdapter, WasmRuntimeCredentialProvider, WasmStagedRuntimeCredentials,
+    WitToolHost, WitToolRuntimeConfig, build_reborn_event_stores, production_wiring_report,
+    set_runtime_http_egress, set_tool_call_http_egress,
 };
 use crate::HostProcessPort;
 use crate::RuntimeHttpBodyStore;
@@ -60,7 +60,7 @@ where
             tool_call_http_egress,
             process_port,
             managed_process_port,
-            tenant_sandbox_process_port,
+            user_sandbox_process_port,
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
@@ -104,7 +104,7 @@ where
             tool_call_http_egress,
             process_port,
             managed_process_port,
-            tenant_sandbox_process_port,
+            user_sandbox_process_port,
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
@@ -167,7 +167,7 @@ where
             tool_call_http_egress,
             process_port,
             managed_process_port,
-            tenant_sandbox_process_port,
+            user_sandbox_process_port,
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
@@ -213,7 +213,7 @@ where
             tool_call_http_egress,
             process_port,
             managed_process_port,
-            tenant_sandbox_process_port,
+            user_sandbox_process_port,
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
@@ -235,7 +235,7 @@ where
     /// [`FilesystemResourceGovernor`] over the supplied [`ScopedFilesystem`].
     /// Backend choice (libSQL, Postgres, in-memory, local disk) is a property
     /// of the underlying [`RootFilesystem`](ironclaw_filesystem::RootFilesystem);
-    /// see `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+    /// see `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
     pub fn with_filesystem_resource_governor<FsBackend>(
         self,
         scoped_filesystem: Arc<ScopedFilesystem<FsBackend>>,
@@ -441,19 +441,30 @@ where
     /// `ironclaw_event_store`, then this method adapts the durable logs
     /// into the live sink traits consumed by runtime services.
     pub fn with_reborn_event_stores(self, stores: RebornEventStores) -> Self {
-        self.with_reborn_event_stores_verified(stores, false)
+        self.with_reborn_event_stores_verified(stores, false, None)
     }
 
     /// Attaches pre-built Reborn durable event/audit stores after the caller
     /// has already enforced production profile restrictions.
     pub fn with_production_reborn_event_stores(self, stores: RebornEventStores) -> Self {
-        self.with_reborn_event_stores_verified(stores, true)
+        self.with_reborn_event_stores_verified(stores, true, None)
+    }
+
+    /// Production composition seam for sharing one runtime-event sink with
+    /// host dispatch, loop milestones, and product-host event producers.
+    pub fn with_production_reborn_event_stores_and_sink(
+        self,
+        stores: RebornEventStores,
+        event_sink: Arc<dyn EventSink>,
+    ) -> Self {
+        self.with_reborn_event_stores_verified(stores, true, Some(event_sink))
     }
 
     fn with_reborn_event_stores_verified(
         mut self,
         stores: RebornEventStores,
         production_verified: bool,
+        event_sink: Option<Arc<dyn EventSink>>,
     ) -> Self {
         if production_verified {
             self.component_types.event_sink =
@@ -470,13 +481,18 @@ where
         }
         // Runtime events are best-effort observability whose append cursor is
         // discarded at the sink, so route them through the write-behind
-        // coalescing sink: a per-turn burst of single-row INSERTs collapses to
-        // one multi-row INSERT per stream per drain window. The compliance
-        // audit log stays synchronous.
-        self.event_sink = Some(Arc::new(CoalescingEventSink::new(
-            stores.events,
-            EventBatchConfig::default(),
-        )));
+        // coalescing sink unless composition supplied the one shared runtime
+        // sink for every producer over this log. The compliance audit log
+        // stays synchronous.
+        let event_sink = event_sink.unwrap_or_else(|| {
+            Arc::new(CoalescingEventSink::new(
+                stores.events,
+                EventBatchConfig::default(),
+            ))
+        });
+        self.process_lifecycle_store
+            .set_event_sink(Arc::clone(&event_sink));
+        self.event_sink = Some(event_sink);
         self.audit_sink = Some(Arc::new(DurableAuditSink::new(stores.audit)));
         self
     }
@@ -490,7 +506,11 @@ where
         config: RebornEventStoreConfig,
     ) -> Result<Self, RebornEventStoreError> {
         let stores = build_reborn_event_stores(profile, config).await?;
-        Ok(self.with_reborn_event_stores_verified(stores, profile == RebornProfile::Production))
+        Ok(self.with_reborn_event_stores_verified(
+            stores,
+            profile == RebornProfile::Production,
+            None,
+        ))
     }
 
     pub fn with_secret_store<T>(mut self, secret_store: Arc<T>) -> Self
@@ -625,27 +645,27 @@ where
         self
     }
 
-    pub fn with_tenant_sandbox_process_port(
+    pub fn with_user_sandbox_process_port(
         mut self,
-        process_port: Arc<TenantSandboxProcessPort>,
+        process_port: Arc<UserSandboxProcessPort>,
     ) -> Self {
-        self.component_types.tenant_sandbox_process_port = Some(ProductionComponentType::named(
-            "TenantSandboxProcessPort",
+        self.component_types.user_sandbox_process_port = Some(ProductionComponentType::named(
+            "UserSandboxProcessPort",
             ProductionImplementationReadiness::UnverifiedProductionImplementation,
         ));
-        self.tenant_sandbox_process_port = Some(process_port);
+        self.user_sandbox_process_port = Some(process_port);
         self
     }
 
-    pub fn with_production_tenant_sandbox_process_port(
+    pub fn with_production_user_sandbox_process_port(
         mut self,
-        process_port: Arc<TenantSandboxProcessPort>,
+        process_port: Arc<UserSandboxProcessPort>,
     ) -> Self {
-        self.component_types.tenant_sandbox_process_port = Some(ProductionComponentType::named(
-            "TenantSandboxProcessPort",
+        self.component_types.user_sandbox_process_port = Some(ProductionComponentType::named(
+            "UserSandboxProcessPort",
             ProductionImplementationReadiness::ProductionCandidate,
         ));
-        self.tenant_sandbox_process_port = Some(process_port);
+        self.user_sandbox_process_port = Some(process_port);
         self
     }
 
@@ -877,6 +897,7 @@ where
             Arc::clone(&self.network_policy_store),
             Arc::clone(&self.runtime_http_egress),
             self.wasm_credential_provider.clone(),
+            Arc::clone(&self.secret_injection_store),
         )?);
         Ok(self.with_wasm_runtime(adapter))
     }

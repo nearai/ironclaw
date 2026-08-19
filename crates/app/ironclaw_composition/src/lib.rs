@@ -24,6 +24,7 @@ mod automation;
 mod backend_store_assembly;
 mod builtin_capability_policy;
 mod capability_authorization;
+mod channel_initialization;
 #[cfg(test)]
 #[path = "extension_lifecycle_capabilities_auth_tests.rs"]
 mod composition_extension_lifecycle_auth_tests;
@@ -53,6 +54,7 @@ mod root;
 mod runtime;
 mod runtime_input;
 mod runtime_mounts;
+mod sandbox;
 mod standalone_bootstrap_assembly;
 mod storage_catalog;
 mod support;
@@ -98,6 +100,11 @@ pub use factory::{KeychainMasterKeyOutcome, provision_standalone_keychain_master
 pub use filesystem_assembly::standalone_db_path;
 // consumer: `ironclaw_cli` config/set · pinned by: `ironclaw_cli` build (the error is the store's; module is private)
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
+// consumer: `ironclaw_cli` native channel bindings · pinned by: `ironclaw_cli` build
+pub use channel_initialization::{
+    FirstPartyChannelInitializationContext, FirstPartyChannelInitializationError,
+    FirstPartyChannelInitializer,
+};
 // consumer: `ironclaw_cli` serve/runtime/native_extensions, `harness/latency/runner` · pinned by: `composition/tests/admin_api_e2e.rs`
 pub use input::{
     ChannelExtensionBinding, OAuthClientConfig, RebornHostBindings, RebornRuntimeProcessBinding,
@@ -108,7 +115,9 @@ pub use input::{
 // consumer: `ironclaw_cli` extension command (no `ironclaw_assistant` dep) · pinned by: `ironclaw_cli` build
 pub use ironclaw_assistant::LifecycleProductResponse;
 // consumer: `ironclaw_cli` runtime (no `ironclaw_turn_runner` dep) · pinned by: `ironclaw_cli` build
-pub use ironclaw_turn_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
+pub use ironclaw_turn_runner::{
+    runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT, turn_scheduler::MAX_HEARTBEAT_INTERVAL_WITHIN_LEASE,
+};
 // consumer: `ironclaw_cli` skills command (no `ironclaw_skills` dep) · pinned by: `ironclaw_cli` build
 pub use ironclaw_skills::{
     SkillSummary as RebornSkillSummary, skill_summary_json as reborn_skill_summary_json,
@@ -126,17 +135,20 @@ pub use memory_provider_factory::{
 };
 // consumer: composition's operator LLM-key wiring test · pinned by: `composition/tests/operator_llm_key_store_wiring.rs`
 pub use operator_secret_store::RuntimeOperatorSecretValueStore;
+// consumer: `ironclaw_cli` explicit sandbox-profile boot wiring · pinned by: `ironclaw_cli` runtime build + profile tests
+pub use sandbox::{build_local_docker_user_sandbox_binding, build_railway_user_sandbox_binding};
 // consumer: `ironclaw_cli` serve + runtime, `harness/latency/runner`, root QA suites · pinned by: `composition/tests/profile_acceptance.rs`
 // (`RebornRuntimeProfileError` left: `deployment` is a `pub mod`, so it stays nameable there.)
 pub use deployment::{
     RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
-    hosted_single_tenant_volume_runtime_policy, local_runtime_build_input,
+    hosted_single_tenant_volume_runtime_policy,
+    hosted_single_tenant_volume_sandboxed_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options, standalone_runtime_policy,
     standalone_unrestricted_runtime_policy,
 };
 // consumer: `ironclaw_assistant/tests/support/planned_agent_loop.rs`, root integration harness · pinned by: `composition/tests/budget_e2e.rs`
 #[cfg(any(test, feature = "test-support"))]
-pub use deployment::local_filesystem_build_input;
+pub use deployment::{local_filesystem_build_input, local_filesystem_build_input_with_profile};
 // consumer: `ironclaw_cli` serve wiring · pinned by: `composition/tests/webui_v2_serve.rs`
 pub use ironhub_link_serve::{
     IRONHUB_REGISTER_PATH, IronhubRegisterRouteState, ironhub_register_route_mount,
@@ -210,7 +222,7 @@ pub mod ironhub {
 
 /// Re-exported identity vocabulary host binaries need to construct
 /// public runtime/WebUI types whose signatures mention a host-api identity.
-/// Kept narrow on purpose — the composition CLAUDE.md says "Expose
+/// Kept narrow on purpose — the composition CONTRACT.md says "Expose
 /// facade-shaped handles only"; these host-api identity types are the
 /// host-identity facade.
 pub mod host_api {
@@ -227,7 +239,7 @@ pub mod host_api {
 /// types are re-exported so host wiring (`ironclaw-reborn serve`, the CLI
 /// `UserDirectory` adapter) depends on the facade vocabulary, never on
 /// `ironclaw_identity` directly. The concrete filesystem-backed store
-/// stays private to this composition layer (composition CLAUDE.md: "keep
+/// stays private to this composition layer (composition CONTRACT.md: "keep
 /// lower substrate handles private").
 // consumer: `ironclaw_cli` user_directory + webui_auth (no `ironclaw_identity` dep) · pinned by: `composition/tests/production_runtime_identity.rs`
 pub use ironclaw_identity::{
@@ -290,6 +302,7 @@ pub struct RebornRuntimeReadinessSnapshot {
     pub text_only_driver: RebornRuntimeComponentStatus,
     pub planned_driver: RebornRuntimeComponentStatus,
     pub subagent_planned_driver: RebornRuntimeComponentStatus,
+    pub unbound_planned_drivers: RebornRuntimeComponentStatus,
     pub planned_default_profile: RebornRuntimeComponentStatus,
 }
 
@@ -338,12 +351,27 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
         ),
         Err(error) => RebornRuntimeComponentStatus::Failed(error.to_string()),
     };
-    let subagent_planned_driver = match family_registry {
+    let subagent_planned_driver = match &family_registry {
         Ok(family_registry) => RebornRuntimeComponentStatus::from_result(
             ironclaw_turn_runner::planned_driver_factory::register_subagent_planned_driver(
                 &mut registry,
-                family_registry,
+                Arc::clone(family_registry),
             ),
+        ),
+        Err(error) => RebornRuntimeComponentStatus::Failed(error.to_string()),
+    };
+    let unbound_planned_drivers = match family_registry {
+        Ok(family_registry) => RebornRuntimeComponentStatus::from_result(
+            ironclaw_turn_runner::planned_driver_factory::register_unbound_planned_driver(
+                &mut registry,
+                Arc::clone(&family_registry),
+            )
+            .and_then(|_| {
+                ironclaw_turn_runner::planned_driver_factory::register_unbound_structured_planned_driver(
+                    &mut registry,
+                    family_registry,
+                )
+            }),
         ),
         Err(error) => RebornRuntimeComponentStatus::Failed(error.to_string()),
     };
@@ -354,6 +382,7 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
         text_only_driver,
         planned_driver,
         subagent_planned_driver,
+        unbound_planned_drivers,
         planned_default_profile,
     }
 }
@@ -392,12 +421,28 @@ pub type PostgresProductionHostRuntimeServices =
 /// `/tenants/<tenant>/users/<user>/<alias>` for the caller's scope, so
 /// two tenants sharing one underlying [`RootFilesystem`] cannot collide
 /// on identically-shaped paths.
+/// The web-app channel's registration document, at its pre-§8 address.
+///
+/// Both halves of this path are persisted identity: the `/web-push` alias
+/// resolves to a physical per-user subpath, and `subscriptions.json` is the
+/// name every existing enrollment already lives under. The store's shape
+/// migrated forward; its address deliberately did not.
 const PER_USER_ALIASES: &[&str] = &[
     "/product-results",
     "/processes",
     "/secrets",
     "/authorization",
     "/outbound",
+    // The web-app channel's enrollment store. The alias keeps its pre-rename
+    // `web-push` spelling on purpose: it resolves to a PHYSICAL per-user
+    // subpath (`/tenants/<t>/users/<u>/web-push`), so renaming it would
+    // orphan every persisted browser enrollment. Pinned as sanctioned
+    // residue by the web-push-vocabulary retirement gate.
+    "/web-push",
+    // Generic per-channel delivery registrations for every OTHER channel.
+    // The web-app channel keeps its own alias above rather than moving here,
+    // because moving it would relocate live enrollment documents.
+    "/delivery-registrations",
     "/run-state",
     "/checkpoint-state",
     "/approvals",
@@ -405,11 +450,13 @@ const PER_USER_ALIASES: &[&str] = &[
     "/replay-payloads",
     "/threads",
     "/conversations",
+    "/suggestions",
     "/turns",
     "/resources",
     "/engine",
     "/skills",
     "/workspace",
+    "/llm-preferences",
 ];
 
 /// The canonical global `/system` subroots, each exposed as its own read-only
@@ -425,7 +472,7 @@ const SYSTEM_SUBROOTS: [&str; 3] = ["/system/settings", "/system/extensions", "/
 /// isolation is structural rather than a convention. `/tenant-shared`
 /// resolves to `/tenants/<tenant>/shared`; `/system/{settings,
 /// extensions, skills}` route globally as read-only. See
-/// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+/// `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
 ///
 /// The system sentinel scope (see
 /// [`ironclaw_host_api::resource::ResourceScope::system`]) routes records under
@@ -457,10 +504,17 @@ fn invocation_mount_view_for_segments(
     let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 4);
     for alias in PER_USER_ALIASES {
         let target = format!("{tenant_user_prefix}{alias}");
+        let permissions = if *alias == "/suggestions" {
+            // Suggestions are retained model output. Their store performs no
+            // deletion, so do not grant filesystem deletion authority.
+            MountPermissions::read_write()
+        } else {
+            MountPermissions::read_write_list_delete()
+        };
         grants.push(MountGrant::new(
             MountAlias::new(*alias)?,
             VirtualPath::new(target)?,
-            MountPermissions::read_write_list_delete(),
+            permissions,
         ));
     }
     grants.push(MountGrant::new(
@@ -601,6 +655,8 @@ pub enum RebornCompositionError {
     Mount(#[from] ironclaw_host_api::error::HostApiError),
     #[error("reborn filesystem substrate failed: {0}")]
     Filesystem(#[from] ironclaw_filesystem::FilesystemError),
+    #[error("reborn libSQL runtime substrate failed: {0}")]
+    LibSqlRuntime(#[from] ironclaw_libsql_runtime::LibSqlRuntimeError),
     #[error("reborn resource governor substrate failed: {0}")]
     Resource(#[from] ResourceError),
     #[error("reborn approval store substrate failed: {0}")]
@@ -615,12 +671,17 @@ pub enum RebornCompositionError {
     Turn(#[from] TurnError),
     #[error("reborn run-profile resolver substrate failed: {0}")]
     RunProfile(#[from] ironclaw_loop_contracts::RunProfileRegistryError),
-    #[error("production tenant-sandbox process backend requires a tenant sandbox process binding")]
-    MissingTenantSandboxProcessPort,
+    #[error("production user-sandbox process backend requires a user sandbox process binding")]
+    MissingUserSandboxProcessPort,
     #[error(
-        "production runtime policy uses {process_backend:?} but a tenant sandbox process binding was supplied"
+        "production runtime policy uses {process_backend:?} but a user sandbox process binding was supplied"
     )]
-    UnexpectedTenantSandboxProcessPort { process_backend: ProcessBackendKind },
+    UnexpectedUserSandboxProcessPort { process_backend: ProcessBackendKind },
+    /// Carries the store's filesystem cause; flattening it into a message
+    /// would leave an operator unable to tell a broken database from a
+    /// rejected index.
+    #[error("process journal startup migration failed")]
+    ProcessJournalMigration(#[from] ironclaw_processes::ProcessJournalStoreError),
     #[error("reborn production wiring failed: {report:?}")]
     ProductionWiring {
         report: ironclaw_host_runtime::ProductionWiringReport,
@@ -707,6 +768,18 @@ mod mount_view_tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn invocation_mount_view_denies_suggestion_deletion() {
+        let view = invocation_mount_view(&sample_scope()).unwrap();
+        let (_, grant) = view
+            .resolve_with_grant(&ScopedPath::new("/suggestions/doc.json").unwrap())
+            .unwrap();
+        assert!(grant.permissions.read);
+        assert!(grant.permissions.write);
+        assert!(grant.permissions.list);
+        assert!(!grant.permissions.delete);
     }
 
     #[tokio::test]

@@ -220,6 +220,12 @@ pub struct RebornAuthAccount {
     pub state: AuthAccountState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<AuthAccountLastError>,
+    /// Recipe-ceiling scopes the granted account does not hold (#7660). A
+    /// non-empty list on a `connected` account means the vendor recipe
+    /// widened after this grant: the card offers a re-consent ("update
+    /// access") affordance; it is NOT a broken or unfinished connection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_recipe_scopes: Vec<String>,
     /// Exactly one account per (user, vendor) is the default whenever any
     /// account exists. Always `true` today (list length ≤ 1).
     pub is_default: bool,
@@ -274,6 +280,23 @@ pub struct RebornExtensionInfo {
     pub install_scope: Option<LifecycleInstallScope>,
 }
 
+/// Generic client-side effect produced by a product command. Keeping this
+/// independent of command names lets future commands navigate without the
+/// WebUI learning command-specific behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RebornProductCommandEffect {
+    OpenThread { thread_id: String },
+}
+
+impl RebornProductCommandEffect {
+    pub fn open_thread_id(&self) -> Option<&str> {
+        match self {
+            Self::OpenThread { thread_id } => Some(thread_id.as_str()),
+        }
+    }
+}
+
 /// Response for `product.commands.execute`. Exactly one of `result` /
 /// `rejection` is present; `command` names the resolved command token when
 /// one could be extracted from `text` (empty when parsing failed before a
@@ -285,4 +308,6 @@ pub struct RebornExecuteProductCommandResponse {
     pub result: Option<crate::commands::CommandResultView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejection: Option<RebornCommandRejection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect: Option<RebornProductCommandEffect>,
 }

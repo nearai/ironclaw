@@ -2323,7 +2323,6 @@ async def test_reborn_v2_current_extension_setup_and_delivery_matrix(
         await expect(pairing_panel.get_by_test_id("pairing-countdown")).to_have_text(
             re.compile(r"^Expires in \d+:\d{2}$")
         )
-        await expect(pairing_panel.get_by_text(re.compile(r"/start"))).to_be_visible()
         await expect(pairing_panel.get_by_text(re.compile(r"/pair\b"))).to_have_count(0)
         await expect(telegram_modal.get_by_text("Telegram Bot Token")).to_have_count(0)
         await telegram_modal.get_by_label("Close").click()
@@ -2416,11 +2415,18 @@ async def test_reborn_v2_current_extension_setup_and_delivery_matrix(
                 },
             }
         ]
+        # The notification-channels panel merges this stored-channel response
+        # with the `/outbound/targets` catalog above (see
+        # `mergeNotificationChannelRows`).
         delivery_preferences = {
             "body": {
-                "final_reply_target": slack_target,
-                "final_reply_target_status": "available",
-                "default_modality": "text",
+                "channels": [
+                    {
+                        "target_id": slack_target["target_id"],
+                        "status": "available",
+                        "option": {"target": slack_target},
+                    }
+                ]
             }
         }
 
@@ -2447,7 +2453,7 @@ async def test_reborn_v2_current_extension_setup_and_delivery_matrix(
             if path == "/api/webchat/v2/outbound/targets":
                 await fulfill_json(route, {"targets": delivery_targets})
                 return
-            if path == "/api/webchat/v2/outbound/preferences":
+            if path == "/api/webchat/v2/outbound/notification-channels":
                 await fulfill_json(route, delivery_preferences["body"])
                 return
             await route.continue_()
@@ -2457,17 +2463,11 @@ async def test_reborn_v2_current_extension_setup_and_delivery_matrix(
         await page.goto(
             f"{reborn_v2_server}/automations?token={REBORN_V2_AUTH_TOKEN}"
         )
-        delivery_choices = page.get_by_role(
-            "radiogroup", name="Where triggered results are sent"
-        )
-        await expect(delivery_choices).to_be_visible(timeout=5000)
         await expect(
-            delivery_choices.get_by_text("Slack direct message", exact=True)
-        ).to_be_visible()
+            page.get_by_text("Where notifications are sent", exact=True)
+        ).to_be_visible(timeout=5000)
         await expect(
-            delivery_choices.get_by_text(
-                "Web app only (no external delivery)", exact=True
-            )
+            page.get_by_text("Slack direct message", exact=True)
         ).to_be_visible()
 
         # Removing Slack from the caller's extension membership removes its
@@ -2484,24 +2484,20 @@ async def test_reborn_v2_current_extension_setup_and_delivery_matrix(
         assert harness["remove_requests"] == ["slack"]
 
         delivery_targets.clear()
-        delivery_preferences["body"] = {
-            "final_reply_target_status": "none_configured",
-            "default_modality": "text",
-        }
+        delivery_preferences["body"] = {"channels": []}
         await page.goto(
             f"{reborn_v2_server}/automations?token={REBORN_V2_AUTH_TOKEN}"
         )
-        delivery_choices = page.get_by_role(
-            "radiogroup", name="Where triggered results are sent"
-        )
-        await expect(delivery_choices).to_be_visible(timeout=5000)
         await expect(
-            delivery_choices.get_by_text("Slack direct message", exact=True)
+            page.get_by_text("Where notifications are sent", exact=True)
+        ).to_be_visible(timeout=5000)
+        await expect(
+            page.get_by_text("Slack direct message", exact=True)
         ).to_have_count(0)
-        await expect(page.get_by_text("Current default", exact=True)).to_have_count(0)
         await expect(
-            delivery_choices.get_by_text(
-                "Web app only (no external delivery)", exact=True
+            page.get_by_text(
+                "No notification channel is selected — approval prompts, auth prompts, and failure notices won't be delivered anywhere.",
+                exact=True,
             )
         ).to_be_visible()
 

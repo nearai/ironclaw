@@ -29,6 +29,7 @@ use ironclaw_host_api::{
     host_port::{HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog},
     http::RuntimeCredentialTarget,
     ids::{ExtensionId, VendorId},
+    messaging::StandardMessagingOp,
     trust::RequestedTrustClass,
 };
 
@@ -82,6 +83,11 @@ pub enum ManifestV3Error {
     MissingAuthRecipe { vendor: String },
     #[error("[auth.{vendor}] recipe is not referenced by any credential")]
     UnreferencedAuthRecipe { vendor: String },
+    #[error(
+        "manifest declares more than one `method = \"device_link\"` auth surface \
+         ([auth.{first}] and [auth.{second}]); an extension links at most one account"
+    )]
+    MultipleDeviceLinkRecipes { first: String, second: String },
     #[error(
         "credential audience host `{host}` must be a literal host (wildcards are not allowed \
          in v3 manifests)"
@@ -148,7 +154,19 @@ struct RawToolV3 {
     default_permission: PermissionMode,
     #[serde(default = "default_tool_visibility")]
     visibility: crate::v2::CapabilityVisibility,
-    input_schema_ref: String,
+    /// The standard messaging operation this tool binds to (standardized
+    /// messaging framework spec §6). `#[serde(default)]` so a bespoke tool
+    /// omits the field entirely; validated and consumed in the per-tool loop
+    /// in [`parse_v3`], never threaded through unchecked.
+    #[serde(default)]
+    standard_op: Option<StandardMessagingOp>,
+    /// Required for a bespoke tool; must be omitted for a `standard_op`
+    /// binding, which uses the host-synthesized
+    /// `standard:messaging/<op>.input.v1` ref instead. `#[serde(default)]`
+    /// so a bound entry can omit it — the per-tool loop enforces the inverse
+    /// rule (non-bound tools must declare one) explicitly.
+    #[serde(default)]
+    input_schema_ref: Option<String>,
     #[serde(default)]
     output_schema_ref: Option<String>,
     #[serde(default)]
@@ -346,6 +364,14 @@ pub(crate) fn parse_v3(
 
     // Validate recipes.
     let mut recipes: BTreeMap<VendorId, VendorAuthRecipe> = BTreeMap::new();
+    // At most one device-link surface per extension, structurally, the way
+    // `[channel]` is at most one. Nothing downstream can express two: the
+    // binding slot holds a single adapter, and the host resolves the flow's
+    // vendor by scanning the surfaces and taking the first device-link match —
+    // so a second one would not be rejected, it would be silently ignored, and
+    // flows, minted accounts, and custody grants would all attribute to
+    // whichever vendor happened to sort first.
+    let mut device_link_vendor: Option<String> = None;
     for (vendor, recipe) in raw.auth {
         recipe
             .validate()
@@ -353,6 +379,15 @@ pub(crate) fn parse_v3(
                 vendor: vendor.clone(),
                 error,
             })?;
+        if matches!(recipe, VendorAuthRecipe::DeviceLink(_)) {
+            if let Some(first) = &device_link_vendor {
+                return Err(ManifestV3Error::MultipleDeviceLinkRecipes {
+                    first: first.clone(),
+                    second: vendor.clone(),
+                });
+            }
+            device_link_vendor = Some(vendor.clone());
+        }
         recipes.insert(VendorId::new(vendor)?, recipe);
     }
 
@@ -434,6 +469,7 @@ pub(crate) fn parse_v3(
             effects: with_dispatch_effect(mcp.effects.clone()),
             default_permission: mcp.default_permission,
             visibility: crate::v2::CapabilityVisibility::HostInternal,
+            standard_op: None,
             input_schema_ref: format!("schemas/{id}/dynamic/mcp_server.input.v1.json"),
             output_schema_ref: None,
             prompt_doc_ref: None,
@@ -451,7 +487,96 @@ pub(crate) fn parse_v3(
         );
         mcp_template_credentials = Some(template_credentials);
     }
+    let mut seen_standard_ops: std::collections::HashSet<StandardMessagingOp> = Default::default();
     for tool in raw.tools {
+        // A `standard_op` binding claims host-owned canonical vocabulary
+        // (standardized messaging framework spec §6): the operation must
+        // have graduated a contract, the tool id must be the
+        // extension-namespaced op name, the schema refs are host-synthesized
+        // (never author-declared), a write op must declare `external_write`,
+        // an extension may bind an op at most once, and — because an `[mcp]`
+        // manifest's static tools inherit the server connection template
+        // wholesale (including a hardcoded `output_schema_ref: None` below)
+        // — a `standard_op` cannot combine with `[mcp]` at all.
+        if let Some(op) = tool.standard_op {
+            if mcp.is_some() {
+                return Err(ManifestV3Error::Invalid {
+                    reason: format!(
+                        "tool `{}` declares standard_op on an [mcp] manifest; static tools \
+                         inherit the server connection template and cannot bind a standard op",
+                        tool.id
+                    ),
+                });
+            }
+            if op.contract().is_none() {
+                return Err(ManifestV3Error::Invalid {
+                    reason: format!(
+                        "standard_op `{}` is reserved and not yet bindable",
+                        op.op_name()
+                    ),
+                });
+            }
+            let expected_id = format!("{}.{}", id.as_str(), op.op_name());
+            if tool.id != expected_id {
+                return Err(ManifestV3Error::Invalid {
+                    reason: format!(
+                        "standard op tool id must be `{expected_id}`, got `{}`",
+                        tool.id
+                    ),
+                });
+            }
+            if tool.input_schema_ref.is_some() || tool.output_schema_ref.is_some() {
+                return Err(ManifestV3Error::Invalid {
+                    reason: format!(
+                        "standard op `{}` uses host-canonical schemas; remove \
+                         input_schema_ref/output_schema_ref",
+                        tool.id
+                    ),
+                });
+            }
+            if op.is_write() && !tool.effects.contains(&EffectKind::ExternalWrite) {
+                return Err(ManifestV3Error::Invalid {
+                    reason: format!(
+                        "standard op `{}` is a write operation and must declare the \
+                         external_write effect",
+                        tool.id
+                    ),
+                });
+            }
+            if !seen_standard_ops.insert(op) {
+                return Err(ManifestV3Error::Invalid {
+                    reason: format!(
+                        "standard op `{}` may be bound at most once per extension",
+                        op.op_name()
+                    ),
+                });
+            }
+        }
+        // A bound tool's schemas are the host-synthesized canonical refs; a
+        // bespoke tool must declare its own — the inverse of the check
+        // above, enforced here so both arms below get a resolved `String`
+        // even though `RawToolV3::input_schema_ref` is optional on the wire.
+        let (input_schema_ref, output_schema_ref) = match tool.standard_op {
+            Some(op) => (
+                ironclaw_host_api::capability_profile::CapabilityProfileSchemaRef::standard_messaging_input(op)
+                    .map_err(|error| ManifestV3Error::Invalid { reason: error.to_string() })?
+                    .into_string(),
+                Some(
+                    ironclaw_host_api::capability_profile::CapabilityProfileSchemaRef::standard_messaging_output(op)
+                        .map_err(|error| ManifestV3Error::Invalid { reason: error.to_string() })?
+                        .into_string(),
+                ),
+            ),
+            None => {
+                let input_schema_ref =
+                    tool.input_schema_ref
+                        .ok_or_else(|| ManifestV3Error::Invalid {
+                            reason: format!("tool {} requires input_schema_ref", tool.id),
+                        })?;
+                (input_schema_ref, tool.output_schema_ref.clone())
+            }
+        };
+
         // Statically pinned tools on an `[mcp]` manifest are the surfaces
         // guaranteed present without live discovery (bundled fallback, first
         // boot); a successful tools/list discovery replaces them with the
@@ -486,7 +611,11 @@ pub(crate) fn parse_v3(
                     effects: with_dispatch_effect(mcp.effects.clone()),
                     default_permission: tool.default_permission,
                     visibility: tool.visibility,
-                    input_schema_ref: tool.input_schema_ref,
+                    // The guard above rejects standard operations on MCP
+                    // manifests; keep this inherited template explicitly
+                    // incapable of acquiring a standard binding.
+                    standard_op: None,
+                    input_schema_ref,
                     output_schema_ref: None,
                     prompt_doc_ref: tool.prompt_doc_ref,
                     required_host_ports: derived_host_ports(&mcp.effects, true),
@@ -503,8 +632,9 @@ pub(crate) fn parse_v3(
                 effects: with_dispatch_effect(tool.effects.clone()),
                 default_permission: tool.default_permission,
                 visibility: tool.visibility,
-                input_schema_ref: tool.input_schema_ref,
-                output_schema_ref: tool.output_schema_ref,
+                standard_op: tool.standard_op,
+                input_schema_ref,
+                output_schema_ref,
                 prompt_doc_ref: tool.prompt_doc_ref,
                 required_host_ports: derived_host_ports(&tool.effects, sandboxed_runtime),
                 runtime_credentials: tool
@@ -587,16 +717,12 @@ pub(crate) fn parse_v3(
     let auth = recipes
         .into_iter()
         .map(|(vendor, recipe)| {
-            let setup = match &recipe {
-                VendorAuthRecipe::Oauth2Code(oauth) => RuntimeCredentialAccountSetup::OAuth {
-                    scopes: oauth.scopes.clone(),
-                },
-                VendorAuthRecipe::ApiKey(_) => RuntimeCredentialAccountSetup::ManualToken,
-            };
+            let setup = account_setup_for_recipe(&recipe);
             ResolvedAuthSurface {
                 vendor,
                 setup,
                 recipe: Some(recipe),
+                oauth_resource: None,
                 protected_resource_metadata_url: None,
             }
         })
@@ -756,6 +882,27 @@ fn derived_host_ports(effects: &[EffectKind], sandboxed_runtime: bool) -> Vec<St
     }
 }
 
+/// Project a declared auth recipe onto the credential-account setup a runtime
+/// credential requirement carries.
+///
+/// One function, two call sites (the per-credential requirement and the
+/// per-vendor resolved auth surface) precisely because they must never
+/// disagree: a vendor whose surface says `oauth` while its credentials say
+/// `manual_token` produces a connect affordance that services a challenge the
+/// engine cannot mint.
+fn account_setup_for_recipe(recipe: &VendorAuthRecipe) -> RuntimeCredentialAccountSetup {
+    match recipe {
+        VendorAuthRecipe::Oauth2Code(oauth) => RuntimeCredentialAccountSetup::OAuth {
+            scopes: oauth.scopes.clone(),
+        },
+        VendorAuthRecipe::ApiKey(_) => RuntimeCredentialAccountSetup::ManualToken,
+        // Display metadata only — the recipe declares no scopes and no
+        // endpoints, so there is nothing to carry onto the setup. Satisfaction
+        // is the stored session the device link produces.
+        VendorAuthRecipe::DeviceLink(_) => RuntimeCredentialAccountSetup::DeviceLink,
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // arch-exempt: too_many_args, private normalization helper pending a CredentialContext bundle if it grows, extension-runtime P2
 fn credential_from_v3(
     handle: &str,
@@ -778,12 +925,7 @@ fn credential_from_v3(
             vendor: vendor.as_str().to_string(),
         });
     };
-    let setup = match recipe {
-        VendorAuthRecipe::Oauth2Code(oauth) => RuntimeCredentialAccountSetup::OAuth {
-            scopes: oauth.scopes.clone(),
-        },
-        VendorAuthRecipe::ApiKey(_) => RuntimeCredentialAccountSetup::ManualToken,
-    };
+    let setup = account_setup_for_recipe(recipe);
     referenced_vendors.insert(vendor.clone(), ());
     Ok(RawRuntimeCredentialV2 {
         handle: handle.to_string(),

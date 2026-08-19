@@ -75,7 +75,7 @@ impl AuthChallengeProvider for RecipeAuthChallengeProvider {
                 .await
                 .map_err(|error| {
                     tracing::debug!(
-                        target = "ironclaw::reborn::channel_pairing",
+                        target: "ironclaw::reborn::channel_pairing",
                         %error,
                         "pairing challenge materialization failed"
                     );
@@ -108,6 +108,10 @@ impl AuthChallengeProvider for RecipeAuthChallengeProvider {
                     expires_at: issue.expires_at,
                     connection: service.connection_requirement().clone(),
                 }),
+                // This branch materializes a *pairing* challenge; a device-link
+                // frame only ever comes from a durable device-link flow record,
+                // which this path does not read.
+                device_link: None,
             }));
         }
 

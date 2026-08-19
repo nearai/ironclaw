@@ -41,7 +41,9 @@ use std::process::Command;
 #[allow(dead_code)]
 mod ratchet_support;
 
-use ratchet_support::{production_rust_files, strip_comments_and_strings, workspace_root};
+use ratchet_support::{
+    production_rust_files, strip_cfg_test_blocks, strip_comments_and_strings, workspace_root,
+};
 
 const RUNNER: &str = "ironclaw_turn_runner";
 const LOOP_HOST: &str = "ironclaw_loop_host";
@@ -205,60 +207,6 @@ fn production_sources(root: &Path, crate_name: &str) -> Vec<(PathBuf, String)> {
             (path, cleaned)
         })
         .collect()
-}
-
-/// Remove `#[cfg(test)]`-gated items by brace balance. Must run **after**
-/// comment/string stripping — it counts raw `{`/`}` bytes, so a brace inside a
-/// comment or a string literal would desynchronise it.
-///
-/// Deliberately does not strip `#[cfg(feature = "test-support")]`: that
-/// compiles in the `--all-features` lanes this suite runs under, so an item
-/// behind it is a real definition.
-fn strip_cfg_test_blocks(source: &str) -> String {
-    const MARKER: &str = "#[cfg(test)]";
-    let mut out = String::with_capacity(source.len());
-    let mut rest = source;
-    while let Some(index) = rest.find(MARKER) {
-        out.push_str(&rest[..index]);
-        let after = &rest[index + MARKER.len()..];
-        let Some(open) = after.find('{') else {
-            // `#[cfg(test)] mod tests;` — an out-of-line declaration, no block.
-            match after.find(';') {
-                Some(semi) => {
-                    rest = &after[semi + 1..];
-                    continue;
-                }
-                None => return out,
-            }
-        };
-        if let Some(semi) = after.find(';')
-            && semi < open
-        {
-            rest = &after[semi + 1..];
-            continue;
-        }
-        let mut depth = 0usize;
-        let mut end = None;
-        for (offset, byte) in after.bytes().enumerate().skip(open) {
-            match byte {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = Some(offset);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        match end {
-            Some(offset) => rest = &after[offset + 1..],
-            None => return out,
-        }
-    }
-    out.push_str(rest);
-    out
 }
 
 /// Definition sites of `name` introduced by `keyword`, in already-cleaned

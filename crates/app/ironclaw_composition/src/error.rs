@@ -42,6 +42,8 @@ pub enum RebornBuildError {
     Turn(#[from] ironclaw_turns::TurnError),
     #[error("reborn mount view construction failed")]
     Mount(#[from] ironclaw_host_api::error::HostApiError),
+    #[error("process journal startup migration failed")]
+    ProcessJournalMigration(#[from] ironclaw_processes::ProcessJournalStoreError),
 }
 
 impl From<ironclaw_extension_host::RebornExtensionHostBuildError> for RebornBuildError {
@@ -81,6 +83,7 @@ impl From<crate::RebornCompositionError> for RebornBuildError {
             crate::RebornCompositionError::MissingSecretMasterKey => Self::MissingSecretMasterKey,
             crate::RebornCompositionError::Mount(error) => Self::Mount(error),
             crate::RebornCompositionError::Filesystem(error) => Self::Filesystem(error),
+            crate::RebornCompositionError::LibSqlRuntime(error) => Self::LibSqlRuntime(error),
             crate::RebornCompositionError::Resource(error) => Self::Resource(error),
             crate::RebornCompositionError::ApprovalStore(error) => Self::ApprovalStore(error),
             crate::RebornCompositionError::CapabilityLease(error) => Self::CapabilityLease(error),
@@ -93,8 +96,12 @@ impl From<crate::RebornCompositionError> for RebornBuildError {
             crate::RebornCompositionError::ProductionWiring { report } => {
                 Self::ProductionWiring { report }
             }
-            error @ crate::RebornCompositionError::MissingTenantSandboxProcessPort
-            | error @ crate::RebornCompositionError::UnexpectedTenantSandboxProcessPort { .. } => {
+            // Carried, not flattened: the store error holds the filesystem cause.
+            crate::RebornCompositionError::ProcessJournalMigration(source) => {
+                Self::ProcessJournalMigration(source)
+            }
+            error @ crate::RebornCompositionError::MissingUserSandboxProcessPort
+            | error @ crate::RebornCompositionError::UnexpectedUserSandboxProcessPort { .. } => {
                 Self::InvalidConfig {
                     reason: error.to_string(),
                 }
@@ -115,25 +122,25 @@ mod tests {
     }
 
     #[test]
-    fn composition_missing_tenant_sandbox_process_port_becomes_invalid_config() {
+    fn composition_missing_user_sandbox_process_port_becomes_invalid_config() {
         let error =
-            RebornBuildError::from(crate::RebornCompositionError::MissingTenantSandboxProcessPort);
+            RebornBuildError::from(crate::RebornCompositionError::MissingUserSandboxProcessPort);
 
         assert!(
-            matches!(error, RebornBuildError::InvalidConfig { reason } if reason == "production tenant-sandbox process backend requires a tenant sandbox process binding")
+            matches!(error, RebornBuildError::InvalidConfig { reason } if reason == "production user-sandbox process backend requires a user sandbox process binding")
         );
     }
 
     #[test]
-    fn composition_unexpected_tenant_sandbox_process_port_becomes_invalid_config() {
+    fn composition_unexpected_user_sandbox_process_port_becomes_invalid_config() {
         let error = RebornBuildError::from(
-            crate::RebornCompositionError::UnexpectedTenantSandboxProcessPort {
+            crate::RebornCompositionError::UnexpectedUserSandboxProcessPort {
                 process_backend: ironclaw_host_api::runtime_policy::ProcessBackendKind::LocalHost,
             },
         );
 
         assert!(
-            matches!(error, RebornBuildError::InvalidConfig { reason } if reason == "production runtime policy uses LocalHost but a tenant sandbox process binding was supplied")
+            matches!(error, RebornBuildError::InvalidConfig { reason } if reason == "production runtime policy uses LocalHost but a user sandbox process binding was supplied")
         );
     }
 

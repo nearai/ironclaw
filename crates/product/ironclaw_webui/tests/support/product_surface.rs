@@ -214,7 +214,7 @@ impl ProductSurface for ProgrammableProductSurface {
             })?,
             after_cursor: request
                 .after_cursor
-                .map(ironclaw_assistant::ProjectionCursor::new)
+                .map(ironclaw_product_contracts::outbound::ProjectionCursor::new)
                 .transpose()
                 .map_err(ProductSurfaceError::internal_from)?,
         };

@@ -20,7 +20,7 @@
 use ironclaw_config::BudgetDefaults;
 use ironclaw_event_log::{SecurityBoundary, SecurityDecision};
 use ironclaw_host_api::ids::ProcessId;
-use ironclaw_loop_contracts::{LoopHostMilestoneKind, LoopRecoveryClass};
+use ironclaw_loop_contracts::{BatchPolicyKind, LoopHostMilestoneKind, LoopRecoveryClass};
 use ironclaw_processes::ProcessKind;
 use ironclaw_resources::{ResourceAccount, ResourceGovernor, ResourceTally};
 use ironclaw_threads::SessionThreadService as _;
@@ -107,7 +107,7 @@ pub enum ToolErrorClass {
 impl ToolErrorClass {
     /// The `safe_summary` prefix the executor writes for this class — see
     /// `capability_{failed,denied}_summary` in
-    /// `crates/ironclaw_agent_loop/src/executor/capabilities.rs`.
+    /// `crates/loop/ironclaw_agent_loop/src/executor/capabilities.rs`.
     fn summary_prefix(self) -> &'static str {
         match self {
             Self::Failed => "capability failed with ",
@@ -537,6 +537,25 @@ impl RebornIntegrationHarness {
         }
         Err(format!(
             "no model message content contained {needle:?}; captured {} request(s)",
+            requests.len()
+        )
+        .into())
+    }
+
+    /// Assert that the final interactive model request still carries `needle`.
+    /// This avoids a vacuous pass from an earlier request when testing context
+    /// retained across a long-running turn.
+    pub async fn assert_last_model_message_content_contains(
+        &self,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let requests = self.scripted_llm.captured_requests();
+        let last = requests.last().ok_or("no model requests were captured")?;
+        if last.iter().any(|message| message.content.contains(needle)) {
+            return Ok(());
+        }
+        Err(format!(
+            "final model request did not contain {needle:?}; captured {} request(s)",
             requests.len()
         )
         .into())
@@ -1080,6 +1099,36 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert the loop's caller-visible policy for a capability batch of the
+    /// specified size. The policy controls whether execution may proceed in
+    /// parallel and whether a suspension stops the remaining batch.
+    pub async fn assert_capability_batch_policy(
+        &self,
+        call_count: u32,
+        expected: BatchPolicyKind,
+    ) -> HarnessResult<()> {
+        let policies = self
+            .loop_milestones()
+            .into_iter()
+            .filter_map(|milestone| match milestone.kind {
+                LoopHostMilestoneKind::CapabilityBatchStarted {
+                    call_count: actual_count,
+                    policy,
+                    ..
+                } if actual_count == call_count => Some(policy),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if policies.contains(&expected) {
+            return Ok(());
+        }
+        Err(format!(
+            "no CapabilityBatchStarted milestone for a {call_count}-call batch classified \
+             {expected:?}; saw {policies:?}"
+        )
+        .into())
+    }
+
     /// Assert the always-wired security-audit recorder captured an event with
     /// the expected stable boundary/decision/code tuple.
     pub async fn assert_security_audit_event_recorded(
@@ -1141,6 +1190,69 @@ impl RebornIntegrationHarness {
             "no CompactionFailed milestone with reason_kind {reason_kind:?} since baseline {baseline}; saw {seen:?}"
         )
         .into())
+    }
+
+    /// Every `DriverNote` milestone summary recorded by this harness, in order.
+    ///
+    /// A driver note is the operator-visible channel for "a subsystem stopped
+    /// contributing but the run continued" — it reaches the live work summary
+    /// rather than only a log line.
+    fn driver_note_summaries(&self) -> Vec<String> {
+        self.loop_milestones()
+            .into_iter()
+            .filter_map(|milestone| match milestone.kind {
+                LoopHostMilestoneKind::DriverNote { safe_summary, .. } => {
+                    Some(safe_summary.as_str().to_string())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Assert an operator-visible driver note reported degraded memory
+    /// retrieval — the evidence that a retrieval/backend FAILURE is
+    /// distinguishable from "no matching memory" outside the returned value.
+    ///
+    /// Driver notes are emitted from a spawned task, so poll over a bounded
+    /// window rather than racing the emit.
+    pub async fn assert_memory_retrieval_degraded_note(&self) -> HarnessResult<()> {
+        let mut waited = std::time::Duration::ZERO;
+        while waited < std::time::Duration::from_secs(5) {
+            if self
+                .driver_note_summaries()
+                .iter()
+                .any(|summary| summary.contains("memory retrieval degraded"))
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            waited += std::time::Duration::from_millis(25);
+        }
+        Err(format!(
+            "no driver note reporting degraded memory retrieval; saw {:?}",
+            self.driver_note_summaries()
+        )
+        .into())
+    }
+
+    /// Assert NO memory-degradation driver note was emitted. Pairs with
+    /// [`Self::assert_memory_retrieval_degraded_note`]: a healthy backend that
+    /// simply matched nothing must not look like an outage.
+    pub async fn assert_no_memory_retrieval_degraded_note(&self) -> HarnessResult<()> {
+        // Give a stray emit the same window the positive assertion waits on, so
+        // this cannot pass merely by checking too early.
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let summaries = self.driver_note_summaries();
+        if summaries
+            .iter()
+            .any(|summary| summary.contains("memory retrieval degraded"))
+        {
+            return Err(format!(
+                "an empty-but-healthy memory retrieval reported degradation: {summaries:?}"
+            )
+            .into());
+        }
+        Ok(())
     }
 
     /// Assert exactly one typed redaction milestone was emitted for the applied
@@ -1689,6 +1801,22 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert the compactor persisted at least `minimum` durable summaries.
+    pub async fn assert_summary_artifact_count_at_least(
+        &self,
+        minimum: usize,
+    ) -> HarnessResult<()> {
+        let count = self
+            .thread_harness
+            .summary_artifacts(self.binding.thread_id.clone())
+            .await?
+            .len();
+        if count >= minimum {
+            return Ok(());
+        }
+        Err(format!("expected at least {minimum} durable summary artifact(s), saw {count}").into())
+    }
+
     /// Assert no durable compaction summary contains forbidden content. The
     /// diagnostic deliberately omits `needle` and summary bodies.
     pub async fn assert_summary_artifacts_lack(&self, needle: &str) -> HarnessResult<()> {
@@ -1938,6 +2066,21 @@ impl RebornIntegrationHarness {
     pub async fn assert_conversation_history_contains(&self, needle: &str) -> HarnessResult<()> {
         self.conversation_history_contains_impl(0, None, needle)
             .await
+    }
+
+    pub async fn assert_conversation_history_message_count_at_least(
+        &self,
+        minimum: usize,
+    ) -> HarnessResult<()> {
+        let history = self.persisted_history().await?;
+        if history.len() >= minimum {
+            return Ok(());
+        }
+        Err(format!(
+            "persisted conversation history contained {} message(s), expected at least {minimum}",
+            history.len()
+        )
+        .into())
     }
 
     /// Assert NO persisted thread-history message's `content` contains

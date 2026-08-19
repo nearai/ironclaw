@@ -27,6 +27,16 @@ test("renderMarkdown returns an empty string for falsy content", () => {
   assert.equal(renderMarkdown(undefined), "");
 });
 
+test("renderMarkdown renders gemoji shortcodes outside code", () => {
+  const out = renderMarkdown(
+    "Hello :wave: :smile: :sunglasses: :+1:\n\n`:wave:`\n\n```text\n:wave:\n```",
+  );
+
+  assert.match(out, /Hello 👋 😄 😎 👍/);
+  assert.match(out, /<code>:wave:<\/code>/);
+  assert.match(out, /<pre><code class="language-text">:wave:/);
+});
+
 test("renderMarkdown fails closed when DOMPurify is unsupported", async () => {
   vi.resetModules();
   vi.doMock("dompurify", () => ({

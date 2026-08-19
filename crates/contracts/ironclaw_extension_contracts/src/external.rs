@@ -117,6 +117,43 @@ impl From<ExternalActorBindingEpoch> for String {
     }
 }
 
+/// Stable vendor-issued actor identifier.
+///
+/// This is the typed form used when a host has proven an actor identity but
+/// does not need the actor kind or presentation metadata carried by a full
+/// [`ExternalActorRef`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct ExternalActorId(String);
+
+impl ExternalActorId {
+    pub fn new(value: impl Into<String>) -> Result<Self, ProductAdapterError> {
+        let value = value.into();
+        validate_external_id("external_actor_id", &value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ExternalActorId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl std::fmt::Display for ExternalActorId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// External actor reference. Equality/hash use only stable identity
 /// (`kind`, `id`); `display_name` is presentation metadata.
 #[derive(Debug, Clone, Serialize)]
@@ -421,20 +458,32 @@ fn validate_attachment_filename(value: &str) -> Result<(), ProductAdapterError> 
     Ok(())
 }
 
+/// Kind-vs-MIME agreement runs in one direction only: the three media-mirror
+/// kinds (`Image`, `Audio`, `Video`) claim exactly what the MIME base states,
+/// so a mismatch there is an adapter mislabel and is rejected. The semantic
+/// kinds (`Sticker`, `Voice`, `Document`, `Other`) carry vendor presentation
+/// meaning a MIME base cannot express — a sticker is `image/webp`,
+/// `video/webm`, or a vendor animated format; a voice note is `audio/ogg`; a
+/// document is any MIME "sent as file" — and accept any MIME. The previous
+/// reverse rule (media MIME forces the media kind) made those pairs
+/// unconstructible, which failed whole-update parsing at ingress and let one
+/// sticker poison a vendor's webhook redelivery queue.
 fn validate_attachment_kind(
     mime_type: &str,
     kind: ProductAttachmentKind,
 ) -> Result<(), ProductAdapterError> {
     let base = mime_type.split('/').next().unwrap_or_default();
-    let expected = match base {
-        "image" => Some(ProductAttachmentKind::Image),
-        "audio" => Some(ProductAttachmentKind::Audio),
-        "video" => Some(ProductAttachmentKind::Video),
-        _ => None,
+    let required_base = match kind {
+        ProductAttachmentKind::Image => Some("image"),
+        ProductAttachmentKind::Audio => Some("audio"),
+        ProductAttachmentKind::Video => Some("video"),
+        ProductAttachmentKind::Sticker
+        | ProductAttachmentKind::Voice
+        | ProductAttachmentKind::Document
+        | ProductAttachmentKind::Other => None,
     };
-    if let Some(expected) = expected
-        && kind != expected
-        && kind != ProductAttachmentKind::Other
+    if let Some(required_base) = required_base
+        && base != required_base
     {
         return Err(ProductAdapterError::InvalidIdentifier {
             kind: "attachment_kind",
@@ -520,6 +569,57 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn attachment_semantic_kinds_construct_for_real_vendor_shapes() {
+        // Regression: stickers (`image/webp` + `Sticker`) and voice notes
+        // (`audio/ogg` + `Voice`) were unconstructible, so the whole update
+        // failed parse, ingress answered non-2xx, and the sending vendor's
+        // in-order redelivery bricked the chat behind the poison update.
+        let cases = [
+            ("image/webp", ProductAttachmentKind::Sticker),
+            ("video/webm", ProductAttachmentKind::Sticker),
+            ("application/x-tgsticker", ProductAttachmentKind::Sticker),
+            ("audio/ogg", ProductAttachmentKind::Voice),
+            ("image/jpeg", ProductAttachmentKind::Document),
+            ("video/mp4", ProductAttachmentKind::Document),
+            ("audio/mpeg", ProductAttachmentKind::Document),
+            ("image/png", ProductAttachmentKind::Other),
+        ];
+        for (mime, kind) in cases {
+            assert!(
+                ProductAttachmentDescriptor::new("file_42", mime, None, Some(64), kind).is_ok(),
+                "expected `{mime}` + {kind:?} to be constructible"
+            );
+        }
+    }
+
+    #[test]
+    fn attachment_media_kinds_still_require_matching_mime_base() {
+        let rejected = [
+            ("application/pdf", ProductAttachmentKind::Image),
+            ("image/png", ProductAttachmentKind::Audio),
+            ("audio/ogg", ProductAttachmentKind::Video),
+            ("text/plain", ProductAttachmentKind::Video),
+        ];
+        for (mime, kind) in rejected {
+            assert!(
+                ProductAttachmentDescriptor::new("file_42", mime, None, Some(64), kind).is_err(),
+                "expected `{mime}` + {kind:?} to be rejected as a mislabel"
+            );
+        }
+        let accepted = [
+            ("image/png", ProductAttachmentKind::Image),
+            ("audio/mpeg", ProductAttachmentKind::Audio),
+            ("video/mp4", ProductAttachmentKind::Video),
+        ];
+        for (mime, kind) in accepted {
+            assert!(
+                ProductAttachmentDescriptor::new("file_42", mime, None, Some(64), kind).is_ok(),
+                "expected `{mime}` + {kind:?} to be constructible"
+            );
+        }
     }
 
     #[test]

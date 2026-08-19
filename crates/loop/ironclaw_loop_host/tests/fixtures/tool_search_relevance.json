@@ -1,0 +1,1566 @@
+{
+  "tools": [
+    {
+      "kind": "builtin",
+      "capability_id": "builtin.time",
+      "name": "builtin__time",
+      "description": "Return the current local time.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "timezone": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "builtin",
+      "capability_id": "builtin.weather",
+      "name": "builtin__weather",
+      "description": "Get a weather forecast for a location.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "location": {
+            "type": "string"
+          },
+          "days": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "kind": "builtin",
+      "capability_id": "builtin.calculator",
+      "name": "builtin__calculator",
+      "description": "Evaluate a mathematical expression.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "expression": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "builtin",
+      "capability_id": "builtin.http_fetch",
+      "name": "builtin__http_fetch",
+      "description": "Fetch an HTTP URL and return its response.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "builtin",
+      "capability_id": "filesystem.read_text",
+      "name": "filesystem__read_text",
+      "description": "Read text from a workspace file.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "max_bytes": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "kind": "builtin",
+      "capability_id": "filesystem.write_text",
+      "name": "filesystem__write_text",
+      "description": "Write text content to a workspace file.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "overwrite": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    {
+      "kind": "builtin",
+      "capability_id": "memory.search",
+      "name": "memory__search",
+      "description": "Search saved memories and notes.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "kind": "builtin",
+      "capability_id": "memory.save",
+      "name": "memory__save",
+      "description": "Remember a durable note for later recall.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "github.list_issues",
+      "name": "github__list_issues",
+      "description": "List repository issues with state and label filters.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "github.create_issue",
+      "name": "github__create_issue",
+      "description": "Create a repository issue or bug report.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "github.get_pull_request",
+      "name": "github__get_pull_request",
+      "description": "Get pull request details and review state.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "pull_number": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "kind": "wasm",
+      "capability_id": "github.create_or_update_file",
+      "name": "github__create_or_update_file",
+      "description": "Create or replace repository file content.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "committer": {
+            "type": "object",
+            "properties": {
+              "display_name": {
+                "type": "string"
+              },
+              "email_address": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "wasm",
+      "capability_id": "github.add_issue_assignees",
+      "name": "github__add_issue_assignees",
+      "description": "Assign users to an issue or pull request.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "issue_number": {
+            "type": "integer"
+          },
+          "assignees": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "slack.send_message",
+      "name": "slack__send_message",
+      "description": "Send a message to a Slack channel or thread.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "channel_id": {
+            "type": "string"
+          },
+          "thread_ts": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "slack.search_messages",
+      "name": "slack__search_messages",
+      "description": "Search Slack message history.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "channel_id": {
+            "type": "string"
+          },
+          "oldest_ts": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "slack.add_reaction",
+      "name": "slack__add_reaction",
+      "description": "Add an emoji reaction to a Slack message.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "channel_id": {
+            "type": "string"
+          },
+          "message_ts": {
+            "type": "string"
+          },
+          "emoji": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "google-calendar.create_event",
+      "name": "google_calendar__create_event",
+      "description": "Create a calendar meeting or recurring event.",
+      "verified": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "calendar_id": {
+            "type": "string"
+          },
+          "attendees": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "email": {
+                  "type": "string"
+                },
+                "display_name": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "schedule": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "recurrence": {
+                    "type": "string",
+                    "description": "Repeated event rule"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "start_at": {
+                    "type": "string"
+                  },
+                  "end_at": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "google-calendar.list_events",
+      "name": "google_calendar__list_events",
+      "description": "List upcoming calendar events.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "calendar_id": {
+            "type": "string"
+          },
+          "time_min": {
+            "type": "string"
+          },
+          "time_max": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "google-drive.search_files",
+      "name": "google_drive__search_files",
+      "description": "Find files and folders in Google Drive.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "folder_id": {
+            "type": "string"
+          },
+          "mime_type": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "google-drive.upload_file",
+      "name": "google_drive__upload_file",
+      "description": "Upload content as a file to Google Drive.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "folder_id": {
+            "type": "string"
+          },
+          "mime_type": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "gmail.search_messages",
+      "name": "gmail__search_messages",
+      "description": "Search email messages in Gmail.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "label_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "include_spam_trash": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "gmail.send_message",
+      "name": "gmail__send_message",
+      "description": "Send an email message through Gmail.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "subject": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "cc": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "google-sheets.read_values",
+      "name": "google_sheets__read_values",
+      "description": "Read cell values from a spreadsheet range.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "spreadsheet_id": {
+            "type": "string"
+          },
+          "range": {
+            "type": "string"
+          },
+          "major_dimension": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "google-sheets.append_values",
+      "name": "google_sheets__append_values",
+      "description": "Append rows of values to a spreadsheet.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "spreadsheet_id": {
+            "type": "string"
+          },
+          "range": {
+            "type": "string"
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "notion.search_pages",
+      "name": "notion__search_pages",
+      "description": "Search Notion pages and databases.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "sort_direction": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "notion.create_page",
+      "name": "notion__create_page",
+      "description": "Create a page in a Notion database.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "parent_database_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "properties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "mcp",
+      "capability_id": "linear.create_issue",
+      "name": "linear__create_issue",
+      "description": "Create a Linear work item or task.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "team_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "kind": "mcp",
+      "capability_id": "linear.search_issues",
+      "name": "linear__search_issues",
+      "description": "Search Linear work items and issues.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "team_id": {
+            "type": "string"
+          },
+          "assignee_id": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "mcp",
+      "capability_id": "linear.update_issue",
+      "name": "linear__update_issue",
+      "description": "Update a Linear issue status or priority.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "issue_id": {
+            "type": "string"
+          },
+          "status_id": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "jira.create_issue",
+      "name": "jira__create_issue",
+      "description": "Create a Jira ticket in a project.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project_key": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "issue_type": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "jira.search_issues",
+      "name": "jira__search_issues",
+      "description": "Search Jira tickets using JQL.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "jql": {
+            "type": "string"
+          },
+          "max_results": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "stripe.list_customers",
+      "name": "stripe__list_customers",
+      "description": "List Stripe billing customers.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "created_after": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "stripe.create_refund",
+      "name": "stripe__create_refund",
+      "description": "Refund a Stripe charge or payment intent.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "charge_id": {
+            "type": "string"
+          },
+          "payment_intent_id": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "hubspot.search_contacts",
+      "name": "hubspot__search_contacts",
+      "description": "Search CRM contacts in HubSpot.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "kind": "provider",
+      "capability_id": "hubspot.create_contact",
+      "name": "hubspot__create_contact",
+      "description": "Create a CRM contact in HubSpot.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "first_name": {
+            "type": "string"
+          },
+          "last_name": {
+            "type": "string"
+          },
+          "company": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "mcp",
+      "capability_id": "database.query",
+      "name": "database__query",
+      "description": "Run a read-only SQL database query.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "sql": {
+            "type": "string"
+          },
+          "parameters": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "timeout_ms": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "kind": "mcp",
+      "capability_id": "docs.lookup",
+      "name": "docs__lookup",
+      "description": "Look up internal documentation articles.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "collection": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "mcp",
+      "capability_id": "incident.search",
+      "name": "incident__search",
+      "description": "Search operational incidents and outages.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "service": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string"
+          },
+          "started_after": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "mcp",
+      "capability_id": "browser.navigate",
+      "name": "browser__navigate",
+      "description": "Open and navigate a browser page.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "wait_until": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "wasm",
+      "capability_id": "image.resize",
+      "name": "image__resize",
+      "description": "Resize an image to target dimensions.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "source_path": {
+            "type": "string"
+          },
+          "width": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          },
+          "fit_mode": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "wasm",
+      "capability_id": "pdf.extract_text",
+      "name": "pdf__extract_text",
+      "description": "Extract text from PDF pages.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "page_range": {
+            "type": "string"
+          },
+          "preserve_layout": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    {
+      "kind": "wasm",
+      "capability_id": "archive.create",
+      "name": "archive__create",
+      "description": "Create a compressed archive from files.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "output_path": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "wasm",
+      "capability_id": "csv.filter_rows",
+      "name": "csv__filter_rows",
+      "description": "Filter CSV rows by column values.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "input_path": {
+            "type": "string"
+          },
+          "output_path": {
+            "type": "string"
+          },
+          "column": {
+            "type": "string"
+          },
+          "predicate": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "extension_lifecycle",
+      "capability_id": "extension.search",
+      "name": "extension__search",
+      "description": "Search the extension catalog.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "extension_lifecycle",
+      "capability_id": "extension.install",
+      "name": "extension__install",
+      "description": "Install an extension package from the catalog.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "extension_id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "extension_lifecycle",
+      "capability_id": "extension.activate",
+      "name": "extension__activate",
+      "description": "Enable an installed extension.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "extension_id": {
+            "type": "string"
+          },
+          "profile_id": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "extension_lifecycle",
+      "capability_id": "extension.deactivate",
+      "name": "extension__deactivate",
+      "description": "Disable an extension while keeping it installed.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "extension_id": {
+            "type": "string"
+          },
+          "profile_id": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "kind": "extension_lifecycle",
+      "capability_id": "extension.remove",
+      "name": "extension__remove",
+      "description": "Uninstall and remove an extension package.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "extension_id": {
+            "type": "string"
+          },
+          "purge_data": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    {
+      "kind": "extension_lifecycle",
+      "capability_id": "extension.configure",
+      "name": "extension__configure",
+      "description": "Configure settings and credentials for an extension.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "extension_id": {
+            "type": "string"
+          },
+          "settings": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "extension_lifecycle",
+      "capability_id": "extension.status",
+      "name": "extension__status",
+      "description": "Inspect extension installation and activation status.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "extension_id": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ],
+  "intents": [
+    {
+      "class": "exact_name",
+      "query": "github__add_issue_assignees",
+      "relevance": {
+        "github__add_issue_assignees": 3
+      }
+    },
+    {
+      "class": "exact_name",
+      "query": "google_sheets__read_values",
+      "relevance": {
+        "google_sheets__read_values": 3
+      }
+    },
+    {
+      "class": "exact_name",
+      "query": "extension__configure",
+      "relevance": {
+        "extension__configure": 3
+      }
+    },
+    {
+      "class": "exact_name",
+      "query": "slack__add_reaction",
+      "relevance": {
+        "slack__add_reaction": 3
+      }
+    },
+    {
+      "class": "exact_name",
+      "query": "database__query",
+      "relevance": {
+        "database__query": 3
+      }
+    },
+    {
+      "class": "exact_name",
+      "query": "pdf__extract_text",
+      "relevance": {
+        "pdf__extract_text": 3
+      }
+    },
+    {
+      "class": "canonical_id",
+      "query": "extension.install",
+      "relevance": {
+        "extension__install": 3
+      }
+    },
+    {
+      "class": "canonical_id",
+      "query": "google-calendar.create_event",
+      "relevance": {
+        "google_calendar__create_event": 3
+      }
+    },
+    {
+      "class": "canonical_id",
+      "query": "github.get_pull_request",
+      "relevance": {
+        "github__get_pull_request": 3
+      }
+    },
+    {
+      "class": "canonical_id",
+      "query": "memory.search",
+      "relevance": {
+        "memory__search": 3
+      }
+    },
+    {
+      "class": "canonical_id",
+      "query": "stripe.create_refund",
+      "relevance": {
+        "stripe__create_refund": 3
+      }
+    },
+    {
+      "class": "canonical_id",
+      "query": "csv.filter_rows",
+      "relevance": {
+        "csv__filter_rows": 3
+      }
+    },
+    {
+      "class": "alias",
+      "query": "assign issue users",
+      "relevance": {
+        "github__add_issue_assignees": 3
+      }
+    },
+    {
+      "class": "alias",
+      "query": "remember this note",
+      "relevance": {
+        "memory__save": 3
+      }
+    },
+    {
+      "class": "alias",
+      "query": "find saved notes",
+      "relevance": {
+        "memory__search": 3
+      }
+    },
+    {
+      "class": "alias",
+      "query": "send an email",
+      "relevance": {
+        "gmail__send_message": 3
+      }
+    },
+    {
+      "class": "alias",
+      "query": "look up mail",
+      "relevance": {
+        "gmail__search_messages": 3
+      }
+    },
+    {
+      "class": "alias",
+      "query": "make a bug report",
+      "relevance": {
+        "github__create_issue": 3,
+        "jira__create_issue": 2,
+        "linear__create_issue": 1
+      }
+    },
+    {
+      "class": "alias",
+      "query": "schedule a meeting",
+      "relevance": {
+        "google_calendar__create_event": 3
+      }
+    },
+    {
+      "class": "alias",
+      "query": "find drive documents",
+      "relevance": {
+        "google_drive__search_files": 3
+      }
+    },
+    {
+      "class": "alias",
+      "query": "add spreadsheet rows",
+      "relevance": {
+        "google_sheets__append_values": 3
+      }
+    },
+    {
+      "class": "alias",
+      "query": "open a web page",
+      "relevance": {
+        "browser__navigate": 3,
+        "builtin__http_fetch": 1
+      }
+    },
+    {
+      "class": "alias",
+      "query": "uninstall plugin",
+      "relevance": {
+        "extension__remove": 3
+      }
+    },
+    {
+      "class": "alias",
+      "query": "compress these files",
+      "relevance": {
+        "archive__create": 3
+      }
+    },
+    {
+      "class": "parameter",
+      "query": "timezone",
+      "relevance": {
+        "builtin__time": 3
+      }
+    },
+    {
+      "class": "parameter",
+      "query": "max bytes path",
+      "relevance": {
+        "filesystem__read_text": 3
+      }
+    },
+    {
+      "class": "parameter",
+      "query": "overwrite content path",
+      "relevance": {
+        "filesystem__write_text": 3
+      }
+    },
+    {
+      "class": "parameter",
+      "query": "pull number",
+      "relevance": {
+        "github__get_pull_request": 3
+      }
+    },
+    {
+      "class": "parameter",
+      "query": "thread ts channel id",
+      "relevance": {
+        "slack__send_message": 3,
+        "slack__search_messages": 1
+      }
+    },
+    {
+      "class": "parameter",
+      "query": "oldest ts",
+      "relevance": {
+        "slack__search_messages": 3
+      }
+    },
+    {
+      "class": "parameter",
+      "query": "mime type folder id",
+      "relevance": {
+        "google_drive__search_files": 2,
+        "google_drive__upload_file": 2
+      }
+    },
+    {
+      "class": "parameter",
+      "query": "include spam trash",
+      "relevance": {
+        "gmail__search_messages": 3
+      }
+    },
+    {
+      "class": "parameter",
+      "query": "major dimension",
+      "relevance": {
+        "google_sheets__read_values": 3
+      }
+    },
+    {
+      "class": "parameter",
+      "query": "parent database id",
+      "relevance": {
+        "notion__create_page": 3
+      }
+    },
+    {
+      "class": "parameter",
+      "query": "status id priority",
+      "relevance": {
+        "linear__update_issue": 3
+      }
+    },
+    {
+      "class": "parameter",
+      "query": "JQL max results",
+      "relevance": {
+        "jira__search_issues": 3
+      }
+    },
+    {
+      "class": "parameter",
+      "query": "payment intent id amount",
+      "relevance": {
+        "stripe__create_refund": 3
+      }
+    },
+    {
+      "class": "parameter",
+      "query": "fit mode width height",
+      "relevance": {
+        "image__resize": 3
+      }
+    },
+    {
+      "class": "nested",
+      "query": "committer display name",
+      "relevance": {
+        "github__create_or_update_file": 3
+      }
+    },
+    {
+      "class": "nested",
+      "query": "committer email address",
+      "relevance": {
+        "github__create_or_update_file": 3
+      }
+    },
+    {
+      "class": "nested",
+      "query": "recurrence rule",
+      "relevance": {
+        "google_calendar__create_event": 3
+      }
+    },
+    {
+      "class": "nested",
+      "query": "attendee display name",
+      "relevance": {
+        "google_calendar__create_event": 3
+      }
+    },
+    {
+      "class": "nested",
+      "query": "spreadsheet nested values",
+      "relevance": {
+        "google_sheets__append_values": 3
+      }
+    },
+    {
+      "class": "nested",
+      "query": "headers additional properties",
+      "relevance": {
+        "builtin__http_fetch": 3
+      }
+    },
+    {
+      "class": "ambiguous",
+      "query": "create issue",
+      "relevance": {
+        "github__create_issue": 3,
+        "linear__create_issue": 2,
+        "jira__create_issue": 2
+      }
+    },
+    {
+      "class": "ambiguous",
+      "query": "search issues",
+      "relevance": {
+        "linear__search_issues": 3,
+        "jira__search_issues": 3,
+        "github__list_issues": 1
+      }
+    },
+    {
+      "class": "ambiguous",
+      "query": "search messages",
+      "relevance": {
+        "slack__search_messages": 3,
+        "gmail__search_messages": 3
+      }
+    },
+    {
+      "class": "ambiguous",
+      "query": "create page file",
+      "relevance": {
+        "notion__create_page": 2,
+        "github__create_or_update_file": 2
+      }
+    },
+    {
+      "class": "ambiguous",
+      "query": "search documents",
+      "relevance": {
+        "google_drive__search_files": 3,
+        "docs__lookup": 2,
+        "notion__search_pages": 1
+      }
+    },
+    {
+      "class": "ambiguous",
+      "query": "write content",
+      "relevance": {
+        "filesystem__write_text": 3,
+        "google_drive__upload_file": 2,
+        "github__create_or_update_file": 1
+      }
+    },
+    {
+      "class": "provider",
+      "query": "Slack emoji",
+      "relevance": {
+        "slack__add_reaction": 3
+      }
+    },
+    {
+      "class": "provider",
+      "query": "Stripe billing customers",
+      "relevance": {
+        "stripe__list_customers": 3
+      }
+    },
+    {
+      "class": "provider",
+      "query": "HubSpot CRM contact",
+      "relevance": {
+        "hubspot__search_contacts": 2,
+        "hubspot__create_contact": 2
+      }
+    },
+    {
+      "class": "provider",
+      "query": "Linear task priority",
+      "relevance": {
+        "linear__create_issue": 2,
+        "linear__update_issue": 2
+      }
+    },
+    {
+      "class": "provider",
+      "query": "Notion database page",
+      "relevance": {
+        "notion__create_page": 3,
+        "notion__search_pages": 1
+      }
+    },
+    {
+      "class": "provider",
+      "query": "Google Calendar upcoming events",
+      "relevance": {
+        "google_calendar__list_events": 3
+      }
+    },
+    {
+      "class": "hard_negative",
+      "query": "refund payment intent",
+      "relevance": {
+        "stripe__create_refund": 3
+      }
+    },
+    {
+      "class": "hard_negative",
+      "query": "search contact email CRM",
+      "relevance": {
+        "hubspot__search_contacts": 3,
+        "hubspot__create_contact": 1
+      }
+    },
+    {
+      "class": "hard_negative",
+      "query": "read spreadsheet range",
+      "relevance": {
+        "google_sheets__read_values": 3
+      }
+    },
+    {
+      "class": "hard_negative",
+      "query": "upload drive mime type",
+      "relevance": {
+        "google_drive__upload_file": 3,
+        "google_drive__search_files": 1
+      }
+    },
+    {
+      "class": "hard_negative",
+      "query": "pull request review state",
+      "relevance": {
+        "github__get_pull_request": 3
+      }
+    },
+    {
+      "class": "hard_negative",
+      "query": "disable extension keep installed",
+      "relevance": {
+        "extension__deactivate": 3,
+        "extension__remove": 1
+      }
+    },
+    {
+      "class": "hard_negative",
+      "query": "incident severity service outage",
+      "relevance": {
+        "incident__search": 3
+      }
+    },
+    {
+      "class": "hard_negative",
+      "query": "calendar recurring attendee",
+      "relevance": {
+        "google_calendar__create_event": 3,
+        "google_calendar__list_events": 1
+      }
+    },
+    {
+      "class": "no_match",
+      "query": "quantum banana telescope",
+      "relevance": {}
+    },
+    {
+      "class": "no_match",
+      "query": "volcanic ukulele orchestra",
+      "relevance": {}
+    },
+    {
+      "class": "no_match",
+      "query": "bioluminescent submarine recipe",
+      "relevance": {}
+    },
+    {
+      "class": "no_match",
+      "query": "origami asteroid observatory",
+      "relevance": {}
+    },
+    {
+      "class": "no_match",
+      "query": "telepathic cactus translator",
+      "relevance": {}
+    },
+    {
+      "class": "no_match",
+      "query": "ceramic dragon hatchery",
+      "relevance": {}
+    },
+    {
+      "class": "no_match",
+      "query": "antimatter accordion lessons",
+      "relevance": {}
+    },
+    {
+      "class": "no_match",
+      "query": "invisible lighthouse blueprint",
+      "relevance": {}
+    }
+  ]
+}

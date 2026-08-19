@@ -1,3 +1,4 @@
+// arch-exempt: large_file, edge-submission denial cases belong with materialized-state transitions, plan #7598
 use std::collections::HashSet;
 
 use chrono::Utc;
@@ -10,12 +11,13 @@ use serde_json::json;
 use super::*;
 use crate::{
     ClaimProcessesRequest, CloseProcessDependencyRequest, OpenProcessDependencyRequest,
-    ProcessCheckpointPayload, ProcessDependencyState, ProcessDependencySubmission,
-    ProcessInputPayload, ProcessInputRef, ProcessInputSubmission, ProcessLeaseRequest,
-    ProcessOperationId, ProcessTerminalEvidence, ProcessWorkerId, PruneReleasedProcessRequest,
+    ProcessCheckpointPayload, ProcessConcurrencyClass, ProcessDependencyState,
+    ProcessDependencySubmission, ProcessInputPayload, ProcessInputRef, ProcessInputSubmission,
+    ProcessLeaseRequest, ProcessOperationId, ProcessSubmissionEdge, ProcessSuspension,
+    ProcessSuspensionKind, ProcessTerminalEvidence, ProcessWorkerId, PruneReleasedProcessRequest,
     RecordProcessCheckpointRequest, RecoverExpiredProcessLeasesRequest, ReleaseProcessTreeRequest,
     ReserveProcessTreeRequest, SettleProcessDependencyRequest, StateTransitionCase,
-    SubmitProcessRequest, assert_state_transition_table,
+    SubmitProcessAtEdgeRequest, SubmitProcessRequest, assert_state_transition_table,
     journal_store::{ProcessControlMutation, ProcessTransitionMutation, StoredProcessCommand},
 };
 
@@ -43,6 +45,7 @@ fn snapshot(
         status,
         suspension: None,
         checkpoint_ref: None,
+        checkpoint_kind: None,
         input_ref: None,
         failure: None,
         journal_cursor: ProcessJournalCursor(1),
@@ -105,6 +108,322 @@ fn assert_error(
     assert_eq!(
         error_class(result.expect_err("transition must fail")),
         expected
+    );
+}
+
+#[test]
+fn submit_at_edge_materializes_only_the_requested_lifecycle_entry() {
+    let cases = [
+        (
+            ProcessSubmissionEdge::Completed,
+            ProcessLifecycleStatus::Completed,
+            ProcessJournalKind::Completed,
+        ),
+        (
+            ProcessSubmissionEdge::Failed {
+                failure: SanitizedFailure::from_trusted_static("capability_failed"),
+            },
+            ProcessLifecycleStatus::Failed,
+            ProcessJournalKind::Failed,
+        ),
+    ];
+
+    for (edge, expected_status, expected_kind) in cases {
+        let mut state = ProcessJournalMaterializedState::default();
+        let mut submission = submit_request(ProcessId::new(), scope("edge"));
+        submission.process_kind = ProcessKind::CapabilityInvocationState;
+        let outcome = state
+            .apply_command(StoredProcessCommand::SubmitAtEdge(Box::new(
+                SubmitProcessAtEdgeRequest { submission, edge },
+            )))
+            .expect("edge submission");
+        let StoredCommandOutcome::Submitted(snapshot, true) = outcome else {
+            panic!("expected new edge submission");
+        };
+
+        assert_eq!(snapshot.status, expected_status);
+        assert_eq!(snapshot.lease, None);
+        assert_eq!(state.journal.len(), 1);
+        assert_eq!(state.journal[0].kind, expected_kind);
+    }
+
+    let mut state = ProcessJournalMaterializedState::default();
+    let checkpoint_ref = ProcessCheckpointRef::from_trusted("invocation-edge");
+    let suspension = ProcessSuspension {
+        kind: ProcessSuspensionKind::Approval,
+        gate_ref: None,
+        activity_id: None,
+        credential_requirements: Vec::new(),
+        detail: None,
+    };
+    let mut submission = submit_request(ProcessId::new(), scope("suspended-edge"));
+    submission.process_kind = ProcessKind::CapabilityInvocationState;
+    submission.checkpoint_ref = Some(checkpoint_ref.clone());
+    let outcome = state
+        .apply_command(StoredProcessCommand::SubmitAtEdge(Box::new(
+            SubmitProcessAtEdgeRequest {
+                submission,
+                edge: ProcessSubmissionEdge::Suspended {
+                    suspension: suspension.clone(),
+                },
+            },
+        )))
+        .expect("suspended edge submission");
+    let StoredCommandOutcome::Submitted(snapshot, true) = outcome else {
+        panic!("expected new suspended edge submission");
+    };
+    assert_eq!(snapshot.status, ProcessLifecycleStatus::Suspended);
+    assert_eq!(snapshot.checkpoint_ref, Some(checkpoint_ref));
+    assert_eq!(snapshot.suspension, Some(suspension));
+    assert_eq!(state.journal.len(), 1);
+    assert_eq!(state.journal[0].kind, ProcessJournalKind::Suspended);
+
+    assert_error(
+        ProcessJournalMaterializedState::default().apply_command(
+            StoredProcessCommand::SubmitAtEdge(Box::new(SubmitProcessAtEdgeRequest {
+                submission: submit_request(ProcessId::new(), scope("invalid-edge-kind")),
+                edge: ProcessSubmissionEdge::Completed,
+            })),
+        ),
+        "request",
+    );
+}
+#[test]
+fn submit_at_edge_rejects_incompatible_submissions() {
+    let suspension = ProcessSuspension {
+        kind: ProcessSuspensionKind::Approval,
+        gate_ref: None,
+        activity_id: None,
+        credential_requirements: Vec::new(),
+        detail: None,
+    };
+    let mut missing_checkpoint = submit_request(ProcessId::new(), scope("missing-checkpoint"));
+    missing_checkpoint.process_kind = ProcessKind::CapabilityInvocationState;
+    assert_error(
+        ProcessJournalMaterializedState::default().apply_command(
+            StoredProcessCommand::SubmitAtEdge(Box::new(SubmitProcessAtEdgeRequest {
+                submission: missing_checkpoint,
+                edge: ProcessSubmissionEdge::Suspended { suspension },
+            })),
+        ),
+        "request",
+    );
+
+    for edge in [
+        ProcessSubmissionEdge::Completed,
+        ProcessSubmissionEdge::Failed {
+            failure: SanitizedFailure::from_trusted_static("edge_failed"),
+        },
+    ] {
+        let mut terminal_checkpoint =
+            submit_request(ProcessId::new(), scope("terminal-checkpoint"));
+        terminal_checkpoint.process_kind = ProcessKind::CapabilityInvocationState;
+        terminal_checkpoint.checkpoint_ref =
+            Some(ProcessCheckpointRef::from_trusted("terminal-checkpoint"));
+        assert_error(
+            ProcessJournalMaterializedState::default().apply_command(
+                StoredProcessCommand::SubmitAtEdge(Box::new(SubmitProcessAtEdgeRequest {
+                    submission: terminal_checkpoint,
+                    edge,
+                })),
+            ),
+            "request",
+        );
+    }
+
+    let incompatible_shapes = [
+        (
+            "exclusive",
+            (|submission: &mut SubmitProcessRequest| {
+                submission.exclusive_within_scope = true;
+            }) as fn(&mut SubmitProcessRequest),
+        ),
+        ("parent", |submission: &mut SubmitProcessRequest| {
+            submission.parent_process_id = Some(ProcessId::new());
+        }),
+        ("root", |submission: &mut SubmitProcessRequest| {
+            submission.root_process_id = Some(ProcessId::new());
+        }),
+        ("tree-cap", |submission: &mut SubmitProcessRequest| {
+            submission.spawn_tree_descendant_cap = Some(1);
+        }),
+        ("dependency", |submission: &mut SubmitProcessRequest| {
+            submission.dependency = Some(ProcessDependencySubmission {
+                dependent_process_id: ProcessId::new(),
+                root_process_id: ProcessId::new(),
+                group_ref: None,
+                metadata: serde_json::Value::Null,
+            });
+        }),
+        ("input", |submission: &mut SubmitProcessRequest| {
+            submission.input = Some(ProcessInputSubmission {
+                input_ref: ProcessInputRef::from_trusted("edge-input"),
+                payload: ProcessInputPayload::new(b"input".to_vec()).expect("bounded input"),
+            });
+        }),
+    ];
+    for (label, mutate) in incompatible_shapes {
+        let mut submission = submit_request(ProcessId::new(), scope(label));
+        submission.process_kind = ProcessKind::CapabilityInvocationState;
+        mutate(&mut submission);
+        assert_error(
+            ProcessJournalMaterializedState::default().apply_command(
+                StoredProcessCommand::SubmitAtEdge(Box::new(SubmitProcessAtEdgeRequest {
+                    submission,
+                    edge: ProcessSubmissionEdge::Completed,
+                })),
+            ),
+            "request",
+        );
+    }
+}
+
+#[test]
+fn edge_submissions_keep_only_compact_bindings_not_persisted_snapshots() {
+    let mut state = ProcessJournalMaterializedState::default();
+    let request_scope = scope("edge-bindings");
+    let process_id = ProcessId::new();
+    let mut submission = submit_request(process_id, request_scope);
+    submission.process_kind = ProcessKind::CapabilityInvocationState;
+    submission.operation_id = Some(ProcessOperationId::from_trusted("edge-op"));
+    let command = || {
+        StoredProcessCommand::SubmitAtEdge(Box::new(SubmitProcessAtEdgeRequest {
+            submission: submission.clone(),
+            edge: ProcessSubmissionEdge::Completed,
+        }))
+    };
+
+    let StoredCommandOutcome::Submitted(_, true) = state
+        .apply_command(command())
+        .expect("initial edge submission")
+    else {
+        panic!("expected initial edge submission");
+    };
+    // The perf contract: an edge submission must not persist a full-snapshot
+    // idempotency record that every later journal command re-serializes.
+    // Only the compact in-memory binding is retained.
+    assert!(
+        state.submission_idempotency.is_empty(),
+        "edge submissions must not grow the persisted idempotency map"
+    );
+    assert_eq!(
+        state
+            .edge_submission_bindings
+            .values()
+            .filter(|bound| **bound == process_id)
+            .count(),
+        1,
+        "compact op-id binding must be recorded"
+    );
+
+    // Replay semantics are unchanged: the identical submission resolves from
+    // the durable process row without a second journal entry, and a
+    // same-operation submission for a different process is still rejected.
+    let StoredCommandOutcome::Submitted(_, false) = state
+        .apply_command(command())
+        .expect("idempotent edge replay")
+    else {
+        panic!("expected idempotent edge replay");
+    };
+    assert_eq!(state.journal.len(), 1);
+
+    let mut different_process = submission.clone();
+    different_process.process_id = ProcessId::new();
+    assert_error(
+        state.apply_command(StoredProcessCommand::SubmitAtEdge(Box::new(
+            SubmitProcessAtEdgeRequest {
+                submission: different_process,
+                edge: ProcessSubmissionEdge::Completed,
+            },
+        ))),
+        "request",
+    );
+    assert_eq!(state.journal.len(), 1, "rejected replay must not write");
+}
+
+#[test]
+fn submit_at_edge_replay_requires_matching_submission_and_writes_once() {
+    let mut state = ProcessJournalMaterializedState::default();
+    let mut submission = submit_request(ProcessId::new(), scope("edge-replay"));
+    submission.process_kind = ProcessKind::CapabilityInvocationState;
+    submission.operation_id = Some(ProcessOperationId::from_trusted("edge-operation"));
+    let command = || {
+        StoredProcessCommand::SubmitAtEdge(Box::new(SubmitProcessAtEdgeRequest {
+            submission: submission.clone(),
+            edge: ProcessSubmissionEdge::Completed,
+        }))
+    };
+
+    let StoredCommandOutcome::Submitted(_, true) = state
+        .apply_command(command())
+        .expect("initial edge submission")
+    else {
+        panic!("expected initial edge submission");
+    };
+    let StoredCommandOutcome::Submitted(_, false) = state
+        .apply_command(command())
+        .expect("idempotent edge replay")
+    else {
+        panic!("expected idempotent edge replay");
+    };
+    assert_eq!(state.journal.len(), 1);
+
+    let mut retried = submission.clone();
+    retried.created_at += chrono::Duration::seconds(1);
+    let StoredCommandOutcome::Submitted(_, false) = state
+        .apply_command(StoredProcessCommand::SubmitAtEdge(Box::new(
+            SubmitProcessAtEdgeRequest {
+                submission: retried,
+                edge: ProcessSubmissionEdge::Completed,
+            },
+        )))
+        .expect("idempotent edge retry with a fresh attempt timestamp")
+    else {
+        panic!("expected idempotent edge retry");
+    };
+
+    let mismatched_submissions = [
+        (|request: &mut SubmitProcessRequest| {
+            request.process_id = ProcessId::new();
+        }) as fn(&mut SubmitProcessRequest),
+        |request: &mut SubmitProcessRequest| {
+            request.owner_user_id = Some(UserId::new("different-owner").expect("owner"));
+        },
+        |request: &mut SubmitProcessRequest| {
+            request.concurrency_class =
+                Some(ProcessConcurrencyClass::from_trusted("different-class"));
+        },
+        |request: &mut SubmitProcessRequest| {
+            request.checkpoint_ref =
+                Some(ProcessCheckpointRef::from_trusted("different-checkpoint"));
+        },
+        |request: &mut SubmitProcessRequest| {
+            request.metadata = json!({"record_type": "different"});
+        },
+    ];
+    for mutate in mismatched_submissions {
+        let mut mismatched = submission.clone();
+        mutate(&mut mismatched);
+        assert_error(
+            state.apply_command(StoredProcessCommand::SubmitAtEdge(Box::new(
+                SubmitProcessAtEdgeRequest {
+                    submission: mismatched,
+                    edge: ProcessSubmissionEdge::Completed,
+                },
+            ))),
+            "request",
+        );
+    }
+    assert_error(
+        state.apply_command(StoredProcessCommand::SubmitAtEdge(Box::new(
+            SubmitProcessAtEdgeRequest {
+                submission,
+                edge: ProcessSubmissionEdge::Failed {
+                    failure: SanitizedFailure::from_trusted_static("different_edge"),
+                },
+            },
+        ))),
+        "request",
     );
 }
 
@@ -540,6 +859,7 @@ fn defensive_transition_matrix_fails_closed_without_corrupting_state() {
             payload: ProcessCheckpointPayload::new(payload.to_vec()).expect("payload"),
             created_at: Utc::now(),
             link_to_process: true,
+            kind: None,
             metadata: serde_json::Value::Null,
         };
     assert_error(
@@ -832,6 +1152,7 @@ fn command_dispatch_covers_submit_claim_heartbeat_transition_and_control_replay(
         payload: ProcessCheckpointPayload::new(b"checkpoint".to_vec()).expect("payload"),
         created_at: Utc::now(),
         link_to_process: true,
+        kind: None,
         metadata: json!({"checkpoint": true}),
     };
     let mut submission = submit_request(process_id, request_scope.clone());
@@ -1125,6 +1446,7 @@ fn command_dispatch_covers_tree_dependency_checkpoint_and_legacy_import() {
         payload: ProcessCheckpointPayload::new(b"state".to_vec()).expect("checkpoint payload"),
         created_at: Utc::now(),
         link_to_process: true,
+        kind: None,
         metadata: serde_json::Value::Null,
     };
     state
@@ -1135,79 +1457,179 @@ fn command_dispatch_covers_tree_dependency_checkpoint_and_legacy_import() {
         .expect("checkpoint replay");
 }
 
+/// One row of the lease-recovery matrix.
+struct RecoveryCase {
+    label: &'static str,
+    status: ProcessLifecycleStatus,
+    checkpointed: bool,
+    checkpoint_kind: Option<ProcessCheckpointKind>,
+    claim_count: u64,
+    /// How long before `now` the lease expired.
+    expired_for: chrono::Duration,
+    /// `None` means recovery must leave the process alone.
+    expected: Option<(ProcessLifecycleStatus, Option<&'static str>)>,
+}
+
 #[test]
-fn expired_lease_recovery_covers_cancel_requeue_and_bounded_failure_states() {
+fn expired_lease_recovery_covers_cancel_requeue_grace_and_bounded_failure_states() {
+    const LEASE_TTL: chrono::Duration = chrono::Duration::seconds(90);
     let request_scope = scope("recovery");
     let now = Utc::now();
     let worker_id = ProcessWorkerId::from_trusted("recovery-worker");
-    let statuses = [
-        (
-            ProcessLifecycleStatus::CancelRequested,
-            None,
-            1,
-            ProcessLifecycleStatus::Cancelled,
-            None,
-        ),
-        (
-            ProcessLifecycleStatus::Running,
-            None,
-            1,
-            ProcessLifecycleStatus::Queued,
-            None,
-        ),
-        (
-            ProcessLifecycleStatus::Running,
-            Some(ProcessCheckpointRef::from_trusted("checkpoint")),
-            1,
-            ProcessLifecycleStatus::Failed,
-            Some("lease_expired"),
-        ),
-        (
-            ProcessLifecycleStatus::Running,
-            None,
-            MAX_CRASH_RECOVERY_RECLAIMS,
-            ProcessLifecycleStatus::Failed,
-            Some("crash_retry_exhausted"),
-        ),
+    let past_grace = LEASE_TTL + chrono::Duration::seconds(1);
+    let within_grace = chrono::Duration::seconds(1);
+    let cases = [
+        RecoveryCase {
+            label: "cancel-requested is cancelled as soon as the lease expires",
+            status: ProcessLifecycleStatus::CancelRequested,
+            checkpointed: false,
+            checkpoint_kind: None,
+            claim_count: 1,
+            expired_for: within_grace,
+            expected: Some((ProcessLifecycleStatus::Cancelled, None)),
+        },
+        RecoveryCase {
+            label: "checkpointless work is requeued immediately, without a grace window",
+            status: ProcessLifecycleStatus::Running,
+            checkpointed: false,
+            checkpoint_kind: None,
+            claim_count: 1,
+            expired_for: within_grace,
+            expected: Some((ProcessLifecycleStatus::Queued, None)),
+        },
+        RecoveryCase {
+            label: "a side-effect checkpoint is never resumed — resuming would re-run the effect",
+            status: ProcessLifecycleStatus::Running,
+            checkpointed: true,
+            checkpoint_kind: Some(ProcessCheckpointKind::BeforeSideEffect),
+            claim_count: 1,
+            expired_for: past_grace,
+            expected: Some((ProcessLifecycleStatus::Failed, Some("lease_expired"))),
+        },
+        RecoveryCase {
+            label: "an unknown checkpoint kind fails closed like a side-effect checkpoint",
+            status: ProcessLifecycleStatus::Running,
+            checkpointed: true,
+            checkpoint_kind: None,
+            claim_count: 1,
+            expired_for: past_grace,
+            expected: Some((ProcessLifecycleStatus::Failed, Some("lease_expired"))),
+        },
+        RecoveryCase {
+            label: "a before-model checkpoint inside the grace window is left for a later sweep",
+            status: ProcessLifecycleStatus::Running,
+            checkpointed: true,
+            checkpoint_kind: Some(ProcessCheckpointKind::BeforeModel),
+            claim_count: 1,
+            expired_for: within_grace,
+            expected: None,
+        },
+        RecoveryCase {
+            label: "a before-model checkpoint past the grace window is requeued",
+            status: ProcessLifecycleStatus::Running,
+            checkpointed: true,
+            checkpoint_kind: Some(ProcessCheckpointKind::BeforeModel),
+            claim_count: 1,
+            expired_for: past_grace,
+            expected: Some((ProcessLifecycleStatus::Queued, None)),
+        },
+        RecoveryCase {
+            label: "a before-block checkpoint past the grace window is requeued",
+            status: ProcessLifecycleStatus::Running,
+            checkpointed: true,
+            checkpoint_kind: Some(ProcessCheckpointKind::BeforeBlock),
+            claim_count: 1,
+            expired_for: past_grace,
+            expected: Some((ProcessLifecycleStatus::Queued, None)),
+        },
+        RecoveryCase {
+            label: "checkpointed requeue shares the crash-reclaim budget and fails when spent",
+            status: ProcessLifecycleStatus::Running,
+            checkpointed: true,
+            checkpoint_kind: Some(ProcessCheckpointKind::BeforeModel),
+            claim_count: MAX_CRASH_RECOVERY_RECLAIMS,
+            expired_for: past_grace,
+            expected: Some((ProcessLifecycleStatus::Failed, Some("lease_expired"))),
+        },
+        RecoveryCase {
+            label: "checkpointless requeue keeps its own bounded budget",
+            status: ProcessLifecycleStatus::Running,
+            checkpointed: false,
+            checkpoint_kind: None,
+            claim_count: MAX_CRASH_RECOVERY_RECLAIMS,
+            expired_for: within_grace,
+            expected: Some((
+                ProcessLifecycleStatus::Failed,
+                Some("crash_retry_exhausted"),
+            )),
+        },
     ];
     let mut state = ProcessJournalMaterializedState::default();
     let mut process_ids = Vec::new();
-    for (status, checkpoint_ref, claim_count, _, _) in &statuses {
+    for case in &cases {
         let process_id = ProcessId::new();
         process_ids.push(process_id);
-        let mut process = snapshot(process_id, *status, request_scope.clone());
-        process.checkpoint_ref = checkpoint_ref.clone();
+        let mut process = snapshot(process_id, case.status, request_scope.clone());
+        process.checkpoint_ref = case
+            .checkpointed
+            .then(|| ProcessCheckpointRef::from_trusted("checkpoint"));
+        process.checkpoint_kind = case.checkpoint_kind;
         process.lease = Some(ProcessLeaseSnapshot {
             worker_id: worker_id.clone(),
             lease_token: ProcessLeaseToken::from_trusted(process_id.to_string()),
-            lease_expires_at: Some(now - chrono::Duration::seconds(1)),
-            last_heartbeat_at: Some(now - chrono::Duration::seconds(2)),
-            claim_count: *claim_count,
+            lease_expires_at: Some(now - case.expired_for),
+            last_heartbeat_at: Some(now - case.expired_for - chrono::Duration::seconds(1)),
+            claim_count: case.claim_count,
         });
         state.processes.insert(process_id, process);
     }
 
     let recovered = state
-        .apply_command(StoredProcessCommand::RecoverExpired(
-            RecoverExpiredProcessLeasesRequest {
+        .apply_command(StoredProcessCommand::RecoverExpired {
+            request: RecoverExpiredProcessLeasesRequest {
                 now,
                 scope_filter: Some(request_scope),
                 process_kind_filter: Some(ProcessKind::Internal),
             },
-        ))
+            lease_duration_millis: u64::try_from(LEASE_TTL.num_milliseconds())
+                .expect("lease ttl millis"),
+        })
         .expect("recover expired leases");
     let StoredCommandOutcome::Recovered(response) = recovered else {
         panic!("recovery command returned wrong outcome");
     };
-    assert_eq!(response.recovered.len(), statuses.len());
-    for (process_id, (_, _, _, expected_status, failure)) in process_ids.into_iter().zip(statuses) {
+    let expected_recovered = cases.iter().filter(|case| case.expected.is_some()).count();
+    assert_eq!(response.recovered.len(), expected_recovered);
+    for (process_id, case) in process_ids.into_iter().zip(&cases) {
         let recovered = state.processes.get(&process_id).expect("recovered process");
-        assert_eq!(recovered.status, expected_status);
-        assert_eq!(
-            recovered.failure.as_ref().map(SanitizedFailure::category),
-            failure
-        );
-        assert!(recovered.lease.is_none());
+        match case.expected {
+            Some((expected_status, failure)) => {
+                assert_eq!(recovered.status, expected_status, "{}", case.label);
+                assert_eq!(
+                    recovered.failure.as_ref().map(SanitizedFailure::category),
+                    failure,
+                    "{}",
+                    case.label
+                );
+                assert!(recovered.lease.is_none(), "{}", case.label);
+                if expected_status == ProcessLifecycleStatus::Queued {
+                    assert_eq!(
+                        recovered.crash_reclaim_count, case.claim_count,
+                        "requeue must carry the claim count forward as the reclaim budget: {}",
+                        case.label
+                    );
+                }
+            }
+            None => {
+                assert_eq!(recovered.status, case.status, "{}", case.label);
+                assert!(
+                    recovered.lease.is_some(),
+                    "a process held for the grace window keeps its lease: {}",
+                    case.label
+                );
+                assert!(recovered.failure.is_none(), "{}", case.label);
+            }
+        }
     }
 }
 

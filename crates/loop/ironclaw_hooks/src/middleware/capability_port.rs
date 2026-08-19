@@ -227,13 +227,20 @@ impl HookedLoopCapabilityPort {
         invocation: &LoopRequest,
         provider: Option<ironclaw_host_api::ids::ExtensionId>,
     ) -> BeforeCapabilityDispatchOutcome {
-        let ctx = self.hook_context(invocation, provider).await;
-        self.dispatcher.dispatch_before_capability(&ctx).await
+        let ctx = Box::pin(self.hook_context(invocation, provider)).await;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.dispatcher.dispatch_before_capability(&ctx)).await
     }
 }
 
 #[async_trait]
 impl LoopCapabilityPort for HookedLoopCapabilityPort {
+    fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
+        self.inner.requires_ordered_batch_invocation(invocations)
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         self.inner.tool_definitions()
     }
@@ -256,7 +263,10 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
         &self,
         request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner.register_provider_tool_call(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.inner.register_provider_tool_call(request)).await
     }
 
     async fn visible_capabilities(
@@ -266,7 +276,10 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
         // Visible-surface queries don't go through hooks (the surface itself
         // is owned by profile-scoped filtering; hooks gate invocation, not
         // listing).
-        self.inner.visible_capabilities(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.inner.visible_capabilities(request)).await
     }
 
     async fn invoke_capability(
@@ -277,14 +290,20 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
             .provider_resolver
             .provider_for(&request.capability_id.to_string())
             .await;
-        let outcome = self.run_dispatch(&request, provider.clone()).await;
-        let result = match self.decision_to_outcome(&outcome).await {
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let outcome = Box::pin(self.run_dispatch(&request, provider.clone())).await;
+        let result = match Box::pin(self.decision_to_outcome(&outcome)).await {
             // Hook produced a restrictive decision — already a host_api
             // `Resolution` on the channel the loop speaks.
             Some(resolution) => Ok(resolution),
             // Hooks allowed: forward to the inner port, which already returns a
             // `Resolution` (§5.3 flip) — pure pass-through, no variant inspection.
-            None => self.inner.invoke_capability(request).await,
+            // Chain-boxing: each port delegation is boxed so the stacked
+            // decorator chain never compiles into a single oversized poll
+            // frame (see reborn_integration_model_recovery stack-overflow).
+            None => Box::pin(self.inner.invoke_capability(request)).await,
         };
         // Fire AfterCapability observers regardless of whether the hook
         // short-circuited or the inner port ran. Observer-only point — no
@@ -292,14 +311,15 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
         // and allowed invocations. The resolved provider is threaded so the
         // dispatcher can enforce `OwnCapabilities` scope on Installed
         // observers (serrrfirat finding #3).
-        let _ = self
-            .dispatcher
-            .dispatch_observer_at_with_provider(
-                crate::registry::HookPointSpec::AfterCapability,
-                self.tenant_id.clone(),
-                provider,
-            )
-            .await;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let _ = Box::pin(self.dispatcher.dispatch_observer_at_with_provider(
+            crate::registry::HookPointSpec::AfterCapability,
+            self.tenant_id.clone(),
+            provider,
+        ))
+        .await;
         result
     }
 
@@ -390,12 +410,14 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
                 stopped_on_suspension: false,
             })
         } else {
-            self.inner
-                .invoke_capability_batch(LoopRequestBatch {
-                    invocations: pending,
-                    stop_on_first_suspension,
-                })
-                .await
+            // Chain-boxing: each port delegation is boxed so the stacked
+            // decorator chain never compiles into a single oversized poll
+            // frame (see reborn_integration_model_recovery stack-overflow).
+            Box::pin(self.inner.invoke_capability_batch(LoopRequestBatch {
+                invocations: pending,
+                stop_on_first_suspension,
+            }))
+            .await
         };
 
         // If the inner port errored, we still owe per-entry AfterCapability
@@ -695,6 +717,10 @@ mod tests {
 
     #[async_trait]
     impl LoopCapabilityPort for AlwaysCompletedPort {
+        fn requires_ordered_batch_invocation(&self, _invocations: &[LoopRequest]) -> bool {
+            false
+        }
+
         async fn visible_capabilities(
             &self,
             _request: VisibleCapabilityRequest,
@@ -709,7 +735,6 @@ mod tests {
                     safe_name: "cap.x".to_string(),
                     safe_description: "test capability".to_string(),
                     description_trust: Default::default(),
-                    concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::Exclusive,
                     parameters_schema: serde_json::Value::Null,
                 }],
             })
@@ -757,6 +782,18 @@ mod tests {
     }
 
     struct DenyingHook;
+
+    #[test]
+    fn hooked_port_preserves_inner_ordered_batch_requirement() {
+        let wrapped = HookedLoopCapabilityPort::new(
+            Arc::new(AlwaysCompletedPort::new()),
+            Arc::new(HookDispatcher::new(HookRegistry::new())),
+            tenant(),
+        );
+
+        assert!(!wrapped.requires_ordered_batch_invocation(&[invocation("cap.x")]));
+    }
+
     #[async_trait]
     impl RestrictedBeforeCapabilityHook for DenyingHook {
         async fn evaluate(

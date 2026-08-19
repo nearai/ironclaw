@@ -66,6 +66,7 @@ use ironclaw_wasm::{
     WasmStagedRuntimeCredentials, WitToolExecution, WitToolHost, WitToolRequest, WitToolRuntime,
     WitToolRuntimeConfig,
 };
+use secrecy::ExposeSecret;
 
 use crate::obligations::{
     NetworkObligationPolicyStore, RuntimeCredentialAccountResolver, RuntimeSecretInjectionStore,
@@ -77,7 +78,7 @@ use crate::{
     HostRuntimeError, HostRuntimeHttpEgressPort, InvocationServicesResolutionRequest,
     InvocationServicesResolver, PostEditCheckConfig, ProcessObligationLifecycleStore,
     RuntimeBackendHealth, RuntimeProcessPort, RuntimeSecretMaterialStager, RuntimeSecretStageError,
-    TenantSandboxProcessPort, ToolCallHttpEgress,
+    ToolCallHttpEgress, UserSandboxProcessPort,
 };
 use ironclaw_runtime_policy::{PlannerError, plan_capability};
 use process_executor::{HostProcessExecutor, RuntimeDispatchProcessExecutor};
@@ -94,6 +95,7 @@ mod tool_resolver;
 mod wasm_blocking;
 mod wasm_diagnostics;
 mod wasm_execution;
+mod wasm_secrets;
 
 use production_wiring::{
     ProductionComponentType, ProductionComponentTypes, ProductionImplementationReadiness,
@@ -155,7 +157,7 @@ where
     tool_call_http_egress: SharedToolCallHttpEgress,
     process_port: Arc<dyn RuntimeProcessPort>,
     managed_process_port: bool,
-    tenant_sandbox_process_port: Option<Arc<dyn RuntimeProcessPort>>,
+    user_sandbox_process_port: Option<Arc<dyn RuntimeProcessPort>>,
     wasm_credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
@@ -369,6 +371,17 @@ impl ProductAuthProviderRuntimePorts {
             .consume(source_scope, lease.id)
             .await
             .map_err(stage_secret_error)?;
+        // A "Configured" account whose resolved material is empty cannot
+        // authenticate anything. Stage the typed re-auth signal instead of a
+        // slot the guest would fail opaquely on (#7307) — mirrors the
+        // obligation-handler `stage_credential_material` boundary.
+        if secret.expose_secret().is_empty() {
+            tracing::debug!(
+                secret_handle = %source_handle.as_str(),
+                "stage_material_once: resolved credential material is empty; requiring re-auth"
+            );
+            return Err(ProductAuthCredentialStageError::AuthRequired);
+        }
         self.secret_injection_store
             .insert(target_scope, capability_id, target_handle, secret)
             .map_err(|_| ProductAuthCredentialStageError::Backend)
@@ -456,7 +469,7 @@ where
             tool_call_http_egress: Arc::new(Mutex::new(None)),
             process_port: Arc::new(HostProcessPort::new()),
             managed_process_port: true,
-            tenant_sandbox_process_port: None,
+            user_sandbox_process_port: None,
             wasm_credential_provider: None,
             runtime_health: None,
             runtime_policy: None,
@@ -495,7 +508,7 @@ where
                 runtime_http_egress: None,
                 runtime_http_egress_verified: false,
                 runtime_process_port: ProductionComponentType::of::<HostProcessPort>(),
-                tenant_sandbox_process_port: None,
+                user_sandbox_process_port: None,
                 wasm_credential_provider: None,
                 wasm_credential_provider_verified: false,
                 wasm_runtime_credential_provider_captured: false,
@@ -603,9 +616,9 @@ where
             invocation_services_resolver =
                 invocation_services_resolver.with_audit_sink(Arc::clone(audit_sink));
         }
-        if let Some(process_port) = &self.tenant_sandbox_process_port {
+        if let Some(process_port) = &self.user_sandbox_process_port {
             invocation_services_resolver = invocation_services_resolver
-                .with_tenant_sandbox_process_port(Arc::clone(process_port));
+                .with_user_sandbox_process_port(Arc::clone(process_port));
         }
         if let Some(post_edit_check) = &self.post_edit_check {
             invocation_services_resolver =
@@ -869,6 +882,23 @@ where
                 && descriptor.id.as_str() == crate::SHELL_CAPABILITY_ID
                 && first_party_runtime.contains_handler(&descriptor.id)
         })
+    }
+}
+
+/// Test-only accessors, kept in their own cfg-gated block rather than as
+/// per-method gates inside the production impl above.
+///
+/// The `test-support` half of the gate is load-bearing: the sole caller is
+/// `ironclaw_composition/tests/libsql_substrate.rs`, an integration test in
+/// another crate, which a plain `#[cfg(test)]` would not reach.
+#[cfg(any(test, feature = "test-support"))]
+impl<F, G> HostRuntimeServices<F, G>
+where
+    F: RootFilesystem + 'static,
+    G: ResourceGovernor + 'static,
+{
+    pub fn process_runtime_for_test(&self) -> Arc<dyn ironclaw_processes::ProcessRuntimePort> {
+        self.process_services.process_runtime()
     }
 }
 

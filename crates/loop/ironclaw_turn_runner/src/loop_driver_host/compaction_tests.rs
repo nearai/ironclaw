@@ -153,11 +153,12 @@ async fn build_compaction_ports_dispatches_through_scope_resolved_gateway() {
         thread_service,
         thread_scope,
         model_gateway,
-        Arc::new(in_memory_agent_turn_runtime()) as Arc<dyn AgentTurnRuntimePort>,
+        Arc::new(in_memory_agent_turn_runtime()) as Arc<dyn AgentTurnSpawnTreeRuntimePort>,
         Arc::new(in_memory_loop_checkpoint_store()) as Arc<dyn LoopCheckpointStore>,
         Arc::new(InMemoryLoopHostMilestoneSink::default()) as Arc<dyn LoopHostMilestoneSink>,
         TextOnlyLoopHostConfig {
             max_messages: 8,
+            prompt_context_budget: Default::default(),
             require_model_route_snapshot: false,
         },
         InstructionSafetyContext::non_production_noop(),

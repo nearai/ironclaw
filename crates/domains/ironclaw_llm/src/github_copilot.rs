@@ -24,7 +24,8 @@ use crate::github_copilot_auth::CopilotTokenManager;
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmProvider,
     Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
-    strip_unsupported_completion_params, strip_unsupported_tool_params,
+    openai_json_schema_response_format, strip_unsupported_completion_params,
+    strip_unsupported_tool_params,
 };
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 use ironclaw_common::llm_costs as costs;
@@ -251,6 +252,7 @@ impl LlmProvider for GithubCopilotProvider {
             max_tokens: req.max_tokens,
             temperature: req.temperature,
             stop: req.stop_sequences,
+            response_format: req.response_format.map(openai_json_schema_response_format),
             tools: None,
             tool_choice: None,
         };
@@ -320,6 +322,7 @@ impl LlmProvider for GithubCopilotProvider {
             max_tokens: req.max_tokens,
             temperature: req.temperature,
             stop: req.stop_sequences,
+            response_format: req.response_format.map(openai_json_schema_response_format),
             tools: if tools.is_empty() { None } else { Some(tools) },
             tool_choice,
         };
@@ -412,6 +415,8 @@ struct OpenAiRequest {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stop: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<OpenAiTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -727,6 +732,59 @@ mod tests {
         assert!(converted[1].tool_calls.is_some());
         assert_eq!(converted[2].role, "tool");
         assert_eq!(converted[2].tool_call_id, Some("call_1".to_string()));
+    }
+
+    #[test]
+    fn copilot_request_serializes_native_response_schema() {
+        let schema = crate::provider::JsonSchemaResponseFormat::strict(
+            "suggestions",
+            serde_json::json!({"type": "object", "properties": {"items": {"type": "array"}}}),
+        );
+        let request = OpenAiRequest {
+            model: "gpt-4o".to_string(),
+            messages: convert_messages(vec![ChatMessage::user("Return suggestions")]),
+            max_tokens: None,
+            temperature: None,
+            stop: None,
+            response_format: Some(openai_json_schema_response_format(
+                crate::provider::CompletionResponseFormat::JsonSchema(schema),
+            )),
+            tools: None,
+            tool_choice: None,
+        };
+        let json = serde_json::to_value(request).expect("serialize Copilot request");
+        assert_eq!(
+            json["response_format"],
+            serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "suggestions",
+                    "strict": true,
+                    "schema": {"type": "object", "properties": {"items": {"type": "array"}}}
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn copilot_request_serializes_native_json_object_mode() {
+        let request = OpenAiRequest {
+            model: "gpt-4o".to_string(),
+            messages: convert_messages(vec![ChatMessage::user("Return an object")]),
+            max_tokens: None,
+            temperature: None,
+            stop: None,
+            response_format: Some(openai_json_schema_response_format(
+                crate::provider::CompletionResponseFormat::JsonObject,
+            )),
+            tools: None,
+            tool_choice: None,
+        };
+        let json = serde_json::to_value(request).expect("serialize Copilot request");
+        assert_eq!(
+            json["response_format"],
+            serde_json::json!({"type": "json_object"})
+        );
     }
 
     #[test]

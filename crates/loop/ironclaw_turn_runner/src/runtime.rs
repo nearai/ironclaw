@@ -1,25 +1,26 @@
 //! Default Reborn runtime-loop composition.
 
-use std::{error::Error, fmt, sync::Arc};
+use std::{collections::HashMap, error::Error, fmt, sync::Arc};
 
 use ironclaw_event_log::SecurityAuditSink;
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_loop_contracts::{
-    AgentLoopDriverError, AgentLoopHostError, CommunicationContextProvider,
-    InstructionSafetyContext, LoopCapabilityPort, LoopHostMilestoneSink, LoopModelBudgetAccountant,
-    LoopModelPolicyGuard, LoopRunContext, MemoryPromptContextService, RunProfileResolver,
+    AgentLoopDriverError, AgentLoopHostError, CapabilitySurfaceProfileId,
+    CommunicationContextProvider, InstructionSafetyContext, LoopCapabilityPort,
+    LoopHostMilestoneSink, LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopRunContext,
+    MemoryPromptContextService, RunProfileResolver,
 };
 use ironclaw_loop_host::{
     AgentTurnRunCancellationFactory, AwaitEdgeSettler, AwaitEdgeWriter,
     CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier, HostIdentityContextSource,
-    HostInputQueue, HostInputQueueReconcile, HostManagedModelGateway, HostSkillContextSource,
-    HostUserProfileSource, LoopAttachmentReadPort, LoopCapabilityPortDecorator,
-    LoopCapabilityPortFactory, LoopCapabilityResultWriter, ModelRouteResolver,
-    PerSurfaceCapabilityDenyDecorator, ProductLiveCancellationReadiness, RunCancellationFactory,
-    SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec, SubagentDefinitionResolver,
-    SubagentPromptComposer, SubagentPromptMaterialSource, SubagentSpawnCapabilityPort,
-    SubagentSpawnDeps, SubagentSpawnLimits, ToolDisclosureCapabilityDecorator, ToolDisclosureMode,
-    verify_product_live_cancellation_probe,
+    HostInputQueue, HostInputQueueReconcile, HostManagedModelGateway,
+    HostManagedPromptDiagnosticSink, HostSkillContextSource, HostUserProfileSource,
+    LoopAttachmentReadPort, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
+    LoopCapabilityResultWriter, ModelRouteResolver, ProductLiveCancellationReadiness,
+    RunCancellationFactory, SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec,
+    SubagentDefinitionResolver, SubagentPromptComposer, SubagentPromptMaterialSource,
+    SubagentSpawnCapabilityPort, SubagentSpawnDeps, SubagentSpawnLimits,
+    ToolDisclosureCapabilityDecorator, ToolDisclosureMode, verify_product_live_cancellation_probe,
 };
 use ironclaw_memory::MemoryService;
 use ironclaw_outbound::ReplyAttachmentIntentPort;
@@ -37,13 +38,14 @@ use crate::{
     driver_registry::{DriverRegistry, DriverRegistryError},
     loop_driver_host::{
         HookDispatcherBuilderFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,
-        apply_capability_surface_profile, capability_resolve_error_to_agent_host_error,
+        apply_capability_surface_policy, capability_resolve_error_to_agent_host_error,
     },
     loop_exit_applier::{AwaitDependentRunEvidenceStore, ThreadCheckpointLoopExitEvidencePort},
     planned_driver_factory::{
         DefaultPlannedDriverRegistrationError, default_planned_run_profile_resolver,
         register_default_planned_driver, register_default_text_only_driver,
-        register_subagent_planned_driver,
+        register_subagent_planned_driver, register_unbound_planned_driver,
+        register_unbound_structured_planned_driver,
     },
     subagent::{
         capability_surface::SubagentCapabilitySurfaceResolver, flavors,
@@ -85,6 +87,19 @@ pub const DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS: std::num::NonZeroU32 =
         None => std::num::NonZeroU32::MIN,
     };
 
+/// Default cap for the `unbound` concurrency class (prepared-context runs).
+///
+/// Bounded below [`DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS`]: unbound runs are
+/// programmatic fan-out (subagents, structured extractions), the workload
+/// class most likely to arrive in bursts, and they must never starve the
+/// interactive pool.
+pub const DEFAULT_MAX_CONCURRENT_UNBOUND_RUNS: std::num::NonZeroU32 =
+    match std::num::NonZeroU32::new(4) {
+        Some(v) => v,
+        // 4 is a non-zero compile-time constant so this arm is never reached.
+        None => std::num::NonZeroU32::MIN,
+    };
+
 /// Default per-`(tenant, owner user)` concurrency cap so a single user (or a
 /// thread-storm) cannot monopolise the shared scheduler pool.
 pub const DEFAULT_MAX_CONCURRENT_RUNS_PER_USER: std::num::NonZeroU32 =
@@ -108,11 +123,14 @@ pub struct DefaultPlannedRuntimeConfig {
     /// [`tokio::sync::Semaphore::MAX_PERMITS`]. See [`scheduler_permit_count`].
     pub worker_count: Option<std::num::NonZeroUsize>,
     /// Capability IDs removed from every model-facing capability surface,
-    /// regardless of the resolved profile allow-set.
+    /// regardless of the resolved capability-surface profile.
     pub disabled_capability_ids: Vec<CapabilityId>,
     pub text_only_driver: TextOnlyModelReplyDriverConfig,
     pub host: TextOnlyLoopHostConfig,
     pub tool_disclosure: ToolDisclosureMode,
+    /// Profile-owned visibility preferences, keyed by capability-surface
+    /// profile id. Values are canonical capability ids and never grant access.
+    pub tool_disclosure_profile_pins: HashMap<CapabilitySurfaceProfileId, Vec<CapabilityId>>,
     pub planned_default_iteration_limit: Option<std::num::NonZeroU32>,
     /// Override for the default family's model availability-retry budget
     /// (`DefaultRecoveryStrategy::max_model_availability_attempts`). `None`
@@ -124,7 +142,7 @@ pub struct DefaultPlannedRuntimeConfig {
 impl Default for DefaultPlannedRuntimeConfig {
     fn default() -> Self {
         Self {
-            heartbeat_interval: std::time::Duration::from_secs(10),
+            heartbeat_interval: std::time::Duration::from_secs(15),
             poll_interval: std::time::Duration::from_secs(5),
             lease_recovery_interval: std::time::Duration::from_secs(10),
             worker_count: Some(DEFAULT_TURN_RUNNER_WORKER_COUNT),
@@ -132,10 +150,97 @@ impl Default for DefaultPlannedRuntimeConfig {
             text_only_driver: TextOnlyModelReplyDriverConfig::default(),
             host: TextOnlyLoopHostConfig::default(),
             tool_disclosure: ToolDisclosureMode::from_env(),
+            tool_disclosure_profile_pins: HashMap::new(),
             planned_default_iteration_limit: None,
             planned_model_availability_retry_attempts: None,
         }
     }
+}
+
+pub const REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV: &str = "REBORN_TOOL_DISCLOSURE_PROFILE_PINS";
+
+impl DefaultPlannedRuntimeConfig {
+    /// Resolve operator-controlled environment configuration for production
+    /// startup. Programmatic `Default` remains deterministic; the composition
+    /// root calls this fallible boundary so a malformed pin map cannot silently
+    /// disable an intended optimization.
+    pub fn try_from_env() -> Result<Self, DefaultPlannedRuntimeConfigError> {
+        Ok(Self {
+            tool_disclosure_profile_pins: tool_disclosure_profile_pins_from_env()?,
+            ..Self::default()
+        })
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DefaultPlannedRuntimeConfigError {
+    #[error("{REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV} is not valid UTF-8")]
+    ProfilePinsNotUnicode,
+    #[error("{REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV} is invalid: {source}")]
+    ProfilePins {
+        #[source]
+        source: ToolDisclosureProfilePinsParseError,
+    },
+}
+
+fn tool_disclosure_profile_pins_from_env()
+-> Result<HashMap<CapabilitySurfaceProfileId, Vec<CapabilityId>>, DefaultPlannedRuntimeConfigError>
+{
+    let raw = match std::env::var(REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV) {
+        Ok(raw) => raw,
+        Err(std::env::VarError::NotPresent) => return Ok(HashMap::new()),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(DefaultPlannedRuntimeConfigError::ProfilePinsNotUnicode);
+        }
+    };
+    parse_tool_disclosure_profile_pins(&raw)
+        .map_err(|source| DefaultPlannedRuntimeConfigError::ProfilePins { source })
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ToolDisclosureProfilePinsParseError {
+    #[error("profile-pin JSON is invalid: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("profile id {profile:?} is invalid: {reason}")]
+    Profile { profile: String, reason: String },
+    #[error("capability id {capability:?} for profile {profile:?} is invalid: {reason}")]
+    Capability {
+        profile: String,
+        capability: String,
+        reason: String,
+    },
+}
+
+fn parse_tool_disclosure_profile_pins(
+    raw: &str,
+) -> Result<
+    HashMap<CapabilitySurfaceProfileId, Vec<CapabilityId>>,
+    ToolDisclosureProfilePinsParseError,
+> {
+    let parsed = serde_json::from_str::<HashMap<String, Vec<String>>>(raw)?;
+    let mut resolved = HashMap::new();
+    for (profile, pins) in parsed {
+        let profile_id = CapabilitySurfaceProfileId::new(profile.clone()).map_err(|reason| {
+            ToolDisclosureProfilePinsParseError::Profile {
+                profile: profile.clone(),
+                reason,
+            }
+        })?;
+        let pins = pins
+            .into_iter()
+            .map(|capability| {
+                CapabilityId::new(capability.clone()).map_err(|error| {
+                    ToolDisclosureProfilePinsParseError::Capability {
+                        profile: profile.clone(),
+                        capability,
+                        reason: error.to_string(),
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        resolved.insert(profile_id, pins);
+    }
+    Ok(resolved)
 }
 
 /// Map the configured worker count into a scheduler-semaphore permit count.
@@ -159,6 +264,14 @@ fn scheduler_permit_count(worker_count: Option<std::num::NonZeroUsize>) -> usize
         // oversized operator config loudly before it ever reaches here.
         .unwrap_or(tokio::sync::Semaphore::MAX_PERMITS)
         .min(tokio::sync::Semaphore::MAX_PERMITS)
+}
+
+fn turn_run_scheduler_config(config: &DefaultPlannedRuntimeConfig) -> TurnRunSchedulerConfig {
+    TurnRunSchedulerConfig::default()
+        .with_max_concurrent_runs(scheduler_permit_count(config.worker_count))
+        .with_runner_heartbeat_interval(config.heartbeat_interval)
+        .with_poll_interval(config.poll_interval)
+        .with_lease_recovery_interval(config.lease_recovery_interval)
 }
 
 fn default_disabled_capability_ids() -> Vec<CapabilityId> {
@@ -241,6 +354,8 @@ where
     /// textual `<attachments>` pointer (the same fallback a text-only model
     /// gets) rather than failing the turn.
     pub attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
+    /// Process-local operator diagnostics captured at the resolved prompt boundary.
+    pub prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
     /// Shared run-scoped intent store used by the explicit attachment
     /// capability and transcript finalizer. Production must pass the exact
     /// same handle to both sides so sealing cannot split from registration.
@@ -555,7 +670,9 @@ where
         )
     })?;
     register_default_planned_driver(&mut registry, Arc::clone(&family_registry))?;
-    register_subagent_planned_driver(&mut registry, family_registry)?;
+    register_subagent_planned_driver(&mut registry, Arc::clone(&family_registry))?;
+    register_unbound_planned_driver(&mut registry, Arc::clone(&family_registry))?;
+    register_unbound_structured_planned_driver(&mut registry, family_registry)?;
     let driver_registry = Arc::new(registry);
 
     let resolver = Arc::new(
@@ -622,7 +739,12 @@ where
     let base_coordinator = DefaultTurnCoordinator::new(Arc::clone(&agent_turn_runtime))
         .with_run_profile_resolver(Arc::clone(&run_profile_resolver))
         .with_wake_notifier(Arc::clone(&wake_notifier))
-        .with_process_runtime(agent_turn_runtime.as_ref().clone());
+        .with_process_runtime(agent_turn_runtime.as_ref().clone())
+        .with_prepared_context_source(Arc::new(
+            ironclaw_threads::ThreadServicePreparedContextSource::new(Arc::clone(
+                &parts.thread_service,
+            )),
+        ));
     let base_coordinator_arc = Arc::new(base_coordinator);
     let child_runs: Arc<dyn TurnSpawnTreePort> = base_coordinator_arc.clone();
     let coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = base_coordinator_arc;
@@ -630,7 +752,11 @@ where
         .bind_coordinator(Arc::clone(&coordinator))
         .map_err(|error| DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string()))?;
 
-    let agent_turn_runtime_port: Arc<dyn AgentTurnRuntimePort> = agent_turn_runtime.clone();
+    // The host factory needs the spawn-tree superset: besides cancellation
+    // observation it reads the claimed run's journal record to fence transcript
+    // writes on the lease the run was actually claimed under.
+    let agent_turn_runtime_port: Arc<dyn AgentTurnSpawnTreeRuntimePort> =
+        agent_turn_runtime.clone();
     let subagent_prompt_source: Arc<dyn SubagentPromptMaterialSource> =
         Arc::new(GateBackedSubagentPromptMaterialSource::new(
             process_system.inputs(),
@@ -659,63 +785,51 @@ where
             parts.capability_surface_resolver,
             Arc::clone(&subagent_prompt_source),
         ));
-    let tool_disclosure_decorator = if parts.config.tool_disclosure.is_bridged() {
+    let tool_disclosure_decorator = if parts.config.tool_disclosure.is_enabled() {
         tracing::debug!(
             target: "ironclaw::reborn::runtime",
-            "reborn tool disclosure decorator wired (bridged)"
+            mode = ?parts.config.tool_disclosure,
+            "reborn tool disclosure decorator wired"
         );
         Some(Arc::new(ToolDisclosureCapabilityDecorator::new(
             Arc::clone(&parts.capability_result_writer),
+            parts.config.tool_disclosure,
         )))
     } else {
         None
     };
     // TEMP(disable-spawn-subagents): explicit composition decision to remove the
     // spawn_subagent capability from the model-facing surface across all
-    // profiles. Applied as the OUTERMOST decorator so it strips the capability
-    // whether it was surfaced by `spawn_decorator` (the rich flavor-aware tool)
-    // or by the host-runtime first-party manifest (the bare authorization stub).
-    // This is a deny list — it takes effect regardless of the resolved profile
-    // allow-set (which is `All` for top-level runs, making a profile allow-set
-    // narrowing a no-op). Override `disabled_capability_ids` to re-enable in
-    // targeted regression harnesses.
+    // profiles. The ids are folded into the one resolved policy below, after
+    // spawn decoration and before disclosure. Override `disabled_capability_ids`
+    // to re-enable it in targeted regression harnesses.
     let global_denied = parts.config.disabled_capability_ids.clone();
+    let scheduler_config = turn_run_scheduler_config(&parts.config);
     // Issue #5505: a scheduled-trigger fire must not be able to create,
     // remove, pause, or resume triggers (read-only trigger_list stays
-    // available). Kept as a *second* named set — not folded into
-    // `global_denied` — so it only applies on the `scheduled_trigger`
-    // capability-surface profile.
+    // available). These ids are folded into that run's one resolved policy only
+    // for the `scheduled_trigger` capability-surface profile.
     let scheduled_trigger_denied = SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS
         .iter()
         .map(|id| CapabilityId::new(*id))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
-    // Construction-guard fix: always add this decorator, even when both deny
-    // sets happen to be empty. A prior version only added it `if
-    // !disabled.is_empty()`, which meant emptying the global disabled-capability
-    // list (the documented spawn_subagent re-enable toggle) would silently also
-    // drop the scheduled-trigger deny — an unrelated toggle must never
-    // re-enable `trigger_create` for scheduled fires. Kept as the OUTERMOST
-    // decorator (added last, after the tool-disclosure decorator above) so
-    // it strips capabilities regardless of what surfaced them.
-    let deny_decorator: Arc<dyn LoopCapabilityPortDecorator> =
-        Arc::new(PerSurfaceCapabilityDenyDecorator::new(
-            global_denied,
-            vec![(
-                ironclaw_loop_contracts::CapabilitySurfaceProfileId::new(
-                    crate::planned_driver_factory::SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID,
-                )
-                .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?,
-                scheduled_trigger_denied,
-            )],
-        ));
+    let unbound_denied = UNBOUND_DENIED_CAPABILITY_IDS
+        .iter()
+        .map(|id| CapabilityId::new(*id))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
         Arc::new(RuntimeProfiledCapabilityPortFactory {
             inner: parts.capability_factory,
             surface_resolver: capability_surface_resolver,
             spawn_decorator,
             tool_disclosure_decorator,
-            deny_decorator,
+            global_denied,
+            scheduled_trigger_denied,
+            unbound_denied,
+            declarations_thread_service: Arc::clone(&parts.thread_service),
+            tool_disclosure_profile_pins: parts.config.tool_disclosure_profile_pins,
         });
     let safety_context = parts
         .safety_context
@@ -750,6 +864,9 @@ where
     host_factory = host_factory.with_cancellation_factory(cancellation_factory);
     if let Some(port) = parts.attachment_read_port {
         host_factory = host_factory.with_attachment_read_port(port);
+    }
+    if let Some(sink) = parts.prompt_diagnostic_sink {
+        host_factory = host_factory.with_prompt_diagnostic_sink(sink);
     }
     if let Some(port) = parts.reply_attachment_intent_port {
         host_factory = host_factory.with_reply_attachment_intent_port(port);
@@ -811,11 +928,6 @@ where
         executor = executor.with_after_turn_memory_recorder(recorder);
     }
     let executor = Arc::new(executor);
-    let scheduler_config = TurnRunSchedulerConfig::default()
-        .with_max_concurrent_runs(scheduler_permit_count(parts.config.worker_count))
-        .with_runner_heartbeat_interval(parts.config.heartbeat_interval)
-        .with_poll_interval(parts.config.poll_interval)
-        .with_lease_recovery_interval(parts.config.lease_recovery_interval);
     let scheduler = TurnRunScheduler::new_with_process_runtime(
         process_system.runtime(),
         executor,
@@ -839,9 +951,8 @@ where
 /// triggers (a fire mutating the trigger fleet is exactly the reported "a
 /// routine that creates routines" bug). Read-only
 /// [`ironclaw_host_runtime::TRIGGER_LIST_CAPABILITY_ID`] is intentionally
-/// excluded from this list. Applied via
-/// [`ironclaw_loop_host::PerSurfaceCapabilityDenyDecorator`]'s per-surface
-/// deny list, scoped to
+/// excluded from this list. Folded into the one resolved host-API policy for
+/// the
 /// [`crate::planned_driver_factory::SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID`]
 /// only.
 const SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS: &[&str] = &[
@@ -851,15 +962,35 @@ const SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS: &[&str] = &[
     ironclaw_host_runtime::TRIGGER_RESUME_CAPABILITY_ID,
 ];
 
+/// Unbound runs execute a prepared context with no conversation and no
+/// interactive principal: spawning subagents from one is denied outright
+/// (the spawn tree is a conversation-lane feature), and trigger mutators
+/// stay denied for the same reason a fire's are — a background run minting
+/// more background work is the runaway class this lane must not open.
+const UNBOUND_DENIED_CAPABILITY_IDS: &[&str] = &[
+    ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
+    ironclaw_host_runtime::TRIGGER_CREATE_CAPABILITY_ID,
+    ironclaw_host_runtime::TRIGGER_REMOVE_CAPABILITY_ID,
+    ironclaw_host_runtime::TRIGGER_PAUSE_CAPABILITY_ID,
+    ironclaw_host_runtime::TRIGGER_RESUME_CAPABILITY_ID,
+];
+
 /// Runner-private per-run factory that preserves the canonical wrapper order
-/// while passing one resolved allow-set directly to every consumer that needs
+/// while passing one resolved policy directly to every consumer that needs
 /// it. The neutral loop-host decorator contract remains synchronous.
 struct RuntimeProfiledCapabilityPortFactory {
     inner: Arc<dyn LoopCapabilityPortFactory>,
     surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
     spawn_decorator: Arc<dyn LoopCapabilityPortDecorator>,
     tool_disclosure_decorator: Option<Arc<ToolDisclosureCapabilityDecorator>>,
-    deny_decorator: Arc<dyn LoopCapabilityPortDecorator>,
+    global_denied: Vec<CapabilityId>,
+    scheduled_trigger_denied: Vec<CapabilityId>,
+    unbound_denied: Vec<CapabilityId>,
+    /// Declared-tools source for unbound runs: the prepared-context record
+    /// journaled beside the run's thread. Non-empty declared tools narrow the
+    /// resolved surface to exactly that allowlist.
+    declarations_thread_service: Arc<dyn SessionThreadService>,
+    tool_disclosure_profile_pins: HashMap<CapabilitySurfaceProfileId, Vec<CapabilityId>>,
 }
 
 #[async_trait::async_trait]
@@ -868,23 +999,90 @@ impl LoopCapabilityPortFactory for RuntimeProfiledCapabilityPortFactory {
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        let allow_set = Arc::new(
-            self.surface_resolver
-                .resolve(run_context)
-                .await
-                .map_err(capability_resolve_error_to_agent_host_error)?,
-        );
-        let mut capabilities = self.inner.create_capability_port(run_context).await?;
+        let mut policy = self
+            .surface_resolver
+            .resolve(run_context)
+            .await
+            .map_err(capability_resolve_error_to_agent_host_error)?;
+        if let Some(allowed) = run_context
+            .product_context
+            .as_ref()
+            .and_then(|context| context.execution_policy.as_ref())
+            .and_then(|execution_policy| execution_policy.allowed_capability_ids.as_ref())
+        {
+            policy = policy.narrow_to_capability_ids(allowed.iter().cloned());
+        }
+        let mut denied = self.global_denied.clone();
+        let surface_profile_id = run_context
+            .resolved_run_profile
+            .capability_surface_profile_id
+            .as_str();
+        if surface_profile_id
+            == crate::planned_driver_factory::SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID
+        {
+            denied.extend(self.scheduled_trigger_denied.iter().cloned());
+        }
+        if surface_profile_id
+            == crate::planned_driver_factory::UNBOUND_CAPABILITY_SURFACE_PROFILE_ID
+        {
+            denied.extend(self.unbound_denied.iter().cloned());
+            // Declared-tools allowlist: a prepared context that names its
+            // tools narrows the surface to exactly that set (the denies
+            // above still subtract). Empty declared tools keep the default
+            // unbound surface. A read failure fails the host build closed —
+            // running an unbound turn against an unknown declaration set
+            // would silently widen its surface.
+            let declarations = ironclaw_threads::read_declarations_for_run_scope(
+                self.declarations_thread_service.as_ref(),
+                &run_context.scope,
+            )
+            .await
+            .map_err(|error| {
+                // debug!, not warn!: background diagnostics stay off the REPL.
+                // Stable summary, no backend detail (redaction discipline).
+                tracing::debug!(%error, "unbound declarations read failed");
+                AgentLoopHostError::new(
+                    ironclaw_loop_contracts::AgentLoopHostErrorKind::Unavailable,
+                    "unbound declarations read failed",
+                )
+            })?;
+            if let Some(declarations) = declarations
+                && !declarations.tools.is_empty()
+            {
+                let allowed = policy.capability_ids.clone().intersect(
+                    ironclaw_host_api::capability_surface::CapabilityIdScope::only(
+                        declarations.tools,
+                    ),
+                );
+                policy = policy.with_capability_ids(allowed);
+            }
+        }
+        policy = policy.deny_capability_ids(denied);
+        let policy = Arc::new(policy);
+        let mut capabilities = self
+            .inner
+            .create_capability_port_with_surface_policy(run_context, Arc::clone(&policy))
+            .await?;
         capabilities = self.spawn_decorator.decorate(run_context, capabilities);
+        capabilities = apply_capability_surface_policy(capabilities, Arc::clone(&policy));
         if let Some(decorator) = self.tool_disclosure_decorator.as_ref() {
-            capabilities = decorator.decorate_with_allow_set(
+            let pins = self
+                .tool_disclosure_profile_pins
+                .get(
+                    &run_context
+                        .resolved_run_profile
+                        .capability_surface_profile_id,
+                )
+                .cloned()
+                .unwrap_or_default();
+            capabilities = decorator.decorate_with_policy_and_pins(
                 run_context,
                 capabilities,
-                Arc::clone(&allow_set),
+                Arc::clone(&policy),
+                pins,
             );
         }
-        capabilities = self.deny_decorator.decorate(run_context, capabilities);
-        Ok(apply_capability_surface_profile(capabilities, allow_set))
+        Ok(capabilities)
     }
 }
 
@@ -940,20 +1138,26 @@ impl LoopCapabilityPortDecorator for SubagentSpawnCapabilityDecorator {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
 
     use super::{
+        DefaultPlannedRuntimeConfig, REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV,
         RuntimeProfiledCapabilityPortFactory, SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS,
-        ToolDisclosureCapabilityDecorator, scheduler_permit_count,
+        ToolDisclosureCapabilityDecorator, ToolDisclosureMode, parse_tool_disclosure_profile_pins,
+        scheduler_permit_count, turn_run_scheduler_config,
     };
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId},
+        capability_surface::CapabilitySurfacePolicy,
+        execution_policy::TurnExecutionPolicy,
+        ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
         resolution::{Resolution, ResolutionBatch},
         runtime::RuntimeKind,
+        turn::{ProductTurnContext, TurnOriginKind, TurnOwner},
     };
     use ironclaw_host_runtime::{
         TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
@@ -961,17 +1165,28 @@ mod tests {
     };
     use ironclaw_loop_contracts::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView,
-        CapabilitySurfaceVersion, ConcurrencyHint, InMemoryRunProfileResolver, LoopCapabilityPort,
-        LoopRequest, LoopRequestBatch, LoopRunContext, RunProfileResolutionRequest,
-        RunProfileResolver, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilitySurfaceProfileId, CapabilitySurfaceVersion, InMemoryRunProfileResolver,
+        LoopCapabilityPort, LoopRequest, LoopRequestBatch, LoopRunContext,
+        RunProfileResolutionRequest, RunProfileResolver, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     };
     use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
     use ironclaw_loop_host::{
-        CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
+        CapabilityResolveError, CapabilitySurfaceProfileResolver,
         DecoratingLoopCapabilityPortFactory, LoopCapabilityPortDecorator,
-        LoopCapabilityPortFactory, PerSurfaceCapabilityDenyDecorator,
+        LoopCapabilityPortFactory,
     };
+
+    #[test]
+    fn planned_runtime_wires_fifteen_second_heartbeat_and_three_failure_budget() {
+        let scheduler_config = turn_run_scheduler_config(&DefaultPlannedRuntimeConfig::default());
+        assert_eq!(
+            scheduler_config.runner_heartbeat_interval(),
+            std::time::Duration::from_secs(15)
+        );
+        assert_eq!(scheduler_config.max_consecutive_heartbeat_failures(), 3);
+    }
 
     #[test]
     fn scheduler_permit_count_unlimited_uses_max_permits() {
@@ -1001,6 +1216,72 @@ mod tests {
         assert_eq!(permits, tokio::sync::Semaphore::MAX_PERMITS);
         // Must not panic.
         let _ = tokio::sync::Semaphore::new(permits);
+    }
+
+    #[test]
+    fn profile_pin_config_parses_typed_capability_ids() {
+        let parsed = parse_tool_disclosure_profile_pins(
+            r#"{"interactive_tools":["github.search_code","gmail.list_messages"]}"#,
+        )
+        .expect("valid profile-pin configuration");
+
+        assert_eq!(
+            parsed[&CapabilitySurfaceProfileId::new("interactive_tools")
+                .expect("valid test profile id")]
+                .iter()
+                .map(CapabilityId::as_str)
+                .collect::<Vec<_>>(),
+            vec!["github.search_code", "gmail.list_messages"]
+        );
+    }
+
+    #[test]
+    fn profile_pin_config_rejects_the_entire_map_when_any_id_is_invalid() {
+        assert!(
+            parse_tool_disclosure_profile_pins(
+                r#"{"interactive_tools":["github.search_code"],"mission":["invalid"]}"#,
+            )
+            .is_err()
+        );
+        assert!(parse_tool_disclosure_profile_pins("[]").is_err());
+        assert!(
+            parse_tool_disclosure_profile_pins(r#"{"INVALID PROFILE":["github.search_code"]}"#,)
+                .is_err(),
+            "profile identities must be validated at the environment boundary"
+        );
+    }
+
+    #[test]
+    fn profile_pin_environment_rejects_invalid_configuration_at_runtime_startup() {
+        const CHILD_MARKER: &str = "IRONCLAW_PROFILE_PIN_CONFIG_TEST_CHILD";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let error = DefaultPlannedRuntimeConfig::try_from_env()
+                .expect_err("invalid profile pins must reject runtime configuration");
+            assert!(
+                error.to_string().contains("is invalid"),
+                "startup error must retain configuration context: {error}"
+            );
+            return;
+        }
+
+        for invalid in ["{", r#"{"interactive_tools":["invalid"]}"#] {
+            let output = std::process::Command::new(
+                std::env::current_exe().expect("current test executable"),
+            )
+            .args([
+                "profile_pin_environment_rejects_invalid_configuration_at_runtime_startup",
+                "--nocapture",
+            ])
+            .env(CHILD_MARKER, "1")
+            .env(REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV, invalid)
+            .output()
+            .expect("child test process executes");
+            assert!(
+                output.status.success(),
+                "runtime startup must reject invalid pin config: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     async fn test_run_context() -> LoopRunContext {
@@ -1220,6 +1501,33 @@ mod tests {
         }
     }
 
+    struct RecordingSurfacePolicyFactory {
+        port: Arc<dyn LoopCapabilityPort>,
+        policies: Arc<Mutex<Vec<CapabilitySurfacePolicy>>>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityPortFactory for RecordingSurfacePolicyFactory {
+        async fn create_capability_port(
+            &self,
+            _run_context: &LoopRunContext,
+        ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+            Ok(Arc::clone(&self.port))
+        }
+
+        async fn create_capability_port_with_surface_policy(
+            &self,
+            _run_context: &LoopRunContext,
+            surface_policy: Arc<CapabilitySurfacePolicy>,
+        ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+            self.policies
+                .lock()
+                .unwrap()
+                .push(surface_policy.as_ref().clone());
+            Ok(Arc::clone(&self.port))
+        }
+    }
+
     struct NoopDecorator {
         decorate_calls: Arc<AtomicUsize>,
     }
@@ -1244,9 +1552,9 @@ mod tests {
         async fn resolve(
             &self,
             _run_context: &LoopRunContext,
-        ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+        ) -> Result<CapabilitySurfacePolicy, CapabilityResolveError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(CapabilityAllowSet::All)
+            Ok(CapabilitySurfacePolicy::allow_all())
         }
     }
 
@@ -1266,15 +1574,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn profiled_factory_resolves_allow_set_once_with_tool_disclosure() {
+    async fn profiled_factory_resolves_policy_once_with_tool_disclosure() {
         let calls = Arc::new(AtomicUsize::new(0));
         let decorate_calls = Arc::new(AtomicUsize::new(0));
+        let policies = Arc::new(Mutex::new(Vec::new()));
+        let denied_id = CapabilityId::new("demo.denied").expect("valid capability id");
         let inner = Arc::new(InnerPort {
             label: "inner",
             log: Arc::new(Mutex::new(Vec::new())),
         });
         let factory = RuntimeProfiledCapabilityPortFactory {
-            inner: Arc::new(StaticFactory { port: inner }),
+            inner: Arc::new(RecordingSurfacePolicyFactory {
+                port: inner,
+                policies: Arc::clone(&policies),
+            }),
             surface_resolver: Arc::new(CountingSurfaceResolver {
                 calls: Arc::clone(&calls),
             }),
@@ -1283,8 +1596,15 @@ mod tests {
             }),
             tool_disclosure_decorator: Some(Arc::new(ToolDisclosureCapabilityDecorator::new(
                 Arc::new(UnusedResultWriter),
+                ToolDisclosureMode::Bridged,
             ))),
-            deny_decorator: Arc::new(NoopDecorator { decorate_calls }),
+            global_denied: vec![denied_id.clone()],
+            scheduled_trigger_denied: Vec::new(),
+            unbound_denied: Vec::new(),
+            declarations_thread_service: Arc::new(
+                ironclaw_threads::InMemorySessionThreadService::default(),
+            ),
+            tool_disclosure_profile_pins: HashMap::new(),
         };
 
         factory
@@ -1295,20 +1615,78 @@ mod tests {
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,
-            "one resolved allow-set must be shared by disclosure and enforcement"
+            "one resolved policy must be shared by disclosure and enforcement"
         );
+        let policies = policies.lock().unwrap();
+        assert_eq!(
+            policies.len(),
+            1,
+            "the resolved policy is passed inward once"
+        );
+        assert!(
+            !policies[0].permits_capability_id(&denied_id),
+            "the host-visible request must receive the final deny-subtracted policy"
+        );
+    }
+
+    #[tokio::test]
+    async fn structured_trigger_allowlist_narrows_the_canonical_surface_policy() {
+        let policies = Arc::new(Mutex::new(Vec::new()));
+        let allowed = CapabilityId::new("demo.allowed").expect("allowed id");
+        let excluded = CapabilityId::new("demo.excluded").expect("excluded id");
+        let inner = Arc::new(InnerPort {
+            label: "inner",
+            log: Arc::new(Mutex::new(Vec::new())),
+        });
+        let factory = RuntimeProfiledCapabilityPortFactory {
+            inner: Arc::new(RecordingSurfacePolicyFactory {
+                port: inner,
+                policies: Arc::clone(&policies),
+            }),
+            surface_resolver: Arc::new(CountingSurfaceResolver {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            spawn_decorator: Arc::new(NoopDecorator {
+                decorate_calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            tool_disclosure_decorator: None,
+            global_denied: Vec::new(),
+            scheduled_trigger_denied: Vec::new(),
+            unbound_denied: Vec::new(),
+            declarations_thread_service: Arc::new(
+                ironclaw_threads::InMemorySessionThreadService::default(),
+            ),
+            tool_disclosure_profile_pins: HashMap::new(),
+        };
+        let mut context = test_run_context().await;
+        let mut product_context = ProductTurnContext::new(
+            TurnOriginKind::ScheduledTrigger,
+            None,
+            None,
+            TurnOwner::Personal {
+                user: UserId::new("user-runtime-test").expect("user id"),
+            },
+        );
+        product_context.execution_policy = Some(TurnExecutionPolicy {
+            allowed_capability_ids: Some(vec![allowed.clone()]),
+            required_skills: Vec::new(),
+            ..TurnExecutionPolicy::default()
+        });
+        context.product_context = Some(product_context);
+
+        factory
+            .create_capability_port(&context)
+            .await
+            .expect("profiled capability port");
+
+        let policies = policies.lock().unwrap();
+        assert!(policies[0].permits_capability_id(&allowed));
+        assert!(!policies[0].permits_capability_id(&excluded));
     }
 
     // ── Issue #5505: scheduled-trigger capability-surface deny-map ───────────
 
-    /// Fixed-surface inner port standing in for the host capability port —
-    /// exercised through `DecoratingLoopCapabilityPortFactory` +
-    /// [`PerSurfaceCapabilityDenyDecorator`], the same composition pipeline
-    /// `build_default_planned_runtime` constructs its
-    /// `PerSurfaceCapabilityDenyDecorator` through, not `decorate()` called
-    /// in isolation (mechanism-level coverage of
-    /// `PerSurfaceCapabilityDenyDecorator` itself lives in
-    /// `ironclaw_loop_host::capability_surface_filter`).
+    /// Fixed-surface inner port standing in for the host capability port.
     struct FixedSurfacePort {
         surface: VisibleCapabilitySurface,
     }
@@ -1351,7 +1729,6 @@ mod tests {
             safe_name: capability_id.to_string(),
             safe_description: format!("{capability_id} description"),
             description_trust: Default::default(),
-            concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: serde_json::json!({"type": "object"}),
         }
     }
@@ -1386,7 +1763,7 @@ mod tests {
     }
 
     async fn visible_capability_ids(
-        factory: &DecoratingLoopCapabilityPortFactory,
+        factory: &dyn LoopCapabilityPortFactory,
         run_context: &LoopRunContext,
     ) -> Vec<String> {
         let port = factory
@@ -1404,27 +1781,31 @@ mod tests {
 
     #[tokio::test]
     async fn scheduled_trigger_surface_excludes_mutators_interactive_includes_them() {
-        // Test through the caller: drive the composed
-        // DecoratingLoopCapabilityPortFactory + PerSurfaceCapabilityDenyDecorator
-        // pipeline's `visible_capabilities()`, not `decorate()` in isolation.
+        // Test through the caller: drive the same runner-private factory that
+        // resolves and enforces the production policy.
         let global_denied = vec![
             CapabilityId::new(ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         ];
         let inner: Arc<dyn LoopCapabilityPort> = Arc::new(FixedSurfacePort {
             surface: full_trigger_and_spawn_surface(),
         });
-        let factory =
-            DecoratingLoopCapabilityPortFactory::new(Arc::new(StaticFactory { port: inner }))
-                .with_decorator(Arc::new(PerSurfaceCapabilityDenyDecorator::new(
-                    global_denied,
-                    vec![(
-                ironclaw_loop_contracts::CapabilitySurfaceProfileId::new(
-                    crate::planned_driver_factory::SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID,
-                )
-                .unwrap(),
-                scheduled_trigger_mutator_ids(),
-            )],
-                )));
+        let factory = RuntimeProfiledCapabilityPortFactory {
+            inner: Arc::new(StaticFactory { port: inner }),
+            surface_resolver: Arc::new(CountingSurfaceResolver {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            spawn_decorator: Arc::new(NoopDecorator {
+                decorate_calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            tool_disclosure_decorator: None,
+            global_denied,
+            scheduled_trigger_denied: scheduled_trigger_mutator_ids(),
+            unbound_denied: Vec::new(),
+            declarations_thread_service: Arc::new(
+                ironclaw_threads::InMemorySessionThreadService::default(),
+            ),
+            tool_disclosure_profile_pins: HashMap::new(),
+        };
 
         let scheduled_ids =
             visible_capability_ids(&factory, &scheduled_trigger_run_context().await).await;
@@ -1470,18 +1851,23 @@ mod tests {
         let inner: Arc<dyn LoopCapabilityPort> = Arc::new(FixedSurfacePort {
             surface: full_trigger_and_spawn_surface(),
         });
-        let factory =
-            DecoratingLoopCapabilityPortFactory::new(Arc::new(StaticFactory { port: inner }))
-                .with_decorator(Arc::new(PerSurfaceCapabilityDenyDecorator::new(
-                    Vec::new(),
-                    vec![(
-                ironclaw_loop_contracts::CapabilitySurfaceProfileId::new(
-                    crate::planned_driver_factory::SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID,
-                )
-                .unwrap(),
-                scheduled_trigger_mutator_ids(),
-            )],
-                )));
+        let factory = RuntimeProfiledCapabilityPortFactory {
+            inner: Arc::new(StaticFactory { port: inner }),
+            surface_resolver: Arc::new(CountingSurfaceResolver {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            spawn_decorator: Arc::new(NoopDecorator {
+                decorate_calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            tool_disclosure_decorator: None,
+            global_denied: Vec::new(),
+            scheduled_trigger_denied: scheduled_trigger_mutator_ids(),
+            unbound_denied: Vec::new(),
+            declarations_thread_service: Arc::new(
+                ironclaw_threads::InMemorySessionThreadService::default(),
+            ),
+            tool_disclosure_profile_pins: HashMap::new(),
+        };
 
         let scheduled_ids =
             visible_capability_ids(&factory, &scheduled_trigger_run_context().await).await;

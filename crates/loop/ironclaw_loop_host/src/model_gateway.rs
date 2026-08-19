@@ -26,15 +26,12 @@ use crate::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
     HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedModelStreamSink,
-    HostManagedToolResultContent, ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort,
-    ThreadBackedLoopModelPort, ThreadContextWindowCache,
+    HostManagedToolResultContent, ModelCost, ProviderModelId, StaticModelCostTable,
+    ThreadBackedLoopContextPort, ThreadBackedLoopModelPort, ThreadContextWindowCache,
 };
 use async_trait::async_trait;
 use ironclaw_common::llm_costs::{default_cost, model_cost};
-use ironclaw_host_api::{
-    approval::sha256_digest_token,
-    ids::{CapabilityId, ProviderToolName},
-};
+use ironclaw_host_api::{approval::sha256_digest_token, ids::ProviderToolName};
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
     FinishReason, ImageUrl, LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest,
@@ -60,10 +57,14 @@ use ironclaw_turns::{ModelInvalidOutputDetailReason as InvalidOutputReason, Turn
 use tracing::debug;
 
 mod prompt_cache_activity;
+mod redaction;
 
 use prompt_cache_activity::{
     ModelCallCacheUsage, PromptCacheActivityLog, PromptCacheCallScope,
     system_prompt_cache_signature, tool_definitions_cache_signature,
+};
+use redaction::{
+    redact_completion_request, redact_tool_completion_request, redact_tool_definitions,
 };
 
 use crate::{
@@ -86,7 +87,6 @@ const PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER: &str =
 const PROVIDER_TOOL_ARGUMENTS_INVALID_MARKER: &str =
     "arguments omitted because the provider emitted malformed tool-call JSON";
 const CONTEXT_SHADOW_TARGET: &str = "ironclaw::reborn::context_shadow";
-const UNAVAILABLE_CAPABILITY_REPLY: &str = "That capability is unavailable or disabled for this request, so I will not route it through another tool.";
 
 fn trace_model_latency_ok(
     operation: &'static str,
@@ -261,13 +261,16 @@ where
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
             Arc::new(EphemeralInstructionMaterializationStore::default());
         let context_window_cache = Arc::new(ThreadContextWindowCache::default());
-        self.issue_host_prompt_bundle(
-            &request.context,
-            &request.request,
-            Arc::clone(&instruction_materialization_store),
-            Arc::clone(&context_window_cache),
-        )
-        .await?;
+        let prompt_bundle = self
+            .issue_host_prompt_bundle(
+                &request.context,
+                &request.request,
+                Arc::clone(&instruction_materialization_store),
+                Arc::clone(&context_window_cache),
+            )
+            .await?;
+        let mut request = request;
+        request.request.messages = prompt_bundle.messages;
         let mut port = ThreadBackedLoopModelPort::new(
             Arc::clone(&self.thread_service),
             self.thread_scope.clone(),
@@ -310,7 +313,7 @@ where
         request: &LoopModelRequest,
         instruction_materialization_store: Arc<dyn InstructionMaterializationStore>,
         context_window_cache: Arc<ThreadContextWindowCache>,
-    ) -> Result<(), LoopModelGatewayError> {
+    ) -> Result<ironclaw_loop_contracts::LoopPromptBundle, LoopModelGatewayError> {
         let context_port = Arc::new(
             ThreadBackedLoopContextPort::new(
                 Arc::clone(&self.thread_service),
@@ -335,7 +338,7 @@ where
                 checkpoint_state_ref: None,
                 max_messages: Some(self.max_messages.min(u32::MAX as usize) as u32),
                 inline_messages: request.inline_messages.clone(),
-                capability_view: None,
+                capability_view: request.capability_view.clone(),
             })
             .await
             .map_err(host_error_to_model_gateway_error)?;
@@ -353,7 +356,7 @@ where
             )));
         }
 
-        Ok(())
+        Ok(prompt_bundle)
     }
 }
 
@@ -403,6 +406,24 @@ impl<P> HostManagedModelGateway for LlmProviderModelGateway<P>
 where
     P: LlmProvider + ?Sized + Send + Sync,
 {
+    fn diagnostic_effective_model(
+        &self,
+        model_profile_id: &ModelProfileId,
+        fallback_index: u32,
+        resolved_model_route: Option<&HostManagedModelRouteSnapshot>,
+    ) -> Option<ProviderModelId> {
+        let route = self.policy.route_for(model_profile_id)?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            resolved_model_route.map(HostManagedModelRouteSnapshot::model_id),
+        )
+        .ok()?;
+        resolve_fallback_route(self.provider.as_ref(), fallback_index, &model_override)
+            .ok()
+            .and_then(|route| ProviderModelId::new(route.model).ok())
+    }
+
     async fn stream_model(
         &self,
         request: HostManagedModelRequest,
@@ -435,19 +456,22 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             self.provider.as_ref(),
             completion,
             None,
             None,
             None,
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 
     async fn stream_model_with_progress(
@@ -483,19 +507,22 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             self.provider.as_ref(),
             completion,
             None,
             None,
             Some(sink),
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 
     async fn stream_model_with_capabilities(
@@ -531,23 +558,26 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
         let provider_turn_scope = format!(
             "run={run_id}\nturn={turn_id}\nmodel_call={}",
             self.provider_turn_sequence.fetch_add(1, Ordering::Relaxed)
         );
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             self.provider.as_ref(),
             completion,
             Some(capabilities),
             Some(provider_turn_scope),
             None,
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 
     async fn stream_model_with_capabilities_and_progress(
@@ -584,23 +614,26 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
         let provider_turn_scope = format!(
             "run={run_id}\nturn={turn_id}\nmodel_call={}",
             self.provider_turn_sequence.fetch_add(1, Ordering::Relaxed)
         );
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             self.provider.as_ref(),
             completion,
             Some(capabilities),
             Some(provider_turn_scope),
             Some(sink),
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 }
 
@@ -762,20 +795,23 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             provider.as_ref(),
             completion,
             None,
             None,
             None,
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 
     async fn stream_model_with_progress(
@@ -803,20 +839,23 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             provider.as_ref(),
             completion,
             None,
             None,
             Some(sink),
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 
     async fn stream_model_with_capabilities(
@@ -844,6 +883,7 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
@@ -851,17 +891,19 @@ where
             "run={run_id}\nturn={turn_id}\nmodel_call={}",
             self.provider_turn_sequence.fetch_add(1, Ordering::Relaxed)
         );
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             provider.as_ref(),
             completion,
             Some(capabilities),
             Some(provider_turn_scope),
             None,
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 
     async fn stream_model_with_capabilities_and_progress(
@@ -890,6 +932,7 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
@@ -897,17 +940,19 @@ where
             "run={run_id}\nturn={turn_id}\nmodel_call={}",
             self.provider_turn_sequence.fetch_add(1, Ordering::Relaxed)
         );
-        complete_model_request(
+        let diagnostic_effective_model = replay_identity.provider_model_id.clone();
+        let result = complete_model_request(
             provider.as_ref(),
             completion,
             Some(capabilities),
             Some(provider_turn_scope),
             Some(sink),
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
-        .await
-        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
+        .await;
+        with_model_diagnostic_evidence(result, effective_fallback_index, diagnostic_effective_model)
     }
 }
 
@@ -947,6 +992,20 @@ fn add_request_metadata(
     completion
         .metadata
         .insert("run_id".to_string(), run_id.to_string());
+}
+
+fn with_model_diagnostic_evidence(
+    result: Result<HostManagedModelResponse, HostManagedModelError>,
+    effective_fallback_index: u32,
+    effective_model: String,
+) -> Result<HostManagedModelResponse, HostManagedModelError> {
+    result
+        .map(|response| {
+            response
+                .with_effective_fallback_index(effective_fallback_index)
+                .with_diagnostic_effective_model(effective_model.clone())
+        })
+        .map_err(|error| error.with_diagnostic_effective_model(effective_model))
 }
 
 fn resolve_fallback_route<P>(
@@ -1212,6 +1271,8 @@ impl ProviderReplayIdentity {
 struct ProviderRequestContext {
     replay_identity: ProviderReplayIdentity,
     next_fallback_index: Option<u32>,
+    /// Strategy-imposed provider tool-choice constraint for this call.
+    tool_choice: Option<ironclaw_loop_contracts::LoopModelToolChoice>,
 }
 
 impl ProviderRequestContext {
@@ -1219,7 +1280,16 @@ impl ProviderRequestContext {
         Self {
             replay_identity,
             next_fallback_index,
+            tool_choice: None,
         }
+    }
+
+    fn with_tool_choice(
+        mut self,
+        tool_choice: Option<ironclaw_loop_contracts::LoopModelToolChoice>,
+    ) -> Self {
+        self.tool_choice = tool_choice;
+        self
     }
 }
 
@@ -1321,7 +1391,7 @@ impl CompletionStreamSink for ProviderStreamSink {
 )]
 async fn complete_model_request<P>(
     provider: &P,
-    completion: CompletionRequest,
+    mut completion: CompletionRequest,
     capabilities: Option<Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>>,
     provider_turn_scope: Option<String>,
     stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
@@ -1334,7 +1404,25 @@ where
     let ProviderRequestContext {
         replay_identity,
         next_fallback_index,
+        tool_choice,
     } = request_context;
+    let redaction_started_at = Instant::now();
+    let redaction_count = redact_completion_request(&mut completion);
+    if tracing::enabled!(target: CONTEXT_SHADOW_TARGET, tracing::Level::DEBUG) {
+        debug!(
+            target: CONTEXT_SHADOW_TARGET,
+            message_count = completion.messages.len(),
+            redaction_count,
+            elapsed_micros = redaction_started_at.elapsed().as_micros(),
+            "reborn provider-bound message redaction shadow measurement"
+        );
+    }
+    if redaction_count > 0 {
+        debug!(
+            redaction_count,
+            "reborn model gateway redacted provider-bound message content"
+        );
+    }
     let system_prompt_hash = system_prompt_cache_signature(&completion.messages);
     if let Some(capabilities) = capabilities {
         let tool_definitions = capabilities
@@ -1362,19 +1450,56 @@ where
             );
         }
         if !tool_definitions.is_empty() {
-            let unavailable_capability_guard =
-                unavailable_requested_capability_guard(&completion.messages, &tool_definitions);
+            // A strategy-forced tool choice must name a capability on the
+            // visible tool surface; resolving through the definitions keeps
+            // capability→provider-name mapping in one place and rejects a
+            // forced capability the model could not actually call.
+            let forced_provider_tool_name = match tool_choice.as_ref() {
+                Some(ironclaw_loop_contracts::LoopModelToolChoice::ForcedCapability {
+                    capability_id,
+                }) => Some(
+                    tool_definitions
+                        .iter()
+                        .find(|definition| &definition.capability_id == capability_id)
+                        .map(|definition| definition.name.as_str().to_string())
+                        .ok_or_else(|| {
+                            HostManagedModelError::safe(
+                                HostManagedModelErrorKind::InvalidRequest,
+                                "forced tool choice is not on the visible tool surface",
+                            )
+                        })?,
+                ),
+                None => None,
+            };
             let mut recovery_tool_names = Vec::with_capacity(tool_definitions.len());
-            let llm_tool_definitions = tool_definitions
+            let mut llm_tool_definitions = tool_definitions
                 .into_iter()
                 .map(|definition| {
                     recovery_tool_names.push(definition.name.as_str().to_string());
                     provider_tool_definition_to_llm(definition)
                 })
                 .collect::<Vec<_>>();
+            let tool_redaction_started_at = Instant::now();
+            let tool_redaction_count = redact_tool_definitions(&mut llm_tool_definitions);
+            if tracing::enabled!(target: CONTEXT_SHADOW_TARGET, tracing::Level::DEBUG) {
+                debug!(
+                    target: CONTEXT_SHADOW_TARGET,
+                    tool_definition_count = llm_tool_definitions.len(),
+                    redaction_count = tool_redaction_count,
+                    elapsed_micros = tool_redaction_started_at.elapsed().as_micros(),
+                    "reborn provider-bound tool redaction shadow measurement"
+                );
+            }
+            if tool_redaction_count > 0 {
+                debug!(
+                    redaction_count = tool_redaction_count,
+                    "reborn model gateway redacted provider-bound tool metadata"
+                );
+            }
             let tool_definitions_hash = tool_definitions_cache_signature(&recovery_tool_names);
-            let tool_request =
+            let mut tool_request =
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
+            tool_request.tool_choice = forced_provider_tool_name;
             debug!("reborn model gateway dispatching tool-capable provider request");
             let provider_started_at = live_latency_started_at();
             let response = match if let Some(stream_sink) = stream_sink.as_ref() {
@@ -1424,7 +1549,6 @@ where
                     .as_deref()
                     .unwrap_or("model_call=unknown"),
                 &replay_identity,
-                unavailable_capability_guard.as_ref(),
             )
             .await
             {
@@ -1456,6 +1580,14 @@ where
                             &response,
                             error.safe_summary.as_str(),
                         ));
+                    let repair_redaction_count =
+                        redact_tool_completion_request(&mut repair_request);
+                    if repair_redaction_count > 0 {
+                        debug!(
+                            redaction_count = repair_redaction_count,
+                            "reborn model gateway redacted provider-bound repair content"
+                        );
+                    }
                     let rejected_response = response;
                     let retry_started_at = live_latency_started_at();
                     let response = match provider.complete_with_tools(repair_request).await {
@@ -1499,7 +1631,6 @@ where
                             .as_deref()
                             .unwrap_or("model_call=unknown"),
                         &replay_identity,
-                        unavailable_capability_guard.as_ref(),
                     )
                     .await;
                     match &result {
@@ -1538,6 +1669,15 @@ where
         debug!(
             "reborn model gateway dispatching text-only provider request because no capability port was supplied"
         );
+    }
+
+    if tool_choice.is_some() {
+        // Reaching the text-only path with a forced tool choice means the
+        // caller constrained a call that has no tool surface at all.
+        return Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "forced tool choice requires a tool-capable model call",
+        ));
     }
 
     let provider_started_at = live_latency_started_at();
@@ -1658,7 +1798,9 @@ fn estimate_tool_schema_tokens(definitions: &[ProviderToolDefinition]) -> u32 {
             "description": definition.description.as_str(),
             "parameters": &definition.parameters,
         });
-        total.saturating_add(crate::context_shadow::estimate_tokens(&schema.to_string()))
+        total.saturating_add(
+            crate::estimate_tokens_from_chars(&schema.to_string()).saturating_as_u32(),
+        )
     })
 }
 
@@ -1676,7 +1818,6 @@ async fn tool_response_to_host(
     capabilities: Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
     provider_turn_scope: &str,
     replay_identity: &ProviderReplayIdentity,
-    unavailable_capability_guard: Option<&UnavailableCapabilityGuard>,
 ) -> Result<HostManagedModelResponse, HostManagedModelError> {
     if tracing::enabled!(tracing::Level::DEBUG) {
         let tool_call_name_sample = response
@@ -1699,23 +1840,6 @@ async fn tool_response_to_host(
             FinishReason::ToolUse | FinishReason::Stop
         )
     {
-        if let Some(guard) = unavailable_capability_guard {
-            debug!(
-                requested_capability_id = %guard.capability_id,
-                tool_call_count = response.tool_calls.len(),
-                "reborn model gateway suppressed provider tool calls after unavailable named capability request"
-            );
-            return Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
-                UNAVAILABLE_CAPABILITY_REPLY,
-                response.reasoning,
-            )
-            .with_usage(LoopModelUsage {
-                input_tokens: response.input_tokens,
-                output_tokens: response.output_tokens,
-                cache_read_input_tokens: response.cache_read_input_tokens,
-                cache_creation_input_tokens: response.cache_creation_input_tokens,
-            }));
-        }
         let advertised_tool_names = capabilities
             .tool_definitions()
             .map_err(map_capability_host_error)?
@@ -1879,190 +2003,6 @@ fn provider_calls_are_advertised_or_resolvable(
         }
     }
     true
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct UnavailableCapabilityGuard {
-    capability_id: CapabilityId,
-}
-
-fn unavailable_requested_capability_guard(
-    messages: &[ChatMessage],
-    tool_definitions: &[ProviderToolDefinition],
-) -> Option<UnavailableCapabilityGuard> {
-    let latest_user = messages
-        .iter()
-        .rev()
-        .find(|message| message.role == Role::User)?;
-    let visible_capability_ids = tool_definitions
-        .iter()
-        .map(|definition| definition.capability_id.as_str())
-        .collect::<HashSet<_>>();
-    // Namespaces the agent actually has (a visible capability shares the prefix,
-    // e.g. `builtin`). Used only to rescue backticked references to REAL
-    // capability namespaces from the inline-code skip — a backticked `builtin.echo`
-    // is still a request, whereas a backticked `playwright.sync_api` (a library
-    // whose namespace this agent doesn't have) is a code reference.
-    let visible_namespaces = visible_capability_ids
-        .iter()
-        .filter_map(|id| id.split('.').next())
-        .collect::<HashSet<_>>();
-
-    extract_explicit_capability_request_ids(&latest_user.content, &visible_namespaces)
-        .into_iter()
-        .find(|capability_id| !visible_capability_ids.contains(capability_id.as_str()))
-        .map(|capability_id| UnavailableCapabilityGuard { capability_id })
-}
-
-fn extract_explicit_capability_request_ids(
-    content: &str,
-    visible_namespaces: &HashSet<&str>,
-) -> Vec<CapabilityId> {
-    let mut ids = Vec::new();
-    let mut token_start = None;
-    // Track Markdown inline-code parity (per line) in this same single pass so we
-    // never rescan the line for each token — one long user line with many
-    // capability-shaped tokens would otherwise be O(n^2).
-    let mut in_inline_code = false;
-    let mut token_in_code = false;
-    for (index, character) in content.char_indices() {
-        if is_capability_token_char(character) {
-            if token_start.is_none() {
-                token_start = Some(index);
-                token_in_code = in_inline_code;
-            }
-            continue;
-        }
-        if let Some(start) = token_start.take() {
-            push_explicit_capability_request_token(
-                content,
-                start,
-                index,
-                token_in_code,
-                visible_namespaces,
-                &mut ids,
-            );
-        }
-        match character {
-            '\n' => in_inline_code = false,
-            '`' => in_inline_code = !in_inline_code,
-            _ => {}
-        }
-    }
-    if let Some(start) = token_start {
-        push_explicit_capability_request_token(
-            content,
-            start,
-            content.len(),
-            token_in_code,
-            visible_namespaces,
-            &mut ids,
-        );
-    }
-    ids
-}
-
-fn is_capability_token_char(character: char) -> bool {
-    character.is_ascii_lowercase()
-        || character.is_ascii_digit()
-        || matches!(character, '_' | '-' | '.')
-}
-
-fn push_explicit_capability_request_token(
-    content: &str,
-    start: usize,
-    end: usize,
-    in_inline_code: bool,
-    visible_namespaces: &HashSet<&str>,
-    ids: &mut Vec<CapabilityId>,
-) {
-    let token = &content[start..end];
-    if !is_likely_capability_reference(token)
-        || !is_explicit_capability_request_token(content, start, end)
-    {
-        return;
-    }
-    // Tokens written in Markdown inline code (e.g. "use `playwright.sync_api`", a
-    // Python module) are code references, not capability requests — ignore them.
-    // Two exceptions keep genuine requests covered even when backticked:
-    //  - the prompt explicitly labels the token a tool/capability
-    //    ("use the `builtin.http` capability"), or
-    //  - the token names a real capability namespace this agent has
-    //    (`builtin.echo` — `builtin` is a live namespace, unlike `playwright`).
-    if in_inline_code
-        && !has_capability_noun_context(content, start, end)
-        && !token_namespace_is_visible(token, visible_namespaces)
-    {
-        return;
-    }
-    if let Ok(capability_id) = CapabilityId::new(token)
-        && !ids.iter().any(|existing| existing == &capability_id)
-    {
-        ids.push(capability_id);
-    }
-}
-
-fn is_likely_capability_reference(token: &str) -> bool {
-    // A decimal number lifted from prose (e.g. "use 0.95 in formulas") tokenizes
-    // as `digits.digits`, which satisfies the `namespace.name` shape below and is
-    // otherwise mistaken for an explicitly requested capability id. That trips the
-    // unavailable-capability guard and suppresses the entire turn's tool calls,
-    // stranding the model ("…will not route it through another tool"). A real
-    // capability id is never a bare number, so reject anything that parses as one.
-    if token.parse::<f64>().is_ok() {
-        return false;
-    }
-    token.starts_with("builtin.") || token.split('.').count() == 2
-}
-
-/// True when the token's namespace (its first dotted segment) is one the agent
-/// actually has — a backticked reference to a real capability namespace is still
-/// a request, unlike a library reference (`playwright.sync_api`).
-fn token_namespace_is_visible(token: &str, visible_namespaces: &HashSet<&str>) -> bool {
-    token
-        .split('.')
-        .next()
-        .is_some_and(|namespace| visible_namespaces.contains(namespace))
-}
-
-/// The request-word immediately before `start` (alphanumeric/`_`/`-` run).
-fn previous_request_word(content: &str, start: usize) -> Option<&str> {
-    content[..start]
-        .trim_end()
-        .rsplit(|character: char| !is_capability_request_word_char(character))
-        .find(|word| !word.is_empty())
-}
-
-/// True when the word right before or after the token is an explicit "tool" /
-/// "capability" noun — the prompt is calling the token out as a capability, so
-/// it's a genuine request even when written in backticks.
-fn has_capability_noun_context(content: &str, start: usize, end: usize) -> bool {
-    let next_word = content[end..]
-        .trim_start()
-        .split(|character: char| !is_capability_request_word_char(character))
-        .find(|word| !word.is_empty());
-    previous_request_word(content, start).is_some_and(is_capability_request_noun)
-        || next_word.is_some_and(is_capability_request_noun)
-}
-
-fn is_explicit_capability_request_token(content: &str, start: usize, end: usize) -> bool {
-    previous_request_word(content, start).is_some_and(is_capability_request_verb)
-        || has_capability_noun_context(content, start, end)
-}
-
-fn is_capability_request_word_char(character: char) -> bool {
-    character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
-}
-
-fn is_capability_request_verb(word: &str) -> bool {
-    matches!(
-        word.to_ascii_lowercase().as_str(),
-        "use" | "using" | "call" | "run" | "execute" | "invoke"
-    )
-}
-
-fn is_capability_request_noun(word: &str) -> bool {
-    matches!(word.to_ascii_lowercase().as_str(), "tool" | "capability")
 }
 
 fn provider_tool_call_from_llm(
@@ -2247,7 +2187,8 @@ fn map_provider_tool_output_error(error: AgentLoopHostError) -> HostManagedModel
 fn is_repairable_provider_tool_output_error(error: &HostManagedModelError) -> bool {
     error.kind == HostManagedModelErrorKind::InvalidOutput
         && (is_provider_arguments_too_large_summary(&error.safe_summary)
-            || is_provider_tool_arguments_parse_error_summary(&error.safe_summary))
+            || is_provider_tool_arguments_parse_error_summary(&error.safe_summary)
+            || error.safe_summary == InvalidOutputReason::OutsideCapabilitySurface.safe_summary())
 }
 
 fn is_provider_tool_arguments_parse_error_summary(safe_summary: &str) -> bool {
@@ -2291,7 +2232,7 @@ fn provider_tool_repair_result_content(tool_call: &ToolCall, safe_summary: &str)
         content.push_str(parse_error);
     }
     content.push_str(
-        "\n\nNone of this response's tool calls were executed. Retry with valid JSON arguments or answer directly without this tool if it is not needed.",
+        "\n\nNone of this response's tool calls were executed. Retry with an available capability and valid arguments, or answer directly without the rejected tool.",
     );
     content
 }
@@ -2528,6 +2469,14 @@ fn provider_replay_matches_identity(
     provider_call: &ProviderToolCallReferenceEnvelope,
     expected: &ProviderReplayIdentity,
 ) -> bool {
+    // Seeded prepared-context tool history carries the host-owned sentinel
+    // identity: replay it as a faithful tool round on ANY route. The
+    // carve-out is exact-match on the sentinel only; the accept door forces
+    // `signature: None` on seeded envelopes, so this can never smuggle a
+    // real route's replay artifacts.
+    if provider_call.provider_id == ironclaw_threads::PREPARED_SEED_PROVIDER_ID {
+        return true;
+    }
     provider_call.provider_id == expected.provider_id
         && provider_call.provider_model_id == expected.provider_model_id
 }
@@ -2545,6 +2494,13 @@ fn validate_provider_replay_identity(
             error,
         )
     })?;
+    // Seeded prepared-context envelopes carry the host-owned sentinel
+    // identity; route equality is not applicable to them (the match gate in
+    // `provider_replay_matches_identity` admits them on ANY route, and the
+    // accept door forces `signature: None` on seeded envelopes).
+    if provider_call.provider_id == ironclaw_threads::PREPARED_SEED_PROVIDER_ID {
+        return Ok(());
+    }
     if provider_call.provider_id != expected.provider_id
         || provider_call.provider_model_id != expected.provider_model_id
     {
@@ -2835,6 +2791,80 @@ mod tests {
     use std::time::Duration;
 
     #[derive(Default)]
+    struct StopSequenceRecordingProvider {
+        requests: Mutex<Vec<CompletionRequest>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for StopSequenceRecordingProvider {
+        fn model_name(&self) -> &str {
+            "stop-sequence-recording-model"
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            Default::default()
+        }
+
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request);
+            Ok(CompletionResponse {
+                content: "done".to_string(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            unreachable!("the stop-sequence test has no tool surface")
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_model_request_redacts_stop_sequences_before_provider_dispatch() {
+        let provider = StopSequenceRecordingProvider::default();
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        request.stop_sequences = Some(vec!["password: swordfish".to_string()]);
+        let replay_identity =
+            ProviderReplayIdentity::new("stop-sequence-recording-provider", provider.model_name())
+                .unwrap();
+
+        complete_model_request(
+            &provider,
+            request,
+            None,
+            None,
+            None,
+            ProviderRequestContext::new(replay_identity, None),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let requests = provider
+            .requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].stop_sequences,
+            Some(vec!["password: [REDACTED_SECRET]".to_string()])
+        );
+    }
+
+    #[derive(Default)]
     struct RecordingSafeTextSink {
         updates: Mutex<Vec<String>>,
     }
@@ -2936,84 +2966,6 @@ mod tests {
             Some(1),
         );
         assert_eq!(auth.next_fallback_index, None);
-    }
-
-    fn tool_def(capability_id: &str, name: &str) -> ProviderToolDefinition {
-        ProviderToolDefinition {
-            capability_id: CapabilityId::new(capability_id).unwrap(),
-            name: ProviderToolName::new(name).unwrap(),
-            description: String::new(),
-            description_trust: Default::default(),
-            parameters: serde_json::json!({}),
-        }
-    }
-
-    #[test]
-    fn guard_ignores_incidental_code_references() {
-        // The playwright/browser tasks literally instruct: "use `playwright.sync_api`"
-        // — a Python module named right after a request verb. That is NOT a
-        // capability request; the guard must not fire and suppress the model's
-        // legitimate write_file calls.
-        let messages = vec![ChatMessage::user(
-            "Read form.html, then use `playwright.sync_api` (Python sync API) to \
-             write an end-to-end test saved as test_form.py.",
-        )];
-        let tools = vec![
-            tool_def("builtin.write_file", "builtin__write_file"),
-            tool_def("builtin.read_file", "builtin__read_file"),
-        ];
-        assert!(
-            unavailable_requested_capability_guard(&messages, &tools).is_none(),
-            "guard must not misfire on the code reference `playwright.sync_api`"
-        );
-    }
-
-    #[test]
-    fn guard_still_fires_on_real_disabled_capability() {
-        // A genuine, un-backticked request for a capability that isn't visible must
-        // still fire (`builtin.http` is gated off here).
-        let messages = vec![ChatMessage::user(
-            "Fetch the page using the builtin.http capability.",
-        )];
-        let tools = vec![tool_def("builtin.write_file", "builtin__write_file")];
-        let guard = unavailable_requested_capability_guard(&messages, &tools);
-        assert!(
-            guard.is_some(),
-            "guard should still fire for a real builtin capability that is disabled"
-        );
-        assert_eq!(guard.unwrap().capability_id.as_str(), "builtin.http");
-    }
-
-    #[test]
-    fn guard_fires_on_backticked_capability_with_explicit_noun() {
-        // Backticks alone don't excuse a request the prompt explicitly labels a
-        // capability/tool — the inline-code skip must not swallow a genuine
-        // request. Here `builtin.http` is backticked but called a "capability".
-        let messages = vec![ChatMessage::user(
-            "Fetch the page using the `builtin.http` capability.",
-        )];
-        let tools = vec![tool_def("builtin.write_file", "builtin__write_file")];
-        let guard = unavailable_requested_capability_guard(&messages, &tools);
-        assert!(
-            guard.is_some(),
-            "explicitly-labeled capability must still fire even when backticked"
-        );
-        assert_eq!(guard.unwrap().capability_id.as_str(), "builtin.http");
-    }
-
-    #[test]
-    fn guard_fires_on_backticked_known_namespace_capability() {
-        // A backticked reference to a REAL capability namespace this agent has
-        // (`builtin`) is still a request, even with only a request verb and no
-        // tool/capability noun — unlike a library ref such as `playwright.sync_api`.
-        let messages = vec![ChatMessage::user("Use `builtin.echo` to print the banner.")];
-        let tools = vec![tool_def("builtin.write_file", "builtin__write_file")];
-        let guard = unavailable_requested_capability_guard(&messages, &tools);
-        assert!(
-            guard.is_some(),
-            "backticked known-namespace capability must still fire"
-        );
-        assert_eq!(guard.unwrap().capability_id.as_str(), "builtin.echo");
     }
 
     #[test]
@@ -3607,42 +3559,6 @@ mod tests {
             repair_assistant.reasoning_details,
             Some(expected_reasoning),
             "repaired assistant message must preserve typed reasoning_details"
-        );
-    }
-
-    #[test]
-    fn is_likely_capability_reference_rejects_decimal_numbers() {
-        // Decimals from prose ("use 0.95 in formulas") tokenize as `digits.digits`
-        // and must NOT be treated as capability references — that false positive
-        // trips the unavailable-capability guard and suppresses the whole turn.
-        for token in ["0.95", "1.5", "95.0", "3.524", "0.0158"] {
-            assert!(
-                !is_likely_capability_reference(token),
-                "decimal {token} must not look like a capability reference"
-            );
-        }
-        // Real capability ids are still recognized.
-        for token in ["builtin.shell", "builtin.read_file", "gmail.send"] {
-            assert!(
-                is_likely_capability_reference(token),
-                "{token} should be a capability reference"
-            );
-        }
-    }
-
-    #[test]
-    fn guard_ignores_decimal_in_prose() {
-        // Regression for OfficeQA UID0242: the prompt "compute the
-        // correlation-adjusted 95% = 0.95 (use 0.95 in formulas)" previously had
-        // "0.95" extracted as an explicitly requested (but unavailable) capability,
-        // suppressing every tool call so the model gave up.
-        let messages = vec![ChatMessage::user(
-            "compute the correlation-adjusted 95% = 0.95 (use 0.95 in formulas)",
-        )];
-        let tools = vec![tool_def("builtin.shell", "builtin__shell")];
-        assert!(
-            unavailable_requested_capability_guard(&messages, &tools).is_none(),
-            "guard must not misfire on the decimal `0.95`"
         );
     }
 }

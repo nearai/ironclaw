@@ -8,10 +8,12 @@ mod support;
 
 use std::time::Duration;
 
-use ironclaw_assistant::ProductInboundAck;
 use ironclaw_loop_host::HostManagedModelResponse;
+use ironclaw_product_contracts::inbound::ProductInboundAck;
 use ironclaw_turns::TurnStatus;
-use parity_qa_support::binary_e2e::{RebornBinaryE2EHarness, RebornHarnessSharedStorage};
+use parity_qa_support::binary_e2e::{
+    HarnessWaitConfig, RebornBinaryE2EHarness, RebornHarnessSharedStorage,
+};
 use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
 use reborn_support::harness::{RecordingTestCapabilityPort, test_product_scope};
 
@@ -101,7 +103,15 @@ async fn reborn_user_submit_completes_while_another_turn_state_write_is_blocked(
     assert!(matches!(live.ack, ProductInboundAck::Accepted { .. }));
 
     live_harness
-        .wait_for_submitted_status(&live, TurnStatus::Completed)
+        .wait_for_status_in_scope_with_config(
+            live.scope.clone(),
+            live.run_id,
+            TurnStatus::Completed,
+            HarnessWaitConfig {
+                timeout: LOCK_FREE_SUBMIT_TIMEOUT,
+                poll_interval: Duration::from_millis(10),
+            },
+        )
         .await
         .expect("live run should complete while the first writer remains blocked");
 

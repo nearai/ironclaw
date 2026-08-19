@@ -638,6 +638,33 @@ fn capability_provider_host_api_allows_missing_prompt_doc_ref() {
 }
 
 #[test]
+fn capability_provider_host_api_rejects_invalid_output_schema_ref() {
+    let manifest = CAPABILITY_PROVIDER_MANIFEST.replace(
+        "output_schema_ref = \"schemas/telegram/send_message.output.v1.json\"",
+        "output_schema_ref = \"../send_message.output.v1.json\"",
+    );
+
+    let error = ExtensionManifest::parse(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
+    )
+    .expect_err("output schema refs must remain relative to the package root");
+
+    assert!(
+        matches!(
+            error,
+            ExtensionError::ManifestV2(ManifestV2Error::InvalidSchemaRef {
+                field: "output_schema_ref",
+                ..
+            })
+        ),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[test]
 fn capability_provider_host_api_rejects_duplicate_capability_ids() {
     let manifest = CAPABILITY_PROVIDER_MANIFEST.replace(
         "[[capability_provider.tools.capabilities]]",

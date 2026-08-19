@@ -247,15 +247,6 @@ async fn subscribe_resume_maps_projection_update_errors() {
             ProjectionStreamError::Source,
         ),
         (
-            ProjectionError::TurnEventRebaseRequired {
-                requested: ironclaw_host_api::turn::EventCursor(0),
-                earliest: ironclaw_host_api::turn::EventCursor(5),
-            },
-            ProjectionStreamError::InvalidRequest {
-                reason: "turn event projection rebase required outside subscribe flow",
-            },
-        ),
-        (
             ProjectionError::MissingProjectionMetadata {
                 field: ironclaw_event_projections::MissingMetadataField::OwnerUserId,
             },

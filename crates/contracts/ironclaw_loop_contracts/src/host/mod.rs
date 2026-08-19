@@ -20,7 +20,7 @@ pub use capability::{
     AuthResumeApprovalIdentity, CapabilityApprovalResume, CapabilityAuthResume,
     CapabilityDeniedReasonKind, CapabilityDeniedReasonKindValue, CapabilityDescriptionTrust,
     CapabilityDescriptorView, CapabilityFailure, CapabilityProgress, CapabilityResultMessage,
-    ConcurrencyHint, LoopCapabilityPort, LoopRequest, LoopRequestBatch, ProviderToolCall,
+    LoopCapabilityPort, LoopRequest, LoopRequestBatch, ProviderToolCall,
     ProviderToolCallCapabilityIds, ProviderToolCallReference, ProviderToolCallReplay,
     ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
     VisibleCapabilitySurface,
@@ -33,7 +33,7 @@ pub use context::{
     LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES,
     LoopContextBundle, LoopContextCompactionKind, LoopContextCompactionMetadata,
     LoopContextMessage, LoopContextPort, LoopContextRequest, LoopContextSnippet,
-    LoopContextSnippetMetadata, LoopInputCursor,
+    LoopContextSnippetMetadata, LoopContextWindowTruncation, LoopInputCursor,
 };
 pub use error::{AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind};
 pub use input::{
@@ -42,8 +42,9 @@ pub use input::{
 pub use model::{
     AssistantReply, CapabilityCallCandidate, LoopInlineMessage, LoopInlineMessageRole,
     LoopModelCapabilityView, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
-    LoopModelUsage, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleGrant,
-    LoopPromptBundleRequest, LoopPromptPort, ModelStreamChunk, ParentLoopOutput, PromptMode,
+    LoopModelToolChoice, LoopModelUsage, LoopPromptBundle, LoopPromptBundleAuthority,
+    LoopPromptBundleGrant, LoopPromptBundleRequest, LoopPromptDiagnosticMetadata, LoopPromptPort,
+    ModelStreamChunk, ParentLoopOutput, PromptMode,
 };
 pub use progress::{
     AgentLoopDriverHost, BatchPolicyKind, LoopCancellationPort, LoopCancellationSignal,
@@ -57,7 +58,7 @@ pub use refs::{
 };
 pub use run_context::{LoopModelRouteSnapshot, LoopRunContext, LoopRunInfoPort};
 pub use transcript::{
-    AppendCapabilityResultRef, BeginAssistantDraft, FinalizeAssistantMessage, LoopTranscriptPort,
-    UpdateAssistantDraft,
+    AppendCapabilityResultRef, BeginAssistantDraft, CapabilityResultIntrinsicOutcome,
+    FinalizeAssistantMessage, LoopTranscriptPort, UpdateAssistantDraft,
 };
 pub use validate::{sanitize_model_visible_text, validate_model_route_component_value};

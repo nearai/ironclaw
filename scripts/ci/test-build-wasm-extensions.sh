@@ -13,7 +13,7 @@
 # Why this file exists: the first-party manifest set used to be keyed to the
 # literal crates/extensions/packages/*/manifest.toml glob.
 # Under the target-architecture family move that glob matches nothing even
-# though the manifests are still there (docs/reborn/target-architecture/
+# though the manifests are still there (docs/internal/reborn/target-architecture/
 # CHECKLIST.md WS10, #6963). Discovery now resolves the owning crate by NAME
 # through scripts/ci/lib/crate_tree.py, and these cases pin both that it finds
 # a moved crate and that an empty set still refuses.

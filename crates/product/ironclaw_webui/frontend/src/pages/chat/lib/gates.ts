@@ -5,8 +5,11 @@
 // `resolve_gate` call can fill them into the v2 path params.
 
 // Challenge kinds describe interaction modality, not provider:
-// `manual_token` is a pasted credential, `oauth_url` is a browser relay, and
-// `pairing` presents a host-issued code/deep link/QR flow.
+// `manual_token` is a pasted credential, `oauth_url` is a browser relay,
+// `pairing` presents a host-issued code/deep link/QR flow, and `device_link`
+// walks a vendor's own multi-step "link a device" handshake.
+
+import { deviceLinkFrameFromWire } from "../../../lib/device-link-frame";
 
 // Optional `ChannelConnectionPromptContext` carried on channel authentication
 // gates. Present on the live `auth_required` prompt as `prompt.connection`
@@ -68,6 +71,9 @@ export function gateFromEvent(eventType, prompt) {
       // Channel-pairing gates ride the same `manual_token` rail but carry the
       // connection requirement so the frontend renders the pairing card.
       connection: connectionFromContext(prompt.connection),
+      // Present only on `device_link` challenges: the frame the card paints
+      // while it starts (or resumes) the flow behind it.
+      deviceLink: deviceLinkFrameFromWire(prompt.device_link),
       runId: prompt.turn_run_id,
       // AuthPromptView carries `auth_request_ref`, but v2's resolve
       // path is `/runs/{run_id}/gates/{gate_ref}/resolve` — auth
@@ -115,6 +121,8 @@ export function gateFromProjectionGate(gate) {
       expiresAt: authContext.expires_at || null,
       // Present only for channel-pairing gates (see connectionFromContext).
       connection: connectionFromContext(authContext.connection),
+      // Present only for device-link gates (see deviceLinkFromGate).
+      deviceLink: deviceLinkFrameFromWire(authContext.device_link),
     };
   }
   return {
@@ -137,6 +145,25 @@ export function channelConnectionFromGate(gate) {
   if (!gate || gate.kind !== "auth_required") return null;
   if (gate.challengeKind !== "pairing") return null;
   return gate.connection || null;
+}
+
+// A device-link gate is an auth gate whose challenge kind says so. Both the
+// card selector in chat.tsx and anything that needs the frame derive from this
+// ONE predicate, exactly as `channelConnectionFromGate` does for pairing — a
+// gate can never be a device link to one consumer and a token paste to
+// another.
+//
+// The frame is optional even on a device-link gate: a projection row written
+// before the field existed carries none, and the card starts a flow of its own
+// rather than refusing to render.
+export function deviceLinkFromGate(gate) {
+  if (!gate || gate.kind !== "auth_required") return null;
+  if (gate.challengeKind !== "device_link") return null;
+  return gate.deviceLink || null;
+}
+
+export function gateIsDeviceLink(gate) {
+  return Boolean(gate) && gate.kind === "auth_required" && gate.challengeKind === "device_link";
 }
 
 function gateWithApprovalContext(gate, approvalContext, fallbackDescription) {

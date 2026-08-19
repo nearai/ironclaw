@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The automated deletion test (docs/reborn/extension-runtime/overview.md §8,
+# The automated deletion test (docs/internal/reborn/extension-runtime/overview.md §8,
 # checklist DEL-9): every generic Reborn crate's dependency graph must be free
 # of concrete extension crates, and its tests must pass without them.
 #
@@ -7,7 +7,7 @@
 # workspace crate declaring a Reborn layer — minus the concrete extension
 # crates themselves, the package inventory crate, and the sanctioned
 # assemblers (the binary and the architecture test crate).
-# This mirrors `crates/ironclaw_architecture_tests/tests/reborn_extension_specificity.rs`;
+# This mirrors `crates/app/ironclaw_architecture_tests/tests/reborn_extension_specificity.rs`;
 # keep the two lists in sync.
 #
 # TEMPORARY_EXCEPTIONS below mirrors CONCRETE_DEPENDENCY_EXCEPTIONS in that

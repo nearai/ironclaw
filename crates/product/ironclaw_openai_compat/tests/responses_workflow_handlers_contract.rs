@@ -11,11 +11,8 @@ use async_trait::async_trait;
 use axum::body::Body;
 use http::Request;
 use http_body_util::BodyExt;
-use ironclaw_assistant::{
-    AuthRequirement, ProductInboundAck, ProductInboundPayload, ProductOutboundEnvelope,
-    ProductRejection, ProductRejectionKind, ProjectionSubscriptionRequest, ProtocolAuthEvidence,
-};
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
 use ironclaw_openai_compat::{
     OpenAiChatProjectionStreamRequest, OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller,
     OpenAiCompatBindInternalRefs, OpenAiCompatExternalToolResume,
@@ -31,6 +28,11 @@ use ironclaw_openai_compat::{
     OpenAiResponseUsage, OpenAiResponseWaitRequest, OpenAiResponsesMessageRole,
     OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow, openai_compat_router_with_state,
 };
+use ironclaw_product_contracts::inbound::{
+    ProductInboundAck, ProductInboundPayload, ProductRejection, ProductRejectionKind,
+};
+use ironclaw_product_contracts::outbound::ProductOutboundEnvelope;
+use ironclaw_product_contracts::projection::ProjectionSubscriptionRequest;
 use ironclaw_product_contracts::surface::ProductSurface;
 use ironclaw_turns::{AcceptedMessageRef, TurnActor, TurnRunId, TurnScope};
 use serde_json::{Value, json};
@@ -1361,6 +1363,7 @@ fn accepted_ack() -> ProductInboundAck {
     ProductInboundAck::Accepted {
         accepted_message_ref: AcceptedMessageRef::new("msg:test").expect("accepted ref"),
         submitted_run_id: TurnRunId::new(),
+        submission: None,
     }
 }
 
@@ -1368,6 +1371,7 @@ fn deferred_busy_ack() -> ProductInboundAck {
     ProductInboundAck::DeferredBusy {
         accepted_message_ref: AcceptedMessageRef::new("msg:busy").expect("accepted ref"),
         active_run_id: TurnRunId::new(),
+        busy: None,
     }
 }
 
@@ -1375,6 +1379,7 @@ fn rejected_busy_ack() -> ProductInboundAck {
     ProductInboundAck::RejectedBusy {
         accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("accepted ref"),
         active_run_id: None,
+        busy: None,
     }
 }
 

@@ -16,10 +16,14 @@ mod reborn_support;
 #[path = "../../support/mod.rs"]
 mod support;
 
+mod scenario_always_on_memory_recall_libsql;
 mod scenario_disabled_binding_offers_no_memory_tools;
 mod scenario_lifecycle_gates_host_memory_calls;
+mod scenario_memory_retrieval_failure_is_visible;
 mod scenario_memory_search_finds_seeded;
 mod scenario_memory_tree_reflects_structure;
+mod scenario_paraphrased_prompt_recall_libsql;
+mod scenario_proactive_prompt_recall_libsql;
 mod scenario_write_then_read_cross_thread;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
@@ -67,6 +71,51 @@ async fn memory_group_e2e() {
     report.record(
         "disabled_binding_offers_no_memory_tools",
         scenario_disabled_binding_offers_no_memory_tools::run().await,
+    );
+
+    // Scenario 6: production-shaped native memory over libSQL, driven through
+    // the actual runner and captured model prompt rather than a direct service
+    // call. It owns a separate group because the backend/lifecycle binding is
+    // intentionally different from the lightweight shared group above.
+    report.record(
+        "proactive_prompt_recall_libsql",
+        scenario_proactive_prompt_recall_libsql::run().await,
+    );
+
+    // Scenario 7 (#7185): the recall case scenario 6 cannot cover — the reader
+    // opens on a topic sharing no vocabulary with the saved fact, so only the
+    // always-on curated `MEMORY.md` lane can put it in the prompt. Own group,
+    // same libSQL reason as scenario 6.
+    report.record(
+        "always_on_memory_recall_libsql",
+        scenario_always_on_memory_recall_libsql::run().await,
+    );
+
+    // Scenario 8 (#7185): ranked-OR retrieval. A fact saved as one sentence is
+    // recalled by a differently-worded question sharing only some of its
+    // content words — the case every-term (AND) matching silently missed.
+    //
+    // The binary owns the group, per the group-scenario contract. It is a
+    // SEPARATE libSQL group rather than the shared `g` above for scenario 6's
+    // reason (the backend binding differs), and separate from scenarios 6/7 on
+    // purpose: those assert on which snippets reach the prompt, and a ranked
+    // top-N lane over one shared store would couple each scenario's positive
+    // assertion to the documents its siblings happened to seed first.
+    let paraphrase_group = RebornIntegrationGroup::builtin_tools_with_native_memory_libsql()
+        .await
+        .expect("libSQL-backed native memory group builds");
+    report.record(
+        "paraphrased_prompt_recall_libsql",
+        scenario_paraphrased_prompt_recall_libsql::run(&paraphrase_group).await,
+    );
+
+    // Scenario 9 (#7185/#7275 observability): a retrieval/backend FAILURE is
+    // distinguishable from "no matching memory" — same turn, same assertions,
+    // only the bound provider's lane outcome differs. Own groups (the provider
+    // is a construction input).
+    report.record(
+        "memory_retrieval_failure_is_visible",
+        scenario_memory_retrieval_failure_is_visible::run().await,
     );
 
     report.assert_all_passed();

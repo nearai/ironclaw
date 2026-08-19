@@ -21,6 +21,39 @@ branch_percent = 0.0
 # issue = "https://github.com/nearai/ironclaw/issues/NNNN"
 # review_after = "2026-10-30"
 
+[[exemption]]
+path = "crates/contracts/ironclaw_host_api/src/capability.rs"
+lines = [265]
+owner = "@nearai/runtime"
+reason = "Serde-backed struct field declaration has no executable LLVM line record."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_host_runtime/src/capability_catalog.rs"
+lines = [145, 146, 147, 149, 154, 155, 156, 158, 161, 162, 163, 164]
+owner = "@nearai/runtime"
+reason = "Fail-closed guards cover impossible invalid host-compiled schema states behind the typed standard schema ref constructor."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_host_runtime/src/standard_op_output.rs"
+lines = [91]
+branch_lines = [86]
+owner = "@nearai/runtime"
+reason = "Fail-closed validator-cache fallback is unreachable while the compile-checked canonical schema registry remains the sole cache source."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/kernel/ironclaw_host_runtime/src/surface.rs"
+lines = [386, 387, 390]
+owner = "@nearai/runtime"
+reason = "Fail-closed JSON parse guard is unreachable because resolution returns only compile-checked host schema constants."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
 # ---------------------------------------------------------------------------
 # WS1.1 turn-vocabulary move (PR #6967). These lines are a verbatim relocation
 # of existing bodies from `ironclaw_turns` into `ironclaw_host_api::turn`. No
@@ -405,7 +438,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_first_party_extension_ports/src/skill_activation_capability.rs"
+path = "crates/loop/ironclaw_loop_host/src/skill_activation/skill_activation_capability.rs"
 lines = [121]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
@@ -497,7 +530,7 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/loop/ironclaw_turn_runner/src/subagent/await_edge/mod.rs"
-lines = [112, 149]
+lines = [105, 142]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
@@ -969,7 +1002,7 @@ review_after = "2026-11-01"
 
 [[exemption]]
 path = "crates/kernel/ironclaw_turns/src/process_projection/metadata.rs"
-lines = [139, 140, 141]
+lines = [130, 131, 132]
 owner = "@nearai/reborn"
 reason = "serde default fn for legacy persisted rows missing steering_allowed; integration always writes the field. Crate-tier legacy-row deserialization test covers it."
 issue = "https://github.com/nearai/ironclaw/issues/7006"
@@ -1174,11 +1207,10 @@ review_after = "2026-11-02"
 [[exemption]]
 path = "crates/domains/ironclaw_threads/src/filesystem_service/transcript_migration.rs"
 lines = [
-  39, 62, 63, 103, 104, 159, 168, 169, 170, 171,
-  173, 178, 190, 202, 203, 204, 205, 207, 212, 213,
-  214, 216, 221, 222, 233, 238, 239, 241, 273, 274, 275,
+  39, 62, 63, 100, 101, 155, 164, 165, 166, 167,
+  169, 174, 183, 184, 195, 200, 201, 203, 235, 236, 237,
 ]
-branch_lines = [62, 101, 156, 169, 175, 183, 203, 212, 229, 238, 267]
+branch_lines = [62, 98, 152, 165, 171, 179, 191, 200, 229]
 owner = "@nearai/reborn"
 reason = "Contract tests deterministically cover writer-admission BackendBusy, VersionMismatch page retry, bounded exhaustion, successful message/summary rebuild, and durable marker read-back. Residuals are alternate failure sites inside the same bounded state machine, malformed legacy records, disappearing rows, and non-durable marker/backend failures not separately selectable through FaultInjecting."
 issue = "https://github.com/nearai/ironclaw/issues/6974"

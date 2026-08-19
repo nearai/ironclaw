@@ -21,6 +21,50 @@ pub fn standalone_db_path(root: &Path) -> PathBuf {
     root.join(STANDALONE_DB_FILENAME)
 }
 
+/// Read a file back out of the standalone database, for tests that assert WHERE a skill landed.
+/// Skill writes go to the DB-backed filesystem, so a `storage_root.join(...).exists()` check asks
+/// the wrong question (nearai/ironclaw#7168).
+#[cfg(test)]
+pub(crate) async fn database_file_bytes(
+    storage_root: &Path,
+    virtual_path: &str,
+) -> Option<Vec<u8>> {
+    let db = Arc::new(
+        libsql::Builder::new_local(standalone_db_path(storage_root))
+            .build()
+            .await
+            .expect("open standalone libsql database"),
+    );
+    let vfs = LibSqlRootFilesystem::new(db).expect("libsql root filesystem");
+    vfs.run_migrations().await.expect("libsql migrations");
+    let path = VirtualPath::new(virtual_path).expect("virtual path");
+    ironclaw_filesystem::RootFilesystem::read_file(&vfs, &path)
+        .await
+        .ok()
+}
+
+/// Seed a file into the standalone database, for tests that need a skill the runtime can find.
+#[cfg(test)]
+pub(crate) async fn write_database_file_for_test(
+    storage_root: &Path,
+    virtual_path: &str,
+    contents: &[u8],
+) {
+    std::fs::create_dir_all(storage_root).expect("storage root");
+    let db = Arc::new(
+        libsql::Builder::new_local(standalone_db_path(storage_root))
+            .build()
+            .await
+            .expect("open standalone libsql database"),
+    );
+    let vfs = LibSqlRootFilesystem::new(db).expect("libsql root filesystem");
+    vfs.run_migrations().await.expect("libsql migrations");
+    let path = VirtualPath::new(virtual_path).expect("virtual path");
+    ironclaw_filesystem::RootFilesystem::write_file(&vfs, &path, contents)
+        .await
+        .expect("write seeded file into the database");
+}
+
 pub(crate) struct FilesystemAssembly {
     pub(crate) filesystem: Arc<CompositeRootFilesystem>,
     pub(crate) durable_backend: DurableBackend,
@@ -151,6 +195,44 @@ where
         backend,
     )?;
     Ok(())
+}
+
+/// A root filesystem the process journal writes through, over its own backend
+/// handle.
+///
+/// The journal's heartbeat is the liveness signal a run's lease depends on.
+/// While it shared one connection pool with event-store, trigger, and
+/// result-read traffic, a busy turn could starve its own heartbeat until the
+/// lease expired underneath it — the run then failed `lease_expired` while it
+/// was still healthy. Giving the journal its own backend handle means a
+/// heartbeat never queues behind data-plane work.
+///
+/// The mount set is exactly [`mount_database_roots`]', so the journal resolves
+/// the same virtual paths to the same rows the shared filesystem would have
+/// written. Only the connection it travels over differs.
+pub(crate) fn process_journal_root_filesystem<F>(
+    backend: Arc<F>,
+) -> Result<Arc<CompositeRootFilesystem>, RebornBuildError>
+where
+    F: RootFilesystem + 'static,
+{
+    let mut root = CompositeRootFilesystem::new();
+    mount_database_roots(&mut root, backend)?;
+    Ok(Arc::new(root))
+}
+
+/// Build the journal filesystem over libSQL's bounded secondary write lane.
+/// `mount_roots` preserves the data-plane mount layout and row identity; the
+/// runtime owns the writer-admission invariant for #7714.
+pub(crate) fn libsql_journal_lane_filesystem(
+    runtime: &ironclaw_libsql_runtime::LibSqlRuntime,
+    mount_roots: impl FnOnce(
+        Arc<LibSqlRootFilesystem>,
+    ) -> Result<Arc<CompositeRootFilesystem>, RebornBuildError>,
+) -> Result<Arc<CompositeRootFilesystem>, RebornBuildError> {
+    let lane_runtime = Arc::new(runtime.split_journal_lane()?);
+    // The data-plane handle already migrated this database.
+    mount_roots(Arc::new(LibSqlRootFilesystem::from_runtime(lane_runtime)))
 }
 
 pub(crate) fn mount_database_roots<F>(

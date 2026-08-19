@@ -33,8 +33,8 @@ use crate::journal::{
     ProcessTreeReservation, PruneReleasedProcessRequest, RecordProcessCheckpointRequest,
     RecoverExpiredProcessLeasesRequest, RecoverExpiredProcessLeasesResponse,
     ReleaseProcessTreeRequest, ReserveProcessTreeRequest, ResumeProcessRequest,
-    SettleProcessDependencyRequest, StopProcessRequest, SubmitProcessRequest,
-    SubmitProcessWithCheckpointRequest, SuspendProcessRequest,
+    SettleProcessDependencyRequest, StopProcessRequest, SubmitProcessAtEdgeRequest,
+    SubmitProcessRequest, SubmitProcessWithCheckpointRequest, SuspendProcessRequest,
 };
 use crate::types::{invalid_path, same_scope_owner};
 
@@ -45,7 +45,10 @@ mod observer;
 mod rows;
 mod state;
 
-pub use state::MAX_CRASH_RECOVERY_RECLAIMS;
+pub use state::{
+    CRASH_RETRY_EXHAUSTED_FAILURE_CATEGORY, LEASE_EXPIRED_FAILURE_CATEGORY,
+    MAX_CRASH_RECOVERY_RECLAIMS,
+};
 mod validation;
 use command::StoredProcessCommand;
 use migration::{
@@ -237,6 +240,18 @@ where
     pub fn with_concurrency_limits(mut self, limits: ProcessConcurrencyLimits) -> Self {
         self.concurrency_limits = limits;
         self
+    }
+
+    /// The configured lease TTL in the journal's millisecond representation.
+    ///
+    /// Claim, heartbeat, and expiry recovery all carry the same TTL into the
+    /// journal command, so they share one conversion and one rejection.
+    fn lease_duration_millis(&self) -> Result<u64, ProcessJournalStoreError> {
+        u64::try_from(self.lease_duration.as_millis()).map_err(|_| {
+            ProcessJournalStoreError::InvalidRequest(
+                "process lease duration exceeds journal representation".to_string(),
+            )
+        })
     }
 
     async fn submit_process_inner(
@@ -659,6 +674,19 @@ where
         Ok(snapshot)
     }
 
+    async fn submit_process_at_edge(
+        &self,
+        request: SubmitProcessAtEdgeRequest,
+    ) -> Result<JournaledProcessSnapshot, Self::Error> {
+        let outcome = self
+            .execute(StoredProcessCommand::SubmitAtEdge(Box::new(request)))
+            .await?;
+        let StoredCommandOutcome::Submitted(snapshot, _changed) = outcome else {
+            return Err(unexpected_outcome("submit_process_at_edge", outcome));
+        };
+        Ok(snapshot)
+    }
+
     async fn submit_process_with_checkpoint(
         &self,
         request: SubmitProcessWithCheckpointRequest,
@@ -718,12 +746,7 @@ where
         &self,
         request: ClaimProcessesRequest,
     ) -> Result<Vec<ClaimedProcess>, Self::Error> {
-        let lease_duration_millis =
-            u64::try_from(self.lease_duration.as_millis()).map_err(|_| {
-                ProcessJournalStoreError::InvalidRequest(
-                    "process lease duration exceeds journal representation".to_string(),
-                )
-            })?;
+        let lease_duration_millis = self.lease_duration_millis()?;
         let claimed = match self
             .execute(StoredProcessCommand::Claim {
                 request,
@@ -744,12 +767,7 @@ where
         &self,
         request: ProcessLeaseRequest,
     ) -> Result<ProcessJournalCursor, Self::Error> {
-        let lease_duration_millis =
-            u64::try_from(self.lease_duration.as_millis()).map_err(|_| {
-                ProcessJournalStoreError::InvalidRequest(
-                    "process lease duration exceeds journal representation".to_string(),
-                )
-            })?;
+        let lease_duration_millis = self.lease_duration_millis()?;
         let snapshot = match self
             .execute(StoredProcessCommand::Heartbeat {
                 request,
@@ -768,8 +786,12 @@ where
         &self,
         request: RecoverExpiredProcessLeasesRequest,
     ) -> Result<RecoverExpiredProcessLeasesResponse, Self::Error> {
+        let lease_duration_millis = self.lease_duration_millis()?;
         let response = match self
-            .execute(StoredProcessCommand::RecoverExpired(request))
+            .execute(StoredProcessCommand::RecoverExpired {
+                request,
+                lease_duration_millis,
+            })
             .await?
         {
             StoredCommandOutcome::Recovered(response) => response,
@@ -1374,16 +1396,6 @@ where
                         scope: snapshot.scope.clone(),
                         owner_user_id: snapshot.owner_user_id.clone(),
                         suspension: snapshot.suspension.clone()?,
-                        resume_source_ref: snapshot
-                            .metadata
-                            .pointer("/agent_turn/source_binding_ref")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
-                        reply_target_ref: snapshot
-                            .metadata
-                            .pointer("/agent_turn/reply_target_binding_ref")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
                         historical: false,
                     })
                 })

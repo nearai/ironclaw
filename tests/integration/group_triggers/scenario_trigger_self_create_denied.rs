@@ -4,14 +4,14 @@
 //! (`SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS`, PR #5515).
 //!
 //! Drives a triggered-origin run (`submit_triggered_turn_scripted`) that scripts
-//! `builtin.trigger_create`. The host's `PerSurfaceCapabilityDenyDecorator`,
+//! `builtin.trigger_create`. The host's `resolved CapabilitySurfacePolicy`,
 //! keyed on the `scheduled_trigger` run profile's capability-surface id, strips
 //! trigger_create/remove/pause/resume from the model-visible surface
 //! (`trigger_list` stays visible).
 //!
 //! Traced, not assumed: denial happens at the model-gateway seam
 //! (`ironclaw_loop_host::model_gateway`'s `validate_provider_tool_call`, via
-//! `CapabilitySurfaceDenyFilter`), BEFORE a `CapabilityCallCandidate` is ever
+//! `CapabilitySurfacePolicyFilter`), BEFORE a `CapabilityCallCandidate` is ever
 //! constructed — so `CapabilityStage` never runs and nothing is appended via
 //! `append_tool_result_reference` (confirmed empirically: persisted history is
 //! exactly `[User, Assistant]`, no `ToolResultReference`). The executor
@@ -60,7 +60,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                 "builtin.trigger_create",
                 json!({
                     "name": INTERACTIVE_CONTROL_TRIGGER_NAME,
-                    "prompt": "remain scheduled",
+                    "execution_contract": super::support::trigger_execution_contract("remain scheduled"),
                     "schedule": {"kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC"},
                 }),
             ),
@@ -88,7 +88,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                     "builtin.trigger_create",
                     json!({
                         "name": SELF_CREATE_ATTEMPT_TRIGGER_NAME,
-                        "prompt": "remind me again",
+                        "execution_contract": super::support::trigger_execution_contract("remind me again"),
                         "schedule": {"kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC"},
                     }),
                 ),
@@ -151,11 +151,14 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let capability_harness = g
         .capability_harness()
         .ok_or("trigger group must expose its capability harness")?;
+    let milestone_sink: Arc<dyn ironclaw_loop_contracts::LoopHostMilestoneSink> =
+        Arc::new(InMemoryLoopHostMilestoneSink::default());
     let raw_port = capability_harness
         .create_recording_capability_port(
             &run_context,
-            &Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            &milestone_sink,
             None,
+            ironclaw_host_api::capability_surface::CapabilitySurfacePolicy::allow_all(),
         )
         .await?;
     assert_capability_denied(
@@ -163,7 +166,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         "builtin.trigger_create",
         json!({
             "name": SELF_CREATE_ATTEMPT_TRIGGER_NAME,
-            "prompt": "remind me again",
+            "execution_contract": super::support::trigger_execution_contract("remind me again"),
             "schedule": {"kind": "once", "at": "2999-01-02T00:00:00", "timezone": "UTC"},
         }),
     )

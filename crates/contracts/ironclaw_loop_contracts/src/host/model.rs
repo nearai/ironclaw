@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::instruction_bundle::InstructionBundleFingerprint;
 use crate::refs::ModelProfileId;
+use crate::skill_context::SkillName;
 use ironclaw_host_api::turn::{CapabilityActivityId, LoopMessageRef, TurnRunId};
 
 use super::capability::ProviderToolCallReplay;
@@ -30,6 +31,19 @@ pub struct LoopModelCapabilityView {
     pub visible_capability_ids: Vec<CapabilityId>,
 }
 
+/// Provider tool-choice constraint attached by the loop's model strategy for
+/// ONE model call. Absent means the provider default ("auto"). The host
+/// translates the constraint into the provider's forcing vocabulary;
+/// providers without named-tool forcing degrade to their "some tool
+/// required" mode rather than dropping the constraint silently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LoopModelToolChoice {
+    /// The model must invoke exactly this capability on this call. The
+    /// capability must already be visible in the request's capability view.
+    ForcedCapability { capability_id: CapabilityId },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopModelRequest {
     pub messages: Vec<LoopModelMessage>,
@@ -40,8 +54,14 @@ pub struct LoopModelRequest {
     /// Zero-based index into the host-resolved ordered fallback chain.
     #[serde(default)]
     pub fallback_index: u32,
+    /// Zero-based agent-loop iteration that issued this provider call.
+    #[serde(default)]
+    pub iteration: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability_view: Option<LoopModelCapabilityView>,
+    /// Strategy-imposed provider tool-choice constraint for this call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<LoopModelToolChoice>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +139,8 @@ pub struct LoopPromptBundle {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compaction_message_index: Vec<LoopContextCompactionMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent_window_truncation: Option<crate::host::context::LoopContextWindowTruncation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_fingerprint: Option<InstructionBundleFingerprint>,
     #[serde(default)]
     pub identity_message_count: u32,
@@ -132,6 +154,14 @@ pub struct LoopPromptBundleGrant {
     pub messages: Vec<LoopModelMessage>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
     pub instruction_fingerprint: Option<InstructionBundleFingerprint>,
+    pub diagnostic_metadata: LoopPromptDiagnosticMetadata,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LoopPromptDiagnosticMetadata {
+    pub identity_message_count: u32,
+    pub instruction_snippet_count: u32,
+    pub active_skills: Vec<SkillName>,
 }
 
 #[derive(Clone, Default)]
@@ -155,6 +185,15 @@ impl LoopPromptBundleAuthority {
         context: &LoopRunContext,
         bundle: &LoopPromptBundle,
     ) -> Result<(), AgentLoopHostError> {
+        self.issue_bundle_with_diagnostic_metadata(context, bundle, None)
+    }
+
+    pub fn issue_bundle_with_diagnostic_metadata(
+        &self,
+        context: &LoopRunContext,
+        bundle: &LoopPromptBundle,
+        diagnostic_metadata: Option<LoopPromptDiagnosticMetadata>,
+    ) -> Result<(), AgentLoopHostError> {
         if !bundle.bundle_ref.is_for_run(context) {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::ScopeMismatch,
@@ -162,13 +201,24 @@ impl LoopPromptBundleAuthority {
             ));
         }
 
-        self.lock_state()?.latest_by_run.insert(
+        let mut state = self.lock_state()?;
+        let diagnostic_metadata = diagnostic_metadata
+            .or_else(|| {
+                state
+                    .latest_by_run
+                    .get(&context.run_id)
+                    .filter(|grant| grant.bundle_ref == bundle.bundle_ref)
+                    .map(|grant| grant.diagnostic_metadata.clone())
+            })
+            .unwrap_or_default();
+        state.latest_by_run.insert(
             context.run_id,
             LoopPromptBundleGrant {
                 bundle_ref: bundle.bundle_ref.clone(),
                 messages: bundle.messages.clone(),
                 surface_version: bundle.surface_version.clone(),
                 instruction_fingerprint: bundle.instruction_fingerprint.clone(),
+                diagnostic_metadata,
             },
         );
         Ok(())
@@ -289,6 +339,16 @@ fn is_zero_u32(value: &u32) -> bool {
 }
 
 impl LoopModelUsage {
+    /// Add an optional supplemental call to an optional cumulative snapshot.
+    pub fn merge_optional(cumulative: Option<Self>, supplemental: Option<Self>) -> Option<Self> {
+        let Some(supplemental) = supplemental else {
+            return cumulative;
+        };
+        let mut cumulative = cumulative.unwrap_or_default();
+        cumulative.add_assign(&supplemental);
+        Some(cumulative)
+    }
+
     /// Accumulate another call's usage into this running per-run total.
     pub fn add_assign(&mut self, other: &LoopModelUsage) {
         self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
@@ -378,6 +438,7 @@ mod tests {
             messages: Vec::new(),
             surface_version: None,
             compaction_message_index: Vec::new(),
+            recent_window_truncation: None,
             instruction_fingerprint: None,
             identity_message_count: 0,
             instruction_snippet_count: 0,

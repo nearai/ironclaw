@@ -13,8 +13,7 @@
 use ironclaw_host_api::ids::TenantId;
 use ironclaw_host_api::product_adapter::auth::{
     AuthRequirement, ChannelIngressVerifier, HostAuthenticationGrant, HostProtocolAuthenticator,
-    ProtocolAuthEvidence, VerifiedInboundGrant, mark_bearer_token_verified,
-    mark_bearer_token_verified_for_tenant, mark_session_verified, mark_session_verified_for_tenant,
+    ProtocolAuthEvidence, VerifiedInboundGrant, mark_bearer_token_verified_for_tenant,
 };
 
 /// Stands in for `ironclaw_webui`'s authentication middleware, whose real
@@ -30,48 +29,29 @@ fn tenant() -> TenantId {
     TenantId::new("tenant-a").expect("tenant")
 }
 
+/// ✎ **WS8, 2026-08-05:** this used to exercise `mark_bearer_token_verified`
+/// too, and a sibling `session_mint_requires_a_host_authentication_grant`
+/// exercised both session mints. All three had zero callers in any build and
+/// were deleted as dead mint surface, so the tests lost their subjects rather
+/// than their assertions: `mark_bearer_token_verified_for_tenant` is the whole
+/// surviving bearer/session half, and it carries every property the deleted
+/// half did except "an unscoped mint carries no tenant" — which
+/// `auth.rs`'s inline `verified_can_only_be_constructed_via_host_helper_inside_crate`
+/// still pins on the crate-private constructor underneath.
 #[test]
 fn bearer_mint_requires_a_host_authentication_grant() {
     let authenticator = TestHostAuthenticator;
-
-    let evidence = mark_bearer_token_verified(authenticator.host_authentication_grant(), "alice");
-    assert!(evidence.is_verified());
-    let claim = evidence.claim().expect("claim");
-    assert_eq!(claim.requirement(), &AuthRequirement::BearerToken);
-    assert_eq!(claim.subject(), "alice");
-    assert!(claim.tenant_id().is_none());
 
     let scoped = mark_bearer_token_verified_for_tenant(
         authenticator.host_authentication_grant(),
         "alice",
         tenant(),
     );
-    assert_eq!(scoped.claim().expect("claim").tenant_id(), Some(&tenant()));
-}
-
-#[test]
-fn session_mint_requires_a_host_authentication_grant() {
-    let authenticator = TestHostAuthenticator;
-
-    let evidence = mark_session_verified(
-        authenticator.host_authentication_grant(),
-        "__Host-session",
-        "alice",
-    );
-    assert_eq!(
-        evidence.claim().expect("claim").requirement(),
-        &AuthRequirement::SessionCookie {
-            name: "__Host-session".to_string()
-        }
-    );
-
-    let scoped = mark_session_verified_for_tenant(
-        authenticator.host_authentication_grant(),
-        "__Host-session",
-        "alice",
-        tenant(),
-    );
-    assert_eq!(scoped.claim().expect("claim").tenant_id(), Some(&tenant()));
+    assert!(scoped.is_verified());
+    let claim = scoped.claim().expect("claim");
+    assert_eq!(claim.requirement(), &AuthRequirement::BearerToken);
+    assert_eq!(claim.subject(), "alice");
+    assert_eq!(claim.tenant_id(), Some(&tenant()));
 }
 
 /// The cross-crate seam `ironclaw_extension_contracts::verified_inbound` uses.

@@ -3,7 +3,7 @@
 //! Its load-bearing clause is **"no module builds a failure string of its
 //! own"**: reasons come from `diagnostics`' cause enums, so every token the
 //! model can see is bounded and enumerable in one file. That clause was
-//! documented in three places (`src/lib.rs`, `CLAUDE.md`, and the
+//! documented in three places (`src/lib.rs`, `AGENTS.md`, and the
 //! `diagnostics` module doc) and enforced in none — and the crate carried a
 //! live exception, `egress.rs`, which minted `"runtime_http_egress_panicked"`
 //! inline and forwarded `stable_runtime_reason()` verbatim into
@@ -162,10 +162,10 @@ fn mcp_client_error_has_no_blanket_string_conversion() {
 fn the_charter_text_names_the_rule_this_gate_enforces() {
     let lib = std::fs::read_to_string(src_dir().join("lib.rs")).expect("read lib.rs");
     let guardrails =
-        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("CLAUDE.md"))
-            .expect("read CLAUDE.md");
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("AGENTS.md"))
+            .expect("read AGENTS.md");
 
-    for (label, text) in [("lib.rs", &lib), ("CLAUDE.md", &guardrails)] {
+    for (label, text) in [("lib.rs", &lib), ("AGENTS.md", &guardrails)] {
         // Whitespace-normalized: both files wrap the sentence, and `lib.rs`
         // prefixes every line with `//!`. A gate that depended on the wrap
         // column would fail on a reflow and teach people to delete it.

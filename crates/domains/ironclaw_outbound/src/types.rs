@@ -6,31 +6,20 @@ use ironclaw_host_api::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::delivery_resolution::{
-    CommunicationDeliveryKind, CommunicationDeliveryResolutionRequest, CommunicationModality,
-};
+use crate::delivery_resolution::{CommunicationDeliveryResolutionRequest, CommunicationModality};
 use crate::{OutboundDeliveryId, OutboundError, ProjectionSubscriptionId, ProjectionUpdateRef};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutboundPushKind {
     FinalReply,
+    #[serde(alias = "progress_update")]
     Progress,
+    #[serde(alias = "approval_prompt")]
     GateRequired,
     AuthPrompt,
     DeliveryStatus,
-}
-
-impl From<CommunicationDeliveryKind> for OutboundPushKind {
-    fn from(kind: CommunicationDeliveryKind) -> Self {
-        match kind {
-            CommunicationDeliveryKind::FinalReply => Self::FinalReply,
-            CommunicationDeliveryKind::ProgressUpdate => Self::Progress,
-            CommunicationDeliveryKind::ApprovalPrompt => Self::GateRequired,
-            CommunicationDeliveryKind::AuthPrompt => Self::AuthPrompt,
-            CommunicationDeliveryKind::DeliveryStatus => Self::DeliveryStatus,
-        }
-    }
+    ModelDelivery,
 }
 
 #[allow(dead_code)] // retained for future debug/log surfaces — not yet wired
@@ -42,6 +31,7 @@ impl OutboundPushKind {
             Self::GateRequired => "gate_required",
             Self::AuthPrompt => "auth_prompt",
             Self::DeliveryStatus => "delivery_status",
+            Self::ModelDelivery => "model_delivery",
         }
     }
 }
@@ -179,14 +169,6 @@ pub struct LoadSubscriptionCursorRequest {
     pub thread_id: ThreadId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AdvanceSubscriptionCursorRequest {
-    pub subscription_id: ProjectionSubscriptionId,
-    pub actor: TurnActor,
-    pub thread_id: ThreadId,
-    pub cursor: ProjectionCursor,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutboundDeliveryStatus {
@@ -199,6 +181,9 @@ pub enum OutboundDeliveryStatus {
     Sending,
     /// Legacy pre-coordinator state (kept for persisted rows).
     Pending,
+    /// Terminal: policy resolved the delivery axis, but no enrolled target
+    /// existed and no adapter/provider call was made.
+    NoTarget,
     Delivered,
     Failed,
     /// Terminal-ambiguous: the process died after possible vendor success.
@@ -320,6 +305,15 @@ pub struct OutboundDeliveryAttempt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutboundDeliveryDecision {
+    /// The stable delivery fact was already recorded past the point of
+    /// possible vendor egress (`Sending` or terminal). Its durable state is
+    /// authoritative, so replay must not revalidate a target or mint another
+    /// audit attempt. A row still `Prepared` — a crash before the claim, no
+    /// egress possible — is deliberately NOT this: it re-enters validation
+    /// and returns `Authorized` on the stored row.
+    AlreadyRecorded {
+        attempt: OutboundDeliveryAttempt,
+    },
     Authorized {
         attempt: OutboundDeliveryAttempt,
         target: ValidatedReplyTargetBinding,
@@ -357,4 +351,23 @@ pub struct ClaimDeliveryAttemptForSendRequest {
 pub struct RecoverInterruptedDeliveryRequest {
     pub delivery_id: OutboundDeliveryId,
     pub scope: TurnScope,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OutboundPushKind;
+
+    #[test]
+    fn canonical_delivery_kind_reads_the_retired_resolution_spellings() {
+        assert_eq!(
+            serde_json::from_str::<OutboundPushKind>(r#""progress_update""#)
+                .expect("retired progress kind"),
+            OutboundPushKind::Progress
+        );
+        assert_eq!(
+            serde_json::from_str::<OutboundPushKind>(r#""approval_prompt""#)
+                .expect("retired approval kind"),
+            OutboundPushKind::GateRequired
+        );
+    }
 }

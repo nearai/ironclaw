@@ -39,8 +39,8 @@ use std::sync::OnceLock;
 use serde_json::Value;
 
 use ratchet_support::{
-    TypeDefOccurrence, collect_type_defs, production_rust_files, strip_comments_and_strings,
-    workspace_root,
+    TypeDefOccurrence, collect_type_defs, is_rust_identifier, production_rust_files,
+    strip_cfg_test_blocks, strip_comments_and_strings, workspace_root,
 };
 
 const PRODUCT: &str = "ironclaw_assistant";
@@ -110,6 +110,13 @@ const PRODUCT_SYMBOLS_WEBUI_STILL_NAMES: &[(&str, &str)] = &[
     // --- frozen inventory (§6.1.3) ----------------------------------------
     ("ADMIN_CONFIGURATION_REPLACE_CAPABILITY", "inventory"),
     ("ADMIN_CONFIGURATION_VIEW", "inventory"),
+    // Admin thread scraping (#7228): the three scrape views are part of the
+    // same frozen view inventory as ADMIN_USERS_VIEW / ADMIN_USER_SECRETS_VIEW;
+    // concrete descriptor constants stay in product per §6.1.3 (contracts
+    // crate holds only the ProductView shape, never concrete inventory).
+    ("ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW", "inventory"),
+    ("ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW", "inventory"),
+    ("ADMIN_THREAD_SCRAPE_THREADS_VIEW", "inventory"),
     ("ADMIN_USERS_VIEW", "inventory"),
     ("ADMIN_USER_CREATE_COMMAND", "inventory"),
     ("ADMIN_USER_DELETE_CAPABILITY", "inventory"),
@@ -163,8 +170,8 @@ const PRODUCT_SYMBOLS_WEBUI_STILL_NAMES: &[(&str, &str)] = &[
     ("OPERATOR_SETUP_VIEW", "inventory"),
     ("OPERATOR_STATUS_VIEW", "inventory"),
     ("OUTBOUND_DELIVERY_TARGETS_VIEW", "inventory"),
-    ("OUTBOUND_PREFERENCES_SET_CAPABILITY", "inventory"),
-    ("OUTBOUND_PREFERENCES_VIEW", "inventory"),
+    ("NOTIFICATION_CHANNELS_SET_COMMAND", "inventory"),
+    ("NOTIFICATION_CHANNELS_VIEW", "inventory"),
     ("PRODUCT_COMMAND_EXECUTE_COMMAND", "inventory"),
     ("PRODUCT_COMMAND_LIST_COMMAND", "inventory"),
     ("PROJECTS_VIEW", "inventory"),
@@ -216,7 +223,7 @@ const PRODUCT_SYMBOLS_OPENAI_COMPAT_STILL_NAMES: &[(&str, &str)] = &[
 // `product_attachment_capabilities` to `ironclaw_attachments` as
 // `AttachmentCapabilities` / `attachment_capabilities` — the two symbols this
 // list called out by name as that row's to own. Shrink-only.
-const WEBUI_PRODUCT_SYMBOL_BASELINE: usize = 100;
+const WEBUI_PRODUCT_SYMBOL_BASELINE: usize = 103;
 const OPENAI_COMPAT_PRODUCT_SYMBOL_BASELINE: usize = 3;
 
 /// Boundary vocabulary this row moved: declared in `ironclaw_product_contracts`
@@ -332,15 +339,6 @@ fn crate_src(name: &str) -> PathBuf {
     crate_dir(name).join("src")
 }
 
-fn is_rust_identifier(ident: &str) -> bool {
-    let mut chars = ident.chars();
-    match chars.next() {
-        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
-        _ => return false,
-    }
-    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-}
-
 fn items_defined_in(crate_name: &str) -> BTreeSet<String> {
     let mut found: BTreeMap<String, Vec<TypeDefOccurrence>> = BTreeMap::new();
     collect_type_defs(
@@ -357,91 +355,6 @@ fn items_defined_in(crate_name: &str) -> BTreeSet<String> {
         "no items discovered in {crate_name} — the walk is broken, not the crate"
     );
     found.into_keys().collect()
-}
-
-/// Walk the crate's production `.rs` files.
-///
-/// Every I/O error panics rather than being skipped: a scan that silently drops
-/// an unreadable directory or entry reports a *smaller* residue than reality and
-/// passes. Same hardening as `reborn_extension_host_port_inversion.rs`.
-fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = std::fs::read_dir(dir)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", dir.display()));
-    for entry in entries {
-        let entry = entry.unwrap_or_else(|error| {
-            panic!("cannot read an entry under {}: {error}", dir.display())
-        });
-        let path = entry.path();
-        if path.is_dir() {
-            if matches!(
-                path.file_name().and_then(|name| name.to_str()),
-                Some("target") | Some("node_modules") | Some("tests") | Some("frontend")
-            ) {
-                continue;
-            }
-            rust_files(&path, out);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-            if name == "tests.rs" || name.ends_with("_tests.rs") {
-                continue;
-            }
-            out.push(path);
-        }
-    }
-}
-
-/// Remove `#[cfg(test)]`-gated items. Only the *production* edge matters here:
-/// a test may reach product through the crate's dev-dependency without the
-/// shipped artifact carrying the import. Same stripping shape as
-/// `reborn_extension_host_port_inversion.rs`.
-fn strip_cfg_test_blocks(source: &str) -> String {
-    const MARKER: &str = "#[cfg(test)]";
-    let mut out = String::with_capacity(source.len());
-    let mut rest = source;
-    while let Some(at) = rest.find(MARKER) {
-        out.push_str(&rest[..at]);
-        let after = &rest[at + MARKER.len()..];
-        let Some(open) = after.find('{') else {
-            match after.find(';') {
-                Some(semi) => {
-                    rest = &after[semi + 1..];
-                    continue;
-                }
-                None => return out,
-            }
-        };
-        if let Some(semi) = after.find(';')
-            && semi < open
-        {
-            rest = &after[semi + 1..];
-            continue;
-        }
-        let bytes = after.as_bytes();
-        let mut depth = 0usize;
-        let mut idx = open;
-        while idx < bytes.len() {
-            match bytes[idx] {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-            idx += 1;
-        }
-        if idx >= bytes.len() {
-            return out;
-        }
-        rest = &after[idx + 1..];
-    }
-    out.push_str(rest);
-    out
 }
 
 /// Every `ironclaw_assistant::…` symbol a source names, whether through a braced
@@ -477,13 +390,57 @@ fn product_symbols_in(source: &str) -> BTreeSet<String> {
         };
         let tail = tail.trim_start();
         if let Some(group) = tail.strip_prefix('{') {
-            let Some(close) = group.find('}') else {
+            // Balanced walk, splitting elements only at depth-0 commas. The
+            // previous `group.find('}')` closed at the FIRST closing brace, so
+            // a nested group (`use ironclaw_assistant::{m::{X}};`) truncated
+            // mid-element and recorded NOTHING — a sabotage-verified fail-open
+            // (gate audit 2026-08): a brand-new product import spelled that
+            // way passed this gate silently.
+            let mut depth = 0usize;
+            let mut element_start = 0usize;
+            let mut elements = Vec::new();
+            let mut close = None;
+            for (index, ch) in group.char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        if depth == 0 {
+                            close = Some(index);
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    ',' if depth == 0 => {
+                        elements.push(&group[element_start..index]);
+                        element_start = index + 1;
+                    }
+                    _ => {}
+                }
+            }
+            let Some(close) = close else {
                 continue;
             };
-            for raw in group[..close].split(',') {
-                let name = raw.split(" as ").next().unwrap_or(raw).trim();
-                if is_rust_identifier(name) {
-                    names.insert(name.to_string());
+            elements.push(&group[element_start..close]);
+            for raw in elements {
+                let element = raw.trim();
+                let leading: String = element
+                    .chars()
+                    .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                    .collect();
+                let rest = element[leading.len()..].trim_start();
+                if rest.starts_with("::") {
+                    // Qualified or nested element (`module::X`, `module::{X}`):
+                    // record the leading path segment, the same key the
+                    // single-path branch below records for
+                    // `ironclaw_assistant::module::X`.
+                    if is_rust_identifier(&leading) {
+                        names.insert(leading);
+                    }
+                } else {
+                    let name = element.split(" as ").next().unwrap_or(element).trim();
+                    if is_rust_identifier(name) {
+                        names.insert(name.to_string());
+                    }
                 }
             }
         } else {
@@ -500,8 +457,7 @@ fn product_symbols_in(source: &str) -> BTreeSet<String> {
 }
 
 fn product_symbols_named_by(crate_name: &str) -> (BTreeSet<String>, usize) {
-    let mut files = Vec::new();
-    rust_files(&crate_src(crate_name), &mut files);
+    let files = production_rust_files(&crate_src(crate_name));
     assert!(
         files.len() > 5,
         "expected to walk {crate_name}'s source tree; found {} files",
@@ -662,6 +618,8 @@ fn import_scanner_reads_symbols_out_of_real_use_shapes() {
         fn f(x: &ironclaw_assistant::Qualified) -> ironclaw_assistant::AlsoQualified { }
         use ironclaw_product_contracts::surface::NotProduct;
         use ironclaw_product_contracts::inbound_requests::{AlsoNotProduct};
+        use ironclaw_assistant::{nested_module::{NestedSymbol}};
+        use ironclaw_assistant::{qualified_module::QualifiedInGroup, FlatMate};
         use my_ironclaw_product::NotOurs;
         // use ironclaw_assistant::Commented;
         #[cfg(test)]
@@ -700,6 +658,24 @@ fn import_scanner_reads_symbols_out_of_real_use_shapes() {
     assert!(
         !found.contains("Renamed"),
         "the alias is local; the residue list is keyed by the exported name: {found:?}"
+    );
+    assert!(
+        found.contains("nested_module"),
+        "a nested use group names its module segment — the first-`}}` truncation \
+         recorded nothing here (sabotage-verified fail-open, gate audit 2026-08): {found:?}"
+    );
+    assert!(
+        !found.contains("NestedSymbol"),
+        "the leaf of a nested group is attributed to its module row, matching the \
+         single-path branch: {found:?}"
+    );
+    assert!(
+        found.contains("qualified_module") && !found.contains("QualifiedInGroup"),
+        "a qualified element inside a group records its leading segment: {found:?}"
+    );
+    assert!(
+        found.contains("FlatMate"),
+        "a flat member sharing a group with a qualified element is still recorded: {found:?}"
     );
 }
 

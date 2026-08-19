@@ -7,6 +7,7 @@
 // arch-exempt: large_file, product-auth serve router and DTO/route composition surface; decomposition into per-route submodules tracked by the Slack-OAuth audit, plan #5604
 
 mod accounts;
+mod device_link;
 mod lifecycle;
 mod manual_token;
 mod oauth;
@@ -14,9 +15,10 @@ mod oauth;
 mod oauth_start_tests;
 
 use std::{
+    collections::HashMap,
     hash::Hash,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::Duration,
 };
 
@@ -70,11 +72,13 @@ use url::Url;
 use uuid::Uuid;
 
 use ironclaw_auth::{
-    ProviderIdentityHookFactory, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
-    RebornManualTokenSubmitResponse, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
-    RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornOAuthStartFlowRequest,
-    RebornProductAuthServices,
+    AuthFlowRecord, ProviderIdentityHookFactory, RebornManualTokenSetupRequest,
+    RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornOAuthCallbackError,
+    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
+    RebornOAuthStartFlowRequest, RebornProductAuthServices,
 };
+use ironclaw_extension_contracts::auth_prompt::DeviceLinkPromptView;
+use ironclaw_extension_contracts::device_link::{DeviceLinkInput, DeviceLinkMode};
 
 pub(crate) const OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start";
 pub(crate) const OAUTH_CALLBACK_PATH: &str = "/api/reborn/product-auth/oauth/callback/{flow_id}";
@@ -98,6 +102,13 @@ pub(crate) const ACCOUNTS_SELECT_PATH: &str = "/api/reborn/product-auth/accounts
 pub(crate) const ACCOUNTS_RECOVERY_PATH: &str = "/api/reborn/product-auth/accounts/recovery";
 pub(crate) const ACCOUNTS_REFRESH_PATH: &str = "/api/reborn/product-auth/accounts/refresh";
 pub(crate) const LIFECYCLE_CLEANUP_PATH: &str = "/api/reborn/product-auth/lifecycle/cleanup";
+/// Device-link operations. Each makes a vendor-visible transition, which is
+/// why none of them rides the generic flow-status read — see the header of
+/// `device_link.rs`.
+pub(crate) const DEVICE_LINK_START_PATH: &str = "/api/reborn/product-auth/device-link/start";
+pub(crate) const DEVICE_LINK_POLL_PATH: &str = "/api/reborn/product-auth/device-link/poll";
+pub(crate) const DEVICE_LINK_INPUT_PATH: &str = "/api/reborn/product-auth/device-link/input";
+pub(crate) const DEVICE_LINK_CANCEL_PATH: &str = "/api/reborn/product-auth/device-link/cancel";
 
 const OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.start";
 const OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.callback";
@@ -113,11 +124,16 @@ const ACCOUNTS_SELECT_ROUTE_ID: &str = "product_auth.accounts.select";
 const ACCOUNTS_RECOVERY_ROUTE_ID: &str = "product_auth.accounts.recovery";
 const ACCOUNTS_REFRESH_ROUTE_ID: &str = "product_auth.accounts.refresh";
 const LIFECYCLE_CLEANUP_ROUTE_ID: &str = "product_auth.lifecycle.cleanup";
+const DEVICE_LINK_START_ROUTE_ID: &str = "product_auth.device_link.start";
+const DEVICE_LINK_POLL_ROUTE_ID: &str = "product_auth.device_link.poll";
+const DEVICE_LINK_INPUT_ROUTE_ID: &str = "product_auth.device_link.input";
+const DEVICE_LINK_CANCEL_ROUTE_ID: &str = "product_auth.device_link.cancel";
 const OAUTH_PKCE_VERIFIER_CACHE_CAPACITY: NonZeroUsize = match NonZeroUsize::new(1024) {
     Some(value) => value,
     // SAFETY: 1024 is a non-zero literal cache cap.
     None => unreachable!(),
 };
+const OAUTH_CALLBACK_SINGLE_FLIGHT_CAPACITY: usize = 1024;
 const PRODUCT_AUTH_MUTATION_BODY_LIMIT_BYTES: NonZeroU64 = match NonZeroU64::new(16 * 1024) {
     Some(value) => value,
     // SAFETY: 16 KiB is a non-zero literal body cap.
@@ -177,6 +193,10 @@ pub struct ProductAuthRouteState {
     /// receives the callback's vendor id and resolves what (if anything)
     /// to bind itself.
     provider_identity_hook: Option<Arc<ProviderIdentityHookFactory>>,
+    /// Same-host callback retries for one durable flow wait for the original
+    /// completion instead of racing its one-time claim. Weak entries keep this
+    /// process-local coordination bounded without becoming flow authority.
+    callback_single_flight: CallbackSingleFlight,
     // First-slice WebUI OAuth stores the raw PKCE verifier process-locally
     // because `AuthFlowRecord` deliberately serializes hashes only. Production
     // HA must replace this with a host-owned encrypted verifier store before
@@ -334,6 +354,9 @@ impl ProductAuthRouteState {
             default_agent_id,
             default_project_id,
             provider_identity_hook: None,
+            callback_single_flight: CallbackSingleFlight::new(
+                OAUTH_CALLBACK_SINGLE_FLIGHT_CAPACITY,
+            ),
             pkce_verifiers: ExpiringLruCache::new(
                 OAUTH_PKCE_VERIFIER_CACHE_CAPACITY,
                 StoredPkceVerifier::expires_at,
@@ -459,6 +482,13 @@ impl ProductAuthRouteState {
             .and_then(|factory| factory(vendor, callback_scope))
     }
 
+    fn callback_completion_lock(
+        &self,
+        flow_id: AuthFlowId,
+    ) -> Result<Arc<tokio::sync::Mutex<()>>, ProductAuthRouteFailure> {
+        self.callback_single_flight.lock_for(flow_id)
+    }
+
     fn auth_engine(&self) -> Result<Arc<ironclaw_auth::AuthEngine>, ProductAuthRouteFailure> {
         self.product_auth
             .auth_engine()
@@ -525,10 +555,46 @@ impl std::fmt::Debug for ProductAuthRouteState {
             .field(
                 "provider_identity_hook",
                 &self.provider_identity_hook.is_some(),
-            );
+            )
+            .field("callback_single_flight", &"CallbackSingleFlight<...>");
         builder
             .field("pkce_verifiers", &"ExpiringLruCache<...>")
             .finish()
+    }
+}
+
+#[derive(Clone)]
+struct CallbackSingleFlight {
+    locks: Arc<Mutex<HashMap<AuthFlowId, Weak<tokio::sync::Mutex<()>>>>>,
+    capacity: usize,
+}
+
+impl CallbackSingleFlight {
+    fn new(capacity: usize) -> Self {
+        Self {
+            locks: Arc::new(Mutex::new(HashMap::new())),
+            capacity,
+        }
+    }
+
+    fn lock_for(
+        &self,
+        flow_id: AuthFlowId,
+    ) -> Result<Arc<tokio::sync::Mutex<()>>, ProductAuthRouteFailure> {
+        let mut locks = self
+            .locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&flow_id).and_then(Weak::upgrade) {
+            return Ok(lock);
+        }
+        if locks.len() >= self.capacity {
+            return Err(ProductAuthRouteFailure::backend_unavailable());
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(flow_id, Arc::downgrade(&lock));
+        Ok(lock)
     }
 }
 
@@ -607,7 +673,7 @@ pub type ProductAuthRouteMount = SplitRouteMount;
 // Product-auth HTTP is a host-owned auth/secret-ingress boundary. Its
 // mutations enter `RebornProductAuthServices` directly; they are not in-turn
 // tool calls and must not surface raw secrets through the model-visible
-// tool-dispatch path. Contract: `docs/reborn/contracts/auth-product.md`.
+// tool-dispatch path. Contract: `docs/internal/reborn/contracts/auth-product.md`.
 // dispatch-exempt: host-owned auth/secret ingress, not in-turn tool dispatch
 pub fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRouteMount {
     let public = Router::new()
@@ -661,6 +727,22 @@ pub fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRout
                 LIFECYCLE_CLEANUP_PATH,
                 post(lifecycle::lifecycle_cleanup_handler),
             )
+            .route(
+                DEVICE_LINK_START_PATH,
+                post(device_link::device_link_start_handler),
+            )
+            .route(
+                DEVICE_LINK_POLL_PATH,
+                post(device_link::device_link_poll_handler),
+            )
+            .route(
+                DEVICE_LINK_INPUT_PATH,
+                post(device_link::device_link_input_handler),
+            )
+            .route(
+                DEVICE_LINK_CANCEL_PATH,
+                post(device_link::device_link_cancel_handler),
+            )
             .with_state(state.clone()),
         public.with_state(state),
         product_auth_route_descriptors(),
@@ -685,6 +767,12 @@ pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
         (ACCOUNTS_RECOVERY_ROUTE_ID, ACCOUNTS_RECOVERY_PATH),
         // accounts/refresh omitted here — uses tighter rate limit below.
         (LIFECYCLE_CLEANUP_ROUTE_ID, LIFECYCLE_CLEANUP_PATH),
+        (DEVICE_LINK_START_ROUTE_ID, DEVICE_LINK_START_PATH),
+        (DEVICE_LINK_INPUT_ROUTE_ID, DEVICE_LINK_INPUT_PATH),
+        (DEVICE_LINK_CANCEL_ROUTE_ID, DEVICE_LINK_CANCEL_PATH),
+        // device-link/poll omitted here — a card polls it every ~3s, which the
+        // shared 20/min mutation budget would throttle into a stalled link, so
+        // it carries the poll-cadence policy below.
     ];
     let mut descriptors: Vec<IngressRouteDescriptor> = PROTECTED_MUTATIONS
         .iter()
@@ -716,6 +804,12 @@ pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
         NetworkMethod::Post,
         OAUTH_FLOW_RECONCILE_PATH,
         flow_reconcile_policy(),
+    ));
+    descriptors.push(descriptor(
+        DEVICE_LINK_POLL_ROUTE_ID,
+        NetworkMethod::Post,
+        DEVICE_LINK_POLL_PATH,
+        device_link_poll_policy(),
     ));
     descriptors.push(descriptor(
         OAUTH_CALLBACK_ROUTE_ID,
@@ -764,6 +858,36 @@ pub(super) fn protected_mutation_policy() -> IngressPolicy {
         effect_path: AllowedEffectPath::ProductSurface,
     })
     .expect("product-auth OAuth start policy must validate") // safety: LocalGateway + bearer + AuthenticatedCaller is the same authenticated local product workflow shape used by WebUI mutations.
+}
+
+/// The device-link poll route's policy: an authenticated bounded-body
+/// mutation like every other device-link operation (it makes a vendor call),
+/// but on the poll cadence a card actually uses. The 20/min mutation budget
+/// would throttle a ~3s poll into a stalled link; the host's own poll floor is
+/// what keeps a hot-looping card from turning into vendor traffic, so this cap
+/// is the outer bound, not the real one.
+pub(super) fn device_link_poll_policy() -> IngressPolicy {
+    IngressPolicy::new(IngressPolicyParts {
+        listener_class: ListenerClass::LocalGateway,
+        auth: IngressAuthPolicy::Required {
+            schemes: vec![IngressAuthScheme::BearerToken],
+        },
+        scope_source: ironclaw_host_api::ingress::IngressScopeSource::AuthenticatedCaller,
+        body_limit: BodyLimitPolicy::Limited {
+            max_bytes: PRODUCT_AUTH_MUTATION_BODY_LIMIT_BYTES,
+        },
+        rate_limit: RateLimitPolicy::Limited {
+            scope: RateLimitScope::PerCaller,
+            max_requests: OAUTH_FLOW_STATUS_MAX_REQUESTS,
+            window_seconds: OAUTH_RATE_WINDOW_SECONDS,
+        },
+        cors: CorsPolicy::SameOriginOnly,
+        websocket_origin: WebSocketOriginPolicy::NotApplicable,
+        streaming: StreamingMode::None,
+        audit: AuditTraceClass::UserAction,
+        effect_path: AllowedEffectPath::ProductSurface,
+    })
+    .expect("product-auth device-link poll policy must validate") // safety: the protected-mutation shape with the read-cadence rate cap.
 }
 
 pub(super) fn flow_status_policy() -> IngressPolicy {
@@ -912,11 +1036,108 @@ pub(crate) struct ProductOAuthStartResponse {
 }
 
 /// Sanitized durable flow-status projection returned by the origin-independent
-/// OAuth flow-status poll. Carries the lifecycle status enum ONLY — never
-/// tokens, PKCE verifiers, authorization codes, or opaque state.
+/// flow-status poll. Carries the lifecycle status enum, the flow's own id, and
+/// — for a device link — the additive frame of §8.12. Never tokens, PKCE
+/// verifiers, authorization codes, or opaque state.
+///
+/// `flow_id` and `device_link` are additive: an OAuth client that only reads
+/// `status` sees the same field it always did, and `device_link` is omitted
+/// entirely for a flow that is not a device link.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct OAuthFlowStatusResponse {
     pub(crate) status: AuthFlowStatus,
+    pub(crate) flow_id: AuthFlowId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) device_link: Option<DeviceLinkPromptView>,
+}
+
+/// The response every device-link operation returns: which flow, where it
+/// stands, and the frame the card renders.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DeviceLinkFlowResponse {
+    pub(crate) flow_id: AuthFlowId,
+    pub(crate) status: AuthFlowStatus,
+    /// The invocation the flow's scope was minted with, echoed for the same
+    /// reason [`ManualTokenSetupResponse`] echoes it: `scope_matches` is exact
+    /// equality over the whole scope, and `poll`/`input`/`cancel` re-derive
+    /// that scope from what the browser sends back. A caller that had no
+    /// invocation to carry into `start` (the Extensions configure modal — no
+    /// run, no gate) gets a freshly minted one here; without it in the
+    /// response, that caller could start a link and then never advance it.
+    pub(crate) invocation_id: InvocationId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) device_link: Option<DeviceLinkPromptView>,
+}
+
+/// Start (or resume) a device link.
+#[derive(Deserialize)]
+pub(super) struct DeviceLinkStartBody {
+    provider: String,
+    /// The installed extension whose manifest declares the device-link recipe.
+    extension_name: String,
+    #[serde(default)]
+    mode: DeviceLinkModeBody,
+    run_id: Option<String>,
+    gate_ref: Option<String>,
+    /// The flow the card already holds, if any. A card that re-renders must
+    /// not burn the payload the user is mid-scan on.
+    resume_flow_id: Option<String>,
+    #[serde(flatten)]
+    scope: ScopeFields,
+}
+
+/// Which of the extension's two declared paths to run. Defaults to the primary
+/// one, so a caller that omits it cannot accidentally select a fallback the
+/// extension may not declare.
+#[derive(Default, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum DeviceLinkModeBody {
+    #[default]
+    Default,
+    Alternate,
+}
+
+impl From<DeviceLinkModeBody> for DeviceLinkMode {
+    fn from(value: DeviceLinkModeBody) -> Self {
+        match value {
+            DeviceLinkModeBody::Default => Self::Default,
+            DeviceLinkModeBody::Alternate => Self::Alternate,
+        }
+    }
+}
+
+/// Poll or cancel: the flow, and the invocation that scopes it.
+#[derive(Deserialize)]
+pub(super) struct DeviceLinkFlowRefBody {
+    flow_id: String,
+    #[serde(flatten)]
+    scope: ScopeFields,
+}
+
+/// Submit one value the current frame asked for.
+///
+/// `revision` is the frame the value was typed against; the engine's
+/// compare-and-swap refuses a submission from a superseded frame, which is
+/// what stops a stale card from replaying a credential against a transition
+/// that already ran.
+#[derive(Deserialize)]
+pub(super) struct DeviceLinkInputBody {
+    flow_id: String,
+    revision: u64,
+    kind: DeviceLinkInputKindBody,
+    value: UnvalidatedRawSecretValue,
+    #[serde(flatten)]
+    scope: ScopeFields,
+}
+
+/// Which prompt the submitted value answers. Mirrors the contracts enum
+/// rather than reusing it so the wire shape is owned here, at the boundary.
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum DeviceLinkInputKindBody {
+    Identifier,
+    Code,
+    Password,
 }
 
 /// Query fields for the flow-status poll. The browser echoes back the
@@ -1125,6 +1346,18 @@ impl IntoResponse for ProductAuthRouteFailure {
 
 impl From<AuthProductError> for ProductAuthRouteFailure {
     fn from(error: AuthProductError) -> Self {
+        // A compare-and-swap loss is a CONFLICT, not a "try again later". The
+        // device-link driver reports one when a card submits against a step
+        // revision that has already moved on: re-issuing the same request
+        // unchanged can never succeed, so the 503 + `retryable` the stable
+        // `BackendUnavailable` projection would produce is a false
+        // instruction. 409 tells the card what is actually true — re-read the
+        // flow and re-render. Matched on the typed domain error rather than on
+        // its projected code, which deliberately folds CAS detail away at the
+        // stable product boundary.
+        if matches!(error, AuthProductError::BackendConflict) {
+            return Self::new(StatusCode::CONFLICT, AuthErrorCode::FlowAlreadyTerminal);
+        }
         route_failure_from_callback_error(error.into())
     }
 }
@@ -1291,7 +1524,15 @@ pub(super) async fn scoped_update_binding_for_requester(
             );
             Ok(None)
         }
-        Err(AuthProductError::BackendUnavailable) => {
+        // Unavailable and *unsupported* land together: both mean "this
+        // deployment cannot tell us whether an account already exists", and
+        // the route's answer to that is the same — start a fresh flow rather
+        // than fail the connect outright. (`UnsupportedOperation` is what a
+        // bundle with no account read model wired now reports; it used to
+        // report `BackendUnavailable`, and the two were indistinguishable.)
+        Err(
+            AuthProductError::BackendUnavailable | AuthProductError::UnsupportedOperation { .. },
+        ) => {
             tracing::warn!(
                 target: "ironclaw_webui::product_auth::oauth",
                 provider = %provider.as_str(),
@@ -1784,6 +2025,95 @@ mod tests {
             "flow-status must be per-caller rate limited"
         );
         assert_eq!(policy.cors(), CorsPolicy::SameOriginOnly);
+    }
+
+    /// Every device-link route is an authenticated, bounded-body, per-caller
+    /// POST. None of them may be a GET: all four make a vendor-visible
+    /// transition (start exports a code, poll asks whether it was accepted,
+    /// input hands over a credential, cancel logs the device out), and a GET
+    /// declared read-shaped would hide that from the descriptor contract.
+    #[test]
+    fn device_link_route_descriptors_lock_authenticated_bounded_mutations() {
+        let descriptors = product_auth_route_descriptors();
+        for route_id in [
+            DEVICE_LINK_START_ROUTE_ID,
+            DEVICE_LINK_POLL_ROUTE_ID,
+            DEVICE_LINK_INPUT_ROUTE_ID,
+            DEVICE_LINK_CANCEL_ROUTE_ID,
+        ] {
+            let route = descriptors
+                .iter()
+                .find(|descriptor| descriptor.route_id().as_str() == route_id)
+                .unwrap_or_else(|| panic!("{route_id} must be registered"));
+
+            assert_eq!(
+                route.method(),
+                NetworkMethod::Post,
+                "{route_id} makes a vendor call and must not be declared a read"
+            );
+            assert!(
+                matches!(route.policy().body_limit(), BodyLimitPolicy::Limited { .. }),
+                "{route_id} must bound its request body"
+            );
+            assert!(
+                matches!(
+                    route.policy().auth(),
+                    IngressAuthPolicy::Required { schemes }
+                        if schemes.contains(&IngressAuthScheme::BearerToken)
+                ),
+                "{route_id} must require bearer auth"
+            );
+            assert_eq!(
+                route.policy().scope_source(),
+                ironclaw_host_api::ingress::IngressScopeSource::AuthenticatedCaller,
+                "{route_id} must scope to the authenticated caller, never the body"
+            );
+            assert!(
+                matches!(
+                    route.policy().rate_limit(),
+                    RateLimitPolicy::Limited {
+                        scope: RateLimitScope::PerCaller,
+                        ..
+                    }
+                ),
+                "{route_id} must be per-caller rate limited"
+            );
+            assert_eq!(route.policy().cors(), CorsPolicy::SameOriginOnly);
+        }
+    }
+
+    /// The poll route carries the read cadence, not the mutation budget: a
+    /// card polls it about every three seconds, and the 20/min mutation cap
+    /// would throttle that into a link that never completes.
+    #[test]
+    fn device_link_poll_descriptor_carries_the_poll_cadence_rate_limit() {
+        let descriptors = product_auth_route_descriptors();
+        let poll = descriptors
+            .iter()
+            .find(|descriptor| descriptor.route_id().as_str() == DEVICE_LINK_POLL_ROUTE_ID)
+            .expect("the device-link poll descriptor must be registered");
+        let start = descriptors
+            .iter()
+            .find(|descriptor| descriptor.route_id().as_str() == DEVICE_LINK_START_ROUTE_ID)
+            .expect("the device-link start descriptor must be registered");
+
+        let (
+            RateLimitPolicy::Limited {
+                max_requests: polls,
+                ..
+            },
+            RateLimitPolicy::Limited {
+                max_requests: starts,
+                ..
+            },
+        ) = (poll.policy().rate_limit(), start.policy().rate_limit())
+        else {
+            panic!("both device-link routes must be rate limited");
+        };
+        assert!(
+            polls > starts,
+            "the poll cadence ({polls}/min) must exceed the mutation budget ({starts}/min)"
+        );
     }
 
     #[test]
@@ -2484,6 +2814,167 @@ mod tests {
         );
     }
 
+    /// Browser/ngrok cancellation regression: once the hosted callback has
+    /// claimed the one-time flow, dropping that HTTP request must not cancel
+    /// the token exchange and strand the durable flow at `callback_received`.
+    /// A replay of the identical provider redirect must observe the completed
+    /// grant without exchanging the authorization code a second time.
+    #[tokio::test]
+    async fn vendor_oauth_callback_survives_request_disconnect_and_replays_once() {
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();
+        let interaction_service: Arc<dyn AuthInteractionService> = shared.clone();
+        let credential_setup_service: Arc<dyn CredentialSetupService> = shared.clone();
+        let credential_account_service: Arc<dyn CredentialAccountService> = shared.clone();
+        let pausable_provider = Arc::new(PausableAuthProviderClient::default());
+        let provider_client: Arc<dyn AuthProviderClient> = pausable_provider.clone();
+        let cleanup_service: Arc<dyn SecretCleanupService> = shared.clone();
+        let engine = test_engine(
+            test_vendor_recipe(true, None),
+            Arc::new(PanickingDcrEgress),
+            Arc::new(SecretStore::ephemeral()),
+        );
+        let product_auth = Arc::new(
+            RebornProductAuthServices::new(
+                flow_manager,
+                interaction_service,
+                credential_setup_service,
+                credential_account_service,
+                provider_client,
+                cleanup_service,
+                Arc::new(NoopDispatcher),
+            )
+            .with_auth_engine(engine),
+        );
+        let state = ProductAuthRouteState::new(
+            product_auth,
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        )
+        .with_test_installed_extension_lookup();
+        let app = product_auth_route_mount(state.clone())
+            .protected
+            .layer(axum::Extension(test_caller()));
+        let flow_invocation_id = InvocationId::new();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/vendorco-tools/setup/oauth/start")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "requirement": "vendorco_oauth",
+                            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+                            "invocation_id": flow_invocation_id.to_string(),
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("start json");
+        let flow_id = AuthFlowId::from_uuid(
+            Uuid::parse_str(json["flow_id"].as_str().expect("flow id")).expect("flow uuid"),
+        );
+        let authorization_url = json["authorization_url"]
+            .as_str()
+            .expect("authorization url");
+        let state_value = Url::parse(authorization_url)
+            .expect("authorization url")
+            .query_pairs()
+            .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+            .expect("oauth state");
+        let encoded_state =
+            url::form_urlencoded::byte_serialize(state_value.as_bytes()).collect::<String>();
+        let uri = format!(
+            "/api/reborn/product-auth/oauth/vendorco/callback?state={encoded_state}&code=vendor-auth-code&scope=items:read"
+        )
+        .parse::<Uri>()
+        .expect("callback uri");
+        let callback_state = state.clone();
+        let callback_uri = uri.clone();
+
+        let mut request_task = tokio::spawn(async move {
+            oauth::vendor_oauth_callback_handler(
+                State(callback_state),
+                Path("vendorco".to_string()),
+                RawQuery(callback_uri.query().map(str::to_string)),
+                callback_uri,
+                HeaderMap::new(),
+            )
+            .await
+        });
+        tokio::select! {
+            () = pausable_provider.wait_until_entered() => {}
+            result = &mut request_task => {
+                panic!("callback returned before token exchange could be interrupted: {result:?}");
+            }
+        }
+        request_task.abort();
+        request_task
+            .await
+            .expect_err("the simulated browser request must be canceled");
+
+        let replay_state = state.clone();
+        let replay_uri = uri.clone();
+        let mut replay_task = tokio::spawn(async move {
+            oauth::vendor_oauth_callback_handler(
+                State(replay_state),
+                Path("vendorco".to_string()),
+                RawQuery(replay_uri.query().map(str::to_string)),
+                replay_uri,
+                HeaderMap::new(),
+            )
+            .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut replay_task)
+                .await
+                .is_err(),
+            "the provider retry must wait for the already-running completion"
+        );
+        pausable_provider.release();
+
+        let mut flow_resource = test_resource_scope();
+        flow_resource.invocation_id = flow_invocation_id;
+        let flow_scope = AuthProductScope::new(flow_resource, AuthSurface::Callback);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let flow = shared
+                    .get_flow(&flow_scope, flow_id)
+                    .await
+                    .expect("flow lookup")
+                    .expect("flow");
+                if flow.status == AuthFlowStatus::Completed {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached callback completion must settle after the request disconnects");
+
+        let replay = tokio::time::timeout(Duration::from_secs(2), replay_task)
+            .await
+            .expect("the provider retry must settle after original completion")
+            .expect("the provider retry task must not fail")
+            .expect("the provider's identical retry must observe the completed flow");
+        assert_eq!(replay.status(), StatusCode::OK);
+        assert_eq!(
+            pausable_provider.call_count(),
+            1,
+            "request recovery must never exchange one authorization code twice"
+        );
+    }
+
     /// Restart/replica regression for the durable setup-PKCE port: the
     /// process-local verifier cache dies with the route state, so a callback
     /// arriving after a restart (or on another replica) can only complete
@@ -2993,6 +3484,59 @@ mod tests {
                 saved_body: None,
                 redaction_applied: false,
             })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct PausableAuthProviderClient {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl PausableAuthProviderClient {
+        async fn wait_until_entered(&self) {
+            self.entered.notified().await;
+        }
+
+        fn release(&self) {
+            self.release.notify_one();
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl AuthProviderClient for PausableAuthProviderClient {
+        async fn exchange_callback(
+            &self,
+            _context: ironclaw_auth::OAuthProviderExchangeContext,
+            request: OAuthProviderCallbackRequest,
+        ) -> Result<OAuthProviderExchange, AuthProductError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(OAuthProviderExchange {
+                provider: request.provider,
+                account_label: request.account_label,
+                authorization_code_hash: request.authorization_code_hash,
+                pkce_verifier_hash: request.pkce_verifier_hash,
+                access_secret: SecretHandle::new("pausable-provider-access")
+                    .expect("test secret handle"),
+                refresh_secret: None,
+                scopes: request.scopes,
+                account_id: None,
+                provider_identity: None,
+            })
+        }
+
+        async fn refresh_token(
+            &self,
+            _request: ironclaw_auth::OAuthProviderRefreshRequest,
+        ) -> Result<ironclaw_auth::OAuthProviderRefresh, AuthProductError> {
+            unreachable!("disconnect regression does not refresh credentials")
         }
     }
 }

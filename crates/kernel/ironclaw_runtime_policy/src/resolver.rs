@@ -324,7 +324,7 @@ fn backends_for(
 
         HostedSafe => (
             FilesystemBackendKind::TenantWorkspace,
-            ProcessBackendKind::TenantSandbox,
+            ProcessBackendKind::UserSandbox,
             NetworkMode::Brokered,
             SecretMode::TenantBroker,
             ApprovalPolicy::AskWrites,
@@ -332,7 +332,7 @@ fn backends_for(
         ),
         HostedDev => (
             FilesystemBackendKind::TenantWorkspace,
-            ProcessBackendKind::TenantSandbox,
+            ProcessBackendKind::UserSandbox,
             NetworkMode::Allowlist,
             SecretMode::TenantBroker,
             ApprovalPolicy::AskDestructive,
@@ -340,7 +340,7 @@ fn backends_for(
         ),
         HostedYoloTenantScoped => (
             FilesystemBackendKind::TenantWorkspace,
-            ProcessBackendKind::TenantSandbox,
+            ProcessBackendKind::UserSandbox,
             NetworkMode::Allowlist,
             SecretMode::TenantBroker,
             ApprovalPolicy::Minimal,
@@ -792,6 +792,23 @@ mod tests {
             FilesystemBackendKind::HostWorkspaceAndHome
         );
         assert_ne!(policy.process_backend, ProcessBackendKind::LocalHost);
+    }
+
+    #[test]
+    fn hosted_profiles_resolve_to_user_sandbox_shell() {
+        for profile in [
+            RuntimeProfile::HostedSafe,
+            RuntimeProfile::HostedDev,
+            RuntimeProfile::HostedYoloTenantScoped,
+        ] {
+            let request = if profile.is_yolo() {
+                req_yolo(DeploymentMode::HostedMultiTenant, profile)
+            } else {
+                req(DeploymentMode::HostedMultiTenant, profile)
+            };
+            let policy = resolve(request).unwrap_or_else(|error| panic!("{profile:?}: {error}"));
+            assert_eq!(policy.process_backend, ProcessBackendKind::UserSandbox);
+        }
     }
 
     #[test]

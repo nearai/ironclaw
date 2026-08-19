@@ -1,11 +1,14 @@
 use chrono::{DateTime, Utc};
 use ironclaw_common::AttachmentRef;
 use ironclaw_host_api::ids::{AgentId, MissionId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::turn::TurnRunId;
 use serde::{Deserialize, Serialize};
 
 use crate::capability_display_preview::CapabilityDisplayPreviewEnvelope;
 use crate::identifiers::{SummaryArtifactId, ThreadMessageId};
-use crate::tool_result_reference::{ProviderToolCallReferenceEnvelope, ToolResultSafeSummary};
+use crate::tool_result_reference::{
+    ProviderToolCallReferenceEnvelope, ToolResultIntrinsicOutcome, ToolResultSafeSummary,
+};
 
 pub const GOAL_STATEMENT_MAX_CHARS: usize = 4000;
 
@@ -376,12 +379,24 @@ pub struct AcceptInboundMessageRequest {
     pub content: MessageContent,
 }
 
+/// Internal acceptance metadata that must remain stable across retries and
+/// accepted-message replay. This is deliberately separate from transcript
+/// content so product/UI history never renders submission-routing state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundMessageReplayMetadata {
+    /// Model selected by product policy before the message crossed the durable
+    /// acceptance boundary. `None` preserves the default-model route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedInboundMessage {
     pub thread_id: ThreadId,
     pub message_id: ThreadMessageId,
     pub sequence: u64,
     pub idempotent_replay: bool,
+    pub replay_metadata: InboundMessageReplayMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -395,6 +410,7 @@ pub struct AcceptedInboundMessageReplay {
     pub source_binding_id: Option<String>,
     pub reply_target_binding_id: Option<String>,
     pub turn_run_id: Option<String>,
+    pub replay_metadata: InboundMessageReplayMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -421,6 +437,24 @@ pub struct AppendFinalizedAssistantMessageRequest {
     pub content: MessageContent,
 }
 
+/// Publish the already-durable structured-finalization output into the exact
+/// finalized assistant row produced by the run.
+///
+/// The service resolves the immutable finalization record by `turn_run_id`
+/// and verifies it against the current message before changing anything. The
+/// message id is deliberately carried by the caller: a run may have more
+/// than one assistant reply after steering, so selecting "the latest" row is
+/// not safe for terminal publication. `replacement` must be that record's
+/// raw JSON representation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishStructuredFinalizationMessageRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub message_id: ThreadMessageId,
+    pub turn_run_id: TurnRunId,
+    pub replacement: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendToolResultReferenceRequest {
     pub scope: ThreadScope,
@@ -430,6 +464,7 @@ pub struct AppendToolResultReferenceRequest {
     pub safe_summary: ToolResultSafeSummary,
     pub provider_call: Option<ProviderToolCallReferenceEnvelope>,
     pub model_observation: Option<serde_json::Value>,
+    pub intrinsic_outcome: Option<ToolResultIntrinsicOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -446,6 +481,9 @@ pub struct UpdateToolResultReferenceRequest {
     pub thread_id: ThreadId,
     pub turn_run_id: String,
     pub result_ref: String,
+    /// Exact provider-call row to update. `None` is reserved for legacy
+    /// callers whose durable edge predates provider-call identity.
+    pub provider_call_id: Option<String>,
     pub safe_summary: ToolResultSafeSummary,
 }
 
@@ -475,7 +513,43 @@ pub struct PutToolResultRecordRequest {
 /// tool outputs recoverable in 1-2 calls instead of ~49.
 /// `tool_result_reference.rs`'s `MAX_MODEL_OBSERVATION_BYTES` is derived from
 /// this value; raising it here raises that ceiling too.
+/// Compile-time ceiling on a single `result_read` request: 24 KiB.
+///
+/// Do NOT raise this to widen the env override. `tool_result_reference.rs` derives
+/// `MAX_MODEL_OBSERVATION_BYTES` from it (`* 2`), so raising it changes preview truncation for
+/// every caller. The override is bounded by [`TOOL_RESULT_READ_ENV_CEILING_BYTES`] instead, which
+/// nothing derives from.
 pub const TOOL_RESULT_RECORD_READ_MAX_BYTES: usize = 24 * 1024;
+
+/// Highest value `IRONCLAW_TOOL_RESULT_READ_MAX_BYTES` may request: 64 KiB. Separate from
+/// [`TOOL_RESULT_RECORD_READ_MAX_BYTES`] so the observation envelope stays put.
+pub(crate) const TOOL_RESULT_READ_ENV_CEILING_BYTES: usize = 64 * 1024;
+
+/// Effective per-request cap: 24 KiB by default.
+///
+/// A larger default was tried and reverted -- the trace motivating it was real but the change
+/// shipped alongside two others, so nothing isolates its effect. Raise with
+/// `IRONCLAW_TOOL_RESULT_READ_MAX_BYTES` (bytes), clamped to
+/// `[4, TOOL_RESULT_READ_ENV_CEILING_BYTES]`.
+pub(crate) const TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES: usize = 24 * 1024;
+
+/// Env var controlling [`effective_tool_result_read_max_bytes`].
+pub(crate) const TOOL_RESULT_READ_MAX_BYTES_ENV: &str = "IRONCLAW_TOOL_RESULT_READ_MAX_BYTES";
+
+/// Resolve the effective per-request `result_read` cap.
+///
+/// Unparseable or out-of-range values fall back to the default rather than
+/// failing the run — a malformed tuning knob must not take down an agent.
+pub fn effective_tool_result_read_max_bytes() -> usize {
+    match std::env::var(TOOL_RESULT_READ_MAX_BYTES_ENV) {
+        Ok(raw) => match raw.trim().parse::<usize>() {
+            // floor mirrors `tool_result_records::TOOL_RESULT_RECORD_READ_MIN_BYTES`
+            Ok(v) => v.clamp(4, TOOL_RESULT_READ_ENV_CEILING_BYTES),
+            Err(_) => TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES,
+        },
+        Err(_) => TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadToolResultRecordRequest {
@@ -678,6 +752,32 @@ impl ContextMessage {
 pub struct ContextWindow {
     pub thread_id: ThreadId,
     pub messages: Vec<ContextMessage>,
+    /// Exact boundary of the recent model-visible suffix omitted by
+    /// `max_messages`. Callers may retain explicitly pinned messages older
+    /// than this boundary in addition to the suffix.
+    pub recent_window_truncation: Option<ContextWindowTruncation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextWindowTruncation {
+    pub omitted_through_sequence: u64,
+    pub omitted_through_kind: MessageKind,
+}
+
+pub(crate) fn truncate_context_window(
+    mut messages: Vec<ContextMessage>,
+    max_messages: usize,
+) -> (Vec<ContextMessage>, Option<ContextWindowTruncation>) {
+    if max_messages >= messages.len() {
+        return (messages, None);
+    }
+    let start = messages.len() - max_messages;
+    let boundary = &messages[start - 1];
+    let truncation = ContextWindowTruncation {
+        omitted_through_sequence: boundary.sequence,
+        omitted_through_kind: boundary.kind,
+    };
+    (messages.split_off(start), Some(truncation))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -958,5 +1058,46 @@ mod tests {
         assert_eq!(record.created_at, None);
         assert_eq!(record.updated_at, None);
         assert_eq!(record.content.as_deref(), Some("legacy row"));
+    }
+}
+
+#[cfg(test)]
+mod tool_result_read_cap_tests {
+    use super::*;
+
+    /// 64 KiB, up from the historical 24 KiB, and never above the ceiling the
+    /// observation envelope is derived from.
+    #[test]
+    fn default_is_24k_and_within_the_ceiling() {
+        // Behavior-preserving: 24 KiB is the historical default. The raise to 64 KiB was
+        // never isolated from the other switches it shipped with, so it is available
+        // only via the env override, not as a default.
+        assert_eq!(TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES, 24 * 1024);
+        const { assert!(TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES <= TOOL_RESULT_RECORD_READ_MAX_BYTES) };
+    }
+
+    /// The ceiling bounds only what the ENV OVERRIDE may reach; it is not the default.
+    /// The model-observation envelope is derived from it
+    /// (`* 2`, asserted at compile time in tool_result_reference.rs), so 64 KiB here
+    /// means a 128 KiB envelope. An env override can never exceed the ceiling, so
+    /// the envelope always fits whatever a read returns.
+    #[test]
+    fn contract_ceiling_stays_24k_so_the_observation_envelope_does_not_move() {
+        // `tool_result_reference.rs` derives MAX_MODEL_OBSERVATION_BYTES from this (* 2).
+        // Raising it changes preview truncation for every caller -- see the three
+        // preview/result_read tests that broke when it was briefly 64 KiB.
+        assert_eq!(TOOL_RESULT_RECORD_READ_MAX_BYTES, 24 * 1024);
+        // The override may go higher; nothing is derived from this bound.
+        assert_eq!(TOOL_RESULT_READ_ENV_CEILING_BYTES, 64 * 1024);
+        const { assert!(TOOL_RESULT_READ_ENV_CEILING_BYTES >= TOOL_RESULT_RECORD_READ_MAX_BYTES) };
+    }
+
+    /// A malformed knob must degrade to the default, never fail the run.
+    #[test]
+    fn env_var_name_is_stable() {
+        assert_eq!(
+            TOOL_RESULT_READ_MAX_BYTES_ENV,
+            "IRONCLAW_TOOL_RESULT_READ_MAX_BYTES"
+        );
     }
 }

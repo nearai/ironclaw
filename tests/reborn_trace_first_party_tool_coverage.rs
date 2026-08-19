@@ -34,6 +34,17 @@ use parity_qa_support::{
     },
 };
 
+fn trigger_execution_contract(goal: impl Into<String>) -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "goal": goal.into(),
+        "success_criteria": ["Complete the requested task"],
+        "output_instructions": "Return a concise result",
+        "no_result_text": "No result",
+        "policy": { "result_delivery": "deliver" }
+    })
+}
+
 const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     ECHO_CAPABILITY_ID,
     TIME_CAPABILITY_ID,
@@ -69,18 +80,28 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
     TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
-    // #6520 registers the product-owned run-scoped delivery router as a real
-    // built-in; its e2e coverage lives in
-    // `reborn_integration_delivery_user_journeys` (ROUTE_CURRENT journeys:
-    // exact-listed-target routing, web_app-only routing, stale-target
-    // model-correctable failure).
-    ironclaw_host_runtime::OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
+    // The explicit model-initiated delivery tool. Its e2e coverage is the
+    // delivery user journeys in `reborn_integration_delivery_user_journeys`
+    // (`webui_send_me_on_slack_delivers_via_bot_with_evidence` and siblings),
+    // which drive it through the real composition-wired
+    // `ExtensionHostModelChannelDelivery` → `DeliveryCoordinator` → channel
+    // adapter → vendor wire, asserting at the wire recorder and the outbound
+    // attempt ledger.
+    ironclaw_host_runtime::OUTBOUND_DELIVER_CAPABILITY_ID,
     // This capability's production runtime proof writes a CSV through
     // `builtin.write_file`, invokes the attachment tool through the real
     // host/runtime/loop chain, and verifies the finalized assistant message:
     // `runtime::tests::outbound_delivery::
     // production_reply_attachment_capability_registers_durable_run_intent`.
     ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
+    // #6898 item 3. Both are driven end-to-end by
+    // `reborn_integration_document_edit`: the redline journey reads a .docx
+    // structurally and resolves its tracked changes into a new document, the
+    // spreadsheet journey sets a formula under a named column, the deck journey
+    // clones a slide with its layout, and the PDF journey authors HTML and
+    // renders it.
+    ironclaw_host_runtime::DOCUMENT_EDIT_CAPABILITY_ID,
+    ironclaw_host_runtime::HTML_TO_PDF_CAPABILITY_ID,
 ];
 
 const SKILL_NAME: &str = "reborn-skill-e2e";
@@ -449,7 +470,7 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
                 "call_trigger_create_first_party",
                 serde_json::json!({
                     "name": "Daily trace summary",
-                    "prompt": "Summarize trace state",
+                    "execution_contract": trigger_execution_contract("Summarize trace state"),
                     "schedule": {
                         "kind": "cron",
                         "expression": "0 8 * * *",

@@ -11,7 +11,7 @@ mod http_output;
 mod json;
 mod memory;
 mod model_visible_output;
-mod outbound_delivery;
+mod outbound_deliver;
 mod reply_attachment;
 mod schemas;
 mod shell;
@@ -19,6 +19,7 @@ mod skill_management;
 mod spawn_subagent;
 mod time;
 mod trace_commons;
+mod trigger_creation;
 mod trigger_management;
 
 use std::{future::Future, panic::AssertUnwindSafe, sync::Arc, time::Instant};
@@ -69,7 +70,7 @@ pub use memory::{
     memory_tool_profiles, normalize_memory_tool_input, register_memory_tool_handler,
     register_native_memory_tools,
 };
-pub use outbound_delivery::OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID;
+pub use outbound_deliver::OUTBOUND_DELIVER_CAPABILITY_ID;
 pub use reply_attachment::ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID;
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
@@ -131,6 +132,8 @@ pub const LIST_DIR_CAPABILITY_ID: &str = "builtin.list_dir";
 pub const GLOB_CAPABILITY_ID: &str = "builtin.glob";
 pub const GREP_CAPABILITY_ID: &str = "builtin.grep";
 pub const APPLY_PATCH_CAPABILITY_ID: &str = "builtin.apply_patch";
+pub const DOCUMENT_EDIT_CAPABILITY_ID: &str = "builtin.document_edit";
+pub const HTML_TO_PDF_CAPABILITY_ID: &str = "builtin.html_to_pdf";
 
 // `builtin.shell` is the only built-in first-party handler that directly
 // requires a RuntimeProcessPort. `builtin.spawn_subagent` declares
@@ -159,7 +162,7 @@ const CODING_CAPABILITIES: &[CodingCapabilityMetadata] = &[
     CodingCapabilityMetadata {
         id: READ_FILE_CAPABILITY_ID,
         kind: CodingCapabilityKind::ReadFile,
-        description: "Read text files, and extract text from supported document files, through scoped mounts with v1 read_file output shape",
+        description: "Read text files; return DOCX, XLSX, and PPTX as structured addressable views; and extract text from formats such as PDF, through scoped mounts with v1 read_file output shape",
         effects: &[EffectKind::ReadFilesystem],
         max_input_bytes: MAX_FIRST_PARTY_INPUT_BYTES,
     },
@@ -196,6 +199,20 @@ const CODING_CAPABILITIES: &[CodingCapabilityMetadata] = &[
         kind: CodingCapabilityKind::ApplyPatch,
         description: "Apply exact/fuzzy search-replace edits through scoped mounts",
         effects: &[EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+        max_input_bytes: MAX_APPLY_PATCH_INPUT_BYTES,
+    },
+    CodingCapabilityMetadata {
+        id: DOCUMENT_EDIT_CAPABILITY_ID,
+        kind: CodingCapabilityKind::DocumentEdit,
+        description: "Apply structural edits to a .docx/.xlsx/.pptx (accept or reject tracked changes, set a cell formula, clone a slide) and write the result to a new file, preserving every part the edit does not touch",
+        effects: &[EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+        max_input_bytes: MAX_APPLY_PATCH_INPUT_BYTES,
+    },
+    CodingCapabilityMetadata {
+        id: HTML_TO_PDF_CAPABILITY_ID,
+        kind: CodingCapabilityKind::HtmlToPdf,
+        description: "Render HTML (headings, paragraphs, lists, emphasis) to a new PDF file; existing PDFs are never edited in place",
+        effects: &[EffectKind::WriteFilesystem],
         max_input_bytes: MAX_APPLY_PATCH_INPUT_BYTES,
     },
 ];
@@ -235,7 +252,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     trace_commons::profile_token_manifest()?,
                     trace_commons::profile_set_manifest()?,
                     trace_commons::account_login_link_manifest()?,
-                    outbound_delivery::manifest()?,
+                    outbound_deliver::manifest()?,
                     reply_attachment::manifest()?,
                 ];
                 capabilities.extend(coding_manifests()?);
@@ -256,10 +273,58 @@ pub fn builtin_first_party_package_for_process_backend(
     process_backend: ProcessBackendKind,
 ) -> Result<ExtensionPackage, ExtensionError> {
     let mut package = builtin_first_party_package()?;
-    if !process_port_backed_builtins_enabled(process_backend) {
-        remove_process_port_backed_builtin_capabilities(&mut package)?;
-    }
+    restrict_package_for_process_backend(&mut package, process_backend)?;
     Ok(package)
+}
+
+fn restrict_package_for_process_backend(
+    package: &mut ExtensionPackage,
+    process_backend: ProcessBackendKind,
+) -> Result<(), ExtensionError> {
+    if !process_port_backed_builtins_enabled(process_backend) {
+        remove_process_port_backed_builtin_capabilities(package)?;
+    } else if process_backend == ProcessBackendKind::UserSandbox {
+        // The PR1 user sandbox owns its isolated `/workspace` and runs with
+        // direct container networking but no host network service. These are
+        // not host-filesystem or host-network effects, so do not ask the
+        // invocation resolver to bind either service. Brokered network effects
+        // remain a follow-up once shell traffic can traverse ironclaw_network.
+        append_user_sandbox_shell_guidance(package)?;
+        for effect in [
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
+            EffectKind::Network,
+        ] {
+            remove_builtin_capability_effect(package, SHELL_CAPABILITY_ID, effect)?;
+        }
+    }
+    Ok(())
+}
+
+fn append_user_sandbox_shell_guidance(
+    package: &mut ExtensionPackage,
+) -> Result<(), ExtensionError> {
+    const GUIDANCE: &str = " Runs inside a per-user sandbox with a writable persistent `/workspace` and a read-only system filesystem. Install Python packages under `/workspace`, preferably with `python3 -m venv /workspace/.venv`, then use `/workspace/.venv/bin/python` and `/workspace/.venv/bin/pip` in later calls because shell process state does not persist between calls.";
+
+    let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID)?;
+    let descriptor = package
+        .capabilities
+        .iter_mut()
+        .find(|candidate| candidate.id == capability_id)
+        .ok_or_else(|| ExtensionError::InvalidManifest {
+            reason: format!("built-in first-party package is missing capability {capability_id}"),
+        })?;
+    let manifest = package
+        .manifest
+        .capabilities
+        .iter_mut()
+        .find(|candidate| candidate.id == capability_id)
+        .ok_or_else(|| ExtensionError::InvalidManifest {
+            reason: format!("built-in first-party manifest is missing capability {capability_id}"),
+        })?;
+    descriptor.description.push_str(GUIDANCE);
+    manifest.description.push_str(GUIDANCE);
+    Ok(())
 }
 
 fn process_port_backed_builtins_enabled(process_backend: ProcessBackendKind) -> bool {
@@ -269,7 +334,7 @@ fn process_port_backed_builtins_enabled(process_backend: ProcessBackendKind) -> 
             | ProcessBackendKind::Srt
             | ProcessBackendKind::SmolVm
             | ProcessBackendKind::LocalHost
-            | ProcessBackendKind::TenantSandbox
+            | ProcessBackendKind::UserSandbox
             | ProcessBackendKind::OrgDedicatedRunner
     )
 }
@@ -312,6 +377,39 @@ fn remove_builtin_capability(
         .manifest
         .capabilities
         .retain(|candidate| candidate.id != capability_id);
+    Ok(())
+}
+
+fn remove_builtin_capability_effect(
+    package: &mut ExtensionPackage,
+    capability_id: &str,
+    effect: EffectKind,
+) -> Result<(), ExtensionError> {
+    let capability_id = CapabilityId::new(capability_id)?;
+    let descriptor = package
+        .capabilities
+        .iter_mut()
+        .find(|candidate| candidate.id == capability_id)
+        .ok_or_else(|| ExtensionError::InvalidManifest {
+            reason: format!("built-in first-party package is missing capability {capability_id}"),
+        })?;
+    let manifest = package
+        .manifest
+        .capabilities
+        .iter_mut()
+        .find(|candidate| candidate.id == capability_id)
+        .ok_or_else(|| ExtensionError::InvalidManifest {
+            reason: format!("built-in first-party manifest is missing capability {capability_id}"),
+        })?;
+    if !descriptor.effects.contains(&effect) || !manifest.effects.contains(&effect) {
+        return Err(ExtensionError::InvalidManifest {
+            reason: format!(
+                "built-in first-party capability {capability_id} is missing effect {effect:?}"
+            ),
+        });
+    }
+    descriptor.effects.retain(|candidate| *candidate != effect);
+    manifest.effects.retain(|candidate| *candidate != effect);
     Ok(())
 }
 
@@ -373,13 +471,13 @@ pub fn builtin_first_party_handlers_with_trigger_create_hook(
     Ok(registry)
 }
 
-/// Replace the fail-closed default for the current-run outbound route with the
-/// product-owned routing service selected by composition.
-pub fn register_outbound_delivery_first_party_handler(
+/// Replace the fail-closed default for the explicit model-delivery capability
+/// with the product-owned delivery service selected by composition.
+pub fn register_outbound_deliver_first_party_handler(
     registry: &mut FirstPartyCapabilityRegistry,
-    router: Arc<dyn ironclaw_outbound::RouteCurrentRunFinalReply>,
+    delivery: Arc<dyn ironclaw_outbound::ModelChannelDelivery>,
 ) -> Result<(), HostApiError> {
-    outbound_delivery::insert_handler(registry, router)
+    outbound_deliver::insert_handler(registry, delivery)
 }
 
 /// Replace the fail-closed reply-attachment default with the durable,
@@ -488,21 +586,24 @@ fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, H
         CapabilityId::new(TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID)?,
         handler,
     );
-    outbound_delivery::insert_handler(&mut registry, Arc::new(UnavailableRunFinalReplyRouter))?;
+    outbound_deliver::insert_handler(&mut registry, Arc::new(UnavailableModelChannelDelivery))?;
     reply_attachment::insert_unavailable_handler(&mut registry)?;
     skill_management::insert_handlers(&mut registry)?;
     Ok(registry)
 }
 
-struct UnavailableRunFinalReplyRouter;
+struct UnavailableModelChannelDelivery;
 
 #[async_trait]
-impl ironclaw_outbound::RouteCurrentRunFinalReply for UnavailableRunFinalReplyRouter {
-    async fn route_current_run_final_reply(
+impl ironclaw_outbound::ModelChannelDelivery for UnavailableModelChannelDelivery {
+    async fn deliver_for_model(
         &self,
-        _request: ironclaw_outbound::RouteCurrentRunFinalReplyRequest,
-    ) -> Result<(), ironclaw_outbound::RouteCurrentRunFinalReplyError> {
-        Err(ironclaw_outbound::RouteCurrentRunFinalReplyError::Unavailable)
+        _request: ironclaw_outbound::ModelChannelDeliveryRequest,
+    ) -> Result<
+        ironclaw_outbound::ModelChannelDeliveryEvidence,
+        ironclaw_outbound::ModelChannelDeliveryError,
+    > {
+        Err(ironclaw_outbound::ModelChannelDeliveryError::Unavailable)
     }
 }
 
@@ -520,6 +621,7 @@ fn first_party_capability_manifest(
         effects,
         default_permission,
         visibility: CapabilityVisibility::Model,
+        standard_op: None,
         input_schema_ref: CapabilityProfileSchemaRef::new(format!(
             "schemas/builtin/{schema_name}.input.v1.json"
         ))?,
@@ -583,7 +685,7 @@ impl BuiltinFirstPartyTools {
             return false;
         };
         // Run the check through the resolver-selected, deployment-isolated
-        // process port (tenant sandbox under hosted multi-tenant), NOT
+        // process port (user sandbox under hosted multi-tenant), NOT
         // `services.process` (the deployment-blind local port the edit plan
         // carries), and in the mount that backs the just-edited file (from the
         // edit result's `path`), so a multi-mount workspace checks the edited
@@ -622,7 +724,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
         let (output, display_preview) = match request.capability_id.as_str() {
             ECHO_CAPABILITY_ID => (echo::dispatch(&request.input)?, None),
             TIME_CAPABILITY_ID => (time::dispatch(&request.input)?, None),
-            JSON_CAPABILITY_ID => (json::dispatch(&request.input)?, None),
+            JSON_CAPABILITY_ID => (json::dispatch(&request).await?, None),
             HTTP_CAPABILITY_ID | HTTP_SAVE_CAPABILITY_ID => {
                 let result = http::dispatch(&request).await?;
                 network_egress_bytes = result.network_egress_bytes;

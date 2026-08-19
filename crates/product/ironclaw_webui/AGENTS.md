@@ -7,10 +7,11 @@ one `products`-layer crate above `ironclaw_composition`. Driven by the
 
 ## Start here
 
-- Read `CLAUDE.md` first — it is the module spec (full route table, streaming
+- Read `CONTRACT.md` first — it is the module spec (full route table, streaming
   model, SSE caps, OAuth login security contract). Code follows the spec; the
-  spec is the tiebreaker.
-- Read `README.md` for the composed-crate map (what got folded in from where).
+  spec is the tiebreaker. It is **gate-pinned**: the `handlers.rs`
+  module-charter map is enforced by `tests/handlers_module_charter.rs`.
+- Read `README.md` for orientation (public surface, measured deps/consumers).
 - Treat these as the source of truth before changing behavior:
   - `src/webui_v2/descriptors.rs` + `tests/webui_v2_descriptors_contract.rs` — the route contract.
   - `src/webui_v2/handlers.rs` + `tests/webui_v2_handlers_contract.rs` — handler dispatch.
@@ -57,19 +58,26 @@ one `products`-layer crate above `ironclaw_composition`. Driven by the
   boundary test enforces this DTO/descriptor-only edge.
 - **v1 anything** — the monolith `src/` tree and `ironclaw_engine` are gone, so there is nothing to import; likewise no v1
   channel code, no v1 secrets / settings / DB. This is a Path A native host
-  surface (`docs/reborn/how-to-port-channel-to-reborn.md`).
+  surface (`docs/internal/reborn/how-to-port-channel-to-reborn.md`).
 - **Business/durable state.** Everything the gateway needs flows through
   `ProductSurface`; this crate stores no threads, transcripts, or projections.
 
 ## Allowed dependencies
 
-`ironclaw_auth` (product-auth service facade and route DTOs),
-`ironclaw_common` (shared hashing primitive used to redact auth-token samples),
-`ironclaw_assistant` (wire DTOs and product command/view descriptors),
-`ironclaw_host_api` (`ProductSurface`, caller/error vocabulary, identity
-newtypes, and ingress descriptors), `ironclaw_host_ingress` (Axum route-mount
-carriers), `ironclaw_openai_compat`, and `ironclaw_attachments` (the
-advertised attachment ceilings only — WS5 gave the size limits one home, so the
+The ten normal workspace deps (re-derive:
+`grep -n '^ironclaw' crates/product/ironclaw_webui/Cargo.toml`):
+`ironclaw_product_contracts` (the `ProductSurface` trait, DTOs, and descriptor
+types handlers speak), `ironclaw_host_api` (caller/error vocabulary, identity
+newtypes, ingress descriptors, the sealed evidence home),
+`ironclaw_extension_contracts`, `ironclaw_auth` (product-auth service facade
+and route DTOs), `ironclaw_common` (shared hashing primitive used to redact
+auth-token samples), `ironclaw_assistant` (**frozen residue only** — the 100
+pinned wire-DTO/descriptor-constant symbols; §12.11 D-B),
+`ironclaw_extension_host` (**bounded** — the channel-pairing service core
+only, never lifecycle authority or installation stores; §6.9.4's pairing
+amendment), `ironclaw_host_ingress` (Axum route-mount carriers),
+`ironclaw_openai_compat`, and `ironclaw_attachments` (the advertised
+attachment ceilings only — WS5 gave the size limits one home, so the
 transport reads the same constants the landing routine enforces rather than
 keeping a second copy; PROPOSAL §6.4.9). Plus infra crates: `axum`, `tokio`,
 `tower*`, `tracing`, `thiserror`, `async-trait`, `secrecy`, `subtle`,

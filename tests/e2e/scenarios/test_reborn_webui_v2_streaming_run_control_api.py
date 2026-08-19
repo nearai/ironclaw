@@ -15,6 +15,7 @@ import pytest
 
 from helpers import REBORN_V2_AUTH_TOKEN, sse_stream, wait_for_sse_line
 from reborn_webui_harness import (
+    session_channel_extension_id,
     client_action_id,
     create_thread,
     fetch_timeline,
@@ -248,9 +249,14 @@ async def _submit_message(
     thread_id: str,
     content: str = "hello streaming",
 ) -> dict:
+    extension_id = await session_channel_extension_id(client, base_url)
     response = await client.post(
-        f"{base_url}/api/webchat/v2/threads/{thread_id}/messages",
-        json={"client_action_id": client_action_id(), "content": content},
+        f"{base_url}/api/webchat/v2/channels/{extension_id}/messages",
+        json={
+            "client_action_id": client_action_id(),
+            "thread_id": thread_id,
+            "content": content,
+        },
         timeout=30,
     )
     assert response.status_code in (200, 202), response.text
@@ -407,16 +413,19 @@ async def _run_fault_scenario(
                 timeout=60,
             )
 
-    requests = await _wait_for_mock_llm_request_count(
+    # The retry/delay fault scenarios above are the contract under test: the
+    # run finalizes with the right answer after the scripted provider faults.
+    await _wait_for_mock_llm_request_count(
         mock_llm_server,
         marker,
         expected_request_count,
     )
     assert submitted["run_id"] in json.dumps(sse_event)
     assert assistant["content"] == "The answer is 4."
-    assert all(
-        request.get("stream") is True for request in requests[:expected_request_count]
-    )
+    # The OpenAI-compatible mock rides the buffered trait fallback since
+    # #7120: rig-core 0.33 synthesizes its final response after EOF, so
+    # IronClaw cannot distinguish a complete OpenAI stream from a truncated
+    # one and deliberately keeps the buffered request path for it.
 
 
 async def test_reborn_v2_sse_stream_accepts_bearer_served(

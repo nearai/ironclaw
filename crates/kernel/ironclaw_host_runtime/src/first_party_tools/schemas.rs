@@ -79,32 +79,152 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["parse", "stringify", "query", "validate"]
+                    "enum": ["parse", "stringify", "query", "validate", "length", "last", "slice", "aggregate"],
+                    "description": "JSON operation to perform"
                 },
                 "data": { "description": "JSON string or JSON value to process" },
-                "path": { "type": "string", "description": "Dot/bracket path for query operation" }
+                "file_path": {
+                    "type": "string",
+                    "maxLength": 4096,
+                    "description": "Scoped JSON file below /workspace to read for query or collection operations; mutually exclusive with data and bounded to 8388608 bytes"
+                },
+                "path": {
+                    "type": "string",
+                    "maxLength": 4096,
+                    "description": "Restricted dot/bracket traversal path with an optional $ root, including $, $[1][0], $.nodes[2].data[15][0], [1][0], or nodes[2].data[15][0]. Wildcards, negative indices, slices, filters, recursive descent, expressions, and functions are not supported; use length, last, slice, or aggregate operations instead."
+                },
+                "start": { "type": "integer", "minimum": 0, "description": "Inclusive array start index for slice" },
+                "end": { "type": "integer", "minimum": 0, "description": "Exclusive array end index for slice; at most 4096 items may be returned" },
+                "function": { "type": "string", "enum": ["sum", "average", "min", "max"], "description": "Bounded numeric aggregate: integer-only input computes exactly (sum, min, max) and average rounds its exact sum once; input mixing integers and decimals computes in floating point" },
+                "value_index": { "type": "integer", "minimum": 0, "description": "Optional numeric index to select from each array row before aggregation" }
             },
-            "required": ["operation", "data"],
+            "oneOf": [
+                {
+                    "title": "parse inline JSON text",
+                    "properties": {
+                        "operation": { "const": "parse" },
+                        "data": { "type": "string" }
+                    },
+                    "required": ["operation", "data"],
+                    "not": { "anyOf": [{ "required": ["file_path"] }, { "required": ["path"] }] }
+                },
+                {
+                    "title": "stringify inline JSON",
+                    "properties": { "operation": { "const": "stringify" } },
+                    "required": ["operation", "data"],
+                    "not": { "anyOf": [{ "required": ["file_path"] }, { "required": ["path"] }] }
+                },
+                {
+                    "title": "query inline JSON",
+                    "properties": { "operation": { "const": "query" } },
+                    "required": ["operation", "data", "path"],
+                    "not": { "required": ["file_path"] }
+                },
+                {
+                    "title": "query a scoped workspace JSON file",
+                    "properties": { "operation": { "const": "query" } },
+                    "required": ["operation", "file_path", "path"],
+                    "not": { "required": ["data"] }
+                },
+                {
+                    "title": "get inline JSON collection length",
+                    "properties": { "operation": { "const": "length" } },
+                    "required": ["operation", "data", "path"],
+                    "not": { "required": ["file_path"] }
+                },
+                {
+                    "title": "get workspace JSON collection length",
+                    "properties": { "operation": { "const": "length" } },
+                    "required": ["operation", "file_path", "path"],
+                    "not": { "required": ["data"] }
+                },
+                {
+                    "title": "get last inline JSON array item",
+                    "properties": { "operation": { "const": "last" } },
+                    "required": ["operation", "data", "path"],
+                    "not": { "required": ["file_path"] }
+                },
+                {
+                    "title": "get last workspace JSON array item",
+                    "properties": { "operation": { "const": "last" } },
+                    "required": ["operation", "file_path", "path"],
+                    "not": { "required": ["data"] }
+                },
+                {
+                    "title": "slice an inline JSON array",
+                    "properties": { "operation": { "const": "slice" } },
+                    "required": ["operation", "data", "path", "start", "end"],
+                    "not": { "required": ["file_path"] }
+                },
+                {
+                    "title": "slice a workspace JSON array",
+                    "properties": { "operation": { "const": "slice" } },
+                    "required": ["operation", "file_path", "path", "start", "end"],
+                    "not": { "required": ["data"] }
+                },
+                {
+                    "title": "aggregate an inline JSON numeric array",
+                    "properties": { "operation": { "const": "aggregate" } },
+                    "required": ["operation", "data", "path", "function"],
+                    "not": { "required": ["file_path"] }
+                },
+                {
+                    "title": "aggregate a workspace JSON numeric array",
+                    "properties": { "operation": { "const": "aggregate" } },
+                    "required": ["operation", "file_path", "path", "function"],
+                    "not": { "required": ["data"] }
+                },
+                {
+                    "title": "validate inline JSON text",
+                    "properties": {
+                        "operation": { "const": "validate" },
+                        "data": { "type": "string" }
+                    },
+                    "required": ["operation", "data"],
+                    "not": { "anyOf": [{ "required": ["file_path"] }, { "required": ["path"] }] }
+                }
+            ],
             "additionalProperties": false
         }),
         "schemas/builtin/http.input.v1.json" => http_schema(false),
-        "schemas/builtin/outbound_delivery_target_route_current.input.v1.json" => json!({
+        "schemas/builtin/outbound_deliver.input.v1.json" => json!({
             "type": "object",
             "properties": {
                 "target_id": {
                     "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512,
                     "description": "Opaque target id returned by builtin__outbound_delivery_targets_list."
+                },
+                "content": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32768,
+                    "description": "Markdown content to deliver. The channel renders and splits it. The authoritative limit is 32768 UTF-8 BYTES (schema maxLength counts code points, so multi-byte content may pass the schema and still be rejected)."
                 }
             },
-            "required": ["target_id"],
+            "required": ["target_id", "content"],
             "additionalProperties": false
         }),
-        "schemas/builtin/outbound_delivery_target_route_current.output.v1.json" => json!({
+        "schemas/builtin/outbound_deliver.output.v1.json" => json!({
             "type": "object",
             "properties": {
-                "routed": { "type": "boolean", "const": true }
+                "delivered": { "type": "boolean" },
+                "provider_confirmed": { "type": "boolean" },
+                "target_id": { "type": "string" },
+                "channel": { "type": "string" },
+                "display_name": { "type": "string" },
+                "provider_message_refs": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                },
+                "durably_recorded": { "type": "boolean" },
+                "already_delivered": {
+                    "type": "boolean",
+                    "description": "True when the durable ledger proves this exact delivery already completed earlier in the run. The message was NOT resent; provider_message_refs is empty because the ledger row does not retain them."
+                }
             },
-            "required": ["routed"],
+            "required": ["delivered", "provider_confirmed", "target_id", "channel", "display_name", "provider_message_refs", "durably_recorded", "already_delivered"],
             "additionalProperties": false
         }),
         "schemas/builtin/attach_workspace_file_to_reply.input.v1.json" => json!({
@@ -255,7 +375,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         "schemas/builtin/read_file.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Scoped path to read. Supported document files such as PDFs are returned as extracted text." },
+                "path": { "type": "string", "description": "Scoped path to read. DOCX, XLSX, and PPTX return structured, addressable views for document_edit; formats such as PDF return extracted text." },
                 "offset": { "type": "integer", "minimum": 0, "description": "1-based starting line; 0 starts at the beginning" },
                 "limit": { "type": "integer", "minimum": 0, "description": "Maximum lines to return" }
             },
@@ -311,6 +431,40 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "offset": { "type": "integer", "minimum": 0 }
             },
             "required": ["pattern"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/document_edit.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Scoped path of the .docx/.xlsx/.pptx to edit. Read it with read_file first: the paragraph ids, cell references and slide indexes the edits name come from that read." },
+                "output_path": { "type": "string", "description": "Scoped path for the edited copy. Must differ from path and carry the same extension — the original is never modified." },
+                "edits": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 256,
+                    "description": "Structural edits, applied in order. The accepted shapes depend on the document format.\n\n.docx:\n- {\"op\": \"resolve_all_revisions\", \"disposition\": \"accept\"|\"reject\"} — resolve every tracked change\n- {\"op\": \"resolve_revisions\", \"paragraph\": \"p3\", \"disposition\": \"accept\"|\"reject\"} — resolve one paragraph's tracked changes\n- {\"op\": \"replace_paragraph_text\", \"paragraph\": \"p3\", \"text\": \"...\"} — replace a paragraph's text, keeping its style\n\n.xlsx:\n- {\"op\": \"set_cell_formula\", \"sheet\": \"Sheet1\", \"cell\": \"C5\", \"formula\": \"SUM(C2:C4)\"}\n\n.pptx:\n- {\"op\": \"clone_slide\", \"source\": 1, \"text\": [\"Title\", \"Body\"]} — append a copy of slide `source` (1-based) with its text replaced, inheriting the source's layout and style",
+                    "items": {
+                        "oneOf": [
+                            { "type": "object", "properties": { "op": { "const": "resolve_all_revisions" }, "disposition": { "type": "string", "enum": ["accept", "reject"] } }, "required": ["op", "disposition"], "additionalProperties": false },
+                            { "type": "object", "properties": { "op": { "const": "resolve_revisions" }, "paragraph": { "type": "string" }, "disposition": { "type": "string", "enum": ["accept", "reject"] } }, "required": ["op", "paragraph", "disposition"], "additionalProperties": false },
+                            { "type": "object", "properties": { "op": { "const": "replace_paragraph_text" }, "paragraph": { "type": "string" }, "text": { "type": "string" } }, "required": ["op", "paragraph", "text"], "additionalProperties": false },
+                            { "type": "object", "properties": { "op": { "const": "set_cell_formula" }, "sheet": { "type": "string" }, "cell": { "type": "string" }, "formula": { "type": "string" } }, "required": ["op", "sheet", "cell", "formula"], "additionalProperties": false },
+                            { "type": "object", "properties": { "op": { "const": "clone_slide" }, "source": { "type": "integer", "minimum": 1 }, "text": { "type": "array", "items": { "type": "string" } } }, "required": ["op", "source", "text"], "additionalProperties": false }
+                        ]
+                    }
+                }
+            },
+            "required": ["path", "output_path", "edits"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/html_to_pdf.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Scoped path for the new .pdf. Must not already exist — existing PDFs are never overwritten." },
+                "html": { "type": "string", "maxLength": 1048576, "description": "HTML to render. Supported: h1-h3, p, ul/ol with li, hr as vertical spacing, blockquote, strong/b, em/i, code, br, and HTML entities. Other tags are ignored but their text still renders. CSS is not supported." },
+                "title": { "type": "string", "description": "Document title recorded in the PDF metadata" }
+            },
+            "required": ["path", "html"],
             "additionalProperties": false
         }),
         "schemas/builtin/apply_patch.input.v1.json" => json!({
@@ -620,29 +774,6 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["key", "capability_id", "state", "tenant_id", "user_id"],
             "additionalProperties": false
         }),
-        "schemas/builtin/outbound_preferences_set.input.v1.json" => json!({
-            "type": "object",
-            "properties": {
-                "final_reply_target_id": {
-                    "type": ["string", "null"],
-                    "maxLength": 512,
-                    "description": "Outbound delivery target id to use for final replies. Omit or pass null to clear the preference."
-                }
-            },
-            "additionalProperties": false
-        }),
-        "schemas/builtin/outbound_preferences_set.output.v1.json" => json!({
-            "type": "object",
-            "properties": {
-                "final_reply_target": {
-                    "type": ["object", "null"]
-                },
-                "final_reply_target_status": { "type": "string" },
-                "default_modality": { "type": "string" }
-            },
-            "required": ["final_reply_target", "final_reply_target_status", "default_modality"],
-            "additionalProperties": false
-        }),
         "schemas/builtin/skill_list.input.v1.json" => json!({
             "type": "object",
             "properties": {},
@@ -671,6 +802,29 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "url": {
                     "type": "string",
                     "description": "HTTPS URL to a SKILL.md document, ZIP bundle, or GitHub skill repository/tree to fetch and install"
+                },
+                "files": {
+                    "type": "array",
+                    "description": "Additional bundle files installed alongside SKILL.md, e.g. `scripts/analyze.py`, `references/units.md`, `schemas/report.xsd`. Put a reusable computation in a script rather than describing it in prose: a future run loads the file instead of re-deriving the method. SKILL.md should name the files it relies on.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Bundle-relative path, e.g. `scripts/analyze.py`"
+                            },
+                            "text": {
+                                "type": "string",
+                                "description": "UTF-8 file contents. Use this for scripts, references and schemas."
+                            },
+                            "bytes_base64": {
+                                "type": "string",
+                                "description": "Base64 contents. Only for binary files; prefer `text` otherwise."
+                            }
+                        },
+                        "required": ["path"],
+                        "additionalProperties": false
+                    }
                 }
             },
             "oneOf": [
@@ -779,19 +933,59 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         }),
         "schemas/builtin/trigger_create.input.v1.json" => json!({
             "type": "object",
-            "description": "Create a scheduled trigger. Pass the trigger object itself with top-level fields `name`, `prompt`, and `schedule`; do not wrap the schedule in `operation`, `data`, or a parser request object.",
+            "description": "Create a scheduled trigger from a structured execution contract. Existing stored legacy prompts remain runnable, but new triggers must use `execution_contract`.",
             "properties": {
                 "name": {
                     "type": "string",
                     "description": "Human-readable trigger name. Runtime validation caps UTF-8 content at 256 bytes."
                 },
-                "prompt": {
-                    "type": "string",
-                    "description": "Prompt submitted when the trigger fires. Write only the action performed at fire time. If delivery_target_id is set, never put a send, post, or deliver-results step for that result here; the host delivers the final reply automatically. Never tell the prompt to send results back to the requesting user — receiving results is routing, never a prompt step, even when phrased as 'send me the result' or when the requester's conversation id is known. Put messaging here only when messaging someone else is itself the task, and pin that third-party recipient while the user is present. Do not describe creating, scheduling, or configuring the trigger. Runtime validation caps UTF-8 content at 32768 bytes."
-                },
-                "delivery_target_id": {
-                    "type": "string",
-                    "description": "Optional per-trigger outbound delivery target id from builtin__outbound_delivery_targets_list. When set, the host delivers this trigger's final results to that target. Do not also put a send, post, or deliver-results step for that result in prompt. When omitted, the host inherits the current source run's authorized delivery route when one exists; otherwise the user's default outbound delivery target at fire time is used. This is resolved from trusted run state, never prompt parsing. Prefer setting this whenever the user names a destination for this trigger's results."
+                "execution_contract": {
+                    "type": "object",
+                    "description": "Versioned contract rendered into the frozen future-run prompt. Describe the task itself, never the act of creating or scheduling it. Referenced capabilities only narrow the scheduled surface; required skills must activate before the first model call.",
+                    "properties": {
+                        "version": { "const": 1 },
+                        "goal": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "The complete task for a future run with no memory of this conversation. A scheduled fire runs as the routine's owning user and may use the linked integration capabilities available to the owning user, subject to the user's current connection and permission settings; write requested integration reads or user-authorized actions into this goal explicitly. Include explicit external-delivery steps using builtin__outbound_deliver and target ids selected now from builtin__outbound_delivery_targets_list. A bare send-me request from the web app needs no external-delivery step; the final reply is recorded in the run thread."
+                        },
+                        "success_criteria": {
+                            "type": "array", "minItems": 1, "maxItems": 32,
+                            "items": { "type": "string", "minLength": 1 }
+                        },
+                        "output_instructions": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Required final-answer shape and destination-independent presentation. For a web-app request with no named external destination, this final reply is the delivery."
+                        },
+                        "no_result_text": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Exact useful response when the task finds no result."
+                        },
+                        "policy": {
+                            "type": "object",
+                            "properties": {
+                                "allowed_capability_ids": {
+                                    "type": ["array", "null"], "maxItems": 64,
+                                    "items": { "type": "string" }
+                                },
+                                "required_skills": {
+                                    "type": "array", "maxItems": 8,
+                                    "items": { "type": "string" }
+                                },
+                                "result_delivery": {
+                                    "type": "string",
+                                    "enum": ["deliver", "suppress_when_nothing_to_report"],
+                                    "description": "Derive this from the user's wording. Use suppress_when_nothing_to_report when the user asks to be notified only on a match, change, or actionable result; otherwise use deliver."
+                                }
+                            },
+                            "required": ["result_delivery"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["version", "goal", "success_criteria", "output_instructions", "no_result_text", "policy"],
+                    "additionalProperties": false
                 },
                 "schedule": {
                     "description": "When and how often the trigger fires. This value is the schedule object itself. For recurring triggers use {\"kind\":\"cron\",\"expression\":\"0 14 * * 2\",\"timezone\":\"America/Los_Angeles\"}. For one-time triggers use {\"kind\":\"once\",\"at\":\"2026-06-23T14:00:00\",\"timezone\":\"America/Los_Angeles\"}. Do not pass {\"operation\":\"parse\",\"data\":...}.",
@@ -819,17 +1013,18 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     ]
                 }
             },
-            "required": ["name", "prompt", "schedule"],
+            "required": ["name", "execution_contract", "schedule"],
             "additionalProperties": false
         }),
         "schemas/builtin/trigger_list.input.v1.json" => json!({
             "type": "object",
+            "description": "List the caller's scheduled routines (automations) with state, schedule, next/last fire, and recent runs. The response is the authoritative current routine state for this caller; an empty `triggers` array means no routines exist.",
             "properties": {
                 "limit": {
                     "type": "integer",
-                    "minimum": 0,
+                    "minimum": 1,
                     "maximum": 100,
-                    "description": "Maximum triggers to return. Defaults to 100."
+                    "description": "Maximum triggers to return. Defaults to 100. Must be at least 1: a zero limit is rejected, so an empty `triggers` array is always proof that no routines exist rather than an artifact of the limit."
                 },
                 "run_limit": {
                     "type": "integer",
@@ -962,23 +1157,109 @@ mod tests {
     use super::resolve_builtin_input_schema_ref;
 
     #[test]
-    fn trigger_create_prompt_description_warns_against_self_referential_creation_prompts() {
-        // Issue #5505 (generation-time defense): the model must write the
-        // trigger's per-fire action steps, not meta-instructions describing
-        // creating/scheduling the trigger itself — otherwise a fired trigger
-        // re-invokes trigger_create instead of doing the task ("a routine
-        // that creates routines").
+    fn json_schema_discloses_exact_operation_inputs() {
+        let schema = resolve_builtin_input_schema_ref("schemas/builtin/json.input.v1.json")
+            .expect("JSON schema is registered");
+        let branches = schema["oneOf"].as_array().expect("operation alternatives");
+        assert_eq!(branches.len(), 13);
+        assert_eq!(
+            schema["properties"]["operation"]["enum"],
+            serde_json::json!([
+                "parse",
+                "stringify",
+                "query",
+                "validate",
+                "length",
+                "last",
+                "slice",
+                "aggregate"
+            ])
+        );
+        assert!(branches.iter().any(|branch| {
+            branch["properties"]["operation"]["const"] == "query"
+                && branch["required"] == serde_json::json!(["operation", "data", "path"])
+                && branch["not"]["required"] == serde_json::json!(["file_path"])
+        }));
+        assert!(branches.iter().any(|branch| {
+            branch["properties"]["operation"]["const"] == "query"
+                && branch["required"] == serde_json::json!(["operation", "file_path", "path"])
+                && branch["not"]["required"] == serde_json::json!(["data"])
+        }));
+        assert_eq!(schema["properties"]["file_path"]["maxLength"], 4096);
+        assert!(
+            schema["properties"]["file_path"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("8388608 bytes"))
+        );
+        assert_eq!(schema["properties"]["path"]["maxLength"], 4096);
+        assert!(
+            schema["properties"]["path"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("$.nodes"))
+        );
+        assert_eq!(schema["properties"]["start"]["minimum"], 0);
+        assert_eq!(schema["properties"]["end"]["minimum"], 0);
+        assert_eq!(schema["properties"]["value_index"]["minimum"], 0);
+        assert_eq!(
+            schema["properties"]["function"]["enum"],
+            serde_json::json!(["sum", "average", "min", "max"])
+        );
+        assert!(branches.iter().any(|branch| {
+            branch["properties"]["operation"]["const"] == "slice"
+                && branch["required"]
+                    == serde_json::json!(["operation", "file_path", "path", "start", "end"])
+        }));
+        assert!(branches.iter().any(|branch| {
+            branch["properties"]["operation"]["const"] == "aggregate"
+                && branch["required"]
+                    == serde_json::json!(["operation", "data", "path", "function"])
+        }));
+    }
+
+    #[test]
+    fn trigger_create_requires_structured_execution_contract() {
         let schema =
             resolve_builtin_input_schema_ref("schemas/builtin/trigger_create.input.v1.json")
                 .expect("trigger_create schema is registered");
-        let description = schema["properties"]["prompt"]["description"]
-            .as_str()
-            .expect("prompt description is a string");
-
         assert!(
-            description
-                .contains("Do not describe creating, scheduling, or configuring the trigger"),
-            "prompt description must warn against self-referential creation prompts: {description}"
+            schema["properties"].get("prompt").is_none(),
+            "new trigger creation must not advertise the legacy raw prompt path"
+        );
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["name", "execution_contract", "schedule"])
+        );
+        assert_eq!(
+            schema["properties"]["execution_contract"]["required"],
+            serde_json::json!([
+                "version",
+                "goal",
+                "success_criteria",
+                "output_instructions",
+                "no_result_text",
+                "policy"
+            ])
+        );
+        assert_eq!(
+            schema["properties"]["execution_contract"]["properties"]["policy"]["required"],
+            serde_json::json!(["result_delivery"])
+        );
+        assert!(
+            schema["properties"]["execution_contract"]["properties"]["policy"]["properties"]
+                ["result_delivery"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("otherwise use deliver")),
+            "neutral wording must have the safe delivery fallback"
+        );
+        let goal_description =
+            schema["properties"]["execution_contract"]["properties"]["goal"]["description"]
+                .as_str()
+                .expect("execution-contract goal description is a string");
+        assert!(
+            goal_description.contains(
+                "may use the linked integration capabilities available to the owning user"
+            ) && !goal_description.contains("unavailable to scheduled automations"),
+            "the execution-contract schema must allow future scheduled loop-runs to use the owning user's linked integrations: {goal_description}"
         );
     }
 
@@ -1014,6 +1295,22 @@ mod tests {
         assert_eq!(
             tool_output["required"],
             serde_json::json!(["key", "capability_id", "state", "tenant_id", "user_id"])
+        );
+    }
+
+    /// The schema's advisory `content.maxLength` and the port's authoritative
+    /// byte cap (`ironclaw_outbound::MODEL_DELIVERY_MAX_CONTENT_BYTES`) must
+    /// carry the same number: the schema is what the model sees, the port is
+    /// what enforces, and silent drift between them turns a schema-valid call
+    /// into an unexplained rejection.
+    #[test]
+    fn outbound_deliver_schema_content_bound_matches_the_port_byte_cap() {
+        let input =
+            resolve_builtin_input_schema_ref("schemas/builtin/outbound_deliver.input.v1.json")
+                .expect("outbound_deliver input schema is registered");
+        assert_eq!(
+            input["properties"]["content"]["maxLength"],
+            serde_json::json!(ironclaw_outbound::MODEL_DELIVERY_MAX_CONTENT_BYTES),
         );
     }
 
@@ -1082,31 +1379,6 @@ mod tests {
             serde_json::json!(["no_auth", "bearer", "oauth"])
         );
         assert_eq!(input["additionalProperties"], false);
-    }
-
-    #[test]
-    fn outbound_preferences_set_schemas_are_registered() {
-        let input = resolve_builtin_input_schema_ref(
-            "schemas/builtin/outbound_preferences_set.input.v1.json",
-        )
-        .expect("outbound preferences set input schema is registered");
-        let output = resolve_builtin_input_schema_ref(
-            "schemas/builtin/outbound_preferences_set.output.v1.json",
-        )
-        .expect("outbound preferences set output schema is registered");
-
-        assert_eq!(
-            input["properties"]["final_reply_target_id"]["type"],
-            serde_json::json!(["string", "null"])
-        );
-        assert_eq!(
-            output["required"],
-            serde_json::json!([
-                "final_reply_target",
-                "final_reply_target_status",
-                "default_modality"
-            ])
-        );
     }
 
     #[test]

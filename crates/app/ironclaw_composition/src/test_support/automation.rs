@@ -8,10 +8,9 @@ use std::sync::Arc;
 use ironclaw_assistant::AutomationProductService;
 use ironclaw_processes::ProcessLifecycleLookupSource;
 use ironclaw_triggers::{TriggerActiveRunLookup, TriggerRepository};
-use ironclaw_turns::{AgentTurnRuntimePort, TurnError};
+use ironclaw_turns::TurnError;
 
 use crate::automation::trigger_poller::ProcessActiveRunLookup;
-use crate::factory::TurnStateTriggerSourceReplyTarget;
 
 /// Build the production `RebornAutomationProductService` over
 /// `trigger_repository` plus the harness's own process lifecycle source, for
@@ -45,28 +44,19 @@ pub fn standalone_trigger_active_run_lookup_for_test(
     Arc::new(ProcessActiveRunLookup::new(processes))
 }
 
-/// Repoint the standalone runtime's trigger-source lookup seams at the harness
-/// process runtime. Integration groups build the capability harness before the
-/// group coordinator owns its runtime, so production's single-system wiring must
-/// be late-bound for both active-run listing and trigger delivery inheritance.
+/// Repoint the standalone runtime's trigger-source lifecycle lookup at the
+/// harness process runtime. Integration groups build the capability harness
+/// before the group coordinator owns its runtime, so production's
+/// single-system wiring must be late-bound for active-run listing.
 #[cfg(feature = "test-support")]
 pub fn rebind_standalone_trigger_source_turn_state_for_test(
     runtime: &crate::RebornRuntime,
     lifecycle_source: Arc<dyn ProcessLifecycleLookupSource<Error = TurnError>>,
-    turn_state: Arc<dyn AgentTurnRuntimePort>,
 ) -> Result<(), String> {
-    let reply_target = Arc::new(TurnStateTriggerSourceReplyTarget::new(
-        turn_state as Arc<dyn AgentTurnRuntimePort>,
-    ));
     *runtime
         .trigger_process_lifecycle_source
         .write()
         .map_err(|error| format!("trigger source lifecycle lock unavailable: {error}"))? =
         lifecycle_source;
-    *runtime
-        .trigger_source_reply_target
-        .write()
-        .map_err(|error| format!("trigger source reply-target lock unavailable: {error}"))? =
-        reply_target;
     Ok(())
 }

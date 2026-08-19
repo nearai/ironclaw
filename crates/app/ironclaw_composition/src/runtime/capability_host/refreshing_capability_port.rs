@@ -3,8 +3,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use ironclaw_assistant::{OutboundPreferencesProductService, ProjectService};
+use ironclaw_assistant::OutboundPreferencesProductService;
 use ironclaw_host_api::{
+    capability_surface::CapabilitySurfacePolicy,
     ids::{CapabilityId, ExtensionId, UserId},
     mount::MountView,
     resolution::{Resolution, ResolutionBatch},
@@ -20,6 +21,7 @@ use ironclaw_loop_host::{
     HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
     wrap_external_tools, wrap_surface_disclosure,
 };
+use ironclaw_product_contracts::project_service::ProjectService;
 use ironclaw_threads::SessionThreadService;
 use ironclaw_trust::TrustDecision;
 use ironclaw_turns::ExternalToolCatalog;
@@ -31,8 +33,8 @@ use crate::runtime::capability_host::outbound_delivery::outbound_delivery_capabi
 use ironclaw_approvals::ApprovalSettingsProvider;
 use ironclaw_assistant::project_create_capability;
 use ironclaw_extension_host::capability_surface::ExtensionCapabilitySurfaceSource;
-use ironclaw_first_party_extension_ports::skill_activation_capability;
 use ironclaw_loop_host::result_read_capability;
+use ironclaw_loop_host::skill_activation_capability;
 use ironclaw_loop_host::wrap_synthetic_capabilities;
 
 use super::{
@@ -43,6 +45,7 @@ use super::{
 pub(crate) struct RefreshingCapabilityPortConfig {
     pub(super) runtime: Arc<dyn HostRuntime>,
     pub(super) run_context: LoopRunContext,
+    pub(super) surface_policy: Arc<CapabilitySurfacePolicy>,
     pub(super) fallback_user_id: UserId,
     pub(super) policy: Arc<BuiltinCapabilityPolicy>,
     pub(super) workspace_mounts: MountView,
@@ -58,7 +61,7 @@ pub(crate) struct RefreshingCapabilityPortConfig {
     pub(super) thread_service: Arc<dyn SessionThreadService>,
     pub(super) trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     pub(super) outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
-    pub(super) outbound_delivery_target_set_requires_approval: bool,
+    pub(super) outbound_preference_write_requires_approval: bool,
     pub(super) approval_settings: Arc<dyn ApprovalSettingsProvider>,
     pub(super) approval_requests: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>,
     pub(super) capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort>,
@@ -100,6 +103,7 @@ pub(crate) async fn create_refreshing_capability_port(
     let port = Arc::new(RefreshingCapabilityPort {
         runtime: config.runtime,
         run_context: config.run_context,
+        surface_policy: config.surface_policy,
         fallback_user_id: config.fallback_user_id,
         policy: config.policy,
         workspace_mounts: config.workspace_mounts,
@@ -115,8 +119,8 @@ pub(crate) async fn create_refreshing_capability_port(
         thread_service: config.thread_service,
         trajectory_observer: config.trajectory_observer,
         outbound_preferences_service: config.outbound_preferences_service,
-        outbound_delivery_target_set_requires_approval: config
-            .outbound_delivery_target_set_requires_approval,
+        outbound_preference_write_requires_approval: config
+            .outbound_preference_write_requires_approval,
         approval_settings: config.approval_settings,
         approval_requests: config.approval_requests,
         capability_leases: config.capability_leases,
@@ -140,6 +144,7 @@ pub(crate) async fn create_refreshing_capability_port(
 struct RefreshingCapabilityPort {
     runtime: Arc<dyn HostRuntime>,
     run_context: LoopRunContext,
+    surface_policy: Arc<CapabilitySurfacePolicy>,
     fallback_user_id: UserId,
     policy: Arc<BuiltinCapabilityPolicy>,
     workspace_mounts: MountView,
@@ -155,7 +160,7 @@ struct RefreshingCapabilityPort {
     thread_service: Arc<dyn SessionThreadService>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
-    outbound_delivery_target_set_requires_approval: bool,
+    outbound_preference_write_requires_approval: bool,
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
     approval_requests: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>,
     capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort>,
@@ -186,6 +191,7 @@ impl RefreshingCapabilityPort {
                 memory_mounts: &self.memory_mounts,
                 system_extensions_lifecycle_mounts: &self.system_extensions_lifecycle_mounts,
                 policy: &self.policy,
+                surface_policy: &self.surface_policy,
                 extension_surface: &extension_surface,
             },
         )?;
@@ -322,11 +328,26 @@ impl RefreshingCapabilityPort {
                 self.fallback_user_id.clone(),
                 Arc::clone(&self.approval_requests),
                 Arc::clone(&self.capability_leases),
-                self.outbound_delivery_target_set_requires_approval,
+                self.outbound_preference_write_requires_approval,
                 Arc::clone(&self.approval_settings),
                 Arc::clone(&self.replay_payload_store),
                 Arc::clone(&self.gate_record_store),
             )?);
+        }
+        let suppressed_scheduled_run = self
+            .run_context
+            .product_context
+            .as_ref()
+            .filter(|context| {
+                context.origin == ironclaw_host_api::turn::TurnOriginKind::ScheduledTrigger
+            })
+            .and_then(|context| context.execution_policy.as_ref())
+            .is_some_and(|policy| {
+                policy.result_delivery
+                    == ironclaw_host_api::execution_policy::ResultDeliveryPolicy::SuppressWhenNothingToReport
+            });
+        if suppressed_scheduled_run {
+            synthetic_capabilities.push(ironclaw_loop_host::nothing_to_report_result_capability()?);
         }
         let port = wrap_synthetic_capabilities(
             port,
@@ -358,8 +379,11 @@ impl RefreshingCapabilityPort {
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<(Arc<dyn LoopCapabilityPort>, VisibleCapabilitySurface), AgentLoopHostError> {
-        let port = self.build_inner().await?;
-        let surface = port.visible_capabilities(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let port = Box::pin(self.build_inner()).await?;
+        let surface = Box::pin(port.visible_capabilities(request)).await?;
         Ok((port, surface))
     }
 
@@ -386,7 +410,10 @@ impl RefreshingCapabilityPort {
         request: VisibleCapabilityRequest,
     ) -> Result<(Arc<dyn LoopCapabilityPort>, VisibleCapabilitySurface), AgentLoopHostError> {
         let _guard = self.refresh_lock.lock().await;
-        let (port, surface) = self.refresh_with_surface(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let (port, surface) = Box::pin(self.refresh_with_surface(request)).await?;
         self.replace_current(port.clone())?;
         Ok((port, surface))
     }
@@ -405,6 +432,12 @@ impl RefreshingCapabilityPort {
 
 #[async_trait::async_trait]
 impl LoopCapabilityPort for RefreshingCapabilityPort {
+    fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
+        self.current_port().map_or(true, |port| {
+            port.requires_ordered_batch_invocation(invocations)
+        })
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         self.current_port()?.tool_definitions()
     }
@@ -428,17 +461,21 @@ impl LoopCapabilityPort for RefreshingCapabilityPort {
         &self,
         request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.current_or_refresh()
-            .await?
-            .register_provider_tool_call(request)
-            .await
+        let port = self.current_or_refresh().await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(port.register_provider_tool_call(request)).await
     }
 
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let (_, surface) = self.refresh_current(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let (_, surface) = Box::pin(self.refresh_current(request)).await?;
         Ok(surface)
     }
 
@@ -446,20 +483,22 @@ impl LoopCapabilityPort for RefreshingCapabilityPort {
         &self,
         request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
-        self.current_or_refresh()
-            .await?
-            .invoke_capability(request)
-            .await
+        let port = self.current_or_refresh().await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(port.invoke_capability(request)).await
     }
 
     async fn invoke_capability_batch(
         &self,
         request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
-        self.current_or_refresh()
-            .await?
-            .invoke_capability_batch(request)
-            .await
+        let port = self.current_or_refresh().await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(port.invoke_capability_batch(request)).await
     }
 }
 
@@ -478,6 +517,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
     let crate::test_support::RefreshingCapabilityPortTestParts {
         runtime,
         run_context,
+        surface_policy,
         fallback_user_id,
         workspace_mounts,
         skill_mounts,
@@ -491,7 +531,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
         thread_service,
         trajectory_observer,
         outbound_preferences_service,
-        outbound_delivery_target_set_requires_approval,
+        outbound_preference_write_requires_approval,
         tool_permission_overrides,
         auto_approve_settings,
         persistent_approval_policies,
@@ -525,6 +565,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
     create_refreshing_capability_port(RefreshingCapabilityPortConfig {
         runtime,
         run_context,
+        surface_policy: Arc::new(surface_policy),
         fallback_user_id,
         policy,
         workspace_mounts,
@@ -548,7 +589,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
         thread_service,
         trajectory_observer,
         outbound_preferences_service,
-        outbound_delivery_target_set_requires_approval,
+        outbound_preference_write_requires_approval,
         approval_settings,
         approval_requests,
         capability_leases,

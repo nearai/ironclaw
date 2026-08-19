@@ -9,7 +9,7 @@ use ironclaw_approvals::{
     CapabilityPermissionOverrideStorePort, DenyApproval, LeaseApproval, PersistentApprovalAction,
     PersistentApprovalPolicy, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
     PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
-    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
+    ToolPermissionOverrideInput, ToolPermissionOverrideKey,
     test_support::{
         in_memory_backed_capability_permission_override_store,
         in_memory_backed_persistent_approval_policy_store,
@@ -29,9 +29,8 @@ use ironclaw_authorization::{
 };
 use ironclaw_event_log::InMemoryAuditSink;
 use ironclaw_host_api::turn::{
-    AcceptedMessageRef, EventCursor, IdempotencyKey, ReplyTargetBindingRef, RunProfileId,
-    RunProfileVersion, SourceBindingRef, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope,
-    TurnStatus,
+    AcceptedMessageRef, EventCursor, IdempotencyKey, RunProfileId, RunProfileVersion, TurnActor,
+    TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
     action::{Action, NetworkPolicy},
@@ -602,13 +601,13 @@ impl TurnCoordinator for FakeTurnCoordinator {
             run_id: request.run_id,
             status: *self.status.lock().expect("lock"),
             accepted_message_ref: AcceptedMessageRef::new("msg:approval").expect("valid"),
-            source_binding_ref: SourceBindingRef::new("src:approval").expect("valid"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:approval").expect("valid"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
+            output_contract: ironclaw_host_api::output::OutputContract::AssistantMessage,
             allow_steering: true,
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: self.gate_ref.lock().expect("lock").clone(),
@@ -985,7 +984,7 @@ async fn always_allow_clears_existing_ask_each_time_override() {
         .await
         .expect("override set");
     let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies;
-    let override_store: Arc<dyn ToolPermissionOverrideStorePort> = overrides.clone();
+    let override_store: Arc<dyn CapabilityPermissionOverrideStorePort> = overrides.clone();
     let service = service
         .with_persistent_policy_store(policy_store)
         .with_tool_permission_override_store(override_store);
@@ -1041,7 +1040,7 @@ async fn always_allow_persists_provider_grantee_when_resolver_supplies_one() {
         .await
         .expect("override set");
     let policy_store: Arc<dyn PersistentApprovalPolicyStorePort> = policies.clone();
-    let override_store: Arc<dyn ToolPermissionOverrideStorePort> = overrides.clone();
+    let override_store: Arc<dyn CapabilityPermissionOverrideStorePort> = overrides.clone();
     let service = service
         .with_persistent_policy_store(policy_store)
         .with_persistent_grantee_resolver(Arc::new(StaticPersistentApprovalGranteeResolver {
@@ -2956,3 +2955,9 @@ async fn run_state_read_model_uses_parked_turn_run_id_for_pending_approvals() {
         .expect("other user pending approvals");
     assert!(other_user_pending.is_empty());
 }
+
+// Note: the shared-thread joiner-resolve pin retired with the ephemeral-per-
+// ping remodel (#7377) — its whole point was owner != actor (a gate raised
+// under the acting user, resolved on a turn whose scope owner was the first
+// binder). Ephemeral-per-ping makes owner == actor universally, so the
+// scenario can no longer exist.

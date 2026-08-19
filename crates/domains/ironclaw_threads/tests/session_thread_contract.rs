@@ -10,10 +10,11 @@ use ironclaw_threads::{
     CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
     CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, DeleteToolResultRecordRequest,
     EnsureThreadRequest, FinalizedAssistantMessageByRunRequest, InMemorySessionThreadService,
-    ListThreadsForScopeRequest, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
-    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
-    SessionThreadError, SessionThreadService, SummaryKind, SummaryModelContextPolicy,
+    InboundMessageReplayMetadata, ListThreadsForScopeRequest, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
+    ProviderToolCallReferenceEnvelope, PutToolResultRecordRequest, ReadToolResultRecordRequest,
+    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadService, SummaryKind, SummaryModelContextPolicy,
     TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadHistoryRequest, ThreadMessageId,
     ThreadMessageRangeRequest, ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
     UpdateAssistantDraftRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
@@ -160,6 +161,7 @@ async fn append_tool_result_reference_is_finalized_and_idempotent_per_run_result
 
     let first = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -172,6 +174,7 @@ async fn append_tool_result_reference_is_finalized_and_idempotent_per_run_result
         .unwrap();
     let duplicate = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -678,6 +681,7 @@ async fn duplicate_tool_result_reference_accepts_matching_provider_metadata() {
 
     let first = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -691,6 +695,7 @@ async fn duplicate_tool_result_reference_accepts_matching_provider_metadata() {
 
     let duplicate = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope,
             thread_id: thread.thread_id,
             turn_run_id: "run-1".into(),
@@ -733,6 +738,7 @@ async fn append_tool_result_reference_accepts_multiline_provider_arguments() {
 
     let record = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope,
             thread_id: thread.thread_id,
             turn_run_id: "run-1".into(),
@@ -764,6 +770,7 @@ async fn append_tool_result_reference_backfills_provider_metadata_on_idempotent_
 
     let first = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -776,6 +783,7 @@ async fn append_tool_result_reference_backfills_provider_metadata_on_idempotent_
         .unwrap();
     let duplicate = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -832,6 +840,7 @@ async fn append_tool_result_reference_rejects_conflicting_provider_metadata_on_r
 
     service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -843,10 +852,13 @@ async fn append_tool_result_reference_rejects_conflicting_provider_metadata_on_r
         .await
         .unwrap();
     let mut conflicting_provider_call = provider_call_reference();
-    conflicting_provider_call.provider_call_id = "call_2".to_string();
+    conflicting_provider_call.provider_tool_name =
+        ProviderToolName::new("demo__other").expect("provider tool name");
+    conflicting_provider_call.capability_id = CapabilityId::new("demo.other").unwrap();
 
     let error = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope,
             thread_id: thread.thread_id,
             turn_run_id: "run-1".into(),
@@ -859,6 +871,110 @@ async fn append_tool_result_reference_rejects_conflicting_provider_metadata_on_r
         .expect_err("conflicting provider metadata rejected");
 
     assert!(error.to_string().contains("provider metadata conflicts"));
+}
+
+#[tokio::test]
+async fn append_tool_result_reference_keeps_distinct_provider_calls_with_the_same_result_ref() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("tool-result-shared-continuation");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-tool-result-shared-continuation").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let first_call = provider_call_reference();
+    let mut second_call = provider_call_reference();
+    second_call.provider_call_id = "call_2".to_string();
+
+    let first = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-continuation".into(),
+            safe_summary: ToolResultSafeSummary::new("first page").unwrap(),
+            provider_call: Some(first_call.clone()),
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    let duplicate = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-continuation".into(),
+            safe_summary: ToolResultSafeSummary::new("first page replay").unwrap(),
+            provider_call: Some(first_call),
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    let second = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-continuation".into(),
+            safe_summary: ToolResultSafeSummary::new("second page").unwrap(),
+            provider_call: Some(second_call),
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(duplicate.message_id, first.message_id);
+    assert_ne!(second.message_id, first.message_id);
+    let updated = service
+        .update_tool_result_reference(UpdateToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:shared-continuation".into(),
+            provider_call_id: Some("call_1".to_string()),
+            safe_summary: ToolResultSafeSummary::new("first page settled").unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(updated.message_id, first.message_id);
+    assert_ne!(updated.message_id, second.message_id);
+    assert_eq!(
+        first
+            .tool_result_provider_call
+            .as_ref()
+            .expect("first provider call persists")
+            .provider_call_id,
+        "call_1"
+    );
+    assert_eq!(
+        second
+            .tool_result_provider_call
+            .as_ref()
+            .expect("second provider call persists")
+            .provider_call_id,
+        "call_2"
+    );
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    let result_messages = history
+        .messages
+        .iter()
+        .filter(|message| message.kind == MessageKind::ToolResultReference)
+        .collect::<Vec<_>>();
+    assert_eq!(result_messages.len(), 2);
 }
 
 #[tokio::test]
@@ -969,6 +1085,75 @@ async fn duplicate_external_event_returns_same_message_without_duplicate_history
         .unwrap();
     assert_eq!(history.messages.len(), 1);
     assert_eq!(history.messages[0].content.as_deref(), Some("hello once"));
+}
+
+#[tokio::test]
+async fn accepted_inbound_replay_preserves_resolved_model_metadata() {
+    let service = InMemorySessionThreadService::default();
+    let request_scope = scope("model-replay");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let request = AcceptInboundMessageRequest {
+        scope: request_scope.clone(),
+        thread_id: thread.thread_id,
+        actor_id: "actor-a".into(),
+        source_binding_id: Some("source-model-replay".into()),
+        reply_target_binding_id: Some("reply-model-replay".into()),
+        external_event_id: Some("event-model-replay".into()),
+        content: user_message("hello"),
+    };
+
+    let accepted = service
+        .accept_inbound_message_with_replay_metadata(
+            request.clone(),
+            InboundMessageReplayMetadata {
+                resolved_model: Some("model-a".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        accepted.replay_metadata.resolved_model.as_deref(),
+        Some("model-a")
+    );
+
+    let duplicate = service
+        .accept_inbound_message_with_replay_metadata(
+            request,
+            InboundMessageReplayMetadata {
+                resolved_model: Some("model-b".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(duplicate.idempotent_replay);
+    assert_eq!(
+        duplicate.replay_metadata.resolved_model.as_deref(),
+        Some("model-a")
+    );
+
+    let replay = service
+        .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
+            scope: request_scope,
+            actor_id: "actor-a".into(),
+            source_binding_id: "source-model-replay".into(),
+            external_event_id: "event-model-replay".into(),
+        })
+        .await
+        .unwrap()
+        .expect("accepted replay");
+    assert_eq!(
+        replay.replay_metadata.resolved_model.as_deref(),
+        Some("model-a")
+    );
 }
 
 #[tokio::test]
@@ -1852,6 +2037,7 @@ async fn redaction_removes_tool_result_provider_metadata() {
         .unwrap();
     let tool_result = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -2006,6 +2192,7 @@ async fn thread_message_serialization_omits_provider_replay_metadata() {
 
     let tool_result = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope,
             thread_id: thread.thread_id,
             turn_run_id: "run-1".into(),
@@ -2051,6 +2238,7 @@ async fn exact_context_message_lookup_preserves_provider_metadata_while_history_
 
     let tool_result = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -2140,6 +2328,7 @@ async fn append_tool_result_reference_persists_model_observation_in_envelope() {
 
     let tool_result = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -2162,6 +2351,7 @@ async fn append_tool_result_reference_persists_model_observation_in_envelope() {
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
             result_ref: "result:model-observation-tool".into(),
+            provider_call_id: None,
             safe_summary: ToolResultSafeSummary::new("tool failed after child completion").unwrap(),
         })
         .await
@@ -2173,6 +2363,7 @@ async fn append_tool_result_reference_persists_model_observation_in_envelope() {
 
     let unsafe_record = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -2194,6 +2385,7 @@ async fn append_tool_result_reference_persists_model_observation_in_envelope() {
 
     let unsafe_preview_record = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope,
             thread_id: thread.thread_id,
             turn_run_id: "run-2".into(),
@@ -2253,6 +2445,7 @@ async fn tool_result_preview_with_secretary_survives_model_context_replay() {
     let preview = "Report by the Secretary of the Treasury";
     let tool_result = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -2350,6 +2543,7 @@ async fn append_tool_result_reference_retains_full_size_result_preview() {
 
     let tool_result = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope,
             thread_id: thread.thread_id,
             turn_run_id: "run-1".into(),
@@ -2412,6 +2606,7 @@ async fn append_tool_result_reference_backfills_and_preserves_first_model_observ
 
     service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -2424,6 +2619,7 @@ async fn append_tool_result_reference_backfills_and_preserves_first_model_observ
         .unwrap();
     let backfilled = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -2440,6 +2636,7 @@ async fn append_tool_result_reference_backfills_and_preserves_first_model_observ
 
     service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -2453,6 +2650,7 @@ async fn append_tool_result_reference_backfills_and_preserves_first_model_observ
 
     let without_observation_retry = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -2474,6 +2672,7 @@ async fn append_tool_result_reference_backfills_and_preserves_first_model_observ
 
     let conflict = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope,
             thread_id: thread.thread_id,
             turn_run_id: "run-1".into(),
@@ -2513,6 +2712,7 @@ async fn append_tool_result_reference_drops_oversized_model_observation() {
 
     let record = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope,
             thread_id: thread.thread_id,
             turn_run_id: "run-1".into(),
@@ -4203,4 +4403,336 @@ async fn accept_inbound_message_rejects_oversized_extracted_text() {
         .await
         .unwrap();
     assert!(history.messages.is_empty());
+}
+
+/// Taxonomy baseline for unbound turns: a thread whose scope carries NO
+/// `owner_user_id` (the shape the prepared-context accept door mints) is structurally
+/// invisible to owner-scoped listings — the listing filter is exact-tuple
+/// scope equality, and the owner axis differs. The reverse holds too: an
+/// ownerless-scope enumeration never surfaces a user's own threads.
+#[tokio::test]
+async fn list_threads_for_scope_excludes_ownerless_threads_from_owner_scoped_listings() {
+    let service = InMemorySessionThreadService::default();
+    let owned_scope = scope("taxonomy");
+    let ownerless_scope = ThreadScope {
+        owner_user_id: None,
+        ..owned_scope.clone()
+    };
+
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: owned_scope.clone(),
+            thread_id: Some(ThreadId::new("t-owned-001").unwrap()),
+            created_by_actor_id: "actor-taxonomy".into(),
+            title: Some("owned".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: ownerless_scope.clone(),
+            thread_id: Some(ThreadId::new("t-ownerless-001").unwrap()),
+            created_by_actor_id: "actor-taxonomy".into(),
+            title: Some("ownerless".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let owner_view = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: owned_scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let owner_ids: Vec<&str> = owner_view
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(
+        owner_ids,
+        ["t-owned-001"],
+        "an owner-scoped listing must never surface ownerless threads"
+    );
+
+    let ownerless_view = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: ownerless_scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ownerless_ids: Vec<&str> = ownerless_view
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(
+        ownerless_ids,
+        ["t-ownerless-001"],
+        "an ownerless-scope enumeration must never surface owner-scoped threads"
+    );
+}
+
+/// Prepared-context threads are working state, not conversations: the accept
+/// door stamps every minted thread and listings exclude the stamp EVEN when
+/// the request scope matches exactly (the ownerless pin above only covers the
+/// scope-tuple mismatch); an ordinary conversation thread in the same scope
+/// stays listed. (Pre-marker legacy rows exist only on the filesystem
+/// backend, whose one-time backfill is pinned in its own contract suite.)
+#[tokio::test]
+async fn list_threads_for_scope_excludes_prepared_context_threads_even_when_scope_matches() {
+    let service = InMemorySessionThreadService::default();
+    let request = prepared_request("hidden-list", "hidden-list-key-1");
+    let listing_scope = request.scope.clone();
+    service
+        .accept_prepared_context(request)
+        .await
+        .expect("prepared-context accept succeeds");
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: listing_scope.clone(),
+            thread_id: Some(ThreadId::new("t-visible-001").unwrap()),
+            created_by_actor_id: "actor-hidden-list".into(),
+            title: Some("visible".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let view = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: listing_scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = view
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        ["t-visible-001"],
+        "prepared-context threads must never surface in listings"
+    );
+}
+
+/// Replaying against an EXISTING prepared thread is guarded on both axes:
+/// the same explicit thread id with a different idempotency key is a key
+/// mismatch, and the same key from a different actor is an actor mismatch —
+/// a prepared thread can never be silently rebound.
+#[tokio::test]
+async fn prepared_replay_rejects_key_and_actor_mismatches_through_the_service() {
+    let service = InMemorySessionThreadService::default();
+    let mut request = prepared_request("replay-guard", "replay-guard-key-1");
+    request.thread_id = ThreadId::new("unbound-replay-guard-1").unwrap();
+    service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("first accept");
+
+    let mut wrong_key = request.clone();
+    wrong_key.idempotency_key = "replay-guard-key-2".to_string();
+    assert!(matches!(
+        service.accept_prepared_context(wrong_key).await,
+        Err(ironclaw_threads::SessionThreadError::PreparedContextKeyMismatch { .. })
+    ));
+
+    let mut wrong_actor = request;
+    wrong_actor.actor_id = "user-someone-else".to_string();
+    assert!(matches!(
+        service.accept_prepared_context(wrong_actor).await,
+        Err(ironclaw_threads::SessionThreadError::IdempotentReplayActorMismatch { .. })
+    ));
+}
+
+/// Deleting a prepared thread deletes its journaled record with it: the same
+/// accept re-run afterwards mints a FRESH thread instead of replaying the
+/// deleted one (an orphaned record would resurrect a thread whose rows are
+/// gone).
+#[tokio::test]
+async fn deleting_a_prepared_thread_deletes_its_replay_record() {
+    let service = InMemorySessionThreadService::default();
+    let request = prepared_request("delete-replay", "delete-replay-key-1");
+    let first = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("first accept");
+    assert!(!first.idempotent_replay);
+    service
+        .delete_thread(&request.scope, &first.thread_id)
+        .await
+        .expect("delete");
+
+    let second = service
+        .accept_prepared_context(request)
+        .await
+        .expect("re-accept after delete");
+    assert!(
+        !second.idempotent_replay,
+        "a deleted prepared thread must re-mint, not replay its deleted record"
+    );
+}
+
+fn prepared_request(label: &str, key: &str) -> ironclaw_threads::PreparedContextRequest {
+    ironclaw_threads::PreparedContextRequest {
+        scope: ThreadScope {
+            owner_user_id: None,
+            ..scope(label)
+        },
+        actor_id: format!("user-{label}"),
+        system_prompt: "You are a background task.".to_string(),
+        messages: vec![ironclaw_llm::agent_message::AgentMessage {
+            role: ironclaw_llm::agent_message::AgentMessageRole::User,
+            content: vec![ironclaw_llm::agent_message::ContentPart::text(
+                "do the thing",
+            )],
+        }],
+        declarations: ironclaw_host_api::prepared_context::PreparedTurnDeclarations {
+            tools: Vec::new(),
+            output: ironclaw_host_api::output::OutputContract::JsonSchema {
+                name: "session_v1".to_string(),
+                schema: serde_json::json!({ "type": "object" }),
+            },
+            limits: ironclaw_host_api::prepared_context::TurnLimits {
+                max_model_calls: Some(4),
+                max_capability_invocations: None,
+                max_wall_clock_seconds: None,
+            },
+        },
+        idempotency_key: key.to_string(),
+        thread_id: ThreadId::new(format!("unbound-{key}")).expect("thread id"),
+        title: None,
+        metadata_json: None,
+    }
+}
+
+/// The prepared-context accept door mints an unbound (ownerless) thread, seeds the
+/// caller's context as ordinary transcript rows in order, journals the
+/// declarations beside them, and pins the LAST seeded row as the accepted
+/// message ref.
+#[tokio::test]
+async fn accept_prepared_context_mints_seeds_and_journals() {
+    let service = InMemorySessionThreadService::default();
+    let request = prepared_request("unbound", "unbound-key-1");
+
+    let accepted = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("prepared-context accept succeeds");
+    assert!(!accepted.idempotent_replay);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: accepted.thread_id.clone(),
+        })
+        .await
+        .expect("seeded thread history");
+    assert_eq!(
+        history.thread.scope.owner_user_id, None,
+        "thread is ownerless"
+    );
+    assert_eq!(history.messages.len(), 2);
+    assert_eq!(history.messages[0].kind, MessageKind::System);
+    assert_eq!(history.messages[0].status, MessageStatus::Finalized);
+    assert_eq!(
+        history.messages[0].content.as_deref(),
+        Some("You are a background task.")
+    );
+    assert_eq!(history.messages[1].kind, MessageKind::User);
+    assert_eq!(history.messages[1].status, MessageStatus::Accepted);
+    assert_eq!(history.messages[1].sequence, 2);
+    assert_eq!(
+        accepted.accepted_message_ref.as_str(),
+        format!("msg:{}", history.messages[1].message_id),
+        "the accepted ref pins the last seeded row"
+    );
+
+    let record = service
+        .read_prepared_context(&request.scope, &accepted.thread_id)
+        .await
+        .expect("declarations read-back")
+        .expect("record present");
+    assert_eq!(record.declarations, request.declarations);
+    assert_eq!(record.seeded_message_count, 2);
+
+    // Seeded rows are model-visible through the same context path every
+    // conversation uses.
+    let window = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: request.scope.clone(),
+            thread_id: accepted.thread_id.clone(),
+            max_messages: 16,
+        })
+        .await
+        .expect("context window over seeded thread");
+    assert_eq!(window.messages.len(), 2);
+    assert_eq!(window.messages[0].kind, MessageKind::System);
+    assert_eq!(window.messages[1].kind, MessageKind::User);
+}
+
+/// Replay discipline: the same request converges on the SAME prepared
+/// context (no orphan threads, no duplicate rows); a different key mints a
+/// separate thread; a non-unbound thread reads back `None` declarations.
+#[tokio::test]
+async fn accept_prepared_context_replays_idempotently_without_orphans() {
+    let service = InMemorySessionThreadService::default();
+    let request = prepared_request("unbound-replay", "unbound-key-replay");
+
+    let first = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("first accept");
+    let replay = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("replay accept");
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.thread_id, first.thread_id);
+    assert_eq!(replay.accepted_message_ref, first.accepted_message_ref);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: first.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages.len(), 2, "replay must not duplicate rows");
+
+    let mut second = prepared_request("unbound-replay", "unbound-key-other");
+    second.scope = request.scope.clone();
+    let other = service
+        .accept_prepared_context(second)
+        .await
+        .expect("second key accepts");
+    assert_ne!(other.thread_id, first.thread_id);
+
+    // An ordinary conversation thread is not a prepared context.
+    let plain_scope = scope("unbound-replay-plain");
+    let plain = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: plain_scope.clone(),
+            thread_id: Some(ThreadId::new("t-plain-001").unwrap()),
+            created_by_actor_id: "actor".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("plain thread");
+    assert!(
+        service
+            .read_prepared_context(&plain_scope, &plain.thread_id)
+            .await
+            .expect("read")
+            .is_none()
+    );
 }

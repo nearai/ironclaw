@@ -35,6 +35,7 @@ use ironclaw_host_api::{
 use ironclaw_resources::ResourceGovernor;
 use ironclaw_safety::LeakDetector;
 use ironclaw_secrets::{SecretStoreError, SecretStorePort};
+use secrecy::ExposeSecret;
 
 use super::staged_handoffs::{
     NetworkObligationPolicyStore, RuntimeCredentialAccountRequest,
@@ -849,6 +850,19 @@ async fn stage_credential_material(
             tracing::debug!(err = %e, "stage_credential_material: consume failed");
             crate::services::stage_secret_error(e)
         })?;
+    // A "Configured" account whose resolved material is empty cannot
+    // authenticate anything; staging it would only let the guest fail later
+    // with an opaque `operation_failed` (e.g. an ironhub tool probing
+    // `secret-exists` sees an unusable slot and reports "API key not
+    // configured" as a generic domain failure). Surface the typed re-auth
+    // signal at authorization time instead so the model can act on it.
+    if secret.expose_secret().is_empty() {
+        tracing::debug!(
+            handle = %target.as_str(),
+            "stage_credential_material: resolved credential material is empty; requiring re-auth"
+        );
+        return Err(CredentialStageError::AuthRequired);
+    }
     secret_injections
         .insert(target_scope, capability_id, target, secret)
         .map_err(|e| {

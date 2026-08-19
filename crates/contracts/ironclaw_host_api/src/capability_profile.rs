@@ -9,7 +9,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::HostApiError;
+use crate::{
+    error::HostApiError,
+    messaging::{StandardOpContract, StandardSchemaDirection},
+};
 
 fn validate_schema_ref(value: &str) -> Result<(), HostApiError> {
     if value.is_empty() {
@@ -36,6 +39,10 @@ fn validate_schema_ref(value: &str) -> Result<(), HostApiError> {
             "NUL/control characters are not allowed",
         ));
     }
+    // Generic callers handle extension-declared refs, so even the host-owned
+    // `standard:` namespace is rejected here. Canonical messaging refs can
+    // only be constructed from a typed operation through the dedicated
+    // constructors below; an untrusted string can never claim that identity.
     for ch in value.chars() {
         if !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/')) {
             return Err(HostApiError::invalid_path(
@@ -64,6 +71,50 @@ impl CapabilityProfileSchemaRef {
         let value = value.into();
         validate_schema_ref(&value)?;
         Ok(Self(value))
+    }
+
+    /// Builds the host-owned canonical input schema ref for one implemented
+    /// standard messaging operation. The caller supplies a closed enum, not
+    /// an untrusted ref string, so the reserved namespace cannot be forged.
+    pub fn standard_messaging_input(
+        op: crate::messaging::StandardMessagingOp,
+    ) -> Result<Self, HostApiError> {
+        Self::standard_messaging(op, StandardSchemaDirection::Input)
+    }
+
+    /// Builds the host-owned canonical output schema ref for one implemented
+    /// standard messaging operation.
+    pub fn standard_messaging_output(
+        op: crate::messaging::StandardMessagingOp,
+    ) -> Result<Self, HostApiError> {
+        Self::standard_messaging(op, StandardSchemaDirection::Output)
+    }
+
+    /// Mints the ref at the op's **current** schema version — the version a
+    /// new binding pins. Earlier versions are never minted here but keep
+    /// resolving (`resolve_standard_schema_ref`), so an already-installed
+    /// binding is untouched until its own manifest digest changes.
+    fn standard_messaging(
+        op: crate::messaging::StandardMessagingOp,
+        direction: StandardSchemaDirection,
+    ) -> Result<Self, HostApiError> {
+        let Some(contract) = op.contract() else {
+            return Err(HostApiError::invalid_path(
+                op.op_name(),
+                "reserved standard messaging operation has no schema",
+            ));
+        };
+        let version = match direction {
+            StandardSchemaDirection::Input => StandardOpContract::INPUT_SCHEMA_VERSION,
+            StandardSchemaDirection::Output => contract.output_schema_version,
+        };
+        Ok(Self(format!(
+            "{}{}.{}.{}",
+            crate::messaging::STANDARD_SCHEMA_REF_PREFIX,
+            op.op_name(),
+            direction.as_str(),
+            version.as_str()
+        )))
     }
 
     pub fn as_str(&self) -> &str {
@@ -96,6 +147,12 @@ impl<'de> Deserialize<'de> for CapabilityProfileSchemaRef {
         D: serde::Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
+        // Resolved extension records are the trusted persistence boundary for
+        // this type. Accept only canonical refs that resolve to a compiled-in
+        // host schema; arbitrary or reserved `standard:` strings still fail.
+        if crate::messaging::resolve_standard_schema_ref(&value).is_some() {
+            return Ok(Self(value));
+        }
         Self::new(value).map_err(serde::de::Error::custom)
     }
 }

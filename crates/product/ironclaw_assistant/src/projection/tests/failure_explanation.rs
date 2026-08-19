@@ -172,6 +172,22 @@ fn failure_summary_covers_every_loop_failure_kind_category() {
             LoopFailureKind::CompactionUnavailable.as_str(),
             "The run failed because context compaction was unavailable. Retry with a shorter request or start a new thread.",
         ),
+        (
+            LoopFailureKind::GateNotSupported.as_str(),
+            "The run stopped because it needed an approval, sign-in, or resource this run profile cannot surface. Run it from an interactive surface or adjust permissions first.",
+        ),
+        (
+            LoopFailureKind::WallClockLimit.as_str(),
+            "The run stopped because it reached its time limit. Retry with a narrower request or a higher time limit.",
+        ),
+        (
+            LoopFailureKind::ModelCallLimit.as_str(),
+            "The run stopped because it used up its model-call budget. Retry with a narrower request or a higher budget.",
+        ),
+        (
+            LoopFailureKind::CapabilityInvocationLimit.as_str(),
+            "The run stopped because it used up its tool-call budget. Retry with a narrower request or a higher budget.",
+        ),
     ];
 
     let source_values = loop_failure_kind_as_str_values_from_source();
@@ -1082,6 +1098,7 @@ async fn model_failure_explainer_returns_bounded_assistant_reply() {
             output_text: "The request used an unsupported driver operation, so the run stopped."
                 .to_string(),
             elapsed_ms: 1,
+            usage: None,
         })),
         requests: Mutex::new(Vec::new()),
     });

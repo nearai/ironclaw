@@ -78,6 +78,7 @@ fn real_skill_routing_corpus_matches_the_reviewed_legacy_baseline() {
     validate_corpus(&corpus, &skills_by_name);
 
     let mut metrics = BaselineMetrics::default();
+    let mut baseline_changes = Vec::new();
     for case in &corpus.cases {
         let selected = prefilter_skills_with_options(
             &case.prompt,
@@ -92,11 +93,12 @@ fn real_skill_routing_corpus_matches_the_reviewed_legacy_baseline() {
         .map(|skill| skill.name().to_string())
         .collect::<Vec<_>>();
 
-        assert_eq!(
-            selected, case.baseline_selected,
-            "routing baseline changed for case {}; review whether this is an intentional quality change, then update the fixture",
-            case.id
-        );
+        if selected != case.baseline_selected {
+            baseline_changes.push(format!(
+                "{}: expected {:?}, selected {:?}",
+                case.id, case.baseline_selected, selected
+            ));
+        }
 
         metrics.relevant_total += case.relevant.len();
         metrics.relevant_retrieved += case
@@ -135,6 +137,53 @@ fn real_skill_routing_corpus_matches_the_reviewed_legacy_baseline() {
     // Slice 0 records these quality measurements without enforcing the epic's
     // promotion thresholds. Slice 6 owns turning reviewed targets into gates.
     eprintln!("skill-routing-baseline metrics={metrics:?}");
+    assert!(
+        baseline_changes.is_empty(),
+        "routing baseline changed; review whether each change is intentional, then update the fixture:\n{}",
+        baseline_changes.join("\n")
+    );
+}
+
+#[test]
+fn ordinary_reminder_routes_to_routines_without_commitment_capture() {
+    let skills = load_bundled_skills();
+    let selected = prefilter_skills_with_options(
+        "Remind me in two minutes to stretch.",
+        &skills,
+        TOP_K,
+        EVALUATION_TOKEN_BUDGET,
+        &HashSet::new(),
+        SkillSelectionOptions::default(),
+    )
+    .selected
+    .into_iter()
+    .map(|skill| skill.name().to_string())
+    .collect::<Vec<_>>();
+
+    assert!(
+        selected.iter().any(|name| name == "routine-advisor"),
+        "a timed reminder should load routine guidance: {selected:?}"
+    );
+    assert!(
+        !selected.iter().any(|name| name == "commitment-triage"),
+        "ordinary scheduling must not silently write commitment memory: {selected:?}"
+    );
+
+    let explicit_commitment = prefilter_skills_with_options(
+        "Track this commitment: I promised to review the contract by Friday.",
+        &skills,
+        TOP_K,
+        EVALUATION_TOKEN_BUDGET,
+        &HashSet::new(),
+        SkillSelectionOptions::default(),
+    )
+    .selected;
+    assert!(
+        explicit_commitment
+            .iter()
+            .any(|skill| skill.name() == "commitment-triage"),
+        "explicit commitment capture must remain available"
+    );
 }
 
 /// The nearest ancestor holding both `crates/` and `Cargo.toml`.

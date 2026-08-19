@@ -51,7 +51,48 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // initial route, and prevents model-authored `data-workspace-path` metadata
 // from becoming trusted. The measured /chat closure is 215.8 KB gzip; 217.0 KB
 // retains about 1.2 KB of explicit headroom without weakening the feature.
-const CHAT_GZIP_BUDGET = 217_000;
+// The inspector shell then brought current `main` to 216.9 KB gzip. The SSE
+// reconnect coordinator adds ~0.4 KB of deterministic retry/backpressure logic
+// to the eager chat transport path, where it must be available before the first
+// stream opens. Two more changes then landed on the merged tree, each adding a
+// little to /chat:
+//  - Web Push notifications added ~13 `automations.notificationChannels.devicePush.*`
+//    keys + a reworded `noSelectionHelper` to the eager `en.ts` fallback pack.
+//    Eager code was kept OUT of /chat: `registerServiceWorker` is in the
+//    dependency-free `lib/register-sw.ts`, and the enrollment UI rides the
+//    already-lazy automations route — so this is localized string content.
+//  - The shared native file-picker interaction (#7337) replaced three
+//    route-local impls; Vite emits its ~0.3 KB gzip helper as a shared chunk
+//    (Chat/Settings/Extensions all consume it).
+// Re-measured on the MERGED tree with `vite build` + this check. `main`
+// concurrently re-measured 217.7 KB gzip after its own changes (#7480, #7284
+// et al.); both deltas are in the measurement below.
+// The device-link card then added a multi-step link flow to /chat.
+// Everything deferrable was deferred FIRST, and measured at each step:
+//  - `auth-device-link-card.tsx` and the `device-link-panel` /
+//    `device-link-api` modules behind it load through `React.lazy` from
+//    `chat.tsx` (the inspector-panel pattern), so the card, its step machine,
+//    its polling, and its input forms emit as their own chunks and cost the
+//    initial route nothing. Measured: 220.5 KB eager -> 219.5 KB.
+// What stays eager, and why it cannot move:
+//  - `link-payload-panel.tsx` — the extracted QR/countdown/copy/renew
+//    presentation. It is not new weight so much as relocated weight: it
+//    replaces the identical implementation that already shipped inside the
+//    eager `pairing-web-code-panel.tsx`, and it is now shared with the lazy
+//    device-link chunk, so Vite hoists it into a shared chunk the eager
+//    pairing panel pulls anyway. Keeping a second copy to save the hoist is
+//    precisely the drift the extraction exists to prevent.
+//  - `lib/device-link-frame.ts` — the frame normalizer. The gate selector
+//    (`gates.ts`, eager) has to normalize a device-link gate to decide which
+//    card to render at all, so it cannot sit behind the lazy boundary; a
+//    second eager normalizer would let a polled frame and a gate frame
+//    disagree about the same wire object.
+//  - ~31 `deviceLink.*` keys in `en.ts`, which `i18n.tsx` loads eagerly as the
+//    fallback pack on every page. Measured at 0.5 KB gzip; the other ten
+//    locale packs stay lazy per-locale imports and cost nothing here.
+// Measured /chat closure on the merged tree is 220.4 KB gzip; 222.0 KB
+// retains about 1.6 KB of explicit headroom.
+const CHAT_GZIP_BUDGET = 222_000;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {

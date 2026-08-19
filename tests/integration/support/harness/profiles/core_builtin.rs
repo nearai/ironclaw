@@ -17,6 +17,8 @@ use super::super::{
     standalone_host_runtime_with_http_egress, standalone_host_runtime_with_live_http_egress,
     standalone_host_runtime_with_real_egress_pipeline, workspace_mounts,
 };
+use ironclaw_extension_registry::ExtensionRegistry;
+use ironclaw_filesystem::CompositeRootFilesystem;
 use ironclaw_host_api::{
     action::NetworkPolicy,
     capability::EffectKind,
@@ -212,24 +214,79 @@ pub(crate) async fn core_builtin_tools(
                     process_port_dyn,
                 )?
             };
-            let mut harness = core_builtin_tools_from_runtime(
+            recording_harness_from_runtime(
                 root,
                 workspace_root,
                 runtime,
                 network_policy,
                 UserId::new("reborn-e2e-core-builtins-user")?,
-            )?;
-            harness.http_egress = Some(runtime_http_egress);
-            harness.process_port = recording_process_port;
-            Ok(harness)
+                runtime_http_egress,
+                recording_process_port,
+            )
         }
     }
+}
+
+/// Shared tail for the recording-egress harness shape: wrap a built runtime
+/// in the harness with the recording HTTP egress and (optionally) the
+/// recording process port attached. Both the storage-root branch of
+/// [`core_builtin_tools`] and the shared-filesystem variant
+/// [`core_builtin_tools_over_shared_filesystem`] assemble this exact shape,
+/// differing only in how the runtime is constructed.
+fn recording_harness_from_runtime(
+    root: Arc<tempfile::TempDir>,
+    workspace_root: PathBuf,
+    runtime: Arc<dyn HostRuntime>,
+    network_policy: NetworkPolicy,
+    user_id: UserId,
+    runtime_http_egress: Arc<RecordingRuntimeHttpEgress>,
+    process_port: Option<Arc<super::super::super::process::RecordingProcessPort>>,
+) -> HarnessResult<HostRuntimeCapabilityHarness> {
+    let mut harness =
+        core_builtin_tools_from_runtime(root, workspace_root, runtime, network_policy, user_id)?;
+    harness.http_egress = Some(runtime_http_egress);
+    harness.process_port = process_port;
+    Ok(harness)
 }
 
 /// Zero-arg convenience; most callers want this and never touch
 /// `CoreBuiltinOptions`.
 pub(crate) async fn core_builtin_tools_default() -> HarnessResult<HostRuntimeCapabilityHarness> {
     core_builtin_tools(CoreBuiltinOptions::default()).await
+}
+
+/// Core built-ins over the group's production-shaped shared filesystem. This
+/// is intentionally separate from `core_builtin_tools_default`: ordinary tool
+/// tests keep their lightweight private memory mount, while the memory-recall
+/// scenario must prove that the tool handler and prompt lifecycle read the
+/// same libSQL rows.
+pub(crate) fn core_builtin_tools_over_shared_filesystem(
+    root: Arc<tempfile::TempDir>,
+    filesystem: Arc<CompositeRootFilesystem>,
+    user_id: UserId,
+) -> HarnessResult<HostRuntimeCapabilityHarness> {
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(ironclaw_host_runtime::builtin_first_party_package()?)?;
+    registry.insert(ironclaw_host_runtime::native_memory_first_party_package()?)?;
+    let runtime_http_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+        br#"{"accepted":true}"#.to_vec(),
+    ));
+    let process_port = Arc::new(super::super::super::process::RecordingProcessPort::new());
+    let runtime = super::super::assembly::standalone_host_runtime_over_filesystem_with_registry_and_runtime_http_egress(
+            filesystem,
+            registry,
+            Arc::clone(&runtime_http_egress),
+            Some(Arc::clone(&process_port) as Arc<dyn RuntimeProcessPort>),
+        )?;
+    recording_harness_from_runtime(
+        root.clone(),
+        root.path().join("workspace"),
+        runtime,
+        http_test_policy(),
+        user_id,
+        runtime_http_egress,
+        Some(process_port),
+    )
 }
 
 pub(crate) async fn core_builtin_tools_with_durable_capability_io()

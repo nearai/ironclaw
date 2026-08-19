@@ -11,6 +11,7 @@ use ironclaw_extension_contracts::{
 use ironclaw_extension_registry::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
 };
+use ironclaw_host_api::capability::EXTENSION_SEARCH_CAPABILITY_ID;
 use ironclaw_host_api::{
     capability::{EffectKind, OriginGateMatrix, OriginGatePolicy, PermissionMode},
     capability_profile::CapabilityProfileSchemaRef,
@@ -37,7 +38,6 @@ use ironclaw_extension_host::extension_activation_credentials::RuntimeExtensionA
 use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use ironclaw_product_contracts::package_lifecycle::public_lifecycle_response_json;
 
-pub const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
 pub const EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID: &str =
     "builtin.extension_register_hosted_mcp";
 pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
@@ -171,6 +171,7 @@ fn lifecycle_manifest_with_visibility(
         effects,
         default_permission,
         visibility,
+        standard_op: None,
         input_schema_ref: CapabilityProfileSchemaRef::new(format!(
             "schemas/builtin/{schema_name}.input.v1.json"
         ))?,
@@ -335,6 +336,12 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     .activation_credential_requirements(&package_ref, &request.scope.user_id)
                     .await
                     .map_err(install_activation_readiness_error)?;
+                // Declared requirements that survive the gate below were
+                // verified present for THIS caller — activation success then
+                // means the account is already connected, and the response
+                // must say so (an empty list means the extension simply
+                // declares no per-user credentials).
+                let caller_credentials_verified = !requirements.is_empty();
                 let credential_gate = activation_credential_gate(
                     &request.scope,
                     &self.credential_accounts,
@@ -356,9 +363,15 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                         if activation_response.phase == InstallationState::Active =>
                     {
                         connection_preview_source = Some(activation_response.clone());
+                        let user_link_required = self
+                            .extension_management
+                            .package_declares_device_link_user_link(&package_ref)
+                            .map_err(install_activation_readiness_error)?;
                         Ok(install_response_with_activation(
                             install_response,
                             &activation_response,
+                            caller_credentials_verified,
+                            user_link_required,
                         ))
                     }
                     Ok(activation_response)
@@ -516,13 +529,40 @@ fn display_channel_name(channel: &str) -> String {
     }
 }
 
+/// Appended when install-driven activation succeeded and the caller's
+/// declared credential requirements were all verified present by the
+/// activation credential gate. Without this, an explicit "connect account"
+/// request on an already-connected extension gets only conditional guidance
+/// ("If WebChat shows an account connection panel…") and the model deflects
+/// the user to the web interface instead of continuing.
+const CALLER_ALREADY_CONNECTED_CONFIRMATION: &str = "The calling user's account credentials for this extension were verified as already \
+     connected during this activation. Do not ask the user to connect, authorize, or complete \
+     OAuth again — continue their original request.";
+
+/// `next_step` for an Active install whose channel identity is established
+/// per user by the device-link ceremony. The ceremony renders a scannable
+/// code, so it can only run in the Web UI: the model must send the user
+/// there instead of reporting the connection finished from a chat surface.
+const DEVICE_LINK_USER_SETUP_NEXT_STEP: &str = "Activation completed; model-visible extension tools are ready. Personal capabilities and \
+     chatting as the user still require each user to link their own account from this \
+     extension's card in the Web UI — that ceremony cannot run from chat, so direct the user \
+     there rather than reporting the connection complete.";
+
 fn install_response_with_activation(
     mut install_response: LifecycleProductResponse,
     activation_response: &LifecycleProductResponse,
+    caller_credentials_verified: bool,
+    user_link_required: bool,
 ) -> LifecycleProductResponse {
     install_response.phase = activation_response.phase;
     install_response.blockers = activation_response.blockers.clone();
     install_response.message = activation_response.message.clone();
+    if caller_credentials_verified && activation_response.phase == InstallationState::Active {
+        install_response.message = Some(match install_response.message.take() {
+            Some(message) => format!("{message} {CALLER_ALREADY_CONNECTED_CONFIRMATION}"),
+            None => CALLER_ALREADY_CONNECTED_CONFIRMATION.to_string(),
+        });
+    }
 
     let activation_visible_capability_ids = match activation_response.payload.as_ref() {
         Some(LifecycleProductPayload::ExtensionActivate {
@@ -541,7 +581,11 @@ fn install_response_with_activation(
             *visible_capability_ids = activation_visible_capability_ids;
         }
         *next_step = if activation_response.phase == InstallationState::Active {
-            "Activation completed; model-visible extension tools are ready.".to_string()
+            if user_link_required {
+                DEVICE_LINK_USER_SETUP_NEXT_STEP.to_string()
+            } else {
+                "Activation completed; model-visible extension tools are ready.".to_string()
+            }
         } else {
             "Activation did not complete; inspect the lifecycle phase and blockers.".to_string()
         };
@@ -883,6 +927,7 @@ mod tests {
         AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
         CredentialAccountStatus, CredentialOwnership, NewCredentialAccount, ProviderScope,
     };
+    use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
     use ironclaw_host_api::{
         action::{NetworkPolicy, NetworkTargetPattern},
         capability::{
@@ -897,8 +942,7 @@ mod tests {
         scope::{ExecutionContext, Principal},
     };
     use ironclaw_host_runtime::{
-        CapabilitySurfacePolicy, RuntimeCapabilityOutcome, SurfaceKind, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        RuntimeCapabilityOutcome, SurfaceKind, VisibleCapabilityRequest, VisibleCapabilitySurface,
     };
     use ironclaw_trust::{
         AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustPolicy, TrustProvenance,
@@ -1046,6 +1090,102 @@ mod tests {
     }
 
     #[test]
+    fn install_next_step_directs_device_link_users_to_the_web_ui() {
+        // QA, 2026-08-14: installed from Slack, the model announced
+        // "installed and active" and called linking optional — while the card
+        // showed the user still had to link. Device-link identity is per user
+        // and its ceremony renders a scannable code, so it can only run in
+        // the Web UI; the install result must say so instead of letting a
+        // chat surface declare the connection finished.
+        let install = LifecycleProductResponse {
+            package_ref: None,
+            phase: InstallationState::Installed,
+            blockers: Vec::new(),
+            message: None,
+            payload: Some(LifecycleProductPayload::ExtensionInstall {
+                installed: true,
+                visible_capability_ids: Vec::new(),
+                next_step: "pending".to_string(),
+            }),
+        };
+        let activation = LifecycleProductResponse {
+            package_ref: None,
+            phase: InstallationState::Active,
+            blockers: Vec::new(),
+            message: Some("activation guidance".to_string()),
+            payload: Some(LifecycleProductPayload::ExtensionActivate {
+                activated: true,
+                visible_capability_ids: Vec::new(),
+                connection_required: None,
+            }),
+        };
+
+        let response = install_response_with_activation(install, &activation, false, true);
+        match response.payload {
+            Some(LifecycleProductPayload::ExtensionInstall { next_step, .. }) => {
+                assert!(
+                    next_step.contains("Web UI"),
+                    "next_step must send the user to the Web UI: {next_step}"
+                );
+                assert!(
+                    next_step.contains("cannot run from chat"),
+                    "next_step must say chat cannot finish this: {next_step}"
+                );
+                assert!(
+                    next_step.contains("link their own account"),
+                    "next_step must name the per-user link step: {next_step}"
+                );
+            }
+            other => panic!("expected an install payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn install_response_confirms_connection_only_when_caller_credentials_were_verified() {
+        let install = || LifecycleProductResponse {
+            package_ref: None,
+            phase: InstallationState::Installed,
+            blockers: Vec::new(),
+            message: None,
+            payload: Some(LifecycleProductPayload::ExtensionInstall {
+                installed: true,
+                visible_capability_ids: Vec::new(),
+                next_step: "pending".to_string(),
+            }),
+        };
+        let activation = LifecycleProductResponse {
+            package_ref: None,
+            phase: InstallationState::Active,
+            blockers: Vec::new(),
+            message: Some("activation guidance".to_string()),
+            payload: Some(LifecycleProductPayload::ExtensionActivate {
+                activated: true,
+                visible_capability_ids: Vec::new(),
+                connection_required: None,
+            }),
+        };
+
+        let confirmed = install_response_with_activation(install(), &activation, true, false);
+        let message = confirmed.message.expect("message");
+        assert!(
+            message.starts_with("activation guidance"),
+            "activation guidance must stay first: {message}"
+        );
+        assert!(
+            message.contains("already connected")
+                && message.contains("continue their original request"),
+            "verified caller credentials must be confirmed to the model: {message}"
+        );
+
+        let unverified = install_response_with_activation(install(), &activation, false, false);
+        assert_eq!(
+            unverified.message.as_deref(),
+            Some("activation guidance"),
+            "an extension without declared per-user credentials must not claim a connection"
+        );
+    }
+
+    #[test]
     fn channel_connection_display_preview_marks_inbound_channel_activations() {
         // The in-chat connection panel is opened from this structured display preview,
         // never from the activation prose. Guard the exact seam: the output_kind
@@ -1178,6 +1318,25 @@ mod tests {
             install.parameters_schema["required"],
             serde_json::json!(["extension_id"])
         );
+
+        // Host-compiled builtin descriptions must carry verified-catalog
+        // trust. Under the untrusted default the loop-tier prompt-text
+        // denylist strict-scans them and silently omits any description
+        // containing ordinary auth vocabulary (register_hosted_mcp's
+        // "browser authorization-code flow") from the model prompt's
+        // capability surface.
+        for capability_id in [
+            EXTENSION_SEARCH_CAPABILITY_ID,
+            EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            EXTENSION_REMOVE_CAPABILITY_ID,
+        ] {
+            assert_eq!(
+                description_trust_for(&surface, capability_id),
+                ironclaw_host_api::capability::CapabilityDescriptionTrust::VerifiedCatalog,
+                "{capability_id} description must survive the model-safe descriptor scan"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1235,19 +1394,17 @@ mod tests {
             "model-visible search must still identify Telegram as a channel: {telegram}"
         );
         assert!(
-            telegram["channel_connection"]["instructions"]
-                .as_str()
-                .is_some_and(
-                    |instructions| instructions.contains("IronClaw pairing panel")
-                        && instructions.contains("/start")
-                        && instructions.contains("displayed code")
-                ),
-            "generated-code connection guidance must remain model-visible: {telegram}"
+            telegram.get("channel_connection").is_none(),
+            "model-visible search must strip device-link connection chrome: {telegram}"
         );
-        assert!(
-            telegram["channel_connection"]["error_message"] == "",
-            "generated-code connection failure copy must stay out of model-visible lifecycle output: {telegram}"
-        );
+        let telegram_wire = serde_json::to_string(&search).expect("search response serializes");
+        for retired_pairing_copy in ["IronClaw pairing panel", "/start", "displayed code"] {
+            assert!(
+                !telegram_wire.contains(retired_pairing_copy),
+                "device-link Telegram search must not revive retired proof-code copy \
+                 {retired_pairing_copy:?}: {telegram}"
+            );
+        }
     }
 
     #[test]
@@ -1363,6 +1520,13 @@ mod tests {
         .await
         .expect("install succeeds");
         assert_eq!(install["payload"]["installed"], true);
+        assert!(
+            !install["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("already connected"),
+            "a credential-free install must not claim an account connection: {install}"
+        );
 
         let after_install = active_extension_capability_ids(&extension_management).await;
         assert!(after_install.iter().any(|id| id == "web-access.search"));
@@ -2036,6 +2200,18 @@ mod tests {
         let activate = activate.expect("install-driven hosted MCP activation succeeds");
         assert_eq!(activate["phase"], "active");
 
+        // The caller's declared credential requirement was verified satisfied
+        // by the activation gate, so the model must be told the account is
+        // already connected — otherwise it deflects an explicit "connect
+        // account" request to the web interface (QA thread e79a994f).
+        let message = activate["message"].as_str().expect("activation message");
+        assert!(
+            message.contains("already connected")
+                && message.contains("continue their original request"),
+            "install with pre-satisfied credential requirements must state the \
+             caller's account is already connected: {message}"
+        );
+
         // Live discovery ran through the staged pipeline: the discovered
         // tool is model-visible.
         let active = active_extension_capability_ids(&extension_management).await;
@@ -2392,6 +2568,18 @@ mod tests {
             .find(|capability| capability.descriptor.id.as_str() == capability_id)
             .map(|capability| &capability.descriptor)
             .expect("capability descriptor")
+    }
+
+    fn description_trust_for(
+        surface: &VisibleCapabilitySurface,
+        capability_id: &str,
+    ) -> ironclaw_host_api::capability::CapabilityDescriptionTrust {
+        surface
+            .capabilities
+            .iter()
+            .find(|capability| capability.descriptor.id.as_str() == capability_id)
+            .map(|capability| capability.description_trust)
+            .expect("visible capability")
     }
 
     fn allowed_effects() -> Vec<EffectKind> {

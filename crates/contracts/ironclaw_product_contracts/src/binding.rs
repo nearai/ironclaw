@@ -22,6 +22,7 @@ use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_host_api::product_adapter::{
     AdapterInstallationId, ProductAdapterId, VerifiedAuthClaim,
 };
+use ironclaw_host_api::turn::{ReplyTargetBindingRef, SourceBindingRef};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ProductOperationFailure;
@@ -31,27 +32,33 @@ use crate::inbound::{ProductInboundEnvelope, ProductInboundPayload};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedBinding {
     pub tenant_id: TenantId,
-    /// Real paired human actor who sent or authorized the external action.
+    /// Real paired human actor who sent or authorized the external action —
+    /// and the user scope whose agent/context/tools/memory execute the turn:
+    /// a run acts as the user who invoked it, on every route kind.
     ///
     /// The `user_id` alias is a sanctioned one-time wire-fold for persisted
     /// binding rows written before the actor/subject split — a durable-data
     /// migration concern, not a runtime compatibility path (new
-    /// serializations emit `actor_user_id` only).
+    /// serializations emit `actor_user_id` only). Rows persisted while the
+    /// retired `subject_user_id` field existed still deserialize; the field
+    /// is ignored (see the persisted-shape test below).
     #[serde(alias = "user_id")]
     pub actor_user_id: UserId,
-    /// User scope whose agent/context/tools/memory execute the turn.
-    ///
-    /// Direct/personal routes set this to the actor. Shared routes set this to
-    /// the configured team/agent subject; routes without an explicit subject
-    /// are rejected before turn submission.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subject_user_id: Option<UserId>,
     pub thread_id: ThreadId,
     /// Required for user-message turn submission because Reborn `ThreadScope`
     /// and `TurnScope` are agent-scoped. Product bindings that are only
     /// user-scoped must be completed before entering `InboundTurnService`.
     pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
+    /// Per-event source and reply-target binding refs, carried verbatim from
+    /// the conversation resolution. Shared (channel) routes resolve each
+    /// inbound event onto its OWN ephemeral thread with its own refs; carrying
+    /// them here keeps the accepted message and the submitted run anchored to
+    /// that per-event thread instead of a per-conversation ref pinned to the
+    /// first event's thread. Direct (DM) routes carry their persistent
+    /// per-user thread's refs.
+    pub source_binding_ref: SourceBindingRef,
+    pub reply_target_binding_ref: ReplyTargetBindingRef,
 }
 
 /// Request to resolve external adapter refs into canonical Reborn bindings.
@@ -64,6 +71,20 @@ pub struct ResolveBindingRequest {
     pub external_event_id: ExternalEventId,
     pub route_kind: ProductConversationRouteKind,
     pub auth_claim: VerifiedAuthClaim,
+}
+
+/// Atomically rotate an existing external conversation route to a fresh
+/// canonical thread. The expected id fences stale concurrent reset attempts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetBindingRequest {
+    pub resolve_request: ResolveBindingRequest,
+    pub expected_thread_id: ThreadId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResetBindingOutcome {
+    pub previous_thread_id: ThreadId,
+    pub binding: ResolvedBinding,
 }
 
 /// Stable route-access shape for product bindings.
@@ -85,16 +106,21 @@ pub enum ProductConversationBindingCreationPolicy {
 }
 
 impl ResolveBindingRequest {
-    pub fn from_envelope(envelope: &ProductInboundEnvelope) -> Self {
-        Self {
+    /// Build the binding request for a webhook-verified envelope. Session
+    /// envelopes bind through their owned thread and never reach the external
+    /// binding resolver, so a missing claim fails closed here.
+    pub fn from_envelope(
+        envelope: &ProductInboundEnvelope,
+    ) -> Result<Self, ironclaw_host_api::product_adapter_error::ProductAdapterError> {
+        Ok(Self {
             adapter_id: envelope.adapter_id().clone(),
             installation_id: envelope.installation_id().clone(),
             external_actor_ref: envelope.external_actor_ref().clone(),
             external_conversation_ref: envelope.external_conversation_ref().clone(),
             external_event_id: envelope.external_event_id().clone(),
             route_kind: route_kind_for_inbound_payload(envelope.payload()),
-            auth_claim: envelope.auth_claim().clone(),
-        }
+            auth_claim: envelope.require_verified_auth_claim()?.clone(),
+        })
     }
 }
 
@@ -168,6 +194,17 @@ pub trait ProductBindingResolver: Send + Sync {
         &self,
         request: ResolveBindingRequest,
     ) -> Result<ResolvedBinding, ProductOperationFailure>;
+
+    /// Reset is fail-closed by default so test doubles and custom hosts cannot
+    /// silently claim a route was rotated without durable binding support.
+    async fn reset_binding(
+        &self,
+        _request: ResetBindingRequest,
+    ) -> Result<ResetBindingOutcome, ProductOperationFailure> {
+        Err(ProductOperationFailure::BindingResolutionFailed {
+            reason: "conversation binding reset is not supported".to_string(),
+        })
+    }
 }
 
 #[async_trait]
@@ -188,28 +225,38 @@ where
     ) -> Result<ResolvedBinding, ProductOperationFailure> {
         self.as_ref().lookup_binding(request).await
     }
+
+    async fn reset_binding(
+        &self,
+        request: ResetBindingRequest,
+    ) -> Result<ResetBindingOutcome, ProductOperationFailure> {
+        self.as_ref().reset_binding(request).await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Persisted-shape compatibility: rows written before the actor/subject
+    /// split (the `user_id` spelling) AND rows written while the retired
+    /// `subject_user_id` field existed must both keep deserializing. The
+    /// subject value is deliberately dropped on read — a run acts as the user
+    /// who invoked it, so the actor is the only identity the binding carries.
     #[test]
-    fn resolved_binding_accepts_legacy_user_id_actor_field() {
+    fn resolved_binding_accepts_legacy_user_id_and_retired_subject_field() {
         let binding: ResolvedBinding = serde_json::from_value(serde_json::json!({
             "tenant_id": "tenant:legacy",
             "user_id": "user:legacy-actor",
             "subject_user_id": "user:legacy-subject",
             "thread_id": "thread:legacy",
             "agent_id": "agent:legacy",
-            "project_id": "project:legacy"
+            "project_id": "project:legacy",
+            "source_binding_ref": "source:legacy",
+            "reply_target_binding_ref": "reply:legacy"
         }))
         .expect("legacy binding should deserialize");
 
         assert_eq!(binding.actor_user_id.as_str(), "user:legacy-actor");
-        assert_eq!(
-            binding.subject_user_id.as_ref().map(UserId::as_str),
-            Some("user:legacy-subject")
-        );
     }
 }

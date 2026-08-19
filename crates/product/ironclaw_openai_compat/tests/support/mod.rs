@@ -65,6 +65,14 @@ impl RecordedProductSurfaceSubmit {
         ProductAdapterId::new(OPENAI_COMPAT_ADAPTER_ID).expect("adapter id")
     }
 
+    /// The channel parameter of the raw submit request. OpenAI-compatible
+    /// clients cannot learn a channel id, so the workflows must submit `None`
+    /// (the legacy session-surface lane) — see
+    /// `ProductSubmitTurnRequest::extension_id`.
+    pub(crate) fn extension_id(&self) -> Option<&str> {
+        self.request.extension_id.as_deref()
+    }
+
     pub(crate) fn external_event_id(&self) -> ExternalEventId {
         ExternalEventId::new(
             self.request
@@ -145,7 +153,7 @@ impl FakeProductSurface {
 
     pub(crate) fn program_projection_resolution(
         &self,
-        _request: ironclaw_assistant::ProjectionSubscriptionRequest,
+        _request: ironclaw_product_contracts::projection::ProjectionSubscriptionRequest,
     ) {
     }
 
@@ -378,7 +386,7 @@ impl ProductSurface for FakeProductSurface {
         let thread_id = request.stream_id.ok_or_else(invalid_request)?;
         let after_cursor = request
             .after_cursor
-            .map(ironclaw_assistant::ProjectionCursor::new)
+            .map(ironclaw_product_contracts::outbound::ProjectionCursor::new)
             .transpose()
             .map_err(|_| invalid_request())?;
         let response = self
@@ -411,6 +419,7 @@ fn default_ack(event_id: &str) -> ProductInboundAck {
         accepted_message_ref: AcceptedMessageRef::new(format!("msg:{event_id}"))
             .expect("accepted message ref"),
         submitted_run_id: TurnRunId::new(),
+        submission: None,
     }
 }
 
@@ -424,6 +433,7 @@ fn reborn_submit_from_ack(
             ProductInboundAck::Accepted {
                 accepted_message_ref,
                 submitted_run_id,
+                ..
             } => {
                 return Ok(RebornSubmitTurnResponse::Submitted {
                     thread_id,
@@ -440,6 +450,7 @@ fn reborn_submit_from_ack(
             ProductInboundAck::DeferredBusy {
                 accepted_message_ref,
                 active_run_id,
+                ..
             } => {
                 return Ok(RebornSubmitTurnResponse::RejectedBusy {
                     thread_id,
@@ -453,6 +464,7 @@ fn reborn_submit_from_ack(
             ProductInboundAck::RejectedBusy {
                 accepted_message_ref,
                 active_run_id,
+                ..
             } => {
                 return Ok(RebornSubmitTurnResponse::RejectedBusy {
                     thread_id,

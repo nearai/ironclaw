@@ -31,12 +31,10 @@ use async_trait::async_trait;
 use ironclaw_auth::{
     AuthContinuationEvent, AuthContinuationRef, AuthProductError, RebornAuthContinuationDispatcher,
 };
-use ironclaw_processes::{
-    ProcessGateOwnerMatch, ProcessGateQuery, ProcessGateQuerySource, ProcessSuspensionKind,
-};
+use ironclaw_processes::{ProcessGateQuery, ProcessGateQuerySource, ProcessSuspensionKind};
 use ironclaw_turns::{
-    IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    SourceBindingRef, TurnActor, TurnCoordinator, TurnError, TurnRunId,
+    IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnActor, TurnCoordinator,
+    TurnError, TurnRunId,
 };
 use uuid::Uuid;
 
@@ -82,7 +80,6 @@ impl BlockedAuthResumeFanout {
                 scope_match: Some(ironclaw_processes::ProcessGateScopeMatch::Owner),
                 owner_user_id: Some(user_id.clone()),
                 gate_ref: None,
-                owner_match: Some(ProcessGateOwnerMatch::Explicit),
                 include_historical: false,
             })
             .await
@@ -123,22 +120,6 @@ impl BlockedAuthResumeFanout {
                 tracing::warn!(%run_id, "blocked-auth fan-out found a process gate without a thread scope");
                 continue;
             };
-            let Some(source_binding_ref) = run
-                .resume_source_ref
-                .as_deref()
-                .and_then(|value| SourceBindingRef::new(value).ok())
-            else {
-                tracing::warn!(%run_id, "blocked-auth fan-out found a process gate without a resume source ref");
-                continue;
-            };
-            let Some(reply_target_binding_ref) = run
-                .reply_target_ref
-                .as_deref()
-                .and_then(|value| ReplyTargetBindingRef::new(value).ok())
-            else {
-                tracing::warn!(%run_id, "blocked-auth fan-out found a process gate without a reply target ref");
-                continue;
-            };
             let Ok(idempotency_key) =
                 IdempotencyKey::new(format!("blocked-auth-fanout-{}-{}", event.flow_id, run_id))
             else {
@@ -153,8 +134,6 @@ impl BlockedAuthResumeFanout {
                 actor,
                 run_id,
                 gate_resolution_ref: gate_ref,
-                source_binding_ref,
-                reply_target_binding_ref,
                 idempotency_key,
                 // No credential_ref: the resumed run re-runs its capability
                 // (extension_activate), which re-checks requirement
@@ -419,8 +398,6 @@ mod tests {
                 credential_requirements: vec![requirement],
                 detail: None,
             },
-            resume_source_ref: Some(format!("source:{run_id}")),
-            reply_target_ref: Some(format!("reply:{run_id}")),
             historical: false,
         }
     }

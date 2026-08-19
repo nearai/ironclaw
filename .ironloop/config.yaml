@@ -1,12 +1,8 @@
 version: 1
 
-implementer:
-  instructions: .ironloop/implementer.md
-  network_access: true
+implementer: {}
 
 reviewer:
-  instructions: .ironloop/reviewer.md
-  network_access: true
   auto_review:
     enabled: true
     max_runs: 10
@@ -14,8 +10,8 @@ reviewer:
     user_update: false
 
 resolver:
-  instructions: .ironloop/resolver.md
-  network_access: true
   auto_resolve:
     enabled: true
     max_runs: 10
+
+tester: {}

@@ -1,9 +1,13 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use ironclaw_event_log::{
-    EventCursor, EventError, EventStreamKey, ReadScope, RuntimeEvent, RuntimeEventKind,
+    DurableEventLog, EventCursor, EventError, EventStreamKey, ReadScope, RuntimeEvent,
+    RuntimeEventKind,
 };
 use ironclaw_event_store::{RebornEventStoreConfig, RebornProfile, build_reborn_event_stores};
+use ironclaw_filesystem::{
+    IsolatedPostgresDatabase, IsolatedPostgresProvisioner, PostgresUnreachable,
+};
 use ironclaw_host_api::{
     audit::{ActionResultSummary, ActionSummary, AuditEnvelope, AuditStage, DecisionSummary},
     ids::{
@@ -67,6 +71,35 @@ fn audit_record(scope: &ResourceScope, status: &str) -> AuditEnvelope {
             output_bytes: Some(12),
         }),
     }
+}
+
+async fn assert_model_duration_persistence(log: &Arc<dyn DurableEventLog>, scope: ResourceScope) {
+    let stream = EventStreamKey::from_scope(&scope);
+    log.append(RuntimeEvent::model_completed_with_duration(
+        scope.clone(),
+        capability_id(),
+        37,
+    ))
+    .await
+    .expect("append terminal model event with duration");
+    log.append(RuntimeEvent::model_completed(scope, capability_id()))
+        .await
+        .expect("append historical terminal model event without duration");
+
+    let replay = log
+        .read_after_cursor(&stream, &ReadScope::default(), None, 10)
+        .await
+        .expect("replay terminal model events");
+    assert_eq!(replay.entries.len(), 2);
+    assert_eq!(
+        replay.entries[0].record.duration_ms,
+        Some(37),
+        "new terminal model duration must survive durable serialization and replay"
+    );
+    assert_eq!(
+        replay.entries[1].record.duration_ms, None,
+        "historical terminal model rows without duration must remain readable"
+    );
 }
 #[tokio::test]
 async fn libsql_replay_advances_next_cursor_past_trailing_filtered_records() {
@@ -501,12 +534,59 @@ async fn libsql_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_sema
         Some("project-a".to_string())
     );
 }
+
+#[tokio::test]
+async fn libsql_model_duration_present_and_historical_absent_round_trip() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let stores = build_reborn_event_stores(
+        RebornProfile::Production,
+        RebornEventStoreConfig::Libsql {
+            path_or_url: temp.path().join("model-duration.db").display().to_string(),
+            auth_token: None,
+        },
+    )
+    .await
+    .expect("libsql stores");
+
+    assert_model_duration_persistence(
+        &stores.events,
+        scope_for("libsql-model-duration", "project-a"),
+    )
+    .await;
+}
+// ─── Postgres per-test isolation ──────────────────────────────────────────
+//
+// The two `postgres_*` tests below assert *absolute* cursor values
+// (`EventCursor::new(1)`…), and Postgres cursor assignment draws on
+// database-wide state: any other row in the database shifts the numbers.
+// Unique scope suffixes isolate record filtering but not cursor assignment,
+// so the suite ran red as one invocation against the single database named
+// by `IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL` while every test passed
+// alone on a virgin database (WS12 gauntlet report, §P6). Each test
+// therefore provisions a private database on the configured server —
+// `ironclaw_filesystem`'s shared `test-support` provisioner
+// (`postgres_isolation`), which owns the once-per-binary age-gated stale
+// sweep — keeping the absolute assertions meaningful, exactly as the
+// jsonl/libsql twins keep theirs through per-test temp files.
+//
+// `PostgresUnreachable::Panic`: past a configured URL, every provisioning
+// failure is a broken environment rather than an unconfigured one — this leg
+// has no CI executor, and a silent skip would let the suite pass while
+// testing nothing.
+static POSTGRES: IsolatedPostgresProvisioner = IsolatedPostgresProvisioner::new(
+    "postgres event-store contract",
+    "IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL",
+    "evstore_isolated_",
+    PostgresUnreachable::Panic,
+);
+
+async fn isolated_postgres_database() -> Option<IsolatedPostgresDatabase> {
+    POSTGRES.provision().await
+}
+
 #[tokio::test]
 async fn postgres_replay_advances_next_cursor_past_trailing_filtered_records() {
-    let Ok(url) = std::env::var("IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL") else {
-        eprintln!(
-            "skipping postgres event-store cursor contract: IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL not set"
-        );
+    let Some(db) = isolated_postgres_database().await else {
         return;
     };
     let suffix = std::time::SystemTime::now()
@@ -520,7 +600,7 @@ async fn postgres_replay_advances_next_cursor_past_trailing_filtered_records() {
     let stores = build_reborn_event_stores(
         RebornProfile::Production,
         RebornEventStoreConfig::Postgres {
-            url: SecretString::new(url.into_boxed_str()),
+            url: SecretString::new(db.url().to_owned().into_boxed_str()),
             tls_options: Default::default(),
         },
     )
@@ -559,13 +639,12 @@ async fn postgres_replay_advances_next_cursor_past_trailing_filtered_records() {
         EventCursor::new(2),
         "filtered trailing records must advance Postgres replay cursor"
     );
+    drop(stores);
+    db.cleanup().await;
 }
 #[tokio::test]
 async fn postgres_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_semantics() {
-    let Ok(url) = std::env::var("IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL") else {
-        eprintln!(
-            "skipping postgres event-store contract: IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL not set"
-        );
+    let Some(db) = isolated_postgres_database().await else {
         return;
     };
     let suffix = std::time::SystemTime::now()
@@ -579,7 +658,7 @@ async fn postgres_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_se
     let stores = build_reborn_event_stores(
         RebornProfile::Production,
         RebornEventStoreConfig::Postgres {
-            url: SecretString::new(url.clone().into_boxed_str()),
+            url: SecretString::new(db.url().to_owned().into_boxed_str()),
             tls_options: Default::default(),
         },
     )
@@ -628,7 +707,7 @@ async fn postgres_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_se
     let stores = build_reborn_event_stores(
         RebornProfile::Production,
         RebornEventStoreConfig::Postgres {
-            url: SecretString::new(url.into_boxed_str()),
+            url: SecretString::new(db.url().to_owned().into_boxed_str()),
             tls_options: Default::default(),
         },
     )
@@ -661,6 +740,32 @@ async fn postgres_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_se
             .status,
         Some("project-a".to_string())
     );
+    drop(stores);
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_model_duration_present_and_historical_absent_round_trip() {
+    let Some(db) = isolated_postgres_database().await else {
+        return;
+    };
+    let stores = build_reborn_event_stores(
+        RebornProfile::Production,
+        RebornEventStoreConfig::Postgres {
+            url: SecretString::new(db.url().to_owned().into_boxed_str()),
+            tls_options: Default::default(),
+        },
+    )
+    .await
+    .expect("postgres stores");
+
+    assert_model_duration_persistence(
+        &stores.events,
+        scope_for("postgres-model-duration", "project-a"),
+    )
+    .await;
+    drop(stores);
+    db.cleanup().await;
 }
 
 #[tokio::test]

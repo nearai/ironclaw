@@ -23,8 +23,9 @@ use crate::{
     ConversationRouteKind, ExpectedExternalActorOwner, ExternalConversationIdentity,
     InboundConversationService, InboundTurnError, LinkConversationRequest,
     LinkedConversationBinding, MessageIdempotencyStatus, ReplyTargetBinding,
-    ResolveConversationRequest, ResolveStoredReplyTargetRequest, StoredReplyTargetAccess,
-    StoredReplyTargetBinding, ThreadAccessDecision, ValidateReplyTargetRequest,
+    ResetConversationOutcome, ResetConversationRequest, ResolveConversationRequest,
+    ResolveStoredReplyTargetRequest, StoredReplyTargetAccess, StoredReplyTargetBinding,
+    ThreadAccessDecision, ValidateReplyTargetRequest,
 };
 use ironclaw_extension_contracts::external::{
     ExternalActorBindingEpoch, ExternalActorRef, ExternalConversationRef,
@@ -179,6 +180,21 @@ impl InMemoryConversationServices {
             {
                 return Ok(());
             }
+            // A different canonical owner is a new authority grant. Direct
+            // routes created for the previous user must not survive it: their
+            // canonical thread is still owned by that user, so reusing the
+            // binding would either deny the new owner forever or expose the
+            // old owner's thread. An epoch-only refresh for the SAME user is
+            // a relink of the same identity and deliberately preserves their
+            // conversation continuity. Shared routes remain conversation-
+            // scoped and are preserved in both cases.
+            if state
+                .pairings
+                .get(&actor_key)
+                .is_some_and(|current_user_id| current_user_id != &user_id)
+            {
+                state.revoke_direct_bindings_for_actor(&actor_key);
+            }
             state.pairings.insert(actor_key.clone(), user_id);
             match binding_epoch {
                 Some(binding_epoch) => {
@@ -324,29 +340,6 @@ impl InMemoryConversationServices {
         self.persist_state(old_state, snapshot).await?;
         Ok(removed_count)
     }
-
-    pub async fn add_thread_participant(
-        &self,
-        tenant_id: &TenantId,
-        thread_id: &ThreadId,
-        user_id: UserId,
-    ) -> Result<(), InboundTurnError> {
-        let _mutation = self.mutation_lock.lock().await;
-        self.refresh_state_from_repository().await?;
-        let old_state = self.lock_state()?.clone();
-        let snapshot = {
-            let mut state = self.lock_state()?;
-            let Some(thread) = state.threads.get_mut(&ThreadKey::new(tenant_id, thread_id)) else {
-                return Err(InboundTurnError::ThreadNotFound {
-                    thread_id: thread_id.to_string(),
-                });
-            };
-            thread.participants.insert(user_id);
-            state.clone()
-        };
-        self.persist_state(old_state, snapshot).await?;
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -465,7 +458,7 @@ impl ConversationBindingService for InMemoryConversationServices {
             &request.adapter_installation_id,
             &request.external_actor_ref,
         )?;
-        let binding_key = BindingKey::from_request(&request);
+        let binding_key = BindingKey::for_route(&request);
         let external_conversation_identity =
             ExternalConversationIdentity::from_ref(&request.external_conversation_ref);
         state.ensure_external_event_route(
@@ -489,17 +482,189 @@ impl ConversationBindingService for InMemoryConversationServices {
                 external_actor_id: request.external_actor_ref.id().to_string(),
             }
         })?;
-        state.ensure_participant(&request.tenant_id, &actor_user_id, &binding.thread_id)?;
+        // Same legacy-row kind-mismatch refusal as resolve: a Direct key can
+        // only collide with a retained pre-per-actor shared row.
+        if binding.route_access.shared && request.route_kind == ConversationRouteKind::Direct {
+            return Err(InboundTurnError::BindingRequired {
+                adapter_kind: request.adapter_kind.as_str().to_string(),
+                external_actor_id: request.external_actor_ref.id().to_string(),
+            });
+        }
+        // Shared (channel) routes resolve per-event, mirroring
+        // `resolve_or_create_binding`: replay the ephemeral per-ping thread and
+        // refs minted for THIS event at resolve time, so a lookup for a second
+        // pinger's event addresses that pinger's OWN thread (owner == actor),
+        // not the first pinger's. Lookups never create — an event with no
+        // recorded per-event thread (e.g. a probe for an unresolved event, or a
+        // Direct route) falls back to the conversation-keyed binding, the same
+        // resolution this path returned before the ephemeral-per-ping remodel.
+        let event_shared = if request.route_kind == ConversationRouteKind::Shared {
+            let event_key = ExternalEventRouteKey::new(
+                &request.tenant_id,
+                &request.adapter_kind,
+                &request.adapter_installation_id,
+                &request.external_event_id,
+            );
+            state.event_shared_bindings.get(&event_key).cloned()
+        } else {
+            None
+        };
+        let effective_thread_id = event_shared
+            .as_ref()
+            .map(|shared| shared.thread_id.clone())
+            .unwrap_or_else(|| binding.thread_id.clone());
+        state.ensure_participant(&request.tenant_id, &actor_user_id, &effective_thread_id)?;
         if !binding
             .route_access
             .allows(&route_actor_key, request.route_kind)
         {
             return Err(InboundTurnError::AccessDenied {
                 actor_id: actor_user_id.to_string(),
-                thread_id: binding.thread_id.to_string(),
+                thread_id: effective_thread_id.to_string(),
             });
         }
-        Ok(binding.resolution(actor_user_id, binding_epoch, request.tenant_id))
+        match event_shared {
+            Some(shared) => Ok(binding.resolution_for_thread(
+                actor_user_id,
+                binding_epoch,
+                request.tenant_id,
+                shared.thread_id,
+                shared.source_binding_ref,
+                shared.reply_target_binding_ref,
+            )),
+            None => Ok(binding.resolution(actor_user_id, binding_epoch, request.tenant_id)),
+        }
+    }
+
+    async fn reset_conversation_binding(
+        &self,
+        request: ResetConversationRequest,
+    ) -> Result<ResetConversationOutcome, InboundTurnError> {
+        let _mutation = self.mutation_lock.lock().await;
+        self.refresh_state_from_repository().await?;
+        let old_state = self.lock_state()?.clone();
+        let outcome = {
+            let mut state = self.lock_state()?;
+            let resolve = &request.resolve_request;
+            let actor_user_id = state.resolve_actor(
+                &resolve.tenant_id,
+                &resolve.adapter_kind,
+                &resolve.adapter_installation_id,
+                &resolve.external_actor_ref,
+            )?;
+            let external_conversation_identity =
+                ExternalConversationIdentity::from_ref(&resolve.external_conversation_ref);
+            state.ensure_external_event_route(
+                &resolve.tenant_id,
+                &resolve.adapter_kind,
+                &resolve.adapter_installation_id,
+                &resolve.external_event_id,
+                &external_conversation_identity,
+                &actor_user_id,
+            )?;
+            let reset_key = ExternalEventRouteKey::new(
+                &resolve.tenant_id,
+                &resolve.adapter_kind,
+                &resolve.adapter_installation_id,
+                &resolve.external_event_id,
+            );
+            if let Some(replay) = state.binding_resets.get(&reset_key) {
+                return Ok(replay.clone());
+            }
+
+            let binding_key = BindingKey::for_route(resolve);
+            let current = state.bindings.get(&binding_key).cloned().ok_or_else(|| {
+                InboundTurnError::BindingRequired {
+                    adapter_kind: resolve.adapter_kind.as_str().to_string(),
+                    external_actor_id: resolve.external_actor_ref.id().to_string(),
+                }
+            })?;
+            // Same legacy-row kind-mismatch refusal as resolve/lookup.
+            if current.route_access.shared && resolve.route_kind == ConversationRouteKind::Direct {
+                return Err(InboundTurnError::BindingRequired {
+                    adapter_kind: resolve.adapter_kind.as_str().to_string(),
+                    external_actor_id: resolve.external_actor_ref.id().to_string(),
+                });
+            }
+            if current.thread_id != request.expected_thread_id {
+                return Err(InboundTurnError::BindingConflict {
+                    thread_id: current.thread_id.to_string(),
+                });
+            }
+            let route_actor_key = ActorKey::new(
+                &resolve.tenant_id,
+                &resolve.adapter_kind,
+                &resolve.adapter_installation_id,
+                &resolve.external_actor_ref,
+            );
+            if !current
+                .route_access
+                .allows(&route_actor_key, resolve.route_kind)
+            {
+                return Err(InboundTurnError::AccessDenied {
+                    actor_id: actor_user_id.to_string(),
+                    thread_id: current.thread_id.to_string(),
+                });
+            }
+            let previous_thread = state.thread_for_participant(
+                &resolve.tenant_id,
+                &actor_user_id,
+                &current.thread_id,
+            )?;
+            let new_thread_id = ThreadId::new(Uuid::new_v4().to_string()).map_err(|error| {
+                InboundTurnError::InvalidCanonicalRef {
+                    reason: error.to_string(),
+                }
+            })?;
+            state.threads.insert(
+                ThreadKey::new(&resolve.tenant_id, &new_thread_id),
+                previous_thread,
+            );
+            let replacement = BindingRecord::new(
+                current.tenant_id.clone(),
+                current.adapter_kind.clone(),
+                current.adapter_installation_id.clone(),
+                current.external_conversation_ref.clone(),
+                current.route_access.clone(),
+                BindingTarget::new(
+                    new_thread_id,
+                    current.agent_id.clone(),
+                    current.project_id.clone(),
+                    current.owner_user_id.clone(),
+                ),
+            )?;
+            let binding_epoch = state.pairing_epochs.get(&route_actor_key).cloned();
+            let resolution = replacement.resolution(
+                actor_user_id.clone(),
+                binding_epoch,
+                resolve.tenant_id.clone(),
+            );
+
+            state
+                .source_bindings
+                .remove(current.source_binding_ref.as_str());
+            state
+                .reply_targets
+                .remove(current.reply_target_binding_ref.as_str());
+            state.store_binding(binding_key, replacement);
+            state.record_external_event_route(
+                &resolve.tenant_id,
+                &resolve.adapter_kind,
+                &resolve.adapter_installation_id,
+                &resolve.external_event_id,
+                &external_conversation_identity,
+                &actor_user_id,
+            )?;
+            let outcome = ResetConversationOutcome {
+                previous_thread_id: current.thread_id,
+                resolution,
+            };
+            state.binding_resets.insert(reset_key, outcome.clone());
+            outcome
+        };
+        let snapshot = self.lock_state()?.clone();
+        self.persist_state(old_state, snapshot).await?;
+        Ok(outcome)
     }
 
     async fn link_conversation_to_thread(
@@ -543,6 +708,15 @@ impl ConversationBindingService for InMemoryConversationServices {
                         &request.adapter_installation_id,
                         &request.external_actor_ref,
                     );
+                    // Same legacy-row kind-mismatch refusal as resolve/lookup.
+                    if existing.route_access.shared
+                        && request.route_kind == ConversationRouteKind::Direct
+                    {
+                        return Err(InboundTurnError::AccessDenied {
+                            actor_id: actor_user_id.to_string(),
+                            thread_id: existing.thread_id.to_string(),
+                        });
+                    }
                     if !existing
                         .route_access
                         .allows(&route_actor_key, request.route_kind)
@@ -552,14 +726,6 @@ impl ConversationBindingService for InMemoryConversationServices {
                             thread_id: existing.thread_id.to_string(),
                         });
                     }
-                    if request.route_kind == ConversationRouteKind::Shared {
-                        state.widen_binding_route_access(&binding_key)?;
-                    }
-                    let existing = state
-                        .bindings
-                        .get(&binding_key)
-                        .cloned()
-                        .ok_or(InboundTurnError::StatePoisoned)?;
                     let linked = LinkedConversationBinding {
                         thread_id: existing.thread_id,
                         source_binding_ref: existing.source_binding_ref,
@@ -744,7 +910,7 @@ impl InMemoryConversationServices {
                 &request.adapter_installation_id,
                 &request.external_actor_ref,
             )?;
-            let binding_key = BindingKey::from_request(&request);
+            let binding_key = BindingKey::for_route(&request);
             let external_conversation_identity =
                 ExternalConversationIdentity::from_ref(&request.external_conversation_ref);
             state.ensure_external_event_route(
@@ -769,7 +935,20 @@ impl InMemoryConversationServices {
                     .get(&binding_key)
                     .cloned()
                     .ok_or(InboundTurnError::StatePoisoned)?;
-                state.ensure_participant(&request.tenant_id, &actor_user_id, &binding.thread_id)?;
+                // A `Direct` request can key-collide only with a legacy
+                // conversation-scoped shared row (pre-per-actor rows carry no
+                // actor component — the Direct key shape). Those rows are
+                // retained-but-unreachable by contract: refuse the kind
+                // mismatch instead of trusting adapters to never re-classify
+                // a conversation's route kind.
+                if binding.route_access.shared
+                    && request.route_kind == ConversationRouteKind::Direct
+                {
+                    return Err(InboundTurnError::BindingRequired {
+                        adapter_kind: request.adapter_kind.as_str().to_string(),
+                        external_actor_id: request.external_actor_ref.id().to_string(),
+                    });
+                }
                 if !binding
                     .route_access
                     .allows(&route_actor_key, request.route_kind)
@@ -784,14 +963,6 @@ impl InMemoryConversationServices {
                     trusted_agent_id.as_ref(),
                     trusted_project_id.as_ref(),
                 )?;
-                if request.route_kind == ConversationRouteKind::Shared {
-                    state.widen_binding_route_access(&binding_key)?;
-                    if binding.owner_user_id.is_none()
-                        && let Some(owner_user_id) = trusted_owner_user_id.clone()
-                    {
-                        state.set_binding_owner(&binding_key, owner_user_id)?;
-                    }
-                }
                 state.record_external_event_route(
                     &request.tenant_id,
                     &request.adapter_kind,
@@ -800,47 +971,145 @@ impl InMemoryConversationServices {
                     &external_conversation_identity,
                     &actor_user_id,
                 )?;
-                let binding = state
-                    .bindings
-                    .get(&binding_key)
-                    .cloned()
-                    .ok_or(InboundTurnError::StatePoisoned)?;
-                let resolution =
-                    binding.resolution(actor_user_id, binding_epoch, request.tenant_id);
+                let resolution = match request.route_kind {
+                    // Ephemeral per-ping: a shared (channel) resolve mints a
+                    // fresh pinger-owned thread for a NEW event and replays it
+                    // on redelivery, so owner == actor and there is no shared
+                    // participant set to join. The binding persists only for
+                    // stable reply-target / source refs.
+                    ConversationRouteKind::Shared => {
+                        let event_key = ExternalEventRouteKey::new(
+                            &request.tenant_id,
+                            &request.adapter_kind,
+                            &request.adapter_installation_id,
+                            &request.external_event_id,
+                        );
+                        let (thread_id, source_binding_ref, reply_target_binding_ref) = state
+                            .shared_event_binding(
+                                event_key,
+                                &request.tenant_id,
+                                &request.adapter_kind,
+                                &request.adapter_installation_id,
+                                &binding.external_conversation_ref,
+                                &actor_user_id,
+                                &route_actor_key,
+                                binding.agent_id.clone(),
+                                binding.project_id.clone(),
+                            )?;
+                        binding.resolution_for_thread(
+                            actor_user_id,
+                            binding_epoch,
+                            request.tenant_id.clone(),
+                            thread_id,
+                            source_binding_ref,
+                            reply_target_binding_ref,
+                        )
+                    }
+                    // Direct (DM) routes keep their persistent per-user thread;
+                    // the requester must already be its participant.
+                    ConversationRouteKind::Direct => {
+                        state.ensure_participant(
+                            &request.tenant_id,
+                            &actor_user_id,
+                            &binding.thread_id,
+                        )?;
+                        binding.resolution(actor_user_id, binding_epoch, request.tenant_id.clone())
+                    }
+                };
                 (resolution, state.clone())
             } else {
-                let thread_id = ThreadId::new(Uuid::new_v4().to_string()).map_err(|error| {
-                    InboundTurnError::InvalidCanonicalRef {
-                        reason: error.to_string(),
+                let resolution = match request.route_kind {
+                    // First contact on a shared (channel) route: mint the
+                    // event-keyed ephemeral thread (owned by the pinger) and
+                    // persist a conversation-keyed binding ONLY for its stable
+                    // reply-target / source refs (routing + idempotency). The
+                    // binding does not own a reused thread, so its stored owner
+                    // is left unset — each ping resolves onto its own per-event
+                    // thread via `resolution_for_thread`.
+                    ConversationRouteKind::Shared => {
+                        let event_key = ExternalEventRouteKey::new(
+                            &request.tenant_id,
+                            &request.adapter_kind,
+                            &request.adapter_installation_id,
+                            &request.external_event_id,
+                        );
+                        let (thread_id, source_binding_ref, reply_target_binding_ref) = state
+                            .shared_event_binding(
+                                event_key,
+                                &request.tenant_id,
+                                &request.adapter_kind,
+                                &request.adapter_installation_id,
+                                &request.external_conversation_ref,
+                                &actor_user_id,
+                                &route_actor_key,
+                                trusted_agent_id.clone(),
+                                trusted_project_id.clone(),
+                            )?;
+                        let binding = BindingRecord::new(
+                            request.tenant_id.clone(),
+                            request.adapter_kind.clone(),
+                            request.adapter_installation_id.clone(),
+                            request.external_conversation_ref,
+                            ReplyRouteAccess::new(route_actor_key, request.route_kind),
+                            BindingTarget::new(
+                                thread_id.clone(),
+                                trusted_agent_id,
+                                trusted_project_id,
+                                None,
+                            ),
+                        )?;
+                        let resolution = binding.resolution_for_thread(
+                            actor_user_id.clone(),
+                            binding_epoch,
+                            request.tenant_id.clone(),
+                            thread_id,
+                            source_binding_ref,
+                            reply_target_binding_ref,
+                        );
+                        state.store_binding(binding_key, binding);
+                        resolution
                     }
-                })?;
-                let thread = ThreadRecord {
-                    agent_id: trusted_agent_id.clone(),
-                    project_id: trusted_project_id.clone(),
-                    participants: HashSet::from([actor_user_id.clone()]),
+                    // Direct (DM) route: a persistent per-user thread. The
+                    // trusted owner parameter serves host-trusted lanes that
+                    // bind a Direct conversation FOR a user (the trigger fire
+                    // path binds the creator).
+                    ConversationRouteKind::Direct => {
+                        let thread_id =
+                            ThreadId::new(Uuid::new_v4().to_string()).map_err(|error| {
+                                InboundTurnError::InvalidCanonicalRef {
+                                    reason: error.to_string(),
+                                }
+                            })?;
+                        let thread = ThreadRecord {
+                            agent_id: trusted_agent_id.clone(),
+                            project_id: trusted_project_id.clone(),
+                            participants: HashSet::from([actor_user_id.clone()]),
+                        };
+                        state
+                            .threads
+                            .insert(ThreadKey::new(&request.tenant_id, &thread_id), thread);
+                        let binding = BindingRecord::new(
+                            request.tenant_id.clone(),
+                            request.adapter_kind.clone(),
+                            request.adapter_installation_id.clone(),
+                            request.external_conversation_ref,
+                            ReplyRouteAccess::new(route_actor_key, request.route_kind),
+                            BindingTarget::new(
+                                thread_id,
+                                trusted_agent_id,
+                                trusted_project_id,
+                                trusted_owner_user_id,
+                            ),
+                        )?;
+                        let resolution = binding.resolution(
+                            actor_user_id.clone(),
+                            binding_epoch,
+                            request.tenant_id.clone(),
+                        );
+                        state.store_binding(binding_key, binding);
+                        resolution
+                    }
                 };
-                state
-                    .threads
-                    .insert(ThreadKey::new(&request.tenant_id, &thread_id), thread);
-                let binding = BindingRecord::new(
-                    request.tenant_id.clone(),
-                    request.adapter_kind.clone(),
-                    request.adapter_installation_id.clone(),
-                    request.external_conversation_ref,
-                    ReplyRouteAccess::new(route_actor_key, request.route_kind),
-                    BindingTarget::new(
-                        thread_id,
-                        trusted_agent_id,
-                        trusted_project_id,
-                        trusted_owner_user_id,
-                    ),
-                )?;
-                let resolution = binding.resolution(
-                    actor_user_id.clone(),
-                    binding_epoch,
-                    request.tenant_id.clone(),
-                );
-                state.store_binding(binding_key, binding);
                 state.record_external_event_route(
                     &request.tenant_id,
                     &request.adapter_kind,
@@ -1121,6 +1390,17 @@ impl InMemoryConversationServices {
     }
 }
 
+/// The per-event ephemeral binding a shared (channel) ping resolves onto: its
+/// own thread and its own reply target, minted once per inbound event and
+/// replayed on redelivery. The reply target's `thread_id` equals this thread,
+/// so the existing thread-match / participant checks hold uniformly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SharedEventBinding {
+    pub(crate) thread_id: ThreadId,
+    pub(crate) source_binding_ref: SourceBindingRef,
+    pub(crate) reply_target_binding_ref: ReplyTargetBindingRef,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct InMemoryState {
     #[serde(default, skip)]
@@ -1133,6 +1413,18 @@ pub(crate) struct InMemoryState {
     pub(crate) reply_targets: HashMap<String, ReplyTargetRecord>,
     pub(crate) threads: HashMap<ThreadKey, ThreadRecord>,
     pub(crate) external_event_routes: HashMap<ExternalEventRouteKey, ExternalConversationIdentity>,
+    /// Event-idempotent per-ping shared-route binding: a fresh pinger-owned
+    /// thread AND its matching per-event reply target are minted for a
+    /// genuinely NEW inbound event and replayed for any redelivery of that same
+    /// `external_event_id` — so a channel ping is exactly one ephemeral thread
+    /// (no orphans) whose reply target routes authority-bearing prompts back to
+    /// that pinger alone (the reply target carries the pinger's actor key, and
+    /// its `thread_id` matches the run's, so a stale/cross-event reply ref
+    /// fails the thread check). Empty for Direct (DM) routes.
+    #[serde(default)]
+    pub(crate) event_shared_bindings: HashMap<ExternalEventRouteKey, SharedEventBinding>,
+    #[serde(default)]
+    pub(crate) binding_resets: HashMap<ExternalEventRouteKey, ResetConversationOutcome>,
     pub(crate) message_idempotency: HashMap<MessageIdempotencyKey, AcceptedConversationMessage>,
     pub(crate) message_replays: HashMap<AcceptedMessageReplayKey, StoredAcceptedMessageReplay>,
     pub(crate) submission_keys: HashMap<AcceptedMessageRef, IdempotencyKey>,
@@ -1141,6 +1433,86 @@ pub(crate) struct InMemoryState {
 }
 
 impl InMemoryState {
+    /// The ephemeral per-ping thread for a shared (channel) route, keyed by the
+    /// inbound `external_event_id`. A genuinely NEW event mints a fresh thread
+    /// whose sole participant is the pinger (owner == actor); a redelivery of
+    /// the same event replays the recorded thread, so there is exactly one
+    /// thread per ping and no orphan threads. The persistent conversation
+    /// binding still carries the stable reply-target / source refs for routing
+    /// and idempotency; it no longer owns a reused canonical thread.
+    // arch-exempt: too_many_args, the ephemeral event binding mints a thread from the full identity+routing tuple; it collapses into a typed request when this store is split, plan #6175
+    #[allow(clippy::too_many_arguments)]
+    fn shared_event_binding(
+        &mut self,
+        event_key: ExternalEventRouteKey,
+        tenant_id: &TenantId,
+        adapter_kind: &AdapterKind,
+        adapter_installation_id: &AdapterInstallationId,
+        external_conversation_ref: &ExternalConversationRef,
+        actor_user_id: &UserId,
+        route_actor_key: &ActorKey,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+    ) -> Result<(ThreadId, SourceBindingRef, ReplyTargetBindingRef), InboundTurnError> {
+        if let Some(existing) = self.event_shared_bindings.get(&event_key) {
+            return Ok((
+                existing.thread_id.clone(),
+                existing.source_binding_ref.clone(),
+                existing.reply_target_binding_ref.clone(),
+            ));
+        }
+        let thread_id = ThreadId::new(Uuid::new_v4().to_string()).map_err(|error| {
+            InboundTurnError::InvalidCanonicalRef {
+                reason: error.to_string(),
+            }
+        })?;
+        self.threads.insert(
+            ThreadKey::new(tenant_id, &thread_id),
+            ThreadRecord {
+                agent_id: agent_id.clone(),
+                project_id: project_id.clone(),
+                participants: HashSet::from([actor_user_id.clone()]),
+            },
+        );
+        // A per-event source binding + reply target on THIS thread, owned by
+        // THIS pinger's actor key. `BindingRecord::new` mints matching
+        // source/reply refs so `ensure_binding_refs_match` (same-thread +
+        // shared source ref) holds; authority-bearing (`ExactOriginActor`)
+        // replies resolve only for the pinger, ordinary replies for any paired
+        // participant (route access is shared). The thread equals the run's, so
+        // a reply ref from a different event fails the thread-match check as
+        // `AccessDenied`. It is NOT inserted into the conversation-keyed
+        // `bindings` map — only its source/reply refs are stored.
+        let event_binding = BindingRecord::new(
+            tenant_id.clone(),
+            adapter_kind.clone(),
+            adapter_installation_id.clone(),
+            external_conversation_ref.clone(),
+            ReplyRouteAccess::new(route_actor_key.clone(), ConversationRouteKind::Shared),
+            BindingTarget::new(thread_id.clone(), agent_id, project_id, None),
+        )?;
+        let source_binding_ref = event_binding.source_binding_ref.clone();
+        let reply_target_binding_ref = event_binding.reply_target_binding_ref.clone();
+        self.reply_targets.insert(
+            reply_target_binding_ref.as_str().to_string(),
+            ReplyTargetRecord::from_binding(
+                &event_binding,
+                event_binding.external_conversation_ref.clone(),
+            ),
+        );
+        self.source_bindings
+            .insert(source_binding_ref.as_str().to_string(), event_binding);
+        self.event_shared_bindings.insert(
+            event_key,
+            SharedEventBinding {
+                thread_id: thread_id.clone(),
+                source_binding_ref: source_binding_ref.clone(),
+                reply_target_binding_ref: reply_target_binding_ref.clone(),
+            },
+        );
+        Ok((thread_id, source_binding_ref, reply_target_binding_ref))
+    }
+
     fn store_binding(&mut self, binding_key: BindingKey, binding: BindingRecord) {
         self.source_bindings.insert(
             binding.source_binding_ref.as_str().to_string(),
@@ -1180,49 +1552,6 @@ impl InMemoryState {
                 || route_key.adapter_installation_id != actor_key.adapter_installation_id
                 || !removed_conversations.contains(identity)
         });
-    }
-
-    fn widen_binding_route_access(
-        &mut self,
-        binding_key: &BindingKey,
-    ) -> Result<(), InboundTurnError> {
-        let binding = self
-            .bindings
-            .get_mut(binding_key)
-            .ok_or(InboundTurnError::StatePoisoned)?;
-        binding.route_access.allow_shared();
-        if let Some(source_binding) = self
-            .source_bindings
-            .get_mut(binding.source_binding_ref.as_str())
-        {
-            source_binding.route_access.allow_shared();
-        }
-        if let Some(reply_target) = self
-            .reply_targets
-            .get_mut(binding.reply_target_binding_ref.as_str())
-        {
-            reply_target.route_access.allow_shared();
-        }
-        Ok(())
-    }
-
-    fn set_binding_owner(
-        &mut self,
-        binding_key: &BindingKey,
-        owner_user_id: UserId,
-    ) -> Result<(), InboundTurnError> {
-        let binding = self
-            .bindings
-            .get_mut(binding_key)
-            .ok_or(InboundTurnError::StatePoisoned)?;
-        binding.owner_user_id = Some(owner_user_id.clone());
-        if let Some(source_binding) = self
-            .source_bindings
-            .get_mut(binding.source_binding_ref.as_str())
-        {
-            source_binding.owner_user_id = Some(owner_user_id.clone());
-        }
-        Ok(())
     }
 
     fn ensure_trusted_scope_not_reinterpreted(
@@ -1425,6 +1754,14 @@ impl ActorKey {
     }
 }
 
+/// One binding per external conversation identity: a shared conversation
+/// (a channel thread, or a group chat or topic) is ONE ongoing canonical
+/// thread that every paired participant shares. The thread is owned by
+/// whoever bound it first; each RUN inside it still acts as the user who
+/// invoked it (actor-scoped gates, settings, mounts, and deliveries — the
+/// `LoopRunContext::acting_user_id` ladder). This key shape is byte-identical
+/// to the rows production wrote before the run-acts-as-invoker work, so
+/// existing shared threads resume without migration.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct BindingKey {
     pub(crate) tenant_id: TenantId,
@@ -1434,7 +1771,7 @@ pub(crate) struct BindingKey {
 }
 
 impl BindingKey {
-    pub(crate) fn from_request(request: &ResolveConversationRequest) -> Self {
+    pub(crate) fn for_route(request: &ResolveConversationRequest) -> Self {
         Self {
             tenant_id: request.tenant_id.clone(),
             adapter_kind: request.adapter_kind.clone(),
@@ -1504,10 +1841,6 @@ impl ReplyRouteAccess {
             owner_actor_key,
             shared: route_kind == ConversationRouteKind::Shared,
         }
-    }
-
-    fn allow_shared(&mut self) {
-        self.shared = true;
     }
 
     fn allows(&self, actor_key: &ActorKey, route_kind: ConversationRouteKind) -> bool {
@@ -1670,6 +2003,39 @@ impl BindingRecord {
             turn_scope,
             source_binding_ref: self.source_binding_ref.clone(),
             reply_target_binding_ref: self.reply_target_binding_ref.clone(),
+            access: ThreadAccessDecision::Allowed,
+        }
+    }
+
+    /// Resolution for a shared (channel) route: the run is scoped to the pinger
+    /// on a fresh per-ping `thread_id` (owner == actor — an ephemeral thread
+    /// with a single participant), and its `source_binding_ref` /
+    /// `reply_target_binding_ref` are that ping's OWN per-event refs (matching
+    /// its thread, and matching each other so accept-time ref validation
+    /// holds). The conversation-keyed binding itself only anchors routing.
+    fn resolution_for_thread(
+        &self,
+        actor_user_id: UserId,
+        binding_epoch: Option<ExternalActorBindingEpoch>,
+        tenant_id: TenantId,
+        thread_id: ThreadId,
+        source_binding_ref: SourceBindingRef,
+        reply_target_binding_ref: ReplyTargetBindingRef,
+    ) -> ConversationBindingResolution {
+        let turn_scope = TurnScope::new_with_owner(
+            tenant_id.clone(),
+            self.agent_id.clone(),
+            self.project_id.clone(),
+            thread_id,
+            Some(actor_user_id.clone()),
+        );
+        ConversationBindingResolution {
+            tenant_id,
+            actor: TurnActor::new(actor_user_id),
+            binding_epoch,
+            turn_scope,
+            source_binding_ref,
+            reply_target_binding_ref,
             access: ThreadAccessDecision::Allowed,
         }
     }

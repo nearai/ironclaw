@@ -1,7 +1,145 @@
 use chrono::{Datelike, TimeZone};
 use serde_json::{from_value, json, to_value};
 
+use ironclaw_host_api::{
+    execution_policy::{RequiredSkill, ResultDeliveryPolicy, TurnExecutionPolicy},
+    ids::CapabilityId,
+};
+
 use super::*;
+
+#[test]
+fn structured_execution_spec_validates_and_renders_a_frozen_prompt() {
+    let spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Identify yesterday's failed payments.".to_string(),
+        success_criteria: vec![
+            "Include every failed payment exactly once.".to_string(),
+            "Include customer, amount, currency, and failure reason.".to_string(),
+        ],
+        output_instructions: "Return a Markdown table and total.".to_string(),
+        no_result_text: "No failed payments were found yesterday.".to_string(),
+        policy: TurnExecutionPolicy {
+            allowed_capability_ids: Some(vec![
+                CapabilityId::new("stripe.list_payments").expect("capability id"),
+            ]),
+            required_skills: vec![
+                RequiredSkill::new("payment-operations").expect("required skill"),
+            ],
+            ..TurnExecutionPolicy::default()
+        },
+    };
+
+    spec.validate().expect("valid execution spec");
+
+    assert_eq!(
+        spec.render_prompt(),
+        "## Goal\n\nIdentify yesterday's failed payments.\n\n## Success criteria\n\n- Include every failed payment exactly once.\n- Include customer, amount, currency, and failure reason.\n\n## Output requirements\n\nReturn a Markdown table and total.\n\n## When there is nothing to report\n\nNo failed payments were found yesterday.\n"
+    );
+}
+
+#[test]
+fn structured_execution_spec_renders_placeholders_in_one_pass() {
+    // A field value that itself contains a placeholder token must be inserted
+    // verbatim — sequential replacement would rewrite text belonging to the
+    // earlier field with the later field's value.
+    let spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Report on {{success_criteria}} drift".to_string(),
+        success_criteria: vec!["INJECTED".to_string()],
+        output_instructions: "Return Markdown".to_string(),
+        no_result_text: "Nothing to report".to_string(),
+        policy: TurnExecutionPolicy::default(),
+    };
+
+    let rendered = spec.render_prompt();
+    assert!(
+        rendered.contains("Report on {{success_criteria}} drift"),
+        "goal text must stay verbatim; rendered: {rendered}"
+    );
+    assert_eq!(
+        rendered.matches("INJECTED").count(),
+        1,
+        "criteria must render exactly once; rendered: {rendered}"
+    );
+}
+
+#[test]
+fn structured_execution_spec_requests_typed_no_result_completion_for_explicit_suppression() {
+    let mut spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Check the inbox".to_string(),
+        success_criteria: vec!["Report new messages".to_string()],
+        output_instructions: "Return Markdown, including when no messages are found".to_string(),
+        no_result_text: "No new messages.".to_string(),
+        policy: TurnExecutionPolicy::default(),
+    };
+    assert!(spec.render_prompt().contains("No new messages."));
+    assert!(!spec.render_prompt().contains("builtin__structured_result"));
+
+    spec.policy.result_delivery = ResultDeliveryPolicy::SuppressWhenNothingToReport;
+    let rendered = spec.render_prompt();
+    assert!(
+        rendered.contains(
+            r#"call `builtin__structured_result` with `{"outcome":"nothing_to_report"}`"#
+        )
+    );
+    assert!(rendered.contains("The no-result condition is: No new messages."));
+    assert!(rendered.contains(
+        "This rule overrides any output requirement to report a negative, empty, unchanged, or no-match result."
+    ));
+    assert!(rendered.contains("and do not return an assistant response."));
+}
+
+#[test]
+fn stored_structured_prompt_survives_template_revisions() {
+    // `validate()` runs on stored records before every fire. The persisted
+    // prompt was rendered by whatever template revision was current at
+    // creation, so a record whose prompt no longer matches today's re-render
+    // must stay valid — anything stricter bricks every persisted structured
+    // trigger on a template edit.
+    let mut record = sample_record(TriggerId::new(), tenant("tenant-a"), ts(1_704_070_800));
+    record.execution_spec = Some(TriggerExecutionSpec {
+        version: 1,
+        goal: "Identify yesterday's failed payments.".to_string(),
+        success_criteria: vec!["Include every failed payment exactly once.".to_string()],
+        output_instructions: "Return a Markdown table.".to_string(),
+        no_result_text: "No failed payments were found.".to_string(),
+        policy: TurnExecutionPolicy::default(),
+    });
+    record.prompt = "prompt rendered by an older template revision".to_string();
+
+    record
+        .validate()
+        .expect("persisted prompt is authoritative across template revisions");
+}
+
+#[test]
+fn structured_execution_spec_rejects_duplicate_policy_references() {
+    let capability = CapabilityId::new("stripe.list_payments").expect("capability id");
+    let skill = RequiredSkill::new("payment-operations").expect("required skill");
+    let spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Inspect payments".to_string(),
+        success_criteria: vec!["Report every failure".to_string()],
+        output_instructions: "Return Markdown".to_string(),
+        no_result_text: "No failures".to_string(),
+        policy: TurnExecutionPolicy {
+            allowed_capability_ids: Some(vec![capability.clone(), capability]),
+            required_skills: vec![skill.clone(), skill],
+            ..TurnExecutionPolicy::default()
+        },
+    };
+
+    let error = spec.validate().expect_err("duplicates must be rejected");
+    assert!(matches!(
+        error,
+        TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::ExecutionSpecInvalid,
+            ..
+        }
+    ));
+}
 
 fn ts(seconds: i64) -> Timestamp {
     Utc.timestamp_opt(seconds, 0)
@@ -52,6 +190,7 @@ fn sample_record(
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
         prompt: "summarize unread mail".to_string(),
+        execution_spec: None,
         delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at,
@@ -228,6 +367,9 @@ fn fire_identity_length_prefixing_avoids_component_boundary_collisions() {
 #[tokio::test]
 async fn schedule_provider_emits_due_fire_only() {
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    // A pre-removal record whose retired delivery route has not been migrated
+    // away yet: it must still fire normally, and the fire must carry nothing
+    // but the task (delivery is a step the prompt performs now).
     let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_200));
     record.delivery_target = Some(
         TriggerDeliveryTargetId::new("slack:personal-dm:T123:user-a").expect("delivery target"),
@@ -249,13 +391,14 @@ async fn schedule_provider_emits_due_fire_only() {
     assert_eq!(fire.identity.trigger_id, trigger_id);
     assert_eq!(fire.identity.fire_slot, record.next_run_at);
     assert_eq!(fire.prompt, record.prompt);
-    // Per-trigger delivery routing must survive record -> fire so the
-    // delivery layer can honor it without re-reading the record.
-    assert_eq!(fire.delivery_target, record.delivery_target);
 }
 
+/// The retired column is still decoded off pre-removal rows until the boot
+/// migration rewrites them, so its opaque-id contract still has to hold —
+/// including rejecting the shapes that would smuggle control characters or
+/// invisible separators through a legacy value.
 #[test]
-fn trigger_delivery_target_id_is_opaque_and_validated() {
+fn legacy_delivery_target_column_stays_opaque_and_validated() {
     let target = TriggerDeliveryTargetId::new("slack:personal-dm:T123:user-a")
         .expect("valid delivery target id");
     assert_eq!(target.as_str(), "slack:personal-dm:T123:user-a");
@@ -269,11 +412,11 @@ fn trigger_delivery_target_id_is_opaque_and_validated() {
     );
     assert!(TriggerDeliveryTargetId::new("x".repeat(512)).is_ok());
 
-    assert!(parse_trigger_delivery_target_id("").is_err());
-    assert!(parse_trigger_delivery_target_id(" target").is_err());
-    assert!(parse_trigger_delivery_target_id("target\nid").is_err());
-    assert!(parse_trigger_delivery_target_id("target:\u{200b}hidden").is_err());
-    assert!(parse_trigger_delivery_target_id("x".repeat(513)).is_err());
+    assert!(decode_legacy_delivery_target("").is_err());
+    assert!(decode_legacy_delivery_target(" target").is_err());
+    assert!(decode_legacy_delivery_target("target\nid").is_err());
+    assert!(decode_legacy_delivery_target("target:\u{200b}hidden").is_err());
+    assert!(decode_legacy_delivery_target("x".repeat(513)).is_err());
     assert!(from_value::<TriggerDeliveryTargetId>(json!("")).is_err());
 }
 

@@ -56,8 +56,8 @@ mod ratchet_support;
 // without editing the literals. Identity on today's tree - pinned by
 // `reborn_crate_inventory.rs` (CHECKLIST WS10).
 use ratchet_support::{
-    TypeDefOccurrence, collect_type_defs, crate_dir, crate_path, strip_comments_and_strings,
-    workspace_root,
+    TypeDefOccurrence, collect_type_defs, crate_dir, crate_path, is_rust_identifier,
+    strip_comments_and_strings, workspace_root,
 };
 
 const TYPE_KEYWORDS: &[&str] = &["trait ", "struct ", "enum "];
@@ -65,15 +65,6 @@ const TYPE_KEYWORDS: &[&str] = &["trait ", "struct ", "enum "];
 /// This scanner's own file, skipped so its fixtures do not look like
 /// definitions.
 const SELF_FILE: &str = "reborn_conversations_threads_attachments.rs";
-
-fn is_rust_identifier(ident: &str) -> bool {
-    let mut chars = ident.chars();
-    match chars.next() {
-        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
-        _ => return false,
-    }
-    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-}
 
 /// Every type, trait and enum a crate declares in its production source.
 fn declared_names(root: &Path, crate_name: &str) -> BTreeSet<String> {

@@ -1,5 +1,6 @@
 // @ts-nocheck
 import React from "react";
+import { useLocation } from "react-router";
 import { useT } from "../../lib/i18n";
 import { toast } from "../../lib/toast";
 import {
@@ -23,11 +24,46 @@ import { useChat } from "./hooks/useChat";
 import { useChatCommands } from "./hooks/useChatCommands";
 import { matchCommand } from "./lib/chat-commands";
 import { channelConnectionDisplayName } from "../../lib/channel-connection-events";
-import { channelConnectionFromGate } from "./lib/gates";
+import { channelConnectionFromGate, gateIsDeviceLink } from "./lib/gates";
 import { NEW_DRAFT_KEY } from "./lib/draft-store";
 import { buildRuntimeContext } from "./lib/runtime-context";
 import { buildScopedLogsPath } from "../logs/lib/logs-data";
 import { useInterfacePreferences } from "../../lib/interface-preferences";
+import {
+  inspectorDebugEnabled,
+  latestInspectorRunId,
+  persistInspectorDebugPreference,
+} from "./inspector/inspector-shell";
+
+let LazyInspectorPanel: React.LazyExoticComponent<
+  React.ComponentType<{ threadId: string | null; runId: string | null }>
+> | null = null;
+
+function getInspectorPanel() {
+  LazyInspectorPanel ??= React.lazy(() =>
+    import("./inspector/inspector-panel").then(({ InspectorPanel }) => ({
+      default: InspectorPanel,
+    })),
+  );
+  return LazyInspectorPanel;
+}
+
+// The device-link card carries a whole multi-step flow — payload rendering,
+// step machine, polling, input forms — for a gate most sessions never see.
+// Loaded on demand for the same reason the inspector is: the initial /chat
+// route pays for what every chat needs, not for every card it might ever show.
+let LazyAuthDeviceLinkCard: React.LazyExoticComponent<
+  React.ComponentType<{ gate: unknown; onCancel: () => void }>
+> | null = null;
+
+function getAuthDeviceLinkCard() {
+  LazyAuthDeviceLinkCard ??= React.lazy(() =>
+    import("./components/auth-device-link-card").then(({ AuthDeviceLinkCard }) => ({
+      default: AuthDeviceLinkCard,
+    })),
+  );
+  return LazyAuthDeviceLinkCard;
+}
 
 /* Grace window before an active thread's sidebar state is cleared to idle.
  * Long enough for SSE to rehydrate a gate/run after a thread switch (so a
@@ -75,6 +111,7 @@ export function Chat({
   onConnectionStatusChange,
 }) {
   const t = useT();
+  const location = useLocation();
   const { showChatLogsShortcut } = useInterfacePreferences();
   const {
     messages,
@@ -140,10 +177,22 @@ export function Chat({
     : null;
   const activeThreadHasChannelConnectionGate =
     activeThreadHasGate && Boolean(channelConnectionGate);
+  // Same one-predicate discipline as the pairing selector above: the branch
+  // and the chunk it pulls are decided together, never re-derived at render.
+  const DeviceLinkCard = gateIsDeviceLink(pendingGate) ? getAuthDeviceLinkCard() : null;
   const activeThreadHasOnboarding =
     Boolean(activeThreadId) && Boolean(pendingOnboarding);
   const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
   const activeRunId = activeRun?.runId || null;
+  const inspectorEnabled = inspectorDebugEnabled(location.search);
+  React.useEffect(() => {
+    persistInspectorDebugPreference(location.search);
+  }, [location.search]);
+  const inspectorRunId = React.useMemo(
+    () => latestInspectorRunId(activeRun, messages),
+    [activeRun, messages],
+  );
+  const InspectorPanel = inspectorEnabled ? getInspectorPanel() : null;
   const showTypingIndicator =
     activeThreadIsProcessing &&
     !activeThreadHasGate;
@@ -218,20 +267,32 @@ export function Chat({
       }
       if (composerSendBlockedRef.current) return null;
       const sendCycleId = emptyThreadCycleIdRef.current;
-      // A newly created thread (from either path below) is not yet the
-      // selected/active one — route the browser to it, exactly as the send
+      // A response naming a thread other than the selected/active one —
+      // a newly created landing thread, or a command effect such as `/new`
+      // opening a fresh task — routes the browser to it, exactly as the send
       // path already did, so the result (a system notice for a command, the
-      // first reply for a message) renders somewhere visible. Only the send
-      // that still owns the current empty-thread cycle may navigate; see
-      // `emptyThreadCycleIdRef`.
+      // first reply for a message) renders somewhere visible. From the
+      // landing view, only the send that still owns the current empty-thread
+      // cycle may navigate; see `emptyThreadCycleIdRef`.
       const selectResponseThread = (response) => {
         const responseThreadId = response?.thread_id || activeThreadId;
-        if (
-          !activeThreadId &&
-          responseThreadId &&
-          onSelectThread &&
-          emptyThreadCycleIdRef.current === sendCycleId
-        ) {
+        if (!responseThreadId || !onSelectThread) return;
+        if (activeThreadId) {
+          // `previousActiveThreadIdRef` is reassigned on every render, so
+          // between renders it holds the LATEST selection. A command that
+          // resolves after the user already opened another thread no longer
+          // matches its origin selection and must not steal the newer one
+          // (the landing path gets the same protection from the cycle fence
+          // below).
+          if (
+            responseThreadId !== activeThreadId &&
+            previousActiveThreadIdRef.current === activeThreadId
+          ) {
+            onSelectThread(responseThreadId, { replace: true });
+          }
+          return;
+        }
+        if (emptyThreadCycleIdRef.current === sendCycleId) {
           emptyThreadCycleIdRef.current += 1;
           onSelectThread(responseThreadId, { replace: true });
         }
@@ -446,6 +507,17 @@ export function Chat({
                       approve(pendingGate.requestId, "cancel", pendingGate.kind)}
                   />
                 )
+                : DeviceLinkCard
+                  ? (
+                  // A device link is a multi-step vendor handshake, not a
+                  // credential to paste: the card drives the flow itself and
+                  // the run resumes when the host takes custody of the
+                  // session. Cancelling abandons the parked turn, exactly as
+                  // the pairing card does.
+                  <React.Suspense fallback={null}>
+                    <DeviceLinkCard gate={pendingGate} onCancel={handleCancelRun} />
+                  </React.Suspense>
+                )
                 : pendingGate.challengeKind === "manual_token"
                   ? (
                   <AuthTokenCard
@@ -525,6 +597,11 @@ export function Chat({
         open={shortcutsOpen}
         onClose={() => setShortcutsOpen(false)}
       />
+      {InspectorPanel && (
+        <React.Suspense fallback={null}>
+          <InspectorPanel threadId={activeThreadId} runId={inspectorRunId} />
+        </React.Suspense>
+      )}
     </div>
   );
 }

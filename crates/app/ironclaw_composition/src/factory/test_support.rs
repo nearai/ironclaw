@@ -129,11 +129,6 @@ impl RebornRuntimeStores {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn skill_mounts_for_test(&self) -> &MountView {
-        &self.skill_mounts
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn memory_mounts_for_test(&self) -> &MountView {
         &self.memory_mounts
     }
@@ -267,9 +262,10 @@ impl RebornRuntimeStores {
         else {
             return Ok(None);
         };
-        let installation_id =
-            ironclaw_assistant::AdapterInstallationId::new(authenticated_installation_id)
-                .map_err(|error| error.to_string())?;
+        let installation_id = ironclaw_host_api::product_adapter::AdapterInstallationId::new(
+            authenticated_installation_id,
+        )
+        .map_err(|error| error.to_string())?;
         let outcome = service
             .consume(
                 &installation_id,
@@ -358,6 +354,7 @@ impl RebornRuntimeStores {
                 thread_service: wiring.thread_service,
                 turn_coordinator: wiring.turn_coordinator,
                 input_enqueue: Arc::new(ironclaw_loop_host::RejectingInputEnqueue),
+                llm_config: None,
                 approval_interaction: None,
                 auth_interaction: None,
                 identity: wiring.identity,
@@ -554,15 +551,15 @@ impl RebornRuntimeStores {
 
     /// Test-support access to the standalone per-tool permission override store
     /// (C-SYNTH outbound seam). Backs `StoreApprovalSettingsProvider::tool_override`,
-    /// which the synthetic `outbound_delivery_target_set` capability consults for
+    /// which the synthetic `notification_channels_set` capability consults for
     /// its settings decision — a `Disabled` override drives the `policy_denied`
     /// route. Mirrors `standalone_auto_approve_settings_for_test`; `None` for
     /// production-profile compositions without a standalone runtime.
     #[cfg(feature = "test-support")]
     pub(crate) fn standalone_tool_permission_overrides_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>> {
-        let overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort> =
+    ) -> Option<Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>> {
+        let overrides: Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort> =
             self.tool_permission_overrides.clone();
         Some(overrides)
     }
@@ -954,7 +951,7 @@ pub(crate) async fn open_standalone_approval_settings_stores_for_test(
     storage_root: &Path,
 ) -> Result<
     (
-        Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+        Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>,
         Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>,
         Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,
     ),
@@ -963,10 +960,11 @@ pub(crate) async fn open_standalone_approval_settings_stores_for_test(
     let mut composite = CompositeRootFilesystem::new();
     mount_default_database_roots(storage_root, &mut composite).await?;
     let scoped = crate::wrap_scoped(Arc::new(composite));
-    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort> =
-        Arc::new(ComposedToolPermissionOverrideStore::new(Arc::clone(
-            &scoped,
-        )));
+    let tool_permission_overrides: Arc<
+        dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort,
+    > = Arc::new(ComposedToolPermissionOverrideStore::new(Arc::clone(
+        &scoped,
+    )));
     let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort> =
         Arc::new(ComposedAutoApproveSettingStore::new(Arc::clone(&scoped)));
     let persistent_approval_policies: Arc<
@@ -1142,6 +1140,17 @@ mod attachment_seam_tests {
 pub(crate) fn workspace_mounts_for_test(stores: &RebornRuntimeStores) -> &MountView {
     shared_workspace_view(&stores.workspace_mounts)
         .expect("test runtime uses a shared workspace mount policy")
+}
+
+/// The skill view a lease-terms assertion must use, from the invocation's own scope. There is
+/// deliberately no runtime field to read: production derives it per gate in
+/// `PolicyApprovalLeaseTermsProvider::skill_mounts_for`, so a test must too.
+#[cfg(test)]
+pub(crate) fn skill_mounts_for_test(
+    scope: &ironclaw_host_api::resource::ResourceScope,
+) -> MountView {
+    crate::runtime_mounts::db_backed_skill_management_mount_view(scope)
+        .expect("skill mounts scope for test")
 }
 
 #[cfg(test)]

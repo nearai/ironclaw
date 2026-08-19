@@ -134,7 +134,7 @@ WIT_CHANNEL_CHANGED=false
 # than written as literals: a literal that the crate moved out from under
 # matches nothing, and this gate would then pass *vacuously* on every WIT
 # change — the WS10 silent-dark failure mode
-# (docs/reborn/target-architecture/CHECKLIST.md WS10, #6963). Resolution
+# (docs/internal/reborn/target-architecture/CHECKLIST.md WS10, #6963). Resolution
 # failure exits non-zero so "the crate moved" is an actionable repoint rather
 # than a quietly disabled gate.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -572,6 +572,7 @@ mod tests {
                 ProviderScope::new("admin:org").unwrap(),
             ],
             provider_identity: None,
+            link_revision: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -628,6 +629,7 @@ mod tests {
                 OAuthProviderIdentity::new("user-123", None, None, None)
                     .expect("valid provider identity"),
             ),
+            link_revision: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

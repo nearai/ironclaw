@@ -1,4 +1,6 @@
 // arch-exempt: large_file, backend parity contracts stay in one shared behavioral suite, plan #5274
+use std::time::Duration;
+
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_filesystem::{
@@ -160,6 +162,37 @@ async fn libsql_root_filesystem_lists_direct_children_sorted_with_virtual_paths(
         ]
     );
     assert_eq!(entries[1].file_type, FileType::Directory);
+
+    let first_page = filesystem
+        .list_dir_page(
+            &VirtualPath::new("/engine/tenants/t1/users/u1").unwrap(),
+            None,
+            2,
+        )
+        .await
+        .unwrap();
+    let second_page = filesystem
+        .list_dir_page(
+            &VirtualPath::new("/engine/tenants/t1/users/u1").unwrap(),
+            first_page.last().map(|entry| entry.name.as_str()),
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        first_page
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha.txt", "nested"]
+    );
+    assert_eq!(
+        second_page
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["zeta.txt"]
+    );
 }
 #[tokio::test]
 async fn libsql_root_filesystem_appends_deletes_and_creates_directories() {
@@ -778,6 +811,145 @@ async fn libsql_ensure_index_accepts_fts_kind_and_filter_matches_text() {
         .unwrap();
     assert_eq!(results.len(), 2);
 }
+
+#[tokio::test]
+async fn libsql_fts_treats_free_form_queries_as_plain_text() {
+    let filesystem = libsql_root().await;
+    let prefix = VirtualPath::new("/memory/plain-query").unwrap();
+    let kind = RecordKind::new("chunk").unwrap();
+    let content = IndexKey::new("content").unwrap();
+    let spec = IndexSpec::new(
+        IndexName::new("by_content_plain_query").unwrap(),
+        vec![content.clone()],
+        IndexKind::Fts,
+    );
+    filesystem.ensure_index(&prefix, &spec).await.unwrap();
+    let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+        .unwrap()
+        .with_indexed(
+            content.clone(),
+            IndexValue::Text("launch-code-plum-42 unlocks staging".into()),
+        );
+    filesystem
+        .put(
+            &VirtualPath::new("/memory/plain-query/a").unwrap(),
+            entry,
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+    // Negative document: shares only some terms with every multi-term query
+    // below, so it can tell the FTS5 implicit-AND join apart from an OR join.
+    // If terms were OR-joined (or a required term were wrongly stop-listed),
+    // this partial match would leak into the results.
+    let partial = Entry::record(kind, &serde_json::json!({}))
+        .unwrap()
+        .with_indexed(
+            content.clone(),
+            IndexValue::Text("banana-99 staging".into()),
+        );
+    filesystem
+        .put(
+            &VirtualPath::new("/memory/plain-query/partial").unwrap(),
+            partial,
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    for query in [
+        "What is the staging launch code?",
+        "launch-code-plum-42?",
+        "staging (unlocks)",
+        "launch AND code",
+        "launch OR code",
+        "launch NOT code",
+    ] {
+        let results = filesystem
+            .query(
+                &prefix,
+                &Filter::Fts {
+                    key: content.clone(),
+                    query: query.into(),
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("plain FTS query {query:?} failed: {error:?}"));
+        assert_eq!(
+            results.len(),
+            1,
+            "plain FTS query {query:?} must require every term (partial doc excluded)"
+        );
+        assert!(
+            !results
+                .iter()
+                .any(|result| result.path.as_str().ends_with("/partial")),
+            "plain FTS query {query:?} must not return the partial-match document"
+        );
+    }
+
+    // The negative document is itself searchable: a single-term query for a
+    // term it contains must return it, proving the exclusion above is
+    // term-based rather than a total index failure.
+    let partial_only = filesystem
+        .query(
+            &prefix,
+            &Filter::Fts {
+                key: content.clone(),
+                query: "banana-99".into(),
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(partial_only.len(), 1);
+    assert!(partial_only[0].path.as_str().ends_with("/partial"));
+
+    let punctuation_only = filesystem
+        .query(
+            &prefix,
+            &Filter::Fts {
+                key: content,
+                query: "?!()".into(),
+            },
+            Page::default(),
+        )
+        .await
+        .expect("punctuation-only FTS is a valid empty query");
+    assert!(punctuation_only.is_empty());
+}
+
+#[tokio::test]
+async fn libsql_repeated_fts_declaration_does_not_wait_for_the_writer() {
+    // Regression for #7283: memory search re-declares its FTS index on the
+    // query hot path. Once the cataloged declaration has committed, checking
+    // it must remain available while an unrelated durable write owns libSQL's
+    // single writer lease.
+    let filesystem = libsql_root().await;
+    let prefix = VirtualPath::new("/memory/repeated-fts").unwrap();
+    let content = IndexKey::new("content").unwrap();
+    let spec = IndexSpec::new(
+        IndexName::new("by_content_repeated").unwrap(),
+        vec![content],
+        IndexKind::Fts,
+    );
+    filesystem.ensure_index(&prefix, &spec).await.unwrap();
+
+    let writer = filesystem.begin(&prefix).await.unwrap();
+    let redeclaration = tokio::time::timeout(
+        Duration::from_secs(1),
+        filesystem.ensure_index(&prefix, &spec),
+    )
+    .await;
+    writer.rollback().await;
+
+    assert!(
+        matches!(redeclaration, Ok(Ok(()))),
+        "an existing FTS declaration must not require the writer: {redeclaration:?}"
+    );
+}
+
 #[tokio::test]
 async fn libsql_fts_filter_picks_up_inserts_through_triggers() {
     // After ensure_index, inserting a new row through put() updates the
@@ -1255,6 +1427,181 @@ async fn libsql_ordered_index_declaration_never_backfills_existing_rows() {
         rows[0].entry.indexed[&process_id],
         IndexValue::Text("new".into())
     );
+}
+
+/// Shared cross-backend body for `Filter::FtsRanked` (#7185).
+///
+/// The scenario is conversational recall: a fact is stored as one sentence and
+/// asked for in differently-worded question that shares only SOME of its
+/// content words. `Filter::Fts` requires every content term, so it finds
+/// nothing — the assertion this test opens with, which is what made memory
+/// recall fail in practice. `Filter::FtsRanked` matches on any term and orders
+/// by relevance, so the sentence sharing three query terms comes back ahead of
+/// the one sharing a single term, and the unrelated record stays out.
+///
+/// The AND-semantics assertion is load-bearing: without it a ranked-OR test
+/// would also pass under the old behavior and prove nothing.
+async fn ranked_fts_contract<F: RootFilesystem>(filesystem: &F, base: &str) {
+    let content = IndexKey::new("content").unwrap();
+    let kind = RecordKind::new("chunk").unwrap();
+    let root = VirtualPath::new(base.to_string()).unwrap();
+    let spec = IndexSpec::new(
+        IndexName::new("ranked_fts_content_v1").unwrap(),
+        vec![content.clone()],
+        IndexKind::Fts,
+    );
+    filesystem.ensure_index(&root, &spec).await.unwrap();
+
+    for (leaf, body) in [
+        (
+            "a",
+            "Sarah prefers the standup meeting scheduled early on Thursday mornings",
+        ),
+        ("b", "Sarah keeps a spare umbrella at her desk"),
+        ("c", "Deployment runbook for the staging cluster"),
+    ] {
+        filesystem
+            .put(
+                &VirtualPath::new(format!("{base}/{leaf}")).unwrap(),
+                Entry::record(kind.clone(), &serde_json::json!({}))
+                    .unwrap()
+                    .with_indexed(content.clone(), IndexValue::Text(body.into())),
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+    }
+
+    // Content terms: sarah, like, standup, scheduled. Record `a` carries three
+    // of them but not `like`, so every-term matching returns nothing.
+    let question = "when does Sarah like her standup scheduled";
+
+    let and_results = filesystem
+        .query(
+            &root,
+            &Filter::Fts {
+                key: content.clone(),
+                query: question.into(),
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        and_results.is_empty(),
+        "Filter::Fts requires every content term, so a paraphrased question must miss; got {:?}",
+        and_results
+            .iter()
+            .map(|e| e.path.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let ranked = filesystem
+        .query(
+            &root,
+            &Filter::FtsRanked {
+                key: content.clone(),
+                query: question.into(),
+                limit: 10,
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    let ranked_paths: Vec<&str> = ranked.iter().map(|entry| entry.path.as_str()).collect();
+    assert_eq!(
+        ranked_paths,
+        vec![format!("{base}/a").as_str(), format!("{base}/b").as_str()],
+        "ranked OR must return both partial matches, most relevant first, and exclude the \
+         unrelated record"
+    );
+
+    // `limit` truncates after ranking, so the top-1 request keeps the best hit.
+    let top_one = filesystem
+        .query(
+            &root,
+            &Filter::FtsRanked {
+                key: content.clone(),
+                query: question.into(),
+                limit: 1,
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        top_one.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+        vec![format!("{base}/a").as_str()]
+    );
+
+    // A query with no content terms matches nothing rather than everything.
+    let stop_words_only = filesystem
+        .query(
+            &root,
+            &Filter::FtsRanked {
+                key: content.clone(),
+                query: "and the of to".into(),
+                limit: 10,
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert!(stop_words_only.is_empty());
+
+    // ...and it stays "nothing" on a prefix where no FTS index was ever
+    // declared. Every case above declares the index first, so this is the one
+    // combination that can expose an ordering difference INSIDE a backend:
+    // libSQL resolves the FTS table before reading the query, PostgreSQL reads
+    // the query and never consults an index. The answer to "does a query with
+    // no content terms match anything" does not depend on an index, so it must
+    // not depend on which backend is bound.
+    let undeclared = VirtualPath::new(format!("{base}-undeclared")).unwrap();
+    let stop_words_only_undeclared = filesystem
+        .query(
+            &undeclared,
+            &Filter::FtsRanked {
+                key: content.clone(),
+                query: "and the of to".into(),
+                limit: 10,
+            },
+            Page::default(),
+        )
+        .await;
+    assert!(
+        matches!(&stop_words_only_undeclared, Ok(entries) if entries.is_empty()),
+        "a content-term-free ranked query must be an empty result on every backend even where no \
+         FTS index is declared, got {stop_words_only_undeclared:?}"
+    );
+
+    // Nesting a ranking filter inside a compound would discard the ordering.
+    let nested = filesystem
+        .query(
+            &root,
+            &Filter::And(vec![Filter::FtsRanked {
+                key: content,
+                query: question.into(),
+                limit: 10,
+            }]),
+            Page::default(),
+        )
+        .await;
+    assert!(
+        matches!(nested, Err(FilesystemError::Unsupported { .. })),
+        "nested FtsRanked must be Unsupported on every backend, got {nested:?}"
+    );
+}
+
+#[tokio::test]
+async fn libsql_ranked_fts_finds_paraphrased_recall_in_relevance_order() {
+    let filesystem = libsql_root().await;
+    ranked_fts_contract(&*filesystem, "/memory/ranked-fts").await;
+}
+
+#[tokio::test]
+async fn in_memory_ranked_fts_finds_paraphrased_recall_in_relevance_order() {
+    let filesystem = ironclaw_filesystem::InMemoryBackend::new();
+    ranked_fts_contract(&filesystem, "/memory/ranked-fts").await;
 }
 
 /// Shared cross-backend body: an ordered-index spec declared on an ancestor
@@ -2269,6 +2616,16 @@ mod postgres_tests {
     /// mid-write, far from the cause — and races its own assertions against
     /// their declarations. Path prefixes isolate rows; they cannot isolate
     /// schema, so a schema-level test gets a schema-level scope.
+    ///
+    /// This is the ancestor of the crate's shared `test-support` provisioner
+    /// (`src/postgres_isolation.rs`), which the event-store and
+    /// product-workflow-ledger suites use. This suite deliberately keeps its
+    /// own older variant: its URL resolution goes through `postgres_url()`
+    /// (container startup + the `IRONCLAW_SKIP_POSTGRES_TESTS` opt-out), its
+    /// names are uuid-based rather than epoch-based, and its sweep runs per
+    /// provisioning call without the shared seam's age gate — migrating it is
+    /// a behavior change to this suite's scaffolding, not a de-duplication,
+    /// and is left as a candidate follow-up.
     struct IsolatedDatabase {
         filesystem: PostgresRootFilesystem,
         prefix: String,
@@ -2411,11 +2768,57 @@ mod postgres_tests {
     }
 
     #[tokio::test]
+    async fn postgres_list_dir_page_uses_stable_name_keyset() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        for leaf in ["a.json", "b.json", "c.json", "nested/value.json"] {
+            fs.put(
+                &vpath(&prefix, leaf),
+                Entry::bytes(Vec::new()),
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+        }
+        let root = VirtualPath::new(prefix).unwrap();
+        let first = fs.list_dir_page(&root, None, 2).await.unwrap();
+        let second = fs
+            .list_dir_page(&root, first.last().map(|entry| entry.name.as_str()), 2)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            first
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.json", "b.json"]
+        );
+        assert_eq!(
+            second
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c.json", "nested"]
+        );
+        assert_eq!(second[1].file_type, FileType::Directory);
+    }
+
+    #[tokio::test]
     async fn postgres_ordered_index_declared_at_ancestor_serves_scoped_descendant_queries() {
         let Some((fs, prefix)) = postgres_root().await else {
             return;
         };
         super::ancestor_declared_ordered_index_contract(&fs, &prefix).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_ranked_fts_finds_paraphrased_recall_in_relevance_order() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        super::ranked_fts_contract(&fs, &prefix).await;
     }
 
     #[tokio::test]
@@ -3728,7 +4131,7 @@ mod postgres_tests {
             .query(
                 &prefix_path,
                 &Filter::Fts {
-                    key: content,
+                    key: content.clone(),
                     query: "brown".into(),
                 },
                 Page::default(),
@@ -3736,6 +4139,19 @@ mod postgres_tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 2);
+
+        let natural_language = fs
+            .query(
+                &prefix_path,
+                &Filter::Fts {
+                    key: content,
+                    query: "What is the brown fox?".into(),
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(natural_language.len(), 1);
     }
 
     #[tokio::test]

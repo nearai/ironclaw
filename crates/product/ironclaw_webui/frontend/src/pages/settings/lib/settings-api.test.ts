@@ -2,11 +2,86 @@ import assert from "node:assert/strict";
 import { test, vi } from "vitest";
 
 import {
+  fetchUserModelCatalog,
+  fetchUserModelPreference,
+  setUserModelPolicy,
+  setUserModelPreference,
   settingsFromOperatorConfig,
   toolFromConfigEntry,
   updateToolPermission,
   upsertLlmProvider,
 } from "./settings-api";
+
+test("user model preference API uses caller-safe endpoints and reset payload", async () => {
+  const requests = [];
+  vi.stubGlobal("sessionStorage", {
+    getItem: () => "",
+    removeItem: () => {},
+    setItem: () => {},
+  });
+  vi.stubGlobal("fetch", async (path, options = {}) => {
+    requests.push({ path, options });
+    return new Response(JSON.stringify({ model: null, models: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+
+  try {
+    await fetchUserModelCatalog();
+    await fetchUserModelPreference();
+    await setUserModelPreference(null);
+
+    assert.deepEqual(
+      requests.map(({ path, options }) => [path, options.method || "GET"]),
+      [
+        ["/api/webchat/v2/llm/models", "GET"],
+        ["/api/webchat/v2/llm/model-preference", "GET"],
+        ["/api/webchat/v2/llm/model-preference", "PUT"],
+      ]
+    );
+    assert.deepEqual(JSON.parse(requests[2].options.body), { model: null });
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test("admin model policy API replaces the workspace allowlist", async () => {
+  let requestPath;
+  let requestOptions;
+  vi.stubGlobal("sessionStorage", {
+    getItem: () => "",
+    removeItem: () => {},
+    setItem: () => {},
+  });
+  vi.stubGlobal("fetch", async (path, options = {}) => {
+    requestPath = path;
+    requestOptions = options;
+    return new Response(
+      JSON.stringify({
+        selection_enabled: true,
+        workspace_default: "mock-model",
+        models: ["mock-model", "e2e-selected-model"],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  });
+
+  try {
+    await setUserModelPolicy({
+      workspace_default: "mock-model",
+      allowed_models: ["mock-model", "e2e-selected-model"],
+    });
+    assert.equal(requestPath, "/api/webchat/v2/llm/model-policy");
+    assert.equal(requestOptions.method, "PUT");
+    assert.deepEqual(JSON.parse(requestOptions.body), {
+      workspace_default: "mock-model",
+      allowed_models: ["mock-model", "e2e-selected-model"],
+    });
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
 
 function toolPermissionResponse({
   name = "builtin.echo",

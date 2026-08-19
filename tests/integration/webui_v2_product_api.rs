@@ -21,7 +21,6 @@ use axum::body::{Body, to_bytes};
 use axum::http::StatusCode;
 use axum::http::{Method, Request};
 use chrono::{DateTime, Utc};
-use ironclaw_assistant::{ProductOutboundEnvelope, ProductOutboundPayload};
 use ironclaw_assistant::{RebornServices, RebornStreamEventsRequest};
 use ironclaw_composition::test_support::BudgetTestGateway;
 use ironclaw_composition::{
@@ -45,6 +44,7 @@ use ironclaw_product_contracts::admin_users::{
 use ironclaw_product_contracts::operator_tools::{
     RebornOperatorToolCatalog, RebornOperatorToolInfo,
 };
+use ironclaw_product_contracts::outbound::{ProductOutboundEnvelope, ProductOutboundPayload};
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceStreamRequest,
 };
@@ -1177,6 +1177,42 @@ async fn operator_lists_uninstalled_manifest_admin_configuration_with_secrets_re
             "secret fields must never expose a value: {secret_field}"
         );
     }
+    let telegram_fields = groups
+        .iter()
+        .find(|group| group["group_id"] == "extension.telegram")
+        .and_then(|group| group["fields"].as_array())
+        .expect("telegram group lists fields");
+    // Each handle must carry ITS OWN manifest help text — a distinctive
+    // fragment per field, so a description copied to every field or attached
+    // to the wrong handle fails here even though all six are non-empty.
+    let expected_fragments = [
+        ("telegram_bot_token", "BotFather"),
+        ("telegram_webhook_secret", "random string you invent"),
+        (
+            "telegram_webhook_url",
+            "/webhooks/extensions/telegram/updates",
+        ),
+        ("bot_username", "without the leading @"),
+        ("telegram_api_id", "API development tools"),
+        ("telegram_api_hash", "issued beside your api_id"),
+    ];
+    for (handle, fragment) in expected_fragments {
+        let description = telegram_fields
+            .iter()
+            .find(|field| field["handle"] == handle)
+            .and_then(|field| field["description"].as_str())
+            .unwrap_or_else(|| panic!("field {handle} carries help text on the wire"));
+        assert!(
+            description.contains(fragment),
+            "field {handle} must carry its own manifest help text \
+             (expected fragment {fragment:?}): {description}"
+        );
+    }
+    assert_eq!(
+        telegram_fields.len(),
+        expected_fragments.len(),
+        "every telegram field is covered by a help-text expectation"
+    );
 
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");
@@ -1481,11 +1517,11 @@ async fn user_extension_removal_does_not_erase_admin_configuration() {
 }
 
 /// Tenant administrator configuration is consumed by the channel host but is
-/// never projected onto an ordinary caller's personal setup surface. Pairing
-/// still proves the manifest-declared consumer received the saved deployment
-/// values without exposing their handles or labels through the setup API.
+/// never projected onto an ordinary caller's personal setup surface. Telegram
+/// uses its device-link setup and therefore must not expose the retired bot
+/// proof-code pairing route.
 #[tokio::test]
-async fn extension_setup_hides_manifest_admin_configuration_while_pairing_consumes_it() {
+async fn telegram_setup_hides_admin_configuration_and_excludes_legacy_pairing() {
     let fixture = AdminConfigurationFixture::new("effective-consumer").await;
     let (save_status, save_body) = put_json(
         fixture.operator_router(),
@@ -1532,7 +1568,7 @@ async fn extension_setup_hides_manifest_admin_configuration_while_pairing_consum
     )
     .await;
     let (pairing_status, pairing_body) = post_json(
-        fixture.pairing_member_router(),
+        fixture.legacy_pairing_member_router(),
         "/api/webchat/v2/extensions/telegram/pairing/mint",
         serde_json::json!({}),
     )
@@ -1555,7 +1591,7 @@ async fn extension_setup_hides_manifest_admin_configuration_while_pairing_consum
             StatusCode::OK,
             StatusCode::OK,
             StatusCode::BAD_REQUEST,
-            StatusCode::OK,
+            StatusCode::NOT_FOUND,
         ),
         "save: {save_body}; install: {install_body}; setup: {setup_body}; list: {list_body}; \
          registry: {registry_body}; caller admin submit: {caller_admin_submit_body}; pairing: \
@@ -1571,10 +1607,14 @@ async fn extension_setup_hides_manifest_admin_configuration_while_pairing_consum
         "telegram_webhook_secret",
         "telegram_webhook_url",
         "bot_username",
+        "telegram_api_id",
+        "telegram_api_hash",
         "Bot token",
         "Webhook secret token",
         "Public webhook URL",
         "Bot username",
+        "MTProto api_id",
+        "MTProto api_hash",
         "Telegram deployment configuration",
     ] {
         for (surface, wire) in &ordinary_caller_wires {
@@ -1588,17 +1628,23 @@ async fn extension_setup_hides_manifest_admin_configuration_while_pairing_consum
         setup_body.get("fields").is_none(),
         "caller setup must not expose an administrator field collection: {setup_body}"
     );
-    assert!(
-        pairing_body["code"]
-            .as_str()
-            .is_some_and(|code| !code.is_empty()),
-        "pairing mint omitted its code: {pairing_body}"
+    let credential_requirements = setup_body
+        .pointer("/payload/extensions/0/summary/credential_requirements")
+        .and_then(Value::as_array)
+        .expect("Telegram setup projects credential requirements");
+    assert_eq!(
+        credential_requirements,
+        &[serde_json::json!({
+            "name": "telegram_linked_session",
+            "provider": "telegram",
+            "required": true,
+            "setup": {"kind": "device_link"}
+        })],
+        "one linked session shared by every Telegram tool must render as one setup requirement"
     );
-    assert!(
-        pairing_body["deep_link"]
-            .as_str()
-            .is_some_and(|link| link.starts_with("https://t.me/ironclaw_test_bot?start=")),
-        "pairing mint did not consume the manifest-configured deep-link value: {pairing_body}"
+    assert_eq!(
+        pairing_body["error"], "unknown_extension",
+        "device-link Telegram must not register the retired pairing service: {pairing_body}"
     );
     fixture.shutdown().await;
 }
@@ -1623,6 +1669,9 @@ impl AdminConfigurationFixture {
         .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
         .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
         .with_bundled_first_party_for_test()
+        .with_native_extension_factories(vec![
+            reborn_support::harness::profiles::extension::telegram_fixture_factory(),
+        ])
         .with_network_http_egress_for_test(Arc::new(
             reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
         ));
@@ -1669,7 +1718,7 @@ impl AdminConfigurationFixture {
         }))
     }
 
-    fn pairing_member_router(&self) -> Router {
+    fn legacy_pairing_member_router(&self) -> Router {
         let pairing = ironclaw_webui::channel_pairing_route_mount(
             self.runtime
                 .channel_pairing_registry()
@@ -2061,7 +2110,7 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
 
 /// Minimal `AdminUserService` double for the command-palette scenarios below.
 /// `caller_is_command_admin`
-/// (`crates/ironclaw_assistant/src/reborn_services/product_commands.rs`) only
+/// (`crates/product/ironclaw_assistant/src/reborn_services/product_commands.rs`) only
 /// ever calls `get_user` on this port; every other method fails closed
 /// exactly like the production default (`RejectingAdminUserService`), since
 /// this fixture never exercises them.
@@ -2070,7 +2119,7 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
 /// default, so it falls back to that same rejecting default — proven at the
 /// crate tier by
 /// `list_commands_surfaces_directory_unavailable_as_retryable_503`
-/// (`crates/ironclaw_assistant/tests/reborn_services_contract.rs`). Without this
+/// (`crates/product/ironclaw_assistant/tests/reborn_services_contract.rs`). Without this
 /// double, every caller here would get a retryable 503 instead of a genuine
 /// member/admin result, so the audience-filtering distinction below could
 /// never reach the WebUI route as a 200.
@@ -2200,8 +2249,8 @@ impl AdminUserService for StaticAdminUserService {
 }
 
 /// `GET /commands` filters the registry by the caller's command-admin
-/// audience (member sees only the two `User`-audience commands; admin sees
-/// the full 12-entry registry, including the `Lifecycle` family), and
+/// audience (member sees only the five `User`-audience commands; admin sees
+/// the full 15-entry registry, including the `Lifecycle` family), and
 /// executing an `Admin`-audience action (`/model set ...`) as a member is
 /// rejected at the audience gate before the LLM-config seam ever runs — a 200
 /// response carrying a body-level `rejection`, never a transport error. See
@@ -2242,7 +2291,7 @@ async fn command_list_and_model_execute_are_gated_by_command_admin_role() {
         .collect();
     assert_eq!(
         member_names,
-        vec!["model", "status"],
+        vec!["model", "status", "new", "stop", "interrupt"],
         "member must see only the User-audience commands: {body}"
     );
 
@@ -2260,7 +2309,7 @@ async fn command_list_and_model_execute_are_gated_by_command_admin_role() {
         .collect();
     assert_eq!(
         admin_names.len(),
-        12,
+        15,
         "admin must see the full registry including the Lifecycle family: {body}"
     );
     assert!(
@@ -2288,7 +2337,7 @@ async fn command_list_and_model_execute_are_gated_by_command_admin_role() {
 /// both settle to the same idle `CommandResultView`, never a 404. This
 /// mirrors the crate-tier design pin
 /// (`execute_status_on_foreign_thread_is_indistinguishable_from_unknown` in
-/// `crates/ironclaw_assistant/tests/reborn_services_contract.rs`): leaking
+/// `crates/product/ironclaw_assistant/tests/reborn_services_contract.rs`): leaking
 /// "this thread_id exists but isn't yours" through a 404-vs-200 split would
 /// let a caller probe for other users' thread ids one guess at a time.
 #[tokio::test]
@@ -2368,4 +2417,280 @@ async fn execute_status_command_reflects_owned_thread_and_hides_foreign_thread_e
         foreign_body, never_created_body,
         "a foreign thread must be indistinguishable from a nonexistent one"
     );
+}
+
+// ── Web-push enrollment + notification-channel wire (browser channel) ──────
+
+/// The full web-app channel over the PRODUCTION composition: manifest
+/// bundle, deployment binding, generic first-party initialization (VAPID
+/// seeding + public bootstrap), manifest-derived host allowlist, the product
+/// surface wiring, and the real WebUI routes.
+fn web_app_build_extras(
+    input: ironclaw_composition::RebornHostBindings,
+) -> ironclaw_composition::RebornHostBindings {
+    let mut bundles = ironclaw_extension_host::test_support::first_party_bundles_from_inventory();
+    bundles.push(ironclaw_extension_host::FirstPartyPackageBundle {
+        id: ironclaw_web_app::WEB_APP_EXTENSION_ID.to_string(),
+        display_name: "Browser notifications".to_string(),
+        manifest_toml: ironclaw_web_app_extension::MANIFEST.to_string(),
+        assets: vec![ironclaw_extension_host::FirstPartyPackageAsset {
+            path: "manifest.toml".to_string(),
+            bytes: ironclaw_web_app_extension::MANIFEST.as_bytes().to_vec(),
+        }],
+        onboarding: None,
+        oauth_setup: None,
+        trust_effects: None,
+        search_aliases: Vec::new(),
+    });
+    input
+        .with_first_party_bundles(bundles)
+        .with_channel_extension_bindings(vec![ironclaw_composition::ChannelExtensionBinding {
+            extension_id: ExtensionId::from_trusted(
+                ironclaw_web_app::WEB_APP_EXTENSION_ID.to_string(),
+            ),
+            surfaces: ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                .with_delivery(Arc::new(
+                    ironclaw_web_app_extension::WebAppChannelAdapter::new(),
+                )),
+            preference_target_codec: Some(Arc::new(
+                ironclaw_web_app_extension::WebAppPreferenceTargetCodec,
+            )),
+            outbound_target_provider: Some(Arc::new(
+                ironclaw_web_app_extension::WebAppOutboundTargetProvider::new(),
+            )),
+            first_party_initializer: Some(
+                reborn_support::harness::options::test_web_app_channel_initializer(),
+            ),
+            registration_document_path: Some("/web-push/subscriptions.json".to_string()),
+        }])
+}
+
+/// A browser-shaped subscription body: a REAL P-256 point (any valid point —
+/// generated through the domain crate's own keygen) plus a 16-byte auth
+/// secret.
+fn browser_subscription_body(endpoint: &str) -> Value {
+    use base64::Engine as _;
+    let point = ironclaw_web_app::generate_vapid_key_material("mailto:browser@example.com")
+        .expect("generate a valid P-256 point")
+        .public_key_b64url;
+    serde_json::json!({
+        "endpoint": endpoint,
+        "keys": {
+            "p256dh": point,
+            "auth": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7u8; 16]),
+        },
+        "user_agent": "TestBrowser/1.0",
+    })
+}
+
+#[tokio::test]
+async fn browser_channel_notification_setup_round_trip_through_production_facade() {
+    use base64::Engine as _;
+
+    let root = tempdir().expect("runtime storage tempdir");
+    let storage_root = root.path().join("local-dev");
+    let tenant_id = TenantId::new("webui-webpush-tenant").expect("tenant id");
+    let agent_id = AgentId::new("webui-webpush-agent").expect("agent id");
+    let user_id = UserId::new("webui-webpush-user").expect("user id");
+    let input = web_app_build_extras(
+        ironclaw_composition::local_filesystem_build_input(user_id.as_str(), storage_root.clone())
+            .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+            .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
+            .with_bundled_first_party_for_test()
+            .with_network_http_egress_for_test(Arc::new(
+                reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+            )),
+    );
+    let runtime = build_reborn_runtime(
+        RebornRuntimeInput::from_build_input(input)
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: tenant_id.as_str().to_string(),
+                agent_id: agent_id.as_str().to_string(),
+                source_binding_id: "webui-webpush-source".to_string(),
+                reply_target_binding_id: "webui-webpush-reply".to_string(),
+            })
+            .with_model_gateway_override(Arc::new(BudgetTestGateway::with_constant(
+                "unused", 0, 0,
+            ))),
+    )
+    .await
+    .expect("production Reborn runtime builds");
+    let webui = runtime
+        .product_surface(None)
+        .expect("production product surface builds");
+    let caller = ProductSurfaceCaller::new(
+        tenant_id.clone(),
+        user_id.clone(),
+        Some(agent_id.clone()),
+        None,
+    );
+    let router = || mount_webui_v2_router(Arc::clone(&webui), caller.clone());
+    const ENDPOINT: &str = "https://fcm.googleapis.com/fcm/send/test-token-1";
+
+    // Status before any enrollment, through the GENERIC per-channel
+    // notification-setup surface: the channel declares it requires setup, is
+    // not yet enabled, and its channel-opaque detail advertises a well-formed
+    // VAPID key (seeded by composition on first boot) with zero browsers.
+    let (status, body) = get_json(router(), "/api/webchat/v2/channels/web-app/notifications").await;
+    assert_eq!(status, StatusCode::OK, "status response: {body}");
+    assert_eq!(body["extension_id"], "web-app", "{body}");
+    assert_eq!(body["requires_setup"], true, "{body}");
+    assert_eq!(body["enabled"], false, "{body}");
+    let vapid_public_key = body["detail"]["bootstrap"]["vapid_public_key"]
+        .as_str()
+        .expect("status detail carries the vapid key")
+        .to_string();
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&vapid_public_key)
+        .expect("vapid key is base64url");
+    assert_eq!(decoded.len(), 65, "uncompressed P-256 point");
+    assert_eq!(decoded[0], 0x04, "uncompressed point marker");
+    assert_eq!(body["detail"]["registration_count"], 0, "{body}");
+
+    // The catalog offers the browser channel beside the vendor channels.
+    let (status, body) = get_json(router(), "/api/webchat/v2/outbound/targets").await;
+    assert_eq!(status, StatusCode::OK, "targets response: {body}");
+    let targets = body["targets"].as_array().expect("targets array");
+    // The catalog target id deliberately keeps its pre-rename `web-push`
+    // bytes (a persisted per-user preference identity) while the CHANNEL is
+    // `web-app` — pinning both here is what proves stored selections survive
+    // the rename.
+    let web_app_target = targets
+        .iter()
+        .find(|entry| entry["target"]["target_id"] == "web-push")
+        .unwrap_or_else(|| panic!("web-app target missing from the catalog: {body}"));
+    assert_eq!(web_app_target["target"]["channel"], "web-app", "{body}");
+    assert_eq!(
+        web_app_target["target"]["display_name"], "Web app",
+        "{body}"
+    );
+
+    // web-app is host infrastructure, not a browse-and-install extension: it
+    // must NOT appear in the install catalog (registry or installed lists),
+    // even though it stays a selectable outbound notification target (above).
+    let (status, body) = get_json(router(), "/api/webchat/v2/extensions/registry").await;
+    assert_eq!(status, StatusCode::OK, "registry response: {body}");
+    assert!(
+        !body["entries"]
+            .as_array()
+            .expect("registry entries array")
+            .iter()
+            .any(|entry| entry["package_ref"]["id"] == "web-app"),
+        "web-app must be hidden from the install registry: {body}"
+    );
+    let (status, body) = get_json(router(), "/api/webchat/v2/extensions").await;
+    assert_eq!(status, StatusCode::OK, "extensions response: {body}");
+    assert!(
+        !body["extensions"]
+            .as_array()
+            .expect("installed extensions array")
+            .iter()
+            .any(|entry| entry["package_ref"]["id"] == "web-app"),
+        "web-app must be hidden from the installed extensions list: {body}"
+    );
+
+    // Enroll, then repeat the same endpoint. The host-owned generic store
+    // refreshes in place, so the registration count remains one.
+    let subscription = serde_json::json!({ "payload": browser_subscription_body(ENDPOINT) });
+    let (status, body) = post_json(
+        router(),
+        "/api/webchat/v2/channels/web-app/notifications/enable",
+        subscription.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "enable response: {body}");
+    assert_eq!(body["enabled"], true, "{body}");
+    assert_eq!(body["detail"]["registration_count"], 1, "{body}");
+    let (status, body) = post_json(
+        router(),
+        "/api/webchat/v2/channels/web-app/notifications/enable",
+        subscription,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "re-enable response: {body}");
+    assert_eq!(body["enabled"], true, "{body}");
+    assert_eq!(body["detail"]["registration_count"], 1, "{body}");
+
+    // Status returns only host-minted registration identities and timestamps;
+    // the endpoint capability URL never crosses the product boundary.
+    let (status, body) = get_json(router(), "/api/webchat/v2/channels/web-app/notifications").await;
+    assert_eq!(status, StatusCode::OK, "status response: {body}");
+    assert_eq!(body["enabled"], true, "{body}");
+    assert_eq!(body["detail"]["registration_count"], 1, "{body}");
+    let registration_id = body["detail"]["registrations"][0]["registration_id"]
+        .as_str()
+        .expect("host-minted registration id is present");
+    uuid::Uuid::parse_str(registration_id)
+        .unwrap_or_else(|error| panic!("registration id must be a UUID ({error}): {body}"));
+    // The digest is the browser's only correlation key: lowercase hex SHA-256
+    // of the endpoint, matching device-push.ts::endpointDigestHex exactly.
+    // Regression: project() omitted it, so every enrolled browser derived
+    // "enrolled by another account" and the panel offered no unenroll.
+    assert_eq!(
+        body["detail"]["registrations"][0]["endpoint_digest"],
+        ironclaw_common::hashing::sha256_hex(ENDPOINT.as_bytes()),
+        "{body}"
+    );
+    assert!(
+        !body.to_string().contains(ENDPOINT),
+        "the full endpoint capability URL must never leave the backend: {body}"
+    );
+
+    // An endpoint on a host the manifest never declared fails closed.
+    let (status, body) = post_json(
+        router(),
+        "/api/webchat/v2/channels/web-app/notifications/enable",
+        serde_json::json!({ "payload": browser_subscription_body("https://evil.example.com/x") }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "undeclared push host must be rejected: {body}"
+    );
+
+    // Selecting the browser channel persists through the SAME
+    // notification-channels wire every vendor channel uses.
+    let (status, body) = post_json(
+        router(),
+        "/api/webchat/v2/outbound/notification-channels",
+        serde_json::json!({"target_ids": ["web-push"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "set channels response: {body}");
+    let (status, body) = get_json(router(), "/api/webchat/v2/outbound/notification-channels").await;
+    assert_eq!(status, StatusCode::OK, "get channels response: {body}");
+    assert_eq!(body["channels"][0]["target_id"], "web-push", "{body}");
+    assert_eq!(body["channels"][0]["status"], "available", "{body}");
+
+    // Unenroll; the browser disappears from the caller's status.
+    let (status, body) = post_json(
+        router(),
+        "/api/webchat/v2/channels/web-app/notifications/disable",
+        serde_json::json!({ "payload": { "endpoint": ENDPOINT } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "disable response: {body}");
+    assert_eq!(body["enabled"], false, "{body}");
+    assert_eq!(body["detail"]["registration_count"], 0, "{body}");
+    let (status, body) = get_json(router(), "/api/webchat/v2/channels/web-app/notifications").await;
+    assert_eq!(status, StatusCode::OK, "status response: {body}");
+    assert_eq!(body["detail"]["registration_count"], 0, "{body}");
+
+    // The generic surface fails closed on a channel that is not active in
+    // this deployment: unknown extension ids are a 404, never an empty
+    // fabricated status.
+    let (status, body) = get_json(
+        router(),
+        "/api/webchat/v2/channels/no-such-channel/notifications",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "unknown channel must fail closed: {body}"
+    );
+
+    drop(webui);
+    runtime.shutdown().await.expect("runtime shuts down");
 }
