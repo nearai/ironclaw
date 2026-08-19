@@ -4,12 +4,11 @@ use async_trait::async_trait;
 use ironclaw_host_api::{
     Timestamp,
     execution_policy::{ResultDeliveryPolicy, TurnExecutionPolicy},
-    ids::UserId,
     output::OutputContract,
-    turn::{TurnExecutionOutcome, TurnOriginKind, TurnRunId, TurnScope},
+    turn::{TurnExecutionOutcome, TurnOriginKind, TurnRunId},
 };
 use ironclaw_notifications::{
-    NotificationAction, NotificationId, NotificationInboxStorePort, NotificationKind,
+    LifecycleRef, NotificationAction, NotificationId, NotificationInboxStorePort, NotificationKind,
     NotificationRecipient, NotificationSeverity, NotificationSource, PublishNotificationRequest,
 };
 use ironclaw_processes::{
@@ -75,7 +74,7 @@ impl RunOutcomeProcessCommitObserver {
                 source: NotificationSource {
                     thread_id: thread_id.clone(),
                     turn_run_id: Some(run_id),
-                    lifecycle_ref: Some("process-terminal".to_string()),
+                    lifecycle_ref: Some(outcome_lifecycle_ref("process-terminal")?),
                 },
                 action: NotificationAction::OpenThread { thread_id },
                 occurred_at,
@@ -234,6 +233,11 @@ fn thread_scope_for_snapshot(snapshot: &JournaledProcessSnapshot) -> Option<Thre
     })
 }
 
+fn outcome_lifecycle_ref(value: &'static str) -> Result<LifecycleRef, String> {
+    LifecycleRef::new(value)
+        .map_err(|error| format!("build run outcome lifecycle reference failed: {error}"))
+}
+
 fn outcome_notification_id(
     run_id: TurnRunId,
     kind: NotificationKind,
@@ -248,40 +252,6 @@ fn outcome_notification_id(
     };
     NotificationId::new(format!("run:{run_id}:{kind}"))
         .map_err(|error| format!("build run outcome notification id failed: {error}"))
-}
-
-/// Record a useful external-delivery failure without changing the run's
-/// authoritative terminal state. Retries reuse the same run-scoped id.
-pub(crate) async fn publish_delivery_failure_notification(
-    inbox: &dyn NotificationInboxStorePort,
-    user_id: &UserId,
-    scope: &TurnScope,
-    run_id: TurnRunId,
-    occurred_at: Timestamp,
-) -> Result<(), String> {
-    let notification_id = outcome_notification_id(run_id, NotificationKind::DeliveryFailed)?;
-    inbox
-        .publish(PublishNotificationRequest {
-            id: notification_id,
-            recipient: NotificationRecipient {
-                tenant_id: scope.tenant_id.clone(),
-                user_id: user_id.clone(),
-            },
-            kind: NotificationKind::DeliveryFailed,
-            severity: NotificationSeverity::Error,
-            source: NotificationSource {
-                thread_id: scope.thread_id.clone(),
-                turn_run_id: Some(run_id),
-                lifecycle_ref: Some("external-delivery".to_string()),
-            },
-            action: NotificationAction::OpenThread {
-                thread_id: scope.thread_id.clone(),
-            },
-            occurred_at,
-        })
-        .await
-        .map_err(|error| format!("publish delivery failure notification failed: {error}"))?;
-    Ok(())
 }
 
 #[cfg(test)]
