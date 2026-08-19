@@ -51,7 +51,7 @@ async fn capability_host_invokes_through_runtime_dispatcher_and_completes_run() 
         .await
         .unwrap();
 
-    assert_eq!(result.dispatch.output, json!({"via":"runtime-dispatcher"}));
+    assert_eq!(result.output, json!({"via":"runtime-dispatcher"}));
     let recorded = adapter.take_request();
     assert_eq!(recorded.capability_id, capability_id());
     assert_eq!(recorded.scope, scope);
@@ -149,7 +149,7 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
         .await
         .unwrap();
 
-    assert_eq!(result.dispatch.output, json!({"approved":true}));
+    assert_eq!(result.output, json!({"approved":true}));
     assert_eq!(adapter.request_count(), 1);
     let recorded = adapter.take_request();
     assert_eq!(recorded.scope, scope);

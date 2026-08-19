@@ -873,7 +873,9 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // this test's own failure message.
         // Reviewed growth: immutable, provider-neutral output-contract DTOs
         // belong beside the turn contract consumed across loop families.
-        ("ironclaw_host_api", 20_156),
+        // 20_156 -> 20_334 (2026-08-19, #7686 restack): capability dispatch-result
+        // declarations retained beside main's provider-neutral output contracts.
+        ("ironclaw_host_api", 20_334),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

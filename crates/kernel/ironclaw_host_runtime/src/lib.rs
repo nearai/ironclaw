@@ -42,6 +42,7 @@ use std::{collections::BTreeMap, env, fmt};
 use thiserror::Error;
 
 mod capability_catalog;
+mod capability_response_processor;
 mod document_output;
 mod egress;
 mod extension_contracts;
@@ -504,17 +505,6 @@ impl PartialEq for RuntimeCapabilityFailure {
     }
 }
 
-/// Explicit fallback for outcome categories that the loop adapter cannot handle
-/// yet. New first-class outcome variants should be added to
-/// [`RuntimeCapabilityOutcome`] and exhaustively mapped by consumers instead of
-/// being hidden behind wildcard matches.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeCapabilityUnknown {
-    pub capability_id: CapabilityId,
-    pub kind: String,
-    pub message: Option<String>,
-}
-
 /// Outcomes returned by capability invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeCapabilityOutcome {
@@ -524,7 +514,6 @@ pub enum RuntimeCapabilityOutcome {
     ResourceBlocked(RuntimeResourceGate),
     SpawnedProcess(RuntimeProcessHandle),
     Failed(RuntimeCapabilityFailure),
-    Unknown(RuntimeCapabilityUnknown),
 }
 
 impl RuntimeCapabilityOutcome {
@@ -536,10 +525,21 @@ impl RuntimeCapabilityOutcome {
             Self::ResourceBlocked(_) => "resource_blocked",
             Self::SpawnedProcess(_) => "spawned_process",
             Self::Failed(_) => "failed",
-            Self::Unknown(_) => "unknown",
         }
     }
 }
+
+// `RuntimeCapabilityOutcome` is an in-process host-runtime return value, never
+// a wire type: it carries capability output `serde_json::Value`s alongside
+// internal gate/failure state, and nothing downstream is entitled to
+// serialize or deserialize it directly (projections and transports build
+// their own typed wire shapes from it). Pin that with a compile-time check so
+// an incidental `#[derive(Serialize)]`/`#[derive(Deserialize)]` added later
+// fails the build instead of silently opening a serialization surface.
+static_assertions::assert_not_impl_any!(
+    RuntimeCapabilityOutcome: serde::Serialize,
+    serde::de::DeserializeOwned
+);
 
 /// Stable reasons for capability suspension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

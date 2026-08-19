@@ -14,7 +14,7 @@
 ## What This Crate Owns
 
 - The single caller-facing `CapabilityHost` authority path, currently:
-- `CapabilityHost` (`host`) and the invoke/resume/spawn flows/results: direct invoke/resume parameters, `CapabilityInvocationResult`, `CapabilitySpawnRequest`/`CapabilitySpawnResult` (`requests`); `CapabilityInvocationError`/`ResumeContextMismatchKind` (`error`).
+- `CapabilityHost` (`host`) and the invoke/resume/spawn flows/results: direct invoke/resume parameters, `CapabilitySpawnRequest`/`CapabilitySpawnResult` (`requests`); `CapabilityDispatchResult` re-exported at the crate root from `ironclaw_host_api::dispatch`; `CapabilityInvocationError`/`ResumeContextMismatchKind` (`error`).
 - The obligation seam (`obligations`): `CapabilityObligationHandler`, `CapabilityObligationRequest`/`CapabilityObligationOutcome`, abort/completion requests, `CapabilityObligationPhase`/`CapabilityObligationFailureKind`/`CapabilityObligationError`.
 - The host-private replay-payload store (`replay_payload`): `ReplayPayload`, the `ReplayPayloadStore` port, `ReplayPayloadStore`, and `ReplayPayloadStoreError`. Persists the raw replay payload a gate/auth resume re-dispatches from, keyed by `InvocationId`, behind a `ScopedFilesystem` CAS lane. Never model-visible (no `SafeSummary`) — see Guardrails below.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.

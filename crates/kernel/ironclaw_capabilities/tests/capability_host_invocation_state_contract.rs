@@ -630,7 +630,7 @@ async fn capability_host_returns_dispatch_result_when_run_completion_fails_after
         .await
         .unwrap();
 
-    assert_eq!(result.dispatch.output, json!({"ok": true}));
+    assert_eq!(result.output, json!({"ok": true}));
     assert!(dispatcher.call_count() > 0);
 }
 
@@ -737,7 +737,7 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
         .await
         .unwrap();
 
-    assert_eq!(result.dispatch.output, json!({"ok": true}));
+    assert_eq!(result.output, json!({"ok": true}));
     assert_eq!(
         dispatcher
             .last_request()
@@ -815,7 +815,7 @@ async fn capability_host_returns_dispatch_result_when_run_completion_fails_after
         .await
         .unwrap();
 
-    assert_eq!(result.dispatch.output, json!({"ok": true}));
+    assert_eq!(result.output, json!({"ok": true}));
 }
 
 #[tokio::test]
@@ -1057,7 +1057,7 @@ async fn capability_host_returns_dispatch_result_when_lease_consume_fails_after_
         .await
         .unwrap();
 
-    assert_eq!(result.dispatch.output, json!({"ok": true}));
+    assert_eq!(result.output, json!({"ok": true}));
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, ProcessInvocationStatus::Completed);
     let claimed = leases.get(&scope, lease.grant.id).await.unwrap();
