@@ -153,3 +153,38 @@ test("archive is offered for durable rows only and does not open the thread", as
     "archiving must not also navigate into the thread",
   );
 });
+
+test("load-more appears only while more pages remain", async () => {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  roots.push(root);
+
+  const loadMore = vi.fn();
+  const messages = [{ id: "n-1", title: "One", body: "b", href: "/chat/t-1", durable: true }];
+
+  const open = async (state) => {
+    await act(async () => {
+      root.render(<NotificationCenter state={{ messages, unreadIds: new Set(), ...state }} />);
+    });
+    const bell = container.querySelector<HTMLButtonElement>("[data-testid='notification-bell']");
+    if (!document.querySelector("[data-testid='notification-load-more']") && bell) {
+      await act(async () => bell.click());
+    }
+  };
+
+  await open({ canLoadMore: true, loadMore });
+  const button = document.querySelector<HTMLButtonElement>(
+    "[data-testid='notification-load-more']",
+  );
+  assert.ok(button, "the control shows while the inbox reports another page");
+  await act(async () => button.click());
+  assert.equal(loadMore.mock.calls.length, 1);
+
+  await open({ canLoadMore: false, loadMore });
+  assert.equal(
+    document.querySelector("[data-testid='notification-load-more']"),
+    null,
+    "the control retires once there is nothing left to page",
+  );
+});

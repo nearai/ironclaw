@@ -403,6 +403,68 @@ test("a compatibility notification is never archived through the server", () => 
   );
 });
 
+test("offers more pages only while the inbox reports one and grows the request", () => {
+  const harness = instantiate({
+    data: {
+      inbox: {
+        notifications: [notification()],
+        unread_count: 1,
+        next_cursor: "cursor-page-2",
+      },
+      approvalThreads: { threads: [] },
+    },
+  });
+
+  assert.equal(harness.hook.canLoadMore, true);
+  assert.equal(harness.hook.requestedLimit, 30);
+
+  harness.hook.loadMore();
+  const grown = harness.render();
+
+  assert.equal(
+    grown.requestedLimit,
+    60,
+    "loading more raises the page the polled query asks for",
+  );
+});
+
+test("stops offering more pages once the inbox reports no cursor", () => {
+  const harness = instantiate({
+    data: {
+      inbox: { notifications: [notification()], unread_count: 1, next_cursor: null },
+      approvalThreads: { threads: [] },
+    },
+  });
+
+  assert.equal(harness.hook.canLoadMore, false);
+});
+
+test("never asks the inbox for more than the server page ceiling", () => {
+  const harness = instantiate({
+    data: {
+      inbox: {
+        notifications: [notification()],
+        unread_count: 1,
+        next_cursor: "cursor-page-2",
+      },
+      approvalThreads: { threads: [] },
+    },
+  });
+
+  let hook = harness.hook;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    hook.loadMore();
+    hook = harness.render();
+  }
+
+  assert.equal(hook.requestedLimit, 100);
+  assert.equal(
+    hook.canLoadMore,
+    false,
+    "at the ceiling the control retires instead of asking for a rejected limit",
+  );
+});
+
 test("does not mark a notification merely because its thread route is active", () => {
   const harness = instantiate({
     data: {

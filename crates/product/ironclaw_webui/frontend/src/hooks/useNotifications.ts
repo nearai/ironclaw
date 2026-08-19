@@ -12,6 +12,10 @@ import { useThreadStates } from "../lib/thread-state";
 import { notificationMessages } from "../lib/notifications";
 
 const NOTIFICATION_LIMIT = 30;
+/* The view's own page ceiling (`NOTIFICATION_PAGE_LIMIT_MAX` server-side).
+ * Asking for more is rejected, so the control retires at this point rather
+ * than sending a request the surface will refuse. */
+const NOTIFICATION_LIMIT_MAX = 100;
 const NOTIFICATION_THREAD_LIMIT = 20;
 const NOTIFICATION_REFETCH_MS = 10_000;
 
@@ -92,9 +96,14 @@ export function useNotifications(options = {}) {
   const tenantId = profile?.tenant_id || null;
   const userId = profile?.user_id || null;
   const scope = tenantId && userId ? `${tenantId}:${userId}` : null;
+  /* Paging grows the page the polled query asks for instead of chaining
+   * cursors into a second list. One request stays the single source of truth,
+   * so the optimistic mark-read/archive writes keep applying and a poll can
+   * never disagree with an appended page about the same record. */
+  const [requestedLimit, setRequestedLimit] = React.useState(NOTIFICATION_LIMIT);
   const queryKey = React.useMemo(
-    () => ["notifications", "inbox", tenantId, userId],
-    [tenantId, userId],
+    () => ["notifications", "inbox", tenantId, userId, requestedLimit],
+    [requestedLimit, tenantId, userId],
   );
 
   const query = useQuery({
@@ -105,7 +114,7 @@ export function useNotifications(options = {}) {
       // existing approval notifications disappear. Durable records win in
       // the presentation-layer de-duplication below.
       const [inboxResult, approvalResult] = await Promise.allSettled([
-        listNotifications({ limit: NOTIFICATION_LIMIT }),
+        listNotifications({ limit: requestedLimit }),
         listThreads({
           limit: NOTIFICATION_THREAD_LIMIT,
           needsApproval: true,
@@ -279,6 +288,15 @@ export function useNotifications(options = {}) {
     }
   }, [inboxSupported, markAllReadMutation, markCompatibilitySeen, messages, scope]);
 
+  // `next_cursor` is the surface's own has-more signal.
+  const canLoadMore =
+    Boolean(query.data?.inbox?.next_cursor) && requestedLimit < NOTIFICATION_LIMIT_MAX;
+  const loadMore = React.useCallback(() => {
+    setRequestedLimit((current) =>
+      Math.min(current + NOTIFICATION_LIMIT, NOTIFICATION_LIMIT_MAX),
+    );
+  }, []);
+
   const serverUnreadCount = Number(query.data?.inbox?.unread_count || 0);
   const compatibilityUnreadCount = messages.filter(
     (message) => !message.durable && !message.read,
@@ -305,5 +323,8 @@ export function useNotifications(options = {}) {
     markAllRead,
     isMarkingAllRead: markAllReadMutation.isPending,
     archiveMessage,
+    canLoadMore,
+    loadMore,
+    requestedLimit,
   };
 }

@@ -86,6 +86,8 @@ export function NotificationCenter({ state }) {
   const prepareMessageOpen = state?.prepareMessageOpen;
   const markAllRead = state?.markAllRead;
   const archiveMessage = state?.archiveMessage;
+  const canLoadMore = state?.canLoadMore || false;
+  const loadMore = state?.loadMore;
   const isMarkingAllRead = state?.isMarkingAllRead || false;
   const isLoading = state?.isLoading || false;
   const error = state?.error || null;
@@ -239,6 +241,18 @@ export function NotificationCenter({ state }) {
                       onArchive={archiveMessage}
                     />
                   ))}
+              {messages.length > 0 && canLoadMore && loadMore &&
+              (<button
+                type="button"
+                data-testid="notification-load-more"
+                onClick={() => loadMore()}
+                className={cn(
+                  "w-full border-t border-[var(--v2-panel-border)] px-4 py-2.5 text-sm",
+                  "text-[var(--v2-accent-text)] hover:bg-[var(--v2-surface-soft)]"
+                )}
+              >
+                {t("common.loadMore")}
+              </button>)}
             </div>
           </section>
         </React.Fragment>
