@@ -11,7 +11,7 @@ use ironclaw_extension_contracts::tool_adapter::{
 };
 use ironclaw_host_api::{
     action::NetworkMethod,
-    dispatch::RuntimeDispatchErrorKind,
+    dispatch::{DispatchFailureDetail, DispatchFailureKind, RuntimeDispatchErrorKind},
     ids::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId},
     messaging::StandardMessagingErrorCode,
     mount::{MountPermissions, MountView},
@@ -1328,10 +1328,10 @@ impl ToolAdapter for AcmeFixtureToolAdapter {
                 Ok(tool_result(user_ref_entry_from_vendor(&response)?))
             }
 
-            _ => Err(ToolError::Failed {
-                kind: RuntimeDispatchErrorKind::UndeclaredCapability,
-                safe_summary: None,
-                model_visible_cause: None,
+            _ => Err(ToolError::Rejected {
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability),
+                diagnostic: None,
+                detail: None,
             }),
         }
     }
@@ -1409,11 +1409,11 @@ fn tool_result(output: serde_json::Value) -> ToolResult {
     }
 }
 
-fn acme_tool_error(kind: RuntimeDispatchErrorKind, safe_summary: String) -> ToolError {
-    ToolError::Failed {
-        kind,
-        safe_summary: Some(safe_summary),
-        model_visible_cause: None,
+fn acme_tool_error(kind: RuntimeDispatchErrorKind, host_summary: String) -> ToolError {
+    ToolError::Rejected {
+        kind: DispatchFailureKind::Runtime(kind),
+        diagnostic: None,
+        detail: Some(DispatchFailureDetail::HostSummary { text: host_summary }),
     }
 }
 
@@ -1486,9 +1486,9 @@ fn acme_error_to_standard_code(vendor_code: &str) -> StandardMessagingErrorCode 
 }
 
 /// Builds the adapter error for a non-2xx vendor response: maps the vendor
-/// code and puts the standard code string in the safe summary — the same
-/// error path `send_note` surfaces through today (`ToolError::Failed`'s
-/// `safe_summary`), which is the channel the standard messaging error
+/// code and puts the standard code string in the host summary — the same
+/// error path `send_note` surfaces through today (`ToolError::Rejected`'s
+/// `HostSummary` detail), which is the channel the standard messaging error
 /// taxonomy is documented to ride
 /// (`ironclaw_host_api::messaging::StandardMessagingErrorCode`).
 fn acme_vendor_error(vendor_code: &str) -> ToolError {
@@ -2507,10 +2507,12 @@ pub(crate) mod standard_op_contract_tests {
             let error = invoke_acme("send_message", input, &vendor)
                 .await
                 .expect_err("a non-2xx vendor response must surface as an error");
-            let ToolError::Failed { safe_summary, .. } = error else {
-                panic!("expected ToolError::Failed for vendor code {vendor_code}");
+            let ToolError::Rejected { detail, .. } = error else {
+                panic!("expected ToolError::Rejected for vendor code {vendor_code}");
             };
-            let summary = safe_summary.expect("acme vendor errors carry a safe summary");
+            let Some(DispatchFailureDetail::HostSummary { text: summary }) = detail else {
+                panic!("acme vendor errors carry a host summary");
+            };
             assert!(
                 summary.contains(expected.as_str()),
                 "vendor code {vendor_code}: expected {summary:?} to contain {}",

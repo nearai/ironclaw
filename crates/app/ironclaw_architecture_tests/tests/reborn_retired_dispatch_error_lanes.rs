@@ -5,8 +5,8 @@
 //! `DispatchError::FirstParty` carried no semantics distinct from the generic
 //! `DispatchError::Rejected { runtime, kind, diagnostic, detail, attempt }`
 //! shape — every consumer (`CapabilityInvocationError::from`,
-//! `tool_error_from_dispatch`, `dispatch_error_for_kind`/`dispatch_error_for_tool_error`
-//! in `ironclaw_extension_host`) folded them into the same fields. Provider
+//! `tool_error_from_dispatch` and `dispatch_error_for_tool_error` in
+//! `ironclaw_extension_host`) fold them into the same fields. Provider
 //! rejection is now uniformly `Rejected`, with the originating `RuntimeKind`
 //! carried as metadata rather than encoded in the enum's variant tag.
 //! `ironclaw_host_api::runtime::DispatchErrorLane` and

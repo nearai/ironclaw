@@ -31,7 +31,10 @@ use ironclaw_extension_contracts::tool_adapter::ToolError;
 use ironclaw_host_api::{
     capability::RuntimeCredentialAccountSetup,
     decision::RuntimeCredentialAuthRequirement,
-    dispatch::RuntimeDispatchErrorKind,
+    dispatch::{
+        DispatchFailureDetail, DispatchFailureKind, ProviderDiagnostic, RuntimeDispatchErrorKind,
+        UntrustedProviderMessage,
+    },
     ids::{ExtensionId, SecretHandle, VendorId},
     messaging::StandardMessagingErrorCode,
 };
@@ -67,26 +70,34 @@ const CURSOR_TAG: &str = "p1";
 // Failure construction
 // ---------------------------------------------------------------------------
 
-/// A canonical messaging failure. `safe_summary` carries only the fixed
-/// canonical code string (never vendor payload); `model_visible_cause` carries
+/// A canonical messaging rejection. `HostSummary` carries only the fixed
+/// canonical code string (never vendor payload); `ProviderDiagnostic` carries
 /// the one piece of vendor detail worth surfacing — today, a flood wait's
-/// retry-after — as prose, because no structured retry-after slot is plumbed
-/// through tool dispatch (§6.6).
+/// retry-after — as typed provider text, because no structured retry-after
+/// slot is plumbed through tool dispatch (§6.6).
 pub(crate) fn failed(code: StandardMessagingErrorCode) -> ToolError {
-    ToolError::Failed {
-        kind: RuntimeDispatchErrorKind::OperationFailed,
-        safe_summary: Some(format!("telegram rejected the request: {}", code.as_str())),
-        model_visible_cause: None,
+    ToolError::Rejected {
+        kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+        diagnostic: None,
+        detail: Some(DispatchFailureDetail::HostSummary {
+            text: format!("telegram rejected the request: {}", code.as_str()),
+        }),
     }
 }
 
-/// Same, plus a model-visible cause. The cause is vendor-derived and is NOT
+/// Same, plus a provider diagnostic. The cause is vendor-derived and is NOT
 /// display-safe; downstream scrubbing owns that.
 pub(crate) fn failed_because(code: StandardMessagingErrorCode, cause: String) -> ToolError {
-    ToolError::Failed {
-        kind: RuntimeDispatchErrorKind::OperationFailed,
-        safe_summary: Some(format!("telegram rejected the request: {}", code.as_str())),
-        model_visible_cause: Some(cause),
+    ToolError::Rejected {
+        kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+        diagnostic: Some(ProviderDiagnostic {
+            code: None,
+            message: Some(UntrustedProviderMessage::new(cause)),
+            retry_after: None,
+        }),
+        detail: Some(DispatchFailureDetail::HostSummary {
+            text: format!("telegram rejected the request: {}", code.as_str()),
+        }),
     }
 }
 
@@ -664,7 +675,7 @@ pub(crate) fn map_vendor_error(family: OpFamily, error: &InvocationError) -> Too
     match rpc.name.as_str() {
         "FLOOD_WAIT" | "FLOOD_PREMIUM_WAIT" | "SLOWMODE_WAIT" | "FLOOD_TEST_PHONE_WAIT" => {
             match rpc.value {
-                // Prose is the only carrier available: `safe_summary` is fixed
+                // Prose is the only carrier available: `HostSummary` is fixed
                 // host-authored text and may not interpolate a vendor value,
                 // and nothing plumbs a tool-dispatch retry-after into the
                 // structured `ToolRecoveryObservation` slot today. Do not read

@@ -314,13 +314,13 @@ of the channel these codes actually ride:
   `messaging.*` string into `code` and never the raw Slack error — the raw
   vendor code is consumed by the mapping function but does not cross the
   guest→host boundary on this channel at all.
-- **First-party adapters** use `ToolError::Failed`'s `safe_summary` /
-  `model_visible_cause` (`ironclaw_host_api::tool_adapter`), which has more
-  room in principle (`model_visible_cause` is a free-form string, not a fixed
-  two-field struct). The landed `acme-messenger` conformance fixture still
-  puts only the canonical code in `safe_summary`
+- **First-party adapters** use `ToolError::Rejected`'s typed
+  `DispatchFailureDetail::HostSummary` / `ProviderDiagnostic`
+  (`ironclaw_extension_contracts::tool_adapter`). The landed `acme-messenger`
+  conformance fixture still puts only the canonical code in `HostSummary`
   (`"acme vendor rejected the request: <canonical code>"`), for parity with
-  the WASM transport's behavior — not because the shape forces it.
+  the WASM transport's behavior. A vendor-derived cause, when needed, rides
+  `ProviderDiagnostic` separately and is scrubbed at the model boundary.
 
 Net: **the canonical `messaging.*` code is what reaches the model-visible
 summary on every landed implementation; a raw vendor code is never threaded

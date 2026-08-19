@@ -22,8 +22,14 @@ use ironclaw_extension_contracts::tool_adapter::{
 };
 use ironclaw_extension_registry::ExtensionPackage;
 use ironclaw_host_api::{
-    capability::CapabilityDescriptor, dispatch::DispatchError, ids::CapabilityId,
-    lane::RuntimeLane, runtime::RuntimeKind, runtime_policy::EffectiveRuntimePolicy,
+    capability::CapabilityDescriptor,
+    dispatch::{
+        DispatchError, DispatchFailureDetail, DispatchFailureKind, RuntimeDispatchErrorKind,
+    },
+    ids::CapabilityId,
+    lane::RuntimeLane,
+    runtime::RuntimeKind,
+    runtime_policy::EffectiveRuntimePolicy,
 };
 use ironclaw_resources::ResourceGovernor;
 
@@ -139,10 +145,10 @@ where
         _ports: &ToolPorts<'_>,
     ) -> Result<ToolResult, ToolError> {
         let Some(descriptor) = self.descriptors.get(&call.capability_id) else {
-            return Err(ToolError::Failed {
-                kind: ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::UndeclaredCapability,
-                safe_summary: None,
-                model_visible_cause: None,
+            return Err(ToolError::Rejected {
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability),
+                diagnostic: None,
+                detail: None,
             });
         };
         let execution = self
@@ -200,22 +206,23 @@ pub(super) fn tool_error_from_dispatch(error: DispatchError) -> ToolError {
             model_visible_cause: model_visible_cause.map(|diagnostic| *diagnostic),
         },
         DispatchError::Rejected {
-            runtime,
             kind,
             diagnostic,
             detail,
+            ..
         } => ToolError::Rejected {
-            runtime,
             kind,
             diagnostic,
             detail,
         },
-        other => ToolError::Rejected {
-            runtime: None,
-            kind: other.failure_kind(),
-            diagnostic: None,
-            detail: None,
-        },
+        other => {
+            let summary = other.event_kind().replace('_', " ");
+            ToolError::Rejected {
+                kind: other.failure_kind(),
+                diagnostic: None,
+                detail: Some(DispatchFailureDetail::HostSummary { text: summary }),
+            }
+        }
     }
 }
 

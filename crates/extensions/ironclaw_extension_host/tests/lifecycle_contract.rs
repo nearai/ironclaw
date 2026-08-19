@@ -687,7 +687,6 @@ async fn snapshot_resolver_preserves_typed_provider_rejection() {
             RuntimeDispatchErrorKind, UntrustedProviderMessage,
         },
         ids::CapabilityId,
-        runtime::RuntimeKind,
     };
 
     struct RejectingAdapter;
@@ -700,7 +699,6 @@ async fn snapshot_resolver_preserves_typed_provider_rejection() {
             _ports: &ToolPorts<'_>,
         ) -> Result<ToolResult, ToolError> {
             Err(ToolError::Rejected {
-                runtime: Some(RuntimeKind::Mcp),
                 kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client),
                 diagnostic: Some(ProviderDiagnostic {
                     code: Some(ProviderErrorCode::new("mcp_tool_rejected")),

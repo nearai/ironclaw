@@ -799,7 +799,10 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // ToolAdapter auth errors carry the neutral bounded provider diagnostic
         // through the extension ABI. Parsing and model-safety behavior remain
         // in runtime lanes and loop_host.
-        ("ironclaw_extension_contracts", 10_681),
+        // 10_681 -> 10_871 (#7711 merged-tree convergence): the closed,
+        // lane-neutral ToolError rejection vocabulary and typed WIT response
+        // declarations belong at the extension ABI; execution stays in lanes.
+        ("ironclaw_extension_contracts", 10_871),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt

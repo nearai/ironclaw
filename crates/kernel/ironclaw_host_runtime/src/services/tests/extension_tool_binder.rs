@@ -142,8 +142,10 @@ async fn binder_routes_by_capability_id_through_the_first_party_lane() {
     assert!(
         matches!(
             undeclared,
-            ToolError::Failed {
-                kind: RuntimeDispatchErrorKind::UndeclaredCapability,
+            ToolError::Rejected {
+                kind: ironclaw_host_api::dispatch::DispatchFailureKind::Runtime(
+                    RuntimeDispatchErrorKind::UndeclaredCapability,
+                ),
                 ..
             }
         ),
@@ -255,7 +257,7 @@ fn binder_preserves_provider_rejection_across_the_tool_abi() {
 
 #[test]
 fn binder_preserves_non_rejected_failure_kind_across_the_tool_abi() {
-    use ironclaw_host_api::dispatch::DispatchFailureKind;
+    use ironclaw_host_api::dispatch::{DispatchFailureDetail, DispatchFailureKind};
 
     let error = crate::services::extension_tool_binder::tool_error_from_dispatch(
         DispatchError::UnknownCapability {
@@ -264,7 +266,6 @@ fn binder_preserves_non_rejected_failure_kind_across_the_tool_abi() {
     );
 
     let ToolError::Rejected {
-        runtime,
         kind,
         diagnostic,
         detail,
@@ -272,10 +273,13 @@ fn binder_preserves_non_rejected_failure_kind_across_the_tool_abi() {
     else {
         panic!("non-Rejected routing failures must remain typed Rejected errors");
     };
-    assert_eq!(runtime, None);
     assert_eq!(kind, DispatchFailureKind::UnknownCapability);
     assert!(diagnostic.is_none());
-    assert!(detail.is_none());
+    assert!(matches!(
+        detail,
+        Some(DispatchFailureDetail::HostSummary { text })
+            if text == "unknown capability"
+    ));
 }
 
 #[tokio::test]

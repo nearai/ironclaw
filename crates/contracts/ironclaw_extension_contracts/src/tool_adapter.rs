@@ -12,6 +12,8 @@
 //! in-process envelope the dispatcher builds per invocation; nothing here
 //! serializes.
 
+use std::fmt;
+
 use async_trait::async_trait;
 
 use ironclaw_host_api::{
@@ -20,12 +22,11 @@ use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
     dispatch::{
         CapabilityDisplayOutputPreview, DispatchFailureDetail, DispatchFailureKind,
-        ProviderDiagnostic, RuntimeDispatchErrorKind,
+        ProviderDiagnostic,
     },
     ids::{CapabilityId, SecretHandle},
     mount::MountView,
     resource::{ResourceEstimate, ResourceReservation, ResourceScope},
-    runtime::RuntimeKind,
 };
 
 /// One invocation of one declared capability.
@@ -67,8 +68,10 @@ pub struct ToolResult {
 
 /// Typed invocation failures. The host maps these onto the dispatch port's
 /// redacted failure categories; `AuthRequired` maps to the generic re-auth
-/// gate and resumes through the standard blocked-turn flow.
-#[derive(Debug, Clone, thiserror::Error)]
+/// gate and resumes through the standard blocked-turn flow. All non-auth
+/// failures use `Rejected`, preserving the runtime kind, provider diagnostic,
+/// and any fixed host summary in one payload.
+#[derive(Clone, thiserror::Error)]
 pub enum ToolError {
     #[error("tool invocation requires authorization")]
     AuthRequired {
@@ -81,24 +84,59 @@ pub enum ToolError {
     },
     #[error("tool provider rejected invocation ({kind})")]
     Rejected {
-        runtime: Option<RuntimeKind>,
         kind: DispatchFailureKind,
         /// Provider-authored metadata remains typed so its `Debug` output is
         /// redacted until the host's model-diagnostic scrub/fence seam.
         diagnostic: Option<ProviderDiagnostic>,
+        /// Fixed host-authored public text, kept separate from the untrusted
+        /// provider diagnostic so the host summary remains authoritative.
         detail: Option<DispatchFailureDetail>,
     },
-    #[error("tool invocation failed ({kind:?})")]
-    Failed {
-        kind: RuntimeDispatchErrorKind,
-        /// Fixed, host-authored text only — never interpolated payload data.
-        safe_summary: Option<String>,
-        /// Raw-or-better failure cause for the model-visible Diagnostic seam
-        /// (#5965). Carried across the tool ABI verbatim and scrubbed
-        /// downstream (`scrub_model_visible_detail`) — NOT display-safe here;
-        /// never log or render it directly.
-        model_visible_cause: Option<String>,
-    },
+}
+
+fn debug_redacted_option<T>(value: &Option<T>) -> &'static str {
+    if value.is_some() {
+        "<redacted>"
+    } else {
+        "<none>"
+    }
+}
+
+impl fmt::Debug for ToolError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AuthRequired {
+                required_secrets,
+                credential_requirements,
+                model_visible_cause,
+            } => {
+                let required_secrets = format!("[{} handle(s) redacted]", required_secrets.len());
+                let credential_requirements = format!(
+                    "[{} requirement(s) redacted]",
+                    credential_requirements.len()
+                );
+                formatter
+                    .debug_struct("AuthRequired")
+                    .field("required_secrets", &required_secrets)
+                    .field("credential_requirements", &credential_requirements)
+                    .field(
+                        "model_visible_cause",
+                        &debug_redacted_option(model_visible_cause),
+                    )
+                    .finish()
+            }
+            Self::Rejected {
+                kind,
+                diagnostic,
+                detail,
+            } => formatter
+                .debug_struct("Rejected")
+                .field("kind", kind)
+                .field("diagnostic", &debug_redacted_option(diagnostic))
+                .field("detail", &debug_redacted_option(detail))
+                .finish(),
+        }
+    }
 }
 
 impl PartialEq for ToolError {
@@ -117,37 +155,18 @@ impl PartialEq for ToolError {
                 },
             ) => left_secrets == right_secrets && left_requirements == right_requirements,
             (
-                Self::Failed {
-                    kind: left_kind,
-                    safe_summary: left_summary,
-                    model_visible_cause: left_cause,
-                },
-                Self::Failed {
-                    kind: right_kind,
-                    safe_summary: right_summary,
-                    model_visible_cause: right_cause,
-                },
-            ) => {
-                left_kind == right_kind
-                    && left_summary == right_summary
-                    && left_cause == right_cause
-            }
-            (
                 Self::Rejected {
-                    runtime: left_runtime,
                     kind: left_kind,
                     diagnostic: left_diagnostic,
                     detail: left_detail,
                 },
                 Self::Rejected {
-                    runtime: right_runtime,
                     kind: right_kind,
                     diagnostic: right_diagnostic,
                     detail: right_detail,
                 },
             ) => {
-                left_runtime == right_runtime
-                    && left_kind == right_kind
+                left_kind == right_kind
                     && left_diagnostic == right_diagnostic
                     && left_detail == right_detail
             }
@@ -262,18 +281,67 @@ impl ToolCall {
 
 #[cfg(test)]
 mod tests {
+    use ironclaw_host_api::dispatch::RuntimeDispatchErrorKind;
+
     use super::*;
 
     #[test]
     fn tool_error_display_stays_redacted() {
-        let error = ToolError::Failed {
-            kind: RuntimeDispatchErrorKind::Backend,
-            safe_summary: Some("vendor API unavailable".to_string()),
-            model_visible_cause: None,
+        let error = ToolError::Rejected {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            diagnostic: Some(ProviderDiagnostic {
+                code: None,
+                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                    "vendor API unavailable",
+                )),
+                retry_after: None,
+            }),
+            detail: Some(DispatchFailureDetail::HostSummary {
+                text: "vendor API unavailable".to_string(),
+            }),
         };
         let rendered = error.to_string();
         assert!(rendered.contains("Backend"), "{rendered}");
         assert!(!rendered.contains("token"), "{rendered}");
+    }
+
+    #[test]
+    fn tool_error_debug_never_exposes_untrusted_failure_text() {
+        let rejected = ToolError::Rejected {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            diagnostic: Some(ProviderDiagnostic {
+                code: None,
+                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                    "provider-secret-message",
+                )),
+                retry_after: None,
+            }),
+            detail: Some(DispatchFailureDetail::Diagnostic {
+                text: "raw-detail-secret".to_string(),
+            }),
+        };
+        let rejected_debug = format!("{rejected:?}");
+        assert!(rejected_debug.contains("Rejected"), "{rejected_debug}");
+        assert!(rejected_debug.contains("Backend"), "{rejected_debug}");
+        assert!(rejected_debug.contains("diagnostic"), "{rejected_debug}");
+        assert!(rejected_debug.contains("detail"), "{rejected_debug}");
+        assert!(!rejected_debug.contains("provider-secret-message"));
+        assert!(!rejected_debug.contains("raw-detail-secret"));
+
+        let auth_required = ToolError::AuthRequired {
+            required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
+            model_visible_cause: Some(ProviderDiagnostic {
+                code: None,
+                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                    "auth-secret-message",
+                )),
+                retry_after: None,
+            }),
+        };
+        let auth_debug = format!("{auth_required:?}");
+        assert!(auth_debug.contains("AuthRequired"), "{auth_debug}");
+        assert!(!auth_debug.contains("auth-secret-message"));
     }
 
     #[test]
@@ -323,7 +391,6 @@ mod tests {
 
     fn rejected(kind: DispatchFailureKind, diagnostic: Option<ProviderDiagnostic>) -> ToolError {
         ToolError::Rejected {
-            runtime: Some(RuntimeKind::FirstParty),
             kind,
             diagnostic,
             detail: None,
@@ -366,12 +433,12 @@ mod tests {
             credential_requirements: Vec::new(),
             model_visible_cause: None,
         };
-        let failed = ToolError::Failed {
-            kind: RuntimeDispatchErrorKind::Backend,
-            safe_summary: None,
-            model_visible_cause: None,
+        let rejected = ToolError::Rejected {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            diagnostic: None,
+            detail: None,
         };
 
-        assert_ne!(auth_required, failed);
+        assert_ne!(auth_required, rejected);
     }
 }

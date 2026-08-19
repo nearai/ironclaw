@@ -14,9 +14,7 @@ use ironclaw_extension_contracts::tool_adapter::{
 };
 use ironclaw_host_api::{
     capability::CapabilityDescriptor,
-    dispatch::{
-        CapabilityDispatchRequest, DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind,
-    },
+    dispatch::{CapabilityDispatchRequest, DispatchError},
     ids::{CapabilityId, ExtensionId},
     resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
     runtime::RuntimeKind,
@@ -196,34 +194,6 @@ fn tool_error_to_dispatch_error(
             diagnostic,
             detail,
         },
-        ToolError::Failed {
-            kind,
-            safe_summary,
-            model_visible_cause,
-        } => runtime_dispatch_error(runtime, kind, safe_summary, model_visible_cause),
-    }
-}
-
-fn runtime_dispatch_error(
-    runtime: RuntimeKind,
-    kind: RuntimeDispatchErrorKind,
-    safe_summary: Option<String>,
-    model_visible_cause: Option<String>,
-) -> DispatchError {
-    // Two distinct channels, never merged: the vendor-authored cause rides
-    // `diagnostic` (untrusted, scrubbed downstream at the model-visible
-    // Diagnostic seam), and the host-authored `safe_summary` rides a
-    // separate trusted label so it still becomes the public safe summary
-    // even when a vendor cause is also present. See
-    // `DispatchFailureDetail::HostSummary`'s doc for the invariant.
-    let error = DispatchError::provider_rejected(
-        Some(runtime),
-        DispatchFailureKind::Runtime(kind),
-        model_visible_cause,
-    );
-    match safe_summary {
-        Some(text) => error.with_host_summary(text),
-        None => error,
     }
 }
 
@@ -262,7 +232,8 @@ mod tests {
         capability::{CapabilityDescriptor, EffectKind, PermissionMode},
         dispatch::{
             CapabilityDispatchRequest, DispatchError, DispatchFailureDetail, DispatchFailureKind,
-            ProviderDiagnostic, ProviderErrorCode, UntrustedProviderMessage,
+            ProviderDiagnostic, ProviderErrorCode, RuntimeDispatchErrorKind,
+            UntrustedProviderMessage,
         },
         ids::{ExtensionId, InvocationId, ProductKind, TenantId, UserId},
         invocation::InvocationOrigin,
@@ -422,7 +393,6 @@ mod tests {
             _ports: &ToolPorts<'_>,
         ) -> Result<ToolResult, ToolError> {
             Err(ToolError::Rejected {
-                runtime: Some(RuntimeKind::Wasm),
                 kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied),
                 diagnostic: Some(ProviderDiagnostic {
                     code: Some(ProviderErrorCode::new("channel_not_found")),
@@ -507,27 +477,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_adapter_failed_error_keeps_host_summary_separate_from_vendor_cause() {
-        struct FailedToolAdapter;
+    async fn tool_adapter_rejection_keeps_host_summary_separate_from_vendor_cause() {
+        struct RejectedToolAdapter;
 
         #[async_trait]
-        impl ToolAdapter for FailedToolAdapter {
+        impl ToolAdapter for RejectedToolAdapter {
             async fn invoke(
                 &self,
                 _call: ToolCall,
                 _ports: &ToolPorts<'_>,
             ) -> Result<ToolResult, ToolError> {
-                Err(ToolError::Failed {
-                    kind: RuntimeDispatchErrorKind::Backend,
-                    safe_summary: Some("the tool's backend failed".to_string()),
-                    model_visible_cause: Some("vendor backend returned 503".to_string()),
+                Err(ToolError::Rejected {
+                    kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+                    diagnostic: Some(ProviderDiagnostic {
+                        code: None,
+                        message: Some(UntrustedProviderMessage::new("vendor backend returned 503")),
+                        retry_after: None,
+                    }),
+                    detail: Some(DispatchFailureDetail::HostSummary {
+                        text: "the tool's backend failed".to_string(),
+                    }),
                 })
             }
         }
 
         let mut registry = CapabilityDispatchRegistry::new();
         registry
-            .register_extension(extension("provider-a", Some(Arc::new(FailedToolAdapter))))
+            .register_extension(extension("provider-a", Some(Arc::new(RejectedToolAdapter))))
             .expect("extension registration");
         let resolved = registry
             .resolve(&CapabilityId::new("provider-a.echo").expect("capability id"))
@@ -559,27 +535,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_adapter_failed_error_without_host_summary_carries_only_vendor_cause() {
-        struct FailedToolAdapter;
+    async fn tool_adapter_rejection_without_host_summary_carries_only_vendor_cause() {
+        struct RejectedToolAdapter;
 
         #[async_trait]
-        impl ToolAdapter for FailedToolAdapter {
+        impl ToolAdapter for RejectedToolAdapter {
             async fn invoke(
                 &self,
                 _call: ToolCall,
                 _ports: &ToolPorts<'_>,
             ) -> Result<ToolResult, ToolError> {
-                Err(ToolError::Failed {
-                    kind: RuntimeDispatchErrorKind::Guest,
-                    safe_summary: None,
-                    model_visible_cause: Some("guest trapped".to_string()),
+                Err(ToolError::Rejected {
+                    kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest),
+                    diagnostic: Some(ProviderDiagnostic {
+                        code: None,
+                        message: Some(UntrustedProviderMessage::new("guest trapped")),
+                        retry_after: None,
+                    }),
+                    detail: None,
                 })
             }
         }
 
         let mut registry = CapabilityDispatchRegistry::new();
         registry
-            .register_extension(extension("provider-a", Some(Arc::new(FailedToolAdapter))))
+            .register_extension(extension("provider-a", Some(Arc::new(RejectedToolAdapter))))
             .expect("extension registration");
         let resolved = registry
             .resolve(&CapabilityId::new("provider-a.echo").expect("capability id"))

@@ -3,7 +3,7 @@
 //! fabricated ref, a silently restarted cursor, a filtered sticker.
 
 use grammers_client::{InvocationError, sender::RpcError, session::types::PeerAuth};
-use ironclaw_host_api::messaging::StandardMessagingErrorCode;
+use ironclaw_host_api::{dispatch::DispatchFailureDetail, messaging::StandardMessagingErrorCode};
 
 use super::*;
 
@@ -27,10 +27,10 @@ fn rpc(name: &str, value: Option<u32>) -> InvocationError {
 
 fn code_of(error: &ToolError) -> String {
     match error {
-        ToolError::Failed { safe_summary, .. } => {
-            safe_summary.clone().unwrap_or_else(|| "<none>".to_string())
-        }
-        ToolError::Rejected { kind, .. } => kind.human_summary().to_string(),
+        ToolError::Rejected { kind, detail, .. } => match detail {
+            Some(DispatchFailureDetail::HostSummary { text }) => text.clone(),
+            _ => kind.human_summary().to_string(),
+        },
         ToolError::AuthRequired { .. } => "auth_required".to_string(),
     }
 }
@@ -340,18 +340,24 @@ fn an_unknown_write_outcome_is_a_vendor_error_and_never_sent_unverified() {
 #[test]
 fn a_flood_wait_carries_its_retry_after_as_prose_only() {
     let mapped = map_vendor_error(OpFamily::Write, &rpc("FLOOD_WAIT", Some(31)));
-    let ToolError::Failed {
-        safe_summary,
-        model_visible_cause,
-        ..
+    let ToolError::Rejected {
+        detail, diagnostic, ..
     } = mapped
     else {
-        panic!("flood wait is a failure");
+        panic!("flood wait is a rejection");
     };
     // The fixed half names only the canonical code; the vendor's number rides
     // the free-form half, because no structured retry-after slot exists.
-    let safe_summary = safe_summary.expect("summary");
+    let Some(DispatchFailureDetail::HostSummary { text: safe_summary }) = detail else {
+        panic!("flood waits carry a host summary");
+    };
     assert!(safe_summary.contains(StandardMessagingErrorCode::RateLimited.as_str()));
     assert!(!safe_summary.contains("31"));
-    assert!(model_visible_cause.expect("cause").contains("31"));
+    assert!(
+        diagnostic
+            .and_then(|diagnostic| diagnostic.message)
+            .expect("cause")
+            .as_str()
+            .contains("31")
+    );
 }

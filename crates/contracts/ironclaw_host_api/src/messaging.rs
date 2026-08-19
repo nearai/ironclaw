@@ -585,8 +585,8 @@ impl StandardMessagingErrorCode {
     ];
 
     /// The `messaging.*`-namespaced wire code carried on the structured WASM
-    /// guest error channel (`{code, kind}`) or a first-party `ToolError::Failed`
-    /// safe summary.
+    /// guest error channel (`{code, kind}`) or a first-party
+    /// `ToolError::Rejected`'s `HostSummary` detail.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::UnknownConversation => "messaging.unknown_conversation",
