@@ -483,10 +483,19 @@ impl RebornScopedSandboxCommandTransport {
                 "sandbox user container lifecycle gate disappeared".to_string(),
             )
         })?;
-        let resolved_image = self.resolve_worker_image().await?;
-        let launch = self
-            .user_container_launch_config(&request, &workspace, &resolved_image)
+        // Validate mounts/environment before touching Docker image state so
+        // malformed requests fail at the original trust boundary even when
+        // the worker image is not installed on this host.
+        let mut launch = self
+            .user_container_launch_config(&request, &workspace, &self.config.image)
             .await?;
+        let resolved_image = self.resolve_worker_image().await?;
+        launch.config.image = Some(resolved_image.clone());
+        launch.labels.insert(
+            registry::label_image(user_container::LABEL_PREFIX),
+            resolved_image,
+        );
+        launch.config.labels = Some(launch.labels.clone());
         let _user_lifecycle = gate.lock().await;
         let container_name =
             user_container::ensure_user_container(&self, &user_key, launch).await?;
