@@ -237,6 +237,28 @@ fn default_mcp_permission() -> PermissionMode {
     PermissionMode::Ask
 }
 
+/// The egress allowlist entry every capability on an `[mcp]` manifest needs:
+/// the declared server itself.
+///
+/// Live discovery already does this — `hosted_mcp_discovery` gives each
+/// discovered tool `vec![template.network_target]` precisely because a
+/// credential-free provider has no credential audience to derive egress from.
+/// Statically pinned tools took the other path and got an empty allowlist, so a
+/// no-auth `[mcp]` manifest's static tools are denied at dispatch until
+/// discovery replaces them. Same reasoning, same result, both paths.
+fn mcp_server_network_target(
+    server: &ironclaw_extension_contracts::recipe::HttpsEndpoint,
+) -> NetworkTargetPattern {
+    NetworkTargetPattern {
+        // `HttpsEndpoint` is https by construction.
+        scheme: Some(NetworkScheme::Https),
+        host_pattern: server.host(),
+        port: url::Url::parse(server.as_str())
+            .ok()
+            .and_then(|parsed| parsed.port()),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawMcpCredentialV3 {
@@ -460,7 +482,7 @@ pub(crate) fn parse_v3(
             .collect::<Result<Vec<_>, _>>()?;
         let raw_capability = RawCapabilityV2 {
             id: format!("{id}.mcp_server"),
-            network_targets: Vec::new(),
+            network_targets: vec![mcp_server_network_target(&mcp.server)],
             max_egress_bytes: None,
             description: format!(
                 "Hosted MCP server connection for {} (discovery template; never model-visible)",
@@ -605,7 +627,10 @@ pub(crate) fn parse_v3(
                 }
                 RawCapabilityV2 {
                     id: tool.id,
-                    network_targets: Vec::new(),
+                    // Inherited from the connection template like every other
+                    // field here: the tool talks to exactly one host, the
+                    // declared MCP server.
+                    network_targets: vec![mcp_server_network_target(&mcp.server)],
                     max_egress_bytes: None,
                     description: tool.description,
                     effects: with_dispatch_effect(mcp.effects.clone()),
@@ -1009,5 +1034,60 @@ effects = ["network", "use_secret"]
         )
         .expect("user-registered source may declare an mcp- id");
         assert_eq!(manifest.id.as_str(), "mcp-foo");
+    }
+
+    /// Every capability on an `[mcp]` manifest — the connection template
+    /// included — allowlists the declared server, matching what live discovery
+    /// already gives a discovered tool. A credential-free server has no
+    /// credential audience to supply that host, so without this the
+    /// grant-minted network policy is an empty allowlist and the tool is denied
+    /// at dispatch.
+    #[test]
+    fn mcp_capabilities_allowlist_the_declared_server_without_a_credential() {
+        let catalog = catalog();
+        let manifest_toml = format!(
+            r#"
+schema_version = "{MANIFEST_SCHEMA_VERSION_V3}"
+id = "mcp-zeta"
+name = "Zeta"
+version = "0.1.0"
+description = "Hosted MCP fixture"
+trust = "third_party"
+
+[mcp]
+server = "https://mcp.zeta.example:8443/mcp"
+namespace = "mcp-zeta"
+max_tools = 64
+default_permission = "ask"
+effects = ["network", "use_secret"]
+
+[[tools]]
+id = "mcp-zeta.search"
+description = "Search"
+default_permission = "ask"
+input_schema_ref = "schemas/mcp-zeta/dynamic/search.input.v1.json"
+"#
+        );
+        let (manifest, _resolved) =
+            parse_v3(&manifest_toml, ManifestSource::UserRegistered, &catalog)
+                .expect("mcp manifest parses");
+
+        let expected = NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "mcp.zeta.example".to_string(),
+            port: Some(8443),
+        };
+        assert!(
+            !manifest.capabilities.is_empty(),
+            "manifest should declare the template plus the static tool"
+        );
+        for capability in &manifest.capabilities {
+            assert_eq!(
+                capability.network_targets.as_slice(),
+                std::slice::from_ref(&expected),
+                "capability {} should allowlist the declared MCP server",
+                capability.id
+            );
+        }
     }
 }
