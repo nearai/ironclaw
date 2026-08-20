@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { expect, waitFor } from "storybook/test";
 
 import { withQueryClient, withStubbedFetch } from "../test-support/storybook-decorators";
 import { PairingWebCodePanel } from "./pairing-web-code-panel";
@@ -62,13 +63,42 @@ const withLivePairing = withStubbedFetch([
   { match: `${PAIRING}/mint`, method: "POST", json: () => livePending().pending },
 ]);
 
+// Counts every mint the panel attempts. The stub calls a route's `json` factory
+// per matched request, so incrementing here records the POST the retry button
+// fires — the difference between "the button re-rendered" and "the panel really
+// re-ran its mint path".
+let mintAttempts = 0;
+const failedMint = () => {
+  mintAttempts += 1;
+  return { kind: "service_unavailable" };
+};
+
 const withFailingPairing = withStubbedFetch([
   { match: `${PAIRING}/status`, status: 503, json: { kind: "service_unavailable" } },
-  { match: `${PAIRING}/mint`, method: "POST", status: 503, json: { kind: "service_unavailable" } },
+  { match: `${PAIRING}/mint`, method: "POST", status: 503, json: failedMint },
 ]);
 
 export const Default: Story = { decorators: [withLivePairing] };
 export const Compact: Story = { args: { compact: true }, decorators: [withLivePairing] };
 
 // The backend is unavailable, so the panel settles into its error / retry state.
-export const MintError: Story = { decorators: [withFailingPairing] };
+// Bootstrap only reads status (which fails before it ever mints), so the play
+// function drives the retry itself: the "get a new code" button is the only
+// path to `renew()`, and a failing retry must land back on the alert rather
+// than a stuck spinner or a blank panel.
+export const MintError: Story = {
+  decorators: [withFailingPairing],
+  play: async ({ canvas, userEvent }) => {
+    await expect(await canvas.findByRole("alert")).toBeVisible();
+    const attemptsBefore = mintAttempts;
+
+    await userEvent.click(canvas.getByTestId("pairing-new-code"));
+
+    // `renew()` clears the error, mints, and the stubbed POST fails again.
+    await waitFor(() => expect(mintAttempts).toBe(attemptsBefore + 1));
+    await waitFor(async () => {
+      await expect(canvas.getByRole("alert")).toBeVisible();
+      await expect(canvas.getByTestId("pairing-new-code")).toBeEnabled();
+    });
+  },
+};

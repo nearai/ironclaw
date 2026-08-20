@@ -1,5 +1,5 @@
 import type { Decorator } from "@storybook/react-vite";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
 
@@ -62,6 +62,7 @@ export type FetchStubRoute = {
 
 type StubbedFetch = typeof window.fetch & {
   __storybookStub?: true;
+  /** The real `window.fetch`, carried forward through every stub in a handoff. */
   __original?: typeof window.fetch;
 };
 
@@ -71,20 +72,40 @@ type StubbedFetch = typeof window.fetch & {
  * seed) receive deterministic responses instead of hitting a real backend — a
  * shared/deployed Storybook must never perform a real side effect (e.g. minting
  * a live pairing code). Matched routes return a JSON `Response`; anything
- * unmatched passes through to the real `fetch`. The original is restored on
- * unmount.
+ * unmatched passes through to the real `fetch`.
+ *
+ * Each decorator instance OWNS its stub. Switching stories renders the incoming
+ * decorator before React runs the outgoing one's cleanup, so a shared
+ * "is a stub already installed?" guard would leave the new story running on the
+ * *old* story's routes and would then let the outgoing cleanup restore the real
+ * `fetch` underneath it — a live backend call from a story. Installing
+ * unconditionally when `window.fetch` is not this instance's own stub, and
+ * restoring only while this instance still owns the active stub, keeps the
+ * handoff hermetic in both directions. The real `fetch` is carried forward via
+ * `__original` so stubs never chain-wrap each other.
  */
 export function withStubbedFetch(routes: FetchStubRoute[]): Decorator {
   return function StubbedFetchDecorator(Story) {
+    // Read through a ref so the installed stub always serves this render's
+    // routes, even if the same instance is re-rendered with new ones.
+    const routesRef = useRef(routes);
+    routesRef.current = routes;
+    const ownedRef = useRef<StubbedFetch | null>(null);
+
     // Install synchronously during render so the story's mount effects already
-    // see the stub. Idempotent under React's double-invoked render.
-    if (typeof window !== "undefined" && !(window.fetch as StubbedFetch).__storybookStub) {
-      const original = window.fetch.bind(window);
+    // see the stub. Idempotent under React's double-invoked render: the second
+    // pass sees this instance's own stub already installed.
+    if (typeof window !== "undefined" && window.fetch !== ownedRef.current) {
+      const current = window.fetch as StubbedFetch;
+      const original =
+        current.__storybookStub && current.__original
+          ? current.__original
+          : window.fetch.bind(window);
       const stub = (async (input: RequestInfo | URL, init?: RequestInit) => {
         const url =
           typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
         const method = (init?.method ?? "GET").toUpperCase();
-        const route = routes.find(
+        const route = routesRef.current.find(
           (r) => (r.method ?? "GET").toUpperCase() === method && url.includes(r.match),
         );
         if (!route) return original(input, init);
@@ -97,13 +118,20 @@ export function withStubbedFetch(routes: FetchStubRoute[]): Decorator {
       }) as StubbedFetch;
       stub.__storybookStub = true;
       stub.__original = original;
+      ownedRef.current = stub;
       window.fetch = stub;
     }
     useEffect(() => {
+      // Re-assert ownership: React's StrictMode runs cleanup once before the
+      // real mount, and no render follows it to reinstall.
+      const owned = ownedRef.current;
+      if (owned && window.fetch !== owned) window.fetch = owned;
       return () => {
-        const current = window.fetch as StubbedFetch;
-        if (current.__storybookStub && current.__original) {
-          window.fetch = current.__original;
+        const mine = ownedRef.current;
+        // Only the instance that still owns the active stub may restore — an
+        // incoming story that already installed its own must not be torn down.
+        if (mine && window.fetch === mine && mine.__original) {
+          window.fetch = mine.__original;
         }
       };
     }, []);
