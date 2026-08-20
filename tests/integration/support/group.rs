@@ -504,6 +504,7 @@ impl RebornIntegrationGroup {
             budget: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
+            memory_curation_interval_turns: None,
             trajectory_observer: None,
             runner_lease_ttl_override: None,
             lease_recovery_interval_override: None,
@@ -871,6 +872,12 @@ pub struct RebornIntegrationGroupBuilder {
     /// lifecycle points on a coordinator-path turn. Default `None` (hook
     /// framework dormant, matching today's behavior).
     hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
+    /// E-MEMORY / #7276: when set, the group registers the periodic
+    /// memory-curation hook at the `after_turn` point with this interval, in
+    /// completed turns. Builder method lives in `group_options.rs`. Default
+    /// `None` — the point stays un-wired, matching today's behavior and
+    /// production's opt-in default.
+    memory_curation_interval_turns: Option<u32>,
     /// C-TRAJECTORY: optional observer wired into the group's ONE production
     /// capability-port factory. Default `None`.
     trajectory_observer: Option<Arc<dyn RebornTrajectoryObserver>>,
@@ -1364,6 +1371,31 @@ impl RebornIntegrationGroupBuilder {
             // C-HOOKS / E-HOOK-INFRA: per-run hook dispatcher builder factory
             // (Some only when `hook_dispatcher_builder_factory()` was set).
             hook_dispatcher_builder_factory: self.hook_dispatcher_builder_factory,
+            // E-MEMORY / #7276: the same assembly production performs — the
+            // curation hook over an `UnboundTurnService` built from this
+            // runtime's own thread service and coordinator. `None` unless
+            // `with_memory_curation_interval()` was called, so every other
+            // group is behavior-identical.
+            after_turn_hook_dispatcher_factory: self.memory_curation_interval_turns.map(
+                |interval_turns| {
+                    Box::new(
+                        move |deps: ironclaw_turn_runner::runtime::AfterTurnHookDeps| {
+                            let submitter = Arc::new(ironclaw_assistant::UnboundTurnService::new(
+                                deps.thread_service,
+                                deps.coordinator,
+                                deps.thread_scope.agent_id,
+                                deps.thread_scope.project_id,
+                            ));
+                            ironclaw_assistant::memory_curation::after_turn_curation_dispatcher(
+                                submitter,
+                                interval_turns,
+                            )
+                            .ok()
+                        },
+                    )
+                        as ironclaw_turn_runner::runtime::AfterTurnHookDispatcherFactory
+                },
+            ),
             // C-COMMCTX: delivery-preference / connected-channel provider (Some
             // only when `communication_context_provider()` was set).
             communication_context_provider: self.communication_context_provider,

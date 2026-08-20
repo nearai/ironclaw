@@ -3091,6 +3091,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // below — live-traffic admission, the cutover gate, substrate selection —
     // reads a field on this value instead of re-matching the profile.
     let deployment = services_input.deployment().clone();
+    // Read before `build_runtime_substrate` consumes the input (§ the runtime
+    // policy capture below, same reason).
+    let memory_curation_interval_turns = services_input.memory_curation_interval_turns();
     if let Some(reason) = deployment.traffic().live_traffic_refusal(profile) {
         return Err(RebornRuntimeError::InvalidArgument { reason });
     }
@@ -3748,6 +3751,37 @@ pub(crate) async fn build_runtime_with_resource_governor(
             None,
         )
     });
+    // Periodic memory curation (#7276) fans out from the same resolution, and
+    // is opt-in on top of it: an operator must have asked for an interval AND a
+    // provider must have resolved, because a pass over a document no provider
+    // backs would submit a run whose only three tools do not exist. Disabled
+    // means this stays `None` and the hook is never registered — never a
+    // sentinel interval. Which hook, at which phase, under which trust class is
+    // decided by the crate that owns curation, so this is one call into it.
+    let memory_curation_hook_factory = memory_curation_interval_turns
+        .filter(|_| resolved_memory_provider.is_some())
+        .map(|interval_turns| {
+            Box::new(
+                move |deps: ironclaw_turn_runner::runtime::AfterTurnHookDeps| {
+                    let submitter = Arc::new(ironclaw_assistant::UnboundTurnService::new(
+                        deps.thread_service,
+                        deps.coordinator,
+                        deps.thread_scope.agent_id,
+                        deps.thread_scope.project_id,
+                    ));
+                    ironclaw_assistant::memory_curation::after_turn_curation_dispatcher(
+                        submitter,
+                        interval_turns,
+                    )
+                    .inspect_err(|reason| {
+                        // `debug!`: a chore that could not be wired must not
+                        // corrupt the REPL, and must not fail startup.
+                        tracing::debug!("memory curation hook not installed: {reason}");
+                    })
+                    .ok()
+                },
+            ) as ironclaw_turn_runner::runtime::AfterTurnHookDispatcherFactory
+        });
     let memory_lifecycle = local_runtime
         .map(|local_runtime| local_runtime.memory_lifecycle.clone())
         .unwrap_or_default();
@@ -4003,6 +4037,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         hook_security_audit_sink: Some(Arc::new(ironclaw_event_log::TracingSecurityAuditSink)),
         turn_event_sink: Some(turn_event_sink),
         hook_dispatcher_builder_factory,
+        after_turn_hook_dispatcher_factory: memory_curation_hook_factory,
         communication_context_provider,
         // For the production composition path, use the pre-minted wiring from
         // `build_production_shaped` so the `HostRuntimeServices` notifier (used by

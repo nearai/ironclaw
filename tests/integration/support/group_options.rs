@@ -3,7 +3,7 @@
 //! `with_tool_disclosure_bridged`, `with_tool_disclosure_off`,
 //! `with_narrowed_capability_surface_policy_for_bridged_test`,
 //! `budget_accounting`, `communication_context_provider`,
-//! `hook_dispatcher_builder_factory`.
+//! `hook_dispatcher_builder_factory`, `with_memory_curation_interval`.
 //! Private child module of `group.rs` (owns the struct + `build_base`/
 //! `into_group`), so it reaches the builder's private fields at module-
 //! private visibility instead of widening them to `pub(crate)`. New builder
@@ -57,6 +57,17 @@ impl RebornIntegrationGroupBuilder {
         lifecycle: ironclaw_extension_contracts::memory::MemoryDescriptor,
     ) -> Self {
         self.bound_memory = Some((provider, lifecycle));
+        self
+    }
+
+    /// E-MEMORY / #7276: register the periodic memory-curation hook at the
+    /// group's `after_turn` point, firing a pass every `interval_turns`
+    /// completed turns. Mirrors production's opt-in shape exactly — production
+    /// wires this only when `[memory].curation_interval_turns` is set AND a
+    /// memory provider resolved, so a group that does not call this leaves the
+    /// point un-wired and is behavior-identical to today.
+    pub fn with_memory_curation_interval(mut self, interval_turns: u32) -> Self {
+        self.memory_curation_interval_turns = Some(interval_turns);
         self
     }
 

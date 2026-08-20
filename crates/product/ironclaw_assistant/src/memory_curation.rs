@@ -40,8 +40,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use ironclaw_hooks::dispatch::{HookDispatcher, HookDispatcherBuilder};
+use ironclaw_hooks::identity::{HookId, HookVersion};
+use ironclaw_hooks::ordering::HookPhase;
 use ironclaw_hooks::points::AfterTurnHookContext;
+use ironclaw_hooks::registry::HookRegistry;
 use ironclaw_hooks::sink::PrivilegedAfterTurnHook;
+use ironclaw_hooks::trust::HookTrustClass;
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_host_api::output::OutputContract;
 use ironclaw_host_api::prepared_context::TurnLimits;
@@ -258,6 +263,46 @@ impl MemoryCurationService {
     }
 }
 
+/// Canonical identity of the curation hook binding. `for_builtin` hashes a
+/// stable path + symbol, so this string is the hook's durable identity across
+/// restarts and must not be reworded casually.
+const MEMORY_CURATION_HOOK_PATH: &str =
+    "ironclaw_assistant::memory_curation::MemoryCurationService";
+
+/// Assemble the `after_turn` dispatcher that carries the curation hook.
+///
+/// Composition calls this instead of assembling the parts itself: which hook,
+/// at which phase, under which trust class, is a decision belonging to the
+/// crate that owns the behavior, not to the wiring root. A caller that does not
+/// want curation does not call this at all — there is no "disabled" dispatcher
+/// (see [`MemoryCurationService::new`] on why disabling is never a sentinel
+/// interval).
+///
+/// The dispatcher is deliberately its OWN small dispatcher rather than the
+/// per-run one the loop middleware builds: `after_turn` fires once per run from
+/// the executor, which holds a single process-lifetime `Arc`, while the
+/// middleware dispatchers are minted per run (and, for third-party bindings,
+/// per tenant). Sharing one would mean rebuilding this binding on every run for
+/// no gain.
+pub fn after_turn_curation_dispatcher(
+    submitter: Arc<dyn CurationPassSubmitter>,
+    interval_turns: u32,
+) -> Result<Arc<HookDispatcher>, String> {
+    let service = MemoryCurationService::new(submitter, interval_turns);
+    Ok(HookDispatcherBuilder::new(HookRegistry::new())
+        .install_after_turn(
+            HookId::for_builtin(MEMORY_CURATION_HOOK_PATH, HookVersion::ONE),
+            // Telemetry, the last phase: the run this reacts to is already
+            // terminal, so the hook enforces no contract and gates nothing —
+            // it only reads the outcome and may start its own work.
+            HookPhase::Telemetry,
+            HookTrustClass::Builtin,
+            Box::new(service),
+        )
+        .map_err(|error| format!("could not install the memory curation hook: {error}"))?
+        .build_arc())
+}
+
 #[async_trait]
 impl PrivilegedAfterTurnHook for MemoryCurationService {
     async fn on_turn(&self, ctx: &AfterTurnHookContext) {
@@ -290,6 +335,25 @@ impl PrivilegedAfterTurnHook for MemoryCurationService {
                 return;
             }
         };
+        // DECISION #7770 (gate posture): a pass runs unbound, and the unbound
+        // loop family aborts on an approval gate with `gate_not_supported`
+        // (`ironclaw_agent_loop::strategies::gate::GateNotSupportedStrategy`).
+        // `ironclaw.memory.write` is auto-approved for a default user but NOT
+        // exempt from the gate, so a user who turned auto-approve off would get
+        // a failed pass instead of a skipped one. The epic's intent is
+        // skip-and-note, and it is NOT implemented here on purpose: no
+        // read-only "would this capability gate for this scope" query exists.
+        // Deciding it needs the capability DESCRIPTOR (effects + origin gate
+        // matrix), the run's `ApprovalPolicy`, the `TrustDecision`, grants, and
+        // leases composed together — which happens only inside
+        // `authorize_dispatch_with_trust` at dispatch time, and whose origin
+        // input does not exist until the run is executing. Approximating it
+        // from `ApprovalSettingsProvider::global_auto_approve` alone would
+        // duplicate gate composition in a product service and drift from the
+        // authorizer, which is the stage-collapsing this codebase forbids. The
+        // honest fix belongs at the gate seam (a `GateOutcome` that skips the
+        // capability for the model instead of aborting the run), not here.
+        //
         // Every failure is swallowed at `debug!`. This runs after a terminal run
         // on a background path: `info!`/`warn!` would corrupt the REPL, and a
         // failed chore must never surface as a user-visible problem.
@@ -529,6 +593,30 @@ mod tests {
             1,
             "the interval is counted purely in successful turns"
         );
+    }
+
+    /// The factory composition wires is only useful if a turn dispatched
+    /// through the built dispatcher actually reaches the service. Testing the
+    /// service alone would leave the install arguments (point, trust class,
+    /// phase) unproven — and a wrong trust class is an install-time rejection
+    /// that would silently leave curation un-wired in production.
+    #[tokio::test]
+    async fn the_built_dispatcher_delivers_a_turn_to_the_curation_service() {
+        let submitter = Arc::new(RecordingSubmitter::default());
+        let dispatcher = after_turn_curation_dispatcher(
+            Arc::clone(&submitter) as Arc<dyn CurationPassSubmitter>,
+            1,
+        )
+        .expect("the curation hook installs");
+
+        dispatcher.dispatch_after_turn(ctx_for("user-a")).await;
+
+        assert_eq!(
+            submitter.count(),
+            1,
+            "a completed turn dispatched at the after_turn point must reach the hook"
+        );
+        assert_eq!(submitter.last().caller.user_id.as_str(), "user-a");
     }
 
     /// Zero would submit a pass after every single turn while reading as

@@ -224,6 +224,10 @@ pub struct RebornHostBindings {
     /// build-time wiring can construct and register it. Selection stays in the
     /// binding policy; this only carries the chosen provider's connection.
     pub(crate) memory_provider_connection: Mem0ConnectionConfig,
+    /// Interval, in completed user turns, between periodic memory-curation
+    /// passes (issue #7276). `None` — the default, and the value every existing
+    /// deployment resolves — means the curation hook is never registered.
+    pub(crate) memory_curation_interval_turns: Option<u32>,
 }
 
 /// One channel extension's binary-assembled vendor binding
@@ -413,6 +417,23 @@ impl RebornHostBindings {
     pub fn with_memory_provider_connection(mut self, connection: Mem0ConnectionConfig) -> Self {
         self.memory_provider_connection = connection;
         self
+    }
+
+    /// Enable periodic memory curation at the given interval, in completed
+    /// turns (issue #7276). Resolved by the CLI from
+    /// `[memory].curation_interval_turns`; leaving it unset keeps the hook
+    /// unregistered, which is what every deployment that predates the key
+    /// gets. Curation is disabled by NOT calling this, never by passing a
+    /// sentinel interval.
+    pub fn with_memory_curation_interval_turns(mut self, interval_turns: u32) -> Self {
+        self.memory_curation_interval_turns = Some(interval_turns);
+        self
+    }
+
+    /// The configured curation interval, if any. Read once at runtime build,
+    /// before this input is consumed by the substrate assembly.
+    pub(crate) fn memory_curation_interval_turns(&self) -> Option<u32> {
+        self.memory_curation_interval_turns
     }
 
     /// Override the local runtime tenant/agent identity used by command-style
@@ -955,6 +976,7 @@ impl RebornHostBindings {
             credential_account_visibility_policy: None,
             memory_binding_policy: None,
             memory_provider_connection: Mem0ConnectionConfig::default(),
+            memory_curation_interval_turns: None,
         }
     }
 

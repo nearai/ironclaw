@@ -236,7 +236,18 @@ observed_date = "2026-08-08"
 # delta is the #7681 connect-link notice wiring in extension_host_assembly.rs
 # (~11 lines), predating that growth. Measured on the merged tree with
 # `bash scripts/ci/check-composition-budget.sh --print`, not summed.
-loc_ceiling = 42198
+#
+# Re-measured 42198 -> 42205 on 2026-08-20 for #7770 phase 1 (memory curation
+# wired through composition). The delta is +7 net: composition holds only the
+# `[memory].curation_interval_turns` input field/setter and the few lines that
+# hand the runtime's thread service and coordinator to
+# `ironclaw_assistant::memory_curation::after_turn_curation_dispatcher` — the
+# hook/phase/trust-class assembly itself stays in the crate that owns curation,
+# per AGENTS.md. Measured with `bash scripts/ci/check-composition-budget.sh`,
+# not summed; the mirrored `COMPOSITION_ABSOLUTE_SRC_LOC` in
+# crates/app/ironclaw_architecture_tests/tests/reborn_restructure_baselines.rs
+# moves to the same figure in this commit.
+loc_ceiling = 42205
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -247,8 +258,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 42198
-loc_observed_date = "2026-08-19"
+loc_observed = 42205
+loc_observed_date = "2026-08-20"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the

@@ -91,8 +91,12 @@ const EXPECTED_PRODUCTION_SHAPE: DefaultPlannedRuntimePartsShape =
         hook_security_audit_sink: true, // runtime.rs:3780 always Some(TracingSecurityAuditSink)
         turn_event_sink: true,          // runtime.rs:3781 always Some(turn_event_sink)
         hook_dispatcher_builder_factory: false, // :3230-3258 None, HooksActivationConfig defaults OFF
-        communication_context_provider: true,   // :3337-3357 Some whenever local_runtime present
-        scheduler_wake_wiring: false, // :2847-2857 None outside Production/MigrationDryRun
+        // None unless `[memory].curation_interval_turns` is set AND a memory
+        // provider resolves (#7276). Curation is opt-in, so the default
+        // production shape leaves the after_turn point un-wired.
+        after_turn_hook_dispatcher_factory: false,
+        communication_context_provider: true, // :3337-3357 Some whenever local_runtime present
+        scheduler_wake_wiring: false,         // :2847-2857 None outside Production/MigrationDryRun
     };
 
 /// Deliberate test-double substitutions: `(field, reason)`. Every other field
@@ -178,6 +182,9 @@ fn mask(
         }
         "communication_context_provider" => {
             shape.communication_context_provider = from.communication_context_provider
+        }
+        "after_turn_hook_dispatcher_factory" => {
+            shape.after_turn_hook_dispatcher_factory = from.after_turn_hook_dispatcher_factory
         }
         "scheduler_wake_wiring" => shape.scheduler_wake_wiring = from.scheduler_wake_wiring,
         other => panic!(

@@ -3,6 +3,7 @@
 use std::{collections::HashMap, error::Error, fmt, sync::Arc};
 
 use ironclaw_event_log::SecurityAuditSink;
+use ironclaw_hooks::dispatch::HookDispatcher;
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_loop_contracts::{
     AgentLoopDriverError, AgentLoopHostError, CapabilitySurfaceProfileId,
@@ -320,6 +321,23 @@ impl SchedulerWakeWiring {
     }
 }
 
+/// The runtime pieces an `after_turn` hook may need in order to start work of
+/// its own. Handed to [`AfterTurnHookDispatcherFactory`] once the runtime has
+/// built them.
+pub struct AfterTurnHookDeps {
+    pub thread_service: Arc<dyn SessionThreadService>,
+    pub coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
+    /// The deployment's default agent/project axes, as the conversation path
+    /// resolves them. A hook-started run acts on these axes and on the tenant
+    /// and user the dispatch context carries — never on axes of its own.
+    pub thread_scope: ThreadScope,
+}
+
+/// Builds the process-lifetime `after_turn` dispatcher from the pieces above,
+/// or declines with `None`. Consumed once, at runtime build.
+pub type AfterTurnHookDispatcherFactory =
+    Box<dyn FnOnce(AfterTurnHookDeps) -> Option<Arc<HookDispatcher>> + Send>;
+
 pub struct DefaultPlannedRuntimeParts<G>
 where
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
@@ -418,6 +436,16 @@ where
     /// the hook framework dormant: no dispatcher is composed and the runtime
     /// behaves exactly as it did before hooks existed.
     pub hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
+    /// Builds the process-lifetime `after_turn` hook dispatcher, if the
+    /// composition wants one. `None` (the default) leaves the point un-wired:
+    /// the executor dispatches nothing after a terminal run.
+    ///
+    /// A factory rather than a ready dispatcher because the hooks installed at
+    /// this point may need to START work — and the door they submit through is
+    /// built from the coordinator, which does not exist until this very
+    /// function builds it. The factory is handed those pieces once, after they
+    /// exist, and may still decline by returning `None`.
+    pub after_turn_hook_dispatcher_factory: Option<AfterTurnHookDispatcherFactory>,
     pub communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
     /// Pre-minted scheduler wake wiring.
     ///
@@ -834,6 +862,10 @@ where
     let safety_context = parts
         .safety_context
         .unwrap_or_else(non_production_noop_safety_context);
+    // Keep a copy of the thread scope before it is moved into the host factory
+    // below: the `after_turn` hook factory is invoked further down, once the
+    // coordinator exists, and needs the same default agent/project axes.
+    let after_turn_thread_scope = parts.thread_scope.clone();
     // Build the after-turn memory recorder before `parts.thread_scope` is moved
     // into the host factory below. Present only when a bound memory
     // provider was resolved; it owner-rewrites the base thread scope per run
@@ -926,6 +958,15 @@ where
     );
     if let Some(recorder) = after_turn_memory_recorder {
         executor = executor.with_after_turn_memory_recorder(recorder);
+    }
+    if let Some(factory) = parts.after_turn_hook_dispatcher_factory
+        && let Some(dispatcher) = factory(AfterTurnHookDeps {
+            thread_service: Arc::clone(&parts.thread_service),
+            coordinator: Arc::clone(&coordinator),
+            thread_scope: after_turn_thread_scope,
+        })
+    {
+        executor = executor.with_after_turn_hooks(dispatcher);
     }
     let executor = Arc::new(executor);
     let scheduler = TurnRunScheduler::new_with_process_runtime(
