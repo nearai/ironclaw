@@ -47,10 +47,12 @@ impl HookTrustClass {
             (Self::Installed, DecisionKind::Effect) => true,
             (Self::Installed, DecisionKind::Gate) => false,
             (Self::Installed, DecisionKind::Mutator) => false,
+            (Self::Installed, DecisionKind::Lifecycle) => false,
             (Self::SelfAuthored, DecisionKind::Observer) => true,
             (Self::SelfAuthored, DecisionKind::Effect) => true,
             (Self::SelfAuthored, DecisionKind::Gate) => false,
             (Self::SelfAuthored, DecisionKind::Mutator) => false,
+            (Self::SelfAuthored, DecisionKind::Lifecycle) => false,
         }
     }
 }
@@ -71,6 +73,14 @@ pub enum DecisionKind {
     /// Enqueues a side effect after a durable event. Routes through normal
     /// capability dispatch; never gains ambient authority.
     Effect,
+    /// Runs once a lifecycle stage has already reached a terminal state
+    /// (today: `after_turn`). Act-capable — a lifecycle hook may start
+    /// follow-on work — but it can never change the stage that fired it, so
+    /// failures fail *isolated* rather than closed. Privileged-only by
+    /// default: `Installed` and `SelfAuthored` hooks cannot mint it, because
+    /// starting host-side work off a terminal state is authority those tiers
+    /// do not carry.
+    Lifecycle,
 }
 
 #[cfg(test)]
@@ -83,6 +93,7 @@ mod tests {
         assert!(HookTrustClass::Installed.permits_kind_by_default(DecisionKind::Effect));
         assert!(!HookTrustClass::Installed.permits_kind_by_default(DecisionKind::Gate));
         assert!(!HookTrustClass::Installed.permits_kind_by_default(DecisionKind::Mutator));
+        assert!(!HookTrustClass::Installed.permits_kind_by_default(DecisionKind::Lifecycle));
     }
 
     #[test]
@@ -94,6 +105,7 @@ mod tests {
         assert!(HookTrustClass::SelfAuthored.permits_kind_by_default(DecisionKind::Effect));
         assert!(!HookTrustClass::SelfAuthored.permits_kind_by_default(DecisionKind::Gate));
         assert!(!HookTrustClass::SelfAuthored.permits_kind_by_default(DecisionKind::Mutator));
+        assert!(!HookTrustClass::SelfAuthored.permits_kind_by_default(DecisionKind::Lifecycle));
     }
 
     #[test]
@@ -104,6 +116,7 @@ mod tests {
                 DecisionKind::Mutator,
                 DecisionKind::Observer,
                 DecisionKind::Effect,
+                DecisionKind::Lifecycle,
             ] {
                 assert!(
                     class.permits_kind_by_default(kind),

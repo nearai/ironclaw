@@ -138,7 +138,10 @@ fn point_has_capability_context(point: HookPointSpec) -> bool {
         | HookPointSpec::EventTriggered => true,
         HookPointSpec::BeforePrompt
         | HookPointSpec::AfterModel
-        | HookPointSpec::AfterCheckpoint => false,
+        | HookPointSpec::AfterCheckpoint
+        // `AfterTurn` fires once for a whole turn run; no capability is
+        // resolved at that point, so there is no provider to compare against.
+        | HookPointSpec::AfterTurn => false,
     }
 }
 
@@ -151,6 +154,13 @@ pub enum HookPointSpec {
     AfterModel,
     AfterCapability,
     AfterCheckpoint,
+    /// Fires once after a turn's run reaches a terminal state. This is the
+    /// seam for work about the turn *as a whole* rather than about one model
+    /// call, capability invocation, or checkpoint. Privileged-only
+    /// (`Builtin` / `Trusted`): the point is act-capable — an `AfterTurn`
+    /// hook may start follow-on work — so `Installed` and `SelfAuthored`
+    /// hooks are refused at install time.
+    AfterTurn,
     EventTriggered,
 }
 
