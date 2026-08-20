@@ -47,7 +47,7 @@ function configureModalSourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { ConfigureModal, ModalShell, SetupReadiness };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { ConfigureModal, ModalShell, SetupReadiness, AdminSetupFieldsNotice };`;
 }
 
 function renderModal({
@@ -186,6 +186,8 @@ function renderModal({
     DeviceLinkPanel: context.DeviceLinkPanel,
     PairingWebCodePanel: context.PairingWebCodePanel,
     SetupReadiness: context.globalThis.__testExports.SetupReadiness,
+    AdminSetupFieldsNotice:
+      context.globalThis.__testExports.AdminSetupFieldsNotice,
     invalidations,
     notifications,
     oauthCalls,
@@ -217,6 +219,7 @@ test("ConfigureModal recovers ambiguous hosted MCP auth with only three explicit
           setup: { kind: "manual_token" },
         },
       ],
+      fields: [{ name: "tenant_url", prompt: "Tenant URL" }],
       onboarding: null,
       isLoading: false,
       error: null,
@@ -229,7 +232,9 @@ test("ConfigureModal recovers ambiguous hosted MCP auth with only three explicit
   assert.match(body, /extensions\.customMcpAuth\.no_auth/);
   assert.doesNotMatch(body, /extensions\.customMcpAuth\.auto/);
   assert.doesNotMatch(body, /must-not-be-rendered/);
+  assert.doesNotMatch(body, /Tenant URL/);
   assert.doesNotMatch(body, /extension-secret-/);
+  assertAdminSetupFieldsNotice(view);
 
   const submit = findHandler(view.rendered, "authSelection:");
   assert.ok(submit, "the selected recovery choice can be submitted");
@@ -312,7 +317,7 @@ test("ConfigureModal surfaces every setup blocker without exposing internal refs
 });
 
 test("ConfigureModal reserves channel configuration fields for administrators", () => {
-  const { rendered } = renderModal({
+  const view = renderModal({
     surfaces: channelSurfaces,
     setupResult: {
       phase: "setup_needed",
@@ -332,8 +337,8 @@ test("ConfigureModal reserves channel configuration fields for administrators", 
     },
   });
 
-  const body = JSON.stringify(rendered);
-  assert.match(body, /extensions\.setupFieldsAdminRequired/);
+  const body = JSON.stringify(view.rendered);
+  assertAdminSetupFieldsNotice(view);
   assert.doesNotMatch(body, /Public webhook URL/);
   assert.doesNotMatch(body, /extension-field-public_url/);
   assert.doesNotMatch(body, /extensions\.noConfigRequired/);
@@ -387,6 +392,17 @@ function renderFirstComponent(rendered, component, props = {}) {
     if (child) return child;
   }
   return null;
+}
+
+function assertAdminSetupFieldsNotice(view) {
+  const notice = renderFirstComponent(
+    view.rendered,
+    view.AdminSetupFieldsNotice,
+  );
+  assert.match(
+    JSON.stringify(notice),
+    /extensions\.setupFieldsAdminRequired/,
+  );
 }
 
 // Walks the rendered html-template tree and returns the first captured
@@ -471,6 +487,37 @@ test("ConfigureModal keeps pairing blockers visible beside the pairing panel", (
   assert.doesNotMatch(body, /internal-pairing-correlation/);
 });
 
+test("ConfigureModal keeps administrator fields visible beside the pairing panel", () => {
+  const view = renderModal({
+    surfaces: webCodeSurfaces,
+    packageRef: { kind: "extension", id: "acme-messenger" },
+    displayName: "Acme Messenger",
+    setupResult: {
+      phase: "setup_needed",
+      blockers: [],
+      secrets: [],
+      fields: [
+        {
+          name: "public_url",
+          prompt: "Public webhook URL",
+          optional: false,
+        },
+      ],
+      onboarding: null,
+      isLoading: false,
+      error: null,
+    },
+  });
+
+  assert.equal(
+    renderedContainsComponent(view.rendered, view.PairingWebCodePanel),
+    true,
+  );
+  const body = JSON.stringify(view.rendered);
+  assertAdminSetupFieldsNotice(view);
+  assert.doesNotMatch(body, /Public webhook URL/);
+});
+
 test("ConfigureModal keeps the web-code panel for an installed (non-pairing) lifecycle state", () => {
   const view = renderModal({
     surfaces: webCodeSurfaces,
@@ -528,7 +575,7 @@ test("ConfigureModal renders Slack OAuth without opening the popup automatically
 });
 
 test("ConfigureModal never renders tenant administrator fields in caller setup", () => {
-  const { rendered } = renderModal({
+  const view = renderModal({
     surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "provider-neutral-channel" },
     channel: "provider-neutral-channel",
@@ -562,10 +609,10 @@ test("ConfigureModal never renders tenant administrator fields in caller setup",
     },
   });
 
-  const body = JSON.stringify(rendered);
+  const body = JSON.stringify(view.rendered);
   assert.match(body, /Connect your account/);
   assert.match(body, /extensions\.authorize/);
-  assert.match(body, /extensions\.setupFieldsAdminRequired/);
+  assertAdminSetupFieldsNotice(view);
   assert.doesNotMatch(body, /Tenant deployment provider id/);
   assert.doesNotMatch(body, /deployment_provider_id/);
 });
@@ -1067,7 +1114,7 @@ test("ConfigureModal routes a device-link credential to the link panel, never a 
           setup: { kind: "device_link" },
         },
       ],
-      fields: [],
+      fields: [{ name: "tenant_url", prompt: "Tenant URL" }],
       isLoading: false,
       error: null,
     },
@@ -1084,6 +1131,8 @@ test("ConfigureModal routes a device-link credential to the link panel, never a 
     "a device link is not a host-issued pairing code",
   );
   const body = JSON.stringify(view.rendered);
+  assertAdminSetupFieldsNotice(view);
+  assert.doesNotMatch(body, /Tenant URL/);
   assert.ok(!body.includes("pairing.placeholder"), "no secret paste box");
   assert.ok(
     !body.includes("extensions.noConfigRequired"),

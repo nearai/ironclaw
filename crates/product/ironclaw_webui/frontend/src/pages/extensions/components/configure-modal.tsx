@@ -176,6 +176,7 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
         title={t("extensions.configureName").replace("{name}", extensionName)}
       >
         <SetupReadiness phase={phase} blockers={readinessBlockers} />
+        <AdminSetupFieldsNotice required={fields.length > 0} />
         <DeviceLinkPanel
           provider={deviceLinkSecret.provider}
           extensionName={packageId}
@@ -196,6 +197,7 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
         title={t("extensions.configureName").replace("{name}", extensionName)}
       >
         <SetupReadiness phase={phase} blockers={readinessBlockers} />
+        <AdminSetupFieldsNotice required={fields.length > 0} />
         <PairingWebCodePanel
           extensionId={packageId}
           displayName={extensionName}
@@ -249,6 +251,7 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
         title={t("extensions.configureName").replace("{name}", extensionName)}
       >
         <SetupReadiness phase={phase} blockers={readinessBlockers} />
+        <AdminSetupFieldsNotice required={fields.length > 0} />
         <fieldset className="space-y-2" aria-label={t("extensions.customMcpAuthHint")}>
           {authChoices.map((kind) => (
             <label
@@ -310,14 +313,7 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
       title={t("extensions.configureName").replace("{name}", extensionName)}
     >
       <SetupReadiness phase={phase} blockers={readinessBlockers} />
-      {fields.length > 0 && (
-        <div
-          role="status"
-          className="mb-4 rounded-md border border-white/12 bg-white/[0.04] px-3 py-2 text-xs text-iron-300"
-        >
-          {t("extensions.setupFieldsAdminRequired")}
-        </div>
-      )}
+      <AdminSetupFieldsNotice required={fields.length > 0} />
       {onboarding?.credential_instructions &&
       (
         <p className="mb-4 text-sm leading-6 text-iron-300">
@@ -505,6 +501,19 @@ function SetupReadiness({ phase, blockers = [] }) {
           </ul>
         </div>
       )}
+    </div>
+  );
+}
+
+function AdminSetupFieldsNotice({ required }) {
+  const t = useT();
+  if (!required) return null;
+  return (
+    <div
+      role="status"
+      className="mb-4 rounded-md border border-white/12 bg-white/[0.04] px-3 py-2 text-xs text-iron-300"
+    >
+      {t("extensions.setupFieldsAdminRequired")}
     </div>
   );
 }
