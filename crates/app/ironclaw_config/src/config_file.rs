@@ -152,6 +152,18 @@ pub struct MemorySection {
     /// this field existed. Disabled is expressed by omitting the key, never by
     /// a sentinel value — `0` is rejected here rather than quietly meaning
     /// "after every turn" or "off".
+    ///
+    /// Choosing a value: `10` is a reasonable starting point — it matches the
+    /// interval the Hermes agent uses for its own memory-review fork. This is
+    /// a RATE, not a deadline: too frequent burns tokens re-reading a document
+    /// that has not changed, too rare lets redundancy accumulate past the point
+    /// where a single pass can fix it. Counted per user, and only completed
+    /// conversation turns count.
+    ///
+    /// Requires a memory binding whose provider can replace the standing
+    /// document — today the host-bundled native provider. Setting this against
+    /// another binding fails startup rather than running passes that cannot
+    /// write.
     #[serde(default)]
     pub curation_interval_turns: Option<u32>,
 }

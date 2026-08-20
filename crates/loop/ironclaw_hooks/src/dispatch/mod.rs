@@ -144,9 +144,10 @@ pub(crate) enum EventTriggeredHookImpl {
 }
 
 /// Trait object for an `after_turn` lifecycle hook. Only one variant, because
-/// the point is privileged-only: [`HookDispatcher::install_after_turn`]
-/// refuses `Installed` and `SelfAuthored` trust classes, so there is no
-/// restricted impl to hold. Sealed to this crate for the same reason as
+/// the point is privileged-only: the only installers that exist are
+/// [`HookDispatcher::install_builtin_after_turn`] and
+/// [`HookDispatcher::install_trusted_after_turn`], so there is no restricted
+/// impl to hold. Sealed to this crate for the same reason as
 /// [`BeforeCapabilityHookImpl`].
 pub(crate) enum AfterTurnHookImpl {
     Privileged(Box<dyn PrivilegedAfterTurnHook>),
@@ -765,7 +766,8 @@ impl HookDispatcher {
             HookPointSpec::AfterTurn => {
                 return Err(crate::error::HookError::RegistryConstruction(
                     "after_turn hooks register through their own install \
-                     path (`install_after_turn`), not `install_observer`; \
+                     path (`install_builtin_after_turn` / \
+                     `install_trusted_after_turn`), not `install_observer`; \
                      that point dispatches lifecycle implementations, not \
                      observers"
                         .to_string(),
@@ -958,43 +960,64 @@ impl HookDispatcher {
         )
     }
 
-    // ── After-turn installer ───────────────────────────────────────────────
+    // ── After-turn installers (tier-specific; see AGENTS.md) ──────────────
 
-    /// Install a privileged `after_turn` lifecycle hook.
+    /// Install a builtin-tier privileged `after_turn` lifecycle hook.
     ///
-    /// The point is privileged-only, so this installer rejects
-    /// [`HookTrustClass::Installed`] and [`HookTrustClass::SelfAuthored`] at
-    /// install time rather than at dispatch: an `after_turn` hook may start
-    /// follow-on work off a terminal run, which is authority neither tier
-    /// carries. The reject mirrors the registry's phase-vs-trust gate — a
-    /// [`crate::error::HookError::RegistryConstruction`] naming both the
-    /// tier and the point.
+    /// The point is privileged-only, and that is expressed in the INSTALLER
+    /// SET rather than in a runtime check: only this and
+    /// [`Self::install_trusted_after_turn`] exist, so an `Installed` or
+    /// `SelfAuthored` binding at `after_turn` is not a call anyone can write.
+    /// The tier matters here because an `after_turn` hook may start follow-on
+    /// work off a terminal run, which is authority neither untrusted tier
+    /// carries — mirrored in the trust matrix, where
+    /// [`HookTrustClass::permits_kind_by_default`] denies
+    /// [`crate::trust::DecisionKind::Lifecycle`] to both.
+    ///
+    /// The body is duplicated with [`Self::install_trusted_after_turn`] rather
+    /// than shared behind a `trust_class` parameter, matching the
+    /// `install_builtin_*` / `install_trusted_*` siblings: the duplication is
+    /// what makes an invalid tier unrepresentable instead of merely rejected.
     ///
     /// The binding is always registered at [`HookPointSpec::AfterTurn`];
     /// there is no `point` parameter, because this installer is only for
     /// that point.
-    pub(crate) fn install_after_turn(
+    pub(crate) fn install_builtin_after_turn(
         &mut self,
         hook_id: HookId,
         phase: HookPhase,
-        trust_class: HookTrustClass,
         hook: Box<dyn PrivilegedAfterTurnHook>,
     ) -> Result<(), crate::error::HookError> {
-        match trust_class {
-            HookTrustClass::Builtin | HookTrustClass::Trusted => {}
-            HookTrustClass::Installed | HookTrustClass::SelfAuthored => {
-                return Err(crate::error::HookError::RegistryConstruction(format!(
-                    "{trust_class:?}-tier hook cannot register at point \
-                     {:?}: after_turn is privileged-only because it may \
-                     start follow-on work after a terminal run",
-                    HookPointSpec::AfterTurn
-                )));
-            }
-        }
         let binding = HookBinding {
             hook_id,
             hook_version: HookVersion::ONE,
-            trust_class,
+            trust_class: HookTrustClass::Builtin,
+            phase,
+            priority: HookPriority::DEFAULT,
+            point: HookPointSpec::AfterTurn,
+            event_kind_filter: None,
+            owning_extension: None,
+            scope: HookBindingScope::Global,
+            poisoned: false,
+        };
+        self.insert_binding(binding)?;
+        self.after_turn
+            .insert(hook_id, AfterTurnHookImpl::Privileged(hook));
+        Ok(())
+    }
+
+    /// Install a trusted-tier privileged `after_turn` lifecycle hook. See
+    /// [`Self::install_builtin_after_turn`] for the tier contract.
+    pub(crate) fn install_trusted_after_turn(
+        &mut self,
+        hook_id: HookId,
+        phase: HookPhase,
+        hook: Box<dyn PrivilegedAfterTurnHook>,
+    ) -> Result<(), crate::error::HookError> {
+        let binding = HookBinding {
+            hook_id,
+            hook_version: HookVersion::ONE,
+            trust_class: HookTrustClass::Trusted,
             phase,
             priority: HookPriority::DEFAULT,
             point: HookPointSpec::AfterTurn,
@@ -2473,18 +2496,31 @@ impl HookDispatcherBuilder {
         Ok(self)
     }
 
-    /// Install a privileged `after_turn` lifecycle hook. See
-    /// [`HookDispatcher::install_after_turn`] (private) for the trust
-    /// contract; `Installed` and `SelfAuthored` are rejected here.
-    pub fn install_after_turn(
+    /// Install a builtin-tier privileged `after_turn` lifecycle hook. See
+    /// [`HookDispatcher::install_builtin_after_turn`] (private) for the trust
+    /// contract: the point is privileged-only, and there is deliberately no
+    /// installed/self-authored installer to call.
+    pub fn install_builtin_after_turn(
         mut self,
         hook_id: HookId,
         phase: HookPhase,
-        trust_class: HookTrustClass,
         hook: Box<dyn PrivilegedAfterTurnHook>,
     ) -> Result<Self, crate::error::HookError> {
         self.dispatcher
-            .install_after_turn(hook_id, phase, trust_class, hook)?;
+            .install_builtin_after_turn(hook_id, phase, hook)?;
+        Ok(self)
+    }
+
+    /// Install a trusted-tier privileged `after_turn` lifecycle hook. See
+    /// [`Self::install_builtin_after_turn`].
+    pub fn install_trusted_after_turn(
+        mut self,
+        hook_id: HookId,
+        phase: HookPhase,
+        hook: Box<dyn PrivilegedAfterTurnHook>,
+    ) -> Result<Self, crate::error::HookError> {
+        self.dispatcher
+            .install_trusted_after_turn(hook_id, phase, hook)?;
         Ok(self)
     }
 
@@ -3753,6 +3789,34 @@ mod tests {
             )
             .expect("install_installed_before_prompt signature stable");
 
+        // ── after_turn: the two privileged tier-specific installers ────────
+        // There is deliberately no installed-tier sibling here: the point may
+        // start follow-on work off a terminal run (see
+        // `after_turn_has_no_untrusted_installer`).
+        let builtin_turn = HookId::for_builtin("loader::builtin::turn", HookVersion::ONE);
+        dispatcher
+            .install_builtin_after_turn(
+                builtin_turn,
+                HookPhase::Telemetry,
+                Box::new(RecordingAfterTurnHook {
+                    label: "loader-builtin-turn",
+                    log: Arc::new(TurnLog::default()),
+                }),
+            )
+            .expect("install_builtin_after_turn signature stable");
+
+        let trusted_turn = HookId::for_builtin("loader::trusted::turn", HookVersion::ONE);
+        dispatcher
+            .install_trusted_after_turn(
+                trusted_turn,
+                HookPhase::Telemetry,
+                Box::new(RecordingAfterTurnHook {
+                    label: "loader-trusted-turn",
+                    log: Arc::new(TurnLog::default()),
+                }),
+            )
+            .expect("install_trusted_after_turn signature stable");
+
         // Verify each binding carries the trust class matching its installer.
         // The loader's responsibility is to pick the installer that matches
         // the *source* of the hook; this test confirms that, given a correct
@@ -3761,6 +3825,7 @@ mod tests {
         let by_id: std::collections::HashMap<HookId, HookTrustClass> = registry
             .active_at(HookPointSpec::BeforeCapability)
             .chain(registry.active_at(HookPointSpec::BeforePrompt))
+            .chain(registry.active_at(HookPointSpec::AfterTurn))
             .map(|b| (b.hook_id, b.trust_class))
             .collect();
         assert_eq!(by_id.get(&builtin_cap), Some(&HookTrustClass::Builtin));
@@ -3772,6 +3837,8 @@ mod tests {
             by_id.get(&installed_prompt),
             Some(&HookTrustClass::Installed)
         );
+        assert_eq!(by_id.get(&builtin_turn), Some(&HookTrustClass::Builtin));
+        assert_eq!(by_id.get(&trusted_turn), Some(&HookTrustClass::Trusted));
     }
 
     // ── C5 regression: dedupe + mid-dispatch poison re-check ────────────────
@@ -5214,41 +5281,40 @@ mod tests {
         }
     }
 
-    /// `after_turn` is privileged-only: the point may start follow-on work
-    /// off a terminal run, which is authority the untrusted tiers do not
-    /// carry. Reject at install time, not at dispatch, so a misconfigured
-    /// loader fails loud instead of registering an inert binding.
+    /// `after_turn` is privileged-only, and after the #7770 audit that is a
+    /// property of the API SURFACE, not of a runtime check: there is no
+    /// installed- or self-authored-tier `after_turn` installer to call, on the
+    /// dispatcher or on the builder. This pin is documentation for that — a
+    /// source scan, because "a function does not exist" cannot be asserted by
+    /// calling it. Adding an installed-tier installer for this point, or
+    /// reintroducing the trust-class-parameterized one, fails here — which is
+    /// the point: the loader must not be able to register a third-party hook
+    /// at a point that may start follow-on work off a terminal run.
+    ///
+    /// The needles are assembled with `concat!` so this test's own source text
+    /// does not contain them: a scan of the file it lives in would otherwise
+    /// match itself and fail permanently.
     #[test]
-    fn install_after_turn_rejects_untrusted_tiers() {
-        for (label, trust_class) in [
-            ("installed", HookTrustClass::Installed),
-            ("self-authored", HookTrustClass::SelfAuthored),
+    fn after_turn_has_no_untrusted_installer() {
+        let source = include_str!("mod.rs");
+        for forbidden in [
+            concat!("install_installed_", "after_turn"),
+            concat!("install_self_authored_", "after_turn"),
+            concat!("fn install_", "after_turn("),
         ] {
-            let mut dispatcher = HookDispatcher::new(HookRegistry::new());
-            let err = dispatcher
-                .install_after_turn(
-                    ext_hook_id(label),
-                    HookPhase::Telemetry,
-                    trust_class,
-                    Box::new(RecordingAfterTurnHook {
-                        label: "x",
-                        log: Arc::new(TurnLog::default()),
-                    }),
-                )
-                .expect_err("untrusted tier must be rejected at after_turn");
-            match err {
-                crate::error::HookError::RegistryConstruction(msg) => {
-                    assert!(
-                        msg.contains("AfterTurn") && msg.contains(&format!("{trust_class:?}")),
-                        "unexpected error message: {msg}"
-                    );
-                }
-                other => panic!("expected RegistryConstruction, got {other:?}"),
-            }
-            assert_eq!(
-                dispatcher.count_total_bindings(),
-                0,
-                "rejected install must not leave a binding behind"
+            assert!(
+                !source.contains(forbidden),
+                "`{forbidden}` must not exist: after_turn is privileged-only, \
+                 enforced by which installers exist"
+            );
+        }
+        // The other half of the same contract, stated where a reader looks for
+        // it: the trust matrix denies the lifecycle decision kind to both
+        // untrusted tiers, so even a future generic path could not admit them.
+        for class in [HookTrustClass::Installed, HookTrustClass::SelfAuthored] {
+            assert!(
+                !class.permits_kind_by_default(crate::trust::DecisionKind::Lifecycle),
+                "{class:?} must not carry the lifecycle decision kind"
             );
         }
     }
@@ -5273,7 +5339,7 @@ mod tests {
         match err {
             crate::error::HookError::RegistryConstruction(msg) => {
                 assert!(
-                    msg.contains("after_turn") && msg.contains("install_after_turn"),
+                    msg.contains("after_turn") && msg.contains("install_builtin_after_turn"),
                     "unexpected error message: {msg}"
                 );
             }
@@ -5293,10 +5359,9 @@ mod tests {
             ("policy-phase-first", HookPhase::Policy),
         ] {
             dispatcher
-                .install_after_turn(
+                .install_builtin_after_turn(
                     ext_hook_id(label),
                     phase,
-                    HookTrustClass::Builtin,
                     Box::new(RecordingAfterTurnHook {
                         label,
                         log: Arc::clone(&log),
@@ -5327,18 +5392,16 @@ mod tests {
         let panicking = ext_hook_id("at-panic");
         let mut dispatcher = HookDispatcher::new(HookRegistry::new());
         dispatcher
-            .install_after_turn(
+            .install_builtin_after_turn(
                 panicking,
                 HookPhase::Policy,
-                HookTrustClass::Builtin,
                 Box::new(PanickingAfterTurnHook),
             )
             .expect("install ok");
         dispatcher
-            .install_after_turn(
+            .install_trusted_after_turn(
                 ext_hook_id("at-survivor"),
                 HookPhase::Telemetry,
-                HookTrustClass::Trusted,
                 Box::new(RecordingAfterTurnHook {
                     label: "at-survivor",
                     log: Arc::clone(&log),
@@ -5389,18 +5452,12 @@ mod tests {
         let slow = ext_hook_id("at-slow");
         let mut dispatcher = HookDispatcher::new(HookRegistry::new());
         dispatcher
-            .install_after_turn(
-                slow,
-                HookPhase::Policy,
-                HookTrustClass::Builtin,
-                Box::new(SlowAfterTurnHook),
-            )
+            .install_builtin_after_turn(slow, HookPhase::Policy, Box::new(SlowAfterTurnHook))
             .expect("install ok");
         dispatcher
-            .install_after_turn(
+            .install_builtin_after_turn(
                 ext_hook_id("at-after-slow"),
                 HookPhase::Telemetry,
-                HookTrustClass::Builtin,
                 Box::new(RecordingAfterTurnHook {
                     label: "at-after-slow",
                     log: Arc::clone(&log),

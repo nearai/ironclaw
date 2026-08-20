@@ -541,11 +541,12 @@ impl RecordingAfterTurnHook {
     }
 }
 
-/// Build a dispatcher carrying `hook` at the `after_turn` point, exactly as a
-/// composition would.
-fn after_turn_dispatcher(
+/// Build the per-run dispatcher FACTORY carrying `hook` at the `after_turn`
+/// point, exactly as a composition does: one long-lived hook, one fresh
+/// dispatcher per run.
+fn after_turn_dispatchers(
     hook: Arc<RecordingAfterTurnHook>,
-) -> Arc<ironclaw_hooks::dispatch::HookDispatcher> {
+) -> ironclaw_turn_runner::loop_driver_host::HookDispatcherFactory {
     struct Forwarding(Arc<RecordingAfterTurnHook>);
 
     #[async_trait]
@@ -555,28 +556,33 @@ fn after_turn_dispatcher(
         }
     }
 
-    ironclaw_hooks::dispatch::HookDispatcherBuilder::new(
-        ironclaw_hooks::registry::HookRegistry::new(),
-    )
-    .install_after_turn(
-        ironclaw_hooks::identity::HookId::for_builtin(
-            "ironclaw_turn_runner::tests::recording_after_turn_hook",
-            ironclaw_hooks::identity::HookVersion::ONE,
-        ),
-        ironclaw_hooks::ordering::HookPhase::Telemetry,
-        ironclaw_hooks::trust::HookTrustClass::Builtin,
-        Box::new(Forwarding(hook)),
-    )
-    .expect("the recording hook installs")
-    .build_arc()
+    Arc::new(move || {
+        ironclaw_hooks::dispatch::HookDispatcherBuilder::new(
+            ironclaw_hooks::registry::HookRegistry::new(),
+        )
+        .install_builtin_after_turn(
+            ironclaw_hooks::identity::HookId::for_builtin(
+                "ironclaw_turn_runner::tests::recording_after_turn_hook",
+                ironclaw_hooks::identity::HookVersion::ONE,
+            ),
+            ironclaw_hooks::ordering::HookPhase::Telemetry,
+            Box::new(Forwarding(Arc::clone(&hook))),
+        )
+        .expect("the recording hook installs")
+        .build_arc()
+    })
 }
 
-/// Run one claimed run to completion through the real executor with the
-/// dispatcher attached, and report what the hook saw.
-async fn observed_after_turn_contexts(
+/// Assemble the real executor over a permissive transition port, with the
+/// per-run `after_turn` dispatcher factory attached.
+fn after_turn_executor(
     context: &LoopRunContext,
-    claimed: ClaimedTurnRun,
-) -> Vec<ironclaw_hooks::points::AfterTurnHookContext> {
+    claimed: &ClaimedTurnRun,
+    dispatchers: ironclaw_turn_runner::loop_driver_host::HookDispatcherFactory,
+) -> (
+    RebornTurnRunExecutor,
+    Arc<dyn ironclaw_processes::ProcessTransitionPort<Error = ironclaw_turns::TurnError>>,
+) {
     let descriptor = context.resolved_run_profile.loop_driver.clone();
     let mut registry = DriverRegistry::new();
     registry
@@ -596,7 +602,6 @@ async fn observed_after_turn_contexts(
         Arc::clone(&transitions),
         Arc::new(VerifiedEvidencePort),
     ));
-    let hook = Arc::new(RecordingAfterTurnHook::default());
     let executor = RebornTurnRunExecutor::new(
         applier,
         Arc::new(registry),
@@ -612,7 +617,19 @@ async fn observed_after_turn_contexts(
         }),
         None,
     )
-    .with_after_turn_hooks(after_turn_dispatcher(Arc::clone(&hook)));
+    .with_after_turn_hook_dispatcher_factory(dispatchers);
+    (executor, transitions)
+}
+
+/// Run one claimed run to completion through the real executor with the
+/// dispatcher factory attached, and report what the hook saw.
+async fn observed_after_turn_contexts(
+    context: &LoopRunContext,
+    claimed: ClaimedTurnRun,
+) -> Vec<ironclaw_hooks::points::AfterTurnHookContext> {
+    let hook = Arc::new(RecordingAfterTurnHook::default());
+    let (executor, transitions) =
+        after_turn_executor(context, &claimed, after_turn_dispatchers(Arc::clone(&hook)));
 
     executor
         .execute_claimed_run(claimed, transitions)
@@ -668,5 +685,92 @@ async fn an_unbound_run_never_reaches_the_after_turn_hook() {
     assert!(
         observed.is_empty(),
         "a background run must not fire the point: each pass would schedule its successor"
+    );
+}
+
+/// Hook poison is RUN-scoped. A hook that panics gets its binding poisoned for
+/// the rest of that run's dispatch — and the next run must try it again.
+///
+/// This is the property a process-lifetime dispatcher silently breaks: one
+/// panic in one turn would bar the hook until the process restarted, so
+/// curation (or any lifecycle hook) would go dead with nothing reporting it.
+/// The executor therefore mints a fresh dispatcher per run, and this test
+/// drives TWO runs through ONE long-lived executor to pin that.
+#[tokio::test]
+async fn a_panicking_hook_is_retried_on_the_next_run() {
+    /// Panics the first time it is invoked, records every time after.
+    #[derive(Default)]
+    struct PanicOnceHook {
+        invocations: std::sync::Mutex<usize>,
+        observed: std::sync::Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl ironclaw_hooks::sink::PrivilegedAfterTurnHook for PanicOnceHook {
+        async fn on_turn(&self, _ctx: &ironclaw_hooks::points::AfterTurnHookContext) {
+            let first = {
+                let mut invocations = self.invocations.lock().expect("invocations lock");
+                *invocations += 1;
+                *invocations == 1
+            };
+            assert!(!first, "intentional first-dispatch panic");
+            *self.observed.lock().expect("observed lock") += 1;
+        }
+    }
+
+    let context = ironclaw_agent_loop::test_support::test_run_context("executor-after-turn-poison");
+    let claimed = claimed_run_as(
+        &context,
+        Some(TurnActor::new(
+            UserId::new("user-after-turn").expect("valid user id"),
+        )),
+        RunProfileId::interactive_default(),
+    );
+
+    let hook = Arc::new(PanicOnceHook::default());
+    let dispatchers: ironclaw_turn_runner::loop_driver_host::HookDispatcherFactory = {
+        let hook = Arc::clone(&hook);
+        Arc::new(move || {
+            struct Forwarding(Arc<PanicOnceHook>);
+            #[async_trait]
+            impl ironclaw_hooks::sink::PrivilegedAfterTurnHook for Forwarding {
+                async fn on_turn(&self, ctx: &ironclaw_hooks::points::AfterTurnHookContext) {
+                    self.0.on_turn(ctx).await;
+                }
+            }
+            ironclaw_hooks::dispatch::HookDispatcherBuilder::new(
+                ironclaw_hooks::registry::HookRegistry::new(),
+            )
+            .install_builtin_after_turn(
+                ironclaw_hooks::identity::HookId::for_builtin(
+                    "ironclaw_turn_runner::tests::panic_once_after_turn_hook",
+                    ironclaw_hooks::identity::HookVersion::ONE,
+                ),
+                ironclaw_hooks::ordering::HookPhase::Telemetry,
+                Box::new(Forwarding(Arc::clone(&hook))),
+            )
+            .expect("the panicking hook installs")
+            .build_arc()
+        })
+    };
+
+    let (executor, transitions) = after_turn_executor(&context, &claimed, dispatchers);
+
+    for _ in 0..2 {
+        executor
+            .execute_claimed_run(claimed.clone(), Arc::clone(&transitions))
+            .await
+            .expect("the run applies its exit");
+    }
+
+    assert_eq!(
+        *hook.invocations.lock().expect("invocations lock"),
+        2,
+        "the second run must reach the hook again: poison cannot outlive the run it happened in"
+    );
+    assert_eq!(
+        *hook.observed.lock().expect("observed lock"),
+        1,
+        "the first dispatch panicked; the second one ran to completion"
     );
 }

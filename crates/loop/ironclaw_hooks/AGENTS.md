@@ -141,6 +141,12 @@ the `tier_specific_installers_are_documented_as_loader_contract` test in
   `ironclaw_prompt_envelope` crate, which this crate already depends on).
 - A hook that demonstrates protocol violation (timeout, panic, malformed
   decision) gets its slot poisoned for the rest of the current turn run.
+  Poison is therefore RUN-scoped, and every consumer must hold a dispatcher
+  *factory* rather than a dispatcher: the `after_turn` seam mints one per
+  terminal run (`RebornTurnRunExecutor::with_after_turn_hook_dispatcher_factory`),
+  exactly as the loop middleware mints one per host build. A process-lifetime
+  dispatcher would silently turn one bad run into a hook that stays dead until
+  the process restarts.
 - **The tier-specific installer *names* are load-bearing. Do not collapse the
   trust-class x hook-point installers into one generic,
   trust-class-parameterized installer.**

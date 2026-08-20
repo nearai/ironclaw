@@ -17,12 +17,18 @@
 //!   follow-on work to, and [`AfterTurnHookContext::user_id`] is non-optional
 //!   precisely because of this guard.
 //!
-//! Any TERMINAL state of an ordinary actor-bearing conversation run fires the
+//! - **Only a TERMINAL state fires the point.** A blocked run (approval, auth,
+//!   resource, dependent run, external tool) has not finished: it will be
+//!   resumed and reach a terminal state later, so firing on the blocked state
+//!   too would deliver the SAME turn to every hook twice — a curation-style
+//!   hook would count one turn twice and a notifying hook would announce a
+//!   turn that is still running. The predicate is
+//!   [`TurnStatus::is_terminal`], never a local list, so a status added to the
+//!   kernel is judged by the kernel's own definition here.
+//!
+//! Any terminal state of an ordinary actor-bearing conversation run fires the
 //! point; `completed` distinguishes success from failure or cancellation, and a
-//! hook that only cares about successes checks that flag. The call site invokes
-//! this only after the run has reached a terminal state, so a non-terminal
-//! status is not a case this function is asked to judge — it derives a context
-//! from whatever status the state carries and lets `completed` speak for it.
+//! hook that only cares about successes checks that flag.
 
 use ironclaw_hooks::points::AfterTurnHookContext;
 use ironclaw_host_api::turn::RunProfileId;
@@ -62,6 +68,16 @@ fn is_conversation_turn_profile(profile: &RunProfileId) -> bool {
 /// Derive the `after_turn` context from a terminal run, or `None` when this run
 /// must not fire the point.
 pub fn after_turn_hook_context(state: &TurnRunState) -> Option<AfterTurnHookContext> {
+    // Terminality first: the point is "this turn is over". A gated run that is
+    // later resumed would otherwise fire it once on the block and once on the
+    // real ending — the same turn delivered twice.
+    if !state.status.is_terminal() {
+        debug!(
+            status = ?state.status,
+            "after-turn hooks: run is not terminal; not a hook trigger"
+        );
+        return None;
+    }
     if !is_conversation_turn_profile(&state.resolved_run_profile_id) {
         debug!(
             profile = state.resolved_run_profile_id.as_str(),

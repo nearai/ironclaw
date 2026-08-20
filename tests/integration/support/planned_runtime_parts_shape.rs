@@ -40,7 +40,7 @@ pub struct DefaultPlannedRuntimePartsShape {
     pub hook_security_audit_sink: bool,
     pub turn_event_sink: bool,
     pub hook_dispatcher_builder_factory: bool,
-    pub after_turn_hook_dispatcher_factory: bool,
+    pub after_turn_hook_wiring: bool,
     pub communication_context_provider: bool,
     pub scheduler_wake_wiring: bool,
 }
@@ -95,7 +95,7 @@ where
         hook_security_audit_sink,
         turn_event_sink,
         hook_dispatcher_builder_factory,
-        after_turn_hook_dispatcher_factory,
+        after_turn_hook_wiring,
         communication_context_provider,
         scheduler_wake_wiring,
     } = parts;
@@ -117,7 +117,7 @@ where
         hook_security_audit_sink: hook_security_audit_sink.is_some(),
         turn_event_sink: turn_event_sink.is_some(),
         hook_dispatcher_builder_factory: hook_dispatcher_builder_factory.is_some(),
-        after_turn_hook_dispatcher_factory: after_turn_hook_dispatcher_factory.is_some(),
+        after_turn_hook_wiring: after_turn_hook_wiring.is_some(),
         communication_context_provider: communication_context_provider.is_some(),
         scheduler_wake_wiring: scheduler_wake_wiring.is_some(),
     }

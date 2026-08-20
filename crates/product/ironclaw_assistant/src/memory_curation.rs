@@ -47,7 +47,6 @@ use ironclaw_hooks::ordering::HookPhase;
 use ironclaw_hooks::points::AfterTurnHookContext;
 use ironclaw_hooks::registry::HookRegistry;
 use ironclaw_hooks::sink::PrivilegedAfterTurnHook;
-use ironclaw_hooks::trust::HookTrustClass;
 use ironclaw_host_api::ids::{CapabilityId, TenantId, UserId};
 use ironclaw_host_api::output::OutputContract;
 use ironclaw_host_api::prepared_context::TurnLimits;
@@ -71,17 +70,6 @@ const MEMORY_CURATION_KICKOFF: &str =
 
 /// Name of the structured report contract.
 const MEMORY_CURATION_OUTPUT_NAME: &str = "memory_curation_report_v1";
-
-/// How many completed user turns pass between curation runs, by default.
-///
-/// Ten matches the interval the Hermes agent uses for its own memory-review
-/// fork. It is a rate, not a deadline: too frequent burns tokens re-reading a
-/// document that has not changed, too rare lets redundancy accumulate past the
-/// point where a single pass can fix it.
-// Built without a panic-shaped branch: the production panic baseline scans
-// syntactically, so even a compile-time-unreachable `unreachable!()` counts.
-// `MIN` is 1; saturating_add is const and cannot fail.
-pub const DEFAULT_CURATION_INTERVAL_TURNS: NonZeroU32 = NonZeroU32::MIN.saturating_add(9);
 
 /// Iteration ceiling for one pass: read, decide, write, report, plus room for
 /// one retry. A pass that cannot finish in this many steps is not converging,
@@ -210,10 +198,6 @@ impl MemoryCurationService {
         }
     }
 
-    pub fn with_default_interval(submitter: Arc<dyn CurationPassSubmitter>) -> Self {
-        Self::new(submitter, DEFAULT_CURATION_INTERVAL_TURNS)
-    }
-
     /// Count this turn and report whether it triggers a pass.
     ///
     /// A poisoned lock declines rather than panicking: this runs on a
@@ -295,7 +279,48 @@ impl MemoryCurationService {
 const MEMORY_CURATION_HOOK_PATH: &str =
     "ironclaw_assistant::memory_curation::MemoryCurationService";
 
-/// Assemble the `after_turn` dispatcher that carries the curation hook.
+/// Mints the per-run `after_turn` dispatcher carrying the curation hook.
+///
+/// A FACTORY of dispatchers, not a dispatcher: the hook framework scopes
+/// poison (a panicking or timed-out hook) to one turn run by contract, so the
+/// executor mints a fresh dispatcher per terminal run. One process-lifetime
+/// dispatcher would turn a single bad run into curation being off until the
+/// process restarts, with nothing surfacing it.
+pub type AfterTurnDispatcherFactory = Arc<dyn Fn() -> Arc<HookDispatcher> + Send + Sync>;
+
+/// Forwards the point to the one long-lived service.
+///
+/// Every per-run dispatcher installs a fresh box, all pointing at the SAME
+/// [`MemoryCurationService`]: the per-owner turn counters are the policy's
+/// whole state and must accumulate across runs. A service minted per run would
+/// count every turn as the first one and never reach an interval.
+struct CurationHookBinding(Arc<MemoryCurationService>);
+
+#[async_trait]
+impl PrivilegedAfterTurnHook for CurationHookBinding {
+    async fn on_turn(&self, ctx: &AfterTurnHookContext) {
+        self.0.on_turn(ctx).await;
+    }
+}
+
+/// Build one dispatcher over the shared service.
+fn curation_dispatcher(
+    service: &Arc<MemoryCurationService>,
+) -> Result<Arc<HookDispatcher>, String> {
+    Ok(HookDispatcherBuilder::new(HookRegistry::new())
+        .install_builtin_after_turn(
+            HookId::for_builtin(MEMORY_CURATION_HOOK_PATH, HookVersion::ONE),
+            // Telemetry, the last phase: the run this reacts to is already
+            // terminal, so the hook enforces no contract and gates nothing —
+            // it only reads the outcome and may start its own work.
+            HookPhase::Telemetry,
+            Box::new(CurationHookBinding(Arc::clone(service))),
+        )
+        .map_err(|error| format!("could not install the memory curation hook: {error}"))?
+        .build_arc())
+}
+
+/// Assemble the `after_turn` dispatcher factory that carries the curation hook.
 ///
 /// Composition calls this instead of assembling the parts itself: which hook,
 /// at which phase, under which trust class, is a decision belonging to the
@@ -303,30 +328,26 @@ const MEMORY_CURATION_HOOK_PATH: &str =
 /// want curation does not call this at all — there is no "disabled" dispatcher
 /// (see [`MemoryCurationService::new`] on why disabling is never a sentinel
 /// interval).
-///
-/// The dispatcher is deliberately its OWN small dispatcher rather than the
-/// per-run one the loop middleware builds: `after_turn` fires once per run from
-/// the executor, which holds a single process-lifetime `Arc`, while the
-/// middleware dispatchers are minted per run (and, for third-party bindings,
-/// per tenant). Sharing one would mean rebuilding this binding on every run for
-/// no gain.
-pub fn after_turn_curation_dispatcher(
+pub fn after_turn_curation_dispatcher_factory(
     submitter: Arc<dyn CurationPassSubmitter>,
     interval_turns: NonZeroU32,
-) -> Result<Arc<HookDispatcher>, String> {
-    let service = MemoryCurationService::new(submitter, interval_turns);
-    Ok(HookDispatcherBuilder::new(HookRegistry::new())
-        .install_after_turn(
-            HookId::for_builtin(MEMORY_CURATION_HOOK_PATH, HookVersion::ONE),
-            // Telemetry, the last phase: the run this reacts to is already
-            // terminal, so the hook enforces no contract and gates nothing —
-            // it only reads the outcome and may start its own work.
-            HookPhase::Telemetry,
-            HookTrustClass::Builtin,
-            Box::new(service),
-        )
-        .map_err(|error| format!("could not install the memory curation hook: {error}"))?
-        .build_arc())
+) -> Result<AfterTurnDispatcherFactory, String> {
+    let service = Arc::new(MemoryCurationService::new(submitter, interval_turns));
+    // Install once here, at build time, and throw the result away: an install
+    // that cannot succeed must fail the deployment's startup rather than go
+    // quiet at the first terminal run, where nothing would report it.
+    curation_dispatcher(&service)?;
+    Ok(Arc::new(move || match curation_dispatcher(&service) {
+        Ok(dispatcher) => dispatcher,
+        Err(reason) => {
+            // Unreachable in practice: the identical install already succeeded
+            // above, over the same hook id and phase. If it somehow fails now,
+            // this run gets an EMPTY dispatcher rather than a shared one — a
+            // skipped chore, never a dispatcher whose poison outlives the run.
+            debug!("memory curation: could not mint this run's dispatcher: {reason}");
+            HookDispatcherBuilder::new(HookRegistry::new()).build_arc()
+        }
+    }))
 }
 
 #[async_trait]
@@ -637,13 +658,13 @@ mod tests {
     #[tokio::test]
     async fn the_built_dispatcher_delivers_a_turn_to_the_curation_service() {
         let submitter = Arc::new(RecordingSubmitter::default());
-        let dispatcher = after_turn_curation_dispatcher(
+        let dispatchers = after_turn_curation_dispatcher_factory(
             Arc::clone(&submitter) as Arc<dyn CurationPassSubmitter>,
             interval(1),
         )
         .expect("the curation hook installs");
 
-        dispatcher.dispatch_after_turn(ctx_for("user-a")).await;
+        dispatchers().dispatch_after_turn(ctx_for("user-a")).await;
 
         assert_eq!(
             submitter.count(),
@@ -694,6 +715,49 @@ mod tests {
         assert_eq!(
             submissions[0].public_id, submissions[1].public_id,
             "a replayed trigger must produce the same pass, which the accept door dedupes"
+        );
+    }
+    /// The counters are the policy's whole state, and they must survive the
+    /// per-run dispatcher churn: the executor mints a FRESH dispatcher for
+    /// every terminal run (so hook poison stays run-scoped), and each one
+    /// installs a fresh binding. If the factory minted a fresh SERVICE too,
+    /// every turn would look like the first and no interval would ever be
+    /// reached — curation would be silently dead.
+    #[tokio::test]
+    async fn counters_survive_the_per_run_dispatcher() {
+        let submitter = Arc::new(RecordingSubmitter::default());
+        let dispatchers = after_turn_curation_dispatcher_factory(
+            Arc::clone(&submitter) as Arc<dyn CurationPassSubmitter>,
+            interval(3),
+        )
+        .expect("the curation hook installs");
+
+        // Three runs, three separate dispatchers — as production dispatches.
+        for _ in 0..3 {
+            dispatchers().dispatch_after_turn(ctx_for("user-a")).await;
+        }
+
+        assert_eq!(
+            submitter.count(),
+            1,
+            "the third turn triggers a pass even though each turn had its own dispatcher"
+        );
+    }
+
+    /// Each mint is a genuinely separate dispatcher: poison recorded in one
+    /// run's registry cannot be carried into the next run's.
+    #[test]
+    fn each_mint_is_a_separate_dispatcher() {
+        let submitter = Arc::new(RecordingSubmitter::default());
+        let dispatchers = after_turn_curation_dispatcher_factory(
+            submitter as Arc<dyn CurationPassSubmitter>,
+            interval(3),
+        )
+        .expect("the curation hook installs");
+
+        assert!(
+            !Arc::ptr_eq(&dispatchers(), &dispatchers()),
+            "a shared dispatcher would let one run's poison disable curation until restart"
         );
     }
 }

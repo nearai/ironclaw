@@ -1404,25 +1404,22 @@ impl RebornIntegrationGroupBuilder {
             // runtime's own thread service and coordinator. `None` unless
             // `with_memory_curation_interval()` was called, so every other
             // group is behavior-identical.
-            after_turn_hook_dispatcher_factory: self.memory_curation_interval_turns.map(
-                |interval_turns| {
-                    Box::new(
-                        move |deps: ironclaw_turn_runner::runtime::AfterTurnHookDeps| {
-                            let submitter = Arc::new(ironclaw_assistant::UnboundTurnService::new(
-                                deps.thread_service,
-                                deps.coordinator,
-                                deps.thread_scope.agent_id,
-                                deps.thread_scope.project_id,
-                            ));
-                            ironclaw_assistant::memory_curation::after_turn_curation_dispatcher(
-                                submitter,
-                                interval_turns,
-                            )
-                        },
-                    )
-                        as ironclaw_turn_runner::runtime::AfterTurnHookDispatcherFactory
-                },
-            ),
+            after_turn_hook_wiring: self.memory_curation_interval_turns.map(|interval_turns| {
+                Box::new(
+                    move |deps: ironclaw_turn_runner::runtime::AfterTurnHookDeps| {
+                        let submitter = Arc::new(ironclaw_assistant::UnboundTurnService::new(
+                            deps.thread_service,
+                            deps.coordinator,
+                            deps.thread_scope.agent_id,
+                            deps.thread_scope.project_id,
+                        ));
+                        ironclaw_assistant::memory_curation::after_turn_curation_dispatcher_factory(
+                            submitter,
+                            interval_turns,
+                        )
+                    },
+                ) as ironclaw_turn_runner::runtime::AfterTurnHookWiring
+            }),
             // C-COMMCTX: delivery-preference / connected-channel provider (Some
             // only when `communication_context_provider()` was set).
             communication_context_provider: self.communication_context_provider,

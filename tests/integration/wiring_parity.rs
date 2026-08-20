@@ -94,7 +94,7 @@ const EXPECTED_PRODUCTION_SHAPE: DefaultPlannedRuntimePartsShape =
         // None unless `[memory].curation_interval_turns` is set AND a memory
         // provider resolves (#7276). Curation is opt-in, so the default
         // production shape leaves the after_turn point un-wired.
-        after_turn_hook_dispatcher_factory: false,
+        after_turn_hook_wiring: false,
         communication_context_provider: true, // :3337-3357 Some whenever local_runtime present
         scheduler_wake_wiring: false,         // :2847-2857 None outside Production/MigrationDryRun
     };
@@ -183,9 +183,7 @@ fn mask(
         "communication_context_provider" => {
             shape.communication_context_provider = from.communication_context_provider
         }
-        "after_turn_hook_dispatcher_factory" => {
-            shape.after_turn_hook_dispatcher_factory = from.after_turn_hook_dispatcher_factory
-        }
+        "after_turn_hook_wiring" => shape.after_turn_hook_wiring = from.after_turn_hook_wiring,
         "scheduler_wake_wiring" => shape.scheduler_wake_wiring = from.scheduler_wake_wiring,
         other => panic!(
             "ALLOWED_DIVERGENCES references unknown field {other:?} — update this match and \

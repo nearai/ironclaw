@@ -1,6 +1,8 @@
 //! The `after_turn` hook-context derivation (#7276).
 //!
-//! These pin which finished runs may fire the `after_turn` lifecycle point. The
+//! These pin which finished runs may fire the `after_turn` lifecycle point —
+//! and that "finished" is load-bearing: a blocked run is resumed later, so
+//! firing on the block too would deliver one turn to every hook twice. The
 //! admitted set is an allowlist of conversation profiles, and the excluded ones
 //! are each excluded for a reason a test states: work a hook starts is ITSELF an
 //! unbound run (so accepting unbound completions would let each background pass
@@ -179,20 +181,73 @@ fn a_failed_or_cancelled_run_fires_the_point_with_completed_false() {
     }
 }
 
-/// The derivation judges the SCOPE of a run, never its terminality: the call
-/// site fires it only after a run has reached a terminal state. A non-terminal
-/// status therefore never reaches here in production — the contract pinned is
-/// that the derivation reports such a run as not-completed rather than
-/// inventing a success.
+/// Blocked is not finished. A run parked on an approval, auth, resource,
+/// dependent-run, or external-tool gate is resumed later and reaches a real
+/// terminal state then — so if the blocked state also fired the point, every
+/// gated turn would be delivered to every hook TWICE: counted twice by a
+/// curation-style hook, announced twice by a notifying one, once while the
+/// turn was still running.
 #[test]
-fn a_non_terminal_status_is_never_reported_as_completed() {
-    let state = run_state(
+fn a_blocked_run_never_fires_the_point() {
+    for status in [
+        TurnStatus::BlockedApproval,
+        TurnStatus::BlockedAuth,
+        TurnStatus::BlockedResource,
+        TurnStatus::BlockedDependentRun,
+        TurnStatus::BlockedExternalTool,
+    ] {
+        let state = run_state(status, RunProfileId::interactive_default(), actor());
+        assert!(
+            after_turn_hook_context(&state).is_none(),
+            "{status:?} is not terminal: the same turn would fire the point twice"
+        );
+    }
+}
+
+/// The other non-terminal statuses, for the same reason: the guard is
+/// `TurnStatus::is_terminal()`, the kernel's own predicate, not a local list of
+/// blocked variants that a newly added status could slip past.
+#[test]
+fn an_in_flight_run_never_fires_the_point() {
+    for status in [
+        TurnStatus::Queued,
         TurnStatus::Running,
+        TurnStatus::CancelRequested,
+    ] {
+        let state = run_state(status, RunProfileId::interactive_default(), actor());
+        assert!(after_turn_hook_context(&state).is_none(), "{status:?}");
+    }
+}
+
+/// The pair that matters together: the same run, blocked and then resumed to a
+/// terminal state, fires the point exactly ONCE — on the ending, not on the
+/// gate.
+#[test]
+fn a_gated_then_resumed_turn_fires_the_point_once() {
+    let blocked = run_state(
+        TurnStatus::BlockedApproval,
+        RunProfileId::interactive_default(),
+        actor(),
+    );
+    let mut resumed = blocked.clone();
+    resumed.status = TurnStatus::Completed;
+
+    assert!(after_turn_hook_context(&blocked).is_none());
+    let ctx = after_turn_hook_context(&resumed).expect("the resumed ending fires the point");
+    assert!(ctx.completed);
+    assert_eq!(ctx.run_id, blocked.run_id, "one run, one dispatch");
+}
+
+/// `RecoveryRequired` is terminal per the kernel predicate, so it fires with
+/// `completed = false`: a hook must be able to see that this turn ended badly.
+#[test]
+fn a_recovery_required_run_fires_the_point_as_not_completed() {
+    let state = run_state(
+        TurnStatus::RecoveryRequired,
         RunProfileId::interactive_default(),
         actor(),
     );
 
-    let ctx =
-        after_turn_hook_context(&state).expect("scope guards pass; terminality is not judged");
+    let ctx = after_turn_hook_context(&state).expect("a terminal state yields a context");
     assert!(!ctx.completed);
 }

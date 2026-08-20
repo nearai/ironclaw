@@ -185,16 +185,19 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// on the merged tree with `bash scripts/ci/check-composition-budget.sh
 /// --print`; this record moves with `scripts/ci/composition-budget.toml`'s
 /// `loc_ceiling`/`loc_observed` to the same figure in this commit.
-/// ✎ Re-measured 42_198 -> 42_205 on 2026-08-20 for #7770 phase 1 (memory
-/// curation wired through composition). Composition's own delta is +7 net: the
+/// ✎ Re-measured 42_198 -> 42_316 on 2026-08-20 for #7770 phase 1 (memory
+/// curation wired through composition). Two parts: +7 for the
 /// `[memory].curation_interval_turns` input field/setter plus the lines that
-/// hand the runtime's thread service and coordinator to
-/// `ironclaw_assistant::memory_curation::after_turn_curation_dispatcher`; the
-/// hook/phase/trust-class assembly stays in the crate that owns curation.
-/// Measured with `bash scripts/ci/check-composition-budget.sh`; this record
-/// moves with `scripts/ci/composition-budget.toml`'s
+/// hand the runtime's thread service and coordinator to the curation crate's
+/// own dispatcher-factory builder (hook/phase/trust-class assembly stays
+/// there), and +109 for the approach-audit fix that fails startup closed when
+/// the bound memory provider cannot replace the standing document
+/// (`memory_provider_factory::curation_interval_for_binding` and its tests) —
+/// composition is the only layer that sees both the `[memory]` config and the
+/// resolved binding. Measured with `bash scripts/ci/check-composition-budget.sh`;
+/// this record moves with `scripts/ci/composition-budget.toml`'s
 /// `loc_ceiling`/`loc_observed` to the same figure in this commit.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_205;
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_316;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

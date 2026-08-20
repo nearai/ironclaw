@@ -46,13 +46,19 @@ use crate::{
 /// provider performs a thread-history read plus a write.
 const AFTER_TURN_MEMORY_RECORD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Outer bound on the whole `after_turn` hook dispatch. The dispatcher already
-/// bounds each individual hook, so this is a backstop against dispatcher-level
-/// surprises rather than the primary budget — it exists so the scheduler worker
-/// stays bounded no matter what. Deliberately far tighter than the recorder's
-/// budget because nothing here waits on work a hook STARTS: that executes on
-/// the scheduler like any other turn.
-const AFTER_TURN_HOOK_DISPATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Outer bound on the whole `after_turn` hook dispatch. The dispatcher owns the
+/// real budget: it bounds each hook individually and classifies a hook that
+/// overruns as a timeout failure, poisoning that binding. This is only a
+/// backstop against a dispatcher-level surprise, so the scheduler worker stays
+/// bounded no matter what.
+///
+/// It must therefore be STRICTLY LARGER than (the dispatcher's per-hook
+/// timeout x a plausible hook count), never equal to it: an outer cancel that
+/// lands at the same instant as the inner one takes the whole dispatch away
+/// mid-classification, so the slow hook is neither recorded nor poisoned and
+/// repeats its full budget on every later run. At the recorder's scale (30s)
+/// against a 5s per-hook bound, the dispatcher gets to finish and classify.
+const AFTER_TURN_HOOK_DISPATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn trace_executor_latency_ok(
     operation: &'static str,
@@ -178,11 +184,18 @@ pub struct RebornTurnRunExecutor {
     /// `DefaultPlannedRuntimeParts`).
     // arch-exempt: optional_arc, deferred production wiring, issue #5013
     after_turn_memory_recorder: Option<Arc<AfterTurnMemoryRecorder>>,
-    /// Hook dispatcher fired at the `after_turn` lifecycle point. Optional for
-    /// the same reason as the recorder above: only compositions that register
-    /// lifecycle hooks attach one, and a run finishes cleanly without it.
+    /// Builds the dispatcher fired at the `after_turn` lifecycle point — a
+    /// FACTORY, not a dispatcher, because the executor outlives every run.
+    /// Hook poison isolation is run-scoped by contract
+    /// (`crates/loop/ironclaw_hooks/AGENTS.md`, "poisoned for the rest of the
+    /// current turn run"): a panicking or timing-out hook must be barred for
+    /// the run it misbehaved in and tried again on the next one. Holding one
+    /// process-lifetime dispatcher here would instead bar it until the process
+    /// restarts, silently. Optional for the same reason as the recorder above:
+    /// only compositions that register lifecycle hooks attach one, and a run
+    /// finishes cleanly without it.
     // arch-exempt: optional_arc, lifecycle hooks are opt-in per composition, plan #7770
-    after_turn_hooks: Option<Arc<ironclaw_hooks::dispatch::HookDispatcher>>,
+    after_turn_hook_dispatchers: Option<crate::loop_driver_host::HookDispatcherFactory>,
 }
 
 impl RebornTurnRunExecutor {
@@ -198,7 +211,7 @@ impl RebornTurnRunExecutor {
             host_factory,
             gate_record_store,
             after_turn_memory_recorder: None,
-            after_turn_hooks: None,
+            after_turn_hook_dispatchers: None,
         }
     }
 
@@ -213,14 +226,15 @@ impl RebornTurnRunExecutor {
         self
     }
 
-    /// Attach the dispatcher fired at the `after_turn` lifecycle point. Wired
-    /// by compositions that register lifecycle hooks; absent everywhere else,
-    /// and a run finishes cleanly without it.
-    pub fn with_after_turn_hooks(
+    /// Attach the factory that mints one `after_turn` dispatcher per terminal
+    /// run. Wired by compositions that register lifecycle hooks; absent
+    /// everywhere else, and a run finishes cleanly without it. A factory
+    /// rather than a dispatcher so poison stays run-scoped — see the field.
+    pub fn with_after_turn_hook_dispatcher_factory(
         mut self,
-        hooks: Arc<ironclaw_hooks::dispatch::HookDispatcher>,
+        dispatchers: crate::loop_driver_host::HookDispatcherFactory,
     ) -> Self {
-        self.after_turn_hooks = Some(hooks);
+        self.after_turn_hook_dispatchers = Some(dispatchers);
         self
     }
 }
@@ -570,20 +584,27 @@ impl RebornTurnRunExecutor {
                 // whether this run may fire the point at all (never an unbound
                 // run — otherwise hook-started background work would schedule its
                 // own successor forever).
-                if let Some(hooks) = self.after_turn_hooks.as_ref()
+                if let Some(dispatchers) = self.after_turn_hook_dispatchers.as_ref()
                     && let Some(ctx) = after_turn_hook_context(&state)
-                    && tokio::time::timeout(
+                {
+                    // One FRESH dispatcher for this run. Poison from a hook that
+                    // panicked or overran its budget is scoped to the run it
+                    // happened in; the next run gets a clean registry and tries
+                    // the hook again.
+                    let dispatcher = dispatchers();
+                    if tokio::time::timeout(
                         AFTER_TURN_HOOK_DISPATCH_TIMEOUT,
-                        hooks.dispatch_after_turn(ctx),
+                        dispatcher.dispatch_after_turn(ctx),
                     )
                     .await
                     .is_err()
-                {
-                    // silent-ok: lifecycle hooks are best-effort post-completion.
-                    debug!(
-                        run_id = ?run_id,
-                        "after-turn hook dispatch timed out; skipping (run already terminal)"
-                    );
+                    {
+                        // silent-ok: lifecycle hooks are best-effort post-completion.
+                        debug!(
+                            run_id = ?run_id,
+                            "after-turn hook dispatch timed out; skipping (run already terminal)"
+                        );
+                    }
                 }
                 Ok(())
             }

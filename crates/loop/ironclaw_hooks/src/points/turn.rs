@@ -21,6 +21,21 @@
 //!
 //! Because unbound runs never reach here, [`AfterTurnHookContext::user_id`]
 //! is non-optional: an actorless run has no `AfterTurn` dispatch at all.
+//!
+//! # Terminal coverage today: successfully-applied exits only
+//!
+//! A documented limitation, not an accident. The point is dispatched from the
+//! turn-run executor after it APPLIES a run's loop exit. The other ways a run
+//! reaches a terminal state — a driver invocation that fails, an exit whose
+//! application fails, and the scheduler's own failure terminalization — return
+//! through separate recovery paths that do not dispatch it. So a hook counting
+//! turns sees every ordinary ending (completed, cancelled, and failures the
+//! executor applied) and misses runs terminalized by those fallbacks.
+//!
+//! For the curation-style hooks this point exists for, missing a failure path
+//! is a slightly-late chore, never a wrong one. Routing every terminalization
+//! through one seam is the right shape and is tracked as a follow-up on
+//! #7770.
 
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_host_api::turn::TurnRunId;
