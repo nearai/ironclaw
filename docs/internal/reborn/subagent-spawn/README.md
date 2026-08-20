@@ -17,6 +17,10 @@ its gates win and this file gets a dated correction
 authority (which crate owns the await-edge seam, layer rulings) belongs to
 `docs/internal/reborn/target-architecture/` and the family `AGENTS.md`
 files — this document links to those rulings and never overrides them.
+Surviving source comments in `await_edge/{mod,store,resolver,boot_recovery}.rs`
+and `await_edge_port.rs` still cite `thread-harness-design.md` §-numbers from
+before its deletion; those get repointed at this README's sections in the
+same PR that touches those files anyway (§9, Task 9).
 
 **Structure:** Part I (§1–§8) is the stable record — expected experience,
 current architecture, design rationale, scenario behavior, decisions,
@@ -162,9 +166,15 @@ generic is unnameable after erasure. This is type-placement category 2
 ### 2.5 Crash recovery
 
 `subagent/await_edge/boot_recovery.rs` (`ScopeRecoveryDriver`) re-drives
-`drain_settled_group` for settled-but-unclosed edges on restart, gated so a
-recovering scope refuses new writes until reconciled
-(`check_scope_recovered`).
+`drain_settled_group` for settled-but-unclosed edges in a scope, but only
+**lazily**: `check_scope_recovered` is invoked from the spawn port before a
+*later* spawn into that scope, and from two lazy resolver paths
+(`resolver.rs:1709`, `:1785`). There is no startup caller today — recovery
+is not a boot pass. A parent blocked on a settled-but-undrained edge in a
+scope nothing else touches stays blocked until some later spawn happens to
+touch that scope. A true startup/boot pass for background edges (which need
+one regardless, since they have no gate to block on) is new work owned by
+Part II Task 7; blocking-mode recovery remains lazy as described here.
 
 ### 2.6 Parallel children
 
@@ -195,9 +205,13 @@ The wake half of background delivery landed ahead of the delivery half:
   production decorator (`CancelReconcilingTurnCoordinator` included; its
   initial omission was caught in review — the trait default fails closed).
 - **Autonomous-wake streak cap**: derived from a bounded newest-first run
-  query — after N consecutive non-`Human` activations on a thread, further
-  autonomous wakes are refused until a human participates. This is the
-  guardrail that makes fully-autonomous waking safe (§5, D5).
+  query — after N consecutive `System`-provenance activations on a thread,
+  further autonomous wakes are refused until a human participates.
+  `ParentAgent`-provenance runs are explicitly excluded from the window
+  (`coordinator.rs:618-652`); a separate `ParentAgent` budget ships with
+  `subagent_extend` in R6 (§6), and until then no production path mints
+  `ParentAgent` activations. This is the guardrail that makes fully-autonomous
+  waking safe (§5, D5).
 
 `activate()` has **no production caller yet** — deliberate staging. The
 delivery design below wires it.
@@ -237,7 +251,9 @@ the sweeps retry; the obligation is durable
 
 ### 4.1 Delivery truth, attention obligation
 
-Two durable facts, in order, and the edge tracks both:
+Two durable facts, in order, and the edge tracks both. This is the R2
+lifecycle, built by Part II Task 5 — none of these states, transitions, or
+symbols exist in the tree today:
 
 ```text
 Open → Settled → ResultAppended { message_ref }
@@ -262,7 +278,10 @@ re-accepts and receives the **same** message ref back. The ref persisted
 on the edge (`ResultAppended`) is the fast path, not the proof. The row
 then binds to a queue entry exactly as steering rows do
 (`mark_message_queued` → `enqueue_queued_message`,
-`ironclaw_loop_host/src/{input_queue,durable_input_queue}.rs`).
+`ironclaw_loop_host/src/{input_queue,durable_input_queue}.rs`). A crash between those two calls leaves the edge in
+`ResultAppended` with the row already marked queued but not yet enqueued;
+re-drive re-marks it (an idempotent status flip) and enqueues, and the
+queue's own identity dedupe makes the double-enqueue attempt safe.
 
 **Attention** — the queue entry or the wake — is a separate durable
 obligation. The edge closes only after attention has a durable outcome:
@@ -296,18 +315,27 @@ substitute for it.
    and implemented by `RebornTurnRunExecutor` in
    `turn_runner/src/turn_run_executor.rs` — **not**
    `check_scope_recovered`, which is a spawn-finalization hook on the child
-   scope. On parent run start, edges in `ResultAppended` (and, when the
-   start is human-initiated or otherwise permitted,
-   `AttentionDeferredStreakCap`) for that thread are enqueued into the
-   starting run and closed. The thread-indexed lookup is real, not
-   aspirational: background edges carry a deterministic
+   scope. The sweep covers **every non-closed background edge state for the
+   thread**, not just `Settled`/`ResultAppended`: an edge caught in
+   `AttentionScheduled` (a crash after `record_attention` but before
+   `close`) needs no re-delivery — the attention outcome is already durably
+   accepted (`Queued`: the entry is in the durable queue; `Activated`: the
+   run was durably created) — so the sweep's action for that state is
+   simply `close`, never a re-enqueue or a second `activate`. On parent run
+   start, edges in `ResultAppended`, `AttentionScheduled`, and (when the
+   start is human-initiated or otherwise permitted) `AttentionDeferredStreakCap`
+   for that thread are each driven to closed. The thread-indexed lookup is
+   real, not aspirational: background edges carry a deterministic
    `group_ref = "bg:{parent_thread_id}"` (§4.3), so the existing
    group-ref dependency query serves it; the batch is capped at
    `MAX_QUEUED_INPUTS_PER_RUN`.
-3. **Boot pass**: restart re-drives `Settled`/`ResultAppended` edges
-   through the same deliver path, **including activation of parked
-   parents** — autonomous delivery is a product promise, so boot may wake;
-   the streak cap still applies. Bounded scanning is new work the plan
+3. **Boot pass**: restart re-drives every non-closed background edge
+   (`Settled`, `ResultAppended`, `AttentionScheduled`) through the same
+   recovery logic as the run-start sweep — `Settled`/`ResultAppended`
+   re-enter the deliver path, **including activation of parked parents**
+   (autonomous delivery is a product promise, so boot may wake; the streak
+   cap still applies), while `AttentionScheduled` is simply closed, its
+   attention outcome already durable. Bounded scanning is new work the plan
    owns (Task 7 adds the limit/continuation to the dependency query);
    per-tenant fairness lands with the R4 boot-recovery work.
 
@@ -542,7 +570,9 @@ Things no slice may break; each is enforced or pinned today.
 - **Untrusted child text.** Delivered child content is framed and
   sanitized (§2.3); raw child transcripts are human-only surfaces (R7).
 - **Autonomous wakes are capped.** Every `activate` carries provenance; the
-  streak cap refuses runaway non-human wake chains.
+  streak cap refuses runaway `System`-wake chains. The `ParentAgent` budget
+  ships with `subagent_extend` in R6 (§6) — until then no production path
+  mints `ParentAgent` activations.
 - **Authority never flows through child text.** A delivered child result is
   a typed untrusted-agent artifact — never a human instruction, never an
   approval; parent grants, approval leases, and consent do not transfer
@@ -850,7 +880,10 @@ therefore land in the kernel record, not in projection metadata.
   `ResultAppended`, next drive activates; (d) `CapacityExhausted` → edge
   stays `ResultAppended`; (e) activation transient failure → same; (f)
   streak-cap refusal → `AttentionDeferredStreakCap`, no autonomous retry
-  on re-drive.
+  on re-drive; (g) crash after `record_attention`, before `close` → edge
+  stays `AttentionScheduled`; the sweep (§4.2) closes it directly without
+  re-enqueuing or re-activating — the attention outcome was already
+  durably accepted.
 - [ ] **Step 4:** live-run path: recording enqueue port captured
   `SubagentSettled { child_run_id, message_ref }`; closed via
   `AttentionScheduled(Queued)`; no `activate`.
@@ -864,27 +897,31 @@ therefore land in the kernel record, not in projection metadata.
 - Modify: `crates/loop/ironclaw_turn_runner/src/turn_run_executor.rs` —
   the **run-start sweep** in `RebornTurnRunExecutor::execute_claimed_run`
   (trait declared in `turn_scheduler.rs`): before driving the parent's
-  loop, fetch `ResultAppended` edges — plus `AttentionDeferredStreakCap`
-  when the starting run's provenance is human/permitted — by the
-  deterministic `group_ref = "bg:{parent_thread_id}"` (existing group-ref
-  dependency query; batch capped at `MAX_QUEUED_INPUTS_PER_RUN`), enqueue
-  into the starting run, close.
+  loop, fetch `ResultAppended` and `AttentionScheduled` edges — plus
+  `AttentionDeferredStreakCap` when the starting run's provenance is
+  human/permitted — by the deterministic `group_ref =
+  "bg:{parent_thread_id}"` (existing group-ref dependency query; batch
+  capped at `MAX_QUEUED_INPUTS_PER_RUN`); `ResultAppended` enqueues into
+  the starting run then closes, `AttentionScheduled` simply closes (the
+  attention outcome is already durable — no re-enqueue).
 - Modify: `crates/kernel/ironclaw_processes/src/journal.rs` (+ impls) —
   the unclosed-dependency query gains `limit`/continuation (the bounded
   scan §4.2 requires; today boot recovery reads the full unclosed set).
 - Modify: `crates/loop/ironclaw_turn_runner/src/subagent/await_edge/boot_recovery.rs`
   — boot re-drives `Settled`/`ResultAppended` background edges through
-  `deliver_background` (idempotent by Task 6), activation included,
-  using the bounded query.
+  `deliver_background` (idempotent by Task 6), activation included, and
+  closes any edge caught in `AttentionScheduled` directly, using the
+  bounded query.
 
 - [ ] **Step 1: failing test** (executor tests): run start with one
   `ResultAppended` edge → enqueued + closed; `MAX_QUEUED_INPUTS_PER_RUN + 1`
   pending → capped, remainder stays for the next start; an
   `AttentionDeferredStreakCap` edge drains only on a human-provenance
-  start.
+  start; an `AttentionScheduled` edge is closed without a re-enqueue.
 - [ ] **Step 2: failing test** (boot_recovery): edges in `Settled` and
   `ResultAppended` → both delivered; parked parent activated with `System`
-  provenance and preserved profile; re-run is a no-op.
+  provenance and preserved profile; an `AttentionScheduled` edge is closed
+  with no duplicate delivery; re-run is a no-op.
 - [ ] **Step 3:** implement; green; commit.
 
 ### Task 8: integration scenarios
@@ -919,6 +956,12 @@ Scenarios (harness-side capability enablement; production filter untouched):
   multi-line, move it to `crates/loop/ironclaw_loop_host/prompts/` per the
   repo prompt-file rule): receipt semantics, per-child arrival, "results
   appear as tagged inputs; do not poll".
+- [ ] Repoint every stale §-reference in
+  `await_edge/{mod,store,resolver,boot_recovery}.rs` and
+  `await_edge_port.rs` comments — they currently cite the deleted
+  `thread-harness-design.md`'s §2, §4.1, §4.2, §5.4, §5.5, §5.6 — at the
+  corresponding sections of this README, in this same task since these
+  files are already being touched by T5–T7.
 - [ ] Prune this §9 to a one-line "R2 shipped in PR #NNNN" pointer and
   promote R3 to the pending slot; move anything §4 got wrong during
   implementation into a dated correction. Commit.
@@ -929,7 +972,10 @@ Spec coverage: every §4.3 row maps to a task (variant→T1, drain+stub→T2,
 codec/schema→T3, receipt+group_ref→T4, journal substates→T5, typed
 acceptance + resolver tail→T6, sweeps + bounded queries→T7,
 integration→T8, prompt→T9); every §4.1 state and §4.6 crash row has a
-named failure-injection test (T6 step 3, T7, T8). Placeholder scan: the
+named failure-injection test (T6 step 3, T7, T8), including the
+crash-after-`record_attention`-before-`close` window that leaves an edge
+in `AttentionScheduled` (T6 step 3(g), T7 steps 1–2 — the sweeps close it
+directly since the attention outcome is already durable). Placeholder scan: the
 two deliberately-unpinned points are named as read-steps with a single
 named file each (`resolution.rs` success constructor, T4; live-run query
 method on the runtime port, T6) — bounded, not vague. Type consistency:
