@@ -1,0 +1,84 @@
+---
+title: "Changelog"
+description: "What shipped in each stable IronClaw release"
+icon: clock-rotate-left
+---
+
+Each entry covers one stable release of the `ironclaw` binary. Release
+candidates are not listed. Full commit-level notes live on the
+[GitHub releases page](https://github.com/nearai/ironclaw/releases), and this
+documentation site describes the **latest stable release** — the docs
+for any older release are preserved in its git tag (for example
+[`ironclaw-v1.0.0` docs](https://github.com/nearai/ironclaw/tree/ironclaw-v1.0.0/docs)).
+
+<Update label="2026-08-13" description="v1.2.0">
+
+**Shared channels that just work.**
+
+- **Presence-based admission** — add the bot to a Slack channel or Telegram
+  group and it is served, with nothing to configure: the
+  `slack_allowed_channels` / `telegram_allowed_channels` allowlists and the
+  shared-subject settings are gone.
+- **Genuinely shared conversations** — a Slack thread or Telegram group/topic
+  is one continuous conversation every paired participant shares, and each
+  message still runs as the person who sent it: their identity, memory,
+  settings, and approval gates.
+- **Slack channel context** — pinging the bot at the top level of a channel
+  gives the run recent channel history; pinging inside a thread gives it that
+  thread. Context is fetched host-side and framed as untrusted quoted
+  content, never as instructions.
+- Unpaired users who ping the bot in a shared conversation get a connect
+  notice as a reply on their own message instead of silence.
+- Every parked approval or auth gate is announced individually, in the live
+  conversation and the background automation lane alike.
+- The runtime container image now ships `curl`, so orchestrator HTTP
+  healthchecks pass; Windows first-start filesystem publication and release
+  smoke runs are fixed.
+
+**Upgrading from 1.1.0:** the shared-channel allowlist and subject settings
+(`slack_allowed_channels`, `telegram_allowed_channels`,
+`slack_shared_subject_user_id`, `slack_subject_routes`) are removed —
+admission is presence-based. Previously stored shared-channel notification
+preferences fail closed; DM delivery targets are unchanged. A gate prompt
+delivered but not yet acknowledged when this version deploys re-announces
+once.
+
+</Update>
+
+<Update label="2026-08-06" description="v1.1.0">
+
+**Extension reach and legible failures.**
+
+- **Custom MCP servers** — register a hosted MCP server from the WebUI and use
+  its tools like any other extension, with bounded tool discovery and auth
+  resolved during registration.
+- **IronHub install flow** — install extensions from an IronHub deep link,
+  including private packages.
+- **Durable file attachments** that cross channels.
+- **Slack `/ironclaw` slash commands.**
+- A broad pass on making failures legible: the model is told what to do next
+  instead of hitting an opaque stop, and users get localized, actionable
+  errors instead of silent dead ends.
+
+**Upgrading from 1.0.0:** no migration steps. Extension lifecycle state moved
+to a normalized on-disk shape; rows written by 1.0.0 keep deserializing.
+**Removed:** the `/webhooks/slack/events` compatibility alias.
+
+[Full release notes](https://github.com/nearai/ironclaw/releases/tag/ironclaw-v1.1.0)
+
+</Update>
+
+<Update label="2026-07-27" description="v1.0.0">
+
+**First stable release of the rearchitected IronClaw** — a ground-up rebuild
+of the agent runtime, storage, extension host, and web UI, shipping as the
+`ironclaw` binary on seven platform targets.
+
+**Not an in-place upgrade from 0.29.x:** there is no migration for v1 config,
+databases, settings, or secrets. Treat it as a fresh install — point
+`IRONCLAW_REBORN_HOME` at a new directory, run `ironclaw onboard`, and
+reconnect your providers and channels.
+
+[Full release notes](https://github.com/nearai/ironclaw/releases/tag/ironclaw-v1.0.0)
+
+</Update>

@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use ironclaw_extension_contracts::preference_target::{
     ActivePreferenceTargetCodecs, PreferenceTargetCodec,
 };
+use ironclaw_host_api::execution_policy::ResultDeliveryPolicy;
 use ironclaw_host_api::ids::ThreadId;
 use ironclaw_outbound::{
     ProjectionUpdateRef, TriggeredFireFailureDeliveryRequest, TriggeredRunDelivery,
@@ -122,6 +123,11 @@ impl PostSubmitDeliveryHook for GenericTriggeredRunDeliveryHook {
                 creator_user_id: fire.creator_user_id.clone(),
                 project_scoped: fire.project_id.is_some(),
                 prompt: fire.prompt.clone(),
+                result_delivery: fire
+                    .execution_policy
+                    .as_ref()
+                    .map(|policy| policy.result_delivery)
+                    .unwrap_or(ResultDeliveryPolicy::Deliver),
             })
             .await;
     }

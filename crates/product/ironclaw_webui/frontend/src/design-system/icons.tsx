@@ -1,3 +1,4 @@
+import type { ComponentPropsWithoutRef } from "react";
 
 const paths = {
   attach: (<><path
@@ -137,9 +138,25 @@ const paths = {
     /></>),
 };
 
-export function Icon({ name, className = "", strokeWidth = 1.7 }) {
+export type IconName = string;
+
+export type IconProps = Omit<
+  ComponentPropsWithoutRef<"svg">,
+  "children" | "strokeWidth"
+> & {
+  name: IconName;
+  strokeWidth?: number | string;
+};
+
+export function Icon({
+  name,
+  className = "",
+  strokeWidth = 1.7,
+  ...rest
+}: IconProps) {
   return (
     <svg
+      {...rest}
       aria-hidden="true"
       className={className}
       viewBox="0 0 24 24"

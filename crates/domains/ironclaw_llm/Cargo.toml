@@ -26,6 +26,9 @@ test-support = []
 
 [dependencies]
 ironclaw_common = { path = "../../contracts/ironclaw_common", version = "0.4.2" }
+# Normalized capability identity (`CapabilityId`) for the canonical
+# `AgentMessage` tool-call vocabulary — contracts-tier, no execution.
+ironclaw_host_api = { path = "../../contracts/ironclaw_host_api", version = "0.1.0" }
 ironclaw_safety = { path = "../../substrates/ironclaw_safety", version = "0.2.2" }
 
 async-trait = "0.1"

@@ -2998,6 +2998,39 @@ async def test_reborn_v2_desktop_sidebar_can_collapse_and_persist(reborn_v2_page
     )
 
 
+async def test_reborn_v2_expandable_sidebar_sections_can_collapse(reborn_v2_page):
+    """Active expandable navigation sections can be closed and reopened."""
+    origin = await reborn_v2_page.evaluate("location.origin")
+    sidebar = reborn_v2_page.locator(SEL_V2["sidebar"])
+
+    for section_id, path in (
+        ("extensions", "/extensions/registry"),
+        ("settings", "/settings/inference"),
+        ("admin", "/admin/users"),
+    ):
+        await reborn_v2_page.goto(f"{origin}{path}?token={REBORN_V2_AUTH_TOKEN}")
+        parent = sidebar.get_by_test_id(
+            SEL_V2["sidebar_nav_for"].format(id=section_id)
+        )
+        panel_id = await parent.get_attribute("aria-controls")
+        assert panel_id is not None
+        children = sidebar.locator(f"#{panel_id}").get_by_role("link")
+
+        await expect(parent).to_be_visible(timeout=15000)
+        await expect(parent).to_have_attribute("aria-expanded", "true")
+        await expect(children.first).to_be_visible()
+
+        before_collapse_url = reborn_v2_page.url
+        await parent.click()
+        assert reborn_v2_page.url == before_collapse_url
+        await expect(parent).to_have_attribute("aria-expanded", "false")
+        await expect(children).to_have_count(0)
+
+        await parent.click()
+        await expect(parent).to_have_attribute("aria-expanded", "true")
+        await expect(children.first).to_be_visible()
+
+
 async def test_reborn_v2_messages_omit_identity_labels(reborn_v2_page):
     """User and assistant messages render content without persistent identity labels."""
     composer = reborn_v2_page.locator(SEL_V2["chat_composer"])

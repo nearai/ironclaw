@@ -3,10 +3,10 @@ import { useNavigate, useOutletContext, useParams } from "react-router";
 import React from "react";
 import { useT } from "../../lib/i18n";
 import { Button } from "../../design-system/button";
+import { InlineNotice } from "../../design-system/inline-notice";
 import { EmptyPanel } from "../../design-system/primitives";
 import { useProjectsOverview } from "./hooks/useProjectsOverview";
 import { useProjectWorkspace } from "./hooks/useProjectWorkspace";
-import { FeedbackBanner } from "./components/feedback-banner";
 import { ProjectsSummaryStrip } from "./components/projects-summary-strip";
 import { ProjectsGrid } from "./components/projects-grid";
 import { ProjectWorkspaceShell } from "./components/project-workspace-shell";
@@ -155,11 +155,20 @@ export function ProjectsPage() {
             {headerActions}
           </div>
           {overviewState.error && (
-            <div className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+            <InlineNotice tone="danger" role="alert">
               {overviewState.error.message}
-            </div>
+            </InlineNotice>
           )}
-          <FeedbackBanner result={chatFlowError} onDismiss={() => setChatFlowError(null)} />
+          {chatFlowError && (
+            <InlineNotice
+              tone="danger"
+              role="alert"
+              onDismiss={() => setChatFlowError(null)}
+              dismissLabel={t("projects.feedback.dismiss")}
+            >
+              {chatFlowError.message}
+            </InlineNotice>
+          )}
           {!projectId &&
           (
             <ProjectsSummaryStrip overview={overviewState.overview} />

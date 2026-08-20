@@ -1,10 +1,11 @@
 use chrono::{DateTime, Utc};
+use ironclaw_host_api::output::OutputContract;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AcceptedMessageRef, GateKind, GateResumeDisposition, IdempotencyKey, ProductTurnContext,
-    ReplyTargetBindingRef, RunProfileRequest, SanitizedCancelReason, SourceBindingRef, TurnActor,
-    TurnGateRef, TurnRunId, TurnScope, TurnStatus,
+    AcceptedMessageRef, ActivationProvenance, GateKind, GateResumeDisposition, IdempotencyKey,
+    ProductTurnContext, RunProfileRequest, SanitizedCancelReason, TurnActor, TurnGateRef,
+    TurnRunId, TurnScope, TurnStatus,
 };
 
 pub type TurnTimestamp = DateTime<Utc>;
@@ -51,9 +52,12 @@ pub struct SubmitTurnRequest {
     pub scope: TurnScope,
     pub actor: TurnActor,
     pub accepted_message_ref: AcceptedMessageRef,
-    pub source_binding_ref: SourceBindingRef,
-    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub requested_run_profile: Option<RunProfileRequest>,
+    /// Optional caller declaration of the terminal output contract. Admission
+    /// snapshots it into the durable run record; omission preserves the
+    /// historical assistant-message default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_contract: Option<OutputContract>,
     /// Caller-requested model for this turn. A hint the coordinator resolves to a
     /// concrete per-run model route when the operator has it configured; when it
     /// can't be resolved the run falls back to the deployment's active model.
@@ -74,6 +78,31 @@ pub struct SubmitTurnRequest {
     pub spawn_tree_root_run_id: Option<TurnRunId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product_context: Option<ProductTurnContext>,
+    /// Why this submission is activating the thread. `None` — the default for
+    /// every ordinary caller — is an untagged, human-initiated submission.
+    /// Only the coordinator's `activate()` entry point sets this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_activation_provenance: Option<ActivationProvenance>,
+}
+
+/// Re-activate an existing thread with an explicit provenance tag — the single
+/// re-activation primitive.
+///
+/// Deliberately *not* a second admission path: `activate` builds an ordinary
+/// [`SubmitTurnRequest`], so one-active-run exclusivity, idempotency replay,
+/// and busy rejection behave exactly as they do for any other submission. The
+/// only thing activation adds is the provenance stamp the derived streak caps
+/// read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivateThreadRequest {
+    pub scope: TurnScope,
+    pub actor: TurnActor,
+    pub accepted_message_ref: AcceptedMessageRef,
+    pub provenance: ActivationProvenance,
+    pub idempotency_key: IdempotencyKey,
+    pub received_at: TurnTimestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_run_profile: Option<RunProfileRequest>,
 }
 
 /// Request shape for callers that are creating a child run from an existing
@@ -86,9 +115,11 @@ pub struct SubmitChildRunRequest {
     pub child_scope: TurnScope,
     pub actor: TurnActor,
     pub accepted_message_ref: AcceptedMessageRef,
-    pub source_binding_ref: SourceBindingRef,
-    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub requested_run_profile: Option<RunProfileRequest>,
+    /// Optional terminal output contract for a child run. It is carried into
+    /// the same durable process metadata as a top-level submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_contract: Option<OutputContract>,
     pub idempotency_key: IdempotencyKey,
     pub received_at: TurnTimestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -106,8 +137,6 @@ pub struct ResumeTurnRequest {
     pub actor: TurnActor,
     pub run_id: TurnRunId,
     pub gate_resolution_ref: TurnGateRef,
-    pub source_binding_ref: SourceBindingRef,
-    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub idempotency_key: IdempotencyKey,
     #[serde(default, skip_serializing_if = "ResumeTurnPrecondition::is_default")]
     pub precondition: ResumeTurnPrecondition,
@@ -124,8 +153,6 @@ pub struct RetryTurnRequest {
     pub scope: TurnScope,
     pub actor: TurnActor,
     pub run_id: TurnRunId,
-    pub source_binding_ref: SourceBindingRef,
-    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub idempotency_key: IdempotencyKey,
 }
 
@@ -162,9 +189,6 @@ mod tests {
             actor: TurnActor::new(UserId::from_trusted("user:test".to_string())),
             run_id: TurnRunId::new(),
             gate_resolution_ref: TurnGateRef::new("gate:test-gate").expect("valid gate ref"),
-            source_binding_ref: SourceBindingRef::new("source-binding").expect("valid source ref"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-target")
-                .expect("valid reply target ref"),
             idempotency_key: IdempotencyKey::new("idempotency-key").expect("valid idempotency key"),
             precondition: ResumeTurnPrecondition::default(),
             resume_disposition: disposition,

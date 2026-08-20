@@ -13,6 +13,7 @@ use crate::{
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, FailedExitDetails,
     StageContext, attach_failure_explanation, completed_exit, failed_exit,
+    is_typed_nothing_to_report,
 };
 
 /// Instruction injected by the tools-capable completion nudge — drive the model
@@ -164,7 +165,18 @@ impl ExitStage {
                 let checked = CheckpointStage
                     .write(ctx, state, CheckpointKind::Final)
                     .await?;
-                completed_exit(ctx.host, checked.state, Some(checked.checkpoint_id))
+                let state = if is_typed_nothing_to_report(ctx.host, &checked.state) {
+                    match CheckpointStage
+                        .cancel_if_requested(ctx, checked.state)
+                        .await?
+                    {
+                        CancelCheck::Continue(state) => *state,
+                        CancelCheck::Exit(exit) => return Ok(exit),
+                    }
+                } else {
+                    checked.state
+                };
+                completed_exit(ctx.host, state, Some(checked.checkpoint_id))
             }
             StopKind::NoProgressDetected => {
                 let mut state = state;

@@ -1,12 +1,13 @@
+use ironclaw_host_api::output::OutputContract;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
     turn::{
-        AcceptedMessageRef, CapabilityActivityId, EventCursor, ReplyTargetBindingRef, RunProfileId,
-        RunProfileVersion, SanitizedFailure, SourceBindingRef, TurnActor, TurnCheckpointId,
-        TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
+        AcceptedMessageRef, CapabilityActivityId, EventCursor, RunProfileId, RunProfileVersion,
+        SanitizedFailure, TurnActor, TurnCheckpointId, TurnGateRef, TurnId, TurnRunId, TurnScope,
+        TurnStatus,
     },
 };
 
@@ -123,6 +124,11 @@ pub enum AdmissionRejectionReason {
     Policy,
     Unauthorized,
     Unavailable,
+    /// The thread's consecutive autonomous-wake budget is exhausted. Distinct
+    /// from the other reasons because nothing is wrong with the request or the
+    /// caller — the thread is simply parked pending human attention, and a
+    /// caller may retry after a human activates it.
+    SystemWakeStreak,
 }
 
 impl AdmissionRejectionReason {
@@ -133,6 +139,7 @@ impl AdmissionRejectionReason {
             Self::Policy => "policy",
             Self::Unauthorized => "unauthorized",
             Self::Unavailable => "unavailable",
+            Self::SystemWakeStreak => "system_wake_streak",
         }
     }
 }
@@ -179,10 +186,12 @@ pub struct TurnRunState {
     pub run_id: TurnRunId,
     pub status: TurnStatus,
     pub accepted_message_ref: AcceptedMessageRef,
-    pub source_binding_ref: SourceBindingRef,
-    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub resolved_run_profile_id: RunProfileId,
     pub resolved_run_profile_version: RunProfileVersion,
+    /// Immutable terminal output contract admitted for this run. Defaults to
+    /// the historical assistant-message result for legacy state snapshots.
+    #[serde(default, skip_serializing_if = "OutputContract::is_assistant_message")]
+    pub output_contract: OutputContract,
     /// Whether the resolved run profile admits mid-run steering input
     /// (`SteeringPolicy::allow_steering`, snapshotted at submit resolution).
     /// The busy-submit enqueue gateway consults this before queueing a message
@@ -198,6 +207,11 @@ pub struct TurnRunState {
     /// Responses/Chat surfaces to report `usage` and cost.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_usage: Option<ironclaw_loop_contracts::LoopModelUsage>,
+    /// Semantic result of trusted completion settlement. Separate from
+    /// notification/transport delivery state; absent on nonterminal and
+    /// legacy persisted rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_outcome: Option<crate::TurnExecutionOutcome>,
     pub received_at: TurnTimestamp,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<TurnGateRef>,
@@ -301,6 +315,11 @@ impl TurnError {
                     TurnErrorCategory::Unauthorized
                 }
                 AdmissionRejectionReason::Unavailable => TurnErrorCategory::Unavailable,
+                // Capacity-shaped, not caller error: the thread's autonomous
+                // budget is spent and a human activation restores it, which is
+                // the same "retry later, nothing is malformed" shape the
+                // tenant-limit rejection carries.
+                AdmissionRejectionReason::SystemWakeStreak => TurnErrorCategory::AdmissionRejected,
             },
             Self::ScopeNotFound => TurnErrorCategory::ScopeNotFound,
             Self::Unauthorized => TurnErrorCategory::Unauthorized,

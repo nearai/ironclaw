@@ -36,8 +36,14 @@ pub(super) enum ProductCommandHandler {
     AutomationRename,
     AutomationDelete,
     NotificationChannelsSet,
+    NotificationMarkRead,
+    NotificationMarkAllRead,
+    NotificationArchive,
     NotificationSetupEnable,
     NotificationSetupDisable,
+    SuggestionsGenerate,
+    SuggestionStart,
+    SuggestionDismiss,
 }
 
 impl ProductCommandHandler {
@@ -76,8 +82,14 @@ impl ProductCommandHandler {
             AUTOMATION_RENAME_COMMAND_ID => Some(Self::AutomationRename),
             AUTOMATION_DELETE_COMMAND_ID => Some(Self::AutomationDelete),
             NOTIFICATION_CHANNELS_SET_COMMAND_ID => Some(Self::NotificationChannelsSet),
+            NOTIFICATIONS_MARK_READ_COMMAND_ID => Some(Self::NotificationMarkRead),
+            NOTIFICATIONS_MARK_ALL_READ_COMMAND_ID => Some(Self::NotificationMarkAllRead),
+            NOTIFICATIONS_ARCHIVE_COMMAND_ID => Some(Self::NotificationArchive),
             NOTIFICATION_SETUP_ENABLE_COMMAND_ID => Some(Self::NotificationSetupEnable),
             NOTIFICATION_SETUP_DISABLE_COMMAND_ID => Some(Self::NotificationSetupDisable),
+            SUGGESTIONS_GENERATE_COMMAND_ID => Some(Self::SuggestionsGenerate),
+            SUGGESTION_START_COMMAND_ID => Some(Self::SuggestionStart),
+            SUGGESTION_DISMISS_COMMAND_ID => Some(Self::SuggestionDismiss),
             _ => None,
         }
     }
@@ -316,6 +328,18 @@ impl ProductCommandHandler {
                 let request: RebornSetNotificationChannelsRequest = product_command_input(input)?;
                 command_output(services.set_notification_channels(caller, request).await?)
             }
+            Self::NotificationMarkRead => {
+                let request: ProductNotificationMutationRequest = product_command_input(input)?;
+                command_output(services.mark_notification_read(caller, request).await?)
+            }
+            Self::NotificationMarkAllRead => {
+                let _: ProductMarkAllNotificationsReadRequest = product_command_input(input)?;
+                command_output(services.mark_all_notifications_read(caller).await?)
+            }
+            Self::NotificationArchive => {
+                let request: ProductNotificationMutationRequest = product_command_input(input)?;
+                command_output(services.archive_notification(caller, request).await?)
+            }
             Self::NotificationSetupEnable => {
                 let request: RebornNotificationSetupMutationRequest = product_command_input(input)?;
                 command_output(
@@ -334,6 +358,21 @@ impl ProductCommandHandler {
                         .await?,
                 )
             }
+            Self::SuggestionsGenerate => command_output(
+                services
+                    .generate_suggestions(caller, product_command_input(input)?)
+                    .await?,
+            ),
+            Self::SuggestionStart => command_output(
+                services
+                    .start_suggestion(caller, product_command_input(input)?)
+                    .await?,
+            ),
+            Self::SuggestionDismiss => command_output(
+                services
+                    .dismiss_suggestion(caller, product_command_input(input)?)
+                    .await?,
+            ),
         }
     }
 }
@@ -790,6 +829,30 @@ mod tests {
             (
                 AUTOMATION_DELETE_COMMAND_ID,
                 ProductCommandHandler::AutomationDelete,
+            ),
+            (
+                SUGGESTIONS_GENERATE_COMMAND_ID,
+                ProductCommandHandler::SuggestionsGenerate,
+            ),
+            (
+                SUGGESTION_START_COMMAND_ID,
+                ProductCommandHandler::SuggestionStart,
+            ),
+            (
+                SUGGESTION_DISMISS_COMMAND_ID,
+                ProductCommandHandler::SuggestionDismiss,
+            ),
+            (
+                NOTIFICATIONS_MARK_READ_COMMAND_ID,
+                ProductCommandHandler::NotificationMarkRead,
+            ),
+            (
+                NOTIFICATIONS_MARK_ALL_READ_COMMAND_ID,
+                ProductCommandHandler::NotificationMarkAllRead,
+            ),
+            (
+                NOTIFICATIONS_ARCHIVE_COMMAND_ID,
+                ProductCommandHandler::NotificationArchive,
             ),
         ] {
             let capability = CapabilityId::new(id).expect("valid capability id");

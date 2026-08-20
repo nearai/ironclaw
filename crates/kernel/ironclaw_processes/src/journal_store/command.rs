@@ -8,7 +8,8 @@ use crate::{
     ClaimProcessesRequest, CloseProcessDependencyRequest, OpenProcessDependencyRequest,
     ProcessConcurrencyLimits, ProcessLeaseRequest, PruneReleasedProcessRequest,
     RecordProcessCheckpointRequest, RecoverExpiredProcessLeasesRequest, ReleaseProcessTreeRequest,
-    ReserveProcessTreeRequest, SettleProcessDependencyRequest, SubmitProcessRequest,
+    ReserveProcessTreeRequest, SettleProcessDependencyRequest, SubmitProcessAtEdgeRequest,
+    SubmitProcessRequest,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,6 +17,7 @@ use crate::{
 pub(super) enum StoredProcessCommand {
     ImportLegacyState(Box<ProcessJournalMaterializedState>),
     Submit(Box<SubmitProcessRequest>),
+    SubmitAtEdge(Box<SubmitProcessAtEdgeRequest>),
     SubmitWithCheckpoint {
         request: Box<SubmitProcessRequest>,
         checkpoint: Box<RecordProcessCheckpointRequest>,
@@ -104,6 +106,12 @@ impl StoredProcessCommand {
                         .checkpoints
                         .push(checkpoint.checkpoint_id.clone());
                 }
+            }
+            Self::SubmitAtEdge(request) => {
+                references.process_ids.push(request.submission.process_id);
+                references
+                    .submission_idempotency_keys
+                    .extend(submission_replay_key(&request.submission)?);
             }
             Self::Claim {
                 request, limits, ..

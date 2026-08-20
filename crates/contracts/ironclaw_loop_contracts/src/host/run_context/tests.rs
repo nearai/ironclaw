@@ -100,6 +100,79 @@ fn advisory_model_route_trims_and_rejects_empty_or_invalid_models() {
     );
 }
 
+#[test]
+fn output_contract_is_snapshotted_independently_of_resolved_profile() {
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId};
+    use ironclaw_host_api::output::OutputContract;
+    use ironclaw_host_api::turn::{RunProfileId, RunProfileVersion};
+
+    let scope = TurnScope::new(
+        TenantId::new("tenant-output-contract").expect("tenant"),
+        Some(AgentId::new("agent-output-contract").expect("agent")),
+        Some(ProjectId::new("project-output-contract").expect("project")),
+        ThreadId::new("thread-output-contract").expect("thread"),
+    );
+    let schema = OutputContract::JsonSchema {
+        name: "answer_v1".to_string(),
+        schema: serde_json::json!({"type": "object", "required": ["answer"]}),
+    };
+    let first_profile = ResolvedRunProfile::legacy_compatibility(
+        RunProfileId::default_profile(),
+        RunProfileVersion::new(1),
+        true,
+    );
+    let second_profile = ResolvedRunProfile::legacy_compatibility(
+        RunProfileId::interactive_default(),
+        RunProfileVersion::new(1),
+        true,
+    );
+    let first = LoopRunContext::new(
+        scope.clone(),
+        TurnId::new(),
+        TurnRunId::new(),
+        first_profile,
+    )
+    .with_output_contract(schema.clone());
+    let second = LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), second_profile)
+        .with_output_contract(schema.clone());
+
+    assert_eq!(first.output_contract, schema);
+    assert_eq!(second.output_contract, schema);
+    let first_wire = serde_json::to_value(&first).expect("serialize first context");
+    let second_wire = serde_json::to_value(&second).expect("serialize second context");
+    assert_eq!(
+        first_wire["output_contract"],
+        second_wire["output_contract"]
+    );
+    let restored: LoopRunContext = serde_json::from_value(first_wire).expect("restore context");
+    assert_eq!(restored.output_contract, schema);
+}
+
+#[test]
+fn legacy_context_without_output_contract_rehydrates_assistant_default() {
+    let scope = TurnScope::new(
+        ironclaw_host_api::ids::TenantId::new("tenant-output-legacy").expect("tenant"),
+        None,
+        None,
+        ThreadId::new("thread-output-legacy").expect("thread"),
+    );
+    let profile = ResolvedRunProfile::legacy_compatibility(
+        ironclaw_host_api::turn::RunProfileId::default_profile(),
+        ironclaw_host_api::turn::RunProfileVersion::new(1),
+        true,
+    );
+    let context = LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), profile);
+    let mut wire = serde_json::to_value(&context).expect("serialize context");
+    wire.as_object_mut()
+        .expect("context wire object")
+        .remove("output_contract");
+    let restored: LoopRunContext = serde_json::from_value(wire).expect("restore context");
+    assert_eq!(
+        restored.output_contract,
+        ironclaw_host_api::output::OutputContract::AssistantMessage
+    );
+}
+
 mod acting_identity_ladder {
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId};
     use ironclaw_host_api::turn::{RunProfileId, TurnThreadOwner};

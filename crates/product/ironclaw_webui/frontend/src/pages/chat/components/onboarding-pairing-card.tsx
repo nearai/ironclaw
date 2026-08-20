@@ -4,6 +4,17 @@ import { PairingWebCodePanel } from "../../../components/pairing-web-code-panel"
 import { useT } from "../../../lib/i18n";
 import { channelConnectionDisplayName } from "../../../lib/channel-connection-events";
 
+let LazyOnboardingDeviceLinkPanel = null;
+
+function getOnboardingDeviceLinkPanel() {
+  LazyOnboardingDeviceLinkPanel ??= React.lazy(() =>
+    import("./onboarding-device-link-panel").then(({ OnboardingDeviceLinkPanel }) => ({
+      default: OnboardingDeviceLinkPanel,
+    })),
+  );
+  return LazyOnboardingDeviceLinkPanel;
+}
+
 export function OnboardingPairingCard({ onboarding, onConfigure, onCancel }) {
   const t = useT();
   const [error, setError] = React.useState("");
@@ -34,6 +45,46 @@ export function OnboardingPairingCard({ onboarding, onConfigure, onCancel }) {
       setIsConfiguring(false);
     }
   };
+
+  // Device-link strategy: resolve the credential authority from the installed
+  // extension's setup contract, then host the same multi-step flow used by the
+  // Extensions page. `extensionName` and `provider` are deliberately distinct:
+  // one vendor can back multiple extensions, so the chat surface must not infer
+  // credential authority from the product id.
+  if (onboarding?.strategy === "device_link" && onboarding?.extensionName) {
+    const DeviceLinkOnboarding = getOnboardingDeviceLinkPanel();
+    return (
+      <div
+        data-testid="onboarding-pairing-card"
+        className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-signal/25 bg-signal/5 p-4"
+      >
+        <h3 className="text-sm font-semibold text-iron-100">{copy.title}</h3>
+        {copy.instructions &&
+        (<p className="mt-1 text-sm leading-6 text-iron-300">{copy.instructions}</p>)}
+        <React.Suspense
+          fallback={(<p className="mt-3 text-sm text-iron-400">{t("common.loading")}</p>)}
+        >
+          <DeviceLinkOnboarding
+            onboarding={onboarding}
+            displayName={copy.displayName || onboarding.extensionName}
+            errorMessage={copy.errorMessage}
+          />
+        </React.Suspense>
+        {onCancel &&
+        (
+          <div className="mt-3">
+            <Button
+              variant="ghost"
+              className="h-9 px-3 text-xs"
+              onClick={onCancel}
+            >
+              {t("common.dismiss")}
+            </Button>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   // Web-minted code strategy: this side generates the code, so render the
   // pairing panel (code + deep link + QR + live connect detection) instead of

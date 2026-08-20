@@ -400,6 +400,56 @@ impl ProductConversationBindingService {
         })
     }
 
+    async fn repair_stale_direct_binding(
+        &self,
+        installation_scope: &ProductInstallationScope,
+        request: &ResolveBindingRequest,
+        expected_actor: Option<&ResolvedProductActorUser>,
+    ) -> Result<bool, ProductOperationFailure> {
+        let Some(expected_actor) = expected_actor else {
+            return Ok(false);
+        };
+        if request.route_kind != ProductConversationRouteKind::Direct {
+            return Ok(false);
+        }
+        let ProductActorBindingPolicy::ResolveActor { actor_pairings, .. } =
+            &installation_scope.actor_binding_policy
+        else {
+            return Ok(false);
+        };
+
+        // Old persisted state can contain a pairing already updated to the
+        // resolver's current user while its direct route still points at a
+        // thread owned by the previous user. Only repair that state after the
+        // host resolver confirms the expected identity is still current, and
+        // only if the stored pairing is still owned by that exact identity.
+        self.ensure_resolved_actor_binding_still_current(
+            installation_scope,
+            request,
+            Some(expected_actor),
+        )
+        .await?;
+        let outcome = actor_pairings
+            .unpair_external_actor_if_owned_by(
+                &installation_scope.tenant_id,
+                &conversation_adapter_kind(&request.adapter_id)?,
+                &conversation_installation_id(&request.installation_id)?,
+                &request.external_actor_ref,
+                &ironclaw_conversations::ExpectedExternalActorOwner {
+                    user_id: expected_actor.user_id.clone(),
+                    binding_epoch: expected_actor.binding_epoch.clone(),
+                },
+            )
+            .await
+            .map_err(map_conversation_error)?;
+        if outcome != ironclaw_conversations::ConditionalUnpairOutcome::Unpaired {
+            return Ok(false);
+        }
+        self.apply_resolved_actor_binding(installation_scope, request, expected_actor)
+            .await?;
+        Ok(true)
+    }
+
     /// The reset authorization pair, shared by `reset_binding`'s pre- and
     /// post-rotation checks so the two cannot drift: resolved-actor match and
     /// resolver-backed actor currency. (Shared-conversation admission is
@@ -482,16 +532,38 @@ impl ProductBindingResolver for ProductConversationBindingService {
         // No trusted owner: the conversations domain keys and owns shared
         // bindings by the paired actor (a run acts as the user who invoked
         // it), and Direct product bindings carry no explicit owner.
-        let resolution = self
+        let first_resolution = self
             .conversations
             .resolve_or_create_binding_with_trusted_scope(
-                conversation_request,
+                conversation_request.clone(),
                 installation_scope.default_agent_id.clone(),
                 installation_scope.default_project_id.clone(),
                 None,
             )
-            .await
-            .map_err(map_conversation_error)?;
+            .await;
+        let resolution = match first_resolution {
+            Ok(resolution) => resolution,
+            Err(ironclaw_conversations::InboundTurnError::AccessDenied { .. })
+                if self
+                    .repair_stale_direct_binding(
+                        &installation_scope,
+                        &request,
+                        expected_actor.as_ref(),
+                    )
+                    .await? =>
+            {
+                self.conversations
+                    .resolve_or_create_binding_with_trusted_scope(
+                        conversation_request,
+                        installation_scope.default_agent_id.clone(),
+                        installation_scope.default_project_id.clone(),
+                        None,
+                    )
+                    .await
+                    .map_err(map_conversation_error)?
+            }
+            Err(error) => return Err(map_conversation_error(error)),
+        };
         ensure_resolved_actor_matches_expected_user(expected_actor.as_ref(), &resolution)?;
         self.ensure_resolved_actor_binding_still_current(
             &installation_scope,

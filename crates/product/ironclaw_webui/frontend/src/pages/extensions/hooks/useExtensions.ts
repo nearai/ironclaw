@@ -3,6 +3,9 @@ import React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { clientActionId, gatewayStatus } from "../../../lib/api";
 import {
+  OAUTH_FLOW_POLL_MS,
+  OAUTH_FLOW_STATUS_ERROR_KEYS,
+  OAUTH_FLOW_TIMEOUT_MS,
   completionMatchesFlow,
   failureMatchesFlow,
   isHttpsAuthUrl,
@@ -27,15 +30,8 @@ import {
   importExtension,
 } from "../lib/extensions-api";
 
-const OAUTH_SETUP_REFRESH_MS = 2000;
-const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
 const HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF =
   "hosted_mcp_auth_selection_required";
-const OAUTH_STATUS_ERROR_KEYS = Object.freeze({
-  failed: "extensions.oauthFailed",
-  canceled: "extensions.oauthCanceled",
-  expired: "extensions.oauthExpired",
-});
 
 // OAuth callback constants, HTTPS-auth-URL/popup helpers, and completion
 // parsing/matching are the shared product-auth OAuth event contract — see
@@ -122,6 +118,11 @@ export function useExtensions() {
     // leaving both data and error empty and reproducing the misleading state.
     networkMode: "always",
     refetchOnMount: "always",
+    // Lifecycle and account state can change while the server is restarting or
+    // while this tab is in the background. The app-wide default disables focus
+    // refresh, which otherwise leaves a revoked/connected card stale until a
+    // hard reload even after the backend is healthy again.
+    refetchOnWindowFocus: true,
   });
 
   const registryQuery = useQuery({
@@ -129,6 +130,7 @@ export function useExtensions() {
     queryFn: fetchExtensionRegistry,
     networkMode: "always",
     refetchOnMount: "always",
+    refetchOnWindowFocus: true,
   });
 
   const refetch = React.useCallback(
@@ -512,7 +514,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
             if (status === "completed") {
               complete();
             } else {
-              const errorKey = OAUTH_STATUS_ERROR_KEYS[status];
+              const errorKey = OAUTH_FLOW_STATUS_ERROR_KEYS[status];
               if (typeof errorKey !== "string") return;
               setAuthError(t(errorKey));
               stopWatcher();
@@ -542,7 +544,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
           complete();
           return;
         }
-        const timedOut = Date.now() - startedAt > OAUTH_SETUP_TIMEOUT_MS;
+        const timedOut = Date.now() - startedAt > OAUTH_FLOW_TIMEOUT_MS;
         // Current product-auth OAuth callbacks close their popup after writing
         // durable flow status. With a flow id, popup.closed is expected and the
         // status/event backstop owns completion.
@@ -557,7 +559,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
           stopWatcher();
           refreshSetupState();
         }
-      }, OAUTH_SETUP_REFRESH_MS);
+      }, OAUTH_FLOW_POLL_MS);
       watcherRef.current = cleanup;
       handleCompletion(readLatestProductAuthOAuthCompletion(browserWindow));
     },

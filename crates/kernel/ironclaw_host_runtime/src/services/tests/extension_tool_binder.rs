@@ -182,6 +182,77 @@ async fn binder_preserves_the_auth_gate_payload_across_the_tool_abi() {
     }
 }
 
+#[test]
+fn binder_preserves_the_raw_auth_diagnostic_across_the_tool_abi() {
+    let diagnostic =
+        "provider error code: github_api_error_status_401; provider message: Bad credentials";
+    let error = crate::services::extension_tool_binder::tool_error_from_dispatch(
+        DispatchError::AuthRequired {
+            capability: CapabilityId::new("github.list_issues").unwrap(),
+            required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
+            model_visible_cause: Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
+                code: None,
+                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                    diagnostic,
+                )),
+                retry_after: None,
+            })),
+        },
+    );
+
+    let ToolError::AuthRequired {
+        model_visible_cause: Some(cause),
+        ..
+    } = error
+    else {
+        panic!("binder must preserve the auth diagnostic");
+    };
+    assert_eq!(
+        cause.message.as_ref().map(|message| message.as_str()),
+        Some(diagnostic)
+    );
+    assert!(!format!("{cause:?}").contains("Bad credentials"));
+}
+
+#[test]
+fn binder_preserves_provider_rejection_across_the_tool_abi() {
+    use ironclaw_host_api::dispatch::{
+        DispatchFailureKind, ProviderErrorCode, RuntimeDispatchErrorKind,
+    };
+
+    let error =
+        crate::services::extension_tool_binder::tool_error_from_dispatch(DispatchError::Rejected {
+            runtime: Some(ironclaw_host_api::runtime::RuntimeKind::Mcp),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client),
+            diagnostic: Some(ironclaw_host_api::dispatch::ProviderDiagnostic {
+                code: Some(ProviderErrorCode::new("mcp_tool_rejected")),
+                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                    "Bad credentials",
+                )),
+                retry_after: None,
+            }),
+            detail: None,
+        });
+
+    let ToolError::Rejected {
+        diagnostic: Some(diagnostic),
+        ..
+    } = error
+    else {
+        panic!("binder must preserve typed provider rejection metadata");
+    };
+    assert_eq!(
+        diagnostic.code.as_ref().map(|code| code.as_str()),
+        Some("mcp_tool_rejected")
+    );
+    assert_eq!(
+        diagnostic.message.as_ref().map(|message| message.as_str()),
+        Some("Bad credentials")
+    );
+    assert!(!format!("{diagnostic:?}").contains("Bad credentials"));
+}
+
 #[tokio::test]
 async fn binder_fails_typed_for_an_unconfigured_lane() {
     // No MCP runtime configured: binding an MCP-runtime package fails with

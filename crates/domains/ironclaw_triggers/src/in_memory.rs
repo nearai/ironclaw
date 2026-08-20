@@ -578,6 +578,8 @@ impl TriggerRepository for InMemoryTriggerRepository {
                 run.completed_at = Some(completed_at);
                 run
             });
+        // Recovery may synthesize a completion row when the Running row is
+        // missing, so this edge can still increase cardinality and must prune.
         prune_run_history_locked(&mut state, &request.tenant_id, request.trigger_id);
         Ok(Some(record))
     }
@@ -714,7 +716,6 @@ impl InMemoryTriggerRepository {
         );
         run.thread_id = preserved_thread_id;
         state.runs.insert(key, run);
-        prune_run_history_locked(&mut state, tenant_id, trigger_id);
         Ok(())
     }
 
@@ -752,6 +753,8 @@ impl InMemoryTriggerRepository {
                 run.completed_at = Some(completed_at);
                 run
             });
+        // Terminal recovery can insert a missing history row; retain strict
+        // retention on that conservative fallback.
         prune_run_history_locked(&mut state, tenant_id, trigger_id);
         Ok(())
     }

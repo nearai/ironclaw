@@ -959,6 +959,7 @@ pub(crate) fn capability_surfaces_from_parts(
         struct AuthAccumulator {
             oauth_scopes: Option<BTreeSet<String>>,
             saw_manual_token: bool,
+            saw_device_link: bool,
         }
         let mut providers: BTreeMap<VendorId, AuthAccumulator> = BTreeMap::new();
         for capability in capabilities {
@@ -984,6 +985,14 @@ pub(crate) fn capability_surfaces_from_parts(
                     // pairing) surface through the channel connection
                     // strategy, not as an auth-provider surface.
                     RuntimeCredentialAccountSetup::Pairing => {}
+                    // A device link DOES mint a credential account, so unlike
+                    // pairing it is a real auth-provider surface — discovery
+                    // must show the vendor as connectable. It carries no
+                    // scopes (`VendorAuthRecipe::scope_ceiling` is empty for
+                    // `device_link`), so there is nothing to accumulate.
+                    RuntimeCredentialAccountSetup::DeviceLink => {
+                        accumulator.saw_device_link = true;
+                    }
                 }
             }
         }
@@ -997,6 +1006,16 @@ pub(crate) fn capability_surfaces_from_parts(
                     } => RuntimeCredentialAccountSetup::OAuth {
                         scopes: scopes.into_iter().collect(),
                     },
+                    // Ordered before manual-token for the same reason OAuth is:
+                    // a richer setup masks a plainer one. In practice the two
+                    // cannot legitimately co-occur for one vendor — recipes
+                    // sharing a vendor must be `compatible_for_shared_vendor`,
+                    // which is false across methods — so this only decides the
+                    // projection for a manifest that is already malformed.
+                    AuthAccumulator {
+                        saw_device_link: true,
+                        ..
+                    } => RuntimeCredentialAccountSetup::DeviceLink,
                     AuthAccumulator {
                         saw_manual_token: true,
                         ..

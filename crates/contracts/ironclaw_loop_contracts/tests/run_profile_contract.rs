@@ -194,6 +194,56 @@ fn checkpoint_policy_missing_final_checkpoint_gate_defaults_to_required() {
     .unwrap();
 
     assert!(policy.require_final_checkpoint);
+    // A profile persisted before #7603 carries no interval field. Batching is
+    // opt-in, so it must come back on the original per-model-call cadence —
+    // not a batched one, and not an unusable 0.
+    assert_eq!(policy.before_model_checkpoint_interval, 1);
+    assert_eq!(policy.before_model_flush_interval(), 1);
+}
+
+/// A hand-written or corrupted `0` must fail toward MORE durability — a
+/// `BeforeModel` checkpoint every iteration — never toward writing none.
+#[test]
+fn before_model_checkpoint_interval_of_zero_flushes_every_iteration() {
+    let policy: CheckpointPolicy = serde_json::from_value(serde_json::json!({
+        "require_before_model": true,
+        "require_before_side_effect": true,
+        "require_before_block": true,
+        "max_checkpoint_bytes": 65536,
+        "before_model_checkpoint_interval": 0
+    }))
+    .unwrap();
+
+    assert_eq!(policy.before_model_flush_interval(), 1);
+    for iteration in 0..5 {
+        assert!(
+            policy.flushes_before_model_at(iteration),
+            "iteration {iteration} must flush under a coerced interval of 1"
+        );
+    }
+}
+
+/// The flush points an interval of 3 permits: iteration 0 always checkpoints,
+/// then every third iteration after it. This is the ceiling the executor
+/// applies to consecutive model-only iterations; it still checkpoints more
+/// often than this whenever the previous checkpoint was `BeforeSideEffect`.
+#[test]
+fn before_model_interval_of_three_permits_flushes_every_third_iteration() {
+    let policy = CheckpointPolicy {
+        require_before_model: false,
+        require_before_side_effect: true,
+        require_before_block: true,
+        max_checkpoint_bytes: 64 * 1024,
+        require_final_checkpoint: false,
+        allow_no_reply_completion: false,
+        before_model_checkpoint_interval: 3,
+    };
+
+    let flushed: Vec<u32> = (0..10)
+        .filter(|iteration| policy.flushes_before_model_at(*iteration))
+        .collect();
+
+    assert_eq!(flushed, vec![0, 3, 6, 9]);
 }
 
 #[test]

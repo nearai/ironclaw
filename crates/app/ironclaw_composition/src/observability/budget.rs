@@ -124,6 +124,7 @@ mod tests {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         };
         let _ = governor
             .reserve(
@@ -212,11 +213,13 @@ mod tests {
                 max_checkpoint_bytes: 64 * 1024,
                 require_final_checkpoint: false,
                 allow_no_reply_completion: false,
+                before_model_checkpoint_interval: 1,
             },
             resource_budget_policy: ResourceBudgetPolicy {
                 tier: ResourceBudgetTier::new("budget_helper_tier").unwrap(),
                 max_model_calls: 32,
                 max_capability_invocations: 64,
+                max_wall_clock_seconds: None,
             },
             personal_context_policy: PersonalContextPolicy::Excluded,
             runtime_constraints: RuntimeProfileConstraints {

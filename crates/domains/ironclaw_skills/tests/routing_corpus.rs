@@ -78,6 +78,7 @@ fn real_skill_routing_corpus_matches_the_reviewed_legacy_baseline() {
     validate_corpus(&corpus, &skills_by_name);
 
     let mut metrics = BaselineMetrics::default();
+    let mut baseline_changes = Vec::new();
     for case in &corpus.cases {
         let selected = prefilter_skills_with_options(
             &case.prompt,
@@ -92,11 +93,12 @@ fn real_skill_routing_corpus_matches_the_reviewed_legacy_baseline() {
         .map(|skill| skill.name().to_string())
         .collect::<Vec<_>>();
 
-        assert_eq!(
-            selected, case.baseline_selected,
-            "routing baseline changed for case {}; review whether this is an intentional quality change, then update the fixture",
-            case.id
-        );
+        if selected != case.baseline_selected {
+            baseline_changes.push(format!(
+                "{}: expected {:?}, selected {:?}",
+                case.id, case.baseline_selected, selected
+            ));
+        }
 
         metrics.relevant_total += case.relevant.len();
         metrics.relevant_retrieved += case
@@ -135,6 +137,11 @@ fn real_skill_routing_corpus_matches_the_reviewed_legacy_baseline() {
     // Slice 0 records these quality measurements without enforcing the epic's
     // promotion thresholds. Slice 6 owns turning reviewed targets into gates.
     eprintln!("skill-routing-baseline metrics={metrics:?}");
+    assert!(
+        baseline_changes.is_empty(),
+        "routing baseline changed; review whether each change is intentional, then update the fixture:\n{}",
+        baseline_changes.join("\n")
+    );
 }
 
 #[test]

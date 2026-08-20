@@ -48,7 +48,7 @@ use chrono::{Duration, Utc};
 use ironclaw_filesystem::{
     CasApply, CasExpectation, CasUpdateError, ContentType, Entry, FilesystemError, Filter,
     InMemoryBackend, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page, RecordKind,
-    RootFilesystem, ScopedFilesystem, cas_update,
+    RecordVersion, RootFilesystem, ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{
     Timestamp,
@@ -65,8 +65,9 @@ use tokio::sync::Mutex;
 use crate::{
     CredentialAccount, CredentialAccountId, CredentialAccountStatus, CredentialAccountStore,
     CredentialBrokerError, CredentialSession, CredentialSessionId, CredentialSessionStore,
-    DEFAULT_SECRET_LEASE_TTL_SECONDS, SecretError, SecretLease, SecretLeaseId, SecretLeaseStatus,
-    SecretMaterial, SecretMetadata, SecretStoreError, SecretStorePort, SecretsCrypto,
+    DEFAULT_SECRET_LEASE_TTL_SECONDS, SecretCasExpectation, SecretCasWriteOutcome, SecretError,
+    SecretLease, SecretLeaseId, SecretLeaseStatus, SecretMaterial, SecretMetadata,
+    SecretStoreError, SecretStorePort, SecretVersion, SecretsCrypto, VersionedSecretMaterial,
     credential_account_aad, credential_session_aad, filesystem_secret_aad,
 };
 
@@ -289,15 +290,7 @@ where
 
     async fn write_secret(&self, secret: &StoredSecret) -> Result<(), SecretStoreError> {
         let path = secret_path(&secret.scope, &secret.handle)?;
-        let body = serialize_secret(secret)?;
-        let kind = RecordKind::new(SECRET_RECORD_KIND).map_err(|error| {
-            SecretStoreError::StoreUnavailable {
-                reason: format!("invalid secret record kind: {error}"),
-            }
-        })?;
-        let mut base_entry = Entry::bytes(body).with_content_type(ContentType::json());
-        base_entry.kind = Some(kind);
-        let entry = tag_entry_with_tenant(base_entry, &secret.scope);
+        let entry = secret_entry(secret)?;
         self.ensure_tenant_id_index(&secret.scope).await?;
         self.filesystem
             .put(&secret.scope, &path, entry, CasExpectation::Any)
@@ -473,6 +466,89 @@ where
             handle,
             expires_at,
         })
+    }
+
+    async fn put_versioned(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        material: SecretMaterial,
+        expires_at: Option<Timestamp>,
+        expected: SecretCasExpectation,
+    ) -> Result<SecretCasWriteOutcome, SecretStoreError> {
+        let plaintext = material.expose_secret().as_bytes();
+        let aad = filesystem_secret_aad(&scope, &handle);
+        let (encrypted_value, key_salt) = self
+            .crypto
+            .encrypt(plaintext, &aad)
+            .map_err(secret_error_to_store_error)?;
+        let now = Utc::now();
+        let stored = StoredSecret {
+            scope: scope.clone(),
+            handle: handle.clone(),
+            encrypted_value,
+            key_salt,
+            expires_at,
+            created_at: now,
+            updated_at: now,
+        };
+        let path = secret_path(&stored.scope, &stored.handle)?;
+        let entry = secret_entry(&stored)?;
+        self.ensure_tenant_id_index(&stored.scope).await?;
+        let cas = match &expected {
+            SecretCasExpectation::Absent => CasExpectation::Absent,
+            SecretCasExpectation::Version(version) => {
+                CasExpectation::Version(RecordVersion::from_backend(version.get()))
+            }
+        };
+        match self.filesystem.put(&stored.scope, &path, entry, cas).await {
+            Ok(version) => Ok(SecretCasWriteOutcome::Stored {
+                metadata: SecretMetadata {
+                    scope,
+                    handle,
+                    expires_at,
+                },
+                version: SecretVersion::from_backend(version.get()),
+            }),
+            // A lost race is an outcome the caller must reason about, not an
+            // error: `found` is the version stored now, so the loser can
+            // reload, merge, and try again against reality.
+            Err(FilesystemError::VersionMismatch { found, .. }) => {
+                Ok(SecretCasWriteOutcome::Conflict {
+                    current: found.map(|version| SecretVersion::from_backend(version.get())),
+                })
+            }
+            Err(error) => Err(fs_to_secret_store_error(error)),
+        }
+    }
+
+    async fn read_versioned(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<Option<VersionedSecretMaterial>, SecretStoreError> {
+        let path = secret_path(scope, handle)?;
+        let Some(versioned) = self
+            .filesystem
+            .get(scope, &path)
+            .await
+            .map_err(fs_to_secret_store_error)?
+        else {
+            return Ok(None);
+        };
+        let stored: StoredSecret = deserialize_secret(&versioned.entry.body)?;
+        if !same_scope_owner(&stored.scope, scope) || &stored.handle != handle {
+            return Ok(None);
+        }
+        let aad = filesystem_secret_aad(scope, handle);
+        let decrypted = self
+            .crypto
+            .decrypt(&stored.encrypted_value, &stored.key_salt, &aad)
+            .map_err(secret_error_to_store_error)?;
+        Ok(Some(VersionedSecretMaterial {
+            material: SecretMaterial::from(decrypted.expose().to_string()),
+            version: SecretVersion::from_backend(versioned.version.get()),
+        }))
     }
 
     async fn put_if_absent(
@@ -1134,6 +1210,21 @@ fn secret_path(
         secret_owner_alias(scope),
         handle.as_str()
     ))
+}
+
+/// The filesystem entry a [`StoredSecret`] serializes to. One builder for the
+/// unconditional and compare-and-swap write paths, so the record shape cannot
+/// drift between them.
+fn secret_entry(secret: &StoredSecret) -> Result<Entry, SecretStoreError> {
+    let body = serialize_secret(secret)?;
+    let kind = RecordKind::new(SECRET_RECORD_KIND).map_err(|error| {
+        SecretStoreError::StoreUnavailable {
+            reason: format!("invalid secret record kind: {error}"),
+        }
+    })?;
+    let mut base_entry = Entry::bytes(body).with_content_type(ContentType::json());
+    base_entry.kind = Some(kind);
+    Ok(tag_entry_with_tenant(base_entry, &secret.scope))
 }
 
 fn lease_path(
@@ -3139,6 +3230,180 @@ mod tests {
                 );
             }
             other => panic!("expected BrokerUnavailable, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Compare-and-swap secret writes (`put_versioned` / `read_versioned`).
+    //
+    // The motivating consumer is linked-device session custody: a rotating
+    // vendor auth key clobbered by a concurrent last-writer-wins `put` is a
+    // silently dead link, so the loser of a race must be TOLD it lost — with
+    // the current version — instead of overwriting.
+    // -----------------------------------------------------------------------
+
+    use crate::{SecretCasExpectation, SecretCasWriteOutcome};
+
+    fn cas_store() -> SecretStore<InMemoryBackend> {
+        SecretStore::ephemeral()
+    }
+
+    #[tokio::test]
+    async fn read_versioned_on_a_missing_secret_is_none() {
+        let store = cas_store();
+        let scope = sample_scope("tenant-a", "user-a");
+        let handle = SecretHandle::new("linked_session").unwrap();
+        assert!(
+            store
+                .read_versioned(&scope, &handle)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn put_versioned_round_trips_material_and_version() {
+        let store = cas_store();
+        let scope = sample_scope("tenant-a", "user-a");
+        let handle = SecretHandle::new("linked_session").unwrap();
+
+        let outcome = store
+            .put_versioned(
+                scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("blob-v1".to_string()),
+                None,
+                SecretCasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+        let version = match outcome {
+            SecretCasWriteOutcome::Stored { version, metadata } => {
+                assert_eq!(metadata.handle, handle);
+                version
+            }
+            SecretCasWriteOutcome::Conflict { .. } => panic!("first write must not conflict"),
+        };
+
+        let read = store
+            .read_versioned(&scope, &handle)
+            .await
+            .unwrap()
+            .expect("stored secret is readable");
+        assert_eq!(read.material.expose_secret(), "blob-v1");
+        assert_eq!(read.version, version);
+    }
+
+    #[tokio::test]
+    async fn put_versioned_with_a_stale_version_is_a_conflict_not_last_writer_wins() {
+        let store = cas_store();
+        let scope = sample_scope("tenant-a", "user-a");
+        let handle = SecretHandle::new("linked_session").unwrap();
+
+        let first = store
+            .put_versioned(
+                scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("blob-v1".to_string()),
+                None,
+                SecretCasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+        let SecretCasWriteOutcome::Stored { version: v1, .. } = first else {
+            panic!("first write must store");
+        };
+
+        let second = store
+            .put_versioned(
+                scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("blob-v2".to_string()),
+                None,
+                SecretCasExpectation::Version(v1.clone()),
+            )
+            .await
+            .unwrap();
+        let SecretCasWriteOutcome::Stored { version: v2, .. } = second else {
+            panic!("write with the current version must store");
+        };
+        assert_ne!(v1, v2, "a committed write must advance the version");
+
+        // A writer still holding v1 must LOSE, be told the current version,
+        // and must not have overwritten the stored material.
+        let stale = store
+            .put_versioned(
+                scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("blob-stale".to_string()),
+                None,
+                SecretCasExpectation::Version(v1),
+            )
+            .await
+            .unwrap();
+        match stale {
+            SecretCasWriteOutcome::Conflict { current } => {
+                assert_eq!(
+                    current,
+                    Some(v2.clone()),
+                    "conflict reports the current version"
+                );
+            }
+            SecretCasWriteOutcome::Stored { .. } => {
+                panic!("a stale writer must not win the compare-and-swap")
+            }
+        }
+        let read = store
+            .read_versioned(&scope, &handle)
+            .await
+            .unwrap()
+            .expect("secret still stored");
+        assert_eq!(
+            read.material.expose_secret(),
+            "blob-v2",
+            "the losing write must not clobber the stored material"
+        );
+        assert_eq!(read.version, v2);
+    }
+
+    #[tokio::test]
+    async fn put_versioned_absent_over_an_existing_secret_is_a_conflict() {
+        let store = cas_store();
+        let scope = sample_scope("tenant-a", "user-a");
+        let handle = SecretHandle::new("linked_session").unwrap();
+
+        let first = store
+            .put_versioned(
+                scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("blob-v1".to_string()),
+                None,
+                SecretCasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+        let SecretCasWriteOutcome::Stored { version, .. } = first else {
+            panic!("first write must store");
+        };
+
+        let duplicate = store
+            .put_versioned(
+                scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("blob-imposter".to_string()),
+                None,
+                SecretCasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+        match duplicate {
+            SecretCasWriteOutcome::Conflict { current } => {
+                assert_eq!(current, Some(version));
+            }
+            SecretCasWriteOutcome::Stored { .. } => {
+                panic!("an absent-expectation write over an existing secret must conflict")
+            }
         }
     }
 }

@@ -4,7 +4,7 @@ use chrono::Utc;
 use ironclaw_filesystem::{
     CasExpectation, DiskFilesystem, Entry, Fault, FaultInjecting, FaultKind, FilesystemError,
     FilesystemOperation, Filter, InMemoryBackend, IndexKey, LibSqlRootFilesystem, Page,
-    ScopedFilesystem,
+    PostgresRootFilesystem, RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
     ids::{AgentId, InvocationId, ProcessId, ProjectId, TenantId, ThreadId, UserId},
@@ -30,11 +30,11 @@ use ironclaw_processes::{
     ProcessLifecycleLookupBatchRequest, ProcessLifecycleLookupRequest,
     ProcessLifecycleLookupResult, ProcessLifecycleLookupSource, ProcessLifecycleStatus,
     ProcessOperationId, ProcessSnapshotSource, ProcessStateTransitionRequest,
-    ProcessSubmissionPort, ProcessSuspension, ProcessSuspensionKind, ProcessTerminalEvidence,
-    ProcessTransitionPort, ProcessTreePort, ProcessWorkerId, PruneReleasedProcessRequest,
-    RecordProcessCheckpointRequest, ReleaseProcessTreeRequest, ReserveProcessTreeRequest,
-    ResumeProcessRequest, SettleProcessDependencyRequest, StopProcessRequest, SubmitProcessRequest,
-    SuspendProcessRequest,
+    ProcessSubmissionEdge, ProcessSubmissionPort, ProcessSuspension, ProcessSuspensionKind,
+    ProcessTerminalEvidence, ProcessTransitionPort, ProcessTreePort, ProcessWorkerId,
+    PruneReleasedProcessRequest, RecordProcessCheckpointRequest, ReleaseProcessTreeRequest,
+    ReserveProcessTreeRequest, ResumeProcessRequest, SettleProcessDependencyRequest,
+    StopProcessRequest, SubmitProcessAtEdgeRequest, SubmitProcessRequest, SuspendProcessRequest,
 };
 use serde_json::json;
 use std::{
@@ -521,6 +521,144 @@ async fn each_process_lifecycle_event_is_an_individual_libsql_row() {
         .expect("count row exists");
     let count: i64 = row.get(0).expect("read count");
     assert_eq!(count, 32);
+}
+
+#[tokio::test]
+async fn edge_submission_survives_libsql_restart() {
+    let storage = tempfile::tempdir().expect("temporary process journal database");
+    let database = Arc::new(
+        libsql::Builder::new_local(storage.path().join("edge-submission.db"))
+            .build()
+            .await
+            .expect("build libsql database"),
+    );
+    let backend =
+        Arc::new(LibSqlRootFilesystem::new(database).expect("create libSQL filesystem runtime"));
+    backend
+        .run_migrations()
+        .await
+        .expect("migrate libSQL filesystem");
+    assert_edge_submission_survives_restart(
+        backend,
+        format!("libsql-edge-{}", uuid::Uuid::new_v4()),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn edge_submission_survives_postgres_restart() {
+    let Some(backend) = postgres_backend().await else {
+        eprintln!(
+            "skipping process edge-submission Postgres contract: \
+             IRONCLAW_FILESYSTEM_POSTGRES_URL / DATABASE_URL unavailable"
+        );
+        return;
+    };
+    assert_edge_submission_survives_restart(
+        Arc::new(backend),
+        format!("postgres-edge-{}", uuid::Uuid::new_v4()),
+    )
+    .await;
+}
+
+async fn assert_edge_submission_survives_restart<F>(backend: Arc<F>, fixture: String)
+where
+    F: RootFilesystem + 'static,
+{
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        backend,
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/processes").expect("mount alias"),
+            VirtualPath::new(format!("/engine/process-edge/{fixture}")).expect("virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view"),
+    ));
+    let request_scope = scope();
+    let process_id = ProcessId::new();
+    let request = SubmitProcessAtEdgeRequest {
+        submission: SubmitProcessRequest {
+            process_id,
+            process_kind: ProcessKind::CapabilityInvocationState,
+            scope: request_scope.clone(),
+            exclusive_within_scope: false,
+            operation_id: Some(ProcessOperationId::from_trusted("durable-edge")),
+            owner_user_id: Some(request_scope.user_id.clone()),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at: Utc::now(),
+            metadata: json!({"record_type": "capability_run"}),
+        },
+        edge: ProcessSubmissionEdge::Completed,
+    };
+    ProcessJournalStore::new(Arc::clone(&filesystem))
+        .submit_process_at_edge(request.clone())
+        .await
+        .expect("submit terminal edge");
+
+    let restarted = ProcessJournalStore::new(filesystem);
+    let loaded = restarted
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: request_scope.clone(),
+            process_id,
+        })
+        .await
+        .expect("load edge after restart");
+    assert_eq!(loaded.status, ProcessLifecycleStatus::Completed);
+    assert_eq!(loaded.metadata, request.submission.metadata);
+    restarted
+        .submit_process_at_edge(request)
+        .await
+        .expect("replay edge after restart");
+    let page = restarted
+        .read_process_journal_after(&request_scope, None, None, 16)
+        .await
+        .expect("read edge journal after restart");
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].kind, ProcessJournalKind::Completed);
+}
+
+fn postgres_test_url() -> Option<String> {
+    let primary = std::env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL");
+    match primary {
+        Ok(url) => Some(url),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("IRONCLAW_FILESYSTEM_POSTGRES_URL is configured but not valid UTF-8")
+        }
+        Err(std::env::VarError::NotPresent) => match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(url),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                panic!("DATABASE_URL is configured but not valid UTF-8")
+            }
+            Err(std::env::VarError::NotPresent) => None,
+        },
+    }
+}
+
+async fn postgres_backend() -> Option<PostgresRootFilesystem> {
+    if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
+        return None;
+    }
+    let url = postgres_test_url()?;
+    let config = url
+        .parse::<tokio_postgres::Config>()
+        .expect("parse configured PostgreSQL test URL");
+    let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+    let pool = deadpool_postgres::Pool::builder(manager)
+        .max_size(4)
+        .build()
+        .expect("build PostgreSQL test pool");
+    let backend = PostgresRootFilesystem::new(pool);
+    backend
+        .run_migrations()
+        .await
+        .expect("migrate configured PostgreSQL filesystem");
+    Some(backend)
 }
 
 #[tokio::test]
@@ -2987,12 +3125,7 @@ async fn process_journal_store_owns_lifecycle_and_gate_projection() {
             checkpoint_ref: None,
             input: None,
             created_at: Utc::now(),
-            metadata: json!({
-                "agent_turn": {
-                    "source_binding_ref": "source:journal-contract",
-                    "reply_target_binding_ref": "reply:journal-contract"
-                }
-            }),
+            metadata: json!({ "agent_turn": {} }),
         })
         .await
         .expect("submit process");
@@ -3018,10 +3151,40 @@ async fn process_journal_store_owns_lifecycle_and_gate_projection() {
         worker_id: claim.worker_id.clone(),
         lease_token: claim.lease_token.clone(),
     };
-    store
+    let first_heartbeat_cursor = store
         .heartbeat_process(lease.clone())
         .await
-        .expect("heartbeat process");
+        .expect("first heartbeat process");
+    let second_heartbeat_cursor = store
+        .heartbeat_process(lease.clone())
+        .await
+        .expect("second heartbeat process");
+    assert_eq!(
+        first_heartbeat_cursor, claim.state.journal_cursor,
+        "heartbeats must update lease health without advancing the journal cursor"
+    );
+    assert_eq!(
+        second_heartbeat_cursor, claim.state.journal_cursor,
+        "repeated heartbeats must not reserve journal cursors"
+    );
+
+    let heartbeat_snapshot = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: scope.clone(),
+            process_id,
+        })
+        .await
+        .expect("heartbeat-updated process snapshot");
+    let claimed_lease = claim.state.lease.as_ref().expect("claimed lease");
+    let heartbeat_lease = heartbeat_snapshot.lease.as_ref().expect("heartbeat lease");
+    assert!(
+        heartbeat_lease.last_heartbeat_at >= claimed_lease.last_heartbeat_at,
+        "heartbeat must refresh last_heartbeat_at"
+    );
+    assert!(
+        heartbeat_lease.lease_expires_at >= claimed_lease.lease_expires_at,
+        "heartbeat must refresh lease_expires_at"
+    );
 
     let gate_ref = TurnGateRef::new("gate:journal-contract").expect("gate ref");
     store
@@ -3076,14 +3239,6 @@ async fn process_journal_store_owns_lifecycle_and_gate_projection() {
     assert_eq!(gates.len(), 1);
     assert_eq!(gates[0].process_id, process_id);
     assert_eq!(gates[0].suspension.gate_ref.as_ref(), Some(&gate_ref));
-    assert_eq!(
-        gates[0].resume_source_ref.as_deref(),
-        Some("source:journal-contract")
-    );
-    assert_eq!(
-        gates[0].reply_target_ref.as_deref(),
-        Some("reply:journal-contract")
-    );
 
     let mut owner_scope = scope.clone();
     owner_scope.project_id = None;
@@ -3142,9 +3297,27 @@ async fn process_journal_store_owns_lifecycle_and_gate_projection() {
         .read_process_journal_after(&scope, None, Some(ProcessJournalCursor(0)), 10)
         .await
         .expect("journal page");
-    assert_eq!(page.entries.len(), 4);
+    assert_eq!(page.entries.len(), 3);
     assert_eq!(page.entries[0].status, ProcessLifecycleStatus::Queued);
-    assert_eq!(page.entries[3].status, ProcessLifecycleStatus::Suspended);
+    assert_eq!(page.entries[2].status, ProcessLifecycleStatus::Suspended);
+    assert!(
+        page.entries
+            .iter()
+            .all(|entry| entry.kind != ProcessJournalKind::Heartbeat),
+        "lease-only heartbeats must not append journal entries"
+    );
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|entry| entry.cursor)
+            .collect::<Vec<_>>(),
+        vec![
+            ProcessJournalCursor(1),
+            ProcessJournalCursor(2),
+            ProcessJournalCursor(3)
+        ],
+        "heartbeats must not leave cursor-reservation gaps"
+    );
 }
 
 #[tokio::test]
@@ -3927,10 +4100,11 @@ fn process_input_payload_is_bounded_and_redacted() {
     assert!(!debug.contains("private-goal"));
 }
 
-async fn submit_internal_process<F>(
+async fn submit_internal_process_at<F>(
     store: &ProcessJournalStore<F>,
     scope: &ResourceScope,
     process_id: ProcessId,
+    created_at: chrono::DateTime<Utc>,
 ) -> ironclaw_processes::JournaledProcessSnapshot
 where
     F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
@@ -3950,11 +4124,22 @@ where
             dependency: None,
             checkpoint_ref: None,
             input: None,
-            created_at: Utc::now(),
+            created_at,
             metadata: serde_json::Value::Null,
         })
         .await
         .expect("submit internal process")
+}
+
+async fn submit_internal_process<F>(
+    store: &ProcessJournalStore<F>,
+    scope: &ResourceScope,
+    process_id: ProcessId,
+) -> ironclaw_processes::JournaledProcessSnapshot
+where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    submit_internal_process_at(store, scope, process_id, Utc::now()).await
 }
 
 fn scope() -> ResourceScope {
@@ -3980,4 +4165,273 @@ fn in_memory_backed_processes_filesystem() -> std::sync::Arc<ScopedFilesystem<In
         std::sync::Arc::new(InMemoryBackend::new()),
         mounts,
     ))
+}
+
+/// The derived activation-streak caps read a bounded, newest-first window of a
+/// thread's own agent-turn runs. Two properties are load-bearing and both are
+/// asserted here: ordering must be newest-first (an ascending read returns the
+/// wrong end of history, so a saturated streak would look empty), and the limit
+/// must bound *agent-turn* rows specifically — a thread's scope also holds
+/// non-agent-turn processes, so a naive LIMIT over the scope index can be
+/// filled entirely by rows the cap does not count.
+#[tokio::test]
+async fn recent_agent_turn_snapshots_are_newest_first_and_bounded_by_agent_turn_rows() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    let scope = scope();
+
+    // Interleave agent-turn runs with internal processes in the same scope so
+    // a kind-blind limit would come back short (or empty).
+    // Strictly increasing stamps: the keyset tie-breaker is a random UUID, so
+    // equal timestamps would make the expected order unpredictable.
+    let base = Utc::now();
+    let mut agent_turn_ids = Vec::new();
+    for index in 0..5 {
+        let at = base + chrono::Duration::seconds(index * 2);
+        let agent_turn = ProcessId::new();
+        submit_agent_turn_process_at(&store, &scope, agent_turn, at).await;
+        agent_turn_ids.push(agent_turn);
+        submit_internal_process_at(
+            &store,
+            &scope,
+            ProcessId::new(),
+            at + chrono::Duration::seconds(1),
+        )
+        .await;
+    }
+
+    let recent = store
+        .recent_agent_turn_snapshots(&scope, 3)
+        .await
+        .expect("bounded recent read");
+
+    assert_eq!(
+        recent.len(),
+        3,
+        "the limit must bound agent-turn rows, not rows of any kind"
+    );
+    assert!(
+        recent
+            .iter()
+            .all(|snapshot| snapshot.process_kind == ProcessKind::AgentTurn),
+        "non-agent-turn processes in the same scope must never be returned"
+    );
+
+    let returned: Vec<_> = recent.iter().map(|snapshot| snapshot.process_id).collect();
+    let expected: Vec<_> = agent_turn_ids.iter().rev().take(3).copied().collect();
+    assert_eq!(
+        returned, expected,
+        "must return the newest agent-turn processes, newest first"
+    );
+}
+
+/// A limit larger than the history returns everything without error — the
+/// young-thread case the streak cap reads as "streak not established".
+#[tokio::test]
+async fn recent_agent_turn_snapshots_returns_a_short_window_for_a_young_thread() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    let scope = scope();
+
+    submit_agent_turn_process(&store, &scope, ProcessId::new()).await;
+    submit_agent_turn_process(&store, &scope, ProcessId::new()).await;
+
+    let recent = store
+        .recent_agent_turn_snapshots(&scope, 16)
+        .await
+        .expect("bounded recent read");
+
+    assert_eq!(recent.len(), 2);
+}
+
+async fn submit_agent_turn_process_at<F>(
+    store: &ProcessJournalStore<F>,
+    scope: &ResourceScope,
+    process_id: ProcessId,
+    created_at: chrono::DateTime<Utc>,
+) -> ironclaw_processes::JournaledProcessSnapshot
+where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    store
+        .submit_process(SubmitProcessRequest {
+            process_id,
+            process_kind: ProcessKind::AgentTurn,
+            scope: scope.clone(),
+            exclusive_within_scope: false,
+            operation_id: None,
+            owner_user_id: Some(scope.user_id.clone()),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at,
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("agent-turn process submits")
+}
+
+/// The window walk sorts on `(created_at micros, process_id text)` descending,
+/// and `ProcessId` is a random UUID — so any two rows sharing a microsecond
+/// resolve by UUID, which is not the order a test can predict. Ordering tests
+/// seed strictly increasing stamps through this helper so the tie-breaker is
+/// never reached.
+async fn submit_agent_turn_process<F>(
+    store: &ProcessJournalStore<F>,
+    scope: &ResourceScope,
+    process_id: ProcessId,
+) -> ironclaw_processes::JournaledProcessSnapshot
+where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    submit_agent_turn_process_at(store, scope, process_id, Utc::now()).await
+}
+
+/// The keyset walk pages. With limit=2 the page size is 8, so seeding more
+/// than 8 non-agent-turn processes ahead of the agent-turn rows forces the
+/// walk to advance its cursor and fetch again — the multi-page path, which a
+/// single-page test can never reach.
+#[tokio::test]
+async fn recent_agent_turn_snapshots_walks_past_a_full_page_of_other_kinds() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    let scope = scope();
+
+    let mut agent_turn_ids = Vec::new();
+    for _ in 0..2 {
+        agent_turn_ids.push(ProcessId::new());
+        submit_agent_turn_process(&store, &scope, *agent_turn_ids.last().expect("just pushed"))
+            .await;
+    }
+    // Newer than every agent-turn row, and more than one page of them.
+    for _ in 0..12 {
+        submit_internal_process(&store, &scope, ProcessId::new()).await;
+    }
+
+    let recent = store
+        .recent_agent_turn_snapshots(&scope, 2)
+        .await
+        .expect("bounded recent read");
+
+    let returned: Vec<_> = recent.iter().map(|snapshot| snapshot.process_id).collect();
+    let expected: Vec<_> = agent_turn_ids.iter().rev().copied().collect();
+    assert_eq!(
+        returned, expected,
+        "the walk must page past a full page of non-agent-turn rows to fill the window"
+    );
+}
+
+/// The bounded read carries its own system-scope rejection, distinct from the
+/// unbounded `process_snapshots` it deliberately restricts.
+#[tokio::test]
+async fn recent_agent_turn_snapshots_rejects_a_system_wide_scope() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+
+    let error = store
+        .recent_agent_turn_snapshots(&ResourceScope::system(), 4)
+        .await
+        .expect_err("system-wide reads are unbounded and must be refused");
+
+    assert!(
+        matches!(error, ProcessJournalStoreError::InvalidRequest(_)),
+        "expected InvalidRequest, got {error:?}"
+    );
+}
+
+/// Backend parity for the bounded window read.
+///
+/// This is the first production descending keyset walk with a hand-built
+/// cursor, and it is the only one binding an I64 sort value against a Text
+/// tie-breaker across pages. The two SQL backends compare that cursor very
+/// differently — jsonb operators on PostgreSQL, untyped columns on libSQL — so
+/// `.claude/rules/database.md` "Backend parity" wants the adversarial case in a
+/// shared body rather than an in-memory-only assertion.
+async fn assert_recent_agent_turn_window_parity<F>(store: ProcessJournalStore<F>)
+where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    let scope = scope();
+
+    let base = Utc::now();
+    let mut agent_turn_ids = Vec::new();
+    for index in 0..3 {
+        let id = ProcessId::new();
+        submit_agent_turn_process_at(&store, &scope, id, base + chrono::Duration::seconds(index))
+            .await;
+        agent_turn_ids.push(id);
+    }
+    // Newer than every agent-turn row and more than one page, so the walk must
+    // advance its cursor across pages to fill the window.
+    for index in 0..12 {
+        submit_internal_process_at(
+            &store,
+            &scope,
+            ProcessId::new(),
+            base + chrono::Duration::seconds(100 + index),
+        )
+        .await;
+    }
+
+    let recent = store
+        .recent_agent_turn_snapshots(&scope, 2)
+        .await
+        .expect("bounded recent read");
+
+    assert_eq!(recent.len(), 2, "limit must bound agent-turn rows");
+    assert!(
+        recent
+            .iter()
+            .all(|snapshot| snapshot.process_kind == ProcessKind::AgentTurn),
+        "non-agent-turn processes must never be returned"
+    );
+    let returned: Vec<_> = recent.iter().map(|snapshot| snapshot.process_id).collect();
+    let expected: Vec<_> = agent_turn_ids.iter().rev().take(2).copied().collect();
+    assert_eq!(
+        returned, expected,
+        "must return the newest agent-turn processes, newest first, across pages"
+    );
+}
+
+#[tokio::test]
+async fn recent_agent_turn_snapshots_hold_on_libsql() {
+    let storage = tempfile::tempdir().expect("temporary process journal database");
+    let database = Arc::new(
+        libsql::Builder::new_local(storage.path().join("recent-window.db"))
+            .build()
+            .await
+            .expect("build libsql database"),
+    );
+    let backend = Arc::new(LibSqlRootFilesystem::new(database).expect("libSQL filesystem runtime"));
+    backend
+        .run_migrations()
+        .await
+        .expect("migrate libsql filesystem");
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        backend,
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/processes").expect("mount alias"),
+            VirtualPath::new("/engine/processes").expect("virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view"),
+    ));
+    assert_recent_agent_turn_window_parity(ProcessJournalStore::new(filesystem)).await;
+}
+
+#[tokio::test]
+async fn recent_agent_turn_snapshots_hold_on_postgres() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(backend),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/processes").expect("mount alias"),
+            VirtualPath::new("/engine/processes").expect("virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view"),
+    ));
+    assert_recent_agent_turn_window_parity(ProcessJournalStore::new(filesystem)).await;
 }

@@ -49,6 +49,7 @@ jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
     runs-on: "ubuntu-22.04"
+    timeout-minutes: 20
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
       tag: ${{ !github.event.pull_request && github.ref_name || '' }}
@@ -65,7 +66,7 @@ jobs:
         # we specify bash to get pipefail; it guards against the `curl` command
         # failing. otherwise `sh` won't catch that `curl` returned non-0
         shell: bash
-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh"
+        run: "curl --proto '=https' --tlsv1.2 --max-time 120 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh"
       - name: Cache dist
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -109,6 +110,7 @@ jobs:
       # - N "local" tasks that build each platform's binaries and platform-specific installers
       matrix: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     container: ${{ matrix.container && matrix.container.image || null }}
     env:
       BUILD_MANIFEST_NAME: target/distrib/${{ join(matrix.targets, '-') }}-dist-manifest.json
@@ -128,7 +130,7 @@ jobs:
         if: ${{ matrix.container }}
         run: |
           if ! command -v cargo > /dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            curl --proto '=https' --tlsv1.2 --max-time 120 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
       - name: "Install Node.js for the embedded WebUI"
@@ -212,6 +214,7 @@ jobs:
       - plan
       - build-local-artifacts
     runs-on: "ubuntu-22.04"
+    timeout-minutes: 30
     env:
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
     steps:
@@ -264,6 +267,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
+    timeout-minutes: 30
     outputs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
@@ -337,6 +341,53 @@ jobs:
     secrets:
       DOCKER_REGISTRY_TOKEN: ${{ secrets.DOCKER_REGISTRY_TOKEN }}
 
+  # Point `docs-live` (the Mintlify deployment branch) at each stable
+  # release so the public docs site tracks the released binary, not main.
+  # Force-moved by design: stable tags need not be ancestor-related, and
+  # the branch is a pointer, not a history. Prereleases never move it.
+  # See docs/internal/weekly-release-strategy.md, "Docs publication".
+  publish-docs-live:
+    needs:
+      - plan
+      - host
+    if: ${{ always() && needs.host.result == 'success' && !fromJson(needs.host.outputs.val).announcement_is_prerelease }}
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: "ubuntu-22.04"
+    timeout-minutes: 15
+    steps:
+      - name: Point docs-live at the stable release commit
+        run: |
+          set -euo pipefail
+          # A re-run of an older release's workflow must not move the live
+          # docs site backwards: only the newest stable tag may repoint.
+          newest="$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/ironclaw-v" \
+            --jq '.[].ref' \
+            | sed 's#^refs/tags/##' \
+            | grep -E '^ironclaw-v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V | tail -n 1)"
+          test -n "${newest}"
+          if [ "${GITHUB_REF_NAME}" != "${newest}" ]; then
+            echo "skipping docs-live repoint: ${GITHUB_REF_NAME} is not the newest stable tag (${newest})"
+            exit 0
+          fi
+          # POST bootstraps the branch only when it does not exist yet, so a
+          # real PATCH failure (e.g. branch protection blocking the forced
+          # update) fails the step with its own error. Ref updates raise
+          # ordinary push events, so the Mintlify App deploys from them.
+          if gh api --silent "repos/${GITHUB_REPOSITORY}/git/ref/heads/docs-live"; then
+            gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/git/refs/heads/docs-live" \
+              -f "sha=${GITHUB_SHA}" -F "force=true"
+          else
+            gh api --method POST \
+              "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f "ref=refs/heads/docs-live" -f "sha=${GITHUB_SHA}"
+          fi
+
   announce:
     needs:
       - plan
@@ -346,6 +397,7 @@ jobs:
     # "host" however must run to completion, no skipping allowed!
     if: ${{ always() && needs.host.result == 'success' }}
     runs-on: "ubuntu-22.04"
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

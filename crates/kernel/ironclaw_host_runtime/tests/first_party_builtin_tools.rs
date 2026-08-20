@@ -102,7 +102,8 @@ fn trigger_execution_contract(goal: impl Into<String>) -> Value {
         "goal": goal.into(),
         "success_criteria": ["Complete the requested task"],
         "output_instructions": "Return a concise result",
-        "no_result_text": "No result"
+        "no_result_text": "No result",
+        "policy": { "result_delivery": "deliver" }
     })
 }
 
@@ -687,6 +688,21 @@ async fn builtin_trigger_create_input_schema_declares_schedule_one_of() {
     assert!(
         required_names.contains(&"schedule"),
         "schedule must be listed in required; got {required_names:?}"
+    );
+    assert_eq!(
+        schema["properties"]["execution_contract"]["required"],
+        json!([
+            "version",
+            "goal",
+            "success_criteria",
+            "output_instructions",
+            "no_result_text",
+            "policy"
+        ])
+    );
+    assert_eq!(
+        schema["properties"]["execution_contract"]["properties"]["policy"]["required"],
+        json!(["result_delivery"])
     );
     assert!(
         !required_names.contains(&"completion_policy"),
@@ -1352,6 +1368,46 @@ async fn builtin_trigger_create_rejects_malformed_input_before_persistence() {
 }
 
 #[tokio::test]
+async fn builtin_trigger_create_requires_explicit_result_delivery_before_persistence() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Ambiguous notification",
+            "execution_contract": {
+                "version": 1,
+                "goal": "Check whether example.com is reachable",
+                "success_criteria": ["Reachability checked"],
+                "output_instructions": "Return the result",
+                "no_result_text": "No change"
+            },
+            "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "Europe/Istanbul" }
+        }),
+        context.clone(),
+    )
+    .await;
+
+    assert_failure_input_issue_expected(
+        &failure,
+        "execution_contract.policy.result_delivery",
+        DispatchInputIssueCode::MissingRequired,
+        "deliver or suppress_when_nothing_to_report",
+        "ambiguous delivery choice",
+    );
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn builtin_trigger_create_rejects_invalid_timezone_before_persistence() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository.clone());
@@ -1634,6 +1690,25 @@ async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
                 "schedule": { "kind": 7, "expression": "*/3 * * * *", "timezone": "UTC" }
             }),
             vec![("schedule.kind", DispatchInputIssueCode::TypeMismatch)],
+        ),
+        (
+            "non-string result delivery",
+            json!({
+                "name": "Bad result delivery",
+                "execution_contract": {
+                    "version": 1,
+                    "goal": "Run work",
+                    "success_criteria": ["Work completed"],
+                    "output_instructions": "Return the result",
+                    "no_result_text": "No change",
+                    "policy": { "result_delivery": 7 }
+                },
+                "schedule": { "kind": "cron", "expression": "*/3 * * * *", "timezone": "UTC" }
+            }),
+            vec![(
+                "execution_contract.policy.result_delivery",
+                DispatchInputIssueCode::TypeMismatch,
+            )],
         ),
         (
             "missing schedule timezone",

@@ -21,7 +21,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
-use ironclaw_assistant::{RebornTimelineRequest, TIMELINE_VIEW};
+use ironclaw_assistant::{
+    RebornTimelineRequest, TIMELINE_VIEW, UnboundTurnError, UnboundTurnService,
+    UnboundTurnSubmission,
+};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::turn::{IdempotencyKey, TurnGateRef, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_host_api::{
@@ -93,8 +96,21 @@ pub async fn build_openai_compat_route_mount(
     ));
     let projection_stream = runtime.product_event_stream();
     let product_surface = runtime.product_surface(Some(projection_stream.clone()))?;
+    // The prepared-context door shared by structured-output / tool-history
+    // chat requests: same thread service and coordinator the runtime's own
+    // turn path uses, scoped to the deployment's default agent/project axes
+    // with the authenticated caller threaded through as the thread owner.
+    let prepared_turn_gateway = Arc::new(OpenAiCompatPreparedTurnGateway {
+        service: Arc::new(UnboundTurnService::new(
+            runtime.product_thread_service(),
+            runtime.product_turn_coordinator(),
+            _default_agent_id.clone(),
+            _default_project_id.clone(),
+        )),
+    });
     let chat_projection_reader = Arc::new(OpenAiChatCompletionThreadProjectionReader::new(
         product_surface.clone(),
+        Arc::clone(&prepared_turn_gateway),
     ));
     // The external-tool catalog is the run-scoped seam shared with the loop
     // host: the host records parked calls + completes them from submitted
@@ -123,19 +139,28 @@ pub async fn build_openai_compat_route_mount(
             coordinator: runtime.product_turn_coordinator(),
         }),
         llm_config: crate::product_surface::build_llm_config_service(runtime),
+        prepared_turn_port: prepared_turn_gateway,
     }))
 }
 
 struct OpenAiChatCompletionThreadProjectionReader {
     product_surface: Arc<dyn ProductSurface>,
     poll_interval: Duration,
+    /// Prepared-lane resolver: unbound runs live on stamped-hidden threads the
+    /// caller-scoped timeline projection never surfaces, so their outcome is
+    /// read from run state + the unbound thread directly.
+    prepared_lane: Arc<OpenAiCompatPreparedTurnGateway>,
 }
 
 impl OpenAiChatCompletionThreadProjectionReader {
-    fn new(product_surface: Arc<dyn ProductSurface>) -> Self {
+    fn new(
+        product_surface: Arc<dyn ProductSurface>,
+        prepared_lane: Arc<OpenAiCompatPreparedTurnGateway>,
+    ) -> Self {
         Self {
             product_surface,
             poll_interval: OPENAI_COMPAT_PROJECTION_POLL_INTERVAL,
+            prepared_lane,
         }
     }
 }
@@ -152,6 +177,12 @@ impl OpenAiChatCompletionProjectionReader for OpenAiChatCompletionThreadProjecti
             } => submitted_run_id.to_string(),
             _ => return Err(OpenAiCompatHttpError::internal()),
         };
+        if request.prepared {
+            return self
+                .prepared_lane
+                .wait_for_unbound_completion(&request, self.poll_interval)
+                .await;
+        }
         loop {
             let surface = BoundProductSurface::new(
                 Arc::clone(&self.product_surface),
@@ -179,6 +210,98 @@ impl OpenAiChatCompletionProjectionReader for OpenAiChatCompletionThreadProjecti
                 None => tokio::time::sleep(self.poll_interval).await,
             }
         }
+    }
+}
+
+/// Thin adapter over the assistant-owned prepared-turn service: composition
+/// owns only the wire-DTO mapping and error translation; accept/submit and
+/// terminal read-back behavior live in
+/// `ironclaw_assistant::UnboundTurnService`.
+struct OpenAiCompatPreparedTurnGateway {
+    service: Arc<UnboundTurnService>,
+}
+
+impl OpenAiCompatPreparedTurnGateway {
+    async fn wait_for_unbound_completion(
+        &self,
+        request: &OpenAiChatCompletionProjectionRequest,
+        poll_interval: Duration,
+    ) -> Result<OpenAiChatCompletionProjection, OpenAiCompatHttpError> {
+        let ProductInboundAck::Accepted {
+            submitted_run_id, ..
+        } = &request.accepted_ack
+        else {
+            return Err(OpenAiCompatHttpError::internal());
+        };
+        let outcome = self
+            .service
+            .wait_for_completion(
+                request.public_id.as_str(),
+                &product_surface_caller_from_openai_scope(&request.actor_scope),
+                *submitted_run_id,
+                poll_interval,
+            )
+            .await
+            .map_err(map_prepared_turn_error)?;
+        let mut projection = OpenAiChatCompletionProjection::text(outcome.text);
+        // Run evidence: report the model that actually ran and the
+        // provider-reported usage (unbound-turns design §4.3).
+        projection.effective_model = outcome.effective_model;
+        projection.usage = outcome
+            .model_usage
+            .map(|usage| chat_usage_from_model_usage(&usage));
+        Ok(projection)
+    }
+}
+
+fn map_prepared_turn_error(error: UnboundTurnError) -> OpenAiCompatHttpError {
+    match error {
+        UnboundTurnError::InvalidRequest { reason } => {
+            OpenAiCompatHttpError::invalid_request(Some(reason))
+        }
+        UnboundTurnError::Unavailable => OpenAiCompatHttpError::from_kind(
+            503,
+            true,
+            OpenAiCompatErrorKind::ServiceUnavailable,
+            None,
+        ),
+        UnboundTurnError::RunFailed { category } => {
+            OpenAiCompatHttpError::from_kind(502, false, OpenAiCompatErrorKind::Internal, category)
+        }
+        UnboundTurnError::RunCancelled => OpenAiCompatHttpError::from_kind(
+            409,
+            false,
+            OpenAiCompatErrorKind::Conflict,
+            Some("the run was cancelled".to_string()),
+        ),
+        UnboundTurnError::Internal { reason } => {
+            // Operator diagnostics; the wire stays a bare 500.
+            tracing::debug!(%reason, "unbound turn internal error");
+            OpenAiCompatHttpError::internal()
+        }
+    }
+}
+
+#[async_trait]
+impl ironclaw_openai_compat::OpenAiCompatPreparedTurnPort for OpenAiCompatPreparedTurnGateway {
+    async fn accept_and_submit(
+        &self,
+        request: ironclaw_openai_compat::OpenAiCompatPreparedTurnRequest,
+    ) -> Result<ProductInboundAck, OpenAiCompatHttpError> {
+        let idempotency_key = format!("openai-chat:{}", request.public_id);
+        self.service
+            .accept_and_submit(UnboundTurnSubmission {
+                caller: product_surface_caller_from_openai_scope(&request.scope),
+                public_id: request.public_id,
+                system_prompt: request.system_prompt,
+                messages: request.messages,
+                tools: Vec::new(),
+                output: request.output,
+                requested_model: request.requested_model,
+                idempotency_key,
+            })
+            .await
+            .map_err(map_prepared_turn_error)
     }
 }
 
@@ -1131,8 +1254,6 @@ impl OpenAiCompatExternalToolResume for OpenAiCompatRuntimeExternalToolResume {
                 actor,
                 run_id,
                 gate_resolution_ref: gate_ref,
-                source_binding_ref: state.source_binding_ref.clone(),
-                reply_target_binding_ref: state.reply_target_binding_ref.clone(),
                 idempotency_key,
                 precondition: ResumeTurnPrecondition::BlockedExternalToolGate,
                 resume_disposition: None,
@@ -1211,17 +1332,43 @@ fn response_object(
     }
 }
 
+/// Total prompt/input tokens including cache-creation writes. `cache_read` is
+/// already a subset of `LoopModelUsage::input_tokens` and must NOT be added
+/// again; `cache_creation` is a separate write-side count that OpenAI folds
+/// into the reported input/prompt total. Shared chokepoint for both
+/// OpenAI-compatible usage shapes (Responses `input_tokens` and Chat
+/// Completions `prompt_tokens`) so this accounting has exactly one
+/// definition.
+fn total_prompt_tokens_with_cache_creation(usage: &LoopModelUsage) -> u32 {
+    usage
+        .input_tokens
+        .saturating_add(usage.cache_creation_input_tokens)
+}
+
+/// Build the Chat Completions `usage` object from a run's cumulative token
+/// totals (unbound-turns prepared-chat lane, §4.3). Mirrors
+/// `response_usage_from_model_usage`'s cache-creation accounting through the
+/// shared `total_prompt_tokens_with_cache_creation` chokepoint so the two
+/// OpenAI-compatible wire shapes never drift.
+fn chat_usage_from_model_usage(usage: &LoopModelUsage) -> ironclaw_openai_compat::OpenAiUsage {
+    let prompt_tokens = total_prompt_tokens_with_cache_creation(usage);
+    ironclaw_openai_compat::OpenAiUsage {
+        prompt_tokens,
+        completion_tokens: usage.output_tokens,
+        total_tokens: prompt_tokens.saturating_add(usage.output_tokens),
+        prompt_tokens_details: (usage.cache_read_input_tokens > 0).then_some(
+            ironclaw_openai_compat::OpenAiPromptTokensDetails {
+                cached_tokens: usage.cache_read_input_tokens,
+            },
+        ),
+        cost: None,
+    }
+}
+
 /// Build the OpenAI-compatible `usage` object from a run's cumulative token
 /// totals, pricing it for the given effective model.
 fn response_usage_from_model_usage(usage: &LoopModelUsage, model: &str) -> OpenAiResponseUsage {
-    // OpenAI reports total input (including cache) as `input_tokens`, with the
-    // cached subset broken out under `input_tokens_details`. `cache_read` is
-    // already a subset of `LoopModelUsage::input_tokens`, so it must NOT be
-    // added again; `cache_creation` is a separate write-side count and is
-    // added on top.
-    let total_input = usage
-        .input_tokens
-        .saturating_add(usage.cache_creation_input_tokens);
+    let total_input = total_prompt_tokens_with_cache_creation(usage);
     OpenAiResponseUsage {
         input_tokens: total_input,
         output_tokens: usage.output_tokens,

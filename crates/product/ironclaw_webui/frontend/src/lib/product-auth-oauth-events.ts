@@ -12,6 +12,18 @@
 //
 // Mirrors the style of `lib/channel-connection-events.ts`.
 
+// Watcher bounds, shared by every product-auth OAuth watcher (Extensions page,
+// in-chat onboarding, connect-link landing) so an abandoned popup cannot leave
+// any of them polling the server forever — and so the three cannot drift.
+export const OAUTH_FLOW_TIMEOUT_MS = 10 * 60 * 1000;
+export const OAUTH_FLOW_POLL_MS = 2000;
+// Terminal flow statuses, mapped to the i18n key each watcher shows.
+export const OAUTH_FLOW_STATUS_ERROR_KEYS = Object.freeze({
+  failed: "extensions.oauthFailed",
+  canceled: "extensions.oauthCanceled",
+  expired: "extensions.oauthExpired",
+});
+
 export const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
 export const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";
 export const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";

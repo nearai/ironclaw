@@ -1434,7 +1434,7 @@ const SUBAGENT_FAMILY_FINGERPRINT: &[u8] = concat!(
     "context:DefaultContextStrategy(max_messages=128),",
     "capability:DefaultCapabilityStrategy(all),",
     "model:DefaultModelStrategy(primary_or_fallback_index),",
-    "batch:DefaultBatchPolicyStrategy(exclusive_sequential),",
+    "batch:model_emitted_calls(bounded_fanout=4),",
     "gate:DefaultGateHandlingStrategy(block),",
     "recovery:DefaultRecoveryStrategy(max_attempts_per_class=2),",
     "stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3),",

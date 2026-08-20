@@ -45,4 +45,4 @@ pub use registry::{CapabilityDispatchRegistry, CapabilityRegistrationError};
 pub use replay_payload::{
     ReplayPayload, ReplayPayloadStore, ReplayPayloadStoreError, ReplayPayloadStorePort,
 };
-pub use requests::{CapabilityInvocationResult, CapabilitySpawnRequest, CapabilitySpawnResult};
+pub use requests::{CapabilitySpawnRequest, CapabilitySpawnResult};

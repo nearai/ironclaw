@@ -102,6 +102,9 @@ pub struct RuntimeEvent {
     pub runtime: Option<RuntimeKind>,
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
+    /// Elapsed model-call time in milliseconds. Present only on newly emitted
+    /// terminal model events; historical events default to `None`.
+    pub duration_ms: Option<u64>,
     pub error_kind: Option<String>,
     /// Sanitized, host-authored failure summary for display-only projections.
     pub error_summary: Option<String>,
@@ -149,6 +152,8 @@ struct RuntimeEventWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     output_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     error_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error_summary: Option<String>,
@@ -192,6 +197,9 @@ impl Serialize for RuntimeEvent {
             runtime: self.runtime,
             process_id: self.process_id,
             output_bytes: self.output_bytes,
+            duration_ms: self
+                .duration_ms
+                .map(|duration| duration.min(MAX_RUNTIME_EVENT_DURATION_MS)),
             error_kind: self.error_kind.clone().map(sanitize_error_kind),
             error_summary: self
                 .error_summary
@@ -248,6 +256,8 @@ struct TrustedRuntimeEventWire {
     #[serde(default)]
     output_bytes: Option<u64>,
     #[serde(default)]
+    duration_ms: Option<u64>,
+    #[serde(default)]
     error_kind: Option<String>,
     #[serde(default)]
     error_summary: Option<String>,
@@ -288,6 +298,9 @@ impl RuntimeEventWire {
             runtime: self.runtime,
             process_id: self.process_id,
             output_bytes: self.output_bytes,
+            duration_ms: self
+                .duration_ms
+                .map(|duration| duration.min(MAX_RUNTIME_EVENT_DURATION_MS)),
             error_kind: self.error_kind.map(sanitize_error_kind),
             error_summary,
             hook_id: self.hook_id.map(sanitize_hook_id),
@@ -320,6 +333,9 @@ impl TrustedRuntimeEventWire {
             runtime: self.runtime,
             process_id: self.process_id,
             output_bytes: self.output_bytes,
+            duration_ms: self
+                .duration_ms
+                .map(|duration| duration.min(MAX_RUNTIME_EVENT_DURATION_MS)),
             error_kind: self.error_kind.map(sanitize_error_kind),
             error_summary,
             hook_id: self.hook_id.map(sanitize_hook_id),
@@ -455,6 +471,16 @@ impl RuntimeEvent {
         Self::new_metadata_only(RuntimeEventKind::ModelCompleted, scope, capability_id)
     }
 
+    pub fn model_completed_with_duration(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        duration_ms: u64,
+    ) -> Self {
+        let mut event = Self::model_completed(scope, capability_id);
+        event.duration_ms = Some(duration_ms.min(MAX_RUNTIME_EVENT_DURATION_MS));
+        event
+    }
+
     pub fn model_failed(
         scope: ResourceScope,
         capability_id: CapabilityId,
@@ -476,6 +502,17 @@ impl RuntimeEvent {
             hook_failure_category: None,
             hook_failure_disposition: None,
         })
+    }
+
+    pub fn model_failed_with_duration(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        error_kind: impl Into<String>,
+        duration_ms: u64,
+    ) -> Self {
+        let mut event = Self::model_failed(scope, capability_id, error_kind);
+        event.duration_ms = Some(duration_ms.min(MAX_RUNTIME_EVENT_DURATION_MS));
+        event
     }
 
     pub fn assistant_reply_finalized(scope: ResourceScope, capability_id: CapabilityId) -> Self {
@@ -653,6 +690,7 @@ impl RuntimeEvent {
             runtime: payload.runtime,
             process_id: payload.process_id,
             output_bytes: payload.output_bytes,
+            duration_ms: None,
             error_kind: payload.error_kind,
             error_summary: None,
             hook_id: payload.hook_id,
@@ -841,6 +879,9 @@ pub const UNCLASSIFIED_ERROR_KIND: &str = "Unclassified";
 const MAX_ERROR_KIND_LEN: usize = 64;
 const MAX_ERROR_KIND_SEGMENT_LEN: usize = 24;
 const MAX_ERROR_SUMMARY_BYTES: usize = 512;
+/// One day. A stuck model request can run longer, but durable observability
+/// metadata stays bounded and never becomes an unbounded wall-clock counter.
+pub const MAX_RUNTIME_EVENT_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
 const REDACTED_ERROR_SUMMARY: &str = "the tool failure details were redacted";
 const WORKSPACE_FILE_ERROR_SUMMARY: &str = "can't access your workspace file";
 
@@ -1473,6 +1514,68 @@ mod tests {
         assert!(decoded_old.recovery_stage.is_none());
         assert!(decoded_old.recovery_class.is_none());
         assert!(decoded_old.recovery_disposition.is_none());
+    }
+
+    #[test]
+    fn model_terminal_duration_round_trips_and_historical_started_rows_stay_readable() {
+        let completed =
+            RuntimeEvent::model_completed_with_duration(scope(), capability(), u64::MAX);
+        assert_eq!(
+            completed.duration_ms,
+            Some(MAX_RUNTIME_EVENT_DURATION_MS),
+            "durable model durations must be clamped before serialization"
+        );
+        let completed_wire = serde_json::to_string(&completed).expect("serialize model completion");
+        let completed_round_trip: RuntimeEvent =
+            serde_json::from_str(&completed_wire).expect("deserialize model completion");
+        assert_eq!(completed_round_trip, completed);
+
+        let mut raw_wire =
+            serde_json::to_value(RuntimeEvent::model_completed(scope(), capability()))
+                .expect("serialize raw terminal event fixture");
+        raw_wire
+            .as_object_mut()
+            .expect("runtime event must serialize as an object")
+            .insert("duration_ms".to_string(), serde_json::json!(u64::MAX));
+        let raw_wire = serde_json::to_string(&raw_wire).expect("encode raw terminal event fixture");
+        let untrusted: RuntimeEvent =
+            serde_json::from_str(&raw_wire).expect("deserialize untrusted terminal event");
+        assert_eq!(
+            untrusted.duration_ms,
+            Some(MAX_RUNTIME_EVENT_DURATION_MS),
+            "ordinary wire deserialization must clamp oversized durations"
+        );
+        let trusted = runtime_event_from_trusted_json_str(&raw_wire)
+            .expect("deserialize trusted replay terminal event");
+        assert_eq!(
+            trusted.duration_ms,
+            Some(MAX_RUNTIME_EVENT_DURATION_MS),
+            "trusted replay deserialization must clamp oversized durations"
+        );
+
+        let mut directly_constructed = RuntimeEvent::model_completed(scope(), capability());
+        directly_constructed.duration_ms = Some(u64::MAX);
+        let directly_constructed_wire =
+            serde_json::to_value(directly_constructed).expect("serialize direct terminal event");
+        assert_eq!(
+            directly_constructed_wire
+                .get("duration_ms")
+                .and_then(serde_json::Value::as_u64),
+            Some(MAX_RUNTIME_EVENT_DURATION_MS),
+            "serialization must clamp oversized public-field values"
+        );
+
+        let historical_started = RuntimeEvent::model_started(scope(), capability());
+        let mut historical_wire =
+            serde_json::to_value(historical_started).expect("serialize historical model start");
+        historical_wire
+            .as_object_mut()
+            .expect("runtime event must serialize as an object")
+            .remove("duration_ms");
+        let historical_round_trip: RuntimeEvent = serde_json::from_value(historical_wire)
+            .expect("historical ModelStarted rows must remain readable");
+        assert_eq!(historical_round_trip.kind, RuntimeEventKind::ModelStarted);
+        assert!(historical_round_trip.duration_ms.is_none());
     }
 
     /// PR #3640 finding D10: the round-trip tests above pass `None` for the

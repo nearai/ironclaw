@@ -162,6 +162,37 @@ async fn libsql_root_filesystem_lists_direct_children_sorted_with_virtual_paths(
         ]
     );
     assert_eq!(entries[1].file_type, FileType::Directory);
+
+    let first_page = filesystem
+        .list_dir_page(
+            &VirtualPath::new("/engine/tenants/t1/users/u1").unwrap(),
+            None,
+            2,
+        )
+        .await
+        .unwrap();
+    let second_page = filesystem
+        .list_dir_page(
+            &VirtualPath::new("/engine/tenants/t1/users/u1").unwrap(),
+            first_page.last().map(|entry| entry.name.as_str()),
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        first_page
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha.txt", "nested"]
+    );
+    assert_eq!(
+        second_page
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["zeta.txt"]
+    );
 }
 #[tokio::test]
 async fn libsql_root_filesystem_appends_deletes_and_creates_directories() {
@@ -2734,6 +2765,44 @@ mod postgres_tests {
 
     fn vpath(prefix: &str, leaf: &str) -> VirtualPath {
         VirtualPath::new(format!("{prefix}/{leaf}")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn postgres_list_dir_page_uses_stable_name_keyset() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        for leaf in ["a.json", "b.json", "c.json", "nested/value.json"] {
+            fs.put(
+                &vpath(&prefix, leaf),
+                Entry::bytes(Vec::new()),
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+        }
+        let root = VirtualPath::new(prefix).unwrap();
+        let first = fs.list_dir_page(&root, None, 2).await.unwrap();
+        let second = fs
+            .list_dir_page(&root, first.last().map(|entry| entry.name.as_str()), 2)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            first
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.json", "b.json"]
+        );
+        assert_eq!(
+            second
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c.json", "nested"]
+        );
+        assert_eq!(second[1].file_type, FileType::Directory);
     }
 
     #[tokio::test]

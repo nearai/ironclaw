@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
-    dispatch::{CapabilityDisplayOutputPreview, DispatchFailureDetail},
+    dispatch::{CapabilityDisplayOutputPreview, DispatchFailureDetail, ProviderDiagnostic},
     ids::{ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, ProcessId, SecretHandle},
     resource::{ResourceEstimate, ResourceScope, ResourceUsage},
     result_meta::{FailureFate, FailureKind},
@@ -42,6 +42,7 @@ use std::{collections::BTreeMap, env, fmt};
 use thiserror::Error;
 
 mod capability_catalog;
+mod capability_response_processor;
 mod document_output;
 mod egress;
 mod extension_contracts;
@@ -410,13 +411,95 @@ pub struct RuntimeApprovalGate {
 }
 
 /// Auth/credential suspension state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct RuntimeAuthGate {
     pub gate_id: RuntimeGateId,
     pub capability_id: CapabilityId,
     pub reason: RuntimeBlockedReason,
     pub required_secrets: Vec<SecretHandle>,
     pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+    provider_diagnostic: Option<ProviderDiagnostic>,
+}
+
+impl RuntimeAuthGate {
+    pub fn new(
+        gate_id: RuntimeGateId,
+        capability_id: CapabilityId,
+        reason: RuntimeBlockedReason,
+        required_secrets: Vec<SecretHandle>,
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+    ) -> Self {
+        Self {
+            gate_id,
+            capability_id,
+            reason,
+            required_secrets,
+            credential_requirements,
+            provider_diagnostic: None,
+        }
+    }
+
+    pub fn with_provider_diagnostic(mut self, diagnostic: Option<ProviderDiagnostic>) -> Self {
+        self.provider_diagnostic = diagnostic;
+        self
+    }
+
+    pub fn provider_diagnostic(&self) -> Option<&ProviderDiagnostic> {
+        self.provider_diagnostic.as_ref()
+    }
+}
+
+impl fmt::Debug for RuntimeAuthGate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `required_secrets` handle names are omitted in full and reduced to a
+        // count, matching `DispatchError::AuthRequired`'s Debug convention
+        // (`ironclaw_host_api::dispatch`) so secret-handle identifiers never
+        // reach logs from this gate either.
+        formatter
+            .debug_struct("RuntimeAuthGate")
+            .field("gate_id", &self.gate_id)
+            .field("capability_id", &self.capability_id)
+            .field("reason", &self.reason)
+            .field(
+                "required_secrets",
+                &format!("[{} handle(s) redacted]", self.required_secrets.len()),
+            )
+            .field("credential_requirements", &self.credential_requirements)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for RuntimeAuthGate {
+    fn eq(&self, other: &Self) -> bool {
+        self.gate_id == other.gate_id
+            && self.capability_id == other.capability_id
+            && self.reason == other.reason
+            && self.required_secrets == other.required_secrets
+            && self.credential_requirements == other.credential_requirements
+    }
+}
+
+impl Eq for RuntimeAuthGate {}
+
+#[cfg(test)]
+mod runtime_auth_gate_debug_tests {
+    use super::*;
+
+    #[test]
+    fn debug_redacts_required_secret_handle_names() {
+        let gate = RuntimeAuthGate::new(
+            RuntimeGateId::new(),
+            CapabilityId::new("notion.search").unwrap(),
+            RuntimeBlockedReason::AuthRequired,
+            vec![SecretHandle::new("notion-oauth-token").unwrap()],
+            Vec::new(),
+        );
+
+        let rendered = format!("{gate:?}");
+
+        assert!(!rendered.contains("notion-oauth-token"), "{rendered}");
+        assert!(rendered.contains("1 handle(s) redacted"), "{rendered}");
+    }
 }
 
 /// Resource suspension state.
@@ -504,17 +587,6 @@ impl PartialEq for RuntimeCapabilityFailure {
     }
 }
 
-/// Explicit fallback for outcome categories that the loop adapter cannot handle
-/// yet. New first-class outcome variants should be added to
-/// [`RuntimeCapabilityOutcome`] and exhaustively mapped by consumers instead of
-/// being hidden behind wildcard matches.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeCapabilityUnknown {
-    pub capability_id: CapabilityId,
-    pub kind: String,
-    pub message: Option<String>,
-}
-
 /// Outcomes returned by capability invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeCapabilityOutcome {
@@ -524,7 +596,6 @@ pub enum RuntimeCapabilityOutcome {
     ResourceBlocked(RuntimeResourceGate),
     SpawnedProcess(RuntimeProcessHandle),
     Failed(RuntimeCapabilityFailure),
-    Unknown(RuntimeCapabilityUnknown),
 }
 
 impl RuntimeCapabilityOutcome {
@@ -536,10 +607,21 @@ impl RuntimeCapabilityOutcome {
             Self::ResourceBlocked(_) => "resource_blocked",
             Self::SpawnedProcess(_) => "spawned_process",
             Self::Failed(_) => "failed",
-            Self::Unknown(_) => "unknown",
         }
     }
 }
+
+// `RuntimeCapabilityOutcome` is an in-process host-runtime return value, never
+// a wire type: it carries capability output `serde_json::Value`s alongside
+// internal gate/failure state, and nothing downstream is entitled to
+// serialize or deserialize it directly (projections and transports build
+// their own typed wire shapes from it). Pin that with a compile-time check so
+// an incidental `#[derive(Serialize)]`/`#[derive(Deserialize)]` added later
+// fails the build instead of silently opening a serialization surface.
+static_assertions::assert_not_impl_any!(
+    RuntimeCapabilityOutcome: serde::Serialize,
+    serde::de::DeserializeOwned
+);
 
 /// Stable reasons for capability suspension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

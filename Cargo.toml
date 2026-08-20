@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/contracts/ironclaw_common", "crates/substrates/ironclaw_observability", "crates/contracts/ironclaw_host_api", "crates/product/ironclaw_host_ingress", "crates/substrates/ironclaw_libsql_runtime", "crates/substrates/ironclaw_filesystem", "crates/domains/ironclaw_attachments", "crates/domains/ironclaw_extractors", "crates/substrates/ironclaw_documents", "crates/domains/ironclaw_memory", "crates/extensions/packages/memory-native", "crates/extensions/packages/mem0", "crates/events/ironclaw_event_log", "crates/events/ironclaw_event_projections", "crates/events/ironclaw_event_streams", "crates/events/ironclaw_event_store", "crates/extensions/ironclaw_extension_registry", "crates/extensions/ironclaw_extension_host", "crates/extensions/ironclaw_extension_manager", "crates/kernel/ironclaw_processes", "crates/lanes/ironclaw_sandbox", "crates/lanes/ironclaw_mcp", "crates/lanes/ironclaw_wasm", "crates/lanes/ironclaw_wasm_limiter", "crates/kernel/ironclaw_capabilities", "crates/substrates/ironclaw_secrets", "crates/substrates/ironclaw_network", "crates/kernel/ironclaw_host_runtime", "crates/kernel/ironclaw_runtime_policy", "crates/kernel/ironclaw_authorization", "crates/kernel/ironclaw_approvals", "crates/kernel/ironclaw_resources", "crates/domains/ironclaw_auth", "crates/kernel/ironclaw_trust", "crates/kernel/ironclaw_turns", "crates/contracts/ironclaw_loop_contracts", "crates/contracts/ironclaw_extension_contracts", "crates/contracts/ironclaw_product_contracts", "crates/loop/ironclaw_agent_loop", "crates/domains/ironclaw_threads", "crates/contracts/ironclaw_prompt_envelope", "crates/loop/ironclaw_hooks", "crates/loop/ironclaw_loop_host", "crates/loop/ironclaw_turn_runner", "crates/app/ironclaw_config", "crates/product/ironclaw_operator", "crates/app/ironclaw_composition", "crates/domains/ironclaw_identity", "crates/extensions/ironclaw_extension_support", "crates/app/ironclaw_cli", "crates/domains/ironclaw_trace_commons", "crates/product/ironclaw_webui", "crates/product/ironclaw_openai_compat", "crates/domains/ironclaw_conversations", "crates/product/ironclaw_assistant", "crates/extensions/packages/telegram", "crates/extensions/packages/slack", "crates/extensions/packages/web-app", "crates/domains/ironclaw_outbound", "crates/domains/ironclaw_triggers", "crates/domains/ironclaw_web_app", "crates/app/ironclaw_architecture_tests", "crates/substrates/ironclaw_safety", "crates/domains/ironclaw_skills", "crates/domains/ironclaw_llm", "tools/ironclaw_stress"]
+members = [".", "crates/contracts/ironclaw_common", "crates/substrates/ironclaw_observability", "crates/contracts/ironclaw_host_api", "crates/product/ironclaw_host_ingress", "crates/substrates/ironclaw_libsql_runtime", "crates/substrates/ironclaw_filesystem", "crates/domains/ironclaw_attachments", "crates/domains/ironclaw_extractors", "crates/substrates/ironclaw_documents", "crates/domains/ironclaw_memory", "crates/extensions/packages/memory-native", "crates/extensions/packages/mem0", "crates/events/ironclaw_event_log", "crates/events/ironclaw_event_projections", "crates/events/ironclaw_event_streams", "crates/events/ironclaw_event_store", "crates/extensions/ironclaw_extension_registry", "crates/extensions/ironclaw_extension_host", "crates/extensions/ironclaw_extension_manager", "crates/kernel/ironclaw_processes", "crates/lanes/ironclaw_sandbox", "crates/lanes/ironclaw_mcp", "crates/lanes/ironclaw_wasm", "crates/lanes/ironclaw_wasm_limiter", "crates/kernel/ironclaw_capabilities", "crates/substrates/ironclaw_secrets", "crates/substrates/ironclaw_network", "crates/kernel/ironclaw_host_runtime", "crates/kernel/ironclaw_runtime_policy", "crates/kernel/ironclaw_authorization", "crates/kernel/ironclaw_approvals", "crates/kernel/ironclaw_resources", "crates/domains/ironclaw_auth", "crates/kernel/ironclaw_trust", "crates/kernel/ironclaw_turns", "crates/contracts/ironclaw_loop_contracts", "crates/contracts/ironclaw_extension_contracts", "crates/contracts/ironclaw_product_contracts", "crates/loop/ironclaw_agent_loop", "crates/domains/ironclaw_threads", "crates/contracts/ironclaw_prompt_envelope", "crates/loop/ironclaw_hooks", "crates/loop/ironclaw_loop_host", "crates/loop/ironclaw_turn_runner", "crates/app/ironclaw_config", "crates/product/ironclaw_operator", "crates/app/ironclaw_composition", "crates/domains/ironclaw_identity", "crates/extensions/ironclaw_extension_support", "crates/app/ironclaw_cli", "crates/domains/ironclaw_trace_commons", "crates/product/ironclaw_webui", "crates/product/ironclaw_openai_compat", "crates/domains/ironclaw_conversations", "crates/product/ironclaw_assistant", "crates/extensions/packages/telegram", "crates/extensions/packages/slack", "crates/extensions/packages/web-app", "crates/domains/ironclaw_notifications", "crates/domains/ironclaw_outbound", "crates/domains/ironclaw_triggers", "crates/domains/ironclaw_web_app", "crates/app/ironclaw_architecture_tests", "crates/substrates/ironclaw_safety", "crates/domains/ironclaw_skills", "crates/domains/ironclaw_llm", "tools/ironclaw_stress"]
 default-members = ["crates/app/ironclaw_cli"]
 exclude = [
     # Standalone helper binary, `[workspace]`-rooted and never built here (it
@@ -213,6 +213,9 @@ ironclaw_turns = { path = "crates/kernel/ironclaw_turns", version = "0.1.0", fea
 # `InMemoryDurableEventLog` for the W5-WEBUI-API-1 SSE scenario's test-local
 # `ProjectionStream` wiring (`build_webui_event_stream_for_test`).
 ironclaw_event_log = { path = "crates/events/ironclaw_event_log", version = "0.1.0" }
+# Production RootFilesystem-backed durable event store used by the canonical
+# DB-write measurement target.
+ironclaw_event_store = { path = "crates/events/ironclaw_event_store", version = "0.1.0" }
 # Binary Reborn E2E recovery scenarios replay the milestone-backed durable log
 # through the production event projection service.
 ironclaw_event_projections = { path = "crates/events/ironclaw_event_projections", version = "0.1.0" }
@@ -225,6 +228,8 @@ ironclaw_triggers = { path = "crates/domains/ironclaw_triggers", version = "0.1.
 ironclaw_conversations = { path = "crates/domains/ironclaw_conversations", version = "0.1.0" }
 ironclaw_trust = { path = "crates/kernel/ironclaw_trust", version = "0.1.0" }
 ironclaw_wasm = { path = "crates/lanes/ironclaw_wasm", version = "0.1.0" }
+# Reusable before/after database probe used by dedicated measured workloads.
+ironclaw_stress = { path = "tools/ironclaw_stress", version = "0.1.0" }
 # `ironclaw_outbound/test-support` provides the in-memory-backed
 # `OutboundStateStore` the triggered-delivery outcome-seam int-tier
 # proof injects (asserting a real `TriggeredRunDeliveryDriver`'s recorded
@@ -248,6 +253,10 @@ path = "tests/integration/group_memory/main.rs"
 [[test]]
 name = "reborn_group_extensions"
 path = "tests/integration/group_extensions/main.rs"
+
+[[test]]
+name = "reborn_group_device_link"
+path = "tests/integration/group_device_link/main.rs"
 
 [[test]]
 name = "reborn_group_triggers"
@@ -290,8 +299,16 @@ name = "reborn_integration_sandbox_shell_turn"
 path = "tests/integration/reborn_sandbox_shell_turn.rs"
 
 [[test]]
+name = "reborn_integration_suggestions"
+path = "tests/integration/suggestions.rs"
+
+[[test]]
 name = "reborn_integration_subagent_await_edge"
 path = "tests/integration/subagent_await_edge.rs"
+
+[[test]]
+name = "reborn_integration_unbound_turns"
+path = "tests/integration/unbound_turns.rs"
 
 [[test]]
 name = "reborn_integration_auth_failure"
@@ -488,6 +505,14 @@ path = "tests/integration/webui_v2_router_smoke.rs"
 [[test]]
 name = "reborn_integration_wiring_parity"
 path = "tests/integration/wiring_parity.rs"
+
+[[test]]
+name = "reborn_integration_run_artifact_timings"
+path = "tests/integration/run_artifact_timings.rs"
+
+[[test]]
+name = "reborn_integration_db_write_canonical"
+path = "tests/integration/db_write_canonical.rs"
 
 [profile.release]
 strip = true          # Remove debug symbols from release binaries

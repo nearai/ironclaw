@@ -435,8 +435,10 @@ where
                     system_prompt: self.system_prompt.clone(),
                 },
                 input_text: input.text,
+                context_messages: Vec::new(),
                 max_input_tokens: self.max_input_tokens,
                 deadline_ms: request.deadline_ms,
+                output_contract: None,
             })
             .await
             .map_err(map_inference_error)

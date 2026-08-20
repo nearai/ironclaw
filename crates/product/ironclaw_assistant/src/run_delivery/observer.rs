@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind;
 use ironclaw_extension_contracts::channel_adapter::{
-    OutboundPart, ProductTriggerReason, ReactionAction, RunReaction,
+    OutboundPart, OutboundVisibility, ProductTriggerReason, ReactionAction, RunReaction,
 };
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
@@ -40,8 +40,8 @@ use ironclaw_threads::{
     AttachmentRef, FinalizedAssistantMessageByRunRequest, ThreadMessageRecord, ThreadScope,
 };
 use ironclaw_turns::{
-    GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnErrorCategory, TurnRunId,
-    TurnRunState, TurnScope, TurnStatus,
+    GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnErrorCategory, TurnExecutionOutcome,
+    TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 use tokio::sync::Semaphore;
 
@@ -78,6 +78,11 @@ struct RunNotificationDeliveryContext<'a> {
     scope: &'a TurnScope,
     thread_scope: &'a ThreadScope,
     actor: &'a TurnActor,
+    /// The reply route, owned by the CONVERSATION binding the envelope
+    /// resolved to — runs themselves carry no reply-target binding, so the
+    /// observer routes every notification from the product-side binding it
+    /// already holds.
+    reply_target_binding_ref: &'a ReplyTargetBindingRef,
 }
 
 /// The live working indicator for one run: the currently posted message (if
@@ -641,9 +646,9 @@ impl RunDeliveryObserver {
                         scope: &scope,
                         thread_scope: &thread_scope,
                         actor: &actor,
+                        reply_target_binding_ref: &binding.reply_target_binding_ref,
                     },
                     run_id,
-                    &actionable_state,
                     notification,
                 )
                 .await?;
@@ -865,6 +870,9 @@ impl RunDeliveryObserver {
         let direct_message = envelope_is_direct_chat(envelope);
         let notification = match state.status {
             TurnStatus::Completed => {
+                if state.execution_outcome == Some(TurnExecutionOutcome::NothingToReport) {
+                    return Ok(None);
+                }
                 let Some(message) = self
                     .read_latest_assistant_message(thread_scope, binding, run_id)
                     .await?
@@ -974,6 +982,17 @@ impl RunDeliveryObserver {
                                 Some(AuthPromptChallengeKind::OAuthUrl) | None => {
                                     prompts::OAUTH_PRIVATE_SETUP_MESSAGE.to_string()
                                 }
+                                // Unreachable in practice — `DeviceLink` is
+                                // never serviceable, so it exits through the
+                                // cancel-and-redirect arm below rather than
+                                // reaching this private-target narrowing. The
+                                // arm still carries its own copy so that the
+                                // day a device-link frame becomes deliverable,
+                                // the fallback names the real next step
+                                // instead of the generic dead end.
+                                Some(AuthPromptChallengeKind::DeviceLink) => {
+                                    prompts::DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE.to_string()
+                                }
                                 Some(
                                     AuthPromptChallengeKind::ManualToken
                                     | AuthPromptChallengeKind::Other,
@@ -1021,7 +1040,6 @@ impl RunDeliveryObserver {
         &self,
         context: RunNotificationDeliveryContext<'_>,
         run_id: TurnRunId,
-        state: &TurnRunState,
         notification: ActionableNotification,
     ) -> Result<Vec<DeliveredChannelMessage>, RunDeliveryError> {
         let RunNotificationDeliveryContext {
@@ -1029,8 +1047,9 @@ impl RunDeliveryObserver {
             scope,
             thread_scope,
             actor,
+            reply_target_binding_ref,
         } = context;
-        let reply_target = state.reply_target_binding_ref.clone();
+        let reply_target = reply_target_binding_ref.clone();
         let target_authority = ObservedReplyTargetAuthority {
             scope: scope.clone(),
             actor: actor.clone(),
@@ -1282,10 +1301,9 @@ impl RunDeliveryObserver {
     /// in a shared conversation it lands as a reply anchored on the sender's
     /// own message (the envelope's message-scoped conversation ref carries
     /// the anchor — a threading surface roots a thread on the ping, a flat
-    /// surface quotes it), so the nudge addresses the one unpaired sender
-    /// rather than the room. The
-    /// text is fixed, host-authored, and link-free (OAuth links and pairing
-    /// codes stay out of shared surfaces by the private-setup rules).
+    /// surface quotes it), requested `EphemeralTo` the sender so the nudge —
+    /// and the connect link its manifest text may carry — reaches only that
+    /// one unpaired sender rather than the room (#7681).
     /// Deliberately performs NO binding lookup (the sender is unbound by
     /// definition). Transport retries arrive as `Duplicate`, so this fires
     /// at most once per inbound event, and the per-conversation reservation
@@ -1315,15 +1333,21 @@ impl RunDeliveryObserver {
         let Some(reserved_at) = self.reserve_connect_nudge(conversation_key.clone()) else {
             return true;
         };
+        let visibility = if envelope_is_direct_chat(envelope) {
+            OutboundVisibility::Public
+        } else {
+            OutboundVisibility::EphemeralTo(envelope.external_actor_ref().clone())
+        };
         let delivered = self
             .services
-            .post_notice(
+            .post_notice_with_visibility(
                 DeliveryIntent::ConnectRequired,
                 self.services.fallback_notice_scope.clone(),
                 None,
                 envelope.external_conversation_ref(),
                 &self.connection_notices.connect_required,
                 format!("connect-nudge:{}", envelope.external_event_id().as_str()),
+                visibility,
             )
             .await;
         if delivered.is_none() {

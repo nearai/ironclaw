@@ -18,6 +18,22 @@ async fn oauth_flow_state_machine_conformance_holds_for_in_memory_fake() {
     .await;
 }
 
+/// The device-link half of the same cross-implementation contract. The
+/// durable store runs this suite from the root integration tier; running it
+/// here is what stops the fake and production drifting on the one behavior the
+/// driver's non-idempotency rule depends on.
+#[tokio::test]
+async fn device_link_step_machine_conformance_holds_for_in_memory_fake() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("conformance-step");
+    ironclaw_auth::test_support::conformance::assert_auth_flow_step_conformance(
+        &services,
+        &owner,
+        &provider(),
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn continuation_side_effect_failure_terminalizes_only_the_expected_completion() {
     let services = InMemoryAuthProductServices::new();

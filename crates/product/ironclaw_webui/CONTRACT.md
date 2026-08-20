@@ -107,7 +107,7 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 
 ## `handlers.rs` module-charter map
 
-`src/webui_v2/handlers.rs` is **4,593 lines** and carries a live
+`src/webui_v2/handlers.rs` is **4,890 lines** and carries a live
 `// arch-exempt: large_file` waiver naming plan #5985 (the WebUI route split).
 This map is **not** that split and does not discharge that waiver — PROPOSAL
 §6.4.15 calls this shape "module-charter work, **not a split**", and §6.9.1
@@ -131,6 +131,7 @@ candidate module.
 |---|---|---|---|
 | `session` | The session-bootstrap response and the feature flags it carries | A durable read — bootstrap must stay cheap and non-blocking | `GLOBAL_AUTO_APPROVE_FEATURE_TIMEOUT`, `WebUiV2SessionResponse`, `WebUiV2Features`, `get_session`, `global_auto_approve_enabled` |
 | `threads` | Thread lifecycle, message send, and timeline/thread reads | Run control (that is `runs`) or transport (that is `streaming`) | `create_thread`, `delete_thread`, `session_channel_message`, `get_timeline`, `TimelineQuery`, `list_threads`, `ListThreadsQuery` |
+| `notifications` | Durable notification-inbox listing and lifecycle mutations, including route-edge query/path parsing | External-channel preferences, enrollment, or delivery — those are `outbound` | `list_notifications`, `ListNotificationsQuery`, `NotificationPath`, `mark_notification_read`, `mark_all_notifications_read`, `archive_notification` |
 | `admin-users` | Admin user CRUD, role/status, and per-user secrets; parsing `{user_id}`/`{handle}` into domain types at the edge | Authorization logic — the service enforces admin authorization and last-admin protection | `parse_admin_user_id`, `parse_admin_secret_handle`, `read_admin_user_secret`, `admin_list_users`, `admin_create_user`, `admin_get_user`, `admin_update_user`, `admin_delete_user`, `admin_set_user_status`, `admin_set_user_role`, `admin_list_user_secrets`, `admin_put_user_secret`, `admin_delete_user_secret` |
 | `workspace-fs` | Project-file and mount-catalog reads, and the workspace path-scoping rules that keep a served path inside its projection | Attachment download (that is `attachments`) | `PROJECT_FS_ROOT`, `ProjectFsQuery`, `list_project_files`, `stat_project_file`, `read_project_file`, `project_fs_download_response`, `FsBrowseQuery`, `list_fs_mounts`, `browse_fs_dir`, `stat_fs_path`, `read_fs_file`, `require_fs_browse_path`, `workspace_scoped_projection_required`, `workspace_projection_for`, `workspace_served_path`, `strip_workspace_prefix`, `project_fs_list_path`, `require_project_fs_path` |
 | `projects` | Project CRUD and project membership | Project *files* — those are `workspace-fs` | `ListProjectsQuery`, `list_projects`, `create_project`, `get_project`, `update_project`, `delete_project`, `list_project_members`, `add_project_member`, `update_project_member`, `remove_project_member`, `read_project_member` |
@@ -139,6 +140,7 @@ candidate module.
 | `runs` | Run control: cancel, retry, and gate resolution | Anything that reads a run — that is `threads` or `streaming` | `cancel_run`, `CancelRunPath`, `resolve_gate`, `ResolveGatePath`, `retry_run`, `RetryRunPath` |
 | `commands` | The product command surface: listing and executing | A command *constant* — those are `ironclaw_assistant`'s frozen inventory | `list_commands`, `ExecuteCommandBody`, `execute_command` |
 | `automations` | Automation listing and lifecycle (pause/resume/rename/delete) | Trigger evaluation — that is the triggers domain | `list_automations`, `pause_automation`, `resume_automation`, `rename_automation`, `delete_automation`, `ListAutomationsQuery` |
+| `suggestions` | Suggestion snapshot reads and generation/start/dismiss actions | Suggestion orchestration and durable state — those belong behind `ProductSurface` | `SUGGESTIONS_MAX_RETRY_AFTER_SECONDS`, `list_suggestions`, `generate_suggestions`, `start_suggestion`, `dismiss_suggestion` |
 | `traces` | Trace credits, account traces, the account login link, and hold authorization | Trace *content* — that is `ironclaw_trace_commons` | `trace_credits`, `trace_account_traces`, `trace_account_login_link`, `authorize_trace_hold` |
 | `outbound` | Outbound notification channels, delivery targets, the generic host-owned delivery-registration surface, and its capability-failure→HTTP classification | Delivery itself — the host owns the coordinator; channel-specific enrollment parsing belongs in the channel package | `get_notification_channels`, `set_notification_channels`, `CapabilityFailureHttpClass`, `capability_failure_http_class`, `capability_failure_bad_request`, `capability_resolution_succeeded`, `parse_thread_id_for_response`, `outbound_preferences_forbidden`, `outbound_preferences_unavailable`, `list_outbound_delivery_targets`, `notification_setup_status`, `notification_setup_enable`, `notification_setup_disable` |
 | `skills` | Skill discovery, install/update/remove, content reads, and auto-activation | Skill *selection* — that is `ironclaw_skills` | `list_skills`, `search_skills`, `install_skill`, `get_skill_content`, `update_skill`, `remove_skill`, `set_skill_auto_activate`, `set_auto_activate_learned`, `skill_mutation_succeeded`, `skill_mutation_forbidden`, `skill_mutation_unavailable`, `SkillPath`, `SearchSkillsBody`, `InstallSkillBody`, `UpdateSkillBody`, `SetSkillAutoActivateBody` |
@@ -183,6 +185,10 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.get_session` | GET | `/api/webchat/v2/session` | — | `ProjectionOnly` |
 | `webui.v2.create_thread` | POST | `/api/webchat/v2/threads` | — | `ProductSurface` |
 | `webui.v2.list_threads` | GET | `/api/webchat/v2/threads` (`?limit&cursor`) | — | `ProjectionOnly` |
+| `webui.v2.list_notifications` | GET | `/api/webchat/v2/notifications` (`?limit&cursor`) | — | `ProductSurface` |
+| `webui.v2.mark_notification_read` | POST | `/api/webchat/v2/notifications/{notification_id}/read` | — | `ProductSurface` |
+| `webui.v2.mark_all_notifications_read` | POST | `/api/webchat/v2/notifications/read-all` | — | `ProductSurface` |
+| `webui.v2.archive_notification` | POST | `/api/webchat/v2/notifications/{notification_id}/archive` | — | `ProductSurface` |
 | `webui.v2.delete_thread` | DELETE | `/api/webchat/v2/threads/{thread_id}` | — | `ProductSurface` |
 | `webui.v2.session_channel_message` | POST | `/api/webchat/v2/channels/{extension_id}/messages` | — | `TurnCoordinator` |
 | `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` (`?limit&cursor`) | — | `ProjectionOnly` |
@@ -193,6 +199,7 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | **WebSocket** | `ProjectionOnly` |
 | `webui.v2.cancel_run` / `retry_run` / `resolve_gate` | POST | `…/runs/{run_id}/…` | — | `TurnCoordinator` |
 | `webui.v2.list/pause/resume/rename/delete_automation` | GET/POST/DELETE | `/api/webchat/v2/automations…` | — | `ProductSurface` |
+| `webui.v2.suggestions.list/generate/start/dismiss` | GET/POST/DELETE | `/api/webchat/v2/suggestions…` | — | `ProductSurface` |
 | `webui.v2.list/install/import/remove/get_setup/setup_extension/register_hosted_mcp` | GET/POST | `/api/webchat/v2/extensions…` | — | `ProjectionOnly` / `ProductSurface` |
 | `webui.v2.ironhub_deliver_install` | POST | `/api/webchat/v2/ironhub/install` | — | `ProductSurface` |
 | `webui.v2.*_llm_*` | GET/POST | `/api/webchat/v2/llm/…` | — | `ProjectionOnly` / `ProductSurface` |
@@ -203,6 +210,12 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.trace_*` (credit, account, account-login-link, holds/authorize) | GET/POST | `/api/webchat/v2/traces/…` | — | `ProductSurface` |
 | `webui.v2.notification_setup_status` | GET | `/api/webchat/v2/channels/{extension_id}/notifications` | — | `ProductSurface` |
 | `webui.v2.notification_setup_enable` / `notification_setup_disable` | POST | `/api/webchat/v2/channels/{extension_id}/notifications/{enable,disable}` | — | `ProductSurface` |
+
+`GET /api/webchat/v2/suggestions` is read-only and returns the persisted
+generation status (`empty`, `generating`, `ready`, or `failed`).
+`POST /api/webchat/v2/suggestions/generate` requires a bounded
+`client_action_id`, returns `202 Accepted` with `Retry-After` while generation
+is in progress, and returns `200 OK` for terminal snapshots.
 
 The exact per-route set (methods, query params, auth, rate/body limits) is the
 descriptor table in `src/webui_v2/descriptors.rs`; the count/shape is locked by

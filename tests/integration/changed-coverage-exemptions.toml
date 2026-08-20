@@ -382,7 +382,7 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/loop/ironclaw_turn_runner/src/subagent/await_edge/resolver.rs"
-lines = [2033]
+lines = [2032]
 owner = "@nearai/reborn"
 reason = "Background subagent spawn-mode arm; base lcov shows 0 hits at the same statement (67088a426 line 2024). Only GateRef::new -> TurnGateRef::new changed."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
@@ -530,7 +530,7 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/loop/ironclaw_turn_runner/src/subagent/await_edge/mod.rs"
-lines = [112, 149]
+lines = [105, 142]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
@@ -1002,7 +1002,7 @@ review_after = "2026-11-01"
 
 [[exemption]]
 path = "crates/kernel/ironclaw_turns/src/process_projection/metadata.rs"
-lines = [139, 140, 141]
+lines = [123, 124, 125]
 owner = "@nearai/reborn"
 reason = "serde default fn for legacy persisted rows missing steering_allowed; integration always writes the field. Crate-tier legacy-row deserialization test covers it."
 issue = "https://github.com/nearai/ironclaw/issues/7006"
@@ -1207,11 +1207,10 @@ review_after = "2026-11-02"
 [[exemption]]
 path = "crates/domains/ironclaw_threads/src/filesystem_service/transcript_migration.rs"
 lines = [
-  39, 62, 63, 103, 104, 159, 168, 169, 170, 171,
-  173, 178, 190, 202, 203, 204, 205, 207, 212, 213,
-  214, 216, 221, 222, 233, 238, 239, 241, 273, 274, 275,
+  39, 62, 63, 100, 101, 155, 164, 165, 166, 167,
+  169, 174, 183, 184, 195, 200, 201, 203, 235, 236, 237,
 ]
-branch_lines = [62, 101, 156, 169, 175, 183, 203, 212, 229, 238, 267]
+branch_lines = [62, 98, 152, 165, 171, 179, 191, 200, 229]
 owner = "@nearai/reborn"
 reason = "Contract tests deterministically cover writer-admission BackendBusy, VersionMismatch page retry, bounded exhaustion, successful message/summary rebuild, and durable marker read-back. Residuals are alternate failure sites inside the same bounded state machine, malformed legacy records, disappearing rows, and non-durable marker/backend failures not separately selectable through FaultInjecting."
 issue = "https://github.com/nearai/ironclaw/issues/6974"

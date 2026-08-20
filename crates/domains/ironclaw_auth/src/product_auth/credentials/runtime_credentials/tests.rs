@@ -732,6 +732,80 @@ async fn resolver_does_not_share_host_managed_nearai_account_with_other_requeste
     assert_eq!(error, CredentialStageError::AuthRequired);
 }
 
+/// PROPOSAL §4.5: a linked device is never eligible for the host-managed
+/// credential fallback.
+///
+/// The fallback rule's `scope_matches` predicate deliberately omits `user_id` —
+/// a host-managed key is bootstrapped once and shared across the tenant — so
+/// without this exclusion one person's linked personal account would be handed
+/// to every other user under the same tenant/agent. This drives the same
+/// fixture the passing host-managed tests use and asserts the opposite outcome
+/// once the account carries a link revision.
+#[tokio::test]
+async fn resolver_does_not_serve_a_linked_device_account_through_the_host_managed_fallback() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let host_scope = owner_auth_scope("reborn-cli");
+    let user_scope = owner_auth_scope("alice");
+    let host_access_secret = SecretHandle::new("host_nearai_access").unwrap();
+    let host_account = ConfiguredAccount::new(host_scope.clone(), "nearai")
+        .ownership(CredentialOwnership::ExtensionOwned)
+        .owner_extension("nearai")
+        .access_secret(Some(host_access_secret.clone()))
+        .create(&accounts)
+        .await;
+    // Establishing the link is what makes the account a linked device; the
+    // ownership pin is what lets the bump succeed at all.
+    let linked = accounts
+        .bump_link_revision(&host_scope, host_account.id)
+        .await
+        .expect("an extension-owned account with no grants may be linked");
+    assert!(linked.is_linked_device());
+    let resolver = resolver_with_host_managed_nearai_scope(accounts, host_scope);
+
+    let error = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &user_scope.resource,
+            provider: &VendorId::new("nearai").unwrap(),
+            setup: &RuntimeCredentialAccountSetup::ManualToken,
+            provider_scopes: &[],
+            requester_extension: &ExtensionId::new("nearai").unwrap(),
+        })
+        .await
+        .expect_err("a linked device must never be served through the host-managed fallback");
+
+    assert_eq!(error, CredentialStageError::AuthRequired);
+}
+
+/// The same exclusion from the other side: a request that declares itself a
+/// device-link credential never consults the fallback at all, so a host-managed
+/// account cannot stand in for a user's own link.
+#[tokio::test]
+async fn resolver_does_not_consult_the_host_managed_fallback_for_a_device_link_request() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let host_scope = owner_auth_scope("reborn-cli");
+    let user_scope = owner_auth_scope("alice");
+    ConfiguredAccount::new(host_scope.clone(), "nearai")
+        .ownership(CredentialOwnership::ExtensionOwned)
+        .owner_extension("nearai")
+        .access_secret(Some(SecretHandle::new("host_nearai_access").unwrap()))
+        .create(&accounts)
+        .await;
+    let resolver = resolver_with_host_managed_nearai_scope(accounts, host_scope);
+
+    let error = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &user_scope.resource,
+            provider: &VendorId::new("nearai").unwrap(),
+            setup: &RuntimeCredentialAccountSetup::DeviceLink,
+            provider_scopes: &[],
+            requester_extension: &ExtensionId::new("nearai").unwrap(),
+        })
+        .await
+        .expect_err("a device-link request must not fall back to a host-managed account");
+
+    assert_eq!(error, CredentialStageError::AuthRequired);
+}
+
 #[tokio::test]
 async fn resolver_does_not_share_host_managed_nearai_account_across_tenant() {
     let accounts = Arc::new(InMemoryAuthProductServices::new());

@@ -73,6 +73,9 @@ pub struct OpenAiCompatRouteMountPorts {
     /// deployment has no root LLM provider wired; the route then stays
     /// fail-closed (501) rather than reporting an empty catalog.
     pub llm_config: Option<Arc<dyn LlmConfigService>>,
+    /// Prepared-context door for structured-output / tool-history chat
+    /// requests. Production always wires this; it is a required dependency.
+    pub prepared_turn_port: Arc<dyn crate::OpenAiCompatPreparedTurnPort>,
 }
 
 /// Assemble the OpenAI-compatible router and its ingress descriptors from
@@ -86,6 +89,7 @@ pub fn openai_compat_route_mount(ports: OpenAiCompatRouteMountPorts) -> Protecte
         external_tool_store,
         external_tool_resume,
         llm_config,
+        prepared_turn_port,
     } = ports;
 
     let projection_streamer = Arc::new(OpenAiCompatRuntimeProjectionStreamer::new(Arc::clone(
@@ -96,6 +100,7 @@ pub fn openai_compat_route_mount(ports: OpenAiCompatRouteMountPorts) -> Protecte
             Arc::clone(&product_surface),
             Arc::clone(&ref_store),
             chat_projection_reader,
+            prepared_turn_port,
         )
         .with_projection_streamer(projection_streamer.clone()),
     );

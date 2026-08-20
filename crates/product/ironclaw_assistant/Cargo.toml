@@ -43,6 +43,7 @@ ironclaw_product_contracts = { path = "../../contracts/ironclaw_product_contract
 ironclaw_extension_contracts = { path = "../../contracts/ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_loop_host = { path = "../../loop/ironclaw_loop_host", version = "0.1.0" }
 ironclaw_conversations = { path = "../../domains/ironclaw_conversations", version = "0.1.0" }
+ironclaw_notifications = { path = "../../domains/ironclaw_notifications", version = "0.1.0" }
 ironclaw_outbound = { path = "../../domains/ironclaw_outbound", version = "0.1.0" }
 # The blocked-auth resume fan-out (WS6 eviction from the composition root)
 # reads durable process-gate records to find the caller's other parked runs.
@@ -56,6 +57,7 @@ ironclaw_safety = { path = "../../substrates/ironclaw_safety", version = "0.2.2"
 ironclaw_threads = { path = "../../domains/ironclaw_threads", version = "0.1.0" }
 ironclaw_triggers = { path = "../../domains/ironclaw_triggers", version = "0.1.0" }
 ironclaw_loop_contracts = { path = "../../contracts/ironclaw_loop_contracts", version = "0.1.0" }
+ironclaw_memory = { path = "../../domains/ironclaw_memory", version = "0.1.0" }
 ironclaw_turns = { path = "../../kernel/ironclaw_turns", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -80,6 +82,9 @@ ironclaw_authorization = { path = "../../kernel/ironclaw_authorization", feature
 # Enables the in-memory-backed run-state/approval store constructors for tests only.
 # FaultInjecting decorator: test store fault paths through the real store
 ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", features = ["test-support"] }
+# The mutation-response contract is asserted against the real durable store,
+# so the caller-level test builds one rather than trusting a hand-written double.
+ironclaw_notifications = { path = "../../domains/ironclaw_notifications", version = "0.1.0" }
 # ProductLive planned-loop harness builds a `FilesystemReplayPayloadStore` over
 # an in-memory filesystem so approval/auth resumes reconstitute their replay
 # input (mirrors production's capability-store wiring).

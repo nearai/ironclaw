@@ -3,8 +3,11 @@ use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_extension_contracts::linked_session::{LinkedSessionVersion, SessionBytes};
 use ironclaw_host_api::ids::{ExtensionId, SecretHandle};
 use secrecy::ExposeSecret;
+
+pub mod device_link;
 
 use crate::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowId, AuthFlowManager,
@@ -71,11 +74,22 @@ fn validate_submitted_secret(request: &SecretSubmitRequest) -> Result<(), AuthPr
     Ok(())
 }
 
+/// The fake's opaque-material slot: a monotonic version plus the bytes.
+///
+/// The version is an integer here only because the fake mints its own tokens;
+/// callers see the opaque [`LinkedSessionVersion`] and cannot depend on its
+/// shape.
+struct StoredOpaqueMaterial {
+    version: u64,
+    material: SessionBytes,
+}
+
 #[derive(Default)]
 struct AuthState {
     flows: HashMap<AuthFlowId, AuthFlowRecord>,
     interactions: HashMap<AuthInteractionId, PendingSecretInteraction>,
     accounts: HashMap<CredentialAccountId, CredentialAccount>,
+    opaque_material: HashMap<CredentialAccountId, StoredOpaqueMaterial>,
     continuations: Vec<AuthContinuationEvent>,
     refresh_fails: HashSet<CredentialAccountId>,
     refresh_backend_fails: HashSet<CredentialAccountId>,
@@ -133,6 +147,16 @@ impl InMemoryAuthProductServices {
         self.lock_state()
             .refresh_races
             .insert(account_id, (access_secret, refresh_secret));
+    }
+
+    /// Move a flow's deadline. There is deliberately no production path that
+    /// moves a deadline backwards — a flow clock only ever extends, and only
+    /// up to its cap — so a test that needs a lapsed attempt has to reach past
+    /// the public surface rather than express it through one.
+    pub fn expire_flow_for_tests(&self, flow_id: AuthFlowId, expires_at: Timestamp) {
+        if let Some(record) = self.lock_state().flows.get_mut(&flow_id) {
+            record.expires_at = expires_at;
+        }
     }
 
     pub fn quarantine_cleanup_for_tests(
@@ -274,6 +298,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             pkce_verifier_hash: request.pkce_verifier_hash,
             authorization_code_hash: None,
             error: None,
+            step_state: None,
             continuation_emitted_at: None,
             created_at: now,
             updated_at: now,
@@ -606,6 +631,69 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         record.continuation_emitted_at = Some(emitted_at);
         record.updated_at = emitted_at;
         Ok(record.clone())
+    }
+
+    /// Real compare-and-swap, not a stub.
+    ///
+    /// The loser is told `applied = false` and handed the winner's record —
+    /// modelled here precisely because the whole point of the contract is that
+    /// a consumer must not re-invoke a non-idempotent vendor transition, and a
+    /// fake that always applied would let that bug pass every test.
+    async fn advance_flow_step(
+        &self,
+        scope: &crate::AuthProductScope,
+        input: crate::AuthFlowStepAdvanceInput,
+    ) -> Result<crate::AuthFlowStepAdvance, AuthProductError> {
+        let now = Utc::now();
+        let mut state = self.lock_state();
+        let record = state
+            .flows
+            .get_mut(&input.flow_id)
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if crate::is_terminal_status(record.status) {
+            return Err(AuthProductError::FlowAlreadyTerminal);
+        }
+        let current_revision = record.step_revision();
+        if current_revision != input.expected_revision {
+            return Ok(crate::AuthFlowStepAdvance {
+                record: record.clone(),
+                applied: false,
+            });
+        }
+
+        let previous = record.step_state;
+        record.status = input.status;
+        record.challenge = Some(input.challenge);
+        record.error = input.error;
+        if let Some(account_id) = input.credential_account_id {
+            record.credential_account_id = Some(account_id);
+        }
+        // A flow deadline only ever moves later; the caller owns the cap.
+        if let Some(deadline) = input.flow_expires_at
+            && deadline > record.expires_at
+        {
+            record.expires_at = deadline;
+        }
+        record.step_state = Some(crate::AuthFlowStepState {
+            index: previous.map_or(1, |state| state.index.saturating_add(1)),
+            kind: input.step_kind,
+            revision: current_revision.saturating_add(1),
+            step_expires_at: input.step_expires_at,
+            last_polled_at: input
+                .polled_at
+                .or_else(|| previous.and_then(|state| state.last_polled_at)),
+            poll_attempts: previous
+                .map_or(0, |state| state.poll_attempts)
+                .saturating_add(u32::from(input.polled_at.is_some())),
+        });
+        record.updated_at = now;
+        Ok(crate::AuthFlowStepAdvance {
+            record: record.clone(),
+            applied: true,
+        })
     }
 
     async fn fail_completed_continuation(
@@ -979,6 +1067,128 @@ impl CredentialAccountService for InMemoryAuthProductServices {
             Err(error) => Err(error),
         }
     }
+
+    async fn load_opaque_material(
+        &self,
+        request: crate::OpaqueMaterialRequest,
+    ) -> Result<Option<crate::OpaqueMaterialSnapshot>, AuthProductError> {
+        let state = self.lock_state();
+        let account = authorize_opaque_material(&state, &request)?;
+        let _ = account;
+        Ok(state
+            .opaque_material
+            .get(&request.account_id)
+            .map(|stored| crate::OpaqueMaterialSnapshot {
+                material: stored.material.clone(),
+                version: opaque_version(Some(stored.version)),
+            }))
+    }
+
+    /// Real compare-and-swap over opaque bytes — and deliberately no attempt
+    /// to read them. Conflict *detection* is all this crate owns; a fake that
+    /// merged would model authority auth does not have.
+    async fn store_opaque_material(
+        &self,
+        write: crate::OpaqueMaterialWrite,
+    ) -> Result<crate::OpaqueMaterialWriteOutcome, AuthProductError> {
+        let mut state = self.lock_state();
+        authorize_opaque_material(&state, &write.target)?;
+        let current = state
+            .opaque_material
+            .get(&write.target.account_id)
+            .map(|stored| stored.version);
+        let expected_matches = match current {
+            None => write.expected.is_absent(),
+            Some(version) => {
+                write.expected.as_str() == Some(opaque_version_label(version).as_str())
+            }
+        };
+        if !expected_matches {
+            return Ok(crate::OpaqueMaterialWriteOutcome::Conflict {
+                current: opaque_version(current),
+            });
+        }
+        let next = current.unwrap_or(0).saturating_add(1);
+        state.opaque_material.insert(
+            write.target.account_id,
+            StoredOpaqueMaterial {
+                version: next,
+                material: write.material,
+            },
+        );
+        Ok(crate::OpaqueMaterialWriteOutcome::Stored {
+            version: opaque_version(Some(next)),
+        })
+    }
+
+    async fn bump_link_revision(
+        &self,
+        scope: &crate::AuthProductScope,
+        account_id: CredentialAccountId,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        let now = Utc::now();
+        let mut state = self.lock_state();
+        let account = state
+            .accounts
+            .get_mut(&account_id)
+            .ok_or(AuthProductError::CredentialMissing)?;
+        if !binding_scope_owns_account(scope, account) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        // Same ownership pin the durable store enforces (PROPOSAL §4.5). A fake
+        // that let a reusable account become a linked device would let a
+        // production consumer depend on exactly the unsafe shortcut the pin
+        // exists to close.
+        if !account.linked_device_ownership_is_pinned() {
+            return Err(AuthProductError::invalid_request(
+                "a linked-device account must be extension-owned by exactly one \
+                 extension and carry no grants",
+            ));
+        }
+        account.link_revision = account.link_revision.saturating_add(1);
+        account.updated_at = now;
+        Ok(account.clone())
+    }
+}
+
+/// The scope/requester/revision gate every opaque-material call passes.
+///
+/// The revision check is the one that is easy to forget and expensive to miss:
+/// a handle minted before an unlink names an account that still exists, so
+/// without it a stale holder would read — or clobber — the credential that
+/// replaced the one it was issued for.
+fn authorize_opaque_material<'state>(
+    state: &'state AuthState,
+    request: &crate::OpaqueMaterialRequest,
+) -> Result<&'state CredentialAccount, AuthProductError> {
+    let account = state
+        .accounts
+        .get(&request.account_id)
+        .ok_or(AuthProductError::CredentialMissing)?;
+    if !binding_scope_owns_account(&request.scope, account) {
+        return Err(AuthProductError::CrossScopeDenied);
+    }
+    if !account.is_authorized_for_requester(request.requester_extension.as_ref()) {
+        return Err(AuthProductError::CrossScopeDenied);
+    }
+    if account.link_revision != request.link_revision {
+        return Err(AuthProductError::LinkRevisionStale {
+            current: account.link_revision,
+        });
+    }
+    Ok(account)
+}
+
+fn opaque_version_label(version: u64) -> String {
+    format!("v{version}")
+}
+
+fn opaque_version(version: Option<u64>) -> LinkedSessionVersion {
+    match version {
+        None => LinkedSessionVersion::absent(),
+        Some(version) => LinkedSessionVersion::new(opaque_version_label(version))
+            .unwrap_or_else(|_| LinkedSessionVersion::absent()),
+    }
 }
 
 #[async_trait]
@@ -1327,6 +1537,7 @@ fn create_account_in_state_at(
         refresh_secret: request.refresh_secret,
         scopes: request.scopes,
         provider_identity: None,
+        link_revision: 0,
         created_at: now,
         updated_at: now,
     };

@@ -30,5 +30,6 @@
 
 pub mod api;
 pub mod credentials;
+pub mod device_link;
 pub mod durable;
 pub mod oauth;

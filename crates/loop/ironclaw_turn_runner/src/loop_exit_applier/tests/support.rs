@@ -5,9 +5,8 @@ use async_trait::async_trait;
 use ironclaw_host_api::ids::{ProcessId, TenantId, ThreadId};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef,
-    ReplyTargetBindingRef, RunProfileVersion, SanitizedFailure, SourceBindingRef, TurnActor,
-    TurnCheckpointId, TurnGateRef, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope,
-    TurnStatus,
+    RunProfileVersion, SanitizedFailure, TurnActor, TurnCheckpointId, TurnGateRef, TurnId,
+    TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
 };
 use ironclaw_loop_contracts::{
     CheckpointSchemaId, LoopBlocked, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStateRef,
@@ -147,6 +146,7 @@ where
 {
     thread_service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: thread_scope,
             thread_id,
             turn_run_id: run_id.to_string(),
@@ -174,13 +174,13 @@ pub(super) fn running_run_state(
         run_id,
         status: TurnStatus::Running,
         accepted_message_ref: AcceptedMessageRef::new("msg:accepted").expect("valid"),
-        source_binding_ref: SourceBindingRef::new("source").expect("valid"),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply").expect("valid"),
+        output_contract: ironclaw_host_api::output::OutputContract::AssistantMessage,
         resolved_run_profile_id: ironclaw_turns::RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
+        execution_outcome: None,
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref: None,
@@ -412,6 +412,7 @@ pub(super) fn claimed_run() -> ClaimedTurnRun {
     profile.checkpoint_policy.require_final_checkpoint = false;
     profile.checkpoint_policy.allow_no_reply_completion = false;
     ClaimedTurnRun {
+        subagent_activation_provenance: None,
         state: TurnRunState {
             scope,
             actor: None,
@@ -419,13 +420,13 @@ pub(super) fn claimed_run() -> ClaimedTurnRun {
             run_id: TurnRunId::new(),
             status: TurnStatus::Running,
             accepted_message_ref: AcceptedMessageRef::new("msg:accepted").expect("valid"),
-            source_binding_ref: SourceBindingRef::new("source").expect("valid"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply").expect("valid"),
+            output_contract: ironclaw_host_api::output::OutputContract::AssistantMessage,
             resolved_run_profile_id: ironclaw_turns::RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             allow_steering: true,
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: None,
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
@@ -477,11 +478,13 @@ fn test_profile(
             max_checkpoint_bytes: 64 * 1024,
             require_final_checkpoint: false,
             allow_no_reply_completion: false,
+            before_model_checkpoint_interval: 1,
         },
         resource_budget_policy: ResourceBudgetPolicy {
             tier: ResourceBudgetTier::new("test_tier").expect("valid"),
             max_model_calls: 32,
             max_capability_invocations: 64,
+            max_wall_clock_seconds: None,
         },
         personal_context_policy: ironclaw_loop_contracts::PersonalContextPolicy::Excluded,
         runtime_constraints: RuntimeProfileConstraints {
@@ -557,13 +560,17 @@ impl ProcessTransitionPort for RecordingTransitionPort {
         request: SuspendProcessRequest,
     ) -> Result<JournaledProcessSnapshot, TurnError> {
         *self.apply_calls.lock().expect("lock") += 1;
-        Ok(process_state_for_mapping(
+        let mut snapshot = process_state_for_mapping(
             ProcessLifecycleStatus::Suspended,
             request.process_id,
             None,
             Some(request.suspension),
             Some(request.checkpoint_ref),
-        ))
+        );
+        if let Some(metadata) = request.metadata {
+            snapshot.metadata = metadata;
+        }
+        Ok(snapshot)
     }
 
     async fn complete_process(
@@ -611,13 +618,17 @@ impl ProcessTransitionPort for RecordingTransitionPort {
             .lock()
             .expect("lock")
             .push(request.failure.category().to_string());
-        Ok(process_state_for_mapping(
+        let mut snapshot = process_state_for_mapping(
             ProcessLifecycleStatus::Failed,
             request.process_id,
             Some(request.failure),
             None,
             request.checkpoint_ref,
-        ))
+        );
+        if let Some(metadata) = request.metadata {
+            snapshot.metadata = metadata;
+        }
+        Ok(snapshot)
     }
 
     async fn relinquish_process(

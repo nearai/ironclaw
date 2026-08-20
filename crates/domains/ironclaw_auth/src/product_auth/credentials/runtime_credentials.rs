@@ -546,8 +546,12 @@ fn account_has_provider_scopes(
 fn credential_setup_requires_stored_scopes(setup: &RuntimeCredentialAccountSetup) -> bool {
     match setup {
         RuntimeCredentialAccountSetup::OAuth { .. } => true,
+        // A linked device holds the account's own authority; there is no scope
+        // parameter to store or intersect against (see
+        // `VendorAuthRecipe::scope_ceiling`, which is empty for `device_link`).
         RuntimeCredentialAccountSetup::ManualToken
         | RuntimeCredentialAccountSetup::Pairing
+        | RuntimeCredentialAccountSetup::DeviceLink
         | RuntimeCredentialAccountSetup::Retired => false,
     }
 }

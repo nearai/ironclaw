@@ -441,19 +441,30 @@ where
     /// `ironclaw_event_store`, then this method adapts the durable logs
     /// into the live sink traits consumed by runtime services.
     pub fn with_reborn_event_stores(self, stores: RebornEventStores) -> Self {
-        self.with_reborn_event_stores_verified(stores, false)
+        self.with_reborn_event_stores_verified(stores, false, None)
     }
 
     /// Attaches pre-built Reborn durable event/audit stores after the caller
     /// has already enforced production profile restrictions.
     pub fn with_production_reborn_event_stores(self, stores: RebornEventStores) -> Self {
-        self.with_reborn_event_stores_verified(stores, true)
+        self.with_reborn_event_stores_verified(stores, true, None)
+    }
+
+    /// Production composition seam for sharing one runtime-event sink with
+    /// host dispatch, loop milestones, and product-host event producers.
+    pub fn with_production_reborn_event_stores_and_sink(
+        self,
+        stores: RebornEventStores,
+        event_sink: Arc<dyn EventSink>,
+    ) -> Self {
+        self.with_reborn_event_stores_verified(stores, true, Some(event_sink))
     }
 
     fn with_reborn_event_stores_verified(
         mut self,
         stores: RebornEventStores,
         production_verified: bool,
+        event_sink: Option<Arc<dyn EventSink>>,
     ) -> Self {
         if production_verified {
             self.component_types.event_sink =
@@ -470,13 +481,18 @@ where
         }
         // Runtime events are best-effort observability whose append cursor is
         // discarded at the sink, so route them through the write-behind
-        // coalescing sink: a per-turn burst of single-row INSERTs collapses to
-        // one multi-row INSERT per stream per drain window. The compliance
-        // audit log stays synchronous.
-        self.event_sink = Some(Arc::new(CoalescingEventSink::new(
-            stores.events,
-            EventBatchConfig::default(),
-        )));
+        // coalescing sink unless composition supplied the one shared runtime
+        // sink for every producer over this log. The compliance audit log
+        // stays synchronous.
+        let event_sink = event_sink.unwrap_or_else(|| {
+            Arc::new(CoalescingEventSink::new(
+                stores.events,
+                EventBatchConfig::default(),
+            ))
+        });
+        self.process_lifecycle_store
+            .set_event_sink(Arc::clone(&event_sink));
+        self.event_sink = Some(event_sink);
         self.audit_sink = Some(Arc::new(DurableAuditSink::new(stores.audit)));
         self
     }
@@ -490,7 +506,11 @@ where
         config: RebornEventStoreConfig,
     ) -> Result<Self, RebornEventStoreError> {
         let stores = build_reborn_event_stores(profile, config).await?;
-        Ok(self.with_reborn_event_stores_verified(stores, profile == RebornProfile::Production))
+        Ok(self.with_reborn_event_stores_verified(
+            stores,
+            profile == RebornProfile::Production,
+            None,
+        ))
     }
 
     pub fn with_secret_store<T>(mut self, secret_store: Arc<T>) -> Self

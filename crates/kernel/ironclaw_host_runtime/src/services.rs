@@ -885,6 +885,23 @@ where
     }
 }
 
+/// Test-only accessors, kept in their own cfg-gated block rather than as
+/// per-method gates inside the production impl above.
+///
+/// The `test-support` half of the gate is load-bearing: the sole caller is
+/// `ironclaw_composition/tests/libsql_substrate.rs`, an integration test in
+/// another crate, which a plain `#[cfg(test)]` would not reach.
+#[cfg(any(test, feature = "test-support"))]
+impl<F, G> HostRuntimeServices<F, G>
+where
+    F: RootFilesystem + 'static,
+    G: ResourceGovernor + 'static,
+{
+    pub fn process_runtime_for_test(&self) -> Arc<dyn ironclaw_processes::ProcessRuntimePort> {
+        self.process_services.process_runtime()
+    }
+}
+
 fn local_testing_runtime_policy() -> EffectiveRuntimePolicy {
     ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
         DeploymentMode::LocalSingleUser,

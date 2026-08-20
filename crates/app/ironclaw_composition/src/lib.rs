@@ -41,6 +41,7 @@ mod llm_admin;
 mod memory_binding;
 mod memory_provider_factory;
 mod model_gateway_assembly;
+mod notification_store_assembly;
 mod observability;
 mod operator_secret_store;
 mod operator_tool_catalog;
@@ -302,6 +303,7 @@ pub struct RebornRuntimeReadinessSnapshot {
     pub text_only_driver: RebornRuntimeComponentStatus,
     pub planned_driver: RebornRuntimeComponentStatus,
     pub subagent_planned_driver: RebornRuntimeComponentStatus,
+    pub unbound_planned_drivers: RebornRuntimeComponentStatus,
     pub planned_default_profile: RebornRuntimeComponentStatus,
 }
 
@@ -350,12 +352,27 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
         ),
         Err(error) => RebornRuntimeComponentStatus::Failed(error.to_string()),
     };
-    let subagent_planned_driver = match family_registry {
+    let subagent_planned_driver = match &family_registry {
         Ok(family_registry) => RebornRuntimeComponentStatus::from_result(
             ironclaw_turn_runner::planned_driver_factory::register_subagent_planned_driver(
                 &mut registry,
-                family_registry,
+                Arc::clone(family_registry),
             ),
+        ),
+        Err(error) => RebornRuntimeComponentStatus::Failed(error.to_string()),
+    };
+    let unbound_planned_drivers = match family_registry {
+        Ok(family_registry) => RebornRuntimeComponentStatus::from_result(
+            ironclaw_turn_runner::planned_driver_factory::register_unbound_planned_driver(
+                &mut registry,
+                Arc::clone(&family_registry),
+            )
+            .and_then(|_| {
+                ironclaw_turn_runner::planned_driver_factory::register_unbound_structured_planned_driver(
+                    &mut registry,
+                    family_registry,
+                )
+            }),
         ),
         Err(error) => RebornRuntimeComponentStatus::Failed(error.to_string()),
     };
@@ -366,6 +383,7 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
         text_only_driver,
         planned_driver,
         subagent_planned_driver,
+        unbound_planned_drivers,
         planned_default_profile,
     }
 }
@@ -416,6 +434,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/secrets",
     "/authorization",
     "/outbound",
+    "/notifications",
     // The web-app channel's enrollment store. The alias keeps its pre-rename
     // `web-push` spelling on purpose: it resolves to a PHYSICAL per-user
     // subpath (`/tenants/<t>/users/<u>/web-push`), so renaming it would
@@ -433,6 +452,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/replay-payloads",
     "/threads",
     "/conversations",
+    "/suggestions",
     "/turns",
     "/resources",
     "/engine",
@@ -486,10 +506,18 @@ fn invocation_mount_view_for_segments(
     let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 4);
     for alias in PER_USER_ALIASES {
         let target = format!("{tenant_user_prefix}{alias}");
+        let permissions = if matches!(*alias, "/notifications" | "/suggestions") {
+            // Suggestions are retained model output, and notifications expose
+            // only typed lifecycle transitions. Neither store performs raw
+            // deletion, so do not grant filesystem deletion authority.
+            MountPermissions::read_write()
+        } else {
+            MountPermissions::read_write_list_delete()
+        };
         grants.push(MountGrant::new(
             MountAlias::new(*alias)?,
             VirtualPath::new(target)?,
-            MountPermissions::read_write_list_delete(),
+            permissions,
         ));
     }
     grants.push(MountGrant::new(
@@ -630,6 +658,8 @@ pub enum RebornCompositionError {
     Mount(#[from] ironclaw_host_api::error::HostApiError),
     #[error("reborn filesystem substrate failed: {0}")]
     Filesystem(#[from] ironclaw_filesystem::FilesystemError),
+    #[error("reborn libSQL runtime substrate failed: {0}")]
+    LibSqlRuntime(#[from] ironclaw_libsql_runtime::LibSqlRuntimeError),
     #[error("reborn resource governor substrate failed: {0}")]
     Resource(#[from] ResourceError),
     #[error("reborn approval store substrate failed: {0}")]
@@ -650,6 +680,11 @@ pub enum RebornCompositionError {
         "production runtime policy uses {process_backend:?} but a user sandbox process binding was supplied"
     )]
     UnexpectedUserSandboxProcessPort { process_backend: ProcessBackendKind },
+    /// Carries the store's filesystem cause; flattening it into a message
+    /// would leave an operator unable to tell a broken database from a
+    /// rejected index.
+    #[error("process journal startup migration failed")]
+    ProcessJournalMigration(#[from] ironclaw_processes::ProcessJournalStoreError),
     #[error("reborn production wiring failed: {report:?}")]
     ProductionWiring {
         report: ironclaw_host_runtime::ProductionWiringReport,
@@ -690,6 +725,9 @@ where
 {
     factory::build_postgres_production_host_runtime_services(config).await
 }
+
+#[cfg(test)]
+mod mount_permission_tests;
 
 #[cfg(test)]
 mod mount_view_tests {
@@ -736,32 +774,6 @@ mod mount_view_tests {
                 )
             );
         }
-    }
-
-    #[tokio::test]
-    async fn process_journal_migration_mount_is_system_only_and_read_only() {
-        let root = Arc::new(InMemoryBackend::new());
-        let scoped = wrap_process_journal_scoped(root);
-        let legacy = ScopedPath::new("/legacy-tenants/tenant-a/users/user-a/run-state")
-            .expect("legacy path");
-        assert!(
-            scoped.resolve(&sample_scope(), &legacy).is_err(),
-            "ordinary user scopes must not enumerate other tenant roots"
-        );
-        assert_eq!(
-            scoped
-                .resolve(&ResourceScope::system(), &legacy)
-                .expect("system migration mount")
-                .as_str(),
-            "/tenants/tenant-a/users/user-a/run-state"
-        );
-        assert!(matches!(
-            scoped
-                .write_bytes(&ResourceScope::system(), &legacy, b"forbidden".to_vec())
-                .await
-                .expect_err("migration mount must not mutate legacy authorities"),
-            FilesystemError::PermissionDenied { .. }
-        ));
     }
 
     #[test]

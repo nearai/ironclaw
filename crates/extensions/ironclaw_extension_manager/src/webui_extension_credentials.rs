@@ -192,6 +192,9 @@ fn runtime_credential_setup(
         LifecycleExtensionCredentialSetup::Pairing => {
             ironclaw_host_api::capability::RuntimeCredentialAccountSetup::Pairing
         }
+        LifecycleExtensionCredentialSetup::DeviceLink => {
+            ironclaw_host_api::capability::RuntimeCredentialAccountSetup::DeviceLink
+        }
     }
 }
 

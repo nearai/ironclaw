@@ -375,6 +375,30 @@ def test_provider_trace_compilation_preserves_provider_call_inventory():
     assert actual == _EXPECTED_COMPILED_PROVIDER_CALLS
 
 
+def test_provider_trace_compilation_excludes_unrelated_extension_discovery():
+    """Provider replay must not depend on the external extension registry."""
+    case = next(
+        case
+        for case in PROVIDER_JOURNEY_CASES
+        if case.case_id == "qa_6c_gmail_to_sheet_live_chat"
+    )
+    trace_path = ROOT / case.trace
+    compiled = compile_provider_journey_trace(
+        load_recorded_trace(trace_path),
+        source=trace_path.name,
+        facts=case.replay,
+        provider_tools=EMULATE_SUPPORTED_TOOLS,
+        slack_state=_SEEDED_SLACK_STATE,
+    )
+    compiled_tool_names = {
+        call["name"]
+        for step in compiled.trace["steps"]
+        for call in step["response"].get("tool_calls", [])
+    }
+
+    assert compiled_tool_names <= EMULATE_SUPPORTED_TOOLS
+
+
 def test_provider_trace_compilation_uses_declared_google_seed():
     case = next(
         case
@@ -1404,11 +1428,11 @@ def test_cargo_evidence_counts_an_empty_lib_table_as_a_manual_target(
 # ---------------------------------------------------------------------------
 
 
-def test_every_production_provider_write_maps_to_a_resettable_world():
-    """No production write can run without a world that gets reset."""
+def test_every_deterministically_tested_provider_write_maps_to_a_resettable_world():
+    """No replayable provider write can run without a world that gets reset."""
     unreset = unreset_mutating_tools()
     assert not unreset, (
-        "these production tools declare `external_write` but belong to no "
+        "these deterministically tested tools declare `external_write` but belong to no "
         f"provider world the harness can reset: {sorted(unreset)}. A journey "
         "using one would mutate a world that nothing restores, and the next "
         "test would inherit the result. Add the world to _TOOL_WORLD_PREFIXES "

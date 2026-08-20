@@ -12,8 +12,8 @@ use ironclaw_agent_loop::{
 };
 use ironclaw_host_api::turn::TurnRunId;
 use ironclaw_loop_contracts::{
-    CompactionInitiator, ConcurrencyHint, LoopBlockedKind, LoopCompactionResponse,
-    LoopContextCompactionKind, LoopExit, LoopProgressEvent, LoopRunInfoPort, LoopSummaryArtifactId,
+    CompactionInitiator, LoopBlockedKind, LoopCompactionResponse, LoopContextCompactionKind,
+    LoopExit, LoopProgressEvent, LoopRunInfoPort, LoopSummaryArtifactId,
 };
 
 #[tokio::test(start_paused = true)]
@@ -157,7 +157,7 @@ async fn calls_then_reply_completes() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn parallel_policy_batches_two_calls_in_one_iteration() {
+async fn model_batch_invokes_each_call_through_the_host() {
     let script = ScenarioScript {
         model_responses: VecDeque::from([
             ScriptedModelResponse::Calls(vec![
@@ -168,17 +168,17 @@ async fn parallel_policy_batches_two_calls_in_one_iteration() {
                 text: "done".to_string(),
             },
         ]),
-        capability_outcomes: VecDeque::from([vec![
+        capability_outcomes: VecDeque::new(),
+        single_call_retry_outcomes: VecDeque::from([
             ScriptedCapabilityOutcome::completed("result:a"),
             ScriptedCapabilityOutcome::completed("result:b"),
-        ]]),
-        single_call_retry_outcomes: VecDeque::new(),
+        ]),
         pending_inputs: VecDeque::new(),
     };
     let (host, _) = MockAgentLoopDriverHost::builder()
         .visible_capabilities(vec![
-            capability_descriptor(capability_id("demo.a"), ConcurrencyHint::SafeForParallel),
-            capability_descriptor(capability_id("demo.b"), ConcurrencyHint::SafeForParallel),
+            capability_descriptor(capability_id("demo.a")),
+            capability_descriptor(capability_id("demo.b")),
         ])
         .script(script)
         .build();
@@ -190,15 +190,13 @@ async fn parallel_policy_batches_two_calls_in_one_iteration() {
         .expect("loop execution should succeed");
 
     assert!(matches!(exit, LoopExit::Completed(_)));
-    assert!(host.call_log().iter().any(|call| {
-        matches!(
-            call,
-            MockHostCall::InvokeCapabilityBatch {
-                call_count: 2,
-                stop_on_first_suspension: false
-            }
-        )
-    }));
+    assert_eq!(
+        host.call_log()
+            .iter()
+            .filter(|call| matches!(call, MockHostCall::InvokeCapability { .. }))
+            .count(),
+        2
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -208,19 +206,19 @@ async fn mixed_parallel_batch_blocks_after_recording_completed_results() {
             ScriptedCapabilityCall::new("demo.a"),
             ScriptedCapabilityCall::new("demo.b"),
         ])]),
-        capability_outcomes: VecDeque::from([vec![
+        capability_outcomes: VecDeque::new(),
+        single_call_retry_outcomes: VecDeque::from([
             ScriptedCapabilityOutcome::completed("result:a"),
             ScriptedCapabilityOutcome::ApprovalRequired {
                 gate_ref: "gate:approval".to_string(),
             },
-        ]]),
-        single_call_retry_outcomes: VecDeque::new(),
+        ]),
         pending_inputs: VecDeque::new(),
     };
     let (host, checkpoints) = MockAgentLoopDriverHost::builder()
         .visible_capabilities(vec![
-            capability_descriptor(capability_id("demo.a"), ConcurrencyHint::SafeForParallel),
-            capability_descriptor(capability_id("demo.b"), ConcurrencyHint::SafeForParallel),
+            capability_descriptor(capability_id("demo.a")),
+            capability_descriptor(capability_id("demo.b")),
         ])
         .script(script)
         .build();
@@ -237,15 +235,13 @@ async fn mixed_parallel_batch_blocks_after_recording_completed_results() {
         }
         other => panic!("expected blocked exit, got {other:?}"),
     }
-    assert!(host.call_log().iter().any(|call| {
-        matches!(
-            call,
-            MockHostCall::InvokeCapabilityBatch {
-                call_count: 2,
-                stop_on_first_suspension: false
-            }
-        )
-    }));
+    assert_eq!(
+        host.call_log()
+            .iter()
+            .filter(|call| matches!(call, MockHostCall::InvokeCapability { .. }))
+            .count(),
+        2
+    );
     checkpoints.assert_sequence(&[
         (CheckpointKind::BeforeModel, 0),
         (CheckpointKind::BeforeSideEffect, 0),
@@ -275,10 +271,7 @@ async fn await_dependent_run_blocks_with_dependent_gate_kind() {
         pending_inputs: VecDeque::new(),
     };
     let (host, checkpoints) = MockAgentLoopDriverHost::builder()
-        .visible_capabilities(vec![capability_descriptor(
-            capability_id("demo.spawn"),
-            ConcurrencyHint::Exclusive,
-        )])
+        .visible_capabilities(vec![capability_descriptor(capability_id("demo.spawn"))])
         .script(script)
         .build();
     let state = LoopExecutionState::initial_for_run(host.run_context());
@@ -321,10 +314,7 @@ async fn spawned_child_run_appends_result_ref_and_continues() {
         pending_inputs: VecDeque::new(),
     };
     let (host, _) = MockAgentLoopDriverHost::builder()
-        .visible_capabilities(vec![capability_descriptor(
-            capability_id("demo.spawn"),
-            ConcurrencyHint::Exclusive,
-        )])
+        .visible_capabilities(vec![capability_descriptor(capability_id("demo.spawn"))])
         .script(script)
         .build();
     let state = LoopExecutionState::initial_for_run(host.run_context());
@@ -351,7 +341,7 @@ async fn spawned_child_run_appends_result_ref_and_continues() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn sequential_batch_when_exclusive_present() {
+async fn descriptor_metadata_does_not_change_model_batch_semantics() {
     let script = ScenarioScript {
         model_responses: VecDeque::from([
             ScriptedModelResponse::Calls(vec![
@@ -362,17 +352,17 @@ async fn sequential_batch_when_exclusive_present() {
                 text: "done".to_string(),
             },
         ]),
-        capability_outcomes: VecDeque::from([vec![
+        capability_outcomes: VecDeque::new(),
+        single_call_retry_outcomes: VecDeque::from([
             ScriptedCapabilityOutcome::completed("result:safe"),
             ScriptedCapabilityOutcome::completed("result:exclusive"),
-        ]]),
-        single_call_retry_outcomes: VecDeque::new(),
+        ]),
         pending_inputs: VecDeque::new(),
     };
     let (host, _) = MockAgentLoopDriverHost::builder()
         .visible_capabilities(vec![
-            capability_descriptor(capability_id("demo.safe"), ConcurrencyHint::SafeForParallel),
-            capability_descriptor(capability_id("demo.exclusive"), ConcurrencyHint::Exclusive),
+            capability_descriptor(capability_id("demo.safe")),
+            capability_descriptor(capability_id("demo.exclusive")),
         ])
         .script(script)
         .build();
@@ -384,15 +374,13 @@ async fn sequential_batch_when_exclusive_present() {
         .expect("loop execution should succeed");
 
     assert!(matches!(exit, LoopExit::Completed(_)));
-    assert!(host.call_log().iter().any(|call| {
-        matches!(
-            call,
-            MockHostCall::InvokeCapabilityBatch {
-                call_count: 2,
-                stop_on_first_suspension: true
-            }
-        )
-    }));
+    assert_eq!(
+        host.call_log()
+            .iter()
+            .filter(|call| matches!(call, MockHostCall::InvokeCapability { .. }))
+            .count(),
+        2
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -573,8 +561,8 @@ async fn executor_proactive_byte_cap_drives_full_compaction_cycle() {
     // (We verify via progress events rather than inspecting internal state,
     // since MockAgentLoopDriverHost does not expose staged checkpoint payloads.
     // The initiator-emission / flag-clearing verification is also covered by the
-    // F12 unit-level test in src/executor/tests.rs which inspects checkpoint state
-    // directly.)
+    // F12 unit-level test in src/executor/tests/compaction.rs which inspects
+    // checkpoint state directly.)
     let compaction_completed = progress_events
         .iter()
         .any(|event| matches!(event, LoopProgressEvent::CompactionCompleted { .. }));
@@ -582,4 +570,211 @@ async fn executor_proactive_byte_cap_drives_full_compaction_cycle() {
         compaction_completed,
         "CompactionCompleted must be emitted after successful compaction on the SkipModel iteration"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #7603 — BeforeModel checkpoint batching, and the hazard that bounds it
+// ---------------------------------------------------------------------------
+
+/// Builds a run context whose profile allows batching `BeforeModel`
+/// checkpoints up to every `interval` iterations.
+fn context_with_before_model_interval(
+    label: &str,
+    interval: u32,
+) -> ironclaw_loop_contracts::LoopRunContext {
+    let mut context = ironclaw_agent_loop::test_support::test_run_context(label);
+    context
+        .resolved_run_profile
+        .checkpoint_policy
+        .before_model_checkpoint_interval = interval;
+    context
+}
+
+/// Two rejected replies then an accepted one. An empty reply is rejected by
+/// `DefaultReplyAdmissionStrategy`, so iterations 0 and 1 run the model and
+/// finish without calling any capability — the only shape that produces
+/// consecutive model-only iterations, and therefore the only shape where
+/// batching is allowed to skip anything.
+fn model_only_iterations_then_reply() -> ScenarioScript {
+    ScenarioScript {
+        model_responses: VecDeque::from([
+            ScriptedModelResponse::Reply {
+                text: String::new(),
+            },
+            ScriptedModelResponse::Reply {
+                text: String::new(),
+            },
+            ScriptedModelResponse::Reply {
+                text: "done".to_string(),
+            },
+        ]),
+        capability_outcomes: VecDeque::new(),
+        single_call_retry_outcomes: VecDeque::new(),
+        pending_inputs: VecDeque::new(),
+    }
+}
+
+/// Four tool-call iterations followed by a reply: five model calls in all.
+fn four_calls_then_reply(name: &str) -> ScenarioScript {
+    ScenarioScript {
+        model_responses: (0..4)
+            .map(|_| ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new(name)]))
+            .chain(std::iter::once(ScriptedModelResponse::Reply {
+                text: "done".to_string(),
+            }))
+            .collect(),
+        capability_outcomes: (0..4)
+            .map(|_| vec![ScriptedCapabilityOutcome::completed("result:batched")])
+            .collect(),
+        single_call_retry_outcomes: VecDeque::new(),
+        pending_inputs: VecDeque::new(),
+    }
+}
+
+/// THE HAZARD. Read this before touching `write_before_model_batched`.
+///
+/// A `BeforeModel` checkpoint written after a tool call is NOT bookkeeping.
+/// The scheduler decides whether a lease-expired run may be requeued at all by
+/// reading the KIND of the newest checkpoint on the process row
+/// (`ironclaw_processes`' `replays_side_effect`, consumed by
+/// `apply_recover_expired`). `BeforeSideEffect` means "an external effect may
+/// be in flight" and fails the run closed. The next iteration's `BeforeModel`
+/// is what clears that marker and makes the run auto-recoverable again.
+///
+/// So batching it away would not cost a replayed model call — it would turn a
+/// recoverable crash into a user-visible `lease_expired` failure, on every
+/// tool-using turn. This test pins that the interval NEVER applies when the
+/// previous durable checkpoint was `BeforeSideEffect`: despite an interval of
+/// 3, all five iterations checkpoint.
+///
+/// Removing this constraint safely requires tracking side-effect-outstanding
+/// explicitly on the process row — #7707. Until then, do not "optimize" this.
+#[tokio::test(start_paused = true)]
+async fn before_model_checkpoint_is_never_batched_away_after_a_side_effect_checkpoint() {
+    let (host, checkpoints) = MockAgentLoopDriverHost::builder()
+        .run_context(context_with_before_model_interval("guarded-after-tool", 3))
+        .script(four_calls_then_reply("demo.echo"))
+        .build();
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&families::default(), &host, state)
+        .await
+        .expect("loop execution should succeed");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    checkpoints.assert_sequence(&[
+        (CheckpointKind::BeforeModel, 0),
+        (CheckpointKind::BeforeSideEffect, 0),
+        (CheckpointKind::BeforeModel, 1),
+        (CheckpointKind::BeforeSideEffect, 1),
+        (CheckpointKind::BeforeModel, 2),
+        (CheckpointKind::BeforeSideEffect, 2),
+        (CheckpointKind::BeforeModel, 3),
+        (CheckpointKind::BeforeSideEffect, 3),
+        (CheckpointKind::BeforeModel, 4),
+        (CheckpointKind::Final, 4),
+    ]);
+}
+
+/// Where batching does apply: consecutive model-only iterations. With an
+/// interval of 3, iterations 1 and 2 reuse iteration 0's checkpoint as their
+/// resume point, so three model calls produce one `BeforeModel` write.
+///
+/// This also pins the exit-path guarantee. The run ends on iteration 2, whose
+/// `BeforeModel` was batched away, and the `Final` checkpoint is still written
+/// there — a skipped checkpoint never means a missing terminal resume point.
+#[tokio::test(start_paused = true)]
+async fn before_model_checkpoints_batch_across_consecutive_model_only_iterations() {
+    let (host, checkpoints) = MockAgentLoopDriverHost::builder()
+        .run_context(context_with_before_model_interval("batched-model-only", 3))
+        .script(model_only_iterations_then_reply())
+        .build();
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&families::default(), &host, state)
+        .await
+        .expect("loop execution should succeed");
+
+    match exit {
+        LoopExit::Completed(completed) => assert!(
+            completed.final_checkpoint_id.is_some(),
+            "a completed exit must still carry a durable final checkpoint"
+        ),
+        other => panic!("expected completed exit, got {other:?}"),
+    }
+    checkpoints.assert_sequence(&[(CheckpointKind::BeforeModel, 0), (CheckpointKind::Final, 2)]);
+}
+
+/// The shipped default, and the control for the test above: interval 1 writes
+/// a `BeforeModel` checkpoint on every iteration of the identical script.
+/// Batching is opt-in configuration, not baked-in behavior.
+#[tokio::test(start_paused = true)]
+async fn before_model_interval_of_one_checkpoints_every_model_only_iteration() {
+    let (host, checkpoints) = MockAgentLoopDriverHost::builder()
+        .run_context(context_with_before_model_interval(
+            "unbatched-model-only",
+            1,
+        ))
+        .script(model_only_iterations_then_reply())
+        .build();
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&families::default(), &host, state)
+        .await
+        .expect("loop execution should succeed");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    checkpoints.assert_sequence(&[
+        (CheckpointKind::BeforeModel, 0),
+        (CheckpointKind::BeforeModel, 1),
+        (CheckpointKind::BeforeModel, 2),
+        (CheckpointKind::Final, 2),
+    ]);
+}
+
+/// The exit-path guarantee on the gate arm: a run that parks for approval on
+/// an iteration whose `BeforeModel` was batched away still writes the
+/// per-occurrence `BeforeBlock` checkpoint that resume cross-checks gate
+/// identity against.
+#[tokio::test(start_paused = true)]
+async fn gate_exit_on_a_batched_away_iteration_still_writes_before_block() {
+    let script = ScenarioScript {
+        model_responses: VecDeque::from([
+            // Iteration 0: rejected empty reply, so no side effect is recorded
+            // and iteration 1 is eligible for batching.
+            ScriptedModelResponse::Reply {
+                text: String::new(),
+            },
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+        ]),
+        capability_outcomes: VecDeque::from([vec![ScriptedCapabilityOutcome::ApprovalRequired {
+            gate_ref: "gate:approval".to_string(),
+        }]]),
+        single_call_retry_outcomes: VecDeque::new(),
+        pending_inputs: VecDeque::new(),
+    };
+    let (host, checkpoints) = MockAgentLoopDriverHost::builder()
+        .run_context(context_with_before_model_interval("batched-gate-exit", 3))
+        .script(script)
+        .build();
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&families::default(), &host, state)
+        .await
+        .expect("loop execution should block on approval");
+
+    match exit {
+        LoopExit::Blocked(blocked) => assert_eq!(blocked.gate_ref.as_str(), "gate:approval"),
+        other => panic!("expected blocked exit, got {other:?}"),
+    }
+    // Iteration 1's BeforeModel is batched away; its BeforeBlock is not.
+    checkpoints.assert_sequence(&[
+        (CheckpointKind::BeforeModel, 0),
+        (CheckpointKind::BeforeSideEffect, 1),
+        (CheckpointKind::BeforeBlock, 1),
+    ]);
 }

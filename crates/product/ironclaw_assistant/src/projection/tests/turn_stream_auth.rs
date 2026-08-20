@@ -44,6 +44,7 @@ impl AuthChallengeProvider for FakeAuthChallengeProvider {
             ),
             expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
             pairing: None,
+            device_link: None,
         }))
     }
 }
@@ -96,6 +97,7 @@ impl AuthChallengeProvider for FakePairingAuthChallengeProvider {
                     error_message: "Pairing failed.".to_string(),
                 },
             }),
+            device_link: None,
         }))
     }
 }
@@ -676,6 +678,7 @@ async fn product_event_stream_creates_vendor_oauth_prompt_for_runtime_credential
                 ),
                 expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
                 pairing: None,
+                device_link: None,
             }))
         }
     }

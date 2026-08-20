@@ -87,6 +87,20 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
     ".github/workflows/ironclaw-release.yml": (
         "Smoke exact binaries before packaging upload",
         "scripts/ci/smoke-release-binary.py",
+        # The docs-live repoint: cargo-dist regeneration would silently drop
+        # this hand-added job, unhooking docs publication from releases. The
+        # prerelease guard is pinned literally so an edit that starts moving
+        # docs-live on rc tags fails here first.
+        "publish-docs-live:",
+        "refs/heads/docs-live",
+        "!fromJson(needs.host.outputs.val).announcement_is_prerelease",
+        # The newest-stable-tag guard: without it, re-running an older
+        # release's workflow force-moves docs-live backwards and silently
+        # reverts the live docs site. The comparison itself is pinned, not
+        # just its endpoint and skip message.
+        "git/matching-refs/tags/ironclaw-v",
+        'if [ "${GITHUB_REF_NAME}" != "${newest}" ]; then',
+        "skipping docs-live repoint:",
     ),
 }
 
@@ -1187,6 +1201,9 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
             f"crates/{NESTED_FAMILY}/ironclaw_event_log/src/lib.rs",
             "crates/extensions/packages/slack/manifest.toml",
             "tests/integration/mod.rs",
+            # A PR touching only the release workflow must reach fast-checks,
+            # or its REQUIRED_MARKERS are only enforced post-merge.
+            ".github/workflows/ironclaw-release.yml",
         ),
         out_of_scope=("README.md", "docs/internal/plans/whatever.md", "openwiki/index.md"),
     ),

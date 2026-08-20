@@ -24,6 +24,7 @@ fn auth_required_empty(cap: &str) -> DispatchError {
         capability: CapabilityId::new(cap).unwrap(),
         required_secrets: Vec::new(),
         credential_requirements: Vec::new(),
+        model_visible_cause: None,
     }
 }
 
@@ -32,6 +33,7 @@ fn auth_required_with_secrets(cap: &str) -> DispatchError {
         capability: CapabilityId::new(cap).unwrap(),
         required_secrets: vec![SecretHandle::new("raw_secret").unwrap()],
         credential_requirements: Vec::new(),
+        model_visible_cause: None,
     }
 }
 
@@ -46,6 +48,7 @@ fn auth_required_with_provider(cap: &str, provider: &str) -> DispatchError {
             requester_extension: ExtensionId::new(provider).unwrap(),
             provider_scopes: Vec::new(),
         }],
+        model_visible_cause: None,
     }
 }
 
@@ -131,7 +134,10 @@ fn enrich_leaves_non_empty_credential_requirements_unchanged() {
     );
 }
 
-// ZERO credential obligations → unchanged (empty result, not a guess).
+// ZERO credential obligations → unchanged (empty gate, not a guess). This is
+// the preflight-shaped signal (no declared credential obligation on file at
+// all), which must remain a stable auth gate rather than fall into the
+// "ambiguous attribution" typed failure reserved for >1 obligations.
 #[test]
 fn enrich_leaves_unchanged_when_zero_credential_obligations() {
     let error = auth_required_empty("echo.say");
@@ -152,9 +158,9 @@ fn enrich_leaves_unchanged_when_zero_credential_obligations() {
     );
 }
 
-// TWO credential obligations → NOT enriched (cannot attribute failure to one provider).
+// TWO credential obligations → typed failure; the host does not guess.
 #[test]
-fn enrich_leaves_unchanged_when_two_credential_obligations() {
+fn enrich_fails_without_gate_when_two_credential_obligations() {
     let error = auth_required_empty("echo.say");
     let obligations = [
         inject_credential_obligation("github"),
@@ -163,17 +169,15 @@ fn enrich_leaves_unchanged_when_two_credential_obligations() {
 
     let result = enrich_dispatch_error_credential_requirements(error, &obligations);
 
-    let DispatchError::AuthRequired {
-        credential_requirements,
-        ..
-    } = result
-    else {
-        panic!("expected AuthRequired");
-    };
-    assert!(
-        credential_requirements.is_empty(),
-        "two obligations must leave credential_requirements empty — cannot attribute which provider failed"
-    );
+    assert!(matches!(
+        result,
+        DispatchError::Rejected {
+            kind: ironclaw_host_api::dispatch::DispatchFailureKind::Runtime(
+                ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::SecretDenied
+            ),
+            ..
+        }
+    ));
 }
 
 // Non-AuthRequired variants returned unchanged.

@@ -370,6 +370,7 @@ impl ExtensionLoader for FixedLoader {
                     tools: None,
                     channel: ChannelSurfaces::default()
                         .with_ingress(Arc::clone(&self.adapter) as Arc<dyn ChannelIngress>),
+                    device_link: None,
                 })
             }
         }
@@ -485,6 +486,11 @@ async fn harness(options: HarnessOptions) -> Harness {
             reserved_capability_ids: Default::default(),
             reserved_ingress_routes: options.reserved_routes,
             hook_deadline: Duration::from_secs(5),
+            linked_sessions: ironclaw_extension_host::LinkedSessionStore::unavailable(),
+            linked_accounts: std::sync::Arc::new(
+                ironclaw_extension_host::UnavailableLinkedAccountResolution,
+            ),
+            admin_secrets: None,
         })
         .await,
     );
@@ -1578,6 +1584,7 @@ impl ExtensionLoader for QueueLoader {
                     tools: None,
                     channel: ChannelSurfaces::default()
                         .with_ingress(Arc::clone(&self.0) as Arc<dyn ChannelIngress>),
+                    device_link: None,
                 })
             }
         }
@@ -1739,6 +1746,11 @@ async fn attachment_authority_stays_on_the_parsed_generation_during_snapshot_upg
             reserved_capability_ids: Default::default(),
             reserved_ingress_routes: Default::default(),
             hook_deadline: Duration::from_secs(5),
+            linked_sessions: ironclaw_extension_host::LinkedSessionStore::unavailable(),
+            linked_accounts: std::sync::Arc::new(
+                ironclaw_extension_host::UnavailableLinkedAccountResolution,
+            ),
+            admin_secrets: None,
         })
         .await,
     );
