@@ -76,7 +76,7 @@ each.
   (`:62`, enum `["blocking","background"]`, default blocking); thread
   `args.mode` through `finish_spawn` instead of the hard-coded `Blocking`
   (`:908`); background spawns return an immediate spawn-result payload
-  (`spawn_result.rs` `SubagentSpawnMode::Background`) instead of
+  (`ironclaw_loop_host::SpawnSubagentMode::Background`) instead of
   `await_dependent_run`.
 - Update `prompts/spawn_subagent_description.md` (currently blocking-only
   wording).
