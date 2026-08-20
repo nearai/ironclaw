@@ -128,15 +128,15 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // measures 222.5 KB, the merged tree 224.0 KB. Neither side is spending the
 // other's headroom by mistake; the ceiling simply had two claimants.
 //
-// /chat is now at its structural limit, and the next eager addition should split
-// rather than raise. The split this file would take is `notification-center.tsx`:
-// the bell and its unread dot must stay eager because the badge is always
-// visible, but the panel body (rows, load-more, empty/error states, ~150 lines
-// of markup) only renders once opened and would move behind `React.lazy` the
-// same way `CommandPalette` already does in `layout/gateway-layout.tsx`. That
-// is a behaviour change — first open would suspend — so it belongs in its own
-// change with its own test updates, not folded into a rebase.
-const CHAT_GZIP_BUDGET = 224_000;
+// Re-ratcheted 224.0 -> 223.2 in the same change by taking that split rather
+// than banking the raise: `notification-panel.tsx` now holds the opened panel
+// (rows, load-more, empty/error states) and loads through `React.lazy` from
+// `notification-center.tsx`, the way `CommandPalette` already does in
+// `layout/gateway-layout.tsx`. The bell and its unread dot stay eager because
+// the badge is always on screen. The panel leaves the entry closure as its own
+// 5.39 kB chunk and /chat measures 223.2 KB, so the ceiling follows the
+// measurement down instead of holding headroom this tree does not need.
+const CHAT_GZIP_BUDGET = 223_200;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {

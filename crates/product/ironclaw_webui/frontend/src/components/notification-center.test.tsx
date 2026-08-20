@@ -13,6 +13,24 @@ import { NotificationCenter } from "./notification-center";
 
 const roots = [];
 
+/* The panel is `React.lazy`, so opening it suspends for a microtask before its
+ * markup exists. Every test that asserts on panel contents goes through here. */
+async function openPanel(container: HTMLElement) {
+  await act(async () => {
+    container
+      .querySelector<HTMLButtonElement>("[data-testid='notification-bell']")
+      ?.click();
+  });
+  // The dynamic import resolves over several turns of the microtask queue, so
+  // settle until the panel is actually mounted rather than guessing a count.
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (document.querySelector("[data-testid='notification-panel']")) return;
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
+}
+
 afterEach(() => {
   for (const root of roots.splice(0)) {
     act(() => root.unmount());
@@ -30,11 +48,7 @@ test("notification center renders loading and retryable error states", async () 
   await act(async () => {
     root.render(<NotificationCenter state={{ messages: [], isLoading: true }} />);
   });
-  await act(async () => {
-    container
-      .querySelector<HTMLButtonElement>("[data-testid='notification-bell']")
-      ?.click();
-  });
+  await openPanel(container);
   assert.equal(document.querySelector("[role='status']")?.textContent,
     "notifications.loadingTitle");
 
@@ -83,11 +97,7 @@ test("opening a row delegates acknowledgement policy before navigation", async (
       />,
     );
   });
-  await act(async () => {
-    container
-      .querySelector<HTMLButtonElement>("[data-testid='notification-bell']")
-      ?.click();
-  });
+  await openPanel(container);
   await act(async () => {
     document
       .querySelector<HTMLButtonElement>("[data-testid='notification-row']")
@@ -130,11 +140,7 @@ test("archive is offered for durable rows only and does not open the thread", as
       />,
     );
   });
-  await act(async () => {
-    container
-      .querySelector<HTMLButtonElement>("[data-testid='notification-bell']")
-      ?.click();
-  });
+  await openPanel(container);
 
   const archiveButtons = [
     ...document.querySelectorAll<HTMLButtonElement>("[data-testid='notification-archive']"),
