@@ -22,7 +22,8 @@ use ironclaw_host_runtime::{
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
     TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_package, native_memory_first_party_package,
+    TRIGGER_RUN_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_package,
+    native_memory_first_party_package,
 };
 use ironclaw_loop_contracts::LoopHostMilestoneKind;
 use ironclaw_loop_host::{HostManagedModelMessageRole, HostManagedModelResponse};
@@ -74,6 +75,12 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     TRIGGER_PAUSE_CAPABILITY_ID,
     TRIGGER_RESUME_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID,
+    // Manual trigger runs are user-direct product gestures, not tools exposed
+    // to the ordinary model surface exercised below. Their positive host path
+    // is covered by `builtin_trigger_run_dispatches_submitted_and_replayed_through_host_runtime`;
+    // `scheduled_trigger_fire_cannot_invoke_trigger_mutators` covers the
+    // production-composed scheduled-run denial path.
+    TRIGGER_RUN_CAPABILITY_ID,
     TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID,
     TRACE_COMMONS_CREDITS_CAPABILITY_ID,
