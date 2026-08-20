@@ -59,6 +59,29 @@ test("notificationMessages presents typed server notifications", () => {
   assert.equal(messages[0].read, false);
 });
 
+test("a kind the frontend does not know yet still presents", () => {
+  const messages = notificationMessages([
+    {
+      id: "notification-1",
+      kind: "quota_exhausted",
+      severity: "warning",
+      action: { kind: "open_thread", thread_id: "thread-1" },
+      created_at: "2026-06-30T07:43:00Z",
+      read_at: null,
+      resolved_at: null,
+    },
+  ], t);
+
+  /* The backend can ship a kind before this map learns it, so the fallback is
+   * reachable in production rather than only defensive. */
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].type, "quota_exhausted");
+  assert.equal(messages[0].icon, "bell");
+  assert.equal(messages[0].title, "notifications.generic.title");
+  assert.equal(messages[0].body, "notifications.generic.body");
+  assert.equal(messages[0].href, "/chat/thread-1");
+});
+
 test("notificationMessages preserves resolved records and sorts newest first", () => {
   const messages = notificationMessages([
     {

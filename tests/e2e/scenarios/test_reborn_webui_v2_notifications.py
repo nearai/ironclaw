@@ -246,6 +246,27 @@ async def test_reborn_v2_completion_waits_for_matching_final_reply_render(
         await expect(page.locator(SEL_V2["msg_assistant"])).to_have_count(0)
         assert state["read_at"] is None
 
+        # A final reply from a different run must not acknowledge this record:
+        # the notification describes one run's outcome, and marking it read on
+        # any final reply in the thread would lose that evidence.
+        await page.evaluate(
+            """
+            ([runId, text]) => window.__emitV2Sse("final_reply", {
+              reply: {
+                turn_run_id: runId,
+                text,
+                generated_at: "2026-06-30T08:10:00Z"
+              }
+            }, "cursor-notification-other")
+            """,
+            ["run-unrelated", "An unrelated run answered."],
+        )
+        await expect(page.locator(SEL_V2["msg_assistant"])).to_contain_text(
+            "An unrelated run answered.",
+            timeout=5000,
+        )
+        assert state["read_at"] is None
+
         async with page.expect_response(
             lambda response: response.request.method == "POST"
             and urlparse(response.url).path

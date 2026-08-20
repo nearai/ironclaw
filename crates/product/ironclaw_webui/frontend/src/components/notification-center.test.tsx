@@ -23,12 +23,13 @@ async function openPanel(container: HTMLElement) {
   });
   // The dynamic import resolves over several turns of the microtask queue, so
   // settle until the panel is actually mounted rather than guessing a count.
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
     if (document.querySelector("[data-testid='notification-panel']")) return;
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
   }
+  assert.fail("the lazy notification panel did not mount");
 }
 
 afterEach(() => {
