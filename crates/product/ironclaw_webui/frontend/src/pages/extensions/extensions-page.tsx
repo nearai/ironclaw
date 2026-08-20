@@ -1,4 +1,4 @@
-import { Navigate, useNavigate, useParams } from "react-router";
+import { Navigate, useParams } from "react-router";
 import React from "react";
 import { ConfirmDialog } from "../../design-system/confirm-dialog";
 import { InlineNotice } from "../../design-system/inline-notice";
@@ -104,7 +104,6 @@ function installReturnFocusTarget(packageRef, installTrigger) {
 
 export function ExtensionsPage({ isAdmin = false } = {}) {
   const t = useT();
-  const navigate = useNavigate();
   const { tab = "registry" } = useParams();
   const [configuring, setConfiguring] = React.useState(null);
   const [registeringCustomMcp, setRegisteringCustomMcp] = React.useState(false);
@@ -162,9 +161,6 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
   );
   const handleImport = React.useCallback((file) => importTool({ file }), [importTool]);
   const handleCloseModal = React.useCallback(() => setConfiguring(null), []);
-  const handleOpenAdminConfiguration = React.useCallback(() => {
-    navigate("/admin/configuration");
-  }, [navigate]);
   const handleConfirmRemove = React.useCallback(() => {
     if (!extensionToRemove) return;
     remove(extensionToRemove, {
@@ -292,8 +288,6 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
           extension={configuring}
           onClose={handleCloseModal}
           onSaved={handleSaved}
-          isAdmin={isAdmin}
-          onOpenAdminConfiguration={handleOpenAdminConfiguration}
           returnFocusTo={configureTriggerRef.current}
         />
       )}

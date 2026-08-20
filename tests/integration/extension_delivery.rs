@@ -122,7 +122,7 @@ const TELEGRAM_INSTALLATION: &str = "telegram";
 const TELEGRAM_WEBHOOK_SECRET: &str = "itest-telegram-webhook-secret";
 const TELEGRAM_BOT_TOKEN: &str = "123456:itest-telegram-token";
 const TELEGRAM_REPLY: &str = "Here is the coordinated Telegram reply.";
-const TELEGRAM_CONNECT_REQUIRED: &str = "👋 Link this Telegram account from the Telegram extension in IronClaw, then message me here again.";
+const TELEGRAM_CONNECT_REQUIRED: &str = "👋 Connect this Telegram account to the workspace bot from the Telegram extension in IronClaw, then message me again.";
 
 struct UnexpectedAdmissionSink {
     calls: Arc<AtomicUsize>,

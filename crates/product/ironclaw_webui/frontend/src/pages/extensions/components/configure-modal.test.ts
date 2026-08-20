@@ -31,13 +31,16 @@ const webCodeSurfaces = [
   },
 ];
 const toolSurfaces = [{ kind: "tool" }];
-const deviceLinkChannelSurfaces = [
+const botAndPersonalSurfaces = [
   { kind: "auth" },
   {
     kind: "channel",
     inbound: true,
     outbound: true,
-    connection: { strategy: "device_link" },
+    connection: {
+      strategy: "web_generated_code",
+      instructions: "Open the workspace bot and send the generated code.",
+    },
   },
 ];
 
@@ -67,8 +70,6 @@ function renderModal({
   installationState = "setup_needed",
   onClose = () => {},
   onSaved,
-  isAdmin = false,
-  onOpenAdminConfiguration = () => {},
   translate,
   setupResult,
   oauthMutationState = {},
@@ -184,8 +185,6 @@ function renderModal({
     },
     onClose,
     onSaved,
-    isAdmin,
-    onOpenAdminConfiguration,
   });
   return {
     calls,
@@ -928,9 +927,9 @@ test("ConfigureModal starts the OAuth flow when the popup pre-open succeeds", ()
   );
 });
 
-test("ConfigureModal explains bot and personal-account onboarding before device linking", () => {
+test("ConfigureModal explains independent bot and personal onboarding before connecting", () => {
   const view = renderModal({
-    surfaces: deviceLinkChannelSurfaces,
+    surfaces: botAndPersonalSurfaces,
     packageRef: { kind: "extension", id: "telegram" },
     displayName: "Telegram",
     installationState: "setup_needed",
@@ -954,17 +953,22 @@ test("ConfigureModal explains bot and personal-account onboarding before device 
   assert.match(body, /extensions\.connectionChoice\.title/);
   assert.match(body, /extensions\.connectionChoice\.workspaceBot/);
   assert.match(body, /extensions\.connectionChoice\.personalAccount/);
-  assert.match(body, /extensions\.connectionChoice\.adminRequired/);
+  assert.doesNotMatch(body, /extensions\.connectionChoice\.adminRequired/);
   assert.equal(
     renderedContainsComponent(view.rendered, view.DeviceLinkPanel),
     false,
     "opening Configure must not start personal-account linking",
   );
+  assert.equal(
+    renderedContainsComponent(view.rendered, view.PairingWebCodePanel),
+    false,
+    "opening Configure must not mint a workspace-bot pairing code",
+  );
 });
 
 test("ConfigureModal starts personal-account linking only after Continue", () => {
   const setup = {
-    surfaces: deviceLinkChannelSurfaces,
+    surfaces: botAndPersonalSurfaces,
     packageRef: { kind: "extension", id: "telegram" },
     displayName: "Telegram",
     installationState: "setup_needed",
@@ -985,42 +989,33 @@ test("ConfigureModal starts personal-account linking only after Continue", () =>
   };
   const choice = renderModal({
     ...setup,
-    initialState: [undefined, undefined, "personal_account", false],
+    initialState: [undefined, undefined, "personal_account", null],
   });
 
-  const continueSetup = findHandler(choice.rendered, "setShowDeviceLink");
+  const continueSetup = findHandler(choice.rendered, "setActiveConnection");
   assert.ok(continueSetup, "the selected personal-account option can continue");
   continueSetup();
-  assert.ok(choice.stateSets.includes(true));
+  assert.ok(choice.stateSets.includes("personal_account"));
   assert.equal(renderedContainsComponent(choice.rendered, choice.DeviceLinkPanel), false);
 
   const linking = renderModal({
     ...setup,
-    initialState: [undefined, undefined, "personal_account", true],
+    initialState: [undefined, undefined, "personal_account", "personal_account"],
   });
   assert.equal(
     renderedContainsComponent(linking.rendered, linking.DeviceLinkPanel),
     true,
     "the personal DeviceLinkPanel renders only after Continue",
   );
+  assert.equal(renderedContainsComponent(linking.rendered, linking.PairingWebCodePanel), false);
 });
 
-test("ConfigureModal routes workspace-bot onboarding to existing admin configuration", () => {
-  let closeCalls = 0;
-  let adminConfigurationCalls = 0;
-  const view = renderModal({
-    surfaces: deviceLinkChannelSurfaces,
+test("ConfigureModal starts workspace-bot pairing without personal device linking", () => {
+  const setup = {
+    surfaces: botAndPersonalSurfaces,
     packageRef: { kind: "extension", id: "telegram" },
     displayName: "Telegram",
     installationState: "setup_needed",
-    isAdmin: true,
-    onClose: () => {
-      closeCalls += 1;
-    },
-    onOpenAdminConfiguration: () => {
-      adminConfigurationCalls += 1;
-    },
-    initialState: [undefined, undefined, "workspace_bot", false],
     setupResult: {
       secrets: [
         {
@@ -1035,13 +1030,27 @@ test("ConfigureModal routes workspace-bot onboarding to existing admin configura
       isLoading: false,
       error: null,
     },
+  };
+  const choice = renderModal({
+    ...setup,
+    initialState: [undefined, undefined, "workspace_bot", null],
   });
 
-  const continueSetup = findHandler(view.rendered, "onOpenAdminConfiguration");
-  assert.ok(continueSetup, "an administrator can continue to workspace-bot setup");
+  const continueSetup = findHandler(choice.rendered, "setActiveConnection");
+  assert.ok(continueSetup, "the selected workspace-bot option can continue");
   continueSetup();
-  assert.equal(closeCalls, 1);
-  assert.equal(adminConfigurationCalls, 1);
+  assert.ok(choice.stateSets.includes("workspace_bot"));
+
+  const pairing = renderModal({
+    ...setup,
+    initialState: [undefined, undefined, "workspace_bot", "workspace_bot"],
+  });
+  assert.equal(
+    renderedContainsComponent(pairing.rendered, pairing.PairingWebCodePanel),
+    true,
+    "workspace-bot pairing starts only after Continue",
+  );
+  assert.equal(renderedContainsComponent(pairing.rendered, pairing.DeviceLinkPanel), false);
 });
 
 test("ConfigureModal keeps an auth-only device link on its existing direct flow", () => {

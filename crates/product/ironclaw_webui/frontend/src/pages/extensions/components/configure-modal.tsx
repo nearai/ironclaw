@@ -35,8 +35,6 @@ import { PairingWebCodePanel } from "../../../components/pairing-web-code-panel"
  *   };
  *   onClose: () => void;
  *   onSaved?: (result?: unknown) => void;
- *   isAdmin?: boolean;
- *   onOpenAdminConfiguration?: () => void;
  *   returnFocusTo?: FocusTarget | null;
  * }} props
  */
@@ -44,8 +42,6 @@ export function ConfigureModal({
   extension,
   onClose,
   onSaved,
-  isAdmin = false,
-  onOpenAdminConfiguration,
   returnFocusTo,
 }) {
   const t = useT();
@@ -61,7 +57,7 @@ export function ConfigureModal({
   const [values, setValues] = React.useState({});
   const [hostedMcpAuthSelection, setHostedMcpAuthSelection] = React.useState(null);
   const [connectionChoice, setConnectionChoice] = React.useState(null);
-  const [showDeviceLink, setShowDeviceLink] = React.useState(false);
+  const [activeConnection, setActiveConnection] = React.useState(null);
   const queryClient = useQueryClient();
   const packageId =
     typeof extension?.packageRef === "string"
@@ -161,30 +157,16 @@ export function ConfigureModal({
   // A device-link credential is linked, never pasted: route the connect
   // affordance to the multi-step panel instead of a token form.
   const deviceLinkSecret = deviceLinkSetupSecret(secrets);
-  // A channel that is itself reached through a linked account can still have
-  // a separate deployment-owned bot surface. Keep those two existing flows
-  // visible instead of silently treating personal device link as the only
-  // meaning of "Connect".
+  // Some extensions expose two independent caller-owned ceremonies: pairing
+  // an inbound workspace bot and linking a personal account for user-authority
+  // tools. The manifest remains the source of truth for both paths.
   const offersBotAndPersonalSetup =
-    Boolean(deviceLinkSecret) &&
-    hasChannelSurface(extension) &&
-    connection?.strategy === "device_link";
+    Boolean(deviceLinkSecret) && isWebCodeChannel;
   const handleConnectionChoice = React.useCallback(() => {
-    if (connectionChoice === "workspace_bot") {
-      if (!isAdmin) return;
-      onClose();
-      onOpenAdminConfiguration?.();
-      return;
+    if (connectionChoice) {
+      setActiveConnection(connectionChoice);
     }
-    if (connectionChoice === "personal_account") {
-      setShowDeviceLink(true);
-    }
-  }, [
-    connectionChoice,
-    isAdmin,
-    onClose,
-    onOpenAdminConfiguration,
-  ]);
+  }, [connectionChoice]);
 
   const canSave = manualSecrets.length > 0;
   const isActive = extensionIsActive(extension);
@@ -192,13 +174,10 @@ export function ConfigureModal({
   const setupUrl = httpsUrl(onboarding?.setup_url);
   if (
     offersBotAndPersonalSetup &&
-    !showDeviceLink &&
+    !activeConnection &&
     !hostedMcpAuthSelectionRequired
   ) {
-    const workspaceBotDisabled = !isAdmin;
-    const canContinue =
-      Boolean(connectionChoice) &&
-      !(connectionChoice === "workspace_bot" && workspaceBotDisabled);
+    const canContinue = Boolean(connectionChoice);
     return (
       <ModalShell
         onClose={onClose}
@@ -209,20 +188,12 @@ export function ConfigureModal({
           <legend className="sr-only">
             {t("extensions.connectionChoice.title", { name: extensionName })}
           </legend>
-          <label
-            className={[
-              "flex gap-3 rounded-md border border-white/12 bg-white/[0.04] p-4",
-              workspaceBotDisabled
-                ? "cursor-not-allowed opacity-60"
-                : "cursor-pointer",
-            ].join(" ")}
-          >
+          <label className="flex cursor-pointer gap-3 rounded-md border border-white/12 bg-white/[0.04] p-4">
             <input
               type="radio"
               name="extension-connection-choice"
               value="workspace_bot"
               checked={connectionChoice === "workspace_bot"}
-              disabled={workspaceBotDisabled}
               onChange={() => setConnectionChoice("workspace_bot")}
               className="mt-1 h-4 w-4 accent-signal"
             />
@@ -233,11 +204,6 @@ export function ConfigureModal({
               <span className="mt-1 block text-xs leading-5 text-iron-300">
                 {t("extensions.connectionChoice.workspaceBotDisclosure")}
               </span>
-              {workspaceBotDisabled && (
-                <span className="mt-2 block text-xs text-amber-300">
-                  {t("extensions.connectionChoice.adminRequired")}
-                </span>
-              )}
             </span>
           </label>
           <label className="flex cursor-pointer gap-3 rounded-md border border-white/12 bg-white/[0.04] p-4">
@@ -277,7 +243,7 @@ export function ConfigureModal({
 
   if (
     deviceLinkSecret &&
-    (!offersBotAndPersonalSetup || showDeviceLink) &&
+    (!offersBotAndPersonalSetup || activeConnection === "personal_account") &&
     !hostedMcpAuthSelectionRequired
   ) {
     // Self-contained: the panel starts (or resumes) the flow, polls it, and
@@ -298,7 +264,11 @@ export function ConfigureModal({
     );
   }
 
-  if (isWebCodeChannel && !hostedMcpAuthSelectionRequired) {
+  if (
+    isWebCodeChannel &&
+    (!offersBotAndPersonalSetup || activeConnection === "workspace_bot") &&
+    !hostedMcpAuthSelectionRequired
+  ) {
     // The panel is self-contained (mints/rotates codes, polls status,
     // broadcasts channel-connected on pairing), so the modal only hosts it.
     return (

@@ -4,10 +4,10 @@
 //!    must never grow a `telegram_bot` / `telegram_personal` /
 //!    `telegram_channel` companion identity (the pattern #6116's
 //!    `reborn_retired_taxonomy` gate pins for Slack).
-//! 2. The Reborn context stays free of the v1 pairing surface: no
-//!    `/api/pairing/` route literals in `crates/` or the webui v2 frontend.
-//!    Telegram declares `device_link`, so its authenticated linked account is
-//!    the channel identity and no generated-code pairing service is exposed.
+//! 2. The workspace-bot channel and personal linked-account tools use separate
+//!    ceremonies on the same extension: generated-code pairing binds the bot
+//!    actor, while device link grants the caller's MTProto account.
+//! 3. The Reborn context stays free of the retired v1 `/api/pairing/` routes.
 
 #[allow(dead_code)]
 mod ratchet_support;
@@ -171,27 +171,33 @@ fn generic_extension_lifecycle_has_no_telegram_knowledge() {
 }
 
 #[test]
-fn telegram_device_link_is_the_only_personal_channel_connection_ceremony() {
+fn telegram_bot_pairing_and_personal_device_link_remain_independent() {
     let manifest = crate_path(
         &workspace_root(),
         "crates/extensions/packages/telegram/manifest.toml",
     );
     let source = std::fs::read_to_string(&manifest).expect("Telegram manifest readable");
     let channel_connection = source
-        .split("[channel.connection]")
+        .split("\n[channel.connection]\n")
         .nth(1)
-        .and_then(|tail| tail.split("[channel.connection.notices]").next())
+        .and_then(|tail| tail.split("\n[channel.connection.notices]\n").next())
         .expect("Telegram channel connection section");
+    let auth = source
+        .split("\n[auth.telegram]\n")
+        .nth(1)
+        .and_then(|tail| tail.split("\n[[tools]]\n").next())
+        .expect("Telegram auth section");
 
     assert!(
-        channel_connection.contains("strategy = \"device_link\""),
-        "Telegram must derive channel identity from its authenticated linked device"
+        channel_connection.contains("strategy = \"web_generated_code\"")
+            && channel_connection
+                .contains("deep_link_template = \"https://t.me/{bot_username}?start={code}\"")
+            && channel_connection.contains("inbound_code_prefixes = [\"/start\"]"),
+        "Telegram bot identity must use the generic generated-code pairing ceremony"
     );
     assert!(
-        !channel_connection.contains("web_generated_code")
-            && !channel_connection.contains("deep_link_template")
-            && !channel_connection.contains("inbound_code_prefixes"),
-        "Telegram must not retain generated-code pairing metadata"
+        auth.contains("method = \"device_link\""),
+        "Telegram personal-account tools must keep the independent device-link ceremony"
     );
 }
 
