@@ -15,12 +15,13 @@ use super::{AgentLoopExecutorError, ExecutorStage, StageContext, TurnCompletedSt
 /// `push_completed_result`) and decides whether the next prompt build
 /// should compact-then-skip-the-model.
 ///
-/// **R2 (owner of record, no-op until #4474):** mailbox drain for
-/// settled background-mode subagent children. Producer side (durable
-/// settlement log + `LoopBackgroundChildPort`) lands in WU-C through
-/// WU-E. Until then `drain_settled` returns an empty `Vec` — this stage
-/// owns the seam so all post-capability responsibilities live in one
-/// file (single-seam thesis per the WU-A design doc).
+/// **R2 (retired seam):** this stage once reserved a mailbox-drain seam
+/// for settled background-mode subagent children. The accepted background
+/// design delivers those results as typed loop inputs on the existing
+/// `LoopInputPort` path instead (append model — see
+/// `docs/internal/reborn/subagent-spawn/README.md` §4), so no drain seam
+/// lands here; `drain_settled` below is dead scaffolding slated for
+/// deletion in the background-core slice (R2 of that document's roadmap).
 #[derive(Clone)]
 pub(crate) struct PostCapabilityStage {
     compaction_force: Arc<dyn CompactionForceStrategy>,
@@ -31,9 +32,9 @@ impl PostCapabilityStage {
         Self { compaction_force }
     }
 
-    /// R2 — drain settled background-mode subagent results.
-    /// Returns an empty `Vec` until durable settlement log +
-    /// `LoopBackgroundChildPort` land (#4474).
+    /// Dead scaffolding for a drain seam the accepted background design
+    /// does not use (delivery is a typed `LoopInput` instead — README §4).
+    /// Deleted by the background-core slice.
     fn drain_settled(&self) -> Vec<()> {
         Vec::new()
     }

@@ -1,5 +1,6 @@
 // arch-exempt: large_file, pre-existing size; #6263 only migrated 2 test-double lines to in_memory_agent_turn_runtime(), plan #6263
-//! Per-child/per-settle-group settle path (§2, §5.2, §5.5, §8.1) — the
+//! Per-child/per-settle-group settle path (design narrative:
+//! `docs/internal/reborn/subagent-spawn/README.md`) — the
 //! direct successor to `SubagentCompletionObserver` (deleted with this
 //! module). Owner-recovery/reconstruction/framing helpers below are ported
 //! near-verbatim from `completion_observer.rs` — that logic is
@@ -710,10 +711,10 @@ where
         // never the driving member's, so a mixed-status batch (one sibling
         // failed, another completed) doesn't stamp the same status onto
         // every parent result (external review finding on this PR).
-        // (Batched into one snapshot/CAS write is §8's rule for the
-        // background-mode multi-edge drain case, P2.4 — not required here;
-        // blocking-mode groups are tiny, ≤4 spawns/turn, so a per-member loop
-        // is the simpler, correct choice for PR1.)
+        // (The background-mode multi-edge sweep batches into one snapshot
+        // read + one CAS write — subagent-spawn/README.md §4.3. Not required
+        // here: blocking-mode groups are tiny, ≤4 spawns/turn, so a
+        // per-member loop is the simpler, correct choice.)
         for (_member_child_run_id, member_edge) in &group {
             let status = member_edge
                 .terminal_kind
