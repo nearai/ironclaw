@@ -33,8 +33,7 @@ use ironclaw_turns::{
 
 use super::{AwaitEdge, AwaitEdgeState, EdgeTerminalKind, store::AwaitEdgeStore};
 use crate::subagent::spawn_result::{
-    SpawnedChildRunPayload, SubagentSpawnMode as PayloadSpawnMode,
-    SubagentSpawnStatus as PayloadSpawnStatus, SubagentTerminalEventKind,
+    SpawnedChildRunPayload, SubagentSpawnStatus as PayloadSpawnStatus, SubagentTerminalEventKind,
     SubagentTerminalEventPayload,
 };
 use crate::subagent::untrusted_text::{
@@ -1931,7 +1930,7 @@ fn background_completion_payload(
         child_run_id: event.run_id,
         child_thread_id: edge.child_thread_id.clone(),
         subagent_kind: edge.subagent_kind.clone(),
-        mode: payload_spawn_mode(edge.mode),
+        mode: edge.mode,
         status: payload_spawn_status(event.status)?,
         output_available: event.status == TurnStatus::Completed,
         final_text,
@@ -2092,13 +2091,6 @@ fn thread_scope_from_turn_scope(
         owner_user_id: event.owner_user_id.clone(),
         mission_id: None,
     })
-}
-
-fn payload_spawn_mode(mode: ironclaw_loop_host::SpawnSubagentMode) -> PayloadSpawnMode {
-    match mode {
-        ironclaw_loop_host::SpawnSubagentMode::Blocking => PayloadSpawnMode::Blocking,
-        ironclaw_loop_host::SpawnSubagentMode::Background => PayloadSpawnMode::Background,
-    }
 }
 
 fn payload_spawn_status(status: TurnStatus) -> Result<PayloadSpawnStatus, TurnError> {
