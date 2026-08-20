@@ -88,6 +88,7 @@ jobs:
   changes:
     name: Detect Reborn E2E scope
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       has_e2e_scope: ${{ steps.non_diff.outputs.has_e2e_scope || steps.diff.outputs.has_e2e_scope }}
     steps:
@@ -475,7 +476,11 @@ jobs:
 
       - name: Install Playwright browser
         if: matrix.kind == 'browser'
-        run: playwright install --with-deps chromium
+        # `playwright install --with-deps` shells out to apt as root, so it
+        # inherits the same stall-forever failure as the mold/clang step. The
+        # cache above covers only the browser tarball -- a cache hit still runs
+        # the apt transaction -- so bound the whole thing.
+        run: timeout --signal=INT --kill-after=30s 8m playwright install --with-deps chromium
 
       - name: Checkout pinned Emulate fork
         if: matrix.kind == 'provider'
@@ -635,6 +640,7 @@ jobs:
   reborn-e2e:
     name: Reborn E2E
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: always()
     needs:
       - changes

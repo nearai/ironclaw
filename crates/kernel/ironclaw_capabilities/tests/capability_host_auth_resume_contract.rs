@@ -18,7 +18,10 @@ use ironclaw_host_api::{
     },
     decision::{Decision, DenyReason},
     dispatch::{CapabilityDispatchResult, CapabilityDispatcher, DispatchError},
-    ids::{ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId, UserId},
+    ids::{
+        ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId,
+        SecretHandle, UserId,
+    },
     mount::MountView,
     resource::{ResourceEstimate, ResourceScope},
     scope::{ExecutionContext, Principal},
@@ -28,6 +31,23 @@ use serde_json::json;
 
 mod support;
 use support::*;
+
+fn dispatch_auth_required(capability: CapabilityId) -> DispatchError {
+    DispatchError::AuthRequired {
+        capability,
+        required_secrets: vec![SecretHandle::new("echo_token").unwrap()],
+        credential_requirements: Vec::new(),
+        model_visible_cause: None,
+    }
+}
+
+fn auth_required_dispatcher() -> TestDispatcher {
+    TestDispatcher::responding(|request, _| {
+        Err(dispatch_auth_required(
+            request.invocation.capability.clone(),
+        ))
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -798,11 +818,9 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
     let dispatcher = TestDispatcher::responding(|request, call_index| {
         if call_index == 0 {
             // First dispatch: return AuthRequired to trigger the auth bounce.
-            Err(DispatchError::AuthRequired {
-                capability: request.invocation.capability.clone(),
-                required_secrets: vec![],
-                credential_requirements: vec![],
-            })
+            Err(dispatch_auth_required(
+                request.invocation.capability.clone(),
+            ))
         } else {
             // Second dispatch (from auth_resume_json): succeed.
             Ok(ok_dispatch_result(request))
@@ -1003,11 +1021,7 @@ async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
     let registry = registry_with_echo_capability();
     let dispatcher = TestDispatcher::scripted(vec![
         // First call (from resume_json): auth bounce → lease stays Claimed.
-        Err(DispatchError::AuthRequired {
-            capability: capability_id(),
-            required_secrets: vec![],
-            credential_requirements: vec![],
-        }),
+        Err(dispatch_auth_required(capability_id())),
         // Second call (from auth_resume_json): terminal failure.
         Err(DispatchError::UnknownCapability {
             capability: capability_id(),
@@ -1132,7 +1146,7 @@ async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
 async fn auth_resume_json_non_terminal_auth_bounce_leaves_lease_claimed() {
     // A dispatcher that always returns AuthRequired (non-terminal BlockAuth path).
     let registry = registry_with_echo_capability();
-    let dispatcher = TestDispatcher::auth_required();
+    let dispatcher = auth_required_dispatcher();
     let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
     let approval_requests = ironclaw_approvals::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
@@ -1842,11 +1856,7 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
             if count == 0 {
                 let capability = request.invocation().capability.clone();
                 let _ = request.abort();
-                return Err(DispatchError::AuthRequired {
-                    capability,
-                    required_secrets: vec![],
-                    credential_requirements: vec![],
-                });
+                return Err(dispatch_auth_required(capability));
             }
             // Winner's call: signal we're in dispatch, then wait for release.
             self.in_dispatch.notify_one();
@@ -2121,7 +2131,7 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
     let leases = in_memory_backed_capability_lease_store();
 
     // ── Phase 1: invoke → BlockedApproval ──────────────────────────────────
-    let block_dispatcher = TestDispatcher::auth_required();
+    let block_dispatcher = auth_required_dispatcher();
     let block_host = capability_host(&registry, &block_dispatcher, &ApprovalAuthorizer)
         .with_invocation_state(&run_state)
         .with_approval_requests(&approval_requests);
@@ -2163,7 +2173,7 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
         grants: vec![dispatch_grant()],
     };
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_dispatcher = TestDispatcher::auth_required();
+    let resume_dispatcher = auth_required_dispatcher();
     let resume_host = capability_host(&registry, &resume_dispatcher, &resume_authorizer)
         .with_invocation_state(&run_state)
         .with_approval_requests(&approval_requests)
@@ -2248,7 +2258,7 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
 #[tokio::test]
 async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lease() {
     // Dispatcher: always returns AuthRequired (used for the resume_json bounce).
-    let always_auth_required = TestDispatcher::auth_required();
+    let always_auth_required = auth_required_dispatcher();
 
     let registry = registry_with_echo_capability();
     let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();

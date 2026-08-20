@@ -266,6 +266,7 @@ pub(crate) fn build_product_surface_with_channel_connection(
             )),
         ),
     ));
+    api = api.with_notification_inbox(Arc::clone(&runtime.notification_inbox));
     if let Some(resolver) = runtime.channel_delivery_resolver.clone() {
         api = api.with_notification_setup_service(Arc::new(
             ironclaw_assistant::RegistrationChannelNotificationSetupService::new(

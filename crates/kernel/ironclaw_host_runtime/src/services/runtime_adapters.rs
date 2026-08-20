@@ -467,6 +467,15 @@ where
                     capability: request.capability_id.clone(),
                     required_secrets,
                     credential_requirements,
+                    model_visible_cause: None,
+                },
+                McpError::ProviderRejected(rejection) => DispatchError::Rejected {
+                    runtime: Some(RuntimeKind::Mcp),
+                    kind: ironclaw_host_api::dispatch::DispatchFailureKind::Runtime(
+                        RuntimeDispatchErrorKind::Client,
+                    ),
+                    diagnostic: Some(rejection.diagnostic),
+                    detail: None,
                 },
                 error => DispatchError::Mcp {
                     kind: mcp_error_kind(&error),
@@ -851,6 +860,7 @@ where
                         capability: request.capability_id.clone(),
                         required_secrets,
                         credential_requirements,
+                        model_visible_cause: None,
                     }),
                     FirstPartyCapabilityError::Dispatch {
                         kind,
@@ -1257,6 +1267,7 @@ fn mcp_error_kind(error: &McpError) -> RuntimeDispatchErrorKind {
     match error {
         McpError::Resource(_) => RuntimeDispatchErrorKind::Resource,
         McpError::Client { .. } => RuntimeDispatchErrorKind::Client,
+        McpError::ProviderRejected(_) => RuntimeDispatchErrorKind::Client,
         McpError::InvalidToolCatalog { .. } => RuntimeDispatchErrorKind::OutputDecode,
         McpError::AuthRequired { .. } => RuntimeDispatchErrorKind::Client,
         McpError::UnsupportedTransport { .. } => RuntimeDispatchErrorKind::UnsupportedRunner,

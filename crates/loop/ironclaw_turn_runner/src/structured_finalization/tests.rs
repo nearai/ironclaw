@@ -114,6 +114,7 @@ struct LeaseRuntime {
 impl LeaseRuntime {
     fn record(&self) -> TurnRunRecord {
         TurnRunRecord {
+            subagent_activation_provenance: None,
             run_id: self.run_id,
             turn_id: TurnId::new(),
             scope: self.scope.clone(),

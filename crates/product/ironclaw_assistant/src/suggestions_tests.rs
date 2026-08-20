@@ -167,11 +167,23 @@ fn domain_bounds_match_the_canonical_output_schema() {
         item_schema["properties"]["icon"]["type"],
         serde_json::json!("string")
     );
-    assert!(
-        item_schema["properties"]["icon"]["enum"]
-            .as_array()
-            .is_some_and(|values| values.iter().any(|value| value == "generic")),
-        "the schema owns the icon vocabulary and must keep the `generic` fallback"
+    assert_eq!(
+        item_schema["properties"]["icon"]["enum"],
+        serde_json::json!([
+            "email",
+            "calendar",
+            "document",
+            "storage",
+            "spreadsheet",
+            "presentation",
+            "code",
+            "messaging",
+            "notes",
+            "web",
+            "memory",
+            "generic"
+        ]),
+        "the schema owns one provider-neutral icon vocabulary with a generic fallback"
     );
     assert_eq!(
         item_schema["properties"]["sources"]["minItems"],

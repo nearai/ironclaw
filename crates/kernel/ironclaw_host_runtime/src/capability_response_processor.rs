@@ -1,9 +1,10 @@
 //! Canonical mapping from inline capability-host responses to runtime outcomes.
 //!
-//! Fresh invocation, approval resume, and auth resume all cross this seam. The
-//! processor owns response interpretation only; authorization, dispatch,
-//! obligation settlement, and durable/model projection remain with their
-//! existing owners.
+//! Fresh invocation, approval resume, and auth resume all cross this seam; the
+//! spawn path also reuses its error mapping while keeping successful spawn
+//! outcomes in `spawn_capability`. The processor owns response interpretation
+//! only; authorization, dispatch, obligation settlement, and durable/model
+//! projection remain with their existing owners.
 
 use ironclaw_capabilities::CapabilityInvocationError;
 use ironclaw_extension_registry::ExtensionRegistry;
@@ -52,10 +53,12 @@ pub(super) async fn process_capability_response(
             capability,
             required_secrets,
             credential_requirements,
+            model_visible_cause,
         }) => Ok(auth_required_outcome(
             capability,
             required_secrets,
             credential_requirements,
+            model_visible_cause,
         )),
         Err(CapabilityInvocationError::AuthorizationRequiresApproval { capability }) => {
             match context.mode {
@@ -105,13 +108,25 @@ pub(super) async fn process_capability_response(
             }
         }
         Err(error) => {
-            let should_fail_dispatch_run = context.mode == InlineInvocationMode::Fresh
-                && matches!(error, CapabilityInvocationError::Dispatch { .. });
+            // Dispatch failures are model-visible. Fresh invocations use a
+            // best-effort durable transition because the corresponding record
+            // may already be absent; replacing the actionable provider failure
+            // with HostRuntimeError::Unavailable would hide the real cause.
+            // Resumed invocations own an existing blocked record, so a failed
+            // terminal transition must propagate as host unavailability rather
+            // than leaving that record eligible for a later resume.
+            let is_dispatch_error = matches!(error, CapabilityInvocationError::Dispatch { .. });
             let failure = failed_response(error, context.registry, context.capability_id);
-            if should_fail_dispatch_run {
-                runtime
+            if is_dispatch_error {
+                let transition = runtime
                     .fail_dispatch_run(&failure, context.scope, context.invocation_id)
                     .await;
+                if matches!(
+                    context.mode,
+                    InlineInvocationMode::ApprovalResume | InlineInvocationMode::AuthResume
+                ) {
+                    transition?;
+                }
             }
             Ok(RuntimeCapabilityOutcome::Failed(failure))
         }

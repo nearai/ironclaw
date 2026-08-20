@@ -506,13 +506,13 @@ async fn runtime_capability_suspension_outcomes_do_not_emit_terminal_lifecycle_m
             capability_id: capability_id.clone(),
             reason: RuntimeBlockedReason::ApprovalRequired,
         }),
-        RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate {
-            gate_id: RuntimeGateId::new(),
-            capability_id: capability_id.clone(),
-            reason: RuntimeBlockedReason::AuthRequired,
-            required_secrets: Vec::new(),
-            credential_requirements: Vec::new(),
-        }),
+        RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate::new(
+            RuntimeGateId::new(),
+            capability_id.clone(),
+            RuntimeBlockedReason::AuthRequired,
+            Vec::new(),
+            Vec::new(),
+        )),
         RuntimeCapabilityOutcome::ResourceBlocked(RuntimeResourceGate {
             gate_id: RuntimeGateId::new(),
             capability_id: capability_id.clone(),
@@ -580,13 +580,13 @@ async fn runtime_auth_gate_forwards_credential_requirements() {
                 provider_id.clone(),
             )],
             vec![Ok(RuntimeCapabilityOutcome::AuthRequired(
-                RuntimeAuthGate {
-                    gate_id: RuntimeGateId::new(),
-                    capability_id: capability_id.clone(),
-                    reason: RuntimeBlockedReason::AuthRequired,
-                    required_secrets: Vec::new(),
-                    credential_requirements: vec![requirement.clone()],
-                },
+                RuntimeAuthGate::new(
+                    RuntimeGateId::new(),
+                    capability_id.clone(),
+                    RuntimeBlockedReason::AuthRequired,
+                    Vec::new(),
+                    vec![requirement.clone()],
+                ),
             ))],
         )),
         Arc::new(RecordingResultWriter::default()),
@@ -627,13 +627,13 @@ async fn auth_resume_uses_replay_input_without_resolving_stale_input_ref() {
                 provider_id.clone(),
             )],
             vec![Ok(RuntimeCapabilityOutcome::AuthRequired(
-                RuntimeAuthGate {
-                    gate_id: RuntimeGateId::new(),
-                    capability_id: capability_id.clone(),
-                    reason: RuntimeBlockedReason::AuthRequired,
-                    required_secrets: Vec::new(),
-                    credential_requirements: Vec::new(),
-                },
+                RuntimeAuthGate::new(
+                    RuntimeGateId::new(),
+                    capability_id.clone(),
+                    RuntimeBlockedReason::AuthRequired,
+                    Vec::new(),
+                    Vec::new(),
+                ),
             ))],
         )
         .with_auth_resume_outcomes(vec![Ok(RuntimeCapabilityOutcome::Completed(
@@ -699,6 +699,7 @@ async fn auth_resume_uses_replay_input_without_resolving_stale_input_ref() {
         panic!("auth gate must carry replay metadata, got {auth_blocked:?}");
     };
     let auth_resume = CapabilityAuthResume {
+        gate_ref: LoopGateRef::new("gate:auth-runtime-lifecycle").expect("valid auth gate ref"),
         resume_token: Some(
             CapabilityResumeToken::new(
                 blocked
@@ -789,7 +790,9 @@ async fn denied_auth_resume_terminalizes_through_runtime_without_dispatch() {
         input_ref: CapabilityInputRef::new("input:removed-capability-denial")
             .expect("valid input ref"),
         approval_resume: None,
-        auth_resume: Some(CapabilityAuthResume::denied()),
+        auth_resume: Some(CapabilityAuthResume::denied(
+            LoopGateRef::new("gate:auth-runtime-decline").expect("valid auth gate ref"),
+        )),
     };
 
     let unavailable = port
@@ -857,7 +860,9 @@ async fn denied_auth_resume_terminalizes_through_runtime_without_dispatch() {
         capability_id: capability_id.clone(),
         input_ref: CapabilityInputRef::new("input:changed-after-removal").expect("valid input ref"),
         approval_resume: None,
-        auth_resume: Some(CapabilityAuthResume::denied()),
+        auth_resume: Some(CapabilityAuthResume::denied(
+            LoopGateRef::new("gate:auth-runtime-decline").expect("valid auth gate ref"),
+        )),
     };
     let replay_outcome = port
         .invoke_capability(replay)
@@ -908,6 +913,8 @@ async fn denied_auth_resume_rejects_mismatched_optional_token_before_runtime() {
                 .expect("valid input ref"),
             approval_resume: None,
             auth_resume: Some(CapabilityAuthResume {
+                gate_ref: LoopGateRef::new("gate:auth-malformed-denial")
+                    .expect("valid auth gate ref"),
                 resume_token: Some(resume_token_for_different_activity(activity_id)),
                 disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
                 prior_approval: None,
@@ -1211,13 +1218,13 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
         visible_capability(capability_id.clone(), provider_id.clone()),
         approval_request_id,
         vec![Ok(RuntimeCapabilityOutcome::AuthRequired(
-            RuntimeAuthGate {
-                gate_id: RuntimeGateId::new(),
-                capability_id: capability_id.clone(),
-                reason: RuntimeBlockedReason::AuthRequired,
-                required_secrets: Vec::new(),
-                credential_requirements: Vec::new(),
-            },
+            RuntimeAuthGate::new(
+                RuntimeGateId::new(),
+                capability_id.clone(),
+                RuntimeBlockedReason::AuthRequired,
+                Vec::new(),
+                Vec::new(),
+            ),
         ))],
     ));
     let mut context = execution_context("thread-auth-resume-identity");
@@ -1307,6 +1314,8 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
             input_ref: first_invocation.input_ref.clone(),
             approval_resume: None,
             auth_resume: Some(CapabilityAuthResume {
+                gate_ref: LoopGateRef::new("gate:auth-approved-resume")
+                    .expect("valid auth gate ref"),
                 resume_token: Some(resume.resume_token.clone()),
                 disposition: None,
                 // Carry the prior approval so the port restores the original

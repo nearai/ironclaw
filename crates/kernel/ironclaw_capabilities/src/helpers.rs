@@ -366,6 +366,7 @@ mod tests {
     fn dispatch_input_encode_returns_no_invocation_state_transition() {
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
+            provider_diagnostic: None,
             safe_summary: None,
             detail: None,
         };
@@ -376,6 +377,7 @@ mod tests {
     fn dispatch_backend_returns_no_invocation_state_transition() {
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            provider_diagnostic: None,
             safe_summary: None,
             detail: None,
         };
@@ -386,6 +388,7 @@ mod tests {
     fn dispatch_unknown_capability_returns_no_invocation_state_transition() {
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::UnknownCapability,
+            provider_diagnostic: None,
             safe_summary: None,
             detail: None,
         };
@@ -412,6 +415,7 @@ mod tests {
             capability: capability(),
             required_secrets: Vec::new(),
             credential_requirements: Vec::new(),
+            model_visible_cause: None,
         };
         let transition = error
             .invocation_state_transition()

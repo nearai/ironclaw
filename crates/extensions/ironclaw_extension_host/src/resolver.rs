@@ -140,10 +140,23 @@ fn dispatch_error_for_tool_error(
         ToolError::AuthRequired {
             required_secrets,
             credential_requirements,
+            model_visible_cause,
         } => DispatchError::AuthRequired {
             capability: capability_id.clone(),
             required_secrets,
             credential_requirements,
+            model_visible_cause: model_visible_cause.map(Box::new),
+        },
+        ToolError::Rejected {
+            runtime,
+            kind,
+            diagnostic,
+            detail,
+        } => DispatchError::Rejected {
+            runtime,
+            kind,
+            diagnostic,
+            detail,
         },
         ToolError::Failed {
             kind,

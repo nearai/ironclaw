@@ -30,6 +30,7 @@ fn code_of(error: &ToolError) -> String {
         ToolError::Failed { safe_summary, .. } => {
             safe_summary.clone().unwrap_or_else(|| "<none>".to_string())
         }
+        ToolError::Rejected { kind, .. } => kind.human_summary().to_string(),
         ToolError::AuthRequired { .. } => "auth_required".to_string(),
     }
 }
@@ -303,6 +304,7 @@ fn credential_failures_leave_the_messaging_vocabulary() {
         let ToolError::AuthRequired {
             required_secrets,
             credential_requirements,
+            ..
         } = mapped
         else {
             panic!("{name} must park the run on the re-auth gate, not answer messaging.*");

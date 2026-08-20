@@ -348,6 +348,18 @@ export function Chat({
     [composerSendDisabled, handleSend, setSuggestions]
   );
 
+  // Starting an OOBE suggestion is a server-side operation: the backend creates
+  // the suggestion's own thread and submits its turn through the normal
+  // ProductSurface path, then returns the binding. The browser only navigates
+  // to the thread it is handed — it does not inject the prompt itself.
+  const handleOpenSuggestionThread = React.useCallback(
+    (threadId) => {
+      if (!threadId || !onSelectThread) return;
+      onSelectThread(threadId, { replace: true });
+    },
+    [onSelectThread]
+  );
+
   const handleCancelRun = React.useCallback(
     async () => {
       try {
@@ -446,6 +458,7 @@ export function Chat({
           <EmptyState
             onSuggestion={handleSuggestion}
             onSend={handleSend}
+            onOpenThread={handleOpenSuggestionThread}
             commands={activeThreadId ? chatCommands : []}
             disabled={false}
             sendDisabled={composerSendDisabled}

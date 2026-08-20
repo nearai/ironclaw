@@ -254,6 +254,8 @@ crates/
 │   ├── ironclaw_trace_commons        ▣ [substrates] (renamed)   Trace Commons client: envelope/redaction/queue/credits
 │   ├── ironclaw_web_app             ▣ [substrates]             Web Push (RFC 8030/8291/8292) records, encryption,
 │   │                                                            request planning (added 2026-08-08, browser channel)
+│   ├── ironclaw_notifications        ▣ [substrates] (NEW)       durable metadata-only user notification inbox
+│   │                                                            (added 2026-08-18, notification inbox)
 │   └── ironclaw_outbound             ▣ [substrates]             metadata-only outbound policy/state (sealed grants)
 ├── kernel/                           ▢ the authority perimeter — nine crates, steady-state reached
 │                                       (the transitional tenth, ironclaw_run_state, was deleted by #6696 on 2026-07-29)

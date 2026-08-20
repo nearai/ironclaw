@@ -24,6 +24,7 @@ async fn mcp_lane_executes_manifest_transport_and_reconciles_resources() {
         output: json!({"items":["issue-1"]}),
         usage: ResourceUsage::default().set_wall_clock_ms(9),
         output_bytes: None,
+        provider_rejection: None,
     }));
     let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client.clone());
     let (governor, account) = mcp_governor();
@@ -98,8 +99,10 @@ async fn mcp_lane_invalid_tool_catalog_remains_typed_and_releases_reservation() 
 }
 
 #[tokio::test]
-async fn mcp_lane_auth_failure_returns_manifest_credential_context_and_releases_reservation() {
-    let client = RecordingMcpClient::new(Err(McpClientError::AuthRequired));
+async fn mcp_lane_auth_failure_returns_context_and_accounts_the_provider_attempt() {
+    let client = RecordingMcpClient::new(Err(McpClientError::AuthRequired {
+        usage: ResourceUsage::default().set_network_egress_bytes(37),
+    }));
     let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client);
     let (governor, account) = mcp_governor();
 
@@ -134,7 +137,7 @@ async fn mcp_lane_auth_failure_returns_manifest_credential_context_and_releases_
         other => panic!("expected auth-required MCP error, got {other:?}"),
     }
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
-    assert_eq!(governor.usage_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account).network_egress_bytes, 37);
 }
 
 #[tokio::test]
@@ -143,6 +146,7 @@ async fn mcp_lane_output_limit_releases_reservation() {
         output: json!({"large":"this output is too large for the adapter limit"}),
         usage: ResourceUsage::default(),
         output_bytes: Some(1_000),
+        provider_rejection: None,
     }));
     let runtime = McpRuntime::new(
         McpRuntimeConfig {

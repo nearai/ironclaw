@@ -33,7 +33,7 @@ use ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID;
 use ironclaw_host_api::{
     approval::sha256_digest_token,
     decision::{DenyReason, RuntimeCredentialAuthRequirement},
-    dispatch::CapabilityDispatcher,
+    dispatch::{CapabilityDispatcher, provider_diagnostic_model_cause},
     ids::{ApprovalRequestId, CapabilityId, InvocationId, SecretHandle},
     resource::ResourceScope,
     result_meta::FailureKind,
@@ -562,12 +562,8 @@ impl HostRuntime for DefaultHostRuntime {
         // host_runtime pre-authorization + `context.trust` stamp).
         let registry = self.registry.snapshot();
         // `context` is moved into `resume_json` below, so `resource_scope` must be
-        // cloned out first. `process_capability_response` doesn't read
-        // `context.scope` on the `ApprovalResume` path this PR sends here —
-        // `fail_dispatch_run` is Fresh-gated — but a stacked PR un-gates
-        // `fail_dispatch_run` for resumes too, which reads it again. Left
-        // unconditional rather than threading an `Option`/mode-gated clone that a
-        // near-term rebase would just undo.
+        // cloned out first. The response processor uses it if a dispatch failure
+        // also needs to transition this resumed invocation to a terminal state.
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
         let host = self.capability_host(&registry);
@@ -623,11 +619,8 @@ impl HostRuntime for DefaultHostRuntime {
         // stamp.
         let registry = self.registry.snapshot();
         // Same clone-before-move as `resume_capability` above: `context` is
-        // consumed by `auth_resume_json`, and `process_capability_response`
-        // doesn't read `context.scope` on the `AuthResume` path this PR sends
-        // here (`fail_dispatch_run` is Fresh-gated) — a stacked PR un-gates it
-        // for resumes and reads it again, so this is left unconditional rather
-        // than churned twice.
+        // consumed by `auth_resume_json`, while the response processor uses the
+        // scope if a dispatch failure must transition this resumed invocation.
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
         let host = self.capability_host(&registry);
@@ -749,10 +742,12 @@ impl HostRuntime for DefaultHostRuntime {
                         capability,
                         required_secrets,
                         credential_requirements,
+                        model_visible_cause,
                     } => Ok(auth_required_outcome(
                         capability,
                         required_secrets,
                         credential_requirements,
+                        model_visible_cause,
                     )),
                     other => {
                         let is_standard_write =
@@ -1015,22 +1010,25 @@ impl DefaultHostRuntime {
         failure: &RuntimeCapabilityFailure,
         scope: &ResourceScope,
         invocation_id: InvocationId,
-    ) {
+    ) -> Result<(), HostRuntimeError> {
         let Some(invocation_state) = self.invocation_state.as_ref() else {
-            return;
+            return Ok(());
         };
-        if let Err(error) = invocation_state
+        let result = invocation_state
             .fail(scope, invocation_id, "Dispatch".to_string())
             .await
-        {
+            .map(|_| ())
+            .map_err(unavailable_from_invocation_state);
+        if let Err(error) = &result {
             tracing::warn!(
                 invocation_id = %invocation_id,
                 capability_id = %failure.capability_id,
                 failure_kind = failure.kind.as_str(),
-                transition_error = %unavailable_from_invocation_state(error),
+                transition_error = %error,
                 "terminal dispatch failure could not transition run state; failure is returned to caller",
             );
         }
+        result
     }
 
     pub(super) async fn lookup_approval_request_id(
@@ -1374,14 +1372,18 @@ pub(super) fn auth_required_outcome(
     capability_id: CapabilityId,
     required_secrets: Vec<SecretHandle>,
     credential_requirements: Vec<ironclaw_host_api::decision::RuntimeCredentialAuthRequirement>,
+    model_visible_cause: Option<Box<ironclaw_host_api::dispatch::ProviderDiagnostic>>,
 ) -> RuntimeCapabilityOutcome {
-    RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate {
-        gate_id: stable_auth_gate_id(&capability_id, &required_secrets, &credential_requirements),
-        capability_id,
-        reason: RuntimeBlockedReason::AuthRequired,
-        required_secrets,
-        credential_requirements,
-    })
+    RuntimeCapabilityOutcome::AuthRequired(
+        RuntimeAuthGate::new(
+            stable_auth_gate_id(&capability_id, &required_secrets, &credential_requirements),
+            capability_id,
+            RuntimeBlockedReason::AuthRequired,
+            required_secrets,
+            credential_requirements,
+        )
+        .with_provider_diagnostic(model_visible_cause.map(|diagnostic| *diagnostic)),
+    )
 }
 
 fn stable_auth_gate_id(
@@ -1653,12 +1655,24 @@ fn bounded_diagnostic_text(value: &str) -> String {
 
 /// The raw descriptive cause for the model-visible Diagnostic channel, before
 /// any public-surface gating.
+///
+/// A `Some(diagnostic)` with every field empty (`provider_diagnostic_model_cause`
+/// renders `None`) falls through to `safe_summary` rather than collapsing the
+/// whole cause to `None` — an empty diagnostic must not hide an available
+/// safe summary.
 fn raw_failure_cause(error: &CapabilityInvocationError) -> Option<String> {
-    use CapabilityInvocationError::Dispatch;
-    match error {
-        Dispatch { safe_summary, .. } => safe_summary.clone(),
-        _ => None,
-    }
+    let CapabilityInvocationError::Dispatch {
+        provider_diagnostic,
+        safe_summary,
+        ..
+    } = error
+    else {
+        return None;
+    };
+    provider_diagnostic
+        .as_deref()
+        .and_then(provider_diagnostic_model_cause)
+        .or_else(|| safe_summary.clone())
 }
 
 /// Returns a stable, redacted summary message for a capability invocation
@@ -1810,7 +1824,64 @@ mod tests {
             kind,
             safe_summary: None,
             detail: None,
+            provider_diagnostic: None,
         }
+    }
+
+    #[test]
+    fn raw_failure_cause_falls_back_to_safe_summary_when_diagnostic_renders_empty() {
+        // `provider_diagnostic` is `Some`, but every field is `None`, so
+        // `provider_diagnostic_model_cause` renders `None` for it — the empty
+        // diagnostic must not hide an available safe summary.
+        let error = CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            safe_summary: Some("operation failed".to_string()),
+            detail: None,
+            provider_diagnostic: Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
+                code: None,
+                message: None,
+                retry_after: None,
+            })),
+        };
+
+        assert_eq!(
+            raw_failure_cause(&error),
+            Some("operation failed".to_string())
+        );
+    }
+
+    #[test]
+    fn raw_failure_cause_prefers_non_empty_diagnostic_over_safe_summary() {
+        let error = CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            safe_summary: Some("operation failed".to_string()),
+            detail: None,
+            provider_diagnostic: Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
+                code: None,
+                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                    "provider says no",
+                )),
+                retry_after: None,
+            })),
+        };
+
+        assert_eq!(
+            raw_failure_cause(&error),
+            Some("provider message: provider says no".to_string())
+        );
+    }
+
+    #[test]
+    fn raw_failure_cause_falls_back_to_safe_summary_when_diagnostic_absent() {
+        let error = dispatch(DispatchFailureKind::Runtime(
+            RuntimeDispatchErrorKind::OperationFailed,
+        ));
+        let CapabilityInvocationError::Dispatch { safe_summary, .. } = &error else {
+            unreachable!("dispatch() always builds Dispatch");
+        };
+        assert!(safe_summary.is_none());
+
+        assert_eq!(raw_failure_cause(&error), None);
     }
 
     fn auth_requirement(scopes: &[&str]) -> RuntimeCredentialAuthRequirement {
@@ -1830,9 +1901,30 @@ mod tests {
         let secrets = vec![SecretHandle::new("notion-token").unwrap()];
         let requirements = vec![auth_requirement(&["read", "write"])];
 
-        let first =
-            auth_required_outcome(capability_id.clone(), secrets.clone(), requirements.clone());
-        let second = auth_required_outcome(capability_id, secrets, requirements);
+        let first = auth_required_outcome(
+            capability_id.clone(),
+            secrets.clone(),
+            requirements.clone(),
+            Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
+                code: None,
+                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                    "Bad credentials",
+                )),
+                retry_after: None,
+            })),
+        );
+        let second = auth_required_outcome(
+            capability_id,
+            secrets,
+            requirements,
+            Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
+                code: None,
+                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                    "different provider wording",
+                )),
+                retry_after: None,
+            })),
+        );
 
         let RuntimeCapabilityOutcome::AuthRequired(first_gate) = first else {
             panic!("expected auth gate");
@@ -1841,6 +1933,15 @@ mod tests {
             panic!("expected auth gate");
         };
         assert_eq!(first_gate.gate_id, second_gate.gate_id);
+        assert_eq!(first_gate, second_gate);
+        assert_eq!(
+            first_gate
+                .provider_diagnostic()
+                .and_then(|diagnostic| diagnostic.message.as_ref())
+                .map(|message| message.as_str()),
+            Some("Bad credentials")
+        );
+        assert!(!format!("{first_gate:?}").contains("Bad credentials"));
         assert!(
             first_gate.gate_id.as_str().starts_with("auth-"),
             "gate id should be stable and auth-specific: {}",
@@ -1850,8 +1951,10 @@ mod tests {
 
     #[test]
     fn auth_required_outcome_changes_gate_when_requirements_change() {
-        let first = auth_required_outcome(cap(), Vec::new(), vec![auth_requirement(&["read"])]);
-        let second = auth_required_outcome(cap(), Vec::new(), vec![auth_requirement(&["write"])]);
+        let first =
+            auth_required_outcome(cap(), Vec::new(), vec![auth_requirement(&["read"])], None);
+        let second =
+            auth_required_outcome(cap(), Vec::new(), vec![auth_requirement(&["write"])], None);
 
         let RuntimeCapabilityOutcome::AuthRequired(first_gate) = first else {
             panic!("expected auth gate");
@@ -1881,7 +1984,7 @@ mod tests {
         };
         let gate_id = |setup: Setup| {
             let RuntimeCapabilityOutcome::AuthRequired(gate) =
-                auth_required_outcome(cap(), Vec::new(), vec![requirement_with(setup)])
+                auth_required_outcome(cap(), Vec::new(), vec![requirement_with(setup)], None)
             else {
                 panic!("expected auth gate");
             };
@@ -1936,7 +2039,7 @@ mod tests {
                 provider_scopes: scopes,
             };
             let RuntimeCapabilityOutcome::AuthRequired(gate) =
-                auth_required_outcome(cap(), Vec::new(), vec![requirement])
+                auth_required_outcome(cap(), Vec::new(), vec![requirement], None)
             else {
                 panic!("expected auth gate");
             };
@@ -2223,6 +2326,7 @@ mod tests {
                     .to_string(),
             ),
             detail: None,
+            provider_diagnostic: None,
         };
 
         assert_eq!(
@@ -2244,6 +2348,7 @@ mod tests {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
             safe_summary: Some(raw),
             detail: None,
+            provider_diagnostic: None,
         };
 
         let message = sanitized_failure_message(&error).expect("dispatch produces a message");
@@ -2278,6 +2383,7 @@ mod tests {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
             safe_summary: Some("trigger_create input failed validation".to_string()),
             detail: None,
+            provider_diagnostic: None,
         };
         assert_eq!(
             sanitized_failure_message(&clean).as_deref(),
@@ -2300,6 +2406,7 @@ mod tests {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor),
             safe_summary: Some(raw.clone()),
             detail: None,
+            provider_diagnostic: None,
         };
 
         let failure = failure_from(error, cap());
@@ -2333,6 +2440,7 @@ mod tests {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor),
             safe_summary: Some(raw),
             detail: None,
+            provider_diagnostic: None,
         };
 
         let failure = failure_from(error, cap());
@@ -2374,6 +2482,7 @@ mod tests {
                     .to_string(),
             ),
             detail: None,
+            provider_diagnostic: None,
         };
 
         let failure = failure_from(error, cap());
@@ -2400,6 +2509,7 @@ mod tests {
                     issues: vec![issue.clone()],
                 },
             ),
+            provider_diagnostic: None,
         };
 
         let failure = failure_from(
@@ -2999,6 +3109,7 @@ output_schema_ref = "schemas/w1fixture/bespoke.output.v1.json"
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Network),
             safe_summary: None,
             detail: None,
+            provider_diagnostic: None,
         };
 
         for (capability_id, expect_retry) in [

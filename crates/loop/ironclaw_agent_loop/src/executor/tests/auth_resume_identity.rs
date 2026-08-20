@@ -307,6 +307,7 @@ async fn auth_resume_after_approval_carries_prior_approval_identity() {
                     Vec::new(),
                     "auth required".to_string(),
                     Some(CapabilityAuthResume {
+                        gate_ref: LoopGateRef::new("gate:auth-corr-id-auth").expect("valid"),
                         resume_token: Some(auth_gate_resume_token),
                         disposition: None,
                         prior_approval: None,

@@ -4,7 +4,7 @@
 //! normalized runtime result. Concrete dispatcher/runtime crates implement the
 //! behavior; caller-facing workflow crates depend only on this neutral port.
 
-use std::fmt;
+use std::{fmt, time::Duration};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,95 @@ use crate::{
     },
     runtime::RuntimeKind,
 };
+
+/// Stable provider error code supplied by a protocol decoder.
+///
+/// Codes are untrusted metadata: they are bounded here, omitted from debug
+/// output with the rest of [`ProviderDiagnostic`], and scrubbed before model
+/// visibility.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProviderErrorCode(String);
+
+impl ProviderErrorCode {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(bound_provider_text(value.into()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Untrusted provider-authored message retained for the model diagnostic seam.
+#[derive(Clone, PartialEq, Eq)]
+pub struct UntrustedProviderMessage(String);
+
+impl UntrustedProviderMessage {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(bound_provider_text(value.into()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Passive protocol diagnostic shared by authentication and ordinary provider
+/// rejection paths.
+///
+/// This value is not safe for logs, persistence, UI, or model output. The loop
+/// projection owns secret scrubbing and injection fencing.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProviderDiagnostic {
+    pub code: Option<ProviderErrorCode>,
+    pub message: Option<UntrustedProviderMessage>,
+    pub retry_after: Option<Duration>,
+}
+
+impl fmt::Debug for ProviderDiagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ProviderDiagnostic(<redacted>)")
+    }
+}
+
+/// Truncate `text` to at most `max_bytes` bytes, stepping back to the
+/// nearest UTF-8 char boundary so a multi-byte character is never split.
+/// Returns the truncated prefix and whether truncation occurred.
+fn truncate_at_char_boundary(text: &str, max_bytes: usize) -> (&str, bool) {
+    if text.len() <= max_bytes {
+        return (text, false);
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&text[..end], true)
+}
+
+fn bound_provider_text(mut value: String) -> String {
+    let (truncated, did_truncate) =
+        truncate_at_char_boundary(&value, crate::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES);
+    if did_truncate {
+        let new_len = truncated.len();
+        value.truncate(new_len);
+    }
+    value
+}
+
+/// Canonical model-diagnostic rendering for provider metadata.
+///
+/// The returned string is still untrusted and must pass the host's secret
+/// scrubber and prompt-injection fence before model visibility.
+pub fn provider_diagnostic_model_cause(diagnostic: &ProviderDiagnostic) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(code) = &diagnostic.code {
+        parts.push(format!("provider error code: {}", code.as_str()));
+    }
+    if let Some(message) = &diagnostic.message {
+        parts.push(format!("provider message: {}", message.as_str()));
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
 
 /// Internal adapter request produced after a sealed [`Authorized`] witness is
 /// consumed by the dispatcher.
@@ -67,20 +156,10 @@ pub struct CapabilityDisplayText {
 }
 
 pub fn truncate_capability_display_text(text: &str, max_bytes: usize) -> CapabilityDisplayText {
-    if text.len() <= max_bytes {
-        return CapabilityDisplayText {
-            text: text.to_string(),
-            truncated: false,
-        };
-    }
-
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
+    let (truncated, did_truncate) = truncate_at_char_boundary(text, max_bytes);
     CapabilityDisplayText {
-        text: text[..end].to_string(),
-        truncated: true,
+        text: truncated.to_string(),
+        truncated: did_truncate,
     }
 }
 
@@ -148,7 +227,7 @@ impl DispatchInputIssue {
 }
 
 /// Stable structured dispatch failure details for dispatch validation failures.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum DispatchFailureDetail {
     InvalidInput {
         issues: Vec<DispatchInputIssue>,
@@ -175,6 +254,25 @@ pub enum DispatchFailureDetail {
     HostRemediation {
         text: HostRemediation,
     },
+}
+
+impl fmt::Debug for DispatchFailureDetail {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidInput { issues } => formatter
+                .debug_struct("InvalidInput")
+                .field("issues", issues)
+                .finish(),
+            Self::Diagnostic { .. } => formatter
+                .debug_struct("Diagnostic")
+                .field("text", &"<redacted>")
+                .finish(),
+            Self::HostRemediation { text } => formatter
+                .debug_struct("HostRemediation")
+                .field("text", text)
+                .finish(),
+        }
+    }
 }
 
 /// Stable, redacted runtime failure categories surfaced through the dispatch port.
@@ -458,6 +556,16 @@ pub enum DispatchError {
         capability: CapabilityId,
         required_secrets: Vec<SecretHandle>,
         credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+        model_visible_cause: Option<Box<ProviderDiagnostic>>,
+    },
+    /// Provider/protocol rejection shared across runtime lanes. The lane is
+    /// diagnostic metadata; callers branch on `kind`, not implementation.
+    #[error("provider dispatch rejected: {kind}")]
+    Rejected {
+        runtime: Option<RuntimeKind>,
+        kind: DispatchFailureKind,
+        diagnostic: Option<ProviderDiagnostic>,
+        detail: Option<DispatchFailureDetail>,
     },
     /// MCP dispatch failure. `model_visible_cause` carries the raw backend cause —
     /// it is NOT yet display/model-safe: secret VALUES are scrubbed downstream
@@ -550,6 +658,7 @@ impl fmt::Debug for DispatchError {
                 capability,
                 required_secrets,
                 credential_requirements,
+                ..
             } => f
                 .debug_struct("AuthRequired")
                 .field("capability", capability)
@@ -564,6 +673,18 @@ impl fmt::Debug for DispatchError {
                         credential_requirements.len()
                     ),
                 )
+                .finish(),
+            Self::Rejected {
+                runtime,
+                kind,
+                detail,
+                ..
+            } => f
+                .debug_struct("Rejected")
+                .field("runtime", runtime)
+                .field("kind", kind)
+                .field("detail", detail)
+                .field("diagnostic", &"<redacted>")
                 .finish(),
             Self::Mcp { kind, .. } => f.debug_struct("Mcp").field("kind", kind).finish(),
             Self::Script { kind, .. } => f.debug_struct("Script").field("kind", kind).finish(),
@@ -602,6 +723,7 @@ impl DispatchError {
                 DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied)
             }
             Self::AuthRequired { .. } => DispatchFailureKind::AuthRequired,
+            Self::Rejected { kind, .. } => *kind,
             Self::Mcp { kind, .. }
             | Self::Script { kind, .. }
             | Self::Wasm { kind, .. }
@@ -624,6 +746,10 @@ impl DispatchError {
             Self::AuthorizationExpired { .. } => "authorization_expired",
             Self::MissingProcessAuthorization { .. } => "missing_process_authorization",
             Self::AuthRequired { .. } => "auth_required",
+            Self::Rejected { kind, .. } => match kind {
+                DispatchFailureKind::Runtime(kind) => kind.event_kind(),
+                _ => "provider_rejected",
+            },
             Self::Mcp { kind, .. }
             | Self::Script { kind, .. }
             | Self::Wasm { kind, .. }
@@ -686,5 +812,22 @@ mod tests {
             issue.schema_path.as_deref(),
             Some("/properties/schedule/oneOf/0/properties/kind")
         );
+    }
+
+    #[test]
+    fn provider_diagnostic_is_redacted_and_utf8_byte_bounded() {
+        let message = UntrustedProviderMessage::new(format!(
+            "a{}",
+            "é".repeat(crate::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES)
+        ));
+        let diagnostic = ProviderDiagnostic {
+            code: None,
+            message: Some(message.clone()),
+            retry_after: None,
+        };
+
+        assert!(message.as_str().len() <= crate::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES);
+        assert!(message.as_str().is_char_boundary(message.as_str().len()));
+        assert!(!format!("{diagnostic:?}").contains('é'));
     }
 }

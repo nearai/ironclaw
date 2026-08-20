@@ -225,6 +225,7 @@ impl Fixture {
         expires_at: Option<DateTime<Utc>>,
     ) -> TurnRunRecord {
         TurnRunRecord {
+            subagent_activation_provenance: None,
             run_id: self.run_context.run_id,
             turn_id: self.run_context.turn_id,
             scope: self.run_context.scope.clone(),

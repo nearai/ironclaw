@@ -272,7 +272,7 @@ One struct, one file per parent↔child, fields previously scattered across §2/
 AwaitEdge {
   child_scope: TurnScope,                          // §1
   child_thread_id: ThreadId,
-  mode: SubagentSpawnMode,                         // Blocking | Background
+  mode: SpawnSubagentMode,                         // Blocking | Background
   state: AwaitEdgeState,                           // Open | Settled | Drained | Abandoned (§2)
   terminal_kind: Option<EdgeTerminalKind>,         // set in the settle CAS
   terminal_byte_len: Option<u64>,                  // §5.4 — same settle CAS, observability only

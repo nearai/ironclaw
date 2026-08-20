@@ -24,6 +24,7 @@ jobs:
         || startsWith(github.event.comment.body, '/canary ')
       )
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Check commenter has write permission
         id: auth
