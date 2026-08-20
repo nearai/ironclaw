@@ -123,8 +123,14 @@ the `tier_specific_installers_are_documented_as_loader_contract` test in
   policy, secrets policy, filesystem policy, or network policy.
 - Hooks cannot receive ambient secrets, filesystem handles, network clients,
   process handles, or raw runtime authority.
-- Hook side effects must route through existing `HostRuntime` / capability
-  dispatch paths.
+- Hook side effects must route through existing mediated paths: `HostRuntime`
+  / capability dispatch, or — for `Lifecycle` hooks only (amended 2026-08-20,
+  #7770 phase 1) — prepared-context turn submission
+  (`accept_prepared_context` → `TurnCoordinator::submit_turn`), which is
+  admission-checked at accept and capability-authorized at execution. A
+  lifecycle hook starting an unbound run is mediated work, not ambient
+  authority; every capability that run invokes still crosses the normal
+  authorization stages.
 - Inline hooks run before behavior and may block/change behavior.
 - Event hooks run after durable facts and must not retroactively deny
   completed behavior.

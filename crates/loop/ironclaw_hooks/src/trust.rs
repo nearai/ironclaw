@@ -72,6 +72,16 @@ pub enum DecisionKind {
     Observer,
     /// Enqueues a side effect after a durable event. Routes through normal
     /// capability dispatch; never gains ambient authority.
+    ///
+    /// NOT interchangeable with [`DecisionKind::Lifecycle`], though both are
+    /// act-shaped: `Effect` is permitted for `Installed` / `SelfAuthored`
+    /// tiers by default (see `permits_kind_by_default`) — it is the
+    /// third-party-capable class for post-durable-fact event hooks.
+    /// `Lifecycle` exists precisely because turn-completion must NOT carry
+    /// that default: an installed extension observing (and acting on) every
+    /// user's turn completions is a privacy surface, so the lifecycle class
+    /// is privileged-only. Folding the two would silently widen who may react
+    /// to a finished turn. (#7770 approach-audit disposition, 2026-08-20.)
     Effect,
     /// Runs once a lifecycle stage has already reached a terminal state
     /// (today: `after_turn`). Act-capable — a lifecycle hook may start
