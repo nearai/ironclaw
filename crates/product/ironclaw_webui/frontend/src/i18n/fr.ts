@@ -63,7 +63,7 @@ registerPack("fr", {
   "notifications.approval.body": "Une exécution attend votre approbation.",
   "notifications.authentication.title": "Authentification requise",
   "notifications.authentication.body": "Une exécution nécessite une connexion de compte pour continuer.",
-  "notifications.authentication.detail": "Ouvrir la conversation pour connecter",
+  "notifications.authentication.detail": "Ouvrir la conversation pour connecter le compte",
   "notifications.blocked.title": "Exécution bloquée",
   "notifications.blocked.body": "Une exécution ne peut pas continuer sans votre attention.",
   "notifications.blocked.detail": "Ouvrir la conversation pour les détails",
