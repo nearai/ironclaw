@@ -78,11 +78,10 @@ const MEMORY_CURATION_OUTPUT_NAME: &str = "memory_curation_report_v1";
 /// fork. It is a rate, not a deadline: too frequent burns tokens re-reading a
 /// document that has not changed, too rare lets redundancy accumulate past the
 /// point where a single pass can fix it.
-pub const DEFAULT_CURATION_INTERVAL_TURNS: NonZeroU32 = match NonZeroU32::new(10) {
-    Some(value) => value,
-    // Invariant: 10 is a non-zero literal interval.
-    None => unreachable!(),
-};
+// Built without a panic-shaped branch: the production panic baseline scans
+// syntactically, so even a compile-time-unreachable `unreachable!()` counts.
+// `MIN` is 1; saturating_add is const and cannot fail.
+pub const DEFAULT_CURATION_INTERVAL_TURNS: NonZeroU32 = NonZeroU32::MIN.saturating_add(9);
 
 /// Iteration ceiling for one pass: read, decide, write, report, plus room for
 /// one retry. A pass that cannot finish in this many steps is not converging,
