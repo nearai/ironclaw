@@ -72,13 +72,13 @@ const MEMORY_CURATION_OUTPUT_NAME: &str = "memory_curation_report_v1";
 /// point where a single pass can fix it.
 pub const DEFAULT_CURATION_INTERVAL_TURNS: u32 = 10;
 
-/// Iteration ceiling for one pass: read, decide, write, report, with slack for
+/// Iteration ceiling for one pass: read, decide, write, report, plus room for
 /// one retry. A pass that cannot finish in this many steps is not converging,
 /// and letting it spin costs tokens for a chore nobody requested.
 const MEMORY_CURATION_MAX_ITERATIONS: u32 = 6;
 
 /// Capability-call ceiling: read, maybe a search or two, one write, and the
-/// result tool, with slack. A pass calling far more than this is thrashing.
+/// result tool, plus headroom. A pass calling far more than this is thrashing.
 const MEMORY_CURATION_MAX_CAPABILITY_CALLS: u32 = 12;
 
 /// Wall-clock ceiling for one pass.
