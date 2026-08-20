@@ -220,44 +220,77 @@ sequenceDiagram
     C->>C: full agent loop
     C->>R: terminal event
     R->>R: settle edge (durable)
-    R->>T: framed result written as durable input row
-    R->>R: close edge (delivery truth established)
-    R->>Q: enqueue LoopInput::SubagentSettled (refs)
-    alt parent awake
+    R->>T: framed result appended (idempotent) — edge → ResultAppended
+    alt parent has a live run
+        R->>Q: enqueue LoopInput::SubagentSettled (refs)
         Q-->>P: drained at next loop boundary (steering-like)
     else parent parked or completed
         R->>P: activate(parent_thread, System) — auto-resume
     end
+    R->>R: attention accepted — edge → AttentionScheduled, then closed
+    Note over R: any refusal leaves the edge in ResultAppended —
+the sweeps retry; the obligation is durable
 ```
 
-### 4.1 Delivery truth vs. attention
+### 4.1 Delivery truth, attention obligation
 
-The design's load-bearing split: **the durable write to the parent thread is
-the delivery; the queue entry and the wake are only attention.** The framed
-result lands as a durable thread row (the same
-row-plus-queue-entry pattern steering messages use: `accept_inbound_message`
-→ `mark_message_queued` → `enqueue_queued_message` — see
-`ironclaw_loop_host/src/{input_queue,durable_input_queue}.rs`, whose entries
-bind to transcript rows), and the await edge closes at that write. After
-that point the result is in the parent's context regardless of what happens:
-a lost queue entry or missed wake merely delays *attention*, never delivery
-— the parent's next turn reads the thread and sees it. Production composes
-the durable filesystem-backed queue (`durable_input_queue.rs`; the in-memory
-backend is for tests), so the queue itself also survives restart — but the
-design does not depend on that: the thread write alone is delivery.
+Two durable facts, in order, and the edge tracks both:
+
+```text
+Open → Settled → ResultAppended { message_ref }
+     → AttentionScheduled { queued | activated | suppressed_streak_cap }
+     → closed
+```
+
+**Delivery** is the idempotent append of the framed result to the parent
+thread (the steering pattern: `accept_inbound_message` →
+`mark_message_queued` → `enqueue_queued_message`, rows bound to queue
+entries — `ironclaw_loop_host/src/{input_queue,durable_input_queue}.rs`).
+The accepted `message_ref` is persisted **on the edge**
+(`ResultAppended`), which is what makes retry idempotent: a crash between
+append and the next transition finds the ref and does not mint a second
+row.
+
+**Attention** — the queue entry or the wake — is a separate durable
+obligation. The edge closes only after attention has a durable outcome:
+the input was accepted into a live run's queue (`queued`), an activation
+was accepted (`activated`), or the autonomous streak cap intentionally
+suppressed the wake (`suppressed_streak_cap` — the row stays visible to
+the next permitted or human-initiated activation). Every refusal —
+`RunClosed` (the parent raced to terminal: a transition signal, not a
+success), `CapacityExhausted`, a transient activation failure, a crash at
+any boundary — leaves the edge in `ResultAppended`, where the recovery
+sweeps (§4.2) are still obligated to it. A parked parent can therefore
+never be stranded with a delivered-but-unannounced result: the promise of
+autonomous delivery is carried by durable state, not by a hope that the
+parent happens to run again.
+
+Production composes the durable filesystem-backed queue
+(`durable_input_queue.rs`; in-memory is test-only), so queue entries also
+survive restart — belt and suspenders on top of the obligation, not a
+substitute for it.
 
 ### 4.2 The three attention triggers
 
-1. **Settle-time**: enqueue the typed input; if the parent has no live run,
-   `activate(parent_thread, …, System)`. `ThreadBusy` is a benign no-op —
-   the run-start sweep covers it.
-2. **Run-start sweep**: on every run start/continue, settled-undelivered
-   edges for the scope are drained (`list_unclosed_for_scope` filtered to the
-   parent). Heals wake-vs-completion races.
-3. **Boot pass**: restart re-drives settled edges at the resolver layer (no
-   activate storm; never streak-capped).
+1. **Settle-time**: append (idempotent), then schedule attention — enqueue
+   into the parent's live run, or `activate(parent_thread, …, System)` if
+   there is none. Any refusal leaves the edge in `ResultAppended` for the
+   sweeps; `RunClosed` re-queries parent state and retries as parked.
+2. **Run-start sweep**: hooked at the runner's claimed-run admission seam
+   (`execute_claimed_run`, `turn_runner/src/turn_scheduler.rs`) — **not**
+   `check_scope_recovered`, which is a spawn-finalization hook on the child
+   scope. On parent run start, edges in `ResultAppended` (and
+   `suppressed_streak_cap`) for that thread are enqueued into the starting
+   run and closed. Thread-indexed, bounded per start.
+3. **Boot pass**: restart re-drives `Settled`/`ResultAppended` edges
+   through the same deliver path, **including activation of parked
+   parents** — autonomous delivery is a product promise, so boot may wake;
+   the streak cap still applies and the pass is paginated with per-tenant
+   fairness bounds (the R4 boot-recovery fairness work).
 
-One attempt per settled edge — the edge state is the dedupe.
+The persisted edge state is the dedupe and the retry ledger: one durable
+obligation per child, retried with bounded backoff until closed or
+intentionally suppressed.
 
 ### 4.3 What changes where
 
@@ -265,7 +298,7 @@ One attempt per settled edge — the edge state is the dedupe.
 | --- | --- |
 | `ironclaw_loop_contracts` (`host/input.rs`) | new variant `LoopInput::SubagentSettled { … }` carrying **references only** (child run id + result/message refs — never content; kernel guardrail). Serde round-trip pinned; queue is in-memory so no rolling-row compat concern, but tolerant-reader tests land with the variant per `.claude/rules/types.md`. |
 | `ironclaw_agent_loop` (`executor/input.rs`) | the variant drains **steering-like**: prompt-visible content input, not a control barrier. The `PostCapabilityStage::drain_settled` stub and its stale `LoopBackgroundChildPort` comment are **deleted** — the input path is the drain. |
-| `ironclaw_turn_runner` (resolver) | background tail: settle → framed durable thread write → close edge → enqueue → maybe `activate`. Reuses `child_terminal_output` / summary framing from the blocking tail. Multi-edge sweep uses one thread-snapshot read + one CAS write across all pending pairs (O(E+M)), still delivered as one input per child. |
+| `ironclaw_turn_runner` (resolver) | background tail: settle → idempotent append (`ResultAppended{message_ref}` on the edge) → schedule attention (enqueue or activate) → `AttentionScheduled` → close. Reuses `child_terminal_output` / summary framing from the blocking tail. Writes are per-edge (append, transition, enqueue are separate operations on existing interfaces); coalescing attention across simultaneous settles is an optional later optimization, not a normative claim. One typed input per child either way (D6). |
 | `ironclaw_loop_host` (spawn port) | delete both codec rejections and `background_subagents_disabled()`; advertise `mode` in the parameters schema (enum `["blocking","background"]`, default `blocking`); thread `args.mode` through `finish_spawn`; background spawns return the immediate receipt payload instead of `await_dependent_run`. |
 | prompts | `spawn_subagent_description.md` gains background wording. |
 
@@ -354,10 +387,12 @@ auth gate.
 | --- | --- | --- |
 | Running, mid-turn | durable thread write + queued input | next loop-boundary drain |
 | Suspended on its own gate (approval, auth, blocking spawn) | write + queue; `activate` → `ThreadBusy` no-op | drain on resume; gates untouched |
-| Parked between turns / thread completed | durable write; no live run to queue into | `activate(…, System)` starts a run carrying the framed result (D5) |
-| Autonomous-streak cap exhausted | durable write lands; wake refused | next human-initiated (or otherwise permitted) activation reads the thread |
-| Process crashed after settle, before write | edge still `Settled`, unclosed | boot pass re-drives the write |
-| Process crashed after write, before attention | edge closed; result already in thread | parent's next turn reads it — no signal needed |
+| Parked between turns / thread completed | append → `ResultAppended`; no live run to queue into | `activate(…, System)` accepted → `AttentionScheduled(activated)` (D5) |
+| Parent races to terminal mid-delivery (`RunClosed`) | transition signal, not success — edge stays `ResultAppended` | re-query state, retry as parked; sweeps back it up |
+| Enqueue refused (`CapacityExhausted` / unavailable) | edge stays `ResultAppended` — bounded retry, never loss | run-start sweep / boot pass |
+| Autonomous-streak cap exhausted | `AttentionScheduled(suppressed_streak_cap)` — recorded, not dropped | next permitted or human activation's run-start sweep |
+| Process crashed after settle, before append | edge `Settled`; persisted ref absent | boot pass re-runs the idempotent append |
+| Process crashed after append, before attention | edge `ResultAppended` with `message_ref` | boot pass schedules attention (may activate — §4.2) |
 | Parent run reached terminal with edges still open | normal delivery continues (§4.4 — never abandonment) | activate / sweep; explicit tree teardown is R8 |
 | Many children settle at once | one snapshot read + one CAS write across all pending | still one input per child (D6) |
 
@@ -382,10 +417,15 @@ the append-model design review.
   The append model reuses `LoopInputPort` — which *is* the "existing
   loop-host port surface" the retired shape doc offered as its alternative.
   Reversal: moderate; the variant and enqueue site are contained.
-- **D3 (2026-08-20) Delivery truth = durable thread write; edge closes
-  there.** Queue and wake are attention only (§4.1). Makes the in-memory
-  queue acceptable and collapses the delivery-guarantee analysis to one CAS
-  write. Reversal: cheap (close the edge later at ack instead).
+- **D3 (2026-08-20, amended same day) Delivery truth = idempotent durable
+  append; the edge survives until attention has a durable outcome.** As
+  first written, D3 closed the edge at the thread write — the #7763 design
+  review showed that strands parked/completed parents whenever the process
+  dies (or enqueue/activation is refused) between close and attention: the
+  result exists in history but nothing is obligated to announce it. The
+  edge now carries the full obligation (§4.1 state machine); closing early
+  was the reversal path D3 originally reserved, exercised in review rather
+  than production.
 - **D4 (2026-08-20) `SubagentSettled` carries refs, drains steering-like.**
   Content stays in durable rows (kernel rule: lifecycle metadata and
   references only); the variant is prompt-visible, not a control barrier.
@@ -414,6 +454,19 @@ the append-model design review.
   after observe/steer/cancel surfaces exist (§6) — more conservative than
   the original design's enable-after-PR2, at the cost of one line to change
   our mind.
+- **D10 (2026-08-20, from the #7763 design review) Foundational
+  contracts land before their slices.** Backpressure (attention shares the
+  run queue's 32-entry cap; refusal = bounded retry via the obligation,
+  never loss, never reserved capacity), cumulative autonomy budgets
+  (active children and autonomous activations per parent/root/tenant,
+  token/wall-time ceilings, gate-wait deadlines) and root/subtree
+  cancellation semantics (including held reservations and
+  already-appended partial results) are *documented contracts* the R2 edge
+  schema must be able to express, implemented at their owning slices
+  (R5/R8/R9). Lifecycle taxonomy beyond terminal states
+  (awaiting-input/approval, stuck, timed-out, attention-pending,
+  delivered) is an R5 inspect-contract requirement; terminal attempts stay
+  immutable — a retry is a new attempt.
 - **D9 ◇ Not in scope**: `TurnOwner` vs `TurnThreadOwner` stay separate
   types (ownership shape vs resolution disposition); no stored counters;
   never append to `completion_observer.rs`; new files < 800 lines;
@@ -455,6 +508,21 @@ Things no slice may break; each is enforced or pinned today.
   sanitized (§2.3); raw child transcripts are human-only surfaces (R7).
 - **Autonomous wakes are capped.** Every `activate` carries provenance; the
   streak cap refuses runaway non-human wake chains.
+- **Authority never flows through child text.** A delivered child result is
+  a typed untrusted-agent artifact — never a human instruction, never an
+  approval; parent grants, approval leases, and consent do not transfer
+  through it. Tenant/owner/agent/project and parent run/thread identities
+  come from trusted edge and run records, never from delivered content.
+- **Activation preserves authority, or narrows it.** A `System` activation
+  resolves the thread's intended run profile or a stricter one — never a
+  silently broader default.
+- **The R8 scan checkpoint is a mandatory enablement decision** (D7):
+  production enable requires an explicit re-decision, and if a scanner is
+  adopted its unavailability fails closed.
+- **Inspect is framed; raw is authorized.** Model-facing inspect (R5)
+  returns framed summaries and references only; raw child transcripts (R7)
+  sit behind an authenticated, tenant-scoped, non-enumerating authorization
+  contract.
 - **`ironclaw_agent_loop` stays contracts-only.** Its boundary rule forbids
   `turn_runner`/`loop_host` imports; the layer-matrix exception register is
   pinned empty. Loop ports are defined only in `ironclaw_loop_contracts`
@@ -645,25 +713,52 @@ fn subagent_settled_drains_in_both_user_facing_modes() {
 - [ ] **Step 2:** implement the branch; run → PASS.
 - [ ] **Step 3:** `cargo test -p ironclaw_loop_host` full; commit.
 
-### Task 5: resolver background tail — deliver + wake
+### Task 5: edge states for the attention obligation
+
+**Files:**
+- Modify: `crates/loop/ironclaw_turn_runner/src/subagent/await_edge/mod.rs`
+  (`AwaitEdgeState` gains `ResultAppended`, `AttentionScheduled`; the edge
+  record gains `appended_message_ref: Option<LoopMessageRef>` and
+  `attention_outcome: Option<AttentionOutcome>` with
+  `enum AttentionOutcome { Queued, Activated, SuppressedStreakCap }`,
+  both snake_case serde)
+- Modify: `crates/loop/ironclaw_turn_runner/src/subagent/await_edge/store.rs`
+  (CAS transitions `Settled → ResultAppended` (records the ref) and
+  `ResultAppended → AttentionScheduled` (records the outcome);
+  `list_unclosed_for_scope` already returns these states — they are
+  non-closed)
+
+**Interfaces — produces:** the two transitions Task 6 calls:
+`store.record_result_appended(scope, parent, child, message_ref)` and
+`store.record_attention(scope, parent, child, AttentionOutcome)`.
+
+- [ ] **Step 1: failing test** (store tests): drive
+  `Open → Settled → ResultAppended → AttentionScheduled → close`; assert
+  each intermediate state round-trips through the journal with its payload,
+  and that `record_result_appended` on an edge that already carries a ref
+  returns the existing ref unchanged (idempotency seed).
+- [ ] **Step 2:** implement enum + fields + transitions; serde round-trip
+  test for both new variants.
+- [ ] **Step 3:** `cargo test -p ironclaw_turn_runner` green; commit
+  (structural: schema + transitions, no caller yet).
+
+### Task 6: resolver background tail — append, attend, close
 
 **Files:**
 - Modify: `crates/loop/ironclaw_turn_runner/src/subagent/await_edge/resolver.rs`
 - Modify: `crates/loop/ironclaw_loop_host/src/await_edge_port.rs`
   (`AwaitEdgeSettler` gains `fn bind_input_enqueue(&self, Arc<dyn HostInputEnqueuePort>) -> Result<(), TurnError>`
   — same late-bind pattern and rationale as `bind_coordinator`)
-- Modify: `crates/app/ironclaw_composition/src/runtime.rs` (one
-  `bind_input_enqueue` wiring line next to the existing binds) and
-  `crates/loop/ironclaw_turn_runner/src/runtime.rs` (bind call beside
+- Modify: `crates/app/ironclaw_composition/src/runtime.rs` and
+  `crates/loop/ironclaw_turn_runner/src/runtime.rs` (bind wiring beside
   `bind_coordinator`, ~:751)
 
-**Interfaces — consumes:** Task 1's variant;
+**Interfaces — consumes:** Task 1's variant; Task 5's transitions;
 `HostInputEnqueuePort::enqueue_queued_message(EnqueueQueuedMessageRequest)`;
 `SessionThreadService::{accept_inbound_message, mark_message_queued}`;
 `TurnCoordinator::activate(ActivateThreadRequest)`.
 
-Behavior (in `settle_and_maybe_drain`, after the settle CAS): branch on
-`edge.mode` —
+Behavior (in `settle_and_maybe_drain`, after the settle CAS):
 ```rust
 match edge.mode {
     SpawnSubagentMode::Blocking => {
@@ -674,54 +769,74 @@ match edge.mode {
     }
 }
 ```
-`deliver_background` (new, same file): (1) frame the child result with the
-existing `child_terminal_output` + untrusted wrappers; (2) write it to the
-**parent** thread via `accept_inbound_message` + `mark_message_queued`; (3)
-`close` the edge (delivery truth, D3); (4) if the parent has a live run
-(query via the bound `AgentTurnSpawnTreeRuntimePort`), enqueue
-`LoopInput::SubagentSettled { child_run_id, message_ref }` for that run —
-`RunClosed` is benign (sweep covers it); (5) else
-`coordinator.activate(ActivateThreadRequest { scope: parent scope from
-edge.parent_run_context, actor: edge.parent_run_context.actor (parent
-actor), accepted_message_ref: from step 2, provenance:
-ActivationProvenance::System, idempotency_key: derived from child_run_id
-(the dedupe), received_at: now, requested_run_profile: None })` —
-`ThreadBusy` is a benign no-op. Never call `resume_parent` (§4.6: gates
-stay untouched).
+`deliver_background` (new, same file), each step durable before the next:
+1. **Append (idempotent):** if `edge.appended_message_ref` is set, reuse
+   it; else frame via `child_terminal_output` + the untrusted wrappers,
+   write to the **parent** thread via `accept_inbound_message`, then
+   `record_result_appended` with the accepted ref.
+2. **Attend:** query the parent's live run via the bound
+   `AgentTurnSpawnTreeRuntimePort`. Live run → `mark_message_queued` +
+   `enqueue_queued_message` for that run; accepted →
+   `record_attention(Queued)`. `RunClosed` → re-query and fall through to
+   the parked arm (transition signal, never success). No live run →
+   `coordinator.activate(ActivateThreadRequest { scope/actor from
+   edge.parent_run_context, accepted_message_ref: the appended ref,
+   provenance: ActivationProvenance::System, idempotency_key: derived
+   from child_run_id, received_at: now, requested_run_profile: None })`;
+   accepted → `record_attention(Activated)`; streak-cap refusal →
+   `record_attention(SuppressedStreakCap)`; `ThreadBusy` or transient
+   failure → **return with the edge still `ResultAppended`** (the sweeps
+   own the retry). Never `resume_parent` (§4.6: gates stay untouched).
+3. **Close** only from `AttentionScheduled`.
 
-- [ ] **Step 1: failing crate test** (resolver tests): settle a
-  background-mode edge → assert (a) a framed message row landed on the
-  parent thread, (b) the edge is closed, (c) the recording coordinator saw
-  `activate` with `provenance == System` when no live run exists, and (d)
-  saw **no** `resume_turn`.
-- [ ] **Step 2:** implement `deliver_background` + the trait bind + wiring.
-- [ ] **Step 3:** second test: live parent run present → recording enqueue
-  port captured `SubagentSettled` with the right `child_run_id`; no
-  `activate`.
-- [ ] **Step 4:** `cargo test -p ironclaw_turn_runner -p ironclaw_loop_host`
-  green; behavioral commit; then `cargo test -p ironclaw_architecture_tests`
+- [ ] **Step 1: failing test**: settle a background edge, parked parent →
+  assert framed row appended once, edge walked
+  `Settled → ResultAppended → AttentionScheduled(Activated) → closed`,
+  recording coordinator saw `activate` with `provenance == System`, and
+  **no** `resume_turn`.
+- [ ] **Step 2:** implement; green.
+- [ ] **Step 3: failure-injection tests, one per side effect** (fault
+  double per seam): (a) crash-shaped return after append, before
+  `record_result_appended` → re-drive appends **no second row** (ref
+  lookup); (b) enqueue returns `RunClosed` → edge stays `ResultAppended`,
+  next drive activates; (c) enqueue returns `CapacityExhausted` → edge
+  stays `ResultAppended`; (d) activation transient failure → edge stays
+  `ResultAppended`; (e) streak-cap refusal →
+  `AttentionScheduled(SuppressedStreakCap)`, no retry storm (drive twice,
+  one outcome).
+- [ ] **Step 4:** live-run path test: recording enqueue port captured
+  `SubagentSettled { child_run_id, message_ref }`; edge closed via
+  `AttentionScheduled(Queued)`; no `activate`.
+- [ ] **Step 5:** `cargo test -p ironclaw_turn_runner -p ironclaw_loop_host`
+  green; behavioral commit; `cargo test -p ironclaw_architecture_tests`
   (trait surface changed).
 
-### Task 6: the two healing triggers
+### Task 7: the healing sweeps on real hooks
 
 **Files:**
+- Modify: `crates/loop/ironclaw_turn_runner/src/turn_scheduler.rs` — the
+  **run-start sweep** hooks the claimed-run admission seam
+  (`execute_claimed_run`): before driving the parent's loop, fetch edges in
+  `ResultAppended` / `AttentionScheduled(SuppressedStreakCap)` for the
+  starting run's thread (thread-indexed query, bounded — cap the batch at
+  `MAX_QUEUED_INPUTS_PER_RUN`), enqueue each into the starting run, close.
 - Modify: `crates/loop/ironclaw_turn_runner/src/subagent/await_edge/boot_recovery.rs`
-  (boot pass: settled background edges route to `deliver_background`, never
-  the group drain; no `activate` from boot — §4.2)
-- Modify: run-start sweep — hook where `ScopeRecoveryDriver` already
-  gates run admission (`check_scope_recovered` call path): after a scope
-  passes recovery, `list_unclosed_for_scope` filtered to
-  `state == Settled && mode == Background` for the starting run's thread →
-  `deliver_background` each.
+  — the **boot pass** re-drives `Settled`/`ResultAppended` background
+  edges through `deliver_background` (idempotent by Task 6), activation
+  included, paginated with the per-tenant in-flight bounds this driver
+  already owns.
 
-- [ ] **Step 1: failing test** (boot_recovery tests): a settled background
-  edge + restart-shaped fixture → delivered without any coordinator
-  `activate` call.
-- [ ] **Step 2:** failing test: settle raced `ThreadBusy` (recording
-  coordinator returns busy) → the run-start sweep delivers on next start.
+- [ ] **Step 1: failing test** (scheduler tests): run starts with one
+  `ResultAppended` edge on its thread → input enqueued into that run, edge
+  closed; with `MAX_QUEUED_INPUTS_PER_RUN + 1` pending edges → batch is
+  capped, remainder stays `ResultAppended` for the next start.
+- [ ] **Step 2: failing test** (boot_recovery tests): restart fixture with
+  edges in `Settled` and in `ResultAppended` → both delivered; parked
+  parent activated with `System` provenance; re-running the pass is a
+  no-op (idempotency).
 - [ ] **Step 3:** implement both; green; commit.
 
-### Task 7: integration scenarios
+### Task 7b: integration scenarios
 
 **Files:**
 - Modify: `tests/integration/subagent_await_edge.rs` (extend — same seam)
@@ -732,12 +847,16 @@ Scenarios (harness-side capability enablement; production filter untouched):
 - [ ] `background_child_result_is_delivered_per_child_while_parent_runs` —
   two background children, staggered terminals → two distinct framed rows,
   order matches settle order (D6).
-- [ ] `settled_edge_threadbusy_is_healed_by_run_start` (§4.2 trigger 2).
+- [ ] `run_closed_race_is_healed_by_activation` — parent terminalizes
+  between live-run query and enqueue → delivered via activate (§4.6 row).
 - [ ] `parked_parent_is_activated_with_system_provenance` — assert via the
   run record's journaled `subagent_activation_provenance`.
 - [ ] `background_delivery_replay_is_idempotent` — re-drive
-  `deliver_background` on an already-closed edge → no duplicate row (edge
-  state is the dedupe).
+  `deliver_background` across every state boundary → exactly one row, one
+  attention outcome.
+- [ ] `streak_capped_result_waits_for_human` — cap exhausted → edge
+  `SuppressedStreakCap`; a human-provenance turn on the thread drains it
+  at run start.
 - [ ] Commit with `tests/CLAUDE.md` rows updated.
 
 ### Task 8: prompt + doc closeout
@@ -753,9 +872,13 @@ Scenarios (harness-side capability enablement; production filter untouched):
 ### Self-review (ran 2026-08-20)
 
 Spec coverage: every §4.3 row maps to a task (variant→T1, drain+stub→T2,
-codec/schema→T3, receipt→T4, resolver tail→T5, triggers→T6, tests→T7,
-prompt→T8). Placeholder scan: the two deliberately-unpinned points are named
-as read-steps with a single named file each (`resolution.rs` success
-constructor, T4; live-run query method on the runtime port, T5) — bounded,
-not vague. Type consistency: `SubagentSettled { child_run_id, message_ref }`
-identical in T1/T2/T5.
+codec/schema→T3, receipt→T4, edge states→T5, resolver tail→T6,
+sweeps→T7, integration→T7b, prompt→T8); every §4.1 state and §4.6 crash
+row has a named failure-injection test (T6 step 3, T7, T7b). Placeholder
+scan: the two deliberately-unpinned points are named as read-steps with a
+single named file each (`resolution.rs` success constructor, T4; live-run
+query method on the runtime port, T6) — bounded, not vague. Type
+consistency: `SubagentSettled { child_run_id, message_ref }` identical in
+T1/T2/T6; `AttentionOutcome` identical in T5/T6/T7. Revised 2026-08-20
+after the #7763 design review (durable attention obligation, idempotent
+append, real run-start hook, bounded sweeps).
