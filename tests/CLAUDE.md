@@ -53,7 +53,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Triggers / automations / routines | 11 | 2 | ✓ | ✓ |
 | Memory & workspace | 8 | 2 | — | ✓ |
 | Skills | 1 | 1 | — | ✓ |
-| Multi-user / scope isolation | 5 | 3 | 9 | ✓ |
+| Multi-user / scope isolation | 5 | 4 | 9 | ✓ |
 | Tools & tool dispatch | — | 11 | ✓ | ✓ |
 | Turn lifecycle (cancel/steer/retry/restart) | — | 8 | ✓ | ✓ |
 | WebUI surfaces & APIs | 2 | 2 | — | ✓ (largest) |
@@ -254,6 +254,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | An outbound reply is delivered through the real inbound→outbound pipeline | `extension_delivery.rs` |
 | A Telegram reply quotes the message it answers; a DM arriving mid-run gets an immediate busy notice quoting that DM, and the late reply still quotes its own prompt (#6643/#6644) | `extension_delivery.rs::linked_telegram_actor_turns_attribute_to_the_linking_user_and_unlink_revokes_admission` (anchored delivery evidence) |
 | Tenant-admin configuration and per-user install/remove stay separate state machines | `extension_user_lifecycle_isolation.rs` |
+| A notification inbox belongs to one recipient: knowing another user's notification id grants no read and no mutation | `notification_inbox_user_isolation.rs` |
 | The model sees Telegram's channel and linked tools without the retired proof-code setup recipe | `channel_connection_projection.rs` |
 | An ordinary Telegram user sees device-link setup without deployment secrets, and the retired bot proof-code pairing route stays unavailable | `webui_v2_product_api.rs::telegram_setup_hides_admin_configuration_and_excludes_legacy_pairing` |
 | Delivery preferences / connected channels render into the model prompt | `comm_context.rs` |

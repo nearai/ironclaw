@@ -4599,6 +4599,7 @@ dependencies = [
  "ironclaw_memory",
  "ironclaw_memory_native",
  "ironclaw_network",
+ "ironclaw_notifications",
  "ironclaw_openai_compat",
  "ironclaw_outbound",
  "ironclaw_processes",
