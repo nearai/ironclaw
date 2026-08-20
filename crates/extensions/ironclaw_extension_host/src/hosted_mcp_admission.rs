@@ -16,9 +16,7 @@ impl CanonicalHostedMcpEndpoint {
     pub fn parse(input: &HostedMcpEndpoint) -> Result<Self, HostedMcpAdmissionError> {
         let url = url::Url::parse(input.as_str())
             .map_err(|_| HostedMcpAdmissionError::InvalidEndpoint)?;
-        let host = url
-            .host()
-            .ok_or(HostedMcpAdmissionError::InvalidEndpoint)?;
+        let host = url.host().ok_or(HostedMcpAdmissionError::InvalidEndpoint)?;
         // A literal loopback IP (127.0.0.0/8 or ::1) is a safe, non-rebindable
         // on-device target: it is the single case where `http` is admitted and
         // where an IP literal is allowed. Every other endpoint must be a public
@@ -98,6 +96,18 @@ pub(crate) fn is_loopback_ip_literal(host: &url::Host<&str>) -> bool {
         url::Host::Ipv6(ip) => ip.is_loopback(),
         url::Host::Domain(_) => false,
     }
+}
+
+/// [`is_loopback_ip_literal`] for a stored `NetworkTargetPattern` host, which
+/// is a bare string rather than a parsed URL host. IPv6 patterns may or may not
+/// carry the URL bracket form, so both are accepted. A wildcard or DNS pattern
+/// never parses as an IP and is therefore never loopback.
+pub(crate) fn is_loopback_host_pattern(host_pattern: &str) -> bool {
+    host_pattern
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
