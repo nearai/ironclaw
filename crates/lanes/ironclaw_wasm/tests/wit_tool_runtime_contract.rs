@@ -402,28 +402,49 @@ fn executes_wit_tool_with_fresh_component_instance_per_call() {
 // ever encode the `success(string)` case of the typed `response` variant, so
 // nothing exercised `WitToolOutcome::Failure` decoding through the real
 // component-model lift. `FAILURE_TOOL_WAT` encodes the `failure(guest-failure)`
-// case with every field populated (kind, code, message) to
-// pin the canonical-ABI offsets documented above it.
+// case with every field populated (kind, code, message). Each discriminant is
+// lifted through the real component boundary to pin both the canonical-ABI
+// offsets and the complete generated-enum mapping.
 #[test]
-fn decodes_typed_failure_variant_from_wit_tool_component() {
+fn decodes_every_typed_failure_discriminant_from_wit_tool_component() {
     let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
-    let prepared = runtime
-        .prepare("failing", &tool_component(FAILURE_TOOL_WAT))
-        .unwrap();
-    let host = WitToolHost::deny_all();
+    let cases = [
+        (0, WitErrorKind::AuthRequired),
+        (1, WitErrorKind::Input),
+        (2, WitErrorKind::OutputTooLarge),
+        (3, WitErrorKind::Executor),
+        (4, WitErrorKind::NetworkDenied),
+        (5, WitErrorKind::Client),
+        (6, WitErrorKind::OperationFailed),
+    ];
 
-    let executed = runtime
-        .execute(&prepared, host, WitToolRequest::new("{}"))
-        .unwrap();
+    for (ordinal, expected_kind) in cases {
+        let wat = FAILURE_TOOL_WAT.replacen(
+            "i32.const 52\n    i32.const 4\n    i32.store",
+            &format!("i32.const 52\n    i32.const {ordinal}\n    i32.store"),
+            1,
+        );
+        let prepared = runtime
+            .prepare(&format!("failing-{ordinal}"), &tool_component(&wat))
+            .unwrap();
+        let executed = runtime
+            .execute(
+                &prepared,
+                WitToolHost::deny_all(),
+                WitToolRequest::new("{}"),
+            )
+            .unwrap();
 
-    assert_eq!(
-        executed.outcome,
-        WitToolOutcome::Failure(WitGuestFailure {
-            kind: WitErrorKind::NetworkDenied,
-            code: Some("fixture_failure_code".to_string()),
-            message: Some("fixture failure message".to_string()),
-        })
-    );
+        assert_eq!(
+            executed.outcome,
+            WitToolOutcome::Failure(WitGuestFailure {
+                kind: expected_kind,
+                code: Some("fixture_failure_code".to_string()),
+                message: Some("fixture failure message".to_string()),
+            }),
+            "error-kind ordinal {ordinal}"
+        );
+    }
 }
 
 // Regression: the host runtime offloads `WitToolRuntime::execute` to the
