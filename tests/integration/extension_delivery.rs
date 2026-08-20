@@ -1572,18 +1572,10 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
     .await;
 
     let paired_user = inbound.binding.actor_user_id.clone();
-    let (install_run, unrelated_personal_gate) = lifecycle
-        .submit_turn_until_auth_blocked("install telegram")
-        .await
-        .expect("install turn reaches its separate personal-account prompt");
     lifecycle
-        .deny_auth_gate(install_run, &unrelated_personal_gate)
+        .submit_turn("install telegram")
         .await
-        .expect("declining personal account linking resumes the install turn");
-    lifecycle
-        .wait_for_status(install_run, TurnStatus::Completed)
-        .await
-        .expect("Telegram installs without a personal device link");
+        .expect("Telegram installs without requiring a personal device link");
     let telegram_binding_service =
         wait_for_production_registration(&assembly, services, "telegram").await;
     lifecycle
@@ -2589,18 +2581,10 @@ async fn paired_telegram_bot_actor_turns_attribute_to_the_user_and_disconnect_re
     )
     .await;
     let paired_user = inbound.binding.actor_user_id.clone();
-    let (install_run, unrelated_personal_gate) = lifecycle
-        .submit_turn_until_auth_blocked("install telegram")
-        .await
-        .expect("install turn reaches its separate personal-account prompt");
     lifecycle
-        .deny_auth_gate(install_run, &unrelated_personal_gate)
+        .submit_turn("install telegram")
         .await
-        .expect("declining personal account linking resumes the install turn");
-    lifecycle
-        .wait_for_status(install_run, TurnStatus::Completed)
-        .await
-        .expect("Telegram installs without a personal device link");
+        .expect("Telegram installs without requiring a personal device link");
     let channel_connection = group
         .channel_connection()
         .expect("delivery group composes production channel connection");
