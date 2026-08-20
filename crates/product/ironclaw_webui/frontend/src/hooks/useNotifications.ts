@@ -17,6 +17,16 @@ type RenderedNotificationSource = {
   turnRunId: string;
 };
 
+type NotificationQueryData = {
+  compatibility?: Array<{
+    id: string;
+    read?: boolean;
+    threadId?: string;
+    [key: string]: unknown;
+  }>;
+  [key: string]: unknown;
+};
+
 const NOTIFICATION_LIMIT = 30;
 /* A stop so one hook cannot walk an unbounded inbox in a single pass. The
  * store's own per-recipient bound is far larger than anyone pages through by
@@ -148,40 +158,48 @@ export function useNotifications(
   const query = useQuery({
     queryKey,
     queryFn: async ({ signal }) => {
-      /* Read the inbox first and fall back only where it does not exist. These
-       * used to run as a pair on every poll, which cost a discarded
-       * approval-thread query — and a dynamic import of the presenter — every
-       * ten seconds in every signed-in tab, for a result the surface throws
-       * away as soon as the inbox answers. The fallback surface pays one extra
-       * round-trip instead; it is the surface that has no inbox at all. */
-      let inbox;
-      try {
-        inbox = await readInboxPages(loadedPages, signal);
-      } catch (error) {
-        if (!isNotificationInboxUnsupported(error)) throw error;
-        const approvalThreads = await listThreads({
+      /* The inbox consumer can deploy before its approval producer. Read the
+       * legacy approval source during that rollout so an answering but empty
+       * inbox does not erase an existing approval notification. Durable rows
+       * win in the presentation-level de-duplication below. */
+      const [inboxResult, approvalResult] = await Promise.allSettled([
+        readInboxPages(loadedPages, signal),
+        listThreads({
           limit: NOTIFICATION_THREAD_LIMIT,
           needsApproval: true,
           signal,
-        });
-        const presenter = await import("../lib/notification-approval-compat");
-        const seenIds = presenter.getNotificationState(scope).seenIds;
-        const records = Array.isArray(approvalThreads?.threads)
-          ? approvalThreads.threads
-          : [];
-        return {
-          inbox: { notifications: [], unread_count: 0 },
-          inboxSupported: false,
-          compatibility: presenter
-            .approvalThreadNotifications(records.map(normalizeThread), threadStates, t)
-            .map((message) => ({
-              ...message,
-              durable: false,
-              read: seenIds.has(message.id),
-            })),
-        };
+        }),
+      ]);
+
+      let inboxSupported = true;
+      let inbox;
+      if (inboxResult.status === "fulfilled") {
+        inbox = inboxResult.value;
+      } else if (isNotificationInboxUnsupported(inboxResult.reason)) {
+        inboxSupported = false;
+        inbox = { notifications: [], unread_count: 0 };
+      } else {
+        throw inboxResult.reason;
       }
-      return { inbox, inboxSupported: true, compatibility: [] };
+
+      if (approvalResult.status === "rejected") {
+        if (!inboxSupported) throw approvalResult.reason;
+        return { inbox, inboxSupported, compatibility: [] };
+      }
+
+      const presenter = await import("../lib/notification-approval-compat");
+      const seenIds = presenter.getNotificationState(scope).seenIds;
+      const records = Array.isArray(approvalResult.value?.threads)
+        ? approvalResult.value.threads
+        : [];
+      const compatibility = presenter
+        .approvalThreadNotifications(records.map(normalizeThread), threadStates, t)
+        .map((message) => ({
+          ...message,
+          durable: false,
+          read: seenIds.has(message.id),
+        }));
+      return { inbox, inboxSupported, compatibility };
     },
     enabled: enabled && Boolean(tenantId && userId),
     refetchInterval: NOTIFICATION_REFETCH_MS,
@@ -193,23 +211,20 @@ export function useNotifications(
     const durable = notificationMessages(query.data?.inbox?.notifications, t).map(
       (message) => ({ ...message, durable: true }),
     );
-    /* The compatibility rows stand in for a surface that cannot serve the
-     * durable inbox at all. Mixing them in alongside durable records looked
-     * safer, but suppression could only be computed from the rows currently
-     * loaded: archiving a durable approval dropped it from that set and the
-     * pending-thread row for the same thread came straight back, unread and
-     * with no archive control. Where the inbox answers, durable records are the
-     * only truth — including the truth that one was archived. */
-    const compatibility = inboxSupported
-      ? []
-      : (query.data?.compatibility || []).map((message) => ({
-          ...message,
-          durable: false,
-        }));
+    const durableApprovalThreads = new Set(
+      durable
+        .filter((message) => message.type === "approval_required" && message.threadId)
+        .map((message) => message.threadId),
+    );
+    const compatibility = (query.data?.compatibility || [])
+      .filter(
+        (message) => !message.read && !durableApprovalThreads.has(message.threadId),
+      )
+      .map((message) => ({ ...message, durable: false }));
     return [...durable, ...compatibility].sort(
       (left, right) => right.timestamp - left.timestamp,
     );
-  }, [inboxSupported, query.data, t]);
+  }, [query.data, t]);
   const unreadIds = React.useMemo(
     () => new Set(messages.filter((message) => !message.read).map((message) => message.id)),
     [messages],
@@ -235,6 +250,12 @@ export function useNotifications(
       if (!scope || ids.length === 0) return;
       const compatibility = await import("../lib/notification-approval-compat");
       compatibility.markNotificationIdsSeen(ids, scope);
+      queryClient.setQueryData<NotificationQueryData>(queryKey, (current) => ({
+        ...(current || {}),
+        compatibility: (current?.compatibility || []).map((message) =>
+          ids.includes(message.id) ? { ...message, read: true } : message,
+        ),
+      }));
       await queryClient.invalidateQueries({ queryKey });
     },
     [queryClient, queryKey, scope],
@@ -260,9 +281,20 @@ export function useNotifications(
       // and the request would 404.
       const message = messages.find((candidate) => candidate.id === messageId);
       if (!message?.durable) return;
+      const compatibilityIds = (query.data?.compatibility || [])
+        .filter(
+          (candidate) =>
+            !candidate.read &&
+            candidate.threadId &&
+            candidate.threadId === message.threadId,
+        )
+        .map((candidate) => candidate.id);
+      if (compatibilityIds.length > 0) {
+        void markCompatibilitySeen(compatibilityIds);
+      }
       archiveMutation.mutate(messageId);
     },
-    [archiveMutation, messages],
+    [archiveMutation, markCompatibilitySeen, messages, query.data],
   );
 
   const prepareMessageOpen = React.useCallback(

@@ -153,6 +153,7 @@ export function approvalThreadNotifications(
           : "",
         timestamp,
         href: `/chat/${encodeURIComponent(threadId)}`,
+        threadId,
         read: false,
       }];
     })
