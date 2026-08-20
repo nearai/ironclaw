@@ -729,6 +729,7 @@ registerPack("ja", {
   // Automations page
   "automations.action.pause": "一時停止",
   "automations.action.resume": "再開",
+  "automations.action.runNow": "今すぐ実行",
   "automations.eyebrow": "予定された作業",
   "automations.title": "自動化",
   "automations.description": "スケジュールされた自動化のみ。",

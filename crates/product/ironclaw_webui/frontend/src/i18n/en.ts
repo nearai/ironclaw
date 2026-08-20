@@ -777,6 +777,7 @@ registerPack("en", {
   // Automations page
   "automations.action.pause": "Pause",
   "automations.action.resume": "Resume",
+  "automations.action.runNow": "Run now",
   "automations.eyebrow": "Scheduled work",
   "automations.title": "Automations",
   "automations.description": "Scheduled automations only.",

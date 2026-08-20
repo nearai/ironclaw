@@ -591,6 +591,9 @@ pub struct RebornRuntime {
         Arc<dyn ironclaw_product_contracts::project_service::ProjectService>,
     pub(crate) diagnostic_store: Arc<dyn ironclaw_assistant::inspector_store::DiagnosticStorePort>,
     pub(crate) trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    /// Late-bound manual-fire runner shared by product automation actions and
+    /// the scheduler so both surfaces execute through the same worker graph.
+    pub(crate) trigger_manual_fire_runner: Arc<dyn ironclaw_triggers::TriggerManualFireRunner>,
     #[cfg(any(test, feature = "test-support"))]
     #[allow(
         dead_code,
@@ -3522,8 +3525,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
             outbound_preferences_facade.clone(),
             trajectory_observer,
             Some(tool_diagnostic_sink),
-        )
-        .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
+            trigger_poller.enabled,
+        )?;
         (
             capability_host.capability_factory,
             capability_host.capability_input_resolver,
@@ -4335,6 +4338,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 materializer: trigger_poller_services.materializer,
                 trusted_submitter: trigger_poller_services.trusted_submitter,
                 active_run_lookup,
+                manual_fire_runner: Arc::clone(&services.trigger_manual_fire_runner),
                 post_submit_hook_slot: hook_slot,
             },
         )
@@ -4528,6 +4532,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         project_service,
         diagnostic_store,
         trigger_repository: trigger_repository.clone(),
+        trigger_manual_fire_runner: services.trigger_manual_fire_runner.clone(),
         #[cfg(any(test, feature = "test-support"))]
         trigger_process_lifecycle_source: Arc::clone(&services.trigger_process_lifecycle_source),
         broadcast_budget_event_sink,

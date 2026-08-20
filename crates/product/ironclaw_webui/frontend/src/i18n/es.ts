@@ -729,6 +729,7 @@ registerPack("es", {
   // Automations page
   "automations.action.pause": "Pausar",
   "automations.action.resume": "Reanudar",
+  "automations.action.runNow": "Ejecutar ahora",
   "automations.eyebrow": "Trabajo programado",
   "automations.title": "Automatizaciones",
   "automations.description": "Solo automatizaciones programadas.",

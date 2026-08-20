@@ -729,6 +729,7 @@ registerPack("pt-BR", {
   // Automations page
   "automations.action.pause": "Pausar",
   "automations.action.resume": "Retomar",
+  "automations.action.runNow": "Executar agora",
   "automations.eyebrow": "Trabalho agendado",
   "automations.title": "Automações",
   "automations.description": "Somente automações agendadas.",

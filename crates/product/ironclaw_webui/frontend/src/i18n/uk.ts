@@ -729,6 +729,7 @@ registerPack("uk", {
   // Automations page
   "automations.action.pause": "Пауза",
   "automations.action.resume": "Продовжити",
+  "automations.action.runNow": "Запустити зараз",
   "automations.eyebrow": "Запланована робота",
   "automations.title": "Автоматизація",
   "automations.description": "Лише запланована автоматизація.",

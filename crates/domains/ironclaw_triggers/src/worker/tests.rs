@@ -13,14 +13,15 @@ use ironclaw_host_api::{
 
 use super::*;
 use crate::{
-    ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
-    ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
-    FireRetryableFailedRequest, FireTerminalFailedRequest, InMemoryTriggerRepository,
-    TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerError, TriggerFire, TriggerId,
-    TriggerInboundContentRef, TriggerMaterializedPrompt, TriggerPromptMaterializer, TriggerRecord,
-    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
-    TriggerSchedule, TriggerSourceKind, TriggerSourceProvider, TriggerState,
+    ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimManualFireRequest,
+    ClaimedTriggerFire, ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest,
+    FireReplayedRequest, FireRetryableFailedRequest, FireTerminalFailedRequest,
+    InMemoryTriggerRepository, TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID,
+    TRIGGER_TRUSTED_ADAPTER_KIND, TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerError,
+    TriggerFire, TriggerFireIdentity, TriggerId, TriggerInboundContentRef,
+    TriggerMaterializedPrompt, TriggerPromptMaterializer, TriggerRecord, TriggerRepository,
+    TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus, TriggerSchedule,
+    TriggerSourceKind, TriggerSourceProvider, TriggerState,
 };
 
 fn ts(seconds: i64) -> Timestamp {
@@ -607,6 +608,37 @@ async fn tick_skips_claim_race_not_due_without_materializing() {
     assert_eq!(
         report.results.last().map(|result| &result.outcome),
         Some(&TriggerPollerFireOutcome::SkippedNotDue)
+    );
+    assert_eq!(materializer.fires().len(), 0);
+    assert_eq!(submitter.requests().len(), 0);
+}
+
+#[tokio::test]
+async fn manual_fire_does_not_report_a_live_scheduled_claim_race_as_completed() {
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let fire_slot = ts(1_704_067_200);
+    let record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+    let repository = Arc::new(ClaimRaceRepository::new(
+        record.clone(),
+        ClaimDueFireOutcome::NotDue { record },
+    ));
+    let materializer = Arc::new(RecordingMaterializer::success("content:trigger-fire"));
+    let submitter = Arc::new(RecordingSubmitter::with_outcomes(Vec::new()));
+    let worker = worker(
+        repository,
+        materializer.clone(),
+        submitter.clone(),
+        Arc::new(RecordingActiveRunLookup::default()),
+    );
+
+    assert_eq!(
+        worker
+            .run_manual_fire(tenant("tenant-a"), trigger_id, fire_slot)
+            .await
+            .expect("claim race is a model-visible outcome"),
+        TriggerManualFireOutcome::Failed {
+            reason: TriggerPollerFailureReason::Backend,
+        }
     );
     assert_eq!(materializer.fires().len(), 0);
     assert_eq!(submitter.requests().len(), 0);
@@ -1689,6 +1721,20 @@ async fn tick_recovers_stale_claim_only_active_fire_by_replaying_submit() {
     repo.upsert_trigger(sample_record(trigger_id, tenant("tenant-a"), fire_slot))
         .await
         .expect("insert active");
+    repo.claim_manual_fire(ClaimManualFireRequest {
+        tenant_id: tenant("tenant-a"),
+        trigger_id,
+        now: fire_slot,
+    })
+    .await
+    .expect("claim same-slot manual fire");
+    repo.mark_fire_retryable_failed(FireRetryableFailedRequest {
+        tenant_id: tenant("tenant-a"),
+        trigger_id,
+        fire_slot,
+    })
+    .await
+    .expect("settle same-slot manual fire");
     repo.claim_due_fire(ClaimDueFireRequest {
         tenant_id: tenant("tenant-a"),
         trigger_id,
@@ -1728,6 +1774,11 @@ async fn tick_recovers_stale_claim_only_active_fire_by_replaying_submit() {
     );
     assert_eq!(materializer.fires().len(), 1);
     assert_eq!(submitter.requests().len(), 1);
+    assert_eq!(
+        submitter.requests()[0].fire().identity,
+        TriggerFireIdentity::new(tenant("tenant-a"), trigger_id, fire_slot),
+        "claim-only recovery must replay the running scheduled row, not the manual same-slot row"
+    );
     assert_eq!(active_lookup.requests().len(), 0);
     let persisted = repo
         .get_trigger(tenant("tenant-a"), trigger_id)
@@ -1738,11 +1789,15 @@ async fn tick_recovers_stale_claim_only_active_fire_by_replaying_submit() {
     assert_eq!(persisted.active_run_ref, Some(replayed_run_id));
     assert_eq!(persisted.last_fired_slot, Some(fire_slot));
     let runs = repo
-        .list_trigger_run_history(tenant("tenant-a"), trigger_id, 1)
+        .list_trigger_run_history(tenant("tenant-a"), trigger_id, 2)
         .await
         .expect("load run history");
-    assert_eq!(runs[0].run_id, Some(replayed_run_id));
-    assert_eq!(runs[0].thread_id, Some(thread_id));
+    let scheduled = runs
+        .iter()
+        .find(|run| run.source == TriggerSourceKind::Schedule)
+        .expect("scheduled same-slot history");
+    assert_eq!(scheduled.run_id, Some(replayed_run_id));
+    assert_eq!(scheduled.thread_id, Some(thread_id));
 }
 
 #[tokio::test]
@@ -1861,6 +1916,116 @@ async fn tick_retryable_submit_failure_clears_active_and_keeps_slot_retryable() 
     assert_eq!(persisted.next_run_at, fire_slot);
     assert_eq!(persisted.active_fire_slot, None);
     assert_eq!(persisted.active_run_ref, None);
+}
+
+#[tokio::test]
+async fn manual_fire_failure_clears_active_without_advancing_schedule() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZX").expect("ulid");
+    let manual_slot = ts(1_704_067_200);
+    let scheduled_slot = ts(1_704_070_800);
+    repo.upsert_trigger(sample_record(
+        trigger_id,
+        tenant("tenant-a"),
+        scheduled_slot,
+    ))
+    .await
+    .expect("insert");
+    let observer = Arc::new(RecordingSettlementObserver::default());
+    let worker = worker_with_observer(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(vec![Err(
+            TriggerError::InvalidMaterialization {
+                reason: "manual submit permanent failure".to_string(),
+            },
+        )])),
+        Arc::new(RecordingActiveRunLookup::default()),
+        observer.clone(),
+    );
+
+    let outcome = worker
+        .run_manual_fire(tenant("tenant-a"), trigger_id, manual_slot)
+        .await
+        .expect("manual fire returns an outcome");
+
+    assert!(matches!(
+        outcome,
+        TriggerManualFireOutcome::Failed {
+            reason: TriggerPollerFailureReason::InvalidMaterialization,
+        }
+    ));
+    let persisted = repo
+        .get_trigger(tenant("tenant-a"), trigger_id)
+        .await
+        .expect("load")
+        .expect("record present");
+    assert_eq!(persisted.next_run_at, scheduled_slot);
+    assert_eq!(persisted.last_status, Some(TriggerRunStatus::Error));
+    assert_eq!(persisted.active_fire_slot, None);
+    assert_eq!(persisted.active_run_ref, None);
+    let failed_events = observer.failed_events();
+    assert_eq!(failed_events.len(), 1);
+    assert_eq!(
+        failed_events[0].fire.identity,
+        TriggerFireIdentity::for_source(
+            TriggerSourceKind::Manual,
+            tenant("tenant-a"),
+            trigger_id,
+            manual_slot,
+        )
+    );
+}
+
+#[tokio::test]
+async fn manual_fire_submits_the_manual_identity_for_the_claimed_slot() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZW").expect("ulid");
+    let manual_slot = ts(1_704_067_200);
+    repo.upsert_trigger(sample_record(
+        trigger_id,
+        tenant("tenant-a"),
+        manual_slot + chrono::Duration::hours(1),
+    ))
+    .await
+    .expect("insert");
+    let run_id = TurnRunId::new();
+    let submitter = Arc::new(RecordingSubmitter::with_outcomes(vec![Ok(
+        TrustedTriggerFireSubmitOutcome::Accepted {
+            run_id,
+            submitted_at: manual_slot,
+            turn_scope: test_turn_scope(),
+        },
+    )]));
+    let worker = worker(
+        repo,
+        Arc::new(RecordingMaterializer::success("content:manual-fire")),
+        submitter.clone(),
+        Arc::new(RecordingActiveRunLookup::default()),
+    );
+
+    assert_eq!(
+        worker
+            .run_manual_fire(tenant("tenant-a"), trigger_id, manual_slot)
+            .await
+            .expect("manual fire succeeds"),
+        TriggerManualFireOutcome::Submitted { run_id }
+    );
+    let requests = submitter.requests();
+    let submitted_identity = &requests.first().expect("one request").fire().identity;
+    assert_eq!(
+        submitted_identity,
+        &TriggerFireIdentity::for_source(
+            TriggerSourceKind::Manual,
+            tenant("tenant-a"),
+            trigger_id,
+            manual_slot,
+        )
+    );
+    assert_ne!(
+        submitted_identity,
+        &TriggerFireIdentity::new(tenant("tenant-a"), trigger_id, manual_slot)
+    );
 }
 
 #[tokio::test]
@@ -3007,6 +3172,8 @@ impl TriggerSourceProvider for NullSourceProvider {
     async fn evaluate(
         &self,
         _record: &TriggerRecord,
+        _fire_slot: Timestamp,
+        _source: TriggerSourceKind,
         _now: Timestamp,
     ) -> Result<Option<TriggerFire>, TriggerError> {
         Ok(None)
@@ -3018,6 +3185,8 @@ impl TriggerSourceProvider for NotFoundSourceProvider {
     async fn evaluate(
         &self,
         _record: &TriggerRecord,
+        _fire_slot: Timestamp,
+        _source: TriggerSourceKind,
         _now: Timestamp,
     ) -> Result<Option<TriggerFire>, TriggerError> {
         Err(TriggerError::NotFound)
@@ -3029,6 +3198,8 @@ impl TriggerSourceProvider for ErrorSourceProvider {
     async fn evaluate(
         &self,
         _record: &TriggerRecord,
+        _fire_slot: Timestamp,
+        _source: TriggerSourceKind,
         _now: Timestamp,
     ) -> Result<Option<TriggerFire>, TriggerError> {
         Err(self
@@ -4698,6 +4869,18 @@ impl TriggerRepository for ClaimRaceRepository {
     async fn claim_due_fire(
         &self,
         _request: ClaimDueFireRequest,
+    ) -> Result<ClaimDueFireOutcome, TriggerError> {
+        Ok(self
+            .claim_outcome
+            .lock()
+            .expect("claim outcome lock")
+            .take()
+            .expect("claim outcome configured"))
+    }
+
+    async fn claim_manual_fire(
+        &self,
+        _request: ClaimManualFireRequest,
     ) -> Result<ClaimDueFireOutcome, TriggerError> {
         Ok(self
             .claim_outcome

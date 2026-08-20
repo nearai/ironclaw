@@ -279,6 +279,15 @@ export function pauseAutomation({ automationId } = {}) {
   });
 }
 
+export function runAutomation({ automationId } = {}) {
+  if (!automationId) {
+    return Promise.reject(new Error("automationId is required"));
+  }
+  return apiFetch(`${V2_BASE}/automations/${encodeURIComponent(automationId)}/run`, {
+    method: "POST",
+  });
+}
+
 export function resumeAutomation({ automationId } = {}) {
   if (!automationId) {
     return Promise.reject(new Error("automationId is required"));

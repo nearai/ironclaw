@@ -482,6 +482,9 @@ SEL_V2 = {
     "automation_action_for": (
         "[data-testid='automation-action-button'][data-automation-id='{id}']"
     ),
+    "automation_run_now_for": (
+        "[data-testid='automation-run-now-button'][data-automation-id='{id}']"
+    ),
     "automation_delete_for": (
         "[data-testid='automation-delete-button'][data-automation-id='{id}']"
     ),

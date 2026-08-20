@@ -729,6 +729,7 @@ registerPack("hi", {
   // Automations page
   "automations.action.pause": "रोकें",
   "automations.action.resume": "फिर से शुरू करें",
+  "automations.action.runNow": "अभी चलाएं",
   "automations.eyebrow": "निर्धारित कार्य",
   "automations.title": "स्वचालन",
   "automations.description": "केवल अनुसूचित स्वचालन।",

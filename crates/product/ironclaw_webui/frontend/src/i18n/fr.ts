@@ -729,6 +729,7 @@ registerPack("fr", {
   // Automations page
   "automations.action.pause": "Mettre en pause",
   "automations.action.resume": "Reprendre",
+  "automations.action.runNow": "Exécuter maintenant",
   "automations.eyebrow": "Travail planifié",
   "automations.title": "Automatisations",
   "automations.description": "Automatisations planifiées uniquement.",

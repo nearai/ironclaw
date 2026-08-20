@@ -236,10 +236,11 @@ pub use ironclaw_product_contracts::product_wire::{
     RebornAccountBindingSource, RebornAttachmentBytes, RebornAttachmentRequest,
     RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
-    RebornChannelConnectAction, RebornCommandRejection, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornExecuteProductCommandRequest, RebornExtensionActionResponse,
+    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunMutationResult,
+    RebornAutomationRunMutationStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
+    RebornCommandRejection, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExecuteProductCommandRequest, RebornExtensionActionResponse,
     RebornExtensionCredentialSetup, RebornExtensionOnboardingPayload,
     RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
     RebornExtensionSetupField, RebornExtensionSetupSecret, RebornExtensionSurface,
@@ -426,6 +427,9 @@ pub const PROJECT_MEMBER_REMOVE_CAPABILITY: ProductCapabilityDescriptor =
 pub const AUTOMATION_PAUSE_CAPABILITY_ID: &str = "builtin.automation_pause";
 pub const AUTOMATION_PAUSE_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(AUTOMATION_PAUSE_CAPABILITY_ID);
+pub const AUTOMATION_RUN_CAPABILITY_ID: &str = "builtin.automation_run";
+pub const AUTOMATION_RUN_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(AUTOMATION_RUN_CAPABILITY_ID);
 pub const AUTOMATION_RESUME_CAPABILITY_ID: &str = "builtin.automation_resume";
 pub const AUTOMATION_RESUME_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(AUTOMATION_RESUME_CAPABILITY_ID);
@@ -549,6 +553,11 @@ pub const AUTOMATION_PAUSE_COMMAND: ProductSurfaceCommandDescriptor<
     RebornAutomationRequest,
     RebornAutomationMutationResponse,
 > = ProductSurfaceCommandDescriptor::new(AUTOMATION_PAUSE_COMMAND_ID);
+pub const AUTOMATION_RUN_COMMAND_ID: &str = "automation.run";
+pub const AUTOMATION_RUN_COMMAND: ProductSurfaceCommandDescriptor<
+    RebornAutomationRequest,
+    RebornAutomationMutationResponse,
+> = ProductSurfaceCommandDescriptor::new(AUTOMATION_RUN_COMMAND_ID);
 pub const AUTOMATION_RESUME_COMMAND_ID: &str = "automation.resume";
 pub const AUTOMATION_RESUME_COMMAND: ProductSurfaceCommandDescriptor<
     RebornAutomationRequest,
@@ -1162,6 +1171,14 @@ pub trait AutomationProductService: Send + Sync {
         Err(automation_unavailable())
     }
 
+    async fn run_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
+        Err(automation_unavailable())
+    }
+
     async fn resume_automation(
         &self,
         _caller: ProductAgentBoundCaller,
@@ -1242,6 +1259,14 @@ impl AutomationProductService for UnsupportedAutomationProductService {
     }
 
     async fn pause_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
+        Err(automation_unavailable())
+    }
+
+    async fn run_automation(
         &self,
         _caller: ProductAgentBoundCaller,
         _automation_id: String,
@@ -2349,6 +2374,19 @@ pub trait ProductCapabilityInvoker: Send + Sync {
         input: serde_json::Value,
         activity_id: ActivityId,
     ) -> Result<Resolution, ProductSurfaceError>;
+
+    /// Persist structured output produced by product-owned capability
+    /// handlers through the same durable result boundary as runtime-owned
+    /// capabilities.
+    async fn complete_product_result(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _output: serde_json::Value,
+        _activity_id: ActivityId,
+        _summary: &'static str,
+    ) -> Result<Resolution, ProductSurfaceError> {
+        Err(ProductSurfaceError::service_unavailable(false))
+    }
 }
 
 /// Fail-closed default for compositions that have not attached the product
@@ -3364,8 +3402,24 @@ where
         if let Some(operation) =
             product_capability_handlers::ProductCapabilityHandler::parse(&capability)
         {
-            let summary = operation.success_summary();
-            operation.invoke(self, caller, input).await?;
+            let completion_caller = caller.clone();
+            let run_result = operation.invoke(self, caller, input).await?;
+            let summary = match run_result.as_ref().map(|result| result.status) {
+                Some(RebornAutomationRunMutationStatus::Replayed) => {
+                    "automation run was already submitted"
+                }
+                Some(RebornAutomationRunMutationStatus::Submitted) | None => {
+                    operation.success_summary()
+                }
+            };
+            if let Some(run_result) = run_result {
+                let output =
+                    serde_json::to_value(run_result).map_err(ProductSurfaceError::internal_from)?;
+                return self
+                    .product_capability_invoker
+                    .complete_product_result(completion_caller, output, activity_id, summary)
+                    .await;
+            }
             return self.api_capability_success(activity_id, summary);
         }
         self.product_capability_invoker
@@ -5270,6 +5324,23 @@ where
         };
         self.automation_service
             .pause_automation(caller, automation_id)
+            .await
+    }
+
+    async fn run_automation(
+        &self,
+        caller: ProductSurfaceCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
+        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(ProductSurfaceError::from_status(
+                ProductSurfaceErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        self.automation_service
+            .run_automation(caller, automation_id)
             .await
     }
 

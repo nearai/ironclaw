@@ -729,6 +729,7 @@ registerPack("ko", {
   // Automations page
   "automations.action.pause": "일시정지",
   "automations.action.resume": "재개",
+  "automations.action.runNow": "지금 실행",
   "automations.eyebrow": "예정된 작업",
   "automations.title": "자동화",
   "automations.description": "예약된 자동화만 해당됩니다.",

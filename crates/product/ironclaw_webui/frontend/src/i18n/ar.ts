@@ -729,6 +729,7 @@ registerPack("ar", {
   // Automations page
   "automations.action.pause": "إيقاف مؤقت",
   "automations.action.resume": "استئناف",
+  "automations.action.runNow": "تشغيل الآن",
   "automations.eyebrow": "العمل المجدول",
   "automations.title": "الأتمتة",
   "automations.description": "الأتمتة المجدولة فقط.",

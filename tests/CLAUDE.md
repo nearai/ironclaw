@@ -340,7 +340,8 @@ unreachable from another: `reborn_agent_scope_isolation_parity.rs`,
 `reborn_trace_core_builtin_tools_parity.rs`, `reborn_trace_file_tools_parity.rs`,
 `reborn_trace_coding_read_tools_parity.rs`, `reborn_trace_error_path_parity.rs`,
 `reborn_trace_wasm_github_fixture_parity.rs`,
-`reborn_trace_first_party_tool_coverage.rs` (10),
+`reborn_trace_first_party_tool_coverage.rs` (10; including the product-triggered
+manual-run and scheduled-run denial evidence),
 `reborn_recorded_trace_parity.rs`, `reborn_minimal_dispatch_parity.rs`,
 `reborn_response_order_parity.rs`, `reborn_tool_param_coercion_parity.rs`,
 `reborn_approval_traces_parity.rs`, `reborn_turn_state_lock_free_submit_parity.rs`.
@@ -352,7 +353,7 @@ enums), `trace_format.rs`, `trace_llm_tests.rs`,
 
 ---
 
-## 6. Python E2E scenarios — `tests/e2e/scenarios/` (103 files, 1,144 tests)
+## 6. Python E2E scenarios — `tests/e2e/scenarios/` (102 files, 797 top-level tests)
 
 This is an exhaustive inventory, not a claim that every retained scenario is
 currently executable. Current Reborn coverage starts `ironclaw serve` through the
@@ -435,7 +436,7 @@ entries.
 ### 6.6 Automations, routines & projects
 | The user can… | Evidence |
 |---|---|
-| Create an automation through chat; rename, pause, resume, reload, and delete it through the UI with persisted API state; filter automations, retry failed runs, and dismiss error toasts | `test_reborn_webui_v2_smoke.py::test_reborn_v2_automation_lifecycle_persists_from_ui`, other automation tests in that file, `test_reborn_webui_v2_automation_trace_outbound_api.py` (4) |
+| Create an automation through chat; run it now, rename, pause, resume, reload, and delete it through the UI with persisted API state; disable run-now while a request is pending, a fire or run is active, a duplicate click is in flight, or the scheduler is off; keep the list visible while filtering; dismiss and clear safe mutation-error toasts; and open a failed run or its scoped logs | `test_reborn_webui_v2_smoke.py::test_reborn_v2_automation_lifecycle_persists_from_ui`, `…::test_reborn_v2_automation_run_now_respects_active_fire_and_scheduler`, `…::test_reborn_v2_automation_filter_keeps_list_visible_while_loading`, `…::test_reborn_v2_automation_action_error_toast_is_safe_dismissible_and_cleared_on_retry`, `…::test_reborn_v2_automation_failed_run_actions_are_clickable`, `test_reborn_webui_v2_automation_trace_outbound_api.py` (4) |
 | Create event-triggered routines, have them fire on match, respect cooldown, pause/resume | `test_routine_event_batch.py` (8) |
 | Run a full-job routine end-to-end with tools, trigger it manually, see failures in the UI | `test_routine_full_job.py` (3) |
 | Have routines run with injected OAuth credentials | `test_routine_oauth_credential_injection.py` (3) |

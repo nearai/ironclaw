@@ -728,6 +728,7 @@ registerPack("zh-CN", {
   // Automations page
   "automations.action.pause": "暂停",
   "automations.action.resume": "继续",
+  "automations.action.runNow": "立即运行",
   "automations.eyebrow": "自动化计划工作",
   "automations.title": "自动化清单选项",
   "automations.description": "当前页面主要用于浏览并展示系统的自动化以及对应的计划调度。",
