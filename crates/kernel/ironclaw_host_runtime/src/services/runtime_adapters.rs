@@ -474,7 +474,7 @@ where
                     kind: ironclaw_host_api::dispatch::DispatchFailureKind::Runtime(
                         RuntimeDispatchErrorKind::Client,
                     ),
-                    diagnostic: Some(rejection.diagnostic),
+                    diagnostic: Some(Box::new(rejection.diagnostic)),
                     detail: None,
                 },
                 error => DispatchError::Mcp {

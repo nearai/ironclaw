@@ -564,7 +564,7 @@ pub enum DispatchError {
     Rejected {
         runtime: Option<RuntimeKind>,
         kind: DispatchFailureKind,
-        diagnostic: Option<ProviderDiagnostic>,
+        diagnostic: Option<Box<ProviderDiagnostic>>,
         detail: Option<DispatchFailureDetail>,
     },
     /// MCP dispatch failure. `model_visible_cause` carries the raw backend cause —

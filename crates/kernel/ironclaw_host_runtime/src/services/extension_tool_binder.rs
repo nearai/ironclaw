@@ -197,7 +197,7 @@ pub(super) fn tool_error_from_dispatch(error: DispatchError) -> ToolError {
         } => ToolError::AuthRequired {
             required_secrets,
             credential_requirements,
-            model_visible_cause: model_visible_cause.map(|diagnostic| *diagnostic),
+            model_visible_cause,
         },
         DispatchError::Wasm {
             kind,

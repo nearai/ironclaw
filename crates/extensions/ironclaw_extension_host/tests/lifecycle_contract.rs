@@ -603,13 +603,13 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
             Err(ToolError::AuthRequired {
                 required_secrets: vec![SecretHandle::new("acme_token").unwrap()],
                 credential_requirements: Vec::new(),
-                model_visible_cause: Some(ProviderDiagnostic {
+                model_visible_cause: Some(Box::new(ProviderDiagnostic {
                     code: None,
                     message: Some(UntrustedProviderMessage::new(
                         "provider error code: github_api_error_status_401; provider message: Bad credentials",
                     )),
                     retry_after: None,
-                }),
+                })),
             })
         }
     }
@@ -702,11 +702,11 @@ async fn snapshot_resolver_preserves_typed_provider_rejection() {
             Err(ToolError::Rejected {
                 runtime: Some(RuntimeKind::Mcp),
                 kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client),
-                diagnostic: Some(ProviderDiagnostic {
+                diagnostic: Some(Box::new(ProviderDiagnostic {
                     code: Some(ProviderErrorCode::new("mcp_tool_rejected")),
                     message: Some(UntrustedProviderMessage::new("Bad credentials")),
                     retry_after: None,
-                }),
+                })),
                 detail: None,
             })
         }

@@ -418,7 +418,7 @@ pub struct RuntimeAuthGate {
     pub reason: RuntimeBlockedReason,
     pub required_secrets: Vec<SecretHandle>,
     pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
-    provider_diagnostic: Option<ProviderDiagnostic>,
+    provider_diagnostic: Option<Box<ProviderDiagnostic>>,
 }
 
 impl RuntimeAuthGate {
@@ -439,13 +439,13 @@ impl RuntimeAuthGate {
         }
     }
 
-    pub fn with_provider_diagnostic(mut self, diagnostic: Option<ProviderDiagnostic>) -> Self {
+    pub fn with_provider_diagnostic(mut self, diagnostic: Option<Box<ProviderDiagnostic>>) -> Self {
         self.provider_diagnostic = diagnostic;
         self
     }
 
     pub fn provider_diagnostic(&self) -> Option<&ProviderDiagnostic> {
-        self.provider_diagnostic.as_ref()
+        self.provider_diagnostic.as_deref()
     }
 }
 

@@ -181,7 +181,7 @@ fn tool_error_to_dispatch_error(
             capability: capability_id.clone(),
             required_secrets,
             credential_requirements,
-            model_visible_cause: model_visible_cause.map(Box::new),
+            model_visible_cause,
         },
         ToolError::Rejected {
             runtime,
@@ -426,11 +426,11 @@ mod tests {
             Err(ToolError::Rejected {
                 runtime: Some(RuntimeKind::FirstParty),
                 kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied),
-                diagnostic: Some(ProviderDiagnostic {
+                diagnostic: Some(Box::new(ProviderDiagnostic {
                     code: Some(ProviderErrorCode::new("channel_not_found")),
                     message: Some(UntrustedProviderMessage::new("no such channel")),
                     retry_after: None,
-                }),
+                })),
                 detail: None,
             })
         }

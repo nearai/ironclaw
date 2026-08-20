@@ -145,7 +145,7 @@ fn dispatch_error_for_tool_error(
             capability: capability_id.clone(),
             required_secrets,
             credential_requirements,
-            model_visible_cause: model_visible_cause.map(Box::new),
+            model_visible_cause,
         },
         ToolError::Rejected {
             runtime,

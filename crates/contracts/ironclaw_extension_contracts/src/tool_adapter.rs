@@ -77,7 +77,7 @@ pub enum ToolError {
         /// Raw provider rejection retained for the host's downstream
         /// model-diagnostic scrub/fence seam. Its `Debug` representation is
         /// redacted; never log or render it directly.
-        model_visible_cause: Option<ProviderDiagnostic>,
+        model_visible_cause: Option<Box<ProviderDiagnostic>>,
     },
     #[error("tool provider rejected invocation ({kind})")]
     Rejected {
@@ -85,7 +85,7 @@ pub enum ToolError {
         kind: DispatchFailureKind,
         /// Provider-authored metadata remains typed so its `Debug` output is
         /// redacted until the host's model-diagnostic scrub/fence seam.
-        diagnostic: Option<ProviderDiagnostic>,
+        diagnostic: Option<Box<ProviderDiagnostic>>,
         detail: Option<DispatchFailureDetail>,
     },
     #[error("tool invocation failed ({kind:?})")]
@@ -336,11 +336,11 @@ mod tests {
         let left = ToolError::AuthRequired {
             required_secrets: secrets.clone(),
             credential_requirements: Vec::new(),
-            model_visible_cause: Some(ProviderDiagnostic {
+            model_visible_cause: Some(Box::new(ProviderDiagnostic {
                 code: None,
                 message: None,
                 retry_after: None,
-            }),
+            })),
         };
         let right = ToolError::AuthRequired {
             required_secrets: secrets,
@@ -367,7 +367,10 @@ mod tests {
         assert_ne!(left, right);
     }
 
-    fn rejected(kind: DispatchFailureKind, diagnostic: Option<ProviderDiagnostic>) -> ToolError {
+    fn rejected(
+        kind: DispatchFailureKind,
+        diagnostic: Option<Box<ProviderDiagnostic>>,
+    ) -> ToolError {
         ToolError::Rejected {
             runtime: Some(RuntimeKind::FirstParty),
             kind,
@@ -394,11 +397,11 @@ mod tests {
         assert_ne!(
             rejected(
                 denied,
-                Some(ProviderDiagnostic {
+                Some(Box::new(ProviderDiagnostic {
                     code: None,
                     message: None,
                     retry_after: None,
-                })
+                }))
             ),
             rejected(denied, None),
             "differing diagnostic presence must break equality"

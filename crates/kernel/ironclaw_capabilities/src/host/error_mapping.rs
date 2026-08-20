@@ -315,7 +315,7 @@ pub(super) fn enrich_dispatch_error_credential_requirements(
                     kind: ironclaw_host_api::dispatch::DispatchFailureKind::Runtime(
                         ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::SecretDenied,
                     ),
-                    diagnostic: model_visible_cause.map(|diagnostic| *diagnostic),
+                    diagnostic: model_visible_cause,
                     detail: Some(
                         ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic {
                             text: format!(

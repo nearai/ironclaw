@@ -161,7 +161,7 @@ impl From<DispatchError> for CapabilityInvocationError {
                 ..
             } => Self::Dispatch {
                 kind,
-                provider_diagnostic: diagnostic.map(Box::new),
+                provider_diagnostic: diagnostic,
                 safe_summary: None,
                 detail,
             },
@@ -193,7 +193,7 @@ fn dispatch_error_kind(error: &DispatchError) -> DispatchFailureKind {
 fn dispatch_error_model_visible_cause(error: &DispatchError) -> Option<String> {
     match error {
         DispatchError::Rejected { diagnostic, .. } => diagnostic
-            .as_ref()
+            .as_deref()
             .and_then(provider_diagnostic_model_cause),
         DispatchError::Mcp {
             model_visible_cause,
@@ -323,7 +323,7 @@ mod tests {
         let error = CapabilityInvocationError::from(DispatchError::Rejected {
             runtime: Some(RuntimeKind::Mcp),
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client),
-            diagnostic: Some(ProviderDiagnostic {
+            diagnostic: Some(Box::new(ProviderDiagnostic {
                 code: Some(ironclaw_host_api::dispatch::ProviderErrorCode::new(
                     "mcp_tool_rejected",
                 )),
@@ -331,7 +331,7 @@ mod tests {
                     "token lacks repo scope",
                 )),
                 retry_after: None,
-            }),
+            })),
             detail: Some(DispatchFailureDetail::Diagnostic {
                 text: detail_marker.to_string(),
             }),

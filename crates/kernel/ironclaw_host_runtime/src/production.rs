@@ -1382,7 +1382,7 @@ pub(super) fn auth_required_outcome(
             required_secrets,
             credential_requirements,
         )
-        .with_provider_diagnostic(model_visible_cause.map(|diagnostic| *diagnostic)),
+        .with_provider_diagnostic(model_visible_cause),
     )
 }
 

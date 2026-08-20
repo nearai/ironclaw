@@ -225,13 +225,13 @@ fn binder_preserves_provider_rejection_across_the_tool_abi() {
         crate::services::extension_tool_binder::tool_error_from_dispatch(DispatchError::Rejected {
             runtime: Some(ironclaw_host_api::runtime::RuntimeKind::Mcp),
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client),
-            diagnostic: Some(ironclaw_host_api::dispatch::ProviderDiagnostic {
+            diagnostic: Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
                 code: Some(ProviderErrorCode::new("mcp_tool_rejected")),
                 message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
                     "Bad credentials",
                 )),
                 retry_after: None,
-            }),
+            })),
             detail: None,
         });
 
