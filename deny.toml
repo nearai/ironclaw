@@ -14,6 +14,11 @@ ignore = [
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
+    # h2 0.3 accepts unbounded empty DATA frames (low severity). The advisory
+    # is patched only in h2 0.4.16; h2 0.3.27 remains pinned by tonic 0.11
+    # through libsql 0.9.30. Remove this with the libsql/tonic dependency-cone
+    # upgrade rather than forcing an incompatible transitive version here.
+    "RUSTSEC-2026-0258",
     # rsa Marvin timing side-channel — test-only dependency used to mint
     # throwaway local OIDC JWT fixtures; no production network-observable
     # private-key operation is exposed by this dependency.
