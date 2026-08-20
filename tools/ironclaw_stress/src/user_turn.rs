@@ -867,6 +867,7 @@ where
         } = time_stage(
             &mut stages.submit_turn,
             turn_coordinator.submit_turn(SubmitTurnRequest {
+                subagent_activation_provenance: None,
                 scope: context.turn_scope.clone(),
                 actor: TurnActor::new(context.user_id.clone()),
                 accepted_message_ref: AcceptedMessageRef::new(accepted.message_id.to_string())
@@ -1060,6 +1061,7 @@ where
             let SubmitTurnResponse::Accepted { .. } = time_stage(
                 &mut stages.submit_turn,
                 turn_coordinator.submit_turn(SubmitTurnRequest {
+                    subagent_activation_provenance: None,
                     scope: context.turn_scope.clone(),
                     actor: TurnActor::new(context.user_id.clone()),
                     accepted_message_ref: AcceptedMessageRef::new(format!(
@@ -1163,6 +1165,7 @@ where
             let submit_result = time_stage(
                 &mut stages.submit_turn,
                 turn_coordinator.submit_turn(SubmitTurnRequest {
+                    subagent_activation_provenance: None,
                     scope: context.turn_scope.clone(),
                     actor: TurnActor::new(context.user_id.clone()),
                     accepted_message_ref: AcceptedMessageRef::new(accepted.message_id.to_string())

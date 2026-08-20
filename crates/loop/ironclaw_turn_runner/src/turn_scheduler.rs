@@ -497,6 +497,7 @@ mod tests {
             ThreadId::new("thread-scheduler-metadata").expect("thread"),
         );
         let claimed = ClaimedTurnRun {
+            subagent_activation_provenance: None,
             state: TurnRunState {
                 scope,
                 actor: None,

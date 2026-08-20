@@ -94,6 +94,21 @@ registerPack("en", {
   "chat.suggestion3": "Draft an extension readiness check",
   "chat.suggestion3Desc": "Verify setup, auth, pairing, and available capabilities.",
 
+  // Chat — OOBE suggestion cards (feature-gated first-run surface)
+  "chat.oobe.heading": "Suggested for you",
+  "chat.oobe.subtitle": "Approve to run",
+  "chat.oobe.showSuggestions": "Show suggestions",
+  "chat.oobe.hideSuggestions": "Hide suggestions",
+  "chat.oobe.from": "From {sources}",
+  "chat.oobe.dismiss": "Dismiss suggestion",
+  "chat.oobe.action.approve": "Approve",
+  "chat.oobe.action.openThread": "View in thread",
+  "chat.oobe.action.generate": "Suggest something for me",
+  "chat.oobe.action.tryAgain": "Try again",
+  "chat.oobe.status.starting": "Starting\u2026",
+  "chat.oobe.status.generating": "Finding things I can do for you\u2026",
+  "chat.oobe.status.generateFailed": "Couldn\u2019t generate suggestions",
+
   // Chat — input
   "chat.placeholder": "Message IronClaw...",
   "chat.heroPlaceholder": "Ask IronClaw anything.",

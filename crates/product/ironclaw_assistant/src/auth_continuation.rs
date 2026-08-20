@@ -920,6 +920,7 @@ mod tests {
         let actor = TurnActor::new(UserId::new("alice").unwrap());
         let submit = coordinator
             .submit_turn(SubmitTurnRequest {
+                subagent_activation_provenance: None,
                 scope: scope.clone(),
                 requested_model: None,
                 actor: actor.clone(),

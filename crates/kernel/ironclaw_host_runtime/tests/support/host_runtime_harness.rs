@@ -2257,6 +2257,7 @@ pub(crate) fn http_without_body_then_operation_failed_wat() -> String {
 
 pub(crate) fn submit_turn_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
     SubmitTurnRequest {
+        subagent_activation_provenance: None,
         requested_model: None,
         output_contract: None,
         scope: TurnScope::new(

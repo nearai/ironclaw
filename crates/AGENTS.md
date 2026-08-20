@@ -35,7 +35,7 @@ Do not eagerly load every crate guide. Route, then read.
 | [`contracts/`](./contracts/AGENTS.md) | Neutral vocabulary and ports — the leaf tier; nothing executes, persists, or names a vendor. | You are adding or changing a shared type, identity, port trait, or DTO that more than one tier must see. |
 | [`substrates/`](./substrates/AGENTS.md) | Privileged mechanisms the kernel mediates: filesystem, libSQL admission, secrets, network, safety scanning, observability macros. | You are changing storage/network/secret/scanning *mechanism*, not who may use it. |
 | [`events/`](./events/AGENTS.md) | What already happened: redacted evidence vocabulary, durable stores, replay-derived projections, admission-checked streams. | You are changing event vocabulary, event persistence, a read model, or stream delivery. |
-| [`domains/`](./domains/AGENTS.md) | Typed record/service owners behind the kernel: threads, conversations, triggers, memory, skills, auth, attachments, extractors, identity, llm, trace_commons, outbound, web_app. | You are changing a domain's record grammar, service contract, or invariants. |
+| [`domains/`](./domains/AGENTS.md) | Typed record/service owners behind the kernel: threads, conversations, triggers, memory, skills, auth, attachments, extractors, identity, llm, trace_commons, outbound, web_app, notifications. | You are changing a domain's record grammar, service contract, or invariants. |
 | [`kernel/`](./kernel/AGENTS.md) | The authority perimeter, one crate per mediation stage: trust → authorization → approvals → resources → runtime_policy → capabilities → processes → turns → host_runtime. | You are changing what is *allowed to happen* or how recovery stays safe. |
 | [`lanes/`](./lanes/AGENTS.md) | Execution for already-authorized work: wasm, wasm_limiter, mcp, sandbox. | You are changing how an approved invocation physically runs. |
 | [`loop/`](./loop/AGENTS.md) | Replaceable agent behavior and its hosting: agent_loop, loop_host, turn_runner, hooks. | You are changing what the agent decides next, or the drivers/port adapters that host it. |
@@ -92,17 +92,17 @@ files carry their members' exact layers.
 
 ## Workspace facts
 
-**67 packages**: 65 under `crates/`, plus the root package
+**68 packages**: 66 under `crates/`, plus the root package
 `ironclaw_integration_tests` (the in-process Reborn integration suite,
 `tests/integration/`) and `tools/ironclaw_stress`. One documented exclusion:
 `tools/ironclaw_silk_decoder`, a standalone helper that is
 workspace-`exclude`d. Zero crates sit flat under `crates/` and zero owned
 placement exceptions remain. The gate is
 `python3 scripts/ci/check-target-tree.py`, which compares the workspace
-against the documented tree (PROPOSAL §5); on 2026-08-05 it reports:
-`target tree: OK (67 workspace members against 67 documented packages, 1
-documented exclusion(s), 0 owned exception(s))` (re-derived 2026-08-08 with the
-web-app channel's two crates).
+against the documented tree (PROPOSAL §5); on 2026-08-18 it reports:
+`target tree: OK (68 workspace members against 68 documented packages, 1
+documented exclusion(s), 0 owned exception(s))` (re-derived after adding the
+notification inbox crate).
 
 Under `crates/extensions/packages/`, 15 package directories: 5 are workspace
 crates (`slack`, `telegram`, `web-app`, `memory-native`, `mem0`) and 10 are data-only

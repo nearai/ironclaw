@@ -89,6 +89,20 @@ registerPack("de", {
   "chat.suggestion2Desc": "Nach Korrektheitsrisiken, blockierten Freigaben und Follow-ups suchen.",
   "chat.suggestion3": "Extension‑Readiness‑Check entwerfen",
   "chat.suggestion3Desc": "Setup, Authentifizierung, Pairing und verfuegbare Funktionen pruefen.",
+  // Chat — OOBE suggestion cards (English placeholder; localized in a later slice)
+  "chat.oobe.heading": "Suggested for you",
+  "chat.oobe.subtitle": "Approve to run",
+  "chat.oobe.showSuggestions": "Show suggestions",
+  "chat.oobe.hideSuggestions": "Hide suggestions",
+  "chat.oobe.from": "From {sources}",
+  "chat.oobe.dismiss": "Dismiss suggestion",
+  "chat.oobe.action.approve": "Approve",
+  "chat.oobe.action.openThread": "View in thread",
+  "chat.oobe.action.generate": "Suggest something for me",
+  "chat.oobe.action.tryAgain": "Try again",
+  "chat.oobe.status.starting": "Starting\u2026",
+  "chat.oobe.status.generating": "Finding things I can do for you\u2026",
+  "chat.oobe.status.generateFailed": "Couldn\u2019t generate suggestions",
 
   // Chat — input
   "chat.placeholder": "Nachricht an IronClaw…",

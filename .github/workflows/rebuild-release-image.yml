@@ -19,6 +19,7 @@ jobs:
   build:
     name: Rebuild Historical Image
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     permissions:
       actions: write
       contents: read

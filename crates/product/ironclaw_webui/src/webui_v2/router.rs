@@ -21,22 +21,24 @@ use crate::webui_v2::descriptors::{
     WEBUI_V2_PATTERN_ADMIN_THREAD_SCRAPE_THREADS, WEBUI_V2_PATTERN_ADMIN_USER,
     WEBUI_V2_PATTERN_ADMIN_USER_ROLE, WEBUI_V2_PATTERN_ADMIN_USER_SECRET,
     WEBUI_V2_PATTERN_ADMIN_USER_SECRETS, WEBUI_V2_PATTERN_ADMIN_USER_STATUS,
-    WEBUI_V2_PATTERN_ADMIN_USERS, WEBUI_V2_PATTERN_AUTOMATION_DETAIL,
-    WEBUI_V2_PATTERN_BROWSE_FS_DIR, WEBUI_V2_PATTERN_CANCEL_RUN,
-    WEBUI_V2_PATTERN_COMPLETE_NEARAI_WALLET_LOGIN, WEBUI_V2_PATTERN_CREATE_THREAD,
-    WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER, WEBUI_V2_PATTERN_DELETE_THREAD,
-    WEBUI_V2_PATTERN_EXECUTE_COMMAND, WEBUI_V2_PATTERN_GET_ATTACHMENT,
-    WEBUI_V2_PATTERN_GET_LLM_CONFIG, WEBUI_V2_PATTERN_GET_RUN_ARTIFACT,
-    WEBUI_V2_PATTERN_GET_SESSION, WEBUI_V2_PATTERN_GET_THREAD_ARTIFACT,
-    WEBUI_V2_PATTERN_GET_TIMELINE, WEBUI_V2_PATTERN_IMPORT_EXTENSION,
-    WEBUI_V2_PATTERN_INSPECTOR_PROMPT, WEBUI_V2_PATTERN_INSPECTOR_SNAPSHOT,
-    WEBUI_V2_PATTERN_INSPECTOR_TOOL, WEBUI_V2_PATTERN_INSPECTOR_UPDATES,
-    WEBUI_V2_PATTERN_INSTALL_EXTENSION, WEBUI_V2_PATTERN_INSTALL_SKILL,
-    WEBUI_V2_PATTERN_IRONHUB_DELIVER_INSTALL, WEBUI_V2_PATTERN_LIST_AUTOMATIONS,
-    WEBUI_V2_PATTERN_LIST_COMMANDS, WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,
-    WEBUI_V2_PATTERN_LIST_EXTENSIONS, WEBUI_V2_PATTERN_LIST_FS_MOUNTS,
-    WEBUI_V2_PATTERN_LIST_LLM_MODELS, WEBUI_V2_PATTERN_LIST_PROJECT_FILES,
+    WEBUI_V2_PATTERN_ADMIN_USERS, WEBUI_V2_PATTERN_ARCHIVE_NOTIFICATION,
+    WEBUI_V2_PATTERN_AUTOMATION_DETAIL, WEBUI_V2_PATTERN_BROWSE_FS_DIR,
+    WEBUI_V2_PATTERN_CANCEL_RUN, WEBUI_V2_PATTERN_COMPLETE_NEARAI_WALLET_LOGIN,
+    WEBUI_V2_PATTERN_CREATE_THREAD, WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER,
+    WEBUI_V2_PATTERN_DELETE_THREAD, WEBUI_V2_PATTERN_EXECUTE_COMMAND,
+    WEBUI_V2_PATTERN_GET_ATTACHMENT, WEBUI_V2_PATTERN_GET_LLM_CONFIG,
+    WEBUI_V2_PATTERN_GET_RUN_ARTIFACT, WEBUI_V2_PATTERN_GET_SESSION,
+    WEBUI_V2_PATTERN_GET_THREAD_ARTIFACT, WEBUI_V2_PATTERN_GET_TIMELINE,
+    WEBUI_V2_PATTERN_IMPORT_EXTENSION, WEBUI_V2_PATTERN_INSPECTOR_PROMPT,
+    WEBUI_V2_PATTERN_INSPECTOR_SNAPSHOT, WEBUI_V2_PATTERN_INSPECTOR_TOOL,
+    WEBUI_V2_PATTERN_INSPECTOR_UPDATES, WEBUI_V2_PATTERN_INSTALL_EXTENSION,
+    WEBUI_V2_PATTERN_INSTALL_SKILL, WEBUI_V2_PATTERN_IRONHUB_DELIVER_INSTALL,
+    WEBUI_V2_PATTERN_LIST_AUTOMATIONS, WEBUI_V2_PATTERN_LIST_COMMANDS,
+    WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY, WEBUI_V2_PATTERN_LIST_EXTENSIONS,
+    WEBUI_V2_PATTERN_LIST_FS_MOUNTS, WEBUI_V2_PATTERN_LIST_LLM_MODELS,
+    WEBUI_V2_PATTERN_LIST_NOTIFICATIONS, WEBUI_V2_PATTERN_LIST_PROJECT_FILES,
     WEBUI_V2_PATTERN_LIST_PROJECTS, WEBUI_V2_PATTERN_LIST_SKILLS, WEBUI_V2_PATTERN_LOGS,
+    WEBUI_V2_PATTERN_MARK_ALL_NOTIFICATIONS_READ, WEBUI_V2_PATTERN_MARK_NOTIFICATION_READ,
     WEBUI_V2_PATTERN_NOTIFICATION_CHANNELS, WEBUI_V2_PATTERN_NOTIFICATION_SETUP_DISABLE,
     WEBUI_V2_PATTERN_NOTIFICATION_SETUP_ENABLE, WEBUI_V2_PATTERN_NOTIFICATION_SETUP_STATUS,
     WEBUI_V2_PATTERN_OPERATOR_CONFIG, WEBUI_V2_PATTERN_OPERATOR_CONFIG_KEY,
@@ -108,6 +110,7 @@ pub struct WebUiV2State {
     services: Arc<dyn ProductSurface>,
     sse_capacity: Arc<SseCapacity>,
     reborn_projects_enabled: bool,
+    oobe_suggestions_enabled: bool,
     workspace_requires_scoped_projection: bool,
     regression_artifact_export_enabled: bool,
     admin_thread_scrape_enabled: bool,
@@ -128,6 +131,7 @@ impl WebUiV2State {
             services,
             sse_capacity: Arc::new(SseCapacity::new(max_concurrent_streams_per_caller)),
             reborn_projects_enabled: false,
+            oobe_suggestions_enabled: false,
             workspace_requires_scoped_projection: false,
             regression_artifact_export_enabled: false,
             admin_thread_scrape_enabled: false,
@@ -159,6 +163,19 @@ impl WebUiV2State {
 
     pub fn reborn_projects_enabled(&self) -> bool {
         self.reborn_projects_enabled
+    }
+
+    /// Deployment gate for the OOBE first-run suggestion surface. Off by
+    /// default while the surface is still being finished; host composition
+    /// reads the `IRONCLAW_OOBE_SUGGESTIONS` env flag and feeds it here, and
+    /// the browser learns it from `GET /session`'s `features.oobe_suggestions`.
+    pub fn with_oobe_suggestions_enabled(mut self, enabled: bool) -> Self {
+        self.oobe_suggestions_enabled = enabled;
+        self
+    }
+
+    pub fn oobe_suggestions_enabled(&self) -> bool {
+        self.oobe_suggestions_enabled
     }
 
     /// Deployment gate for WebUI workspace fallback behavior. Hosted
@@ -237,6 +254,22 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         .route(
             WEBUI_V2_PATTERN_CREATE_THREAD,
             post(handlers::create_thread).get(handlers::list_threads),
+        )
+        .route(
+            WEBUI_V2_PATTERN_LIST_NOTIFICATIONS,
+            get(handlers::list_notifications),
+        )
+        .route(
+            WEBUI_V2_PATTERN_MARK_NOTIFICATION_READ,
+            post(handlers::mark_notification_read),
+        )
+        .route(
+            WEBUI_V2_PATTERN_MARK_ALL_NOTIFICATIONS_READ,
+            post(handlers::mark_all_notifications_read),
+        )
+        .route(
+            WEBUI_V2_PATTERN_ARCHIVE_NOTIFICATION,
+            post(handlers::archive_notification),
         )
         .route(
             WEBUI_V2_PATTERN_DELETE_THREAD,

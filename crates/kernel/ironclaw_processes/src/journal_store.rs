@@ -733,6 +733,24 @@ where
         snapshots.sort_by_key(|snapshot| snapshot.process_id.as_uuid());
         Ok(snapshots)
     }
+
+    async fn recent_agent_turn_snapshots(
+        &self,
+        scope: &ResourceScope,
+        limit: u32,
+    ) -> Result<Vec<JournaledProcessSnapshot>, Self::Error> {
+        self.ensure_materialized().await?;
+        // `is_system()`, not `== ResourceScope::system()`: the constructor
+        // mints a fresh `invocation_id` on every call, so an equality check
+        // against it can never match and the guard would be dead.
+        if scope.is_system() {
+            return Err(ProcessJournalStoreError::InvalidRequest(
+                "system-wide process snapshot reads are unbounded; use paged process journal reads"
+                    .to_string(),
+            ));
+        }
+        rows::recent_agent_turn_processes_for_scope(self.filesystem.as_ref(), scope, limit).await
+    }
 }
 
 #[async_trait]

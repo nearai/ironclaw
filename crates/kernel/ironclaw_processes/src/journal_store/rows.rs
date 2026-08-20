@@ -710,6 +710,80 @@ where
     decode_process_rows(&rows)
 }
 
+/// Newest-first, bounded read of one scope's `AgentTurn` processes.
+///
+/// `process_scope_v3` is keyed on `(scope_key, created_at, process_id)` and
+/// deliberately not on `process_kind`, while a thread's scope also holds
+/// capability-invocation processes. A flat `LIMIT` could therefore be
+/// satisfied entirely by non-`AgentTurn` rows, so this walks the descending
+/// keyset a page at a time and filters by kind in memory until it has `limit`
+/// agent-turn rows.
+///
+/// Bounded by `MAX_RECENT_PROCESS_PAGES` rather than walking a scope's whole
+/// history: a thread whose newest ~8 pages hold no agent-turn run returns a
+/// short window. The only caller is the derived activation-streak cap, which
+/// treats a short window as "streak not established" — the same disposition it
+/// gives a genuinely young thread.
+pub(super) async fn recent_agent_turn_processes_for_scope<F>(
+    filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
+    limit: u32,
+) -> Result<Vec<JournaledProcessSnapshot>, ProcessJournalStoreError>
+where
+    F: RootFilesystem,
+{
+    const MAX_RECENT_PROCESS_PAGES: u32 = 8;
+
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let prefix = scoped_path(&format!("{MATERIALIZED_PREFIX}/process"))?;
+    let filter = eq_value("scope_key", IndexValue::Text(scope_owner_key(scope)?))?;
+    // Over-fetch per page so a scope interleaving capability-invocation
+    // processes with its runs still makes progress on every round trip.
+    let page_limit = limit.saturating_mul(4).clamp(1, Page::MAX_LIMIT);
+
+    let mut collected: Vec<JournaledProcessSnapshot> = Vec::new();
+    let mut cursor: Option<ironclaw_filesystem::OrderedQueryCursor> = None;
+    for _ in 0..MAX_RECENT_PROCESS_PAGES {
+        let mut page = ironclaw_filesystem::OrderedPage::new(
+            index_name("process_scope_v3")?,
+            index_key("created_at")?,
+            index_key("process_id")?,
+            SortDirection::Descending,
+            page_limit,
+        );
+        if let Some(cursor) = cursor.clone() {
+            page = page.after(cursor);
+        }
+        let rows = filesystem
+            .query_ordered(&ResourceScope::system(), &prefix, &filter, &page)
+            .await?;
+        let exhausted = (rows.len() as u32) < page_limit;
+        let snapshots = decode_process_rows(&rows)?;
+        let Some(last) = snapshots.last() else {
+            // Every row in this page decoded away (tombstones); without a
+            // decodable row there is no cursor to advance past, so stop rather
+            // than re-reading the same page.
+            break;
+        };
+        cursor = Some(ironclaw_filesystem::OrderedQueryCursor {
+            value: IndexValue::I64(last.created_at.timestamp_micros()),
+            tie_breaker: IndexValue::Text(last.process_id.as_uuid().to_string()),
+        });
+        collected.extend(
+            snapshots
+                .into_iter()
+                .filter(|snapshot| snapshot.process_kind == ProcessKind::AgentTurn),
+        );
+        if collected.len() >= limit as usize || exhausted {
+            break;
+        }
+    }
+    collected.truncate(limit as usize);
+    Ok(collected)
+}
+
 pub(super) async fn child_processes<F>(
     filesystem: &ScopedFilesystem<F>,
     parent_process_id: ProcessId,

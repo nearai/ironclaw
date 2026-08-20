@@ -6,6 +6,7 @@
 //! transition APIs are intentionally not re-exported from this crate prelude.
 #![warn(unreachable_pub)]
 
+mod activation_streak;
 mod admission;
 mod agent_turn_runtime;
 mod checkpoint_state;
@@ -23,6 +24,9 @@ mod status;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
+pub use activation_streak::{
+    SYSTEM_WAKE_STREAK_CAP, SYSTEM_WAKE_WINDOW_OVERFETCH, system_wake_admitted,
+};
 pub use admission::{
     AllowAllTurnAdmissionLimitProvider, StaticTurnAdmissionLimitProvider, TurnAdmissionAxisKind,
     TurnAdmissionBucket, TurnAdmissionBucketKind, TurnAdmissionBucketScope,
@@ -62,13 +66,13 @@ pub use external_tool_catalog::{
 // `ironclaw_host_api` directly — see this crate's CLAUDE.md.
 pub use host_managed_ports::{HostManagedLoopModelPort, HostManagedLoopPromptPort};
 pub use ironclaw_host_api::turn::{
-    AcceptedMessageRef, BlockedReason, CapabilityActivityId, EventCursor, GateKind,
-    GateResumeDisposition, IdempotencyKey, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef,
-    ModelInvalidOutputDetailReason, ProductTurnContext, ReplyTargetBindingRef, RunOriginAdapter,
-    RunProfileId, RunProfileRequest, RunProfileVersion, SanitizedCancelReason, SanitizedFailure,
-    SourceBindingRef, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnExecutionOutcome,
-    TurnGateRef, TurnId, TurnLeaseToken, TurnOriginKind, TurnOwner, TurnRunId, TurnRunnerId,
-    TurnScope, TurnStatus, TurnSurfaceType,
+    AcceptedMessageRef, ActivationProvenance, BlockedReason, CapabilityActivityId, EventCursor,
+    GateKind, GateResumeDisposition, IdempotencyKey, LoopExitId, LoopGateRef, LoopMessageRef,
+    LoopResultRef, ModelInvalidOutputDetailReason, ProductTurnContext, ReplyTargetBindingRef,
+    RunOriginAdapter, RunProfileId, RunProfileRequest, RunProfileVersion, SanitizedCancelReason,
+    SanitizedFailure, SourceBindingRef, SubmitTurnResponse, TurnActor, TurnCheckpointId,
+    TurnExecutionOutcome, TurnGateRef, TurnId, TurnLeaseToken, TurnOriginKind, TurnOwner,
+    TurnRunId, TurnRunnerId, TurnScope, TurnStatus, TurnSurfaceType,
 };
 pub use loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
@@ -82,8 +86,8 @@ pub use process_projection::{
     claimed_turn_run_from_process_claim, turn_run_state_from_process_snapshot,
 };
 pub use request::{
-    CancelRunRequest, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
-    RetryTurnRequest, SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,
+    ActivateThreadRequest, CancelRunRequest, GetRunStateRequest, ResumeTurnPrecondition,
+    ResumeTurnRequest, RetryTurnRequest, SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,
 };
 pub use response::{CancelRunResponse, ResumeTurnResponse, RetryTurnResponse, ThreadBusy};
 pub use status::{

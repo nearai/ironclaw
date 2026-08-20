@@ -50,7 +50,7 @@ jobs:
           install_dir="${RUNNER_TEMP}/codebase-memory-mcp-bin"
           archive="${RUNNER_TEMP}/${CBM_ARCHIVE}"
           mkdir -p "${install_dir}"
-          curl --proto '=https' --tlsv1.2 -fsSLo "${archive}" \
+          curl --proto '=https' --tlsv1.2 --max-time 300 -fsSLo "${archive}" \
             "https://github.com/DeusData/codebase-memory-mcp/releases/download/${CBM_VERSION}/${CBM_ARCHIVE}"
           echo "${CBM_SHA256}  ${archive}" | sha256sum --check --strict
           tar -xzf "${archive}" -C "${install_dir}" codebase-memory-mcp

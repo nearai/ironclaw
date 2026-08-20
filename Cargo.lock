@@ -3814,6 +3814,7 @@ dependencies = [
  "ironclaw_loop_contracts",
  "ironclaw_loop_host",
  "ironclaw_memory",
+ "ironclaw_notifications",
  "ironclaw_outbound",
  "ironclaw_processes",
  "ironclaw_product_contracts",
@@ -4007,6 +4008,7 @@ dependencies = [
  "ironclaw_memory_mem0",
  "ironclaw_memory_native",
  "ironclaw_network",
+ "ironclaw_notifications",
  "ironclaw_observability",
  "ironclaw_openai_compat",
  "ironclaw_operator",
@@ -4847,6 +4849,24 @@ dependencies = [
  "tracing",
  "url",
  "zeroize",
+]
+
+[[package]]
+name = "ironclaw_notifications"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "hex",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "libsql",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

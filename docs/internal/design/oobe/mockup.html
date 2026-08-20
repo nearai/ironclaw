@@ -1,0 +1,1255 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IronClaw · OOBE First-Run — Design Mockup</title>
+<style>
+/* ============================================================
+   IronClaw webui_v2 tokens (verbatim from styles/app.css)
+   Light is the app default; dark is the full override.
+   ============================================================ */
+:root{
+  --font-sans:"Geist","Inter","SF Pro Display","Helvetica Neue",ui-sans-serif,system-ui,sans-serif;
+  --font-serif:"Newsreader","Lyon Text","Instrument Serif",georgia,serif;
+  --font-mono:"Geist Mono","SF Mono","JetBrains Mono",ui-monospace,monospace;
+  --near-blue:#0091fd; /* NEAR AI primary brand blue (near.ai/brand) */
+
+  --v2-canvas:#f4f7fb; --v2-canvas-strong:#ffffff;
+  --v2-surface:#ffffff; --v2-surface-soft:#eef4fa; --v2-surface-muted:#e4edf5;
+  --v2-card-bg:rgba(255,255,255,0.92); --v2-card-border:rgba(19,45,68,0.12);
+  --v2-card-shadow:0 1px 2px rgba(19,45,68,0.06),0 12px 32px rgba(19,45,68,0.06);
+  --v2-panel-border:rgba(19,45,68,0.12); --v2-rail:#edf3f8; --v2-input-bg:#ffffff;
+  --v2-text:#243244; --v2-text-strong:#0f1720; --v2-text-muted:#5f7183; --v2-text-faint:#8a9aab;
+  --v2-accent:#2e9de2; --v2-accent-strong:#1678bd; --v2-accent-soft:rgba(76,167,230,0.12); --v2-accent-text:#10649e;
+  --v2-positive-soft:rgba(32,210,154,0.13); --v2-positive-text:#087a5d;
+  --v2-warning-soft:rgba(245,193,91,0.18); --v2-warning-text:#8b5b00;
+  --v2-danger-soft:rgba(255,100,128,0.12); --v2-danger-text:#b42342;
+  --v2-info-soft:rgba(76,167,230,0.12); --v2-info-text:#146fae;
+  --shadow-pop:0 18px 48px rgba(19,45,68,0.16);
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --v2-canvas:#111114; --v2-canvas-strong:#0d0d10;
+    --v2-surface:#1b1b1f; --v2-surface-soft:rgba(255,255,255,0.03); --v2-surface-muted:rgba(255,255,255,0.07);
+    --v2-card-bg:#1b1b1f; --v2-card-border:rgba(255,255,255,0.06);
+    --v2-card-shadow:0 10px 30px rgba(0,0,0,0.18);
+    --v2-panel-border:rgba(255,255,255,0.1); --v2-rail:#151519; --v2-input-bg:#151519;
+    --v2-text:rgba(255,255,255,0.82); --v2-text-strong:#ffffff; --v2-text-muted:rgba(255,255,255,0.6); --v2-text-faint:rgba(255,255,255,0.45);
+    --v2-accent:#4ca7e6; --v2-accent-strong:#2882c8; --v2-accent-soft:rgba(76,167,230,0.14); --v2-accent-text:#8fc8f2;
+    --v2-positive-text:#20d29a; --v2-warning-text:#f5c15b; --v2-danger-text:#ff6480; --v2-info-text:#8fc8f2;
+    --shadow-pop:0 24px 60px rgba(0,0,0,0.5);
+  }
+}
+:root[data-theme="dark"]{
+  --v2-canvas:#111114; --v2-canvas-strong:#0d0d10;
+  --v2-surface:#1b1b1f; --v2-surface-soft:rgba(255,255,255,0.03); --v2-surface-muted:rgba(255,255,255,0.07);
+  --v2-card-bg:#1b1b1f; --v2-card-border:rgba(255,255,255,0.06);
+  --v2-card-shadow:0 10px 30px rgba(0,0,0,0.18);
+  --v2-panel-border:rgba(255,255,255,0.1); --v2-rail:#151519; --v2-input-bg:#151519;
+  --v2-text:rgba(255,255,255,0.82); --v2-text-strong:#ffffff; --v2-text-muted:rgba(255,255,255,0.6); --v2-text-faint:rgba(255,255,255,0.45);
+  --v2-accent:#4ca7e6; --v2-accent-strong:#2882c8; --v2-accent-soft:rgba(76,167,230,0.14); --v2-accent-text:#8fc8f2;
+  --v2-positive-text:#20d29a; --v2-warning-text:#f5c15b; --v2-danger-text:#ff6480; --v2-info-text:#8fc8f2;
+  --shadow-pop:0 24px 60px rgba(0,0,0,0.5);
+}
+:root[data-theme="light"]{
+  --v2-canvas:#f4f7fb; --v2-canvas-strong:#ffffff;
+  --v2-surface:#ffffff; --v2-surface-soft:#eef4fa; --v2-surface-muted:#e4edf5;
+  --v2-card-bg:rgba(255,255,255,0.92); --v2-card-border:rgba(19,45,68,0.12);
+  --v2-card-shadow:0 1px 2px rgba(19,45,68,0.06),0 12px 32px rgba(19,45,68,0.06);
+  --v2-panel-border:rgba(19,45,68,0.12); --v2-rail:#edf3f8; --v2-input-bg:#ffffff;
+  --v2-text:#243244; --v2-text-strong:#0f1720; --v2-text-muted:#5f7183; --v2-text-faint:#8a9aab;
+  --v2-accent:#2e9de2; --v2-accent-strong:#1678bd; --v2-accent-soft:rgba(76,167,230,0.12); --v2-accent-text:#10649e;
+  --v2-positive-text:#087a5d; --v2-warning-text:#8b5b00; --v2-danger-text:#b42342; --v2-info-text:#146fae;
+  --shadow-pop:0 18px 48px rgba(19,45,68,0.16);
+}
+
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  font-family:var(--font-sans);
+  background:var(--v2-canvas);
+  color:var(--v2-text);
+  line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+  padding:clamp(14px,3vw,34px);
+}
+h1,h2,h3,p{margin:0}
+.wrap{max-width:1180px;margin:0 auto}
+
+/* ---------- deliverable chrome ---------- */
+.masthead{display:flex;flex-wrap:wrap;gap:20px;align-items:flex-end;justify-content:space-between;margin-bottom:20px}
+.eyebrow{font-family:var(--font-mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--v2-accent-text);margin-bottom:10px}
+.title{font-family:var(--font-serif);font-weight:560;font-size:clamp(27px,4vw,42px);line-height:1.05;letter-spacing:-.01em;color:var(--v2-text-strong);text-wrap:balance;max-width:20ch}
+.lede{margin-top:12px;max-width:70ch;color:var(--v2-text-muted);font-size:15px;line-height:1.6}
+.lede code{font-family:var(--font-mono);font-size:13px}
+
+/* ---------- controls ---------- */
+.toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:22px 0 12px}
+.seg{display:inline-flex;background:var(--v2-surface-soft);border:1px solid var(--v2-panel-border);border-radius:12px;padding:3px;gap:2px}
+.seg button{font:inherit;font-size:13px;font-weight:560;color:var(--v2-text-muted);background:transparent;border:0;padding:7px 14px;border-radius:9px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--v2-surface);color:var(--v2-text-strong);box-shadow:var(--v2-card-shadow)}
+.seg.primary button[aria-pressed="true"]{color:var(--v2-accent-text)}
+.seg .seglbl{font-family:var(--font-mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--v2-text-faint);align-self:center;padding:0 8px 0 4px}
+.frcontrols{display:flex;flex-wrap:wrap;align-items:center;gap:10px;flex:1 1 auto}
+.frcontrols.hide{display:none}
+.btn{font:inherit;font-size:13px;font-weight:560;display:inline-flex;align-items:center;gap:7px;padding:8px 14px;border-radius:11px;cursor:pointer;border:1px solid var(--v2-panel-border);background:var(--v2-surface);color:var(--v2-text-strong)}
+.btn:hover{border-color:var(--v2-accent)}
+.btn.primary{color:#fff;border:1px solid rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%)}
+.btn.primary:hover{background:radial-gradient(ellipse 200% 220% at 50% 110%,#5BBAF5 0%,#2882c8 60%)}
+.btn svg{width:16px;height:16px}
+.scrub{display:flex;align-items:center;gap:9px;flex:1 1 200px;min-width:180px}
+.track{position:relative;flex:1;height:5px;border-radius:999px;background:var(--v2-surface-muted);overflow:hidden}
+.track > i{position:absolute;inset:0 auto 0 0;width:0;background:var(--v2-accent);border-radius:999px;transition:width .25s ease}
+.beatlbl{font-family:var(--font-mono);font-size:11px;color:var(--v2-text-faint);white-space:nowrap;font-variant-numeric:tabular-nums}
+
+/* ---------- legend ---------- */
+.legend{display:flex;flex-wrap:wrap;gap:8px 16px;margin:4px 0 16px;font-size:12.5px;color:var(--v2-text-muted)}
+.legend b{font-weight:560;color:var(--v2-text)}
+.tag{font-family:var(--font-mono);font-size:10px;letter-spacing:.09em;text-transform:uppercase;padding:3px 7px;border-radius:999px;white-space:nowrap;font-weight:600;border:1px solid transparent}
+.tag.ship{color:var(--v2-positive-text);background:var(--v2-positive-soft)}
+.tag.recompose{color:var(--v2-info-text);background:var(--v2-info-soft)}
+.tag.newevt{color:var(--v2-warning-text);background:var(--v2-warning-soft)}
+.tag.native{color:var(--v2-accent-text);background:var(--v2-accent-soft);border-color:color-mix(in srgb,var(--v2-accent) 40%,transparent)}
+
+/* per-scene caption above the device */
+.beatcap{display:flex;align-items:baseline;gap:10px;margin:2px 0 12px;min-height:22px}
+.beatcap .n{font-family:var(--font-mono);font-size:11px;color:var(--v2-text-faint);white-space:nowrap}
+.beatcap .c{font-size:13.5px;color:var(--v2-text-muted)}
+.beatcap .c b{color:var(--v2-text-strong);font-weight:600}
+
+/* ============================================================
+   Landing device (faithful to webui_v2 chat)
+   ============================================================ */
+.device{position:relative;border:1px solid var(--v2-panel-border);border-radius:22px;background:var(--v2-canvas-strong);overflow:hidden;box-shadow:var(--v2-card-shadow);display:flex;flex-direction:column;min-height:0}
+.topbar{display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--v2-panel-border);background:var(--v2-surface)}
+.topbar .brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13.5px;color:var(--v2-text-strong)}
+.topbar .brand .logo{width:20px;height:20px;color:var(--near-blue)}
+.topbar .newchat{margin-left:6px;display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--v2-text-muted);border:1px solid var(--v2-panel-border);border-radius:9px;padding:5px 9px}
+.topbar .newchat svg{width:13px;height:13px}
+.topbar .who{margin-left:auto;display:flex;align-items:center;gap:9px}
+.topbar .who .av{width:26px;height:26px;border-radius:999px;background:var(--v2-accent-soft);color:var(--v2-accent-text);display:grid;place-items:center;font-size:11px;font-weight:700}
+.topbar .who .nm{font-size:12.5px;color:var(--v2-text-muted)}
+
+/* scenes */
+.scene{display:none}
+.scene.on{display:flex;flex-direction:column}
+
+/* first-run landing canvas */
+.landing{background:var(--v2-canvas);padding:26px 22px 22px;align-items:center;min-height:520px}
+.stagearea{width:100%;max-width:720px;margin:auto;display:flex;flex-direction:column;align-items:center}
+.hero{text-align:center;margin-bottom:6px}
+.hero h2{font-family:var(--font-serif);font-weight:560;font-size:clamp(26px,3.4vw,36px);line-height:1.08;letter-spacing:-.01em;color:var(--v2-text-strong);text-wrap:balance;max-width:18ch;margin:0 auto}
+.hero p{margin-top:12px;font-size:14.5px;color:var(--v2-text-muted);max-width:52ch;margin-left:auto;margin-right:auto;line-height:1.55}
+
+/* reveal helper */
+.rev{transition:opacity .34s ease, transform .34s ease}
+.rev.hide{opacity:0;transform:translateY(8px);pointer-events:none;position:absolute;visibility:hidden}
+@media (prefers-reduced-motion:reduce){.rev{transition:none}}
+
+/* ---------- connect row ---------- */
+.slotwrap{width:100%;position:relative;margin-top:22px;min-height:8px}
+.connect{width:100%;border:1px dashed var(--v2-panel-border);border-radius:16px;background:var(--v2-surface-soft);padding:14px 15px}
+.connect .ch{display:flex;align-items:center;gap:8px;margin-bottom:11px}
+.connect .ch svg{width:15px;height:15px;color:var(--v2-accent-text)}
+.connect .ch .t{font-size:13px;font-weight:600;color:var(--v2-text-strong)}
+.connect .ch .s{font-size:12px;color:var(--v2-text-muted)}
+.connect .apps{display:flex;flex-wrap:wrap;gap:9px;align-items:center}
+.connectbtn{margin-left:auto;display:inline-flex;align-items:center;gap:7px;height:38px;padding:0 16px;border-radius:11px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;color:#fff;border:1px solid rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%)}
+.connectbtn:hover{background:radial-gradient(ellipse 200% 220% at 50% 110%,#5BBAF5 0%,#2882c8 60%)}
+.connectbtn:focus-visible{outline:2px solid color-mix(in srgb,var(--v2-accent) 45%,transparent);outline-offset:2px}
+.cpill{display:inline-flex;align-items:center;gap:9px;border:1px solid var(--v2-panel-border);background:var(--v2-surface);border-radius:12px;padding:7px 11px 7px 8px;cursor:pointer;font:inherit;transition:border-color .15s,background .15s}
+.cpill:hover{border-color:color-mix(in srgb,var(--v2-accent) 42%,var(--v2-panel-border))}
+.cpill .appchip{width:22px;height:22px;display:grid;place-items:center;flex:none;color:var(--v2-text-strong)}
+.cpill .appchip svg{width:100%;height:100%;display:block}
+.cpill .an{font-size:13px;font-weight:560;color:var(--v2-text-strong)}
+.cpill .cstate{width:18px;height:18px;border-radius:6px;border:1.5px solid var(--v2-text-faint);display:grid;place-items:center;flex:none;color:transparent;transition:background .15s,border-color .15s}
+.cpill .cstate svg{width:12px;height:12px}
+.cpill.on{border-color:color-mix(in srgb,var(--v2-positive-text) 45%,var(--v2-panel-border));background:color-mix(in srgb,var(--v2-positive-soft) 55%,var(--v2-surface))}
+.cpill.on .cstate{background:var(--v2-positive-text);border-color:var(--v2-positive-text);color:#fff}
+.connclose{display:inline-grid;place-items:center;width:26px;height:26px;flex:none;border-radius:8px;border:0;background:transparent;color:var(--v2-text-faint);cursor:pointer;margin-left:auto}
+.connclose:hover{background:var(--v2-surface-muted);color:var(--v2-text-strong)}
+.connclose svg{width:14px;height:14px}
+/* composer pill shown when the connect panel is dismissed */
+.connpill{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 5px 0 10px;margin-left:8px;border-radius:999px;border:1px solid color-mix(in srgb,var(--v2-accent) 32%,var(--v2-panel-border));background:var(--v2-accent-soft);color:var(--v2-accent-text);font:inherit;font-size:12.5px;font-weight:560;cursor:pointer;white-space:nowrap}
+.connpill:hover{border-color:color-mix(in srgb,var(--v2-accent) 52%,var(--v2-panel-border))}
+.connpill svg{width:14px;height:14px}
+.connpill .px{display:inline-grid;place-items:center;width:19px;height:19px;border-radius:999px;color:var(--v2-accent-text);opacity:.7}
+.connpill .px:hover{background:color-mix(in srgb,var(--v2-accent) 22%,transparent);opacity:1}
+.connpill .px svg{width:11px;height:11px}
+
+/* ---------- carousel strip (Done for you) ---------- */
+.carousel{width:100%}
+.carousel .chd{display:flex;align-items:center;gap:7px;margin-bottom:9px;padding:0 2px}
+.carousel .chd .spk{width:15px;height:15px;color:var(--v2-accent-text)}
+.carousel .chd .ttl{font-size:13px;font-weight:600;color:var(--v2-text-strong);white-space:nowrap;flex:none}
+.carousel .chd .sub{font-size:11px;color:var(--v2-text-faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto;min-width:0}
+.carousel .chd .chmeta{font-family:var(--font-mono);font-size:11px;color:var(--v2-text-faint);font-variant-numeric:tabular-nums;white-space:nowrap;flex:none}
+.carousel .chd .chmeta:not(:empty)::before{content:"·";margin:0 6px 0 4px;color:var(--v2-text-faint)}
+:root:not(.flags-off) .carousel .chd{padding-right:160px}
+/* relocated agent status line (branded indicator + activity string) — sits above the drawer */
+/* drawer header: agent activity string (title) + subtitle, stacked upper-left */
+#carouselBlock .chd{flex-direction:row;align-items:center;gap:8px}
+#carouselBlock .chd .sub{flex:0 1 auto;min-width:0}
+.chd .dtrow{display:inline-flex;align-items:center}
+.chd .dtitle{font-size:13px;font-weight:600;color:var(--v2-text-strong);white-space:nowrap}
+/* expand/collapse toggle — pinned top-right of the drawer, floats above pills on overflow */
+#drawerToggle{position:absolute;top:11px;right:11px;z-index:4;width:26px;height:26px;display:none;place-items:center;border:0;border-radius:8px;background:var(--v2-surface);box-shadow:-12px 0 12px 5px var(--v2-surface);color:var(--v2-text-muted);cursor:pointer}
+.v-vision #drawerToggle{display:grid}
+#drawerToggle:hover{color:var(--v2-text-strong)}
+#drawerToggle svg{width:16px;height:16px;transition:transform .18s ease}
+#carouselBlock.collapsed #drawerToggle svg{transform:rotate(180deg)}
+#carouselBlock.dismissed{display:none}
+/* restore bar after the whole suggestions drawer is dismissed */
+.nearmark{display:inline-flex;flex:none;color:var(--near-blue)}
+.nearmark .near{width:16px;height:16px;overflow:visible;transform-box:fill-box;transform-origin:center}
+.nearmark.busy .near{animation:near-beat 2s ease-in-out infinite}
+.nearmark.busy .near .near-comet{display:block;animation:near-chase 1.1s linear infinite}
+.nearmark.done .near .near-base{opacity:1}
+@media (prefers-reduced-motion:reduce){.nearmark.busy .near{animation:none}.nearmark .near-comet{display:none!important}}
+.strip{display:flex;gap:10px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none}
+.strip::-webkit-scrollbar{display:none}
+/* collapsed task drawer: cards condense to a scrollable pill row */
+.taskdrawer{display:none;gap:8px;overflow-x:auto;padding:2px 2px 4px;scrollbar-width:none}
+.taskdrawer::-webkit-scrollbar{display:none}
+#carouselBlock.collapsed .carousel{display:none}
+#carouselBlock.collapsed .taskdrawer{display:flex;padding-right:14px}
+/* Vision: the drawer is a bordered frame that docks onto the composer, cards inset */
+.drawer-on #carouselBlock{border:1px solid var(--v2-panel-border);border-bottom:0;border-radius:15px 15px 0 0;background:var(--v2-surface);padding:12px 12px 8px;margin-bottom:0;box-shadow:var(--v2-card-shadow)}
+.drawer-on #carouselBlock .carousel{margin:0}
+.drawer-on .composer.flagwrap{margin-top:0;border-top-left-radius:0;border-top-right-radius:0;box-shadow:none}
+/* condensed pills (logo + title + dismiss X) */
+.tpill{flex:none;display:inline-flex;align-items:center;gap:8px;max-width:230px;border:1px solid var(--v2-panel-border);border-radius:11px;background:var(--v2-card-bg);box-shadow:0 1px 2px rgba(15,18,25,.04);padding:6px 8px 6px 12px;cursor:pointer;font:inherit;text-align:left}
+.tpill:hover{border-color:color-mix(in srgb,var(--v2-accent) 40%,var(--v2-panel-border))}
+.tpill .tplogo{width:18px;height:18px;flex:none;display:grid;place-items:center;color:var(--v2-text-strong)}
+.tpill .tplogo svg{width:100%;height:100%;display:block}
+.tpill .tpt{font-size:12.5px;font-weight:560;color:var(--v2-text-strong);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tpill .pillx{flex:none;width:18px;height:18px;display:grid;place-items:center;border:0;background:transparent;color:var(--v2-text-faint);cursor:pointer;border-radius:5px;line-height:0}
+.tpill .pillx:hover{background:var(--v2-surface-soft);color:var(--v2-text-strong)}
+.tpill .pillx svg{width:12px;height:12px}
+/* empty-state fallback (all suggestions dismissed) */
+.tcard.fallback{flex-direction:row;align-items:center;justify-content:center;gap:10px;min-height:96px;border-style:dashed;box-shadow:none;background:transparent;cursor:pointer;font:inherit;color:var(--v2-text-muted)}
+.tcard.fallback:hover{border-color:var(--v2-accent);color:var(--v2-text-strong)}
+.tcard.fallback .fbico{width:22px;height:22px;flex:none;color:var(--v2-text-faint)}
+.tcard.fallback .fbico svg{width:100%;height:100%}
+.tcard.fallback .fbtxt{font-size:13px;font-weight:560}
+.tpill.fallback{border-style:dashed;color:var(--v2-text-muted)}
+.tpill.fallback .tplogo{color:var(--v2-text-faint)}
+.tcard.fallback.gen .fbico,.tpill.fallback.gen .tplogo{animation:fbpulse 1.6s ease-in-out infinite}
+@keyframes fbpulse{0%,100%{opacity:.45}50%{opacity:1}}
+/* card automating (running) state */
+.acts.runrow{min-height:28px;align-items:center}
+.runstat{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:600;color:var(--v2-accent-text)}
+.runstat .spin{display:inline-flex;animation:spin .9s linear infinite}
+.runstat .spin svg{width:13px;height:13px}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.runstat .spin{animation:none}}
+/* composer attachment chip */
+.attachrow{padding:0 2px 8px}
+.attachrow[hidden]{display:none}
+.attchip{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:540;color:var(--v2-text-strong);background:var(--v2-surface-soft);border:1px solid var(--v2-panel-border);border-radius:9px;padding:5px 6px 5px 10px}
+.attchip>svg{width:14px;height:14px;flex:none;color:var(--v2-text-muted)}
+.attchip .attx{width:18px;height:18px;flex:none;display:grid;place-items:center;border:0;background:transparent;color:var(--v2-text-faint);cursor:pointer;border-radius:5px}
+.attchip .attx:hover{background:var(--v2-surface);color:var(--v2-text-strong)}
+.attchip .attx svg{width:11px;height:11px}
+/* modify modal */
+.modal{position:fixed;inset:0;z-index:200;display:none;align-items:center;justify-content:center;padding:24px}
+.modal.on{display:flex}
+.modalback{position:absolute;inset:0;background:color-mix(in srgb,var(--v2-canvas-strong) 55%,transparent);backdrop-filter:blur(2px)}
+.modalcard{position:relative;width:min(420px,100%);background:var(--v2-surface);border:1px solid var(--v2-panel-border);border-radius:16px;box-shadow:0 24px 60px -20px rgba(15,18,25,.5);overflow:hidden}
+.modalcard .mh{display:flex;align-items:center;gap:8px;padding:14px 16px;border-bottom:1px solid var(--v2-panel-border)}
+.modalcard .mh b{font-size:14px;font-weight:640;color:var(--v2-text-strong);flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.modalcard .mx{width:28px;height:28px;flex:none;display:grid;place-items:center;border:0;background:transparent;color:var(--v2-text-muted);cursor:pointer;border-radius:7px}
+.modalcard .mx:hover{background:var(--v2-surface-soft);color:var(--v2-text-strong)}
+.modalcard .mx svg{width:16px;height:16px}
+.modalcard .mb{padding:16px}
+.modalcard .ml{display:block;font-size:12px;font-weight:560;color:var(--v2-text-muted);margin-bottom:7px}
+.modalcard .mfield{width:100%;font:inherit;font-size:13.5px;line-height:1.5;color:var(--v2-text);background:var(--v2-canvas-strong);border:1px solid var(--v2-panel-border);border-radius:10px;padding:10px 12px;resize:none;outline:none}
+.modalcard .mfield:focus{border-color:var(--v2-accent)}
+.modalcard .mf{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid var(--v2-panel-border)}
+.modalcard .mbtn{font:inherit;font-size:13px;font-weight:600;height:34px;padding:0 14px;border-radius:9px;cursor:pointer;border:1px solid transparent}
+.modalcard .mbtn.ghost{background:transparent;border-color:var(--v2-panel-border);color:var(--v2-text-strong)}
+.modalcard .mbtn.ghost:hover{border-color:var(--v2-accent)}
+.modalcard .mbtn.primary{color:#fff;border-color:rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%)}
+/* auth "browser" dialog */
+.authwin{position:relative;width:min(440px,100%);background:var(--v2-surface);border:1px solid var(--v2-panel-border);border-radius:14px;box-shadow:0 24px 60px -20px rgba(15,18,25,.55);overflow:hidden}
+.authwin .bbar{display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--v2-surface-soft);border-bottom:1px solid var(--v2-panel-border)}
+.authwin .bdots{display:inline-flex;gap:5px;flex:none}
+.authwin .bdots i{width:9px;height:9px;border-radius:999px;background:var(--v2-panel-border)}
+.authwin .burl{flex:1;min-width:0;display:inline-flex;align-items:center;gap:6px;justify-content:center;font-size:11.5px;color:var(--v2-text-muted);background:var(--v2-canvas-strong);border:1px solid var(--v2-panel-border);border-radius:8px;padding:4px 10px;font-family:var(--font-mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.authwin .burl svg{width:11px;height:11px;flex:none;color:var(--v2-positive-text)}
+.authwin .mx{width:26px;height:26px;flex:none;display:grid;place-items:center;border:0;background:transparent;color:var(--v2-text-muted);cursor:pointer;border-radius:6px}
+.authwin .mx:hover{background:var(--v2-surface)}
+.authwin .mx svg{width:15px;height:15px}
+.abody{padding:26px 26px 22px;display:flex;flex-direction:column;align-items:center;text-align:center}
+.abody .astep{font-size:11px;color:var(--v2-text-faint);margin-bottom:14px;font-family:var(--font-mono)}
+.abody .alogo{width:40px;height:40px;display:grid;place-items:center;margin-bottom:14px;color:var(--v2-text-strong)}
+.abody .alogo svg{width:100%;height:100%}
+.abody .atitle{font-size:18px;font-weight:600;color:var(--v2-text-strong);line-height:1.3}
+.abody .asub{font-size:13px;color:var(--v2-text-muted);margin-top:4px}
+.abody .acct{margin-top:18px;display:flex;align-items:center;gap:10px;width:100%;border:1px solid var(--v2-panel-border);border-radius:10px;padding:10px 12px;background:var(--v2-surface);cursor:pointer;font:inherit;text-align:left}
+.abody .acct:hover{border-color:var(--v2-accent);background:var(--v2-surface-soft)}
+.abody .aav{width:30px;height:30px;flex:none;border-radius:999px;background:var(--v2-accent-soft);color:var(--v2-accent-text);display:grid;place-items:center;font-size:12px;font-weight:700}
+.abody .acol{display:flex;flex-direction:column;min-width:0}
+.abody .anm{font-size:13px;font-weight:600;color:var(--v2-text-strong)}
+.abody .aem{font-size:12px;color:var(--v2-text-muted)}
+.abody .scopes{margin-top:16px;width:100%;display:flex;flex-direction:column;gap:8px;text-align:left}
+.abody .ascope{display:flex;align-items:flex-start;gap:8px;font-size:12.5px;color:var(--v2-text)}
+.abody .ascope svg{width:15px;height:15px;flex:none;color:var(--v2-positive-text);margin-top:1px}
+.abody .afoot{margin-top:22px;display:flex;justify-content:flex-end;gap:8px;width:100%}
+.abody .abtn{font:inherit;font-size:13px;font-weight:600;height:36px;padding:0 16px;border-radius:9px;cursor:pointer;border:1px solid transparent}
+.abody .abtn.ghost{background:transparent;border-color:var(--v2-panel-border);color:var(--v2-text-strong)}
+.abody .abtn.ghost:hover{border-color:var(--v2-accent)}
+.abody .abtn.primary{color:#fff;border-color:rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%)}
+/* connect-panel selected pill (pending authorization) */
+.cpill.sel{border-color:color-mix(in srgb,var(--v2-accent) 55%,var(--v2-panel-border));background:var(--v2-accent-soft)}
+.cpill.sel .cstate{background:var(--v2-accent);border-color:var(--v2-accent);color:#fff}
+.cpill[disabled]{cursor:default}
+/* connect banner confirmation (after all selected tools are authorized) */
+#connectBlock.confirmed #connectIcon{color:var(--v2-positive-text)}
+#connectBlock.confirmed .connclose{display:none}
+#connectBlock.confirmed .cpill{cursor:default}
+
+/* automation task card (faithful to automation-task-card.tsx) */
+.tcard{flex:none;width:258px;position:relative;display:flex;flex-direction:column;border:1px solid var(--v2-panel-border);border-radius:16px;background:var(--v2-card-bg);padding:12px;text-align:left;box-shadow:0 1px 2px rgba(15,18,25,.04),0 12px 26px -12px rgba(15,18,25,.12)}
+.tcard .cardx{position:absolute;top:8px;right:8px;z-index:3;width:22px;height:22px;display:grid;place-items:center;border:0;background:transparent;color:var(--v2-text-faint);cursor:pointer;border-radius:6px;line-height:0}
+.tcard .cardx:hover{background:var(--v2-surface-soft);color:var(--v2-text-strong)}
+.tcard .cardx svg{width:14px;height:14px}
+.tcard:hover{border-color:color-mix(in srgb,var(--v2-accent) 32%,var(--v2-panel-border))}
+.tcard .thd{display:flex;align-items:center;gap:9px;margin-bottom:7px;padding-right:20px}
+.tcard .appchip{width:24px;height:24px;display:grid;place-items:center;flex:none;color:var(--v2-text-strong)}
+.tcard .appchip svg{width:100%;height:100%;display:block}
+.tcard .ttl{flex:1;min-width:0;font-size:14px;font-weight:650;line-height:1.25;color:var(--v2-text-strong);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.badge{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:999px;white-space:nowrap}
+.badge.success{color:var(--v2-positive-text);background:var(--v2-positive-soft)}
+.badge.accent{color:var(--v2-accent-text);background:var(--v2-accent-soft)}
+.badge.muted{color:var(--v2-text-muted);background:var(--v2-surface-muted)}
+.badge .bdot{width:5px;height:5px;border-radius:999px;background:currentColor}
+.tcard .metrics{display:flex;flex-wrap:wrap;align-items:center;gap:2px 8px;font-size:12.5px;color:var(--v2-text-muted)}
+.tcard .metrics b{font-weight:660;color:var(--v2-text-strong)}
+.tcard .metrics span+span::before{content:"·";margin-right:8px;color:var(--v2-text-faint)}
+.tcard .tprov{margin-top:7px;font-size:11px;color:var(--v2-text-faint)}
+.tcard .tdesc{font-size:12.5px;line-height:1.45;color:var(--v2-text-muted)}
+.tcard .tdesc b{font-weight:660;color:var(--v2-text-strong)}
+.tcard .acts{margin-top:auto;padding-top:11px;display:flex;align-items:center;gap:3px}
+.tcard .acts button{display:inline-flex;align-items:center;justify-content:center;gap:5px;font:inherit;font-size:11.5px;font-weight:560;height:28px;padding:0 9px;border-radius:8px;cursor:pointer;border:1px solid transparent;background:transparent;color:var(--v2-text-muted)}
+.tcard .acts button svg{width:13px;height:13px}
+.tcard .acts .txt:hover{background:var(--v2-surface);color:var(--v2-text-strong)}
+.tcard .acts .approve{padding:0 13px;color:#fff;font-weight:600;border-color:rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%)}
+.tcard .acts .approve:hover{background:radial-gradient(ellipse 200% 220% at 50% 110%,#5BBAF5 0%,#2882c8 60%)}
+.tcard .acts .revert{color:var(--v2-danger-text)}
+.tcard .acts .revert:hover{background:color-mix(in srgb,var(--v2-danger-text) 12%,transparent);color:var(--v2-danger-text)}
+.tcard.term{opacity:.7}
+.tcard .termrow{margin-top:auto;padding-top:12px;display:flex;align-items:center;gap:6px;font-size:11px;color:var(--v2-text-muted)}
+.tcard .termrow svg{width:13px;height:13px;flex:none}
+.tcard.reveal{animation:card-in .42s cubic-bezier(.2,.7,.2,1) both}
+@keyframes card-in{from{opacity:0;transform:translateY(10px) scale(.98)}to{opacity:1;transform:none}}
+/* first card is conjured into being: it materializes as the spark traces its border */
+.tcard.first{position:relative;animation:conjure .5s cubic-bezier(.2,.8,.2,1.01) both}
+@keyframes conjure{0%{opacity:0;transform:scale(.92);filter:blur(4px)}45%{opacity:1}72%{transform:scale(1.006);filter:blur(0)}100%{transform:scale(1);opacity:1;filter:blur(0)}}
+/* spell lands: a soft glow pulse around the card as the spark completes its loop */
+.tcard.first::after{content:"";position:absolute;inset:-2px;border-radius:18px;pointer-events:none;z-index:1;opacity:0;box-shadow:0 0 14px 1px var(--ais-glow);animation:spell-land .5s ease-out forwards}
+@keyframes spell-land{0%,52%{opacity:0}76%{opacity:.4}100%{opacity:0}}
+/* Gemini-style ai-spark: a gradient spark chases the border path once, then dissipates.
+   SVG stroke-dashoffset (always repaints) — avoids the conic/@property paint bug. */
+/* ai-spark colors — deeper/saturated on light, brighter on dark */
+:root{--ais-1:#1a6fd4;--ais-2:#6f36cf;--ais-3:#cf2b74;--ais-glow:rgba(111,54,207,.4)}
+@media (prefers-color-scheme:dark){:root{--ais-1:#5aa8ee;--ais-2:#a684ea;--ais-3:#ec7d9a;--ais-glow:rgba(166,132,234,.62)}}
+:root[data-theme="dark"]{--ais-1:#5aa8ee;--ais-2:#a684ea;--ais-3:#ec7d9a;--ais-glow:rgba(166,132,234,.62)}
+:root[data-theme="light"]{--ais-1:#1a6fd4;--ais-2:#6f36cf;--ais-3:#cf2b74;--ais-glow:rgba(111,54,207,.4)}
+/* border ring: masks the rotating conic to a thin frame around the card */
+.aispark{position:absolute;inset:0;border-radius:16px;overflow:hidden;pointer-events:none;z-index:2;padding:2px;-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude}
+/* one smooth, continuous comet: a semi-transparent line tapering from a bright head to nothing, swept around the ring */
+.aispin{position:absolute;inset:-55%;background:conic-gradient(from 0deg,transparent 195deg,color-mix(in srgb,var(--ais-1) 48%,transparent) 285deg,color-mix(in srgb,var(--ais-2) 70%,transparent) 336deg,color-mix(in srgb,var(--ais-3) 86%,transparent) 357deg,transparent 360deg);animation:ai-chase .4s linear forwards}
+@keyframes ai-chase{0%{transform:rotate(0);opacity:0}16%{opacity:1}78%{opacity:1}100%{transform:rotate(360deg);opacity:0}}
+@media (prefers-reduced-motion:reduce){.tcard.reveal{animation:none}.tcard.first{animation:none}.tcard.first::after{display:none}.aispark{display:none}}
+
+/* ghost / preview cards (Coach direction) */
+.tcard.ghost{opacity:.5;filter:saturate(.5)}
+.tcard.ghost .acts button{opacity:.6}
+.ghostveil{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;border-radius:14px;background:color-mix(in srgb,var(--v2-canvas) 42%,transparent);backdrop-filter:blur(.5px)}
+.ghostveil .pill{display:inline-flex;align-items:center;gap:8px;background:var(--v2-surface);border:1px solid color-mix(in srgb,var(--v2-accent) 40%,var(--v2-panel-border));border-radius:999px;padding:8px 14px;font-size:12.5px;font-weight:560;color:var(--v2-text-strong);box-shadow:var(--v2-card-shadow)}
+.ghostveil .pill svg{width:14px;height:14px;color:var(--v2-accent-text)}
+.ghostwrap{position:relative}
+
+/* skeleton tiles (anticipatory beat) */
+.sk{flex:none;width:232px;height:96px;border:1px solid var(--v2-panel-border);border-radius:13px;background:var(--v2-card-bg);padding:10px;overflow:hidden;position:relative}
+.sk .ln{height:9px;border-radius:5px;background:var(--v2-surface-muted);margin-bottom:8px}
+.sk .ln.w40{width:40%}.sk .ln.w70{width:70%}.sk .ln.w55{width:55%}
+.sk::after{content:"";position:absolute;inset:0;transform:translateX(-100%);background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--v2-accent) 10%,transparent),transparent);animation:shimmer 1.5s infinite}
+@keyframes shimmer{100%{transform:translateX(100%)}}
+@media (prefers-reduced-motion:reduce){.sk::after{animation:none}}
+
+/* NEAR live status line (verbatim behavior from agent-activity mockup) */
+.livestat{display:flex;align-items:center;gap:9px;padding:8px 2px;font-size:13px;color:var(--v2-text)}
+.livestat .near{width:18px;height:18px;overflow:visible;transform-box:fill-box;transform-origin:center;color:var(--near-blue);flex:none}
+.near .near-base{fill:currentColor;opacity:.22}
+.near .near-comet{fill:none;stroke:currentColor;stroke-width:7;stroke-linecap:round;stroke-linejoin:round;stroke-dashoffset:0;filter:drop-shadow(0 0 1.5px currentColor);display:none}
+.livestat.busy .near{animation:near-beat 2s ease-in-out infinite}
+.livestat.busy .near .near-comet{display:block;animation:near-chase 1.1s linear infinite}
+@keyframes near-chase{to{stroke-dashoffset:calc(-1 * var(--nearlen,70px))}}
+@keyframes near-beat{0%{transform:rotate(0deg) scale(1)}22%{transform:rotate(360deg) scale(1)}50%{transform:rotate(360deg) scale(1)}58%{transform:rotate(360deg) scale(1.28)}66%{transform:rotate(360deg) scale(.98)}74%{transform:rotate(360deg) scale(1.16)}82%{transform:rotate(360deg) scale(1)}100%{transform:rotate(360deg) scale(1)}}
+.livestat .verb{font-weight:560;color:var(--v2-text-strong)}
+.livestat .el{font-family:var(--font-mono);font-size:11.5px;color:var(--v2-text-faint);font-variant-numeric:tabular-nums}
+.livestat.done .near .near-base{opacity:1}
+.livestat.done .verb{font-weight:400;color:var(--v2-text-muted)}
+@media (prefers-reduced-motion:reduce){.livestat.busy .near{animation:none}.near .near-comet{display:none!important}}
+
+/* ---------- composer (composer-v2, faithful) ---------- */
+.composer{width:100%;margin-top:22px;display:flex;flex-direction:column;align-items:stretch;gap:11px;border:1px solid var(--v2-panel-border);border-radius:16px;background:var(--v2-surface);padding:12px 14px;box-shadow:var(--v2-card-shadow)}
+.composer.dock{margin-top:0}
+.composer .inputrow{display:flex;align-items:flex-start;gap:8px}
+.composer .field{flex:1;min-height:24px;color:var(--v2-text);font-size:14.5px;line-height:1.5;padding:3px 2px;background:transparent;border:0;outline:none;resize:none;font-family:inherit;width:100%}
+.composer .field::placeholder{color:var(--v2-text-faint)}
+.composer .field.ph{color:var(--v2-text-faint)}
+.composer .actions{display:flex;align-items:center}
+.composer .rightcluster{margin-left:auto;display:flex;align-items:center;gap:6px}
+.composer .iconbtn{width:36px;height:36px;flex:none;border-radius:999px;display:grid;place-items:center;border:1px solid transparent;background:transparent;color:var(--v2-text-muted);cursor:pointer}
+.composer .iconbtn:hover{background:var(--v2-surface-soft);color:var(--v2-text-strong)}
+.composer .iconbtn svg{width:18px;height:18px}
+.composer .runbtn{display:grid;place-items:center;flex:none;width:36px;height:36px;padding:0;margin-left:2px;border-radius:999px;color:#fff;border:1px solid rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%);cursor:pointer}
+.composer .runbtn svg{width:18px;height:18px}
+.composer .runbtn:hover{background:radial-gradient(ellipse 200% 220% at 50% 110%,#5BBAF5 0%,#2882c8 60%)}
+.composer .runbtn kbd{font-family:inherit;font-size:14px;line-height:1;color:rgba(255,255,255,.9)}
+.composer .runbtn:disabled{background:var(--v2-surface-muted);border-color:transparent;color:var(--v2-text-faint);cursor:default}
+.composer .runbtn:disabled kbd{color:var(--v2-text-faint)}
+
+/* agent mode selector */
+.modewrap{position:relative}
+.modebtn{display:inline-flex;align-items:center;gap:5px;font:inherit;font-size:12.5px;font-weight:540;color:var(--v2-text-muted);background:transparent;border:0;border-radius:9px;padding:6px 9px;cursor:pointer}
+.modebtn:hover{background:var(--v2-surface-soft);color:var(--v2-text-strong)}
+.modebtn .dot{width:7px;height:7px;border-radius:999px;background:var(--v2-accent);flex:none}
+.modebtn .mode-chev{width:14px;height:14px}
+.modemenu{position:absolute;bottom:calc(100% + 8px);left:0;width:280px;background:var(--v2-surface);border:1px solid var(--v2-panel-border);border-radius:14px;box-shadow:var(--shadow-pop);padding:6px;z-index:30;display:flex;flex-direction:column;gap:1px}
+.modemenu[hidden]{display:none}
+.modeopt{display:flex;flex-direction:column;gap:1px;text-align:left;background:transparent;border:0;border-radius:9px;padding:9px 30px 9px 11px;cursor:pointer;position:relative;font:inherit}
+.modeopt:hover{background:var(--v2-surface-soft)}
+.modeopt .mo-t{font-size:13px;font-weight:560;color:var(--v2-text-strong)}
+.modeopt .mo-d{font-size:11.5px;color:var(--v2-text-muted);line-height:1.35}
+.modeopt.is-sel .mo-t{color:var(--v2-accent-text)}
+.modeopt.is-sel::after{content:"";position:absolute;right:12px;top:13px;width:5px;height:10px;border:solid var(--v2-accent-text);border-width:0 2px 2px 0;transform:rotate(45deg)}
+
+/* suggestion chips (empty-state) */
+.suggs{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-top:16px}
+.sugg{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--v2-panel-border);background:var(--v2-surface-soft);border-radius:999px;padding:8px 13px;font-size:13px;color:var(--v2-text-muted);cursor:pointer}
+.sugg:hover{border-color:color-mix(in srgb,var(--v2-accent) 35%,var(--v2-panel-border));color:var(--v2-text-strong)}
+.sugg svg{width:14px;height:14px;color:var(--v2-text-faint)}
+/* completed / error status chips on the card action row */
+.acts .cstat{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600}
+.acts .cstat.ok{color:var(--v2-positive-text)}
+.acts .cstat.err{color:var(--v2-danger-text)}
+.acts .cstat svg{width:14px;height:14px}
+
+/* ============================================================
+   Thread + Plan scenes
+   ============================================================ */
+.threadscene{min-height:520px;background:var(--v2-canvas)}
+.threadscroll{flex:1;min-height:0;overflow-y:auto;padding:22px 20px}
+.threadscroll::-webkit-scrollbar{width:8px}
+.threadscroll::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--v2-text-faint) 42%,transparent);border-radius:8px}
+.threadwrap{width:100%;max-width:640px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
+.tmsg{font-size:14.5px;line-height:1.6}
+.tmsg.user{margin-left:auto;max-width:80%;border:1px solid color-mix(in srgb,var(--v2-accent) 25%,transparent);background:var(--v2-accent-soft);color:var(--v2-text-strong);border-radius:18px;padding:11px 15px}
+.tmsg.assistant{margin-right:auto;max-width:94%;color:var(--v2-text-strong)}
+.tmsg.assistant .lead{font-weight:560;margin-bottom:4px}
+.tmsg.note{margin-right:auto;color:var(--v2-text-muted);font-size:13.5px}
+
+/* shared action buttons (md) */
+.actbtn{display:inline-flex;align-items:center;justify-content:center;gap:6px;font:inherit;font-size:13px;font-weight:560;height:38px;padding:0 14px;border-radius:11px;cursor:pointer;border:1px solid var(--v2-panel-border);background:var(--v2-surface);color:var(--v2-text-strong)}
+.actbtn:hover{border-color:var(--v2-accent)}
+.actbtn svg{width:15px;height:15px}
+.actbtn.primary{color:#fff;border-color:rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%)}
+.actbtn.primary:hover{background:radial-gradient(ellipse 200% 220% at 50% 110%,#5BBAF5 0%,#2882c8 60%)}
+.actbtn.danger{color:var(--v2-danger-text);border-color:color-mix(in srgb,var(--v2-danger-text) 26%,var(--v2-panel-border))}
+.actbtn.ghost{background:transparent;border-color:transparent;color:var(--v2-text-muted)}
+.actbtn.launch{margin-left:auto}
+
+/* calendar reschedule + plan cards */
+.calcard,.plancard{width:100%;max-width:560px;border:1px solid var(--v2-panel-border);border-radius:18px;background:var(--v2-card-bg);box-shadow:var(--v2-card-shadow);overflow:hidden}
+.calcard .chd,.plancard .chd{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--v2-panel-border)}
+.calcard .chd .appchip{width:30px;height:30px;display:grid;place-items:center;flex:none;color:var(--v2-text-strong)}
+.calcard .chd .appchip svg{width:100%;height:100%;display:block}
+.calcard .chd .tt,.plancard .chd .tt{min-width:0}
+.calcard .chd .tt b,.plancard .chd .tt b{display:block;font-size:14px;font-weight:600;color:var(--v2-text-strong);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.calcard .chd .tt small,.plancard .chd .tt small{font-size:12px;color:var(--v2-text-muted)}
+.calcard .chd .badge,.plancard .chd .badge{margin-left:auto}
+.calcard .cbody{padding:16px}
+.calcard .pline{font-size:14px;line-height:1.5;color:var(--v2-text);margin-bottom:12px}
+.slots{display:flex;align-items:stretch;gap:8px}
+.slotblock{flex:1;border:1px solid;border-radius:13px;padding:12px}
+.slotblock.was{border-color:color-mix(in srgb,var(--v2-danger-text) 28%,var(--v2-panel-border));background:var(--v2-danger-soft)}
+.slotblock.now{border-color:color-mix(in srgb,var(--v2-positive-text) 30%,var(--v2-panel-border));background:var(--v2-positive-soft)}
+.slotblock .cap{display:flex;align-items:center;gap:6px;margin-bottom:6px;font-family:var(--font-mono);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.14em}
+.slotblock.was .cap{color:var(--v2-danger-text)}
+.slotblock.now .cap{color:var(--v2-positive-text)}
+.slotblock .cap svg{width:13px;height:13px}
+.slotblock .day{font-size:12px;font-weight:540;color:var(--v2-text-muted)}
+.slotblock .time{font-size:15px;font-weight:640;color:var(--v2-text-strong);margin-top:1px}
+.slotblock.was .time{color:var(--v2-text-muted);text-decoration:line-through;text-decoration-color:color-mix(in srgb,var(--v2-danger-text) 60%,transparent)}
+.slotblock .mt{margin-top:3px;font-size:12px;color:var(--v2-text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.slotblock .conflict{margin-top:6px;display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--v2-danger-text)}
+.slotblock .conflict svg{width:12px;height:12px}
+.slots .arrow{display:flex;align-items:center;color:var(--v2-text-faint)}
+.slots .arrow svg{width:20px;height:20px}
+.calcard .attendees{margin-top:12px;display:flex;flex-wrap:wrap;align-items:center;gap:4px 6px;font-size:12px;color:var(--v2-text-muted)}
+.calcard .attendees svg{width:14px;height:14px}
+.calcard .attendees b{font-weight:540;color:var(--v2-text)}
+.calcard .cfoot,.plancard .pfoot{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:12px 16px;border-top:1px solid var(--v2-panel-border)}
+.termnote{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--v2-text-muted)}
+.termnote svg{width:14px;height:14px}
+.termnote.ok{color:var(--v2-positive-text)}
+
+/* plan card */
+.plancard .chd .ico{width:32px;height:32px;border-radius:10px;display:grid;place-items:center;background:var(--v2-accent-soft);color:var(--v2-accent-text);border:1px solid color-mix(in srgb,var(--v2-accent-text) 34%,var(--v2-panel-border));flex:none}
+.plancard .chd .ico svg{width:16px;height:16px}
+.plist{list-style:none;margin:0;padding:0}
+.plist li{display:flex;align-items:center;gap:12px;padding:12px 16px;border-top:1px solid var(--v2-panel-border)}
+.plist li:first-child{border-top:0}
+.plist .appchip{width:26px;height:26px;display:grid;place-items:center;flex:none;color:var(--v2-text-strong)}
+.plist .appchip svg{width:100%;height:100%;display:block}
+.plist .pinfo{min-width:0;flex:1}
+.plist .pinfo .pt{display:flex;align-items:center;gap:8px}
+.plist .pinfo .pt b{font-size:13px;font-weight:560;color:var(--v2-text-strong);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.plist .pinfo .ps{font-size:12px;color:var(--v2-text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.plist .pacts{display:flex;gap:6px;flex:none}
+.plist .iconsq{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;border:1px solid var(--v2-panel-border);background:var(--v2-surface-soft);color:var(--v2-text-muted);cursor:pointer}
+.plist .iconsq svg{width:15px;height:15px}
+.plist .iconsq:hover{color:var(--v2-text-strong);border-color:var(--v2-accent)}
+.plist li.done .pinfo .pt b{color:var(--v2-text-muted)}
+.plist .donecheck{color:var(--v2-positive-text);width:18px;height:18px;flex:none}
+
+/* annotation flag */
+.flagwrap{position:relative}
+.flag{position:absolute;top:-9px;right:10px;z-index:4;display:inline-flex;gap:5px}
+:root.flags-off .flag,:root.flags-off .legend{display:none!important}
+
+/* footnote */
+.foot{margin-top:26px;padding-top:18px;border-top:1px solid var(--v2-panel-border);color:var(--v2-text-muted);font-size:13px;line-height:1.65;max-width:82ch}
+.foot b{color:var(--v2-text)}
+.foot code{font-family:var(--font-mono);font-size:12px;background:var(--v2-surface-soft);padding:1px 6px;border-radius:5px;color:var(--v2-accent-text)}
+.foot p{margin-bottom:12px}
+.foot a{color:var(--v2-accent-text)}
+
+@keyframes v2-spin{to{transform:rotate(360deg)}}
+</style>
+
+<div class="wrap">
+  <header class="masthead">
+    <div>
+      <div class="eyebrow">IronClaw · webui_v2 · OOBE design session</div>
+      <h1 class="title">The first five minutes</h1>
+      <p class="lede">A working mockup of the OOBE — from the <b>first-run</b> onboarding (cold start → first automation) through the two in-thread concepts: the inline <b>calendar reschedule</b> rich-preview and the batched <b>Plan</b> approval. Built on the real <code>--v2-*</code> tokens. Switch scenes below; on First run, press play to watch the journey.</p>
+    </div>
+    <button class="btn" id="themeBtn" title="Toggle theme" aria-label="Toggle theme">
+      <svg id="themeIco" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+      <span id="themeTxt">Light</span>
+    </button>
+  </header>
+
+  <div class="toolbar">
+    <div class="seg primary" role="tablist" aria-label="Scene">
+      <span class="seglbl">Scene</span>
+      <button id="sFirst" aria-pressed="true">First run</button>
+      <button id="sThread" aria-pressed="false">Thread</button>
+      <button id="sPlan" aria-pressed="false">Plan</button>
+    </div>
+    <span class="frcontrols" id="firstRunControls">
+      <button class="btn primary" id="playBtn">
+        <svg id="playIco" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        <span id="playTxt">Play the first run</span>
+      </button>
+      <button class="btn" id="prevBtn" aria-label="Previous state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>Prev</button>
+      <button class="btn" id="nextBtn" aria-label="Next state">Next<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></button>
+      <button class="btn" id="restartBtn" aria-label="Restart"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg></button>
+      <div class="scrub"><div class="track"><i id="trackFill"></i></div><span class="beatlbl" id="beatLbl">0 / 4</span></div>
+    </span>
+    <button class="btn" id="flagsBtn" aria-pressed="true" title="Show or hide the annotation flags"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3v18"/><path d="M5 4h11l-2 3 2 3H5z"/></svg><span id="flagsTxt">Flags: on</span></button>
+  </div>
+
+  <div class="legend">
+    <span><b>How to read the flags:</b></span>
+    <span><span class="tag ship">Shipped</span> already on main</span>
+    <span><span class="tag recompose">Redesign</span> design update to existing main UI</span>
+    <span><span class="tag newevt">New Feature</span> net-new · needs new events / functionality</span>
+    <span><span class="tag native">New UX</span> new design, not yet on main</span>
+  </div>
+
+  <div class="beatcap"><span class="n" id="capN">Beat 0 / 4</span><span class="c" id="capC"></span></div>
+
+  <!-- ============ DEVICE ============ -->
+  <section class="device">
+    <div class="topbar">
+      <div class="brand">
+        <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M21.443 0c-.89 0-1.714.46-2.18 1.218l-5.017 7.448a.533.533 0 0 0 .792.7l4.938-4.282a.2.2 0 0 1 .334.151v13.41a.2.2 0 0 1-.354.128L5.03.905A2.555 2.555 0 0 0 3.078 0h-.521A2.557 2.557 0 0 0 0 2.557v18.886a2.557 2.557 0 0 0 4.736 1.338l5.017-7.448a.533.533 0 0 0-.792-.7l-4.938 4.283a.2.2 0 0 1-.333-.152V5.352a.2.2 0 0 1 .354-.128l14.924 17.87c.486.574 1.2.905 1.952.906h.521A2.558 2.558 0 0 0 24 21.445V2.557A2.558 2.558 0 0 0 21.443 0Z"/></svg>
+        IronClaw
+      </div>
+      <span class="newchat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>New chat</span>
+      <div class="who"><span class="nm">Ada</span><span class="av">A</span></div>
+    </div>
+
+    <!-- ===== FIRST RUN scene ===== -->
+    <div class="scene landing on" id="sceneFirstRun">
+      <div class="stagearea">
+        <div class="hero">
+          <h2 id="heroTitle">Welcome to IronClaw, Ada.</h2>
+          <p id="heroSub">I'm your agent. Connect a tool or two and I'll start clearing the small stuff off your plate — you'll see it here.</p>
+        </div>
+
+        <div class="slotwrap" id="slotwrap">
+          <div class="rev flagwrap" id="connectBlock">
+            <span class="flag"><span class="tag ship">Shipped</span></span>
+            <div class="connect">
+              <div class="ch"><svg id="connectIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg><span class="t" id="connectTitle">Connect your tools</span><span class="s" id="connectSub">one tap each · add more anytime</span><button class="connclose" id="connCloseBtn" type="button" aria-label="Dismiss connect panel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+              <div class="apps" id="appRow"></div>
+            </div>
+          </div>
+
+          <div class="rev flagwrap ghostwrap" id="ghostBlock">
+            <span class="flag"><span class="tag native">New UX</span></span>
+            <div class="carousel">
+              <div class="chd"><svg class="spk" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l1.9 4.7L18 9l-4 2.7L15.5 17 12 14.4 8.5 17l1.5-5.3L6 9l4.1-1.3z"/></svg><span class="ttl">What I'll handle for you</span><span class="sub">connect a tool to turn these on</span></div>
+              <div class="strip" id="ghostStrip"></div>
+            </div>
+            <div class="ghostveil"><span class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg>Connect to turn these on</span></div>
+          </div>
+
+          <div class="rev flagwrap" id="carouselBlock">
+            <span class="flag"><span class="tag native">New UX</span><span class="tag newevt">New Feature</span></span>
+            <button class="dctl toggle" id="drawerToggle" type="button" title="Collapse" aria-label="Collapse suggestions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
+            <button id="drawerDismiss" type="button" title="Dismiss suggestions" aria-label="Dismiss suggestions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+            <div class="carousel">
+              <div class="chd"><span class="dtrow"><b class="dtitle" id="carTtl">Suggested for you</b><span class="chmeta" id="carMeta"></span></span><span class="sub" id="carSub">Approve to run, or tweak first</span></div>
+              <div class="strip" id="realStrip"></div>
+            </div>
+            <div class="taskdrawer" id="taskDrawer" aria-label="Suggested tasks"></div>
+          </div>
+        </div>
+
+        <!-- live NEAR indicator relocated into the carousel header (#carNear) -->
+
+
+        <div class="composer flagwrap">
+          <span class="flag"><span class="tag recompose">Redesign</span></span>
+          <div class="inputrow">
+            <textarea class="field" id="composerField" rows="1" placeholder="Ask me anything, or tell me what to take off your plate…"></textarea>
+          </div>
+          <div class="attachrow" id="attachRow" hidden><span class="attchip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3 3 0 0 1 4.24 4.24l-9.2 9.19a1 1 0 0 1-1.41-1.41l8.49-8.49"/></svg>Q3-report.pdf<button class="attx" id="attachX" type="button" aria-label="Remove attachment"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></span></div>
+          <div class="actions">
+            <div class="modewrap">
+              <button class="modebtn" id="modeBtn" type="button" aria-expanded="false"><span class="dot"></span><span id="modeLabel">Suggest</span><svg class="mode-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></button>
+              <div class="modemenu" id="modeMenu" hidden>
+                <button class="modeopt is-sel" type="button" data-mode="Suggest"><span class="mo-t">Suggest</span><span class="mo-d">Always ask before taking any action.</span></button>
+                <button class="modeopt" type="button" data-mode="Plan"><span class="mo-t">Plan</span><span class="mo-d">Draft a plan of tasks and wait for approval.</span></button>
+                <button class="modeopt" type="button" data-mode="Auto"><span class="mo-t">Auto</span><span class="mo-d">Auto-run approved task types without asking.</span></button>
+                <button class="modeopt" type="button" data-mode="Bypass"><span class="mo-t">Bypass</span><span class="mo-d">Full automation — act without approvals. Use with care.</span></button>
+              </div>
+            </div>
+            <button class="connpill" id="connPill" type="button" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg><span class="pt">Connect your tools</span><span class="px" id="connPillX" role="button" aria-label="Dismiss"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span></button>
+            <button class="connpill" id="showSuggPill" type="button" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z"/></svg><span class="pt">Show suggestions</span><span class="px" id="showSuggX" role="button" aria-label="Dismiss suggestions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span></button>
+            <div class="rightcluster">
+              <button class="iconbtn" id="attachBtn" title="Attach" aria-label="Attach"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v16M4 12h16"/></svg></button>
+              <button class="runbtn" id="runBtn" disabled aria-label="Send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7z"/></svg></button>
+            </div>
+          </div>
+        </div>
+
+        <div class="suggs" id="suggs">
+          <button class="sugg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v12H7l-3 3z"/></svg>Summarize my unread email</button>
+          <button class="sugg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg>Clear this week's calendar conflicts</button>
+          <button class="sugg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l1.9 4.7L18 9l-4 2.7L15.5 17 12 14.4 8.5 17l1.5-5.3L6 9l4.1-1.3z"/></svg>What did I miss yesterday?</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== THREAD scene ===== -->
+    <div class="scene threadscene" id="sceneThread">
+      <div class="threadscroll">
+        <div class="threadwrap">
+          <div class="tmsg user">My Thursday afternoon is packed — can you clear the conflict on my calendar?</div>
+          <div class="tmsg assistant"><span class="lead">Found one overlap.</span>Here's what I'd do — approve it, tweak the time, or skip it:</div>
+          <div class="flagwrap"><span class="flag"><span class="tag native">New UX</span><span class="tag newevt">New Feature</span></span><div id="calHost1"></div></div>
+          <div class="tmsg note">Earlier today, while in Auto mode, I already moved another conflict for you — you can still undo it:</div>
+          <div class="flagwrap"><span class="flag"><span class="tag native">New UX</span><span class="tag newevt">New Feature</span></span><div id="calHost2"></div></div>
+        </div>
+      </div>
+      <div class="composer dock" aria-hidden="true">
+        <div class="inputrow"><div class="field ph">Reply, or steer the task…</div></div>
+        <div class="actions">
+          <div class="modebtn" style="pointer-events:none"><span class="dot"></span>Suggest<svg class="mode-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></div>
+          <div class="rightcluster">
+            <button class="runbtn" disabled aria-label="Send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7z"/></svg></button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== PLAN scene ===== -->
+    <div class="scene threadscene" id="scenePlan">
+      <div class="threadscroll">
+        <div class="threadwrap">
+          <div class="tmsg assistant"><span class="lead">You're in Plan mode.</span>Here's a batch I can run together — approve all, or adjust any first:</div>
+          <div class="flagwrap"><span class="flag"><span class="tag native">New UX</span><span class="tag newevt">New Feature</span></span><div id="planHost"></div></div>
+        </div>
+      </div>
+      <div class="composer dock" aria-hidden="true">
+        <div class="inputrow"><div class="field ph">Reply, or steer the task…</div></div>
+        <div class="actions">
+          <div class="modebtn" style="pointer-events:none"><span class="dot"></span>Plan<svg class="mode-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></div>
+          <div class="rightcluster">
+            <button class="runbtn" disabled aria-label="Send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7z"/></svg></button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="modal" id="modifyModal" aria-hidden="true">
+      <div class="modalback" id="modifyBack"></div>
+      <div class="modalcard" role="dialog" aria-modal="true">
+        <div class="mh"><b id="modifyTitle">Modify task</b><button class="mx" id="modifyCancel" type="button" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+        <div class="mb"><label class="ml" for="modifyField">Adjust before it runs</label><textarea class="mfield" id="modifyField" rows="3" placeholder="Tell me how to change this — e.g. only archive newsletters, keep anything from my team…"></textarea></div>
+        <div class="mf"><button class="mbtn ghost" id="modifyCancel2" type="button">Cancel</button><button class="mbtn primary" id="modifySave" type="button">Save changes</button></div>
+      </div>
+    </div>
+    <div class="modal" id="authModal" aria-hidden="true">
+      <div class="modalback" id="authBack"></div>
+      <div class="authwin" role="dialog" aria-modal="true">
+        <div class="bbar"><span class="bdots"><i></i><i></i><i></i></span><span class="burl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><span id="authUrl">accounts.google.com</span></span><button class="mx" id="authClose" type="button" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+        <div class="abody" id="authBody"></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="foot">
+    <p><b>What this explores.</b> The <b>Vision</b> north-star OOBE arc in one place, on the real <code>--v2-*</code> tokens — the first-run journey (cold-start connect → anticipatory beat → first-card reveal → docked suggestion drawer) plus the two in-thread concepts (the inline <b>calendar reschedule</b> rich-preview and the batched <b>Plan</b> approval). Pick a <b>Scene</b> and press <b>Play</b> on First run.</p>
+    <p><b>Backing contract.</b> The durable suggestion feed ships in <a href="https://github.com/nearai/ironclaw/pull/7694">PR #7694</a> (generate → list → start → dismiss; one card set per tenant/user). Cards carry <code>title</code>, <code>description</code>, <code>suggested_prompt</code>, a brand <code>icon</code> enum, and <code>source_ids</code> (the tools a card relates to); starting one creates its own thread/run, so cards <b>run in parallel</b>. The PR #6994 frontend consumes that contract behind the off-by-default <code>oobe_suggestions</code> flag; the current plan is <a href="./VISION-RECONCILIATION.md">VISION-RECONCILIATION.md</a>. This mockup is design direction — the shipped card model is simpler than some north-star affordances shown here (e.g. in-thread rich previews).</p>
+    <p><b>Needs the backend suggestion producer</b> (issue #6993 · slice 6): the first-run suggested set is static demo data in the frontend today; the durable producer that emits the real starter set (and any per-task status that persists across visits) is the one net-new backend piece, and the gate for turning <code>oobe_suggestions</code> on in production.</p>
+  </div>
+</div>
+
+<script>
+(function(){
+  var root=document.documentElement;
+  var NEAR_D="M21.443 0c-.89 0-1.714.46-2.18 1.218l-5.017 7.448a.533.533 0 0 0 .792.7l4.938-4.282a.2.2 0 0 1 .334.151v13.41a.2.2 0 0 1-.354.128L5.03.905A2.555 2.555 0 0 0 3.078 0h-.521A2.557 2.557 0 0 0 0 2.557v18.886a2.557 2.557 0 0 0 4.736 1.338l5.017-7.448a.533.533 0 0 0-.792-.7l-4.938 4.283a.2.2 0 0 1-.333-.152V5.352a.2.2 0 0 1 .354-.128l14.924 17.87c.486.574 1.2.905 1.952.906h.521A2.558 2.558 0 0 0 24 21.445V2.557A2.558 2.558 0 0 0 21.443 0Z";
+  // ---- theme ----
+  var sunIco='<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>';
+  var moonIco='<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>';
+  function currentTheme(){return root.getAttribute('data-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');}
+  function setTheme(t){root.setAttribute('data-theme',t);document.getElementById('themeIco').innerHTML=(t==='dark'?moonIco:sunIco);document.getElementById('themeTxt').textContent=(t==='dark'?'Dark':'Light');}
+  setTheme(currentTheme());
+  document.getElementById('themeBtn').onclick=function(){setTheme(currentTheme()==='dark'?'light':'dark');};
+
+  // ---- flags ----
+  var flagsBtn=document.getElementById('flagsBtn'),flagsTxt=document.getElementById('flagsTxt'),flagsOn=true;
+  function setFlags(on){flagsOn=on;root.classList.toggle('flags-off',!on);flagsBtn.setAttribute('aria-pressed',on?'true':'false');flagsTxt.textContent=on?'Flags: on':'Flags: off';}
+  flagsBtn.onclick=function(){setFlags(!flagsOn);};
+
+  // ---- shared icons ----
+  var ICON={
+    mail:'<path d="M4 5h16v14H4z"/><path d="M4 7l8 6 8-6"/>',
+    calendar:'<rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/>',
+    chat:'<path d="M4 4h16v12H7l-3 3z"/>',
+    file:'<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v5h5"/>',
+    edit:'<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
+    undo:'<path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/>',
+    external:'<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
+    check:'<path d="M5 12l5 5 9-11"/>',
+    close:'<path d="M6 6l12 12M18 6L6 18"/>',
+    bolt:'<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>',
+    users:'<path d="M17 21v-2a4 4 0 0 0-3-3.9M9 21v-2a4 4 0 0 1 3-3.9M12 7a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>',
+    list:'<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+    arrow:'<path d="M9 6l6 6-6 6"/>',
+    plus:'<path d="M12 5v14M5 12h14"/>',
+    arrowLeft:'<path d="M15 6l-6 6 6 6"/>',
+    book:'<path d="M6 4h11a1 1 0 0 1 1 1v15H7a1 1 0 0 1-1-1z"/><path d="M9 4v16"/>',
+    triangle:'<path d="M12 5l8 14H4z"/>',
+    code:'<path d="M8 9l-3 3 3 3M16 9l3 3-3 3M13 7l-2 10"/>'
+  };
+  function svg(name,sw){return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="'+(sw||1.8)+'" stroke-linecap="round" stroke-linejoin="round">'+ICON[name]+'</svg>';}
+  function chipStyle(accent){return 'color:'+accent+';background:color-mix(in srgb,'+accent+' 16%,transparent);border-color:color-mix(in srgb,'+accent+' 38%,transparent)';}
+  // real brand product logos (full colour; github/notion are monochrome → currentColor, theme-adaptive)
+  var BRAND={
+    gmail:'<svg viewBox="0 0 48 48" fill="none"><rect x="4" y="9" width="40" height="30" rx="4" fill="#fff"/><path fill="#4caf50" d="M45 16.2l-5 2.75-5 4.75L35 40h7c1.657 0 3-1.343 3-3V16.2z"/><path fill="#1e88e5" d="M3 16.2l3.614 1.71L13 23.7V40H6c-1.657 0-3-1.343-3-3V16.2z"/><polygon fill="#e53935" points="35,11.2 24,19.45 13,11.2 12,17 13,23.7 24,31.95 35,23.7 36,17"/><path fill="#c62828" d="M3 12.298V16.2l10 7.5V11.2L9.876 8.859C9.132 8.301 8.228 8 7.298 8 4.924 8 3 9.924 3 12.298z"/><path fill="#fbc02d" d="M45 12.298V16.2l-10 7.5V11.2l3.124-2.341C38.868 8.301 39.772 8 40.702 8 43.076 8 45 9.924 45 12.298z"/></svg>',
+    calendar:'<svg viewBox="0 0 48 48" fill="none"><rect x="6" y="6" width="36" height="36" rx="3" fill="#fff"/><polygon fill="#1e88e5" points="25.68,20.92 26.688,22.36 28.272,21.208 28.272,29.56 30,29.56 30,18.616 28.56,18.616"/><path fill="#1e88e5" d="M22.943 23.745c.625-.574 1.013-1.37 1.013-2.249 0-1.747-1.533-3.168-3.417-3.168-1.602 0-2.972 1.009-3.33 2.45l1.657.421c.165-.664.868-1.146 1.673-1.146.942 0 1.709.646 1.709 1.443 0 .797-.767 1.443-1.709 1.443h-.997v1.708h.997c1.081 0 1.972.751 1.972 1.677 0 .947-.923 1.677-2.104 1.677-1.081 0-2.007-.61-2.174-1.446l-1.657.421c.359 1.441 1.729 2.5 3.331 2.5 1.884 0 3.417-1.421 3.417-3.168 0-.879-.388-1.675-2.013-2.249z"/><polygon fill="#fbc02d" points="34,42 14,42 13,38 14,34 34,34 35,38"/><polygon fill="#4caf50" points="38,34 38,14 42,13 46,14 46,34 42,35"/><path fill="#1e88e5" d="M34 14l1-4-1-4H9C7.343 6 6 7.343 6 9v25l4 1 4-1V14h20z"/><polygon fill="#e53935" points="34,6 34,14 42,14 42,10 38,6"/><path fill="#1565c0" d="M42 14h-8V6h5c1.657 0 3 1.343 3 3v5z"/><path fill="#2e7d32" d="M9 42h5v-8H6v5c0 1.657 1.343 3 3 3z"/></svg>',
+    docs:'<svg viewBox="0 0 48 48" fill="none"><path fill="#2196f3" d="M37 45H11c-1.657 0-3-1.343-3-3V6c0-1.657 1.343-3 3-3h19l10 10v29c0 1.657-1.343 3-3 3z"/><path fill="#bbdefb" d="M40 13H30V3z"/><path fill="#1565c0" d="M30 13l10 10V13z"/><path fill="#e3f2fd" d="M15 23h18v2H15zm0 4h18v2H15zm0 4h18v2H15zm0 4h10v2H15z"/></svg>',
+    drive:'<svg viewBox="0 0 48 48" fill="none"><path fill="#FFC107" d="M17 6h14l14 24H31z"/><path fill="#1976D2" d="M9.875 42L16.938 30H45l-7 12z"/><path fill="#4CAF50" d="M3 30.125L9.875 42 24 18 17 6z"/></svg>',
+    slack:'<svg viewBox="0 0 48 48" fill="none"><path fill="#33d375" d="M33 8c0-2.209-1.791-4-4-4s-4 1.791-4 4v11c0 2.209 1.791 4 4 4s4-1.791 4-4z"/><path fill="#33d375" d="M43 19c0 2.209-1.791 4-4 4h-4v-4c0-2.209 1.791-4 4-4s4 1.791 4 4z"/><path fill="#40c4ff" d="M8 14c-2.209 0-4 1.791-4 4s1.791 4 4 4h11c2.209 0 4-1.791 4-4s-1.791-4-4-4z"/><path fill="#40c4ff" d="M19 4c2.209 0 4 1.791 4 4v4h-4c-2.209 0-4-1.791-4-4s1.791-4 4-4z"/><path fill="#e91e63" d="M14 40c0 2.209 1.791 4 4 4s4-1.791 4-4V29c0-2.209-1.791-4-4-4s-4 1.791-4 4z"/><path fill="#e91e63" d="M4 29c0-2.209 1.791-4 4-4h4v4c0 2.209-1.791 4-4 4s-4-1.791-4-4z"/><path fill="#ffc107" d="M40 34c2.209 0 4-1.791 4-4s-1.791-4-4-4H29c-2.209 0-4 1.791-4 4s1.791 4 4 4z"/><path fill="#ffc107" d="M29 44c-2.209 0-4-1.791-4-4v-4h4c2.209 0 4 1.791 4 4s-1.791 4-4 4z"/></svg>',
+    notion:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M4.459 4.208c.746.606 1.026.56 2.428.466l13.215-.793c.28 0 .047-.28-.046-.326L17.86 1.968c-.42-.326-.981-.7-2.055-.607L3.01 2.295c-.466.046-.56.28-.374.466zm.793 3.08v13.904c0 .747.373 1.027 1.214.98l14.523-.84c.841-.046.935-.56.935-1.167V6.354c0-.606-.233-.933-.748-.887l-15.177.887c-.56.047-.747.327-.747.933zm14.337.745c.093.42 0 .84-.42.888l-.7.14v10.264c-.608.327-1.168.514-1.635.514-.748 0-.935-.234-1.495-.933l-4.577-7.186v6.952l1.448.327s0 .84-1.168.84l-3.222.186c-.093-.186 0-.653.327-.746l.84-.233V9.854L7.822 9.76c-.094-.42.14-1.026.793-1.073l3.456-.233 4.764 7.279v-6.44l-1.215-.139c-.093-.514.28-.887.747-.933zM3.01 1.336l13.31-.98c1.634-.14 2.055-.047 3.082.7l4.249 2.986c.7.513.934.653.934 1.213v16.378c0 1.026-.373 1.634-1.68 1.726l-15.458.933c-.98.047-1.448-.093-1.962-.746l-3.129-4.06c-.56-.747-.793-1.306-.793-1.96V3.354c0-.839.374-1.54 1.447-1.632z"/></svg>',
+    github:'<svg viewBox="0 0 98 96" fill="none"><path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M41.4395 69.3848C28.8066 67.8535 19.9062 58.7617 19.9062 46.9902C19.9062 42.2051 21.6289 37.0371 24.5 33.5918C23.2559 30.4336 23.4473 23.7344 24.8828 20.959C28.7109 20.4805 33.8789 22.4902 36.9414 25.2656C40.5781 24.1172 44.4062 23.543 49.0957 23.543C53.7852 23.543 57.6133 24.1172 61.0586 25.1699C64.0254 22.4902 69.2891 20.4805 73.1172 20.959C74.457 23.543 74.6484 30.2422 73.4043 33.4961C76.4668 37.1328 78.0937 42.0137 78.0937 46.9902C78.0937 58.7617 69.1934 67.6621 56.3691 69.2891C59.623 71.3945 61.8242 75.9883 61.8242 81.252V91.2051C61.8242 94.0762 64.2168 95.7031 67.0879 94.5547C84.4102 87.9512 98 70.6289 98 49.1914C98 22.1074 75.9883 0 48.9043 0C21.8203 0 0 22.1074 0 49.1914C0 70.4375 13.4941 88.0469 31.6777 94.6504C34.2617 95.6074 36.75 93.8848 36.75 91.3008V83.6445C35.4102 84.2188 33.6875 84.6016 32.1562 84.6016C25.8398 84.6016 22.1074 81.1563 19.4277 74.7441C18.375 72.1602 17.2266 70.6289 15.0254 70.3418C13.877 70.2461 13.4941 69.7676 13.4941 69.1934C13.4941 68.0449 15.4082 67.1836 17.3223 67.1836C20.0977 67.1836 22.4902 68.9063 24.9785 72.4473C26.8926 75.2227 28.9023 76.4668 31.2949 76.4668C33.6875 76.4668 35.2187 75.6055 37.4199 73.4043C39.0469 71.7773 40.291 70.3418 41.4395 69.3848Z"/></svg>',
+    telegram:'<svg viewBox="0 0 48 48" fill="none"><circle cx="24" cy="24" r="22" fill="#29a9eb"/><path fill="#fff" d="M35.24 14.28c.42-.1.9.12.6 1.3l-4.02 18.92c-.3 1.32-1.1 1.63-2.1 1.02L23 31.5l-3.28 3.16c-.36.36-.67.66-1.37.66l.5-6.9 12.43-11.22c.54-.48-.12-.6-.83-.16L16.62 24l-6.42-2c-1.4-.44-1.42-1.4.3-2.07z"/></svg>'
+  };
+  function brandLogo(k){return BRAND[k]||'';}
+  function nearBusy(label){return '<div class="livestat busy" style="padding:2px"><svg class="near" viewBox="0 0 24 24" aria-hidden="true"><path class="near-base" d="'+NEAR_D+'"/></svg><span class="verb">'+label+'</span></div>';}
+
+  // ================= FIRST RUN scene =================
+  var APPS=[
+    {key:'gmail',label:'Gmail',icon:'mail',accent:'#ea4335'},
+    {key:'calendar',label:'Calendar',icon:'calendar',accent:'#4285f4'},
+    {key:'slack',label:'Slack',icon:'chat',accent:'#e01e5a'},
+    {key:'notion',label:'Notion',icon:'book',accent:'#6b7280'},
+    {key:'drive',label:'Drive',icon:'triangle',accent:'#0f9d58'},
+    {key:'github',label:'GitHub',icon:'code',accent:'#7d5bed'}
+  ];
+  var appRow=document.getElementById('appRow'),connectSub=document.getElementById('connectSub'),
+      connectIcon=document.getElementById('connectIcon'),connectTitle=document.getElementById('connectTitle');
+  var PLUG_PATHS='<path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/>';
+  var CHECK_PATHS='<circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/>';
+  var connSet=[], selSet=[], connectState='open', connectPhase='select'; // connectPhase: 'select' | 'done'
+  function isConn(k){return connSet.indexOf(k)>=0;}
+  function isSel(k){return selSet.indexOf(k)>=0;}
+  function appChip(a){return '<span class="appchip">'+brandLogo(a.key)+'</span>';}
+  function advanceFromConnect(){ if(step<1){ step=1; render(); if(playing){clearTimeout(timer);timer=setTimeout(advance,1100);} } }
+  // authorize the selected tools (or all remaining) via the queued OAuth modal, then advance
+  function startConnect(){
+    var queue = selSet.length ? selSet.slice() : APPS.filter(function(a){return !isConn(a.key);}).map(function(a){return a.key;});
+    if(!queue.length) return;
+    openAuth(queue, function(k){ if(!isConn(k)) connSet.push(k); var i=selSet.indexOf(k); if(i>=0) selSet.splice(i,1); }, function(){ if(step<1){ step=1; } render(); setTimeout(function(){ if(step<2){ step=2; render(); } }, 1300); });
+  }
+  function renderConnect(){
+    var all=APPS.length,n=connSet.length;
+    if(connectPhase==='done'){
+      if(connectIcon)connectIcon.innerHTML=CHECK_PATHS;
+      if(connectTitle)connectTitle.textContent='Tools connected';
+      connectSub.textContent=n+' tool'+(n===1?'':'s')+' authorized · getting to work…';
+      connectBlock.classList.add('confirmed');
+      appRow.innerHTML=APPS.filter(function(a){return isConn(a.key);}).map(function(a){
+        return '<span class="cpill on" aria-disabled="true">'+appChip(a)+'<span class="an">'+a.label+'</span><span class="cstate">'+svg('check',3)+'</span></span>';
+      }).join('');
+      return;
+    }
+    if(connectIcon)connectIcon.innerHTML=PLUG_PATHS;
+    if(connectTitle)connectTitle.textContent='Connect your tools';
+    connectBlock.classList.remove('confirmed');
+    connectSub.textContent = n>=all ? 'all connected' : 'select tools, then authorize each';
+    var html=APPS.map(function(a){
+      var on=isConn(a.key), sel=isSel(a.key);
+      return '<button class="cpill'+(on?' on':'')+(sel?' sel':'')+'" data-app="'+a.key+'" type="button" aria-pressed="'+(on||sel)+'"'+(on?' disabled':'')+'>'
+        +appChip(a)+'<span class="an">'+a.label+'</span>'
+        +'<span class="cstate">'+svg('check',3)+'</span></button>';
+    }).join('');
+    if(n<all) html+='<button class="connectbtn" id="connectAllBtn" type="button">'+(selSet.length?('Connect '+selSet.length):'Connect all')+'</button>';
+    appRow.innerHTML=html;
+    appRow.querySelectorAll('.cpill').forEach(function(b){
+      b.onclick=function(){
+        var k=b.getAttribute('data-app'); if(isConn(k)) return;
+        var i=selSet.indexOf(k); if(i>=0) selSet.splice(i,1); else selSet.push(k);
+        renderConnect();
+      };
+    });
+    var cbtn=document.getElementById('connectAllBtn'); if(cbtn) cbtn.onclick=startConnect;
+  }
+  // dismiss the connect panel ↔ show a "Connect your tools" pill in the composer
+  var connCloseBtn=document.getElementById('connCloseBtn'),connPill=document.getElementById('connPill'),connPillX=document.getElementById('connPillX');
+  function setConnectState(s){ connectState=s; render(); }
+  connCloseBtn.onclick=function(){ setConnectState('pill'); };
+  connPill.onclick=function(){ setConnectState('open'); };
+  connPillX.onclick=function(e){ e.stopPropagation(); setConnectState('gone'); };
+  // custom (non-brand) glyphs for the agent/meta tasks
+  var ICO_PROFILE='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.6"/><path d="M5.5 20a6.5 6.5 0 0 1 13 0"/></svg>';
+  var ICO_DIGEST='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2.5"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>';
+  var ICO_WAND='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z"/><path d="M18.4 15.4l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7z"/></svg>';
+  // each card carries a suggested (proposal) phrasing + a completed (result) phrasing, and the tool(s) it needs authorized
+  var CARDS=[
+    {brand:'gmail',label:'Gmail',accent:'#ea4335',when:'2m ago',conn:['gmail'],
+      sug:{title:'Triage your inbox',desc:'Archive marketing → <b>IronClaw Archive</b>, flag urgent for reply'},
+      done:{title:'Triaged your inbox',desc:'<b>40</b> archived · <b>6</b> flagged urgent'}},
+    {brand:'calendar',label:'Google Calendar',accent:'#4285f4',when:'just now',conn:['calendar'],
+      sug:{title:'Tidy your calendar',desc:'Accept free invites, propose new times for conflicts'},
+      done:{title:'Tidied your calendar',desc:'<b>3</b> accepted · <b>2</b> new times proposed'}},
+    {ico:ICO_PROFILE,label:'Gmail, Slack & Telegram',accent:'#7d5bed',when:'just now',conn:['gmail','slack','telegram'],
+      sug:{title:'Build your profile',desc:'Learn how you work across <b>Gmail</b>, <b>Slack</b> & <b>Telegram</b>'},
+      done:{title:'Built your profile',desc:'Profiled <b>Gmail</b> · <b>Slack</b> · <b>Telegram</b>'}},
+    {ico:ICO_DIGEST,label:'Drive & Notion',accent:'#0f9d58',when:'just now',conn:['drive','notion'],
+      sug:{title:'Catch you up (24h)',desc:'Summarize your org, flag replies, propose priorities'},
+      done:{title:'Caught you up (24h)',desc:'<b>12</b> updates · <b>3</b> to reply · <b>4</b> priorities'}},
+    {ico:ICO_WAND,label:'IronClaw',accent:'#2882c8',when:'just now',conn:[],
+      sug:{title:'Suggest 5 automations',desc:'Draft the top <b>5</b> automations I can run for you'},
+      done:{title:'5 automations ready',desc:'<b>5</b> proposed · approve or auto-run'}}
+  ];
+  function badgeFor(state){
+    if(state==='suggested') return '<span class="badge accent">Suggested</span>';
+    if(state==='completed') return '<span class="badge success"><span class="bdot"></span>Completed</span>';
+    return '<span class="badge muted">'+(state==='dismissed'?'Dismissed':'Reverted')+'</span>';
+  }
+  var ICO_SPARK='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 4.7L18 9l-4 2.7L15.5 17 12 14.4 8.5 17l1.5-5.3L6 9l4.1-1.3z"/></svg>';
+  var ICO_REFRESH='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>';
+  var CARD_X='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+  var CONNECT_ICO='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg>';
+  var ICO_PLUS='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>';
+  var ICO_ALERT='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>';
+  function cardHTML(c,idx,state,opts){
+    opts=opts||{};
+    var v=(state==='completed')?c.done:c.sug;
+    var logo=c.ico?('<span class="appchip" style="color:'+c.accent+'">'+c.ico+'</span>'):('<span class="appchip">'+brandLogo(c.brand)+'</span>');
+    var head='<div class="thd">'+logo+'<b class="ttl">'+v.title+'</b></div>';
+    var xbtn='<button class="cardx" data-act="cancel" data-i="'+idx+'" type="button" title="Dismiss" aria-label="Dismiss">'+CARD_X+'</button>';
+    var connectable=c.conn&&c.conn.length;
+    var body,acts;
+    if(state==='unconnected'&&connectable){
+      body='<div class="tdesc conhint">Connect '+c.label+' to run this suggestion.</div>';
+      acts='<div class="acts"><button class="approve" data-act="connect" data-i="'+idx+'">'+CONNECT_ICO+(c.conn.length===1?('Connect '+c.label):('Connect '+c.conn.length+' tools'))+'</button></div>';
+    } else {
+      body='<div class="tdesc">'+v.desc+'</div><div class="tprov">From '+c.label+(state==='completed'?' · '+c.when:'')+'</div>';
+      if(state==='running') acts='<div class="acts runrow"><span class="runstat"><span class="spin">'+ICO_REFRESH+'</span>Automating…</span></div>';
+      else if(state==='failed') acts='<div class="acts"><span class="cstat err">'+ICO_ALERT+'Couldn’t complete</span><button class="txt" data-act="approve" data-i="'+idx+'">'+ICO_REFRESH+'Try again</button></div>';
+      else if(state==='completed') acts='<div class="acts"><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button><button class="txt revert" data-act="revert" data-i="'+idx+'">'+svg('undo')+'Revert</button></div>';
+      else acts='<div class="acts"><button class="approve" data-act="approve" data-i="'+idx+'">Approve</button><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button></div>';
+    }
+    var cls='tcard'+(opts.ghost?' ghost':'')+(opts.first?' first':'');
+    var spark=opts.first?'<div class="aispark" aria-hidden="true"><div class="aispin"></div></div>':'';
+    return '<div class="'+cls+'" data-i="'+idx+'">'+xbtn+head+body+acts+spark+'</div>';
+  }
+  // fallback shown when every suggestion has been dismissed
+  function fallbackCardHTML(){
+    return '<button class="tcard fallback gen" type="button" data-act="refresh"><span class="fbico">'+ICO_SPARK+'</span><span class="fbtxt">Coming up with new suggestions</span></button>'; }
+  function fallbackPillHTML(){
+    return '<button class="tpill fallback gen" type="button" data-act="refresh"><span class="tplogo">'+ICO_SPARK+'</span><span class="tpt">Coming up with new suggestions</span></button>'; }
+  var agentMode='Suggest';
+  function modeProposed(){ return agentMode==='Suggest'||agentMode==='Plan'; }
+  var cardStates=CARDS.map(function(){ return 'suggested'; });
+  function resetCardStates(){ cardStates=CARDS.map(function(){ return modeProposed()?'suggested':'completed'; }); }
+  function visibleIdx(){ var v=[]; for(var i=0;i<CARDS.length;i++){ if(cardStates[i]!=='dismissed') v.push(i); } return v; }
+  function renderCards(revealFirstOnly){
+    var vis=visibleIdx(),html='',dhtml='';
+    if(!vis.length){ html=fallbackCardHTML(); dhtml=fallbackPillHTML(); }
+    else { var list=revealFirstOnly?vis.slice(0,1):vis; for(var k=0;k<list.length;k++){ var idx=list[k]; html+=cardHTML(CARDS[idx],idx,cardStates[idx],{first:(revealFirstOnly&&k===0)}); dhtml+=pillHTML(CARDS[idx],idx,cardStates[idx]); } }
+    realStrip.innerHTML=html; taskDrawer.innerHTML=dhtml; bindCarouselCards(); bindDrawer();
+  }
+  function bindCarouselCards(){
+    realStrip.querySelectorAll('[data-act]').forEach(function(b){
+      b.onclick=function(e){
+        e.stopPropagation();
+        var a=b.getAttribute('data-act');
+        if(a==='refresh'){ resetCardStates(); render(); return; }
+        var i=+b.getAttribute('data-i');
+        if(a==='connect'){ openAuth(CARDS[i].conn, null, function(){ cardStates[i]='suggested'; render(); }); return; }
+        if(a==='modify'){ openModify(CARDS[i].sug.title); return; }
+        if(a==='approve'){ cardStates[i]='running'; render(); setTimeout(function(){ if(cardStates[i]==='running'){ cardStates[i]='completed'; render(); } },950); return; }
+        if(a==='cancel') cardStates[i]='dismissed';
+        else if(a==='revert') cardStates[i]='suggested';
+        else return;
+        render();
+      };
+    });
+  }
+  // condensed pill for the collapsed drawer (typing / returning user); each pill carries an X to dismiss
+  function pillHTML(c,i,state){
+    var v=(state==='completed')?c.done:c.sug;
+    var logo=c.ico?('<span class="tplogo" style="color:'+c.accent+'">'+c.ico+'</span>'):('<span class="tplogo">'+brandLogo(c.brand)+'</span>');
+    return '<div class="tpill" data-i="'+i+'">'+logo+'<span class="tpt">'+v.title+'</span><button class="pillx" data-act="cancel" data-i="'+i+'" type="button" title="Dismiss" aria-label="Dismiss">'+CARD_X+'</button></div>';
+  }
+  function bindDrawer(){
+    taskDrawer.querySelectorAll('.pillx,.tpill.fallback').forEach(function(b){
+      b.onclick=function(e){ e.stopPropagation(); var a=b.getAttribute('data-act'); if(a==='refresh'){ resetCardStates(); render(); return; } cardStates[+b.getAttribute('data-i')]='dismissed'; render(); };
+    });
+    taskDrawer.querySelectorAll('.tpill:not(.fallback)').forEach(function(p){ p.onclick=function(){ drawerState='open'; autoCollapseSuppressed=true; applyDrawer(); }; });
+  }
+  function applyDrawer(){
+    if(!carouselBlock||!taskDrawer) return;
+    var active=(scene==='first') && (step>=2);
+    var hidden=active && (drawerState==='dismissed' || drawerState==='gone');
+    var typing=(!!(field&&field.value.trim())||composerAttach)&&taskDrawer.children.length>0;
+    var collapsed=active && !hidden && (drawerState==='collapsed' || (typing && !autoCollapseSuppressed));
+    carouselBlock.classList.toggle('dismissed',hidden);
+    carouselBlock.classList.toggle('collapsed',collapsed);
+    root.classList.toggle('drawer-on', active && !hidden);
+    if(drawerToggle){ drawerToggle.title=collapsed?'Expand':'Collapse'; drawerToggle.setAttribute('aria-label',collapsed?'Expand suggestions':'Collapse suggestions'); }
+  }
+  document.getElementById('ghostStrip').innerHTML=CARDS.map(function(c,i){return cardHTML(c,i,'completed',{ghost:true});}).join('');
+
+  var connectBlock=document.getElementById('connectBlock'),ghostBlock=document.getElementById('ghostBlock'),
+      carouselBlock=document.getElementById('carouselBlock'),realStrip=document.getElementById('realStrip'),taskDrawer=document.getElementById('taskDrawer'),
+      carMeta=document.getElementById('carMeta'),
+      heroTitle=document.getElementById('heroTitle'),heroSub=document.getElementById('heroSub'),
+      carTtl=document.getElementById('carTtl'),carSub=document.getElementById('carSub'),
+      capN=document.getElementById('capN'),capC=document.getElementById('capC'),
+      trackFill=document.getElementById('trackFill'),beatLbl=document.getElementById('beatLbl');
+
+  var MAX=4, step=0, dir='invite', playing=false, timer=null, scene='first';
+  var CAP=[
+    'The <b>cold start</b>. Zero automations, nothing connected — the screen has to earn the first connect and the first prompt.',
+    'Authorized — the banner <b>confirms</b> the connection (tools turn green), then dismisses as the agent gets to work.',
+    'A brief <b>anticipatory</b> beat — the branded indicator + skeleton tiles say "I\'m on it" instead of showing an empty strip.',
+    'The <b>first automation appears</b> — the strip is born and the first card reveals. The aha moment.',
+    'The strip <b>fills in</b>. Now it matches the populated carousel from PR #6994 — review, modify, or undo any of it.'
+  ];
+  var HERO=[
+    ['Welcome to IronClaw, Ada.',"I'm your agent. Connect a tool or two and I'll start clearing the small stuff off your plate — you'll see it here."],
+    ['Welcome to IronClaw, Ada.',"Nice — your tools are connected. Give me a moment to get the lay of the land."],
+    ['Welcome to IronClaw, Ada.',"Getting oriented — I'll surface the first thing I can take off your plate as soon as it's done."],
+    ['Here’s what I did while you got settled.',"I handled a first one on my own. Everything's reversible — take a look."],
+    ['Here’s what I did while you got settled.',"A few things are already done. Review, tweak, or undo anything — and tell me what else to take on."]
+  ];
+  // mode-aware hero for the card beats (Suggest / Plan): agent proposes rather than auto-runs
+  var HERO_PROP={
+    3:['Here’s the first thing I’d do.',"Approve it, tweak it, or skip — you're in control."],
+    4:['Here’s what I’d take off your plate.',"A few suggestions are ready — approve, tweak, or skip any, and tell me what else to take on."]
+  };
+  var version='vision';
+  var drawerState='open'; // drawer: 'open' (cards) | 'collapsed' (pills)
+  var composerAttach=false, autoCollapseSuppressed=false;
+  // Agent modes (default Suggest); Bypass is the full-automation escalation.
+  var MODES={
+    vision:[['Suggest','Always ask before taking any action.'],['Plan','Draft a plan of tasks and wait for approval.'],['Auto','Auto-run approved task types without asking.'],['Bypass','Full automation — act without approvals. Use with care.']]
+  };
+  var nearStart=0,elTimer=null;
+  function fmt(ms){var s=Math.floor(ms/1000);return Math.floor(s/60)+':'+String(s%60).padStart(2,'0');}
+  function tickEl(){carMeta.textContent=fmt(Date.now()-nearStart);}
+  function show(el,on){el.classList.toggle('hide',!on);}
+
+  function render(){
+    step=Math.max(0,Math.min(step,MAX));
+    var prop=modeProposed();
+    var h;
+    if(step>=3 && prop && HERO_PROP[step]) h=HERO_PROP[step];
+    else h=HERO[step];
+    heroTitle.textContent=h[0];heroSub.textContent=h[1];
+    capN.textContent='Beat '+step+' / '+MAX;
+    capC.innerHTML = CAP[step];
+    var coach=(dir==='coach'),empty=(step<=1),working=(step===2);
+    show(connectBlock, empty && connectState==='open');
+    show(ghostBlock, empty && coach);
+    var carouselActive = (step>=2);
+    show(carouselBlock, carouselActive);
+    connPill.style.display = (empty && connectState==='pill') ? '' : 'none';
+    if(step===0){ connSet=[]; selSet=[]; connectPhase='select'; renderConnect(); } else if(step===1){ if(!connSet.length) connSet=APPS.map(function(a){return a.key;}); selSet=[]; connectPhase='done'; renderConnect(); }
+    if(carouselActive){
+      if(working){
+        carTtl.textContent = prop ? 'Looking for things to suggest' : 'Working on your first automations';
+        carSub.textContent = '';
+        realStrip.innerHTML='<div class="sk"><div class="ln w40"></div><div class="ln w70"></div><div class="ln w55"></div></div>'.repeat(3);
+        taskDrawer.innerHTML='';
+        if(!nearStart)nearStart=Date.now(); if(!elTimer){elTimer=setInterval(tickEl,250);} tickEl();
+      } else {
+        var allDone = cardStates.length && cardStates.every(function(s){return s==='completed'||s==='dismissed';}) && cardStates.some(function(s){return s==='completed';});
+        var anyRun = cardStates.some(function(s){return s==='running';});
+        carTtl.textContent = (!prop||allDone) ? 'Done for you' : (anyRun ? 'Automating…' : 'Suggested for you');
+        carSub.textContent = (!prop||allDone) ? 'Review or undo anytime' : 'Approve to run, or tweak first';
+        renderCards(step===3);
+        if(elTimer){clearInterval(elTimer);elTimer=null;}
+        carMeta.textContent = prop ? '' : (step===3?'worked for 8s':'worked for 14s');
+      }
+    } else {
+      realStrip.innerHTML='';taskDrawer.innerHTML='';carouselBlock.classList.remove('collapsed');
+      if(elTimer){clearInterval(elTimer);elTimer=null;} nearStart=0; carMeta.textContent='';
+    }
+    trackFill.style.width=(step/MAX*100)+'%'; beatLbl.textContent=step+' / '+MAX;
+    applyDrawer();
+  }
+
+  var WAIT={1:true};
+  function advance(){ if(step>=MAX){stop();return;} step++; render(); if(playing){ timer=setTimeout(advance, WAIT[step]?1700:1500); } }
+  function play(){ if(step>=MAX){step=0;render();} playing=true; setPlay(true); timer=setTimeout(advance, 700); }
+  function stop(){ playing=false; setPlay(false); if(timer){clearTimeout(timer);timer=null;} }
+  function resetFirst(){ stop(); step=0; nearStart=0; composerAttach=false; autoCollapseSuppressed=false; var f=document.getElementById('composerField'); if(f)f.value=''; var ar=document.getElementById('attachRow'); if(ar)ar.hidden=true; resetCardStates(); connectState='open'; drawerState='open'; render(); }
+  function setPlay(on){ document.getElementById('playTxt').textContent=on?'Pause':'Play the first run';
+    document.getElementById('playIco').innerHTML=on?'<rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/>':'<path d="M8 5v14l11-7z"/>'; }
+  document.getElementById('playBtn').onclick=function(){ playing?stop():play(); };
+  document.getElementById('nextBtn').onclick=function(){ stop(); if(step<MAX){step++;render();} };
+  document.getElementById('prevBtn').onclick=function(){ stop(); if(step>0){step--;render();} };
+  document.getElementById('restartBtn').onclick=function(){ resetFirst(); };
+  // cold-start direction switcher (Invite/Coach) removed — first run uses the minimal "Invite" cold start
+
+  // mode selector (first-run composer)
+  var modeBtn=document.getElementById('modeBtn'),modeMenu=document.getElementById('modeMenu'),modeLabel=document.getElementById('modeLabel');
+  function closeMode(){modeMenu.hidden=true;modeBtn.setAttribute('aria-expanded','false');}
+  modeBtn.onclick=function(e){e.stopPropagation();var willOpen=modeMenu.hidden;modeMenu.hidden=!willOpen;modeBtn.setAttribute('aria-expanded',willOpen?'true':'false');};
+  function renderModeMenu(){
+    modeMenu.innerHTML=MODES[version].map(function(m){return '<button class="modeopt'+(m[0]===agentMode?' is-sel':'')+'" type="button" data-mode="'+m[0]+'"><span class="mo-t">'+m[0]+'</span><span class="mo-d">'+m[1]+'</span></button>';}).join('');
+  }
+  modeMenu.addEventListener('click',function(e){var o=e.target.closest('.modeopt');if(!o)return;modeMenu.querySelectorAll('.modeopt').forEach(function(x){x.classList.remove('is-sel');});o.classList.add('is-sel');agentMode=o.getAttribute('data-mode');modeLabel.textContent=agentMode;resetCardStates();closeMode();render();});
+  document.addEventListener('click',function(e){if(!modeMenu.hidden && !modeMenu.contains(e.target) && !modeBtn.contains(e.target)) closeMode();});
+  var field=document.getElementById('composerField'),runBtn=document.getElementById('runBtn');
+  var attachBtn=document.getElementById('attachBtn'),attachRow=document.getElementById('attachRow'),attachX=document.getElementById('attachX');
+  function syncRun(){runBtn.disabled=!(field.value.trim()||composerAttach);}
+  function setAttach(on){ composerAttach=on; if(attachRow) attachRow.hidden=!on; autoCollapseSuppressed=false; syncRun(); applyDrawer(); }
+  field.addEventListener('input',function(){field.style.height='auto';field.style.height=Math.min(field.scrollHeight,120)+'px';autoCollapseSuppressed=false;syncRun();applyDrawer();});
+  if(attachBtn) attachBtn.onclick=function(){ setAttach(true); };
+  if(attachX) attachX.onclick=function(){ setAttach(false); };
+  // Modify opens a modification modal (both versions)
+  var modifyModal=document.getElementById('modifyModal'),modifyTitle=document.getElementById('modifyTitle'),modifyField=document.getElementById('modifyField');
+  function openModify(t){ if(!modifyModal)return; modifyTitle.textContent='Modify — '+t; modifyField.value=''; modifyModal.classList.add('on'); }
+  function closeModify(){ if(modifyModal) modifyModal.classList.remove('on'); }
+  ['modifyBack','modifyCancel','modifyCancel2','modifySave'].forEach(function(id){ var el=document.getElementById(id); if(el) el.onclick=closeModify; });
+  // ===== 3rd-party auth: a modal "browser" dialog, queued across the selected tools =====
+  var AUTHMETA={
+    gmail:{name:'Gmail',domain:'accounts.google.com',scope:'Read, send, and organise your email'},
+    calendar:{name:'Google Calendar',domain:'accounts.google.com',scope:'View and manage your calendars and events'},
+    docs:{name:'Google Docs',domain:'accounts.google.com',scope:'View and manage your Google Docs'},
+    drive:{name:'Google Drive',domain:'accounts.google.com',scope:'See, edit, and organise your Drive files'},
+    slack:{name:'Slack',domain:'slack.com',scope:'Read and send messages on your behalf'},
+    notion:{name:'Notion',domain:'www.notion.so',scope:'Read and edit the pages you choose'},
+    github:{name:'GitHub',domain:'github.com',scope:'Access your repositories and issues'},
+    telegram:{name:'Telegram',domain:'oauth.telegram.org',scope:'Read your messages and contacts'}
+  };
+  var authModal=document.getElementById('authModal'),authBody=document.getElementById('authBody'),authUrl=document.getElementById('authUrl');
+  var authQueue=[],authPos=0,authPhase='signin',authOnEach=null,authOnDone=null;
+  function openAuth(keys,onEach,onDone){ authQueue=(keys||[]).slice(); authPos=0; authPhase='signin'; authOnEach=onEach||null; authOnDone=onDone||null; if(!authQueue.length){ if(authOnDone)authOnDone(); return; } renderAuth(); if(authModal)authModal.classList.add('on'); }
+  function closeAuth(){ if(authModal)authModal.classList.remove('on'); }
+  function renderAuth(){
+    var k=authQueue[authPos],meta=AUTHMETA[k]||{name:k,domain:'',scope:''};
+    if(authUrl)authUrl.textContent=meta.domain;
+    var pos=(authQueue.length>1)?'<div class="astep">Connecting '+(authPos+1)+' of '+authQueue.length+' · '+meta.name+'</div>':'';
+    var logo='<span class="alogo">'+brandLogo(k)+'</span>';
+    if(authPhase==='signin'){
+      authBody.innerHTML=pos+logo+'<div class="atitle">Sign in</div><div class="asub">to continue to <b>IronClaw</b></div>'
+        +'<button class="acct" id="authAcct" type="button"><span class="aav">A</span><span class="acol"><span class="anm">Ada Lovelace</span><span class="aem">ada@acme.com</span></span></button>'
+        +'<div class="afoot"><button class="abtn ghost" id="authCancelB" type="button">Cancel</button></div>';
+    } else {
+      authBody.innerHTML=pos+logo+'<div class="atitle"><b>IronClaw</b> wants access</div><div class="asub">to your '+meta.name+' · signed in as ada@acme.com</div>'
+        +'<div class="scopes"><div class="ascope">'+svg('check',2.6)+'<span>'+meta.scope+'</span></div><div class="ascope">'+svg('check',2.6)+'<span>See your name and email address</span></div></div>'
+        +'<div class="afoot"><button class="abtn ghost" id="authCancelB" type="button">Cancel</button><button class="abtn primary" id="authAllow" type="button">Allow</button></div>';
+    }
+    var acct=document.getElementById('authAcct'); if(acct)acct.onclick=function(){ authPhase='consent'; renderAuth(); };
+    var allow=document.getElementById('authAllow'); if(allow)allow.onclick=authAdvance;
+    var cb=document.getElementById('authCancelB'); if(cb)cb.onclick=closeAuth;
+  }
+  function authAdvance(){ var k=authQueue[authPos]; if(authOnEach)authOnEach(k); authPos++; if(authPos>=authQueue.length){ closeAuth(); if(authOnDone)authOnDone(); } else { authPhase='consent'; renderAuth(); } }
+  if(authModal){ var ac=document.getElementById('authClose'),ab=document.getElementById('authBack'); if(ac)ac.onclick=closeAuth; if(ab)ab.onclick=closeAuth; }
+  // Vision drawer controls: collapse/expand + dismiss (with a restore bar)
+  var drawerToggle=document.getElementById('drawerToggle');
+  if(drawerToggle) drawerToggle.onclick=function(){ if(drawerState==='collapsed'){ drawerState='open'; autoCollapseSuppressed=true; } else { drawerState='collapsed'; } applyDrawer(); };
+  var drawerDismiss=document.getElementById('drawerDismiss'),showSuggPill=document.getElementById('showSuggPill'),showSuggX=document.getElementById('showSuggX');
+  if(drawerDismiss) drawerDismiss.onclick=function(){ drawerState='dismissed'; applyDrawer(); };
+  if(showSuggPill) showSuggPill.onclick=function(){ drawerState='open'; autoCollapseSuppressed=true; applyDrawer(); };
+  if(showSuggX) showSuggX.onclick=function(e){ e.stopPropagation(); drawerState='gone'; applyDrawer(); };
+
+  // ================= THREAD scene (calendar reschedule) =================
+  var CAL_ACCENT='#4285f4', TIMES=['4:15 – 4:45 PM','5:00 – 5:30 PM'];
+  var t1={state:'suggested',timeIdx:0};
+  function calCardHTML(host, o, opts){
+    // opts: {automated:bool, allowActions:bool}
+    var automated = o.state==='automated';
+    if(o.state==='dismissed' || o.state==='reverted'){
+      var note = o.state==='dismissed' ? 'Dismissed — nothing was done.' : 'Reverted — the change was undone.';
+      return '<div class="calcard"><div class="chd"><span class="appchip">'+brandLogo('calendar')+'</span>'
+        +'<div class="tt"><b>Move your 3:00 sync</b><small>Google Calendar</small></div>'
+        +'<span class="badge muted">'+(o.state==='dismissed'?'Dismissed':'Reverted')+'</span></div>'
+        +'<div class="cfoot"><span class="termnote">'+svg('undo')+note+'</span></div></div>';
+    }
+    var badge = automated ? '<span class="badge success"><span class="bdot"></span>Completed</span>' : '<span class="badge accent">Suggested</span>';
+    var pline = automated
+      ? 'Moved <b>“Design sync”</b> so it no longer overlaps your <b>“Board prep”</b>.'
+      : '<b>“Design sync”</b> overlaps your <b>“Board prep”</b>. I can move it to a slot that works for everyone.';
+    var nowCap = automated ? 'Now' : 'Proposed';
+    var footer;
+    if(o.busy){
+      footer = '<div class="cfoot">'+nearBusy(o.busyLabel||'Working…')+'</div>';
+    } else if(automated){
+      footer = '<div class="cfoot"><button class="actbtn" data-act="modify">'+svg('edit')+'Modify</button>'
+        +'<button class="actbtn danger" data-act="revert">'+svg('undo')+'Revert</button>'
+        +'<button class="actbtn ghost launch">'+svg('external')+'Open in Google Calendar</button></div>';
+    } else {
+      footer = '<div class="cfoot"><button class="actbtn primary" data-act="approve">'+svg('check')+'Approve</button>'
+        +'<button class="actbtn" data-act="modify">'+svg('edit')+'Modify time</button>'
+        +'<button class="actbtn ghost" data-act="cancel">Skip</button>'
+        +'<button class="actbtn ghost launch">'+svg('external')+'Open</button></div>';
+    }
+    return '<div class="calcard"><div class="chd"><span class="appchip">'+brandLogo('calendar')+'</span>'
+      +'<div class="tt"><b>Move your 3:00 sync</b><small>Google Calendar</small></div>'+badge+'</div>'
+      +'<div class="cbody"><p class="pline">'+pline+'</p>'
+      +'<div class="slots">'
+        +'<div class="slotblock was"><div class="cap">'+svg('close',2)+'Was</div><div class="day">Thu, Jul 23</div><div class="time">3:00 – 3:30 PM</div><div class="mt">Design sync</div><div class="conflict">'+svg('bolt')+'Conflicts with Board prep</div></div>'
+        +'<div class="arrow">'+svg('arrow',2)+'</div>'
+        +'<div class="slotblock now"><div class="cap">'+svg('check',2.4)+nowCap+'</div><div class="day">Thu, Jul 23</div><div class="time">'+TIMES[o.timeIdx]+'</div><div class="mt">Design sync</div></div>'
+      +'</div>'
+      +'<div class="attendees">'+svg('users')+'<b>Attendees</b> Priya, Marcus, Dana +2</div></div>'
+      +footer+'</div>';
+  }
+  function bindCal(host, o, isSecond){
+    host.querySelectorAll('[data-act]').forEach(function(btn){
+      btn.onclick=function(){
+        var act=btn.getAttribute('data-act');
+        if(act==='modify' && o.state==='suggested'){ o.timeIdx=(o.timeIdx+1)%TIMES.length; renderCal(host,o,isSecond); return; }
+        if(act==='cancel'){ o.busy=true; o.busyLabel='Cancelling…'; renderCal(host,o,isSecond); setTimeout(function(){o.busy=false;o.state='dismissed';renderCal(host,o,isSecond);},900); return; }
+        if(act==='approve'){ o.busy=true; o.busyLabel='Rescheduling…'; renderCal(host,o,isSecond); setTimeout(function(){o.busy=false;o.state='automated';renderCal(host,o,isSecond);},1200); return; }
+        if(act==='revert'){ o.busy=true; o.busyLabel='Reverting…'; renderCal(host,o,isSecond); setTimeout(function(){o.busy=false;o.state='reverted';renderCal(host,o,isSecond);},1000); return; }
+        if(act==='modify' && o.state==='automated'){ o.busy=true; o.busyLabel='Re-running…'; renderCal(host,o,isSecond); setTimeout(function(){o.busy=false;o.state='automated';renderCal(host,o,isSecond);},1100); return; }
+      };
+    });
+  }
+  function renderCal(host,o,isSecond){ host.innerHTML=calCardHTML(host,o); bindCal(host,o,isSecond); }
+  function resetThread(){
+    t1={state:'suggested',timeIdx:0,busy:false};
+    renderCal(document.getElementById('calHost1'), t1, false);
+    var t2={state:'automated',timeIdx:1,busy:false};
+    renderCal(document.getElementById('calHost2'), t2, true);
+  }
+
+  // ================= PLAN scene =================
+  var PLAN_ITEMS=[
+    {app:'gmail',brand:'gmail',accent:'#ea4335',title:'Triage 40 unread',sum:'Reply to 12, archive the rest'},
+    {app:'calendar',brand:'calendar',accent:'#4285f4',title:'Accept 3 invites',sum:'No conflicts found'},
+    {app:'file',brand:'docs',accent:'#3b82f6',title:'Summarize 2 docs',sum:'Product spec + retro notes'},
+    {app:'slack',brand:'slack',accent:'#e01e5a',title:'Post standup update',sum:"From yesterday's activity"}
+  ];
+  var plan={state:'open',items:null};
+  function planCardHTML(){
+    var items=plan.items;
+    var remaining=items.filter(function(i){return i.status==='todo';}).length;
+    var allDone=items.length>0 && remaining===0 && plan.state!=='dismissed';
+    var badge = plan.state==='dismissed' ? '<span class="badge muted">Dismissed</span>'
+      : allDone ? '<span class="badge success"><span class="bdot"></span>All done</span>'
+      : '<span class="badge accent">'+remaining+' to approve</span>';
+    var rows=items.map(function(it,idx){
+      var chip='<span class="appchip">'+brandLogo(it.brand)+'</span>';
+      var info='<div class="pinfo"><div class="pt"><b>'+it.title+'</b></div><div class="ps">'+it.sum+'</div></div>';
+      var right;
+      if(it.status==='done'){ right='<svg class="donecheck" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">'+ICON.check+'</svg>'; }
+      else if(it.status==='cancelled'){ right='<span class="badge muted">Skipped</span>'; }
+      else { right='<div class="pacts"><button class="iconsq" data-pact="edit" data-i="'+idx+'" title="Modify">'+svg('edit')+'</button><button class="iconsq" data-pact="cancel" data-i="'+idx+'" title="Skip">'+svg('close',2)+'</button></div>'; }
+      return '<li class="'+(it.status==='done'?'done':'')+'">'+chip+info+right+'</li>';
+    }).join('');
+    var footer;
+    if(plan.state==='running'){ footer='<div class="pfoot">'+nearBusy('Running your plan…')+'</div>'; }
+    else if(allDone){ footer='<div class="pfoot"><span class="termnote ok">'+svg('check',2.2)+'Plan complete — everything’s been handled.</span></div>'; }
+    else if(plan.state==='dismissed'){ footer='<div class="pfoot"><span class="termnote">'+svg('undo')+'Dismissed — nothing was run.</span></div>'; }
+    else { footer='<div class="pfoot"><button class="actbtn primary" data-pfoot="approveAll">'+svg('check')+'Approve all ('+remaining+')</button><button class="actbtn ghost" data-pfoot="dismiss">Dismiss</button></div>'; }
+    return '<div class="plancard"><div class="chd"><span class="ico">'+svg('list')+'</span>'
+      +'<div class="tt"><b>Monday morning cleanup</b><small>4 tasks · about 2 minutes</small></div>'+badge+'</div>'
+      +'<ul class="plist">'+rows+'</ul>'+footer+'</div>';
+  }
+  function bindPlan(host){
+    host.querySelectorAll('[data-pfoot]').forEach(function(b){
+      b.onclick=function(){
+        var a=b.getAttribute('data-pfoot');
+        if(a==='approveAll'){ plan.state='running'; renderPlan(host); setTimeout(function(){ plan.items.forEach(function(i){ if(i.status==='todo') i.status='done'; }); plan.state='done'; renderPlan(host); },1500); }
+        else if(a==='dismiss'){ plan.state='dismissed'; renderPlan(host); }
+      };
+    });
+    host.querySelectorAll('[data-pact]').forEach(function(b){
+      b.onclick=function(){
+        var i=+b.getAttribute('data-i'),a=b.getAttribute('data-pact');
+        if(a==='cancel'){ plan.items[i].status='cancelled'; renderPlan(host); }
+        else if(a==='edit'){ b.style.borderColor='var(--v2-accent)'; }
+      };
+    });
+  }
+  function renderPlan(host){ host.innerHTML=planCardHTML(); bindPlan(host); }
+  function resetPlan(){ plan={state:'open',items:PLAN_ITEMS.map(function(i){return {app:i.app,icon:i.icon,accent:i.accent,title:i.title,sum:i.sum,status:'todo'};})}; renderPlan(document.getElementById('planHost')); }
+
+  // ================= scene switching =================
+  var sFirst=document.getElementById('sFirst'),sThread=document.getElementById('sThread'),sPlan=document.getElementById('sPlan'),
+      frControls=document.getElementById('firstRunControls');
+  function setScene(s){
+    scene=s;
+    sFirst.setAttribute('aria-pressed',s==='first');sThread.setAttribute('aria-pressed',s==='thread');sPlan.setAttribute('aria-pressed',s==='plan');
+    frControls.classList.toggle('hide', s!=='first');
+    document.getElementById('sceneFirstRun').classList.toggle('on', s==='first');
+    document.getElementById('sceneThread').classList.toggle('on', s==='thread');
+    document.getElementById('scenePlan').classList.toggle('on', s==='plan');
+    if(s!=='first'){ stop(); root.classList.remove('drawer-on'); }
+    if(s==='first'){ render(); }
+    else if(s==='thread'){ resetThread(); capN.textContent='Inline chat'; capC.innerHTML='The <b>calendar reschedule</b> rich-preview inside a thread. Approve it, tweak the time, or skip — the top card is live. (Re-click Thread to reset.)'; }
+    else { resetPlan(); capN.textContent='Aggregate tasks'; capC.innerHTML='<b>Plan mode</b> — the agent proposes a batch; one <b>Approve all</b> runs the set. Skip any first. (Re-click Plan to reset.)'; }
+  }
+  sFirst.onclick=function(){setScene('first');};
+  sThread.onclick=function(){setScene('thread');};
+  sPlan.onclick=function(){setScene('plan');};
+
+  // ---- init ----
+  var whoName=document.querySelector('.topbar .who .nm');
+  root.classList.add('v-vision');
+  if(whoName) whoName.textContent='Ada';
+  renderModeMenu();
+  setFlags(true);
+  resetFirst();
+  setScene('first');
+})();
+</script>

@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    AcceptedMessageRef, GateResumeDisposition, ProductTurnContext, RunProfileId, RunProfileVersion,
-    TurnActor, TurnRunRecord, TurnRunState, runner::ClaimedTurnRun,
+    AcceptedMessageRef, ActivationProvenance, GateResumeDisposition, ProductTurnContext,
+    RunProfileId, RunProfileVersion, TurnActor, TurnRunRecord, TurnRunState,
+    runner::ClaimedTurnRun,
 };
 use ironclaw_host_api::turn::TurnExecutionOutcome;
 use ironclaw_loop_contracts::{LoopModelRouteSnapshot, LoopModelUsage, ResolvedRunProfile};
@@ -99,6 +100,11 @@ pub struct AgentTurnProcessStateMetadata {
     pub execution_outcome: Option<TurnExecutionOutcome>,
     #[serde(default)]
     pub subagent_depth: u32,
+    /// Why this run was activated on its thread. Set once at run creation,
+    /// never mutated. Absent on rows written before the field existed, and on
+    /// every ordinary human-initiated submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_activation_provenance: Option<ActivationProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_tree_descendant_cap: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,6 +138,10 @@ impl AgentTurnProcessStateMetadata {
             model_usage: state.model_usage,
             execution_outcome: state.execution_outcome,
             subagent_depth: 0,
+            // State-derived rewrites do not carry lineage (see subagent_depth
+            // above); the durable provenance stays on the originally journaled
+            // metadata.
+            subagent_activation_provenance: None,
             spawn_tree_descendant_cap: None,
             product_context: state.product_context.clone(),
             resume_disposition: state.resume_disposition.clone(),
@@ -145,6 +155,7 @@ impl AgentTurnProcessStateMetadata {
             resolved_run_profile: Some(claimed.resolved_run_profile.clone()),
             subagent_depth: claimed.subagent_depth,
             spawn_tree_descendant_cap: claimed.spawn_tree_descendant_cap,
+            subagent_activation_provenance: claimed.subagent_activation_provenance,
             ..Self::from_state(&claimed.state)
         }
     }

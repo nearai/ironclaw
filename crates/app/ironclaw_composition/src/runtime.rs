@@ -632,6 +632,7 @@ pub struct RebornRuntime {
     pub(crate) workspace_mount_policy: crate::runtime_mounts::WorkspaceMountPolicy,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
+    pub(crate) notification_inbox: Arc<dyn ironclaw_notifications::NotificationInboxStorePort>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) outbound_state: OutboundTestStores,
     #[cfg(any(test, feature = "test-support"))]
@@ -2328,6 +2329,7 @@ impl RebornRuntime {
         let response = match self
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
+                subagent_activation_provenance: None,
                 requested_model: accepted.replay_metadata.resolved_model.clone(),
                 scope: scope.clone(),
                 actor: TurnActor::new(self.actor_user_id.clone()),
@@ -4549,6 +4551,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         workspace_mount_policy: services.workspace_mounts.clone(),
         system_extensions_lifecycle_mounts: services.system_extensions_lifecycle_mounts.clone(),
         outbound_preferences: services.outbound_preferences.clone(),
+        notification_inbox: services.notification_inbox.clone(),
         #[cfg(any(test, feature = "test-support"))]
         outbound_state: OutboundTestStores {
             state: services.outbound_state.clone(),

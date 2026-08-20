@@ -127,3 +127,6 @@ mutants.out.old/
 
 # Skill bundles staged into a workspace at activation. Build output, never source.
 .skills/
+
+# Added by cleanup skill: campaign state, local-only.
+.cleanup/

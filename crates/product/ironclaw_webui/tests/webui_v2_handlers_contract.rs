@@ -118,6 +118,12 @@ use ironclaw_product_contracts::inbound_requests::{
 use ironclaw_product_contracts::ironhub::{
     IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult,
 };
+use ironclaw_product_contracts::notification_inbox::{
+    NOTIFICATIONS_ARCHIVE_COMMAND_ID, NOTIFICATIONS_MARK_ALL_READ_COMMAND_ID,
+    NOTIFICATIONS_MARK_READ_COMMAND_ID, NOTIFICATIONS_VIEW, ProductListNotificationsResponse,
+    ProductNotification, ProductNotificationAction, ProductNotificationKind,
+    ProductNotificationMutationResponse, ProductNotificationSeverity,
+};
 use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
     LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
@@ -1492,6 +1498,28 @@ impl StubServices {
                     next_cursor: None,
                 })
             }
+            id if id == NOTIFICATIONS_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(ProductListNotificationsResponse {
+                    notifications: vec![ProductNotification {
+                        id: "notification-alpha".to_string(),
+                        kind: ProductNotificationKind::AuthenticationRequired,
+                        severity: ProductNotificationSeverity::Warning,
+                        action: ProductNotificationAction::OpenThread {
+                            thread_id: "thread-alpha".to_string(),
+                        },
+                        thread_id: "thread-alpha".to_string(),
+                        turn_run_id: Some("run-alpha".to_string()),
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                        read_at: None,
+                        resolved_at: None,
+                    }],
+                    next_cursor: Some("notification-cursor".to_string()),
+                    unread_count: 1,
+                })
+                .expect("notifications payload"),
+                next_cursor: Some("notification-cursor".to_string()),
+            }),
             _ => Err(rejecting_product_surface_error()),
         }
     }
@@ -1938,6 +1966,25 @@ impl ProductSurface for StubServices {
         ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
         ProductSurfaceError,
     > {
+        if matches!(
+            request.operation_id.as_str(),
+            NOTIFICATIONS_MARK_READ_COMMAND_ID
+                | NOTIFICATIONS_MARK_ALL_READ_COMMAND_ID
+                | NOTIFICATIONS_ARCHIVE_COMMAND_ID
+        ) {
+            self.invoke_calls.lock().expect("lock").push((
+                request.operation_id,
+                request.input,
+                request.activity_id,
+            ));
+            let output =
+                serde_json::to_value(ProductNotificationMutationResponse { updated: true })
+                    .map_err(ProductSurfaceError::internal_from)?;
+            return Ok(
+                ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output },
+            );
+        }
+
         if let Some(call_id) = ProductSurfaceCallId::parse(request.operation_id.as_str()) {
             let output = self
                 .record_product_surface_call(
@@ -3284,6 +3331,76 @@ async fn list_threads_forwards_needs_approval_filter() {
 }
 
 #[tokio::test]
+async fn notification_inbox_routes_query_and_mutate_product_surface() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let list = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/notifications?limit=12&cursor=notification-before")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("list notifications");
+    assert_eq!(list.status(), StatusCode::OK);
+    let body = read_json(list).await;
+    assert_eq!(body["notifications"][0]["kind"], "authentication_required");
+    assert_eq!(body["notifications"][0]["turn_run_id"], "run-alpha");
+    assert_eq!(body["unread_count"], 1);
+
+    for (path, operation_id) in [
+        (
+            "/api/webchat/v2/notifications/notification-alpha/read",
+            NOTIFICATIONS_MARK_READ_COMMAND_ID,
+        ),
+        (
+            "/api/webchat/v2/notifications/read-all",
+            NOTIFICATIONS_MARK_ALL_READ_COMMAND_ID,
+        ),
+        (
+            "/api/webchat/v2/notifications/notification-alpha/archive",
+            NOTIFICATIONS_ARCHIVE_COMMAND_ID,
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("mutate notification");
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(read_json(response).await["updated"], true, "{path}");
+        assert_eq!(
+            services
+                .invoke_calls
+                .lock()
+                .expect("lock")
+                .last()
+                .expect("notification invoke")
+                .0
+                .as_str(),
+            operation_id,
+            "{path}"
+        );
+    }
+
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), NOTIFICATIONS_VIEW.id);
+    assert_eq!(queries[0].params["limit"], 12);
+    assert_eq!(queries[0].cursor.as_deref(), Some("notification-before"));
+}
+
+#[tokio::test]
 async fn list_automations_omits_limits_and_forwards_none() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
@@ -4504,6 +4621,43 @@ async fn get_session_reports_reborn_projects_feature_from_state_flag() {
         assert_eq!(
             body["features"]["reborn_projects"], enabled,
             "features.reborn_projects must mirror the state flag (enabled={enabled})"
+        );
+    }
+}
+
+// The browser hides the OOBE first-run suggestion cards unless the deployment
+// opts in. The gate is delivered through the session response's
+// `features.oobe_suggestions` field, fed from
+// `WebUiV2State::with_oobe_suggestions_enabled` at composition. Drive the real
+// router (not just the state accessor) so a handler that forgot to surface the
+// flag is caught — see `.claude/rules/testing.md` "Test Through the Caller".
+#[tokio::test]
+async fn get_session_reports_oobe_suggestions_feature_from_state_flag() {
+    for enabled in [false, true] {
+        let services = Arc::new(StubServices::default());
+        let router = webui_v2_router(
+            WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+                .with_oobe_suggestions_enabled(enabled),
+        )
+        .layer(axum::Extension(caller()))
+        .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/webchat/v2/session")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(
+            body["features"]["oobe_suggestions"], enabled,
+            "features.oobe_suggestions must mirror the state flag (enabled={enabled})"
         );
     }
 }

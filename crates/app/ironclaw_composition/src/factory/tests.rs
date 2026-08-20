@@ -2040,6 +2040,7 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
         Some(owner.clone()),
     );
     let submit = ironclaw_turns::SubmitTurnRequest {
+        subagent_activation_provenance: None,
         requested_model: None,
         output_contract: None,
         scope,
@@ -2129,6 +2130,7 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
         Some(owner.clone()),
     );
     let submit = ironclaw_turns::SubmitTurnRequest {
+        subagent_activation_provenance: None,
         requested_model: None,
         output_contract: None,
         scope,

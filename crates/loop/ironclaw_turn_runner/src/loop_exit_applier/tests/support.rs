@@ -412,6 +412,7 @@ pub(super) fn claimed_run() -> ClaimedTurnRun {
     profile.checkpoint_policy.require_final_checkpoint = false;
     profile.checkpoint_policy.allow_no_reply_completion = false;
     ClaimedTurnRun {
+        subagent_activation_provenance: None,
         state: TurnRunState {
             scope,
             actor: None,

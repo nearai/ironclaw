@@ -212,6 +212,7 @@ impl AgentTurnProcessRuntime {
             model_usage: None,
             execution_outcome: None,
             subagent_depth: 0,
+            subagent_activation_provenance: request.subagent_activation_provenance,
             spawn_tree_descendant_cap: None,
             product_context: request.product_context,
             resume_disposition: None,
@@ -291,6 +292,9 @@ impl AgentTurnProcessRuntime {
             subagent_depth,
             spawn_tree_root_run_id: Some(turn_run_id_from_process_id(root_process_id)),
             product_context: parent_metadata.product_context.clone(),
+            // A fresh child run is a spawn, not a re-activation of an existing
+            // thread, so it carries no activation provenance.
+            subagent_activation_provenance: None,
         };
         admission_policy
             .check_submit(&submit_template)
@@ -317,6 +321,11 @@ impl AgentTurnProcessRuntime {
             model_usage: None,
             execution_outcome: None,
             subagent_depth,
+            // A fresh child run is a spawn, not a re-activation of an existing
+            // thread, so it carries no activation provenance. `ParentAgent` is
+            // reserved for `subagent_extend` re-activating an already-terminal
+            // child.
+            subagent_activation_provenance: None,
             spawn_tree_descendant_cap: Some(request.spawn_tree_descendant_cap),
             product_context: parent_metadata.product_context,
             resume_disposition: None,
@@ -628,6 +637,19 @@ fn failure_prohibits_retry(failure: &SanitizedFailure) -> bool {
 
 #[async_trait]
 impl crate::AgentTurnRuntimePort for AgentTurnProcessRuntime {
+    async fn recent_runs_for_thread(
+        &self,
+        scope: &TurnScope,
+        limit: u32,
+    ) -> Result<Vec<TurnRunRecord>, TurnError> {
+        self.snapshots
+            .recent_agent_turn_snapshots(&scope.to_resource_scope(), limit)
+            .await?
+            .into_iter()
+            .map(turn_run_record_from_process_snapshot)
+            .collect()
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
@@ -1128,6 +1150,7 @@ fn turn_run_record_from_process_snapshot(
         received_at: state.received_at,
         parent_run_id: snapshot.parent_process_id.map(turn_run_id_from_process_id),
         subagent_depth: metadata.subagent_depth,
+        subagent_activation_provenance: metadata.subagent_activation_provenance,
         spawn_tree_root_run_id: snapshot.root_process_id.map(turn_run_id_from_process_id),
         product_context: state.product_context,
         resume_disposition: state.resume_disposition,
@@ -1206,6 +1229,7 @@ pub fn claimed_turn_run_from_process_claim(
         resolved_run_profile,
         subagent_depth: metadata.subagent_depth,
         spawn_tree_descendant_cap: metadata.spawn_tree_descendant_cap,
+        subagent_activation_provenance: metadata.subagent_activation_provenance,
         runner_id: turn_runner_id_from_worker(&claimed.worker_id)?,
         lease_token: turn_lease_token_from_process(&claimed.lease_token)?,
     })

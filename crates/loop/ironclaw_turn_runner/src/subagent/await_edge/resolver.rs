@@ -917,6 +917,7 @@ mod tests {
         resolved_run_profile: ironclaw_loop_contracts::ResolvedRunProfile,
     ) -> TurnRunRecord {
         TurnRunRecord {
+            subagent_activation_provenance: None,
             run_id: child_run_id,
             turn_id: ironclaw_host_api::turn::TurnId::new(),
             scope: TurnScope::new(

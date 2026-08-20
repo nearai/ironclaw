@@ -193,6 +193,7 @@ impl UnboundTurnService {
         let response = self
             .coordinator
             .submit_turn(SubmitTurnRequest {
+                subagent_activation_provenance: None,
                 scope: self.resolved_turn_scope(&thread_id, &submission.caller),
                 actor: TurnActor::new(submission.caller.user_id),
                 accepted_message_ref: accepted.accepted_message_ref,

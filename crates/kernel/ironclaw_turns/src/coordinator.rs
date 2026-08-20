@@ -56,12 +56,13 @@ fn trace_coordinator_latency_error<E: ?Sized>(
 }
 
 use crate::{
-    AdmissionRejection, AdmissionRejectionReason, AgentTurnRuntimePort,
-    AgentTurnSpawnTreeRuntimePort, CancelRunRequest, CancelRunResponse, EventCursor,
-    GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse,
-    RunProfileId, RunProfileRequest, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
+    ActivateThreadRequest, ActivationProvenance, AdmissionRejection, AdmissionRejectionReason,
+    AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort, CancelRunRequest, CancelRunResponse,
+    EventCursor, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
+    RetryTurnResponse, RunProfileId, RunProfileRequest, SYSTEM_WAKE_STREAK_CAP,
+    SYSTEM_WAKE_WINDOW_OVERFETCH, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
     TurnCapacityResource, TurnError, TurnOriginKind, TurnRunId, TurnRunState, TurnScope,
-    TurnStatus, process_projection::AgentTurnProcessRuntime,
+    TurnStatus, process_projection::AgentTurnProcessRuntime, system_wake_admitted,
 };
 use ironclaw_host_api::prepared_context::{
     PreparedContextSource, PreparedTurnDeclarations, TurnLimits,
@@ -138,6 +139,23 @@ pub trait TurnCoordinator: Send + Sync {
         &self,
         request: SubmitTurnRequest,
     ) -> Result<SubmitTurnResponse, TurnError>;
+
+    /// Re-activate an existing thread with a provenance tag.
+    ///
+    /// Defaults to a refusal rather than an untagged `submit_turn`
+    /// fallthrough: a coordinator that has not opted into activation semantics
+    /// must not silently create runs whose provenance the streak caps then
+    /// cannot see. `DefaultTurnCoordinator` provides the real implementation;
+    /// this default exists so the many test doubles of this trait need not
+    /// each restate it (the same reason `abort_prepared_turn` carries one).
+    async fn activate(
+        &self,
+        _request: ActivateThreadRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        Err(TurnError::InvalidRequest {
+            reason: "this coordinator does not support thread activation".to_string(),
+        })
+    }
 
     async fn resume_turn(
         &self,
@@ -584,6 +602,94 @@ where
         Ok(response)
     }
 
+    async fn activate(
+        &self,
+        request: ActivateThreadRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        // Autonomous-wake containment. Nothing else bounds the cumulative
+        // spawn -> settle -> wake -> spawn cycle: a parent that spawns a fresh
+        // child on every background completion would otherwise loop
+        // indefinitely under every existing cap, with no human in it.
+        //
+        // Refusing costs nothing durable. A settled await-edge stays settled
+        // and drains via the run-start sweep or the boot pass, so this gates
+        // the reactive wake only, never delivery.
+        if request.provenance == ActivationProvenance::System {
+            // ParentAgent runs are outside this window entirely: they neither
+            // count toward the System streak nor reset it, so that any
+            // human-free sequence — however interleaved — stays bounded by
+            // both caps.
+            //
+            // They must be excluded from the FETCH, not filtered after it.
+            // Filtering a K-sized fetch returns fewer than K records the
+            // moment ParentAgent runs are interleaved, and a short window
+            // reads as "streak not established" and admits — which silently
+            // disabled this cap on exactly the interleaved human-free
+            // sequences it exists to bound. The window query is
+            // provenance-blind, so the exclusion is done by over-fetching and
+            // truncating to the cap.
+            let fetch_limit = SYSTEM_WAKE_STREAK_CAP.saturating_mul(SYSTEM_WAKE_WINDOW_OVERFETCH);
+            let raw = self
+                .store
+                .recent_runs_for_thread(&request.scope, fetch_limit)
+                .await?;
+            // A retry of an already-accepted activation must reach
+            // `submit_turn`'s durable idempotency replay, not be refused by
+            // the run it created on its first attempt. Excluding the caller's
+            // own accepted message keeps `activate()`'s advertised
+            // "ordinary submission idempotency" true at the cap boundary.
+            let recent = raw
+                .iter()
+                .filter(|record| record.accepted_message_ref != request.accepted_message_ref)
+                .filter(|record| {
+                    record.subagent_activation_provenance != Some(ActivationProvenance::ParentAgent)
+                })
+                .take(SYSTEM_WAKE_STREAK_CAP as usize)
+                .cloned()
+                .collect::<Vec<_>>();
+            // Fail closed when the window could not be established. The store
+            // returns fewer rows than asked only when history ran out, so a
+            // *full* fetch that still cannot yield a cap-sized non-ParentAgent
+            // window means the streak is unknown, not absent — admitting there
+            // is the fail-open hole the over-fetch alone left behind. A
+            // genuinely short fetch is a young thread and still admits.
+            let window_crowded_out = u32::try_from(raw.len()).unwrap_or(u32::MAX) >= fetch_limit
+                && (recent.len() as u32) < SYSTEM_WAKE_STREAK_CAP;
+            if window_crowded_out || !system_wake_admitted(&recent) {
+                debug!(
+                    thread_id = %request.scope.thread_id,
+                    cap = SYSTEM_WAKE_STREAK_CAP,
+                    "refusing System activation: consecutive-wake streak cap reached"
+                );
+                return Err(TurnError::AdmissionRejected(AdmissionRejection::new(
+                    AdmissionRejectionReason::SystemWakeStreak,
+                )));
+            }
+        }
+
+        // Routed through this coordinator's own `submit_turn` on purpose:
+        // admission, idempotency replay, profile resolution, and the wake
+        // notification are shared with every other submission. The only
+        // difference an activation makes is the provenance stamp.
+        self.submit_turn(SubmitTurnRequest {
+            scope: request.scope,
+            actor: request.actor,
+            accepted_message_ref: request.accepted_message_ref,
+            requested_run_profile: request.requested_run_profile,
+            output_contract: None,
+            requested_model: None,
+            idempotency_key: request.idempotency_key,
+            received_at: request.received_at,
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+            product_context: None,
+            subagent_activation_provenance: Some(request.provenance),
+        })
+        .await
+    }
+
     async fn resume_turn(
         &self,
         request: ResumeTurnRequest,
@@ -785,6 +891,13 @@ where
         request: SubmitTurnRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
         self.as_ref().submit_turn(request).await
+    }
+
+    async fn activate(
+        &self,
+        request: ActivateThreadRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        self.as_ref().activate(request).await
     }
 
     async fn resume_turn(
