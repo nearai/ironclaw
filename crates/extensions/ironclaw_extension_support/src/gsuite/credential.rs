@@ -27,7 +27,9 @@ pub struct GoogleCredential {
 #[derive(Debug, Error)]
 pub enum GoogleCredentialError {
     #[error("Google credential recovery is required")]
-    Recovery(CredentialRecoveryProjection),
+    // Boxed: the projection is the enum's outlier (Rust 1.98
+    // `result_large_err`) and every `Result` in this module paid its size.
+    Recovery(Box<CredentialRecoveryProjection>),
     #[error("Google credential account is missing required scopes")]
     MissingScopes { missing_scopes: Vec<ProviderScope> },
     #[error("Google credential account has no access secret")]
@@ -296,7 +298,7 @@ impl GoogleCredentialResolver {
             .project_recovery(scope, requester_extension, provider)
             .await
         {
-            Ok(recovery) => GoogleCredentialError::Recovery(recovery),
+            Ok(recovery) => GoogleCredentialError::Recovery(Box::new(recovery)),
             Err(error) => error,
         }
     }
@@ -418,7 +420,7 @@ mod tests {
             Vec::new(),
         );
         assert!(matches!(
-            GoogleCredentialError::Recovery(recovery.clone()),
+            GoogleCredentialError::Recovery(Box::new(recovery.clone())),
             GoogleCredentialError::Recovery(_)
         ));
         assert!(matches!(

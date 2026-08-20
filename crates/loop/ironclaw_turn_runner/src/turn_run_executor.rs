@@ -121,7 +121,10 @@ enum DriverInvocationError {
         reason: String,
     },
     HostFinalizationFailed {
-        error: AgentLoopHostError,
+        // Boxed: `AgentLoopHostError` is the enum's ≥128-byte outlier (Rust
+        // 1.98 `result_large_err`); the `DriverError` variant stays unboxed
+        // because five match sites destructure its payload by pattern.
+        error: Box<AgentLoopHostError>,
         cumulative_usage: Option<LoopModelUsage>,
     },
     DriverError {
@@ -431,7 +434,7 @@ impl RebornTurnRunExecutor {
             Ok(exit) => match host.finalize_terminal_output(&exit).await {
                 Ok(()) => Ok(exit),
                 Err(error) => Err(DriverInvocationError::HostFinalizationFailed {
-                    error,
+                    error: Box::new(error),
                     cumulative_usage: loop_exit_model_usage(&exit).or(claimed.state.model_usage),
                 }),
             },
