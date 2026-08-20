@@ -87,12 +87,19 @@ export function NotificationPanel({
   isMarkingAllRead,
   canLoadMore,
   loadMore,
+  pageLimitReached,
   openMessage,
   archiveMessage,
   close,
   panelRef,
 }) {
   const t = useT();
+  /* Focus lands here on mount, not in the opener: the centre's `[open]` effect
+   * runs while `Suspense` is still rendering null, so the ref it reaches for
+   * does not exist yet. */
+  React.useEffect(() => {
+    panelRef?.current?.focus?.();
+  }, [panelRef]);
   if (typeof document === "undefined") return null;
   return createPortal(
         <React.Fragment>
@@ -105,6 +112,7 @@ export function NotificationPanel({
           />
           <section
             role="dialog"
+            aria-modal="true"
             aria-label={t("notifications.title")}
             data-testid="notification-panel"
             ref={panelRef}
@@ -152,6 +160,29 @@ export function NotificationPanel({
             </div>
 
             <div className="max-h-[calc(78dvh-4.5rem)] overflow-y-auto lg:max-h-[calc(min(70vh,32rem)-4.5rem)]">
+              {/* The full-panel error state below only renders on an empty list,
+               * so a refresh or a mark-read/archive that fails while rows are on
+               * screen used to leave no trace at all — the row simply snapped
+               * back from its optimistic update. This banner is that trace. */}
+              {error && messages.length > 0 && (
+                <div
+                  role="alert"
+                  data-testid="notification-error-banner"
+                  className="flex items-center justify-between gap-2 border-b border-[var(--v2-border)] bg-[var(--v2-surface-muted)] px-4 py-2"
+                >
+                  <span className="text-sm text-[var(--v2-text-muted)]">
+                    {t("notifications.errorTitle")}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => refetch?.()}
+                  >
+                    {t("notifications.retry")}
+                  </Button>
+                </div>
+              )}
               {isLoading && messages.length === 0
                 ? (
                     <div className="px-4 py-8 text-center" role="status">
@@ -212,6 +243,14 @@ export function NotificationPanel({
               >
                 {t("common.loadMore")}
               </button>)}
+              {pageLimitReached && (
+                <div
+                  data-testid="notification-page-limit"
+                  className="border-t border-[var(--v2-panel-border)] px-4 py-2.5 text-center text-xs text-[var(--v2-text-muted)]"
+                >
+                  {t("notifications.pageLimit")}
+                </div>
+              )}
             </div>
           </section>
         </React.Fragment>,

@@ -26,12 +26,19 @@ const NOTIFICATION_REFETCH_MS = 10_000;
  * optimistic mark-read and archive writes, the unread total and the
  * compatibility de-duplication all keep working on a single shape — and so a
  * poll refreshes every loaded page instead of leaving appended ones to rot. */
-async function readInboxPages(pages) {
-  const head = await listNotifications({ limit: NOTIFICATION_LIMIT });
+async function readInboxPages(pages, signal) {
+  const head = await listNotifications({ limit: NOTIFICATION_LIMIT, signal });
   const notifications = [...(head?.notifications || [])];
   let cursor = head?.next_cursor || null;
   for (let page = 1; page < pages && cursor; page += 1) {
-    const next = await listNotifications({ limit: NOTIFICATION_LIMIT, cursor });
+    /* Every page is a separate request, so an unmount or a superseding refetch
+     * would otherwise keep walking the cursor to the end of the inbox. */
+    if (signal?.aborted) throw signal.reason ?? new Error("aborted");
+    const next = await listNotifications({
+      limit: NOTIFICATION_LIMIT,
+      cursor,
+      signal,
+    });
     notifications.push(...(next?.notifications || []));
     cursor = next?.next_cursor || null;
   }
@@ -131,16 +138,16 @@ export function useNotifications(options = {}) {
 
   const query = useQuery({
     queryKey,
-    queryFn: async () => {
-      // During the durable-inbox rollout, approval producers may land after
-      // this consumer. Read both sources so switching the UI does not make
-      // existing approval notifications disappear. Durable records win in
-      // the presentation-layer de-duplication below.
+    queryFn: async ({ signal }) => {
+      /* Both reads are attempted on every poll: the compatibility read is what
+       * a surface without the durable inbox falls back to, and which one wins
+       * is decided once `inboxSupported` is known. */
       const [inboxResult, approvalResult] = await Promise.allSettled([
-        readInboxPages(loadedPages),
+        readInboxPages(loadedPages, signal),
         listThreads({
           limit: NOTIFICATION_THREAD_LIMIT,
           needsApproval: true,
+          signal,
         }),
       ]);
 
@@ -187,27 +194,32 @@ export function useNotifications(options = {}) {
     refetchIntervalInBackground: false,
   });
 
+  const inboxSupported = query.data?.inboxSupported !== false;
   const messages = React.useMemo(() => {
     const durable = notificationMessages(query.data?.inbox?.notifications, t).map(
       (message) => ({ ...message, durable: true }),
     );
-    const durableThreadHrefs = new Set(
-      durable
-        .filter((message) => message.type === "approval_required" && message.href)
-        .map((message) => message.href),
-    );
-    const compatibility = (query.data?.compatibility || [])
-      .filter((message) => !durableThreadHrefs.has(message.href))
-      .map((message) => ({ ...message, durable: false }));
+    /* The compatibility rows stand in for a surface that cannot serve the
+     * durable inbox at all. Mixing them in alongside durable records looked
+     * safer, but suppression could only be computed from the rows currently
+     * loaded: archiving a durable approval dropped it from that set and the
+     * pending-thread row for the same thread came straight back, unread and
+     * with no archive control. Where the inbox answers, durable records are the
+     * only truth — including the truth that one was archived. */
+    const compatibility = inboxSupported
+      ? []
+      : (query.data?.compatibility || []).map((message) => ({
+          ...message,
+          durable: false,
+        }));
     return [...durable, ...compatibility].sort(
       (left, right) => right.timestamp - left.timestamp,
     );
-  }, [query.data, t]);
+  }, [inboxSupported, query.data, t]);
   const unreadIds = React.useMemo(
     () => new Set(messages.filter((message) => !message.read).map((message) => message.id)),
     [messages],
   );
-  const inboxSupported = query.data?.inboxSupported !== false;
 
   const markRead = useMutation({
     mutationFn: markNotificationRead,
@@ -313,8 +325,11 @@ export function useNotifications(options = {}) {
 
   // `next_cursor` is the surface's own has-more signal, and it now survives
   // paging: the merged result carries the last loaded page's cursor.
-  const canLoadMore =
-    Boolean(query.data?.inbox?.next_cursor) && loadedPages < NOTIFICATION_PAGE_MAX;
+  const hasMorePages = Boolean(query.data?.inbox?.next_cursor);
+  const canLoadMore = hasMorePages && loadedPages < NOTIFICATION_PAGE_MAX;
+  /* Records remain past the reader's own ceiling. Hiding the control on its own
+   * reads as "that is everything", which is the one thing it does not mean. */
+  const pageLimitReached = hasMorePages && loadedPages >= NOTIFICATION_PAGE_MAX;
   const loadMore = React.useCallback(() => {
     setLoadedPages((current) => Math.min(current + 1, NOTIFICATION_PAGE_MAX));
   }, []);
@@ -347,6 +362,7 @@ export function useNotifications(options = {}) {
     archiveMessage,
     canLoadMore,
     loadMore,
+    pageLimitReached,
     loadedPages,
   };
 }

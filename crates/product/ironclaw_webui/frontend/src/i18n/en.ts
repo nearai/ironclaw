@@ -53,6 +53,7 @@ registerPack("en", {
   "notifications.errorTitle": "Notifications unavailable",
   "notifications.errorDescription": "We couldn't load notifications. Try again.",
   "notifications.retry": "Retry",
+  "notifications.pageLimit": "Older notifications are not shown here.",
   "notifications.allCaughtUp": "All caught up",
   "notifications.unreadCount": "{count} new",
   "notifications.unread": "Unread",

@@ -194,3 +194,85 @@ test("load-more appears only while more pages remain", async () => {
     "the control retires once there is nothing left to page",
   );
 });
+
+test("a cold-loaded panel takes focus off the bell", async () => {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  roots.push(root);
+
+  await act(async () => {
+    root.render(
+      <NotificationCenter
+        state={{ messages: [], unreadIds: new Set(), isLoading: false }}
+      />,
+    );
+  });
+  await openPanel(container);
+
+  const panel = document.querySelector("[data-testid='notification-panel']");
+  assert.ok(panel, "the panel mounted");
+  // The opener cannot focus it: its effect runs while Suspense still renders
+  // null, so the panel has to claim focus when it mounts instead.
+  assert.equal(
+    document.activeElement,
+    panel,
+    "focus moves to the panel after the lazy chunk resolves, not back to the bell",
+  );
+  assert.equal(
+    panel?.getAttribute("aria-modal"),
+    "true",
+    "a portalled dialog over the page announces itself as modal",
+  );
+});
+
+test("a failure while rows are on screen stays visible", async () => {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  roots.push(root);
+
+  const refetch = vi.fn();
+  const messages = [{
+    id: "notification-1",
+    type: "run_completed",
+    title: "Run finished",
+    href: "/chat/thread-1",
+    timestamp: 2,
+    read: false,
+    durable: true,
+  }];
+
+  await act(async () => {
+    root.render(<NotificationCenter state={{ messages, refetch }} />);
+  });
+  await openPanel(container);
+  assert.equal(
+    document.querySelector("[data-testid='notification-error-banner']"),
+    null,
+    "a healthy list shows no banner",
+  );
+
+  await act(async () => {
+    root.render(
+      <NotificationCenter
+        state={{ messages, error: new Error("mark read failed"), refetch }}
+      />,
+    );
+  });
+
+  const banner = document.querySelector("[data-testid='notification-error-banner']");
+  assert.ok(banner, "the failure is reported even though the list still has rows");
+  assert.equal(banner?.getAttribute("role"), "alert");
+  assert.ok(
+    document.querySelectorAll("[data-testid='notification-row']").length > 0,
+    "the rows stay on screen alongside the banner",
+  );
+
+  await act(async () => {
+    [...(banner?.querySelectorAll("button") || [])]
+      .find((button) => button.textContent === "notifications.retry")
+      ?.click();
+  });
+  assert.equal(refetch.mock.calls.length, 1);
+});

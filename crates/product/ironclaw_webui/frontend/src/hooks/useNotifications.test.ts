@@ -237,10 +237,12 @@ test("queries the durable inbox and legacy approvals after profile hydration", a
     },
   });
   assert.equal(harness.queryOptions.enabled, true);
-  const result = await harness.queryOptions.queryFn();
-  assert.deepEqual(JSON.parse(JSON.stringify(harness.inboxCalls)), [{ limit: 30 }]);
+  const result = await harness.queryOptions.queryFn({ signal: new AbortController().signal });
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.inboxCalls)), [
+    { limit: 30, signal: {} },
+  ], "every page carries the query's abort signal");
   assert.deepEqual(JSON.parse(JSON.stringify(harness.threadCalls)), [
-    { limit: 20, needsApproval: true },
+    { limit: 20, needsApproval: true, signal: {} },
   ]);
   assert.equal(result.compatibility[0].id, "approval:thread-transition");
   assert.equal(result.inboxSupported, true);
@@ -254,7 +256,7 @@ test("uses the compatibility fallback when the server does not support the inbox
     data: { approvalThreads: { threads: [{ id: "thread-fallback" }] } },
     inboxError: Object.assign(new Error("inbox unavailable"), { status: 404 }),
   });
-  const result = await harness.queryOptions.queryFn();
+  const result = await harness.queryOptions.queryFn({ signal: new AbortController().signal });
   assert.deepEqual(JSON.parse(JSON.stringify(result.inbox)), {
     notifications: [],
     unread_count: 0,
@@ -262,7 +264,7 @@ test("uses the compatibility fallback when the server does not support the inbox
   assert.equal(result.compatibility[0].id, "approval:thread-fallback");
   assert.equal(result.inboxSupported, false);
   assert.deepEqual(JSON.parse(JSON.stringify(harness.threadCalls)), [
-    { limit: 20, needsApproval: true },
+    { limit: 20, needsApproval: true, signal: {} },
   ]);
 });
 
@@ -272,9 +274,9 @@ test("surfaces transient inbox failures without activating the compatibility pat
     data: { approvalThreads: { threads: [{ id: "thread-fallback" }] } },
     inboxError,
   });
-  await assert.rejects(harness.queryOptions.queryFn(), inboxError);
+  await assert.rejects(harness.queryOptions.queryFn({ signal: new AbortController().signal }), inboxError);
   assert.deepEqual(JSON.parse(JSON.stringify(harness.threadCalls)), [
-    { limit: 20, needsApproval: true },
+    { limit: 20, needsApproval: true, signal: {} },
   ]);
 });
 
@@ -285,7 +287,7 @@ test("keeps durable notifications when the legacy approval query fails", async (
     },
     approvalError: new Error("legacy approvals unavailable"),
   });
-  const result = await harness.queryOptions.queryFn();
+  const result = await harness.queryOptions.queryFn({ signal: new AbortController().signal });
   assert.equal(result.inboxSupported, true);
   assert.equal(result.inbox.notifications[0].id, "notification-1");
   assert.deepEqual(JSON.parse(JSON.stringify(result.compatibility)), []);
@@ -297,7 +299,7 @@ test("surfaces the legacy approval failure when no durable inbox is available", 
     inboxError: Object.assign(new Error("inbox unavailable"), { status: 404 }),
     approvalError,
   });
-  await assert.rejects(harness.queryOptions.queryFn(), approvalError);
+  await assert.rejects(harness.queryOptions.queryFn({ signal: new AbortController().signal }), approvalError);
 });
 
 test("deduplicates fallback approvals when the durable inbox has the same thread", () => {
@@ -332,6 +334,7 @@ test("marks durable and compatibility notifications through their owning state",
 
   const fallback = instantiate({
     data: {
+      inboxSupported: false,
       inbox: { notifications: [], unread_count: 0 },
       compatibility: [{
         id: "approval:thread-fallback",
@@ -442,7 +445,7 @@ const PAGED_INBOX = {
 
 test("paging follows the cursor instead of only widening one request", async () => {
   const harness = instantiate({ data: PAGED_INBOX });
-  await harness.queryOptions.queryFn();
+  await harness.queryOptions.queryFn({ signal: new AbortController().signal });
 
   assert.deepEqual(
     harness.inboxCalls.map((call) => call.cursor),
@@ -454,7 +457,7 @@ test("paging follows the cursor instead of only widening one request", async () 
   harness.hook.loadMore();
   harness.render();
   harness.inboxCalls.length = 0;
-  const merged = await harness.queryOptions.queryFn();
+  const merged = await harness.queryOptions.queryFn({ signal: new AbortController().signal });
 
   assert.deepEqual(
     harness.inboxCalls.map((call) => call.cursor),
@@ -486,7 +489,7 @@ test("paging is not capped by the per-request ceiling", async () => {
     hook = harness.render();
   }
   harness.inboxCalls.length = 0;
-  const merged = await harness.queryOptions.queryFn();
+  const merged = await harness.queryOptions.queryFn({ signal: new AbortController().signal });
 
   assert.deepEqual(
     harness.inboxCalls.map((call) => call.cursor),
@@ -589,7 +592,7 @@ test("acknowledges a rendered completion while an earlier mark-read is in flight
   assert.deepEqual(harness.readCalls, ["notification-completed"]);
 });
 
-test("supports mark all across durable and compatibility stores", async () => {
+test("mark all read ignores compatibility rows once the inbox answers", async () => {
   const harness = instantiate({
     data: {
       inbox: { notifications: [notification()], unread_count: 1 },
@@ -605,9 +608,48 @@ test("supports mark all across durable and compatibility stores", async () => {
   harness.hook.markAllRead();
   await flushAsyncWork();
   assert.deepEqual(harness.allReadCalls, [true]);
-  assert.deepEqual(JSON.parse(JSON.stringify(harness.seenCalls)), [
-    { ids: ["approval:thread-fallback"], scope: "tenant:user" },
-  ]);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(harness.seenCalls)),
+    [],
+    "a supported inbox is the only source, so the local seen-store stays untouched",
+  );
+});
+
+test("an archived approval does not return through the compatibility source", async () => {
+  const harness = instantiate({
+    data: {
+      inbox: {
+        notifications: [notification("notification-1", "thread-fallback")],
+        unread_count: 1,
+      },
+      compatibility: [{
+        id: "approval:thread-fallback",
+        type: "approval",
+        href: "/chat/thread-fallback",
+        timestamp: 1,
+        read: false,
+      }],
+    },
+  });
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(harness.hook.messages.map((message) => message.id))),
+    ["notification-1"],
+    "the durable record is the only row while the inbox answers",
+  );
+
+  harness.hook.archiveMessage("notification-1");
+  await flushAsyncWork();
+
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        harness.optimisticWrites.at(-1).inbox.notifications.map((record) => record.id),
+      ),
+    ),
+    [],
+    "archiving empties the durable list without resurrecting the pending-thread row",
+  );
 });
 
 test("does not call durable mutations when the server lacks the inbox API", async () => {
@@ -630,4 +672,25 @@ test("does not call durable mutations when the server lacks the inbox API", asyn
   assert.deepEqual(JSON.parse(JSON.stringify(harness.seenCalls)), [
     { ids: ["approval:thread-fallback"], scope: "tenant:user" },
   ]);
+});
+
+test("an abort mid-walk stops paging instead of draining the inbox", async () => {
+  const harness = instantiate({ data: PAGED_INBOX });
+  harness.hook.loadMore();
+  harness.hook.loadMore();
+  harness.render();
+  harness.inboxCalls.length = 0;
+
+  // Abort as soon as the head has been read, which is what an unmount or a
+  // superseding refetch does to a query that is still walking its cursor.
+  const controller = new AbortController();
+  const paged = harness.queryOptions.queryFn({ signal: controller.signal });
+  controller.abort();
+
+  await assert.rejects(paged);
+  assert.deepEqual(
+    harness.inboxCalls.map((call) => call.cursor),
+    [undefined],
+    "the walk stops at the head rather than following cursor-2 and cursor-3",
+  );
 });

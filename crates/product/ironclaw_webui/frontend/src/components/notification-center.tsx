@@ -29,6 +29,7 @@ export function NotificationCenter({ state }) {
   const archiveMessage = state?.archiveMessage;
   const canLoadMore = state?.canLoadMore || false;
   const loadMore = state?.loadMore;
+  const pageLimitReached = state?.pageLimitReached || false;
   const isMarkingAllRead = state?.isMarkingAllRead || false;
   const isLoading = state?.isLoading || false;
   const error = state?.error || null;
@@ -45,11 +46,6 @@ export function NotificationCenter({ state }) {
     if (!nextOpen) {
       triggerRef.current?.focus?.();
     }
-  }, [open]);
-
-  React.useEffect(() => {
-    if (!open) return;
-    panelRef.current?.focus?.();
   }, [open]);
 
   React.useEffect(() => {
@@ -115,6 +111,7 @@ export function NotificationCenter({ state }) {
             isMarkingAllRead={isMarkingAllRead}
             canLoadMore={canLoadMore}
             loadMore={loadMore}
+            pageLimitReached={pageLimitReached}
             openMessage={openMessage}
             archiveMessage={archiveMessage}
             close={close}
