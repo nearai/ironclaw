@@ -136,7 +136,14 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // the badge is always on screen. The panel leaves the entry closure as its own
 // 5.39 kB chunk and /chat measures 223.2 KB, so the ceiling follows the
 // measurement down instead of holding headroom this tree does not need.
-const CHAT_GZIP_BUDGET = 223_200;
+//
+// Then raised 223.2 -> 223.4 with a margin, because ratcheting to the measured
+// byte turned out to be a trap: rebasing onto main breached the ceiling by
+// roughly a dozen bytes on commits that touch no frontend code at all. The
+// margin is under a kilobyte, so the ratchet still catches anything that
+// actually ships weight into the entry closure, and the two budgets beside
+// this one were never held to the byte either.
+const CHAT_GZIP_BUDGET = 223_400;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {
