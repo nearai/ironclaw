@@ -273,6 +273,15 @@ test("AutomationDetailPanel disables Run now unless the automation is runnable",
   assert.equal(runButton.disabled, true);
 
   rendered = harness.render({
+    automation: { ...automation(), has_running_run: true },
+    onRunAutomation: (automationId) => calls.push(automationId),
+  });
+  runButton = componentProps(rendered, harness.Button).find(
+    (button) => button["data-testid"] === "automation-run-now-button",
+  );
+  assert.equal(runButton.disabled, true, "visible running state must prevent duplicates");
+
+  rendered = harness.render({
     schedulerEnabled: false,
     onRunAutomation: (automationId) => calls.push(automationId),
   });

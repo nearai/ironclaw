@@ -233,6 +233,7 @@ export function AutomationDetailPanel({
                 isMutating ||
                 !canRun ||
                 automation.has_active_fire ||
+                automation.has_running_run ||
                 !schedulerEnabled
               }
               onClick={() => onRunAutomation?.(automation.automation_id)}

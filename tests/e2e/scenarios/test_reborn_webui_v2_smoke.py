@@ -2244,7 +2244,13 @@ async def test_reborn_v2_automation_run_now_respects_active_fire_and_scheduler(
     request_started = asyncio.Event()
     release_response = asyncio.Event()
 
-    def automation(automation_id: str, name: str, has_active_fire: bool) -> dict:
+    def automation(
+        automation_id: str,
+        name: str,
+        *,
+        has_active_fire: bool,
+        has_running_run: bool = False,
+    ) -> dict:
         return {
             "automation_id": automation_id,
             "name": name,
@@ -2256,7 +2262,18 @@ async def test_reborn_v2_automation_run_now_respects_active_fire_and_scheduler(
             "state": "scheduled",
             "next_run_at": "2026-07-18T09:00:00Z",
             "has_active_fire": has_active_fire,
-            "recent_runs": [],
+            "recent_runs": (
+                [
+                    {
+                        "run_id": "33333333-4444-5555-6666-777777777777",
+                        "status": "running",
+                        "fire_slot": "2026-07-17T09:00:00Z",
+                        "source": "manual",
+                    }
+                ]
+                if has_running_run
+                else []
+            ),
         }
 
     async def handle_automations(route) -> None:
@@ -2270,8 +2287,17 @@ async def test_reborn_v2_automation_run_now_respects_active_fire_and_scheduler(
                     {
                         "scheduler_enabled": scheduler_enabled,
                         "automations": [
-                            automation(runnable_id, "Runnable automation", runnable_active),
-                            automation(active_id, "Already running", True),
+                            automation(
+                                runnable_id,
+                                "Runnable automation",
+                                has_active_fire=False,
+                                has_running_run=runnable_active,
+                            ),
+                            automation(
+                                active_id,
+                                "Already running",
+                                has_active_fire=True,
+                            ),
                         ],
                     }
                 ),
