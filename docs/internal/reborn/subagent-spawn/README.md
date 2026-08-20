@@ -530,6 +530,17 @@ the append-model design review.
   (awaiting-input/approval, stuck, timed-out, attention-pending,
   delivered) is an R5 inspect-contract requirement; terminal attempts stay
   immutable — a retry is a new attempt.
+- **D11 (2026-08-20) Adoptions and skips from the claude-code changelog
+  survey.** Adopted (each mapped into §6): the concurrent-running-children
+  cap (R2), degraded-result taxonomy (R5), budget-breach teardown (R8),
+  conservative depth default (R9), and the child filesystem-scope
+  invariant (§7). Deliberately skipped: agent teams (peer-to-peer trust
+  model — would fork the parent-child tree, D1), `/fork`-style context
+  inheritance (blurs the kernel membrane), named-agent frontmatter files
+  (authoring UX; `SubagentKindId` is already the primitive), and
+  fleet-wide cross-session messaging (R6 covers the in-scope
+  parent→child case). Evidence is changelog-grade — shipped-behavior
+  descriptions, not source.
 - **D9 ◇ Not in scope**: `TurnOwner` vs `TurnThreadOwner` stay separate
   types (ownership shape vs resolution disposition); no stored counters;
   never append to `completion_observer.rs`; new files < 800 lines;
@@ -542,14 +553,14 @@ work, in order — names map to the retired shape doc's slices for continuity:
 
 | # | Work | Contents | Was |
 | --- | --- | --- | --- |
-| R2 | **Background core** | Everything in §4.3 + integration tests: per-child beat, three-trigger healing, `ThreadBusy` heal, crash-replay idempotency, the failure-injection matrix | slice 2 (reshaped: append model replaces wake-only Tasks 8–9) |
+| R2 | **Background core** | Everything in §4.3 + integration tests: per-child beat, three-trigger healing, `ThreadBusy` heal, crash-replay idempotency, the failure-injection matrix. Plus a **concurrent-running-children cap** at spawn admission (same path as the descendant cap) — Claude Code's changelog shows this cap removed and re-added under production pressure; it is D10's "active children per parent" line made real | slice 2 (reshaped: append model replaces wake-only Tasks 8–9) |
 | R3 | **Gate escalation walk** | A blocked child (approval/auth) escalates to its parent; prod-enable gate | slice 4 |
 | R4 | **Counters, operator command, e2e revival** | `ResolveReport` counters; `ironclaw subagent edges`; un-ignore the five e2e tests via harness-side enablement; boot-recovery fairness | slice 5 |
-| R5 | **`subagent_inspect` + per-kind config** | Model-facing status/gate/byte-count metadata (never raw transcript); per-kind budget + model override | slice 6 |
+| R5 | **`subagent_inspect` + per-kind config** | Model-facing status/gate/byte-count metadata (never raw transcript); per-kind budget + model override. Plus the **degraded-result taxonomy**: `child_terminal_output` distinguishes clean success / partial-on-forced-cutoff / provider error — Claude Code shipped three separate fixes for children returning empty on rate-limit cutoff or fabricating success on API error; D10's lifecycle-taxonomy line | slice 6 |
 | R6 | **`subagent_extend` + human priority** | `activate(child, …, ParentAgent)` with consent-to-wake + budget window; `human_waiting` reservation marker | slice 7 |
 | R7 | **WebUI child tree** | `GET …/threads/{id}/children` lineage projection; `ThreadTree` sidebar; raw-vs-framed display rule; interrupt & take over | slice 8 |
-| R8 | **`subagent_cancel`** (security review) + **scan checkpoint** | Model-facing cancel with clean tree teardown; **re-decide D7** (drain-site scan) here, before enable | slice 9 (+ deferred slice 3) |
-| R9 | **Production enable** | Clear the deny filter; reconcile the `tool_call.rs` disabled-behavior tests | slice 10 |
+| R8 | **`subagent_cancel`** (security review) + **scan checkpoint** | Model-facing cancel with clean tree teardown; **budget breach halts running children through this same teardown path** (Claude Code's `--max-budget-usd` fix: denying new spawns is not enough); **re-decide D7** (drain-site scan) here, before enable | slice 9 (+ deferred slice 3) |
+| R9 | **Production enable** | Clear the deny filter; reconcile the `tool_call.rs` disabled-behavior tests; set an explicit conservative **spawn-depth default** per profile (Claude Code started at 1, settled on 3 after operational experience); confirm the child-filesystem-scope decision (§7) was honored | slice 10 |
 
 Navigation parity with Claude Code, for orientation: `/tasks` ≈ R5 inspect,
 opening a subagent ≈ R7 tree + transcript, `SendMessage` ≈ R6 extend,
@@ -584,6 +595,14 @@ Things no slice may break; each is enforced or pinned today.
 - **The R8 scan checkpoint is a mandatory enablement decision** (D7):
   production enable requires an explicit re-decision, and if a scanner is
   adopted its unavailability fails closed.
+- **Children get their own filesystem scope — decided now, enforced before
+  enable.** A child's filesystem-touching capabilities resolve through its
+  own `ScopedFilesystem` scope from the mount catalog, never implicit
+  inheritance of the parent's mounts. Claude Code's changelog carries ~40
+  worktree-escape hardening entries (`git -C`, `GIT_DIR`, symlinks — the
+  same class rediscovered repeatedly); the scoping primitive already
+  exists here, so this is a decision recorded cheaply now rather than a
+  retrofit after enable.
 - **Inspect is framed; raw is authorized.** Model-facing inspect (R5)
   returns framed summaries and references only; raw child transcripts (R7)
   sit behind an authenticated, tenant-scoped, non-enumerating authorization
