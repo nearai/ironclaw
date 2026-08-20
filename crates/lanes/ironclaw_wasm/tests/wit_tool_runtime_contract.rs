@@ -587,9 +587,11 @@ fn execute_bounds_oversized_structured_code_without_corrupting_json() {
 
     assert!(error.len() <= MODEL_DIAGNOSTIC_MAX_BYTES);
     assert_eq!(payload["kind"], "operation_failed");
-    assert!(payload["code"]
-        .as_str()
-        .is_some_and(|code| code.len() < guest_code.len()));
+    assert!(
+        payload["code"]
+            .as_str()
+            .is_some_and(|code| code.len() < guest_code.len())
+    );
     assert_eq!(payload["message"], "provider rejected request");
     assert!(payload.get("unknown").is_none());
 }

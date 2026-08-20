@@ -153,10 +153,7 @@ fn fit_guest_error_field(payload: &mut Map<String, Value>, field: &str, original
     while low < high {
         let midpoint = low + (high - low).div_ceil(2);
         let end = utf8_prefix_end(original, midpoint);
-        payload.insert(
-            field.to_string(),
-            Value::String(original[..end].to_owned()),
-        );
+        payload.insert(field.to_string(), Value::String(original[..end].to_owned()));
         if serialized_guest_error_fits(payload) {
             low = midpoint;
         } else {
@@ -165,10 +162,7 @@ fn fit_guest_error_field(payload: &mut Map<String, Value>, field: &str, original
     }
 
     let end = utf8_prefix_end(original, low);
-    payload.insert(
-        field.to_string(),
-        Value::String(original[..end].to_owned()),
-    );
+    payload.insert(field.to_string(), Value::String(original[..end].to_owned()));
     debug_assert!(serialized_guest_error_fits(payload));
 }
 
