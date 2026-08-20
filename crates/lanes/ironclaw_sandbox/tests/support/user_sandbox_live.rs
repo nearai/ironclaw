@@ -327,11 +327,19 @@ pub(crate) async fn wait_for_running_state(
 pub(crate) async fn wait_for_container_absent(id: &str, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     loop {
-        let output = Command::new("docker")
-            .args(["container", "inspect", id])
+        let id_filter = format!("id={id}");
+        let output = tokio::process::Command::new("docker")
+            .args(["container", "list", "--all", "--quiet", "--filter"])
+            .arg(&id_filter)
             .output()
-            .expect("docker container inspect starts");
-        if !output.status.success() {
+            .await
+            .expect("docker container list starts");
+        assert!(
+            output.status.success(),
+            "docker container list failed while waiting for {id} removal: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if output.stdout.iter().all(u8::is_ascii_whitespace) {
             return;
         }
         assert!(

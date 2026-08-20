@@ -54,8 +54,9 @@ stopping it until all commands finish. The sweeper stops an inactive container;
 the next command adopts and restarts it.
 
 One IronClaw process owns a local Docker workspace root at a time. The
-transport acquires a kernel-held advisory owner lock before container
-reconciliation and fails closed if another live process holds that workspace.
+transport acquires a transport-local advisory owner lock on the workspace root
+before container reconciliation and fails closed if another live process holds
+that workspace.
 The lock, not the file's metadata, grants authority; a stale lock file after a
 crash grants nothing. This keeps process-local activity counters from
 authorizing cleanup of another process's active container.
