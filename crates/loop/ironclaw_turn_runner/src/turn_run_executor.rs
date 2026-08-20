@@ -31,6 +31,7 @@ const AUTH_GATE_LOOP_REF_PREFIX: &str = "gate:auth-";
 use ironclaw_turns::loop_exit::LoopExitApplier;
 
 use crate::{
+    after_turn_curation::curation_signal_for_completed_run,
     after_turn_memory::AfterTurnMemoryRecorder,
     driver_registry::{DriverRegistry, LoopDriverRegistryKey},
     failure_categories::host_stage_unavailable_category,
@@ -44,6 +45,13 @@ use crate::{
 /// skipped (the run is already `Completed`). Generous because a network-backed
 /// provider performs a thread-history read plus a write.
 const AFTER_TURN_MEMORY_RECORD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Bound on the curation TRIGGER — the decision plus, at most, an accept and a
+/// submit. It is deliberately far tighter than the recorder's budget because
+/// nothing here waits on the curation RUN: that executes on the scheduler like
+/// any other turn. Anything slower than this is a sick dependency, and a
+/// background chore is never worth holding a worker for.
+const AFTER_TURN_CURATION_TRIGGER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn trace_executor_latency_ok(
     operation: &'static str,
@@ -166,6 +174,12 @@ pub struct RebornTurnRunExecutor {
     /// `DefaultPlannedRuntimeParts`).
     // arch-exempt: optional_arc, deferred production wiring, issue #5013
     after_turn_memory_recorder: Option<Arc<AfterTurnMemoryRecorder>>,
+    /// Memory-curation trigger (the "dreaming" seam, #7276). Optional for the
+    /// same reason as the recorder above: only a composition that resolved a
+    /// memory provider AND enabled curation attaches one, and a `Completed` run
+    /// finishes cleanly without it.
+    // arch-exempt: optional_arc, feature is opt-in per composition, issue #7276
+    after_turn_curation: Option<Arc<dyn ironclaw_loop_contracts::AfterTurnCurationPort>>,
 }
 
 impl RebornTurnRunExecutor {
@@ -181,6 +195,7 @@ impl RebornTurnRunExecutor {
             host_factory,
             gate_record_store,
             after_turn_memory_recorder: None,
+            after_turn_curation: None,
         }
     }
 
@@ -192,6 +207,16 @@ impl RebornTurnRunExecutor {
         recorder: Arc<AfterTurnMemoryRecorder>,
     ) -> Self {
         self.after_turn_memory_recorder = Some(recorder);
+        self
+    }
+
+    /// Attach the memory-curation trigger. Wired by composition only when the
+    /// feature is enabled; absent everywhere else.
+    pub fn with_after_turn_curation(
+        mut self,
+        curation: Arc<dyn ironclaw_loop_contracts::AfterTurnCurationPort>,
+    ) -> Self {
+        self.after_turn_curation = Some(curation);
         self
     }
 }
@@ -531,6 +556,29 @@ impl RebornTurnRunExecutor {
                         debug!(
                             run_id = ?run_id,
                             "after-turn memory recording timed out; skipping (run already complete)"
+                        );
+                    }
+                }
+                // Memory-curation trigger (#7276). Same post-terminal, bounded,
+                // best-effort discipline as the recorder above: the run is
+                // already terminal, so a slow or unavailable curation path must
+                // never fail it or hold the scheduler worker. The signal itself
+                // decides whether this run qualifies (never an unbound run —
+                // otherwise a curation pass would schedule its own successor).
+                if let Some(curation) = self.after_turn_curation.as_ref()
+                    && let Some(signal) = curation_signal_for_completed_run(&state)
+                    && tokio::time::timeout(
+                        AFTER_TURN_CURATION_TRIGGER_TIMEOUT,
+                        curation.on_completed_turn(signal),
+                    )
+                    .await
+                    .is_err()
+                {
+                    {
+                        // silent-ok: curation is an optional background chore.
+                        debug!(
+                            run_id = ?run_id,
+                            "memory-curation trigger timed out; skipping (run already complete)"
                         );
                     }
                 }

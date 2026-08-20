@@ -32,6 +32,7 @@ mod host;
 mod instruction_bundle;
 mod loop_exit;
 mod memory_context;
+mod memory_curation;
 mod milestones;
 mod model;
 mod model_observation;
@@ -102,6 +103,7 @@ pub use memory_context::{
     MemoryPromptContextService, MemoryRetrievalDegradation, MemoryRetrievalFailureKind,
     MemoryRetrievalLane,
 };
+pub use memory_curation::{AfterTurnCurationPort, AfterTurnCurationSignal};
 pub use milestones::{
     HookDecisionSummary, HookMilestoneSink, InMemoryHookMilestoneSink,
     InMemoryLoopHostMilestoneSink, LoopHostMilestone, LoopHostMilestoneEmitter,

@@ -84,6 +84,10 @@ pub struct UnboundTurnSubmission {
     /// Empty means no caller-selected tools.
     pub tools: Vec<ironclaw_host_api::ids::CapabilityId>,
     pub output: OutputContract,
+    /// Narrowing-only per-run ceilings. Default is unlimited (the profile's own
+    /// ceilings apply); a caller that knows its work should be bounded — a
+    /// background chore nobody is watching, say — declares tighter ones here.
+    pub limits: ironclaw_host_api::prepared_context::TurnLimits,
     pub requested_model: Option<String>,
     /// Caller-owned idempotency key for the accept; the submit key derives
     /// from it (`{key}:submit`). The caller owns its namespace — this
@@ -173,7 +177,7 @@ impl UnboundTurnService {
                 declarations: PreparedTurnDeclarations {
                     tools: submission.tools,
                     output: submission.output,
-                    limits: Default::default(),
+                    limits: submission.limits,
                 },
                 idempotency_key: submission.idempotency_key.clone(),
                 thread_id: thread_id.clone(),
@@ -670,6 +674,7 @@ mod tests {
                 }],
                 tools: Vec::new(),
                 output: output.clone(),
+                limits: Default::default(),
                 requested_model: None,
                 idempotency_key: "forwarded-output-contract-key".to_string(),
             })

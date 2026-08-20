@@ -353,6 +353,8 @@ async fn submit_suggestion_generation(
         }],
         tools: tools.to_vec(),
         output: output.clone(),
+        // Unchanged behavior: suggestions keep the profile's own ceilings.
+        limits: Default::default(),
         requested_model: None,
         idempotency_key: accept_key.to_string(),
     };
