@@ -2006,6 +2006,7 @@ mod tests {
                     output_tokens: 1,
                     total_tokens: 2,
                     cached_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 },
                 raw_response: serde_json::json!({}),
                 message_id: None,
@@ -2517,6 +2518,7 @@ mod tests {
                 output_tokens: self.output_tokens,
                 total_tokens: self.input_tokens + self.output_tokens,
                 cached_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
     }

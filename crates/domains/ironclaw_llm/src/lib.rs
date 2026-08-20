@@ -1987,6 +1987,95 @@ mod tests {
         }
     }
 
+    /// Regression for Qwen 3.8 responses whose final non-streaming message
+    /// contains provider reasoning but neither plain text nor a tool call.
+    ///
+    /// SGLang correctly returns that reasoning in the OpenAI-compatible
+    /// `reasoning_content` field. The registry provider must preserve it
+    /// instead of failing the whole call as an empty response.
+    #[tokio::test]
+    async fn openai_compatible_nonstreaming_preserves_reasoning_only_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let address = listener.local_addr().expect("loopback address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = socket.read(&mut buffer).await.expect("read request");
+                assert!(read > 0, "connection closed before request arrived");
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+
+            let response_body = serde_json::json!({
+                "id": "chatcmpl-qwen-reasoning-only",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "Qwen/Qwen3.8-27B",
+                "system_fingerprint": null,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "reasoning_content": "I should inspect the available tools first.",
+                        "tool_calls": []
+                    },
+                    "logprobs": null,
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 9,
+                    "total_tokens": 21
+                }
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+
+        let config = RegistryProviderConfig::generic(
+            ProviderProtocol::OpenAiCompletions,
+            "openai-compatible",
+            Some(secrecy::SecretString::from("test-key".to_string())),
+            format!("http://{address}"),
+            "Qwen/Qwen3.8-27B",
+        );
+        let provider = create_registry_provider_inner(&config, 5)
+            .expect("registry provider construction succeeds");
+
+        let response = provider
+            .complete_with_tools(ToolCompletionRequest::new(
+                vec![ChatMessage::user("Inspect the tools")],
+                Vec::new(),
+            ))
+            .await
+            .expect("reasoning-only response must not be classified as empty");
+        server.await.expect("loopback server task");
+
+        assert_eq!(
+            response.reasoning.as_deref(),
+            Some("I should inspect the available tools first.")
+        );
+        assert!(response.content.is_none());
+        assert!(response.tool_calls.is_empty());
+    }
+
     #[test]
     fn test_normalize_openai_base_url_leaves_v1_alone() {
         assert_eq!(
