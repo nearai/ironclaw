@@ -185,7 +185,9 @@ pub(super) fn consume_drainable_inputs(
                 cancelled_reason_kind = Some(LoopCancelledReasonKind::HostInterrupt);
                 break;
             }
-            LoopInput::GateResolved { .. } | LoopInput::CapabilitySurfaceChanged { .. } => break,
+            LoopInput::GateResolved { .. }
+            | LoopInput::CapabilitySurfaceChanged { .. }
+            | LoopInput::SubagentSettled { .. } => break,
             LoopInput::UserMessage { .. }
             | LoopInput::FollowUp { .. }
             | LoopInput::Steering { .. } => {
