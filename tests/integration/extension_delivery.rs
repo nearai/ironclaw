@@ -2813,7 +2813,7 @@ async fn paired_telegram_bot_actor_turns_attribute_to_the_user_and_disconnect_re
 
     // 5. Pairing the same verified bot actor with a fresh code restores
     // admission without linking a personal account.
-    pair_telegram_bot_actor(&ingress, services, &paired_user, 608, "424242", "515151").await;
+    pair_telegram_bot_actor(&ingress, services, &paired_user, 610, "424242", "515151").await;
 
     // 6. The same external actor/conversation is admitted again through the
     // workspace-bot pairing and coordinated delivery remains healthy.
