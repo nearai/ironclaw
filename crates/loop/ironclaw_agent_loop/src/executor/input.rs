@@ -185,12 +185,16 @@ pub(super) fn consume_drainable_inputs(
                 cancelled_reason_kind = Some(LoopCancelledReasonKind::HostInterrupt);
                 break;
             }
-            LoopInput::GateResolved { .. }
-            | LoopInput::CapabilitySurfaceChanged { .. }
-            | LoopInput::SubagentSettled { .. } => break,
+            LoopInput::GateResolved { .. } | LoopInput::CapabilitySurfaceChanged { .. } => break,
+            // UserMessage/FollowUp/Steering/SubagentSettled are each drained
+            // by `user_facing_input_matches_drain_mode` in at least one mode
+            // above (SubagentSettled in both), so this arm is unreachable at
+            // runtime for them; it exists only because the match must stay
+            // exhaustive over every `LoopInput` variant.
             LoopInput::UserMessage { .. }
             | LoopInput::FollowUp { .. }
-            | LoopInput::Steering { .. } => {
+            | LoopInput::Steering { .. }
+            | LoopInput::SubagentSettled { .. } => {
                 break;
             }
         }
@@ -216,24 +220,52 @@ pub(super) fn consume_drainable_inputs(
 
 fn user_facing_input_matches_drain_mode(input: &LoopInput, mode: UserFacingInputDrainMode) -> bool {
     match mode {
-        UserFacingInputDrainMode::Steering => {
-            matches!(
-                input,
-                LoopInput::UserMessage { .. } | LoopInput::Steering { .. }
-            )
-        }
+        UserFacingInputDrainMode::Steering => matches!(
+            input,
+            LoopInput::UserMessage { .. }
+                | LoopInput::Steering { .. }
+                | LoopInput::SubagentSettled { .. }
+        ),
         // Steering inputs are drainable at the reply-only exit boundary too: a
         // steering message that arrives during the run's FINAL model call is
         // never seen by the steering drain (which runs at iteration start), so
         // the follow-up drain must consume it and force one more iteration —
-        // otherwise the input strands unconsumed while the run completes.
+        // otherwise the input strands unconsumed while the run completes. A
+        // settled subagent result is the same shape: it can land during the
+        // final model call and must force one more iteration rather than
+        // stranding unconsumed while the run completes.
         UserFacingInputDrainMode::FollowUp => {
             matches!(
                 input,
                 LoopInput::FollowUp { .. }
                     | LoopInput::UserMessage { .. }
                     | LoopInput::Steering { .. }
+                    | LoopInput::SubagentSettled { .. }
             )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_host_api::turn::{LoopMessageRef, TurnRunId};
+
+    use super::{LoopInput, UserFacingInputDrainMode, user_facing_input_matches_drain_mode};
+
+    #[test]
+    fn subagent_settled_drains_in_both_user_facing_modes() {
+        let input = LoopInput::SubagentSettled {
+            child_run_id: TurnRunId::new(),
+            message_ref: LoopMessageRef::new("msg:child-result-1").expect("valid message ref"),
+        };
+        for mode in [
+            UserFacingInputDrainMode::Steering,
+            UserFacingInputDrainMode::FollowUp,
+        ] {
+            assert!(
+                user_facing_input_matches_drain_mode(&input, mode),
+                "settled results must drain in {mode:?}"
+            );
         }
     }
 }
