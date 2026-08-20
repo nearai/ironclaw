@@ -3808,6 +3808,7 @@ dependencies = [
  "ironclaw_event_streams",
  "ironclaw_extension_contracts",
  "ironclaw_filesystem",
+ "ironclaw_hooks",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_identity",

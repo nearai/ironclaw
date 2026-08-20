@@ -12,10 +12,12 @@
 //!
 //! ## Shape
 //!
-//! The loop tier reports "a real user turn completed" through
-//! [`ironclaw_memory::AfterTurnCurationPort`]; every policy decision lives here. A pass is one unbound turn — no conversation, no
-//! reply target — submitted through the same [`UnboundTurnService`] door
-//! OpenAI-compat and subagent spawn use.
+//! The loop tier reports "a turn's run reached a terminal state" through the
+//! `after_turn` hook point ([`ironclaw_hooks::sink::PrivilegedAfterTurnHook`]);
+//! every policy decision lives here, including which of those turns count. A
+//! pass is one unbound turn — no conversation, no reply target — submitted
+//! through the same [`UnboundTurnService`] door OpenAI-compat and subagent
+//! spawn use.
 //!
 //! ## Why the pass reads memory through a tool instead of being handed it
 //!
@@ -38,12 +40,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use ironclaw_hooks::points::AfterTurnHookContext;
+use ironclaw_hooks::sink::PrivilegedAfterTurnHook;
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_host_api::output::OutputContract;
 use ironclaw_host_api::prepared_context::TurnLimits;
 use ironclaw_memory::{
-    AfterTurnCurationPort, AfterTurnCurationSignal, MEMORY_READ_CAPABILITY_ID,
-    MEMORY_SEARCH_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
+    MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
 };
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_threads::agent_message::{AgentMessage, AgentMessageRole, ContentPart};
@@ -204,33 +207,33 @@ impl MemoryCurationService {
     /// Deterministic per-pass key so a crash-retry of the triggering turn
     /// converges on the SAME prepared context and run instead of minting a
     /// second pass over the same document.
-    fn pass_id(signal: &AfterTurnCurationSignal, epoch: u64) -> String {
+    fn pass_id(ctx: &AfterTurnHookContext, epoch: u64) -> String {
         format!(
             "memory-curation-{}-{}-{}",
-            signal.tenant_id.as_str(),
-            signal.user_id.as_str(),
+            ctx.tenant_id.as_str(),
+            ctx.user_id.as_str(),
             epoch
         )
     }
 
     fn build_submission(
-        signal: &AfterTurnCurationSignal,
+        ctx: &AfterTurnHookContext,
         epoch: u64,
     ) -> Result<UnboundTurnSubmission, String> {
         let output =
             OutputContract::try_json_schema(MEMORY_CURATION_OUTPUT_NAME, curation_report_schema())
                 .map_err(|error| format!("curation report schema is invalid: {error}"))?;
-        let public_id = Self::pass_id(signal, epoch);
+        let public_id = Self::pass_id(ctx, epoch);
         Ok(UnboundTurnSubmission {
             // The pass acts AS the owner. Memory is per-user: a pass acting as
             // anything else would read and write the wrong scope. Never an
             // operator-config caller — curation touches one user's memory and
             // has no business holding deployment-wide authority.
             caller: ProductSurfaceCaller::new(
-                signal.tenant_id.clone(),
-                signal.user_id.clone(),
-                signal.agent_id.clone(),
-                signal.project_id.clone(),
+                ctx.tenant_id.clone(),
+                ctx.user_id.clone(),
+                ctx.agent_id.clone(),
+                ctx.project_id.clone(),
             ),
             public_id: public_id.clone(),
             system_prompt: MEMORY_CURATION_PROMPT.to_string(),
@@ -256,9 +259,18 @@ impl MemoryCurationService {
 }
 
 #[async_trait]
-impl AfterTurnCurationPort for MemoryCurationService {
-    async fn on_completed_turn(&self, signal: AfterTurnCurationSignal) {
-        let key = format!("{}/{}", signal.tenant_id.as_str(), signal.user_id.as_str());
+impl PrivilegedAfterTurnHook for MemoryCurationService {
+    async fn on_turn(&self, ctx: &AfterTurnHookContext) {
+        // Only successful turns count. A failed or cancelled turn says nothing
+        // about whether memory needs tidying, and counting it would drift the
+        // interval — the point fires for every terminal state, so this filter
+        // has to live here.
+        if !ctx.completed {
+            return;
+        }
+        // Per-owner key: each user's turns count toward their OWN pass, so a
+        // busy user cannot trigger curation over a quiet user's memory.
+        let key = format!("{}/{}", ctx.tenant_id.as_str(), ctx.user_id.as_str());
         if !self.count_and_check(&key) {
             return;
         }
@@ -271,7 +283,7 @@ impl AfterTurnCurationPort for MemoryCurationService {
             };
             counters.len() as u64
         };
-        let submission = match Self::build_submission(&signal, epoch) {
+        let submission = match Self::build_submission(ctx, epoch) {
             Ok(submission) => submission,
             Err(reason) => {
                 debug!("memory curation: could not build pass: {reason}");
@@ -329,13 +341,18 @@ mod tests {
         }
     }
 
-    fn signal_for(user: &str) -> AfterTurnCurationSignal {
-        AfterTurnCurationSignal {
-            tenant_id: TenantId::new("tenant-a").expect("tenant id"),
-            user_id: UserId::new(user).expect("user id"),
-            agent_id: None,
-            project_id: None,
-        }
+    fn ctx_for(user: &str) -> AfterTurnHookContext {
+        ctx_for_status(user, true)
+    }
+
+    fn ctx_for_status(user: &str, completed: bool) -> AfterTurnHookContext {
+        AfterTurnHookContext::new(
+            TenantId::new("tenant-a").expect("tenant id"),
+            UserId::new(user).expect("user id"),
+            None,
+            None,
+            completed,
+        )
     }
 
     fn service(interval: u32) -> (MemoryCurationService, Arc<RecordingSubmitter>) {
@@ -356,7 +373,7 @@ mod tests {
         let (service, submitter) = service(3);
 
         for _ in 0..2 {
-            service.on_completed_turn(signal_for("user-a")).await;
+            service.on_turn(&ctx_for("user-a")).await;
         }
         assert_eq!(
             submitter.count(),
@@ -364,15 +381,15 @@ mod tests {
             "no pass before the interval is reached"
         );
 
-        service.on_completed_turn(signal_for("user-a")).await;
+        service.on_turn(&ctx_for("user-a")).await;
         assert_eq!(submitter.count(), 1, "the third turn triggers a pass");
 
         for _ in 0..2 {
-            service.on_completed_turn(signal_for("user-a")).await;
+            service.on_turn(&ctx_for("user-a")).await;
         }
         assert_eq!(submitter.count(), 1, "the counter resets after a pass");
 
-        service.on_completed_turn(signal_for("user-a")).await;
+        service.on_turn(&ctx_for("user-a")).await;
         assert_eq!(
             submitter.count(),
             2,
@@ -386,11 +403,11 @@ mod tests {
     async fn counters_are_per_owner() {
         let (service, submitter) = service(2);
 
-        service.on_completed_turn(signal_for("user-a")).await;
-        service.on_completed_turn(signal_for("user-b")).await;
+        service.on_turn(&ctx_for("user-a")).await;
+        service.on_turn(&ctx_for("user-b")).await;
         assert_eq!(submitter.count(), 0, "one turn each is below the interval");
 
-        service.on_completed_turn(signal_for("user-a")).await;
+        service.on_turn(&ctx_for("user-a")).await;
         assert_eq!(submitter.count(), 1);
         assert_eq!(
             submitter.last().caller.user_id.as_str(),
@@ -405,7 +422,7 @@ mod tests {
     #[tokio::test]
     async fn the_submitted_pass_is_scoped_and_bounded() {
         let (service, submitter) = service(1);
-        service.on_completed_turn(signal_for("user-a")).await;
+        service.on_turn(&ctx_for("user-a")).await;
 
         let submission = submitter.last();
         assert_eq!(submission.caller.user_id.as_str(), "user-a");
@@ -464,7 +481,7 @@ mod tests {
     #[tokio::test]
     async fn the_pass_id_is_the_idempotency_key() {
         let (service, submitter) = service(1);
-        service.on_completed_turn(signal_for("user-a")).await;
+        service.on_turn(&ctx_for("user-a")).await;
 
         let submission = submitter.last();
         assert_eq!(
@@ -487,9 +504,31 @@ mod tests {
         let service =
             MemoryCurationService::new(Arc::clone(&submitter) as Arc<dyn CurationPassSubmitter>, 1);
 
-        service.on_completed_turn(signal_for("user-a")).await;
+        service.on_turn(&ctx_for("user-a")).await;
 
         assert_eq!(submitter.count(), 1, "it tried");
+    }
+
+    /// The point fires for every terminal state, so a failed or cancelled turn
+    /// arrives here too. It must not count: a turn that never finished says
+    /// nothing about whether memory needs tidying, and counting it would drift
+    /// the interval away from "every Nth real turn".
+    #[tokio::test]
+    async fn an_unsuccessful_turn_never_counts_toward_the_interval() {
+        let (service, submitter) = service(2);
+
+        for _ in 0..5 {
+            service.on_turn(&ctx_for_status("user-a", false)).await;
+        }
+        assert_eq!(submitter.count(), 0, "unsuccessful turns do not accumulate");
+
+        service.on_turn(&ctx_for("user-a")).await;
+        service.on_turn(&ctx_for("user-a")).await;
+        assert_eq!(
+            submitter.count(),
+            1,
+            "the interval is counted purely in successful turns"
+        );
     }
 
     /// Zero would submit a pass after every single turn while reading as
@@ -498,7 +537,7 @@ mod tests {
     #[tokio::test]
     async fn a_zero_interval_is_clamped_not_treated_as_disabled() {
         let (service, submitter) = service(0);
-        service.on_completed_turn(signal_for("user-a")).await;
+        service.on_turn(&ctx_for("user-a")).await;
         assert_eq!(submitter.count(), 1);
     }
 }

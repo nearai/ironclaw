@@ -40,3 +40,27 @@ pub struct AfterTurnHookContext {
     /// terminal state (failed, cancelled, …).
     pub completed: bool,
 }
+
+impl AfterTurnHookContext {
+    /// Build the context. Required because the struct is `#[non_exhaustive]`:
+    /// the dispatch call site lives in `ironclaw_turn_runner`, outside this
+    /// crate, so it cannot use a struct literal.
+    ///
+    /// `user_id` is taken by value and non-optional by design — see the module
+    /// docs: a run with no bound actor never reaches this point at all.
+    pub fn new(
+        tenant_id: TenantId,
+        user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        completed: bool,
+    ) -> Self {
+        Self {
+            tenant_id,
+            user_id,
+            agent_id,
+            project_id,
+            completed,
+        }
+    }
+}

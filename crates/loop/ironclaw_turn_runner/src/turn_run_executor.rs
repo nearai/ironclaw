@@ -31,7 +31,7 @@ const AUTH_GATE_LOOP_REF_PREFIX: &str = "gate:auth-";
 use ironclaw_turns::loop_exit::LoopExitApplier;
 
 use crate::{
-    after_turn_curation::curation_signal_for_completed_run,
+    after_turn_hooks::after_turn_hook_context,
     after_turn_memory::AfterTurnMemoryRecorder,
     driver_registry::{DriverRegistry, LoopDriverRegistryKey},
     failure_categories::host_stage_unavailable_category,
@@ -46,12 +46,13 @@ use crate::{
 /// provider performs a thread-history read plus a write.
 const AFTER_TURN_MEMORY_RECORD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Bound on the curation TRIGGER — the decision plus, at most, an accept and a
-/// submit. It is deliberately far tighter than the recorder's budget because
-/// nothing here waits on the curation RUN: that executes on the scheduler like
-/// any other turn. Anything slower than this is a sick dependency, and a
-/// background chore is never worth holding a worker for.
-const AFTER_TURN_CURATION_TRIGGER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Outer bound on the whole `after_turn` hook dispatch. The dispatcher already
+/// bounds each individual hook, so this is a backstop against dispatcher-level
+/// surprises rather than the primary budget — it exists so the scheduler worker
+/// stays bounded no matter what. Deliberately far tighter than the recorder's
+/// budget because nothing here waits on work a hook STARTS: that executes on
+/// the scheduler like any other turn.
+const AFTER_TURN_HOOK_DISPATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn trace_executor_latency_ok(
     operation: &'static str,
@@ -174,12 +175,11 @@ pub struct RebornTurnRunExecutor {
     /// `DefaultPlannedRuntimeParts`).
     // arch-exempt: optional_arc, deferred production wiring, issue #5013
     after_turn_memory_recorder: Option<Arc<AfterTurnMemoryRecorder>>,
-    /// Memory-curation trigger (the "dreaming" seam, #7276). Optional for the
-    /// same reason as the recorder above: only a composition that resolved a
-    /// memory provider AND enabled curation attaches one, and a `Completed` run
-    /// finishes cleanly without it.
-    // arch-exempt: optional_arc, feature is opt-in per composition, issue #7276
-    after_turn_curation: Option<Arc<dyn ironclaw_memory::AfterTurnCurationPort>>,
+    /// Hook dispatcher fired at the `after_turn` lifecycle point. Optional for
+    /// the same reason as the recorder above: only compositions that register
+    /// lifecycle hooks attach one, and a run finishes cleanly without it.
+    // arch-exempt: optional_arc, lifecycle hooks are opt-in per composition, issue #7276
+    after_turn_hooks: Option<Arc<ironclaw_hooks::dispatch::HookDispatcher>>,
 }
 
 impl RebornTurnRunExecutor {
@@ -195,7 +195,7 @@ impl RebornTurnRunExecutor {
             host_factory,
             gate_record_store,
             after_turn_memory_recorder: None,
-            after_turn_curation: None,
+            after_turn_hooks: None,
         }
     }
 
@@ -210,13 +210,14 @@ impl RebornTurnRunExecutor {
         self
     }
 
-    /// Attach the memory-curation trigger. Wired by composition only when the
-    /// feature is enabled; absent everywhere else.
-    pub fn with_after_turn_curation(
+    /// Attach the dispatcher fired at the `after_turn` lifecycle point. Wired
+    /// by compositions that register lifecycle hooks; absent everywhere else,
+    /// and a run finishes cleanly without it.
+    pub fn with_after_turn_hooks(
         mut self,
-        curation: Arc<dyn ironclaw_memory::AfterTurnCurationPort>,
+        hooks: Arc<ironclaw_hooks::dispatch::HookDispatcher>,
     ) -> Self {
-        self.after_turn_curation = Some(curation);
+        self.after_turn_hooks = Some(hooks);
         self
     }
 }
@@ -559,28 +560,27 @@ impl RebornTurnRunExecutor {
                         );
                     }
                 }
-                // Memory-curation trigger (#7276). Same post-terminal, bounded,
-                // best-effort discipline as the recorder above: the run is
-                // already terminal, so a slow or unavailable curation path must
-                // never fail it or hold the scheduler worker. The signal itself
-                // decides whether this run qualifies (never an unbound run —
-                // otherwise a curation pass would schedule its own successor).
-                if let Some(curation) = self.after_turn_curation.as_ref()
-                    && let Some(signal) = curation_signal_for_completed_run(&state)
+                // `after_turn` lifecycle hooks (#7276). Same post-terminal,
+                // bounded, best-effort discipline as the recorder above: the run
+                // is already terminal, so a slow or failing hook must never fail
+                // it or hold the scheduler worker. The context derivation decides
+                // whether this run may fire the point at all (never an unbound
+                // run — otherwise hook-started background work would schedule its
+                // own successor forever).
+                if let Some(hooks) = self.after_turn_hooks.as_ref()
+                    && let Some(ctx) = after_turn_hook_context(&state)
                     && tokio::time::timeout(
-                        AFTER_TURN_CURATION_TRIGGER_TIMEOUT,
-                        curation.on_completed_turn(signal),
+                        AFTER_TURN_HOOK_DISPATCH_TIMEOUT,
+                        hooks.dispatch_after_turn(ctx),
                     )
                     .await
                     .is_err()
                 {
-                    {
-                        // silent-ok: curation is an optional background chore.
-                        debug!(
-                            run_id = ?run_id,
-                            "memory-curation trigger timed out; skipping (run already complete)"
-                        );
-                    }
+                    // silent-ok: lifecycle hooks are best-effort post-completion.
+                    debug!(
+                        run_id = ?run_id,
+                        "after-turn hook dispatch timed out; skipping (run already terminal)"
+                    );
                 }
                 Ok(())
             }
