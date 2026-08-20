@@ -476,6 +476,7 @@ impl RebornScopedSandboxCommandTransport {
         if timeout.is_zero() {
             return Err(RuntimeProcessError::Timeout(timeout));
         }
+        user_container::exec_helper_timeout_secs(timeout)?;
         let workspace = self.prepare_workspace(&request.scope).await?;
         let activity = self.activity.begin(&user_key)?;
         let gate = self.activity.gate(&user_key).ok_or_else(|| {
@@ -1053,6 +1054,32 @@ mod tests {
                 .iter()
                 .all(|bind| !bind.contains("ironclaw-http-broker.sock"))
         );
+    }
+
+    #[tokio::test]
+    async fn run_command_rejects_timeout_above_exec_helper_limit_before_docker_io() {
+        let temp = tempfile::tempdir().unwrap();
+        let unavailable = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", unavailable.local_addr().unwrap());
+        let docker = Docker::connect_with_http(&endpoint, 1, bollard::API_DEFAULT_VERSION).unwrap();
+        let transport = RebornScopedSandboxCommandTransport::new(
+            docker,
+            RebornSandboxConfig::new(temp.path().join("workspaces")),
+        );
+
+        let error = transport
+            .run_command(CommandExecutionRequest {
+                scope: sandbox_scope(),
+                mounts: None,
+                command: "true".to_string(),
+                workdir: None,
+                timeout_secs: Some(86_401),
+                extra_env: HashMap::new(),
+            })
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error}").contains("must not exceed 86400 seconds"));
     }
 
     #[tokio::test]

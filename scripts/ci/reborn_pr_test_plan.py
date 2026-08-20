@@ -48,16 +48,25 @@ def _webui_frontend_prefix() -> str:
     return f"{directory}/frontend/"
 
 
-def _sandbox_docker_prefixes() -> tuple[str, ...]:
-    """Sandbox source prefixes whose changes require the Docker lane."""
+@functools.lru_cache(maxsize=None)
+def _sandbox_crate_directory() -> str:
+    """`<ironclaw_sandbox crate dir>`, resolved once per process."""
     try:
-        directory = crate_directory("ironclaw_sandbox", ROOT)
+        return crate_directory("ironclaw_sandbox", ROOT)
     except CrateTreeError as error:
         raise RuntimeError(
             "reborn_pr_test_plan: cannot resolve the ironclaw_sandbox crate, so "
-            f"the source path prefixes used to route the Docker lane are unknown: {error}"
+            f"the source paths used to route the Docker lane are unknown: {error}"
         ) from error
-    return (f"{directory}/src/sandbox_process",)
+
+
+def _sandbox_docker_prefixes() -> tuple[str, ...]:
+    """Sandbox source prefixes whose changes require the Docker lane."""
+    directory = _sandbox_crate_directory()
+    return (
+        f"{directory}/src/sandbox_process",
+        f"{directory}/tests/user_sandbox_docker_live/",
+    )
 
 
 MAX_PR_CRATE_BUCKETS = 3
@@ -853,13 +862,13 @@ def build_plan(
     sandbox_docker_prefixes = SANDBOX_DOCKER_PREFIXES + sandbox_crate_prefixes
     sandbox_docker_exact_paths = set(SANDBOX_DOCKER_EXACT_PATHS)
     if sandbox_crate_prefixes:
-        sandbox_crate_directory = sandbox_crate_prefixes[0].removesuffix(
-            "/src/sandbox_process"
-        )
+        sandbox_crate_directory = _sandbox_crate_directory()
         sandbox_docker_exact_paths.update(
             {
                 f"{sandbox_crate_directory}/Cargo.toml",
                 f"{sandbox_crate_directory}/src/lib.rs",
+                f"{sandbox_crate_directory}/tests/support/user_sandbox_live.rs",
+                f"{sandbox_crate_directory}/tests/user_sandbox_docker_live.rs",
             }
         )
 

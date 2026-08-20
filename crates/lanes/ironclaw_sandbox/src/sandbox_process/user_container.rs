@@ -32,6 +32,8 @@ pub(super) const LABEL_PREFIX: &str = "ironclaw";
 const EXEC_HELPER: &str = "/usr/local/bin/ironclaw-exec";
 const HOST_TIMEOUT_GRACE: Duration = Duration::from_secs(5);
 const CONTAINER_STOP_TIMEOUT_SECS: i64 = 10;
+/// Mirrors the worker helper's hard maximum.
+const MAX_EXEC_TIMEOUT_SECS: u64 = 86_400;
 
 pub(super) struct UserContainerLaunch {
     pub(super) config: Config<String>,
@@ -149,6 +151,19 @@ pub(super) async fn ensure_user_container(
     ))
 }
 
+pub(super) fn exec_helper_timeout_secs(timeout: Duration) -> Result<u64, RuntimeProcessError> {
+    let seconds = timeout
+        .as_secs()
+        .saturating_add(u64::from(timeout.subsec_nanos() > 0))
+        .max(1);
+    if seconds > MAX_EXEC_TIMEOUT_SECS {
+        return Err(RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox command timeout must not exceed {MAX_EXEC_TIMEOUT_SECS} seconds"
+        )));
+    }
+    Ok(seconds)
+}
+
 /// Executes a command while its user's lifecycle gate is held.
 ///
 /// The caller must retain that gate through any error or timeout recycle.
@@ -161,10 +176,7 @@ pub(super) async fn execute_in_user_container(
     timeout: Duration,
 ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
     let started_at = Instant::now();
-    let helper_timeout_secs = timeout
-        .as_secs()
-        .saturating_add(u64::from(timeout.subsec_nanos() > 0))
-        .max(1);
+    let helper_timeout_secs = exec_helper_timeout_secs(timeout)?;
     let outcome_nonce = uuid::Uuid::new_v4().to_string();
     let created = transport
         .docker
@@ -462,7 +474,9 @@ async fn sweep_idle_user_containers(
         let Some(gate) = registry.gate(&key) else {
             continue;
         };
-        let _gate = gate.lock().await;
+        let Ok(_gate) = gate.try_lock() else {
+            continue;
+        };
         if !registry.sweep_eligible(&key, Instant::now(), idle_timeout) {
             continue;
         }
@@ -644,6 +658,39 @@ mod tests {
         );
         assert!(parse_exec_outcome("exit:256").is_err());
         assert!(parse_exec_outcome("unknown").is_err());
+    }
+
+    #[test]
+    fn bounded_tail_retains_final_trailer_and_utf8_boundaries() {
+        let nonce = "abc-123";
+        let trailer = format!("\n{}exit:124\n", outcome_prefix(nonce));
+        let mut tail = String::new();
+        append_tail(&mut tail, &format!("{}{}", "é".repeat(400), trailer), 512);
+
+        assert!(tail.is_char_boundary(tail.len()));
+        assert!(tail.len() <= 512);
+        assert_eq!(
+            parse_exec_outcome_trailer(&tail, nonce).unwrap(),
+            ExecOutcome::Exit(124)
+        );
+    }
+
+    #[test]
+    fn outcome_trailer_uses_last_exact_nonce_and_strips_only_supervisor_line() {
+        let nonce = "abc-123";
+        let mut output = format!(
+            "command wrote {}exit:7\nlater output\n{}timeout\n",
+            outcome_prefix(nonce),
+            outcome_prefix(nonce)
+        );
+        assert_eq!(
+            parse_exec_outcome_trailer(&output, nonce).unwrap(),
+            ExecOutcome::Timeout
+        );
+        strip_exec_outcome_trailer(&mut output, nonce);
+        assert!(output.contains("command wrote"));
+        assert!(!output.ends_with("timeout\n"));
+        assert!(parse_exec_outcome_trailer("ordinary output", nonce).is_err());
     }
 
     #[test]

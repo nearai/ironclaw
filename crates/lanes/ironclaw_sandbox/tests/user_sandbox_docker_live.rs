@@ -612,6 +612,7 @@ async fn foreground_exit_reaps_descendant_that_detaches_into_a_new_session() {
                 "setsid python -c 'import time; time.sleep(300)' '{token}' \
                  >/dev/null 2>&1 </dev/null & \
                  printf '%s' \"$!\" > /workspace/detached.pid; \
+                 printf '%s' '{token}' > /workspace/detached.token; \
                  echo FOREGROUND_RETURNED"
             ),
         )),
@@ -627,8 +628,10 @@ async fn foreground_exit_reaps_descendant_that_detaches_into_a_new_session() {
         .run_command(request(
             user.resource_scope(),
             "pid=$(cat /workspace/detached.pid); \
-             token=$(cat /workspace/detached.token 2>/dev/null || true); \
+             token=$(cat /workspace/detached.token); \
              if [ -d \"/proc/$pid\" ]; then echo DETACHED_PID_ALIVE; exit 1; fi; \
+             if grep -al \"$token\" /proc/[0-9]*/cmdline 2>/dev/null; then \
+             echo DETACHED_TOKEN_STILL_PRESENT; exit 1; fi; \
              echo DETACHED_DESCENDANT_GONE",
         ))
         .await
@@ -771,6 +774,12 @@ async fn timeout_kills_descendants_while_nonzero_exit_remains_output() {
         .expect("ordinary exit 124 remains a command result");
     assert_eq!(ordinary_124.exit_code, 124);
     assert!(ordinary_124.output.contains("ORDINARY_124_OUTPUT"));
+
+    let signaled = transport
+        .run_command(request(thread.resource_scope(), "kill -TERM $$"))
+        .await
+        .expect("signal termination remains an ordinary command result");
+    assert_eq!(signaled.exit_code, 143);
 }
 
 #[tokio::test]

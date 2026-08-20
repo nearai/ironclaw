@@ -36,7 +36,7 @@ operative credential.
 | 3 | Allowlisted TLS egress through MITM (spike CA) | PASS | [results-policy-credentials.md](results-policy-credentials.md) |
 | 4 | Default-deny 403 + structured JSON audit | PASS | same + [audit-denial-example.jsonl](audit-denial-example.jsonl) |
 | 5 | Direct egress dead (public, metadata IP, no default route) | PASS | results-topology-dns.md |
-| 6 | Placeholder→real credential swap, `require: true`, host binding, no secret in logs | PASS (4/4 sub-checks) | results-policy-credentials.md |
+| 6 | Placeholder→real credential swap, `require: true`, host binding, exact literal absent from captured logs | PASS (4/4 sub-checks) | results-policy-credentials.md |
 | 7 | Per-runtime TLS trust matrix (curl/git/node/python/pip) | PASS | [results-tls-trust.md](results-tls-trust.md) |
 | 8 | `docker exec` stream/kill/zombie/latency mechanics | PASS with findings | [results-exec-mechanics.md](results-exec-mechanics.md) |
 | 9 | No IPv6 route off the internal network | PASS | results-topology-dns.md |
@@ -56,16 +56,19 @@ operative credential.
 3. **Group kill works from a sibling exec** (BusyBox syntax: `kill -TERM
    -<PGID>`, no `--`), but a **non-reaping PID 1 leaves zombies** — the worker
    image needs tini or an equivalent reaping init.
-4. **Exec latency**: 30–60 ms median — confirms per-thread container +
-   exec-per-command economics.
+4. **Exec latency**: 30–60 ms observed range, 30 ms median, 38 ms mean —
+   confirms per-thread container + exec-per-command economics.
 5. **TLS trust is per-runtime**: system store (`update-ca-certificates`)
    covers curl/git/python-stdlib and (surprisingly) pip 26.x; **Node ignores
-   the system store** and requires `NODE_EXTRA_CA_CERTS`. The worker image
-   must bake `NODE_EXTRA_CA_CERTS` and `SSL_CERT_FILE` pointing at the proxy CA.
+   the system store** and requires `NODE_EXTRA_CA_CERTS`. The worker image must
+   verify that this path exists. Do not globally point `SSL_CERT_FILE` at the
+   proxy-only CA; use a merged CA bundle or scope that override to the runtime
+   that needs it.
 6. **Credential swap verified end-to-end**: placeholder swapped only at the
    bound host; unswapped when sent to a non-bound host; requests to the bound
-   host without the placeholder are rejected (`require: true`); the real value
-   appears **zero** times in proxy logs.
+   host without the placeholder are rejected (`require: true`). A literal,
+   case-sensitive search found the exact real value zero times in captured
+   proxy logs; encoded, escaped, or transformed representations were not tested.
 7. **A shallow `git clone` of a public repo contacted only `github.com`** —
    the full asset-host constellation (codeload, objects.githubusercontent)
    was allowlisted but unused in this fixture; deeper clones/LFS will need it.
