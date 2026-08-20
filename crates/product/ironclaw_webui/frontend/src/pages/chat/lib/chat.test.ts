@@ -185,7 +185,7 @@ function renderChat({
   return { tree, components };
 }
 
-test("acknowledges a completion notification only after its final reply render", () => {
+function renderWithPendingNotification(messages) {
   const acknowledgements = [];
   renderChat({
     runEffects: true,
@@ -196,12 +196,7 @@ test("acknowledges a completion notification only after its final reply render",
     },
     onNotificationRendered: (source) => acknowledgements.push(source),
     hookState: {
-      messages: [{
-        id: "message-final",
-        role: "assistant",
-        isFinalReply: true,
-        turnRunId: "run-1",
-      }],
+      messages,
       isProcessing: false,
       pendingGate: null,
       suggestions: [],
@@ -221,9 +216,45 @@ test("acknowledges a completion notification only after its final reply render",
       submitAuthToken: async () => {},
     },
   });
-  assert.deepEqual(JSON.parse(JSON.stringify(acknowledgements)), [
-    { threadId: "thread-1", turnRunId: "run-1" },
-  ]);
+  return JSON.parse(JSON.stringify(acknowledgements));
+}
+
+test("acknowledges a completion notification only after its final reply render", () => {
+  assert.deepEqual(
+    renderWithPendingNotification([{
+      id: "message-final",
+      role: "assistant",
+      isFinalReply: true,
+      turnRunId: "run-1",
+    }]),
+    [{ threadId: "thread-1", turnRunId: "run-1" }],
+  );
+});
+
+test("a pending notification is not acknowledged by a non-final reply", () => {
+  assert.deepEqual(
+    renderWithPendingNotification([{
+      id: "message-partial",
+      role: "assistant",
+      isFinalReply: false,
+      turnRunId: "run-1",
+    }]),
+    [],
+    "the run has not produced its answer yet, so nothing has been shown",
+  );
+});
+
+test("a pending notification is not acknowledged by another run's final reply", () => {
+  assert.deepEqual(
+    renderWithPendingNotification([{
+      id: "message-final",
+      role: "assistant",
+      isFinalReply: true,
+      turnRunId: "run-2",
+    }]),
+    [],
+    "acknowledging here would mark a notification read for a reply it does not describe",
+  );
 });
 
 test("Chat cancel button routes through active thread run cancellation", async () => {

@@ -99,11 +99,16 @@ function instantiate({
   const optimisticWrites = [];
   let storedState = { initialized: true, seenIds: new Set() };
   const react = createReactStub();
+  /* A real query cache composes: the second optimistic write starts from the
+   * first one's result. Reading the pristine fixture back every time would let
+   * a second update silently clobber the first and still pass. */
+  let cached = data;
   const queryClient = {
     cancelQueries: async () => {},
-    getQueryData: () => data,
+    getQueryData: () => cached,
     setQueryData: (_key, updater) => {
-      optimisticWrites.push(typeof updater === "function" ? updater(data) : updater);
+      cached = typeof updater === "function" ? updater(cached) : updater;
+      optimisticWrites.push(cached);
     },
     invalidateQueries: () => {},
   };
@@ -117,7 +122,7 @@ function instantiate({
     THREAD_STATE: { NEEDS_ATTENTION: "needs_attention" },
     useQuery: (options) => {
       queryOptions = options;
-      return { data, isLoading: false, error: null, refetch: () => {} };
+      return { data: cached, isLoading: false, error: null, refetch: () => {} };
     },
     useMutation: ({ mutationFn, onMutate }) => {
       mutationIndex += 1;
@@ -693,4 +698,38 @@ test("an abort mid-walk stops paging instead of draining the inbox", async () =>
     [undefined],
     "the walk stops at the head rather than following cursor-2 and cursor-3",
   );
+});
+
+test("archiving twice composes instead of resurrecting the first record", async () => {
+  const harness = instantiate({
+    data: {
+      inbox: {
+        notifications: [
+          notification("notification-1"),
+          notification("notification-2"),
+          notification("notification-3"),
+        ],
+        unread_count: 3,
+      },
+      approvalThreads: { threads: [] },
+    },
+  });
+
+  harness.hook.archiveMessage("notification-1");
+  await flushAsyncWork();
+  harness.render();
+  harness.hook.archiveMessage("notification-2");
+  await flushAsyncWork();
+
+  assert.deepEqual(harness.archiveCalls, ["notification-1", "notification-2"]);
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        harness.optimisticWrites.at(-1).inbox.notifications.map((record) => record.id),
+      ),
+    ),
+    ["notification-3"],
+    "the second archive builds on the first rather than restoring it",
+  );
+  assert.equal(harness.optimisticWrites.at(-1).inbox.unread_count, 1);
 });

@@ -138,6 +138,7 @@ export function NotificationPanel({
                 {unreadCount > 0 && (
                   <Button
                     type="button"
+                    data-testid="notification-mark-all-read"
                     variant="ghost"
                     size="sm"
                     onClick={markAllRead}

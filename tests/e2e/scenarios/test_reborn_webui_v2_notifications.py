@@ -291,7 +291,7 @@ async def test_reborn_v2_notification_mark_all_read_updates_server_inbox(
             == "/api/webchat/v2/notifications/read-all"
             and response.status == 200
         ):
-            await page.get_by_role("button", name="Mark all read").click()
+            await page.locator(SEL_V2["notification_mark_all_read"]).click()
         assert state["read_at"] is not None
         await expect(page.locator(SEL_V2["notification_unread_dot"])).to_have_count(0)
     finally:
@@ -367,10 +367,7 @@ async def test_reborn_v2_error_toast_pauses_dismisses_and_stays_above_notificati
         await page.clock.fast_forward(8500)
         await expect(toast).to_be_visible()
 
-        # A failed delete intentionally leaves the confirmation dialog open so
-        # the user can retry. Close it before exercising the header behind its
-        # modal backdrop.
-        await page.locator(SEL_V2["confirm_dialog_cancel"]).click()
+        # The dialog was already dismissed above, so the bell is reachable.
         await page.locator(SEL_V2["notification_bell"]).click()
         panel = page.locator(SEL_V2["notification_panel"])
         await expect(panel).to_be_visible(timeout=5000)
