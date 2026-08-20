@@ -9,6 +9,7 @@
 //! re-exports these types for backward compatibility.
 
 mod context;
+mod curation;
 mod events;
 mod hash;
 mod metadata;
@@ -22,6 +23,7 @@ mod service;
 pub mod test_support;
 
 pub use context::MemoryContext;
+pub use curation::{AfterTurnCurationPort, AfterTurnCurationSignal};
 pub use events::{
     MemoryAuditContext, MemoryEventSinkError, MemorySignificantEvent, MemorySignificantEventKind,
     MemorySignificantEventSink, MemorySignificantEventSource, MemorySignificantEventStatus,

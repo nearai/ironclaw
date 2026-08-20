@@ -13,8 +13,7 @@
 //! ## Shape
 //!
 //! The loop tier reports "a real user turn completed" through
-//! [`ironclaw_loop_contracts::AfterTurnCurationPort`]; every policy decision
-//! lives here. A pass is one unbound turn — no conversation, no
+//! [`ironclaw_memory::AfterTurnCurationPort`]; every policy decision lives here. A pass is one unbound turn — no conversation, no
 //! reply target — submitted through the same [`UnboundTurnService`] door
 //! OpenAI-compat and subagent spawn use.
 //!
@@ -42,9 +41,9 @@ use async_trait::async_trait;
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_host_api::output::OutputContract;
 use ironclaw_host_api::prepared_context::TurnLimits;
-use ironclaw_loop_contracts::{AfterTurnCurationPort, AfterTurnCurationSignal};
 use ironclaw_memory::{
-    MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
+    AfterTurnCurationPort, AfterTurnCurationSignal, MEMORY_READ_CAPABILITY_ID,
+    MEMORY_SEARCH_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
 };
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_threads::agent_message::{AgentMessage, AgentMessageRole, ContentPart};

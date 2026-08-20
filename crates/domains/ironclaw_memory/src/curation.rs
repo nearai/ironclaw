@@ -5,7 +5,14 @@
 //! reads the file, so the decay is invisible. A periodic curation pass fixes
 //! that — but the tier that NOTICES a turn finished (loop execution) and the
 //! tier that owns product orchestration are deliberately not allowed to depend
-//! on each other, so the vocabulary between them lives here.
+//! on each other, so the vocabulary between them needs a shared home.
+//!
+//! That home is here, with the rest of the memory contract, because this is
+//! memory vocabulary: "curation" means nothing outside memory, and the signal
+//! exists only to decide whether a user's memory needs tidying. Both tiers
+//! already depend on this crate — the runner for after-turn recording, the
+//! product tier for the memory service — so nothing new is pulled in by putting
+//! it where it belongs.
 //!
 //! The loop tier derives an [`AfterTurnCurationSignal`] from a terminal run and
 //! reports it; the product tier implements [`AfterTurnCurationPort`] and owns

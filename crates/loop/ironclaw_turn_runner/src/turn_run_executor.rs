@@ -179,7 +179,7 @@ pub struct RebornTurnRunExecutor {
     /// memory provider AND enabled curation attaches one, and a `Completed` run
     /// finishes cleanly without it.
     // arch-exempt: optional_arc, feature is opt-in per composition, issue #7276
-    after_turn_curation: Option<Arc<dyn ironclaw_loop_contracts::AfterTurnCurationPort>>,
+    after_turn_curation: Option<Arc<dyn ironclaw_memory::AfterTurnCurationPort>>,
 }
 
 impl RebornTurnRunExecutor {
@@ -214,7 +214,7 @@ impl RebornTurnRunExecutor {
     /// feature is enabled; absent everywhere else.
     pub fn with_after_turn_curation(
         mut self,
-        curation: Arc<dyn ironclaw_loop_contracts::AfterTurnCurationPort>,
+        curation: Arc<dyn ironclaw_memory::AfterTurnCurationPort>,
     ) -> Self {
         self.after_turn_curation = Some(curation);
         self

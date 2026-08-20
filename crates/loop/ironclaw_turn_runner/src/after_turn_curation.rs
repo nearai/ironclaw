@@ -1,7 +1,8 @@
 //! Deriving the memory-curation trigger signal from a terminal run (#7276).
 //!
 //! The vocabulary — [`AfterTurnCurationSignal`] and the port the product tier
-//! implements — lives in `ironclaw_loop_contracts`, because this crate and
+//! implements — lives in `ironclaw_memory` with the rest of the memory
+//! contract, because this crate and
 //! `ironclaw_assistant` deliberately do not depend on each other (WS1.7 removed
 //! the production edge). What lives HERE is the one thing only this tier can
 //! do: decide, from a `TurnRunState`, whether a finished run is a curation
@@ -17,7 +18,7 @@
 //! - **A run with no actor is skipped.** Memory is scoped to a human owner;
 //!   without one there is no memory to curate.
 
-use ironclaw_loop_contracts::AfterTurnCurationSignal;
+use ironclaw_memory::AfterTurnCurationSignal;
 use ironclaw_turns::{TurnRunState, TurnStatus};
 use tracing::debug;
 
