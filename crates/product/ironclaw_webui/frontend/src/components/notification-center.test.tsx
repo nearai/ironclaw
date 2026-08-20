@@ -341,3 +341,150 @@ test("a failure while rows are on screen stays visible", async () => {
   });
   assert.equal(refetch.mock.calls.length, 1);
 });
+
+test("shutting the panel tells the reader to stop paging", async () => {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  roots.push(root);
+
+  const collapsePages = vi.fn();
+  const messages = [{
+    id: "n-1", title: "One", href: "/chat/t-1", timestamp: 1, durable: true,
+  }];
+  await act(async () => {
+    root.render(
+      <NotificationCenter
+        state={{ messages, unreadIds: new Set(), collapsePages }}
+      />,
+    );
+  });
+  await openPanel(container);
+  assert.equal(collapsePages.mock.calls.length, 0, "opening does not collapse");
+
+  const closeButton = [...document.querySelectorAll("button")].find(
+    (button) => button.getAttribute("aria-label") === "notifications.close",
+  );
+  await act(async () => closeButton?.click());
+
+  assert.equal(
+    document.querySelector("[data-testid='notification-panel']"),
+    null,
+    "the panel really closed",
+  );
+  assert.equal(
+    collapsePages.mock.calls.length,
+    1,
+    "a closed panel must not leave the poll walking every loaded page",
+  );
+});
+
+test("toggling the bell shut also collapses paging", async () => {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  roots.push(root);
+
+  const collapsePages = vi.fn();
+  await act(async () => {
+    root.render(
+      <NotificationCenter state={{ messages: [], unreadIds: new Set(), collapsePages }} />,
+    );
+  });
+  await openPanel(container);
+
+  const bell = container.querySelector<HTMLButtonElement>(
+    "[data-testid='notification-bell']",
+  );
+  await act(async () => bell?.click());
+
+  assert.equal(document.querySelector("[data-testid='notification-panel']"), null);
+  assert.equal(collapsePages.mock.calls.length, 1);
+});
+
+test("the page-limit notice stands in for a control that cannot retire", async () => {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  roots.push(root);
+
+  const messages = [{
+    id: "n-1", title: "One", href: "/chat/t-1", timestamp: 1, durable: true,
+  }];
+  await act(async () => {
+    root.render(
+      <NotificationCenter
+        state={{ messages, unreadIds: new Set(), canLoadMore: false, pageLimitReached: true }}
+      />,
+    );
+  });
+  await openPanel(container);
+
+  const notice = document.querySelector("[data-testid='notification-page-limit']");
+  assert.ok(notice, "records past the ceiling are announced, not silently dropped");
+  assert.match(notice?.textContent || "", /notifications.pageLimit/);
+  assert.equal(
+    document.querySelector("[data-testid='notification-load-more']"),
+    null,
+    "the control is gone, which is exactly why the notice has to be there",
+  );
+});
+
+test("mark all read is offered only while something is unread", async () => {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  roots.push(root);
+
+  const markAllRead = vi.fn();
+  const messages = [{
+    id: "n-1", title: "One", href: "/chat/t-1", timestamp: 1, durable: true,
+  }];
+  const selector = "[data-testid='notification-mark-all-read']";
+
+  await act(async () => {
+    root.render(
+      <NotificationCenter
+        state={{ messages, unreadIds: new Set(["n-1"]), unreadCount: 1, markAllRead }}
+      />,
+    );
+  });
+  await openPanel(container);
+  const button = document.querySelector<HTMLButtonElement>(selector);
+  assert.ok(button, "an unread row offers the control");
+  assert.equal(button?.disabled, false);
+  await act(async () => button?.click());
+  assert.equal(markAllRead.mock.calls.length, 1);
+
+  await act(async () => {
+    root.render(
+      <NotificationCenter
+        state={{ messages, unreadIds: new Set(), unreadCount: 0, markAllRead }}
+      />,
+    );
+  });
+  assert.equal(
+    document.querySelector(selector),
+    null,
+    "with nothing unread there is nothing to mark",
+  );
+
+  await act(async () => {
+    root.render(
+      <NotificationCenter
+        state={{
+          messages,
+          unreadIds: new Set(["n-1"]),
+          unreadCount: 1,
+          markAllRead,
+          isMarkingAllRead: true,
+        }}
+      />,
+    );
+  });
+  assert.equal(
+    document.querySelector<HTMLButtonElement>(selector)?.disabled,
+    true,
+    "an in-flight request must not be fired twice",
+  );
+});

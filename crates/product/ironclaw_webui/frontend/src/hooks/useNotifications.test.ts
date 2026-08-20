@@ -88,6 +88,7 @@ function instantiate({
   inboxError = null,
   approvalError = null,
   mutationsPending = false,
+  archiveError = null,
 } = {}) {
   let queryOptions;
   const readCalls = [];
@@ -99,6 +100,7 @@ function instantiate({
   const optimisticWrites = [];
   const queryKeys = [];
   const refetchCalls = [];
+  const mutationFailures = [];
   const refetch = () => {
     refetchCalls.push(true);
   };
@@ -135,16 +137,32 @@ function instantiate({
         refetch,
       };
     },
-    useMutation: ({ mutationFn, onMutate }) => {
+    useMutation: ({ mutationFn, onMutate, onError, onSuccess, onSettled }) => {
       mutationIndex += 1;
       return {
-        // `onMutate` runs first so the optimistic cache write is exercised,
-        // and `mutationFn` still fires synchronously so callers can assert the
-        // request without flushing. The optimistic write itself lands a
-        // microtask later, after `onMutate` awaits `cancelQueries`.
+        /* The whole lifecycle, not just the happy half: `onMutate` writes the
+         * optimistic value, and a rejecting `mutationFn` has to reach `onError`
+         * so the rollback is exercised. Stopping at `onMutate` left a failed
+         * archive looking permanently applied with every test still green. */
         mutate: (value) => {
-          onMutate?.(value);
-          return mutationFn(value);
+          const context = onMutate?.(value);
+          // Still synchronous, so callers can assert the request without
+          // flushing; only the outcome handling is deferred.
+          const outcome = mutationFn(value);
+          return Promise.resolve(context).then((resolvedContext) =>
+            Promise.resolve(outcome)
+              .then(
+                (result) => {
+                  onSuccess?.(result, value, resolvedContext);
+                  return result;
+                },
+                (error) => {
+                  onError?.(error, value, resolvedContext);
+                  mutationFailures.push(error);
+                },
+              )
+              .finally(() => onSettled?.()),
+          );
         },
         isPending: mutationsPending,
         error: null,
@@ -169,7 +187,10 @@ function instantiate({
     },
     markNotificationRead: async (id) => readCalls.push(id),
     markAllNotificationsRead: async () => allReadCalls.push(true),
-    archiveNotification: async (id) => archiveCalls.push(id),
+    archiveNotification: async (id) => {
+      archiveCalls.push(id);
+      if (archiveError) throw archiveError;
+    },
     notificationMessages: (notifications) => (notifications || []).map((notification) => ({
       id: notification.id,
       type: notification.kind,
@@ -226,6 +247,7 @@ function instantiate({
     inboxCalls,
     queryKeys,
     refetchCalls,
+    mutationFailures,
     threadCalls,
     seenCalls,
     archiveCalls,
@@ -788,4 +810,62 @@ test("loading more keeps one cache entry so the open panel never blanks", async 
     JSON.parse(JSON.stringify(firstKey)),
     "changing recipient scope selects a different cache entry",
   );
+});
+
+test("closing the panel collapses paging back to the head", async () => {
+  const harness = instantiate({ data: PAGED_INBOX });
+  harness.hook.loadMore();
+  harness.hook.loadMore();
+  harness.render();
+  harness.inboxCalls.length = 0;
+  await harness.queryOptions.queryFn({ signal: new AbortController().signal });
+  assert.deepEqual(
+    harness.inboxCalls.map((call) => call.cursor),
+    [undefined, "cursor-2", "cursor-3"],
+    "a reader who paged twice has the poll walking three pages",
+  );
+
+  harness.hook.collapsePages();
+  harness.render();
+  harness.inboxCalls.length = 0;
+  await harness.queryOptions.queryFn({ signal: new AbortController().signal });
+  assert.deepEqual(
+    harness.inboxCalls.map((call) => call.cursor),
+    [undefined],
+    "with the panel shut the poll is back to one request for the badge",
+  );
+});
+
+test("a failed archive puts the row back and reports the failure", async () => {
+  const archiveError = Object.assign(new Error("archive rejected"), { status: 500 });
+  const harness = instantiate({
+    archiveError,
+    data: {
+      inbox: {
+        notifications: [notification("notification-1"), notification("notification-2")],
+        unread_count: 2,
+      },
+      approvalThreads: { threads: [] },
+    },
+  });
+
+  harness.hook.archiveMessage("notification-1");
+  await flushAsyncWork();
+
+  assert.deepEqual(harness.archiveCalls, ["notification-1"]);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(harness.mutationFailures.map((error) => error.message))),
+    ["archive rejected"],
+    "the rejection reaches onError rather than being swallowed",
+  );
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        harness.optimisticWrites.at(-1).inbox.notifications.map((record) => record.id),
+      ),
+    ),
+    ["notification-1", "notification-2"],
+    "the row the server refused to archive is restored, not left missing",
+  );
+  assert.equal(harness.optimisticWrites.at(-1).inbox.unread_count, 2);
 });

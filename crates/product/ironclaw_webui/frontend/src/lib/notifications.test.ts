@@ -82,6 +82,28 @@ test("a kind the frontend does not know yet still presents", () => {
   assert.equal(messages[0].href, "/chat/thread-1");
 });
 
+test("a run completion carries the run and thread the acknowledgement needs", () => {
+  const messages = notificationMessages([
+    {
+      id: "notification-1",
+      kind: "run_completed",
+      severity: "info",
+      action: { kind: "open_thread", thread_id: "thread-1" },
+      turn_run_id: "run-1",
+      created_at: "2026-06-30T07:43:00Z",
+      read_at: null,
+      resolved_at: null,
+    },
+  ], t);
+
+  /* The deferred acknowledgement matches on exactly these two fields, so
+   * dropping either from the presentation contract would send the completion
+   * notification back to dismissing itself on open, silently. */
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].threadId, "thread-1");
+  assert.equal(messages[0].turnRunId, "run-1");
+});
+
 test("notificationMessages preserves resolved records and sorts newest first", () => {
   const messages = notificationMessages([
     {

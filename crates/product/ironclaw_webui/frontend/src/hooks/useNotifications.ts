@@ -11,6 +11,12 @@ import { useI18n } from "../lib/i18n";
 import { useThreadStates } from "../lib/thread-state";
 import { notificationMessages } from "../lib/notifications";
 
+type RenderedNotificationSource = {
+  notificationId: string;
+  threadId: string;
+  turnRunId: string;
+};
+
 const NOTIFICATION_LIMIT = 30;
 /* A stop so one hook cannot walk an unbounded inbox in a single pass. The
  * store's own per-recipient bound is far larger than anyone pages through by
@@ -114,11 +120,14 @@ export function useNotifications(
 ) {
   const { profile, enabled = true } = options;
   const { t } = useI18n();
-  const queryClient = /** @type {any} */ (useQueryClient());
+  const queryClient = useQueryClient();
   const threadStates = useThreadStates();
-  const [pendingRenderedNotification, setPendingRenderedNotification] = React.useState(
-    /** @type {{ notificationId: string, threadId: string, turnRunId: string } | null} */ (null),
-  );
+  /* A real generic, not a JSDoc cast: this is a .ts file with `checkJs` off, so
+   * `/** @type ... *\/ (null)` is a comment beside a `null` — and with
+   * `strictNullChecks` off the mismatch is not even reported. */
+  const [pendingRenderedNotification, setPendingRenderedNotification] = React.useState<
+    RenderedNotificationSource | null
+  >(null);
   const tenantId = profile?.tenant_id || null;
   const userId = profile?.user_id || null;
   const scope = tenantId && userId ? `${tenantId}:${userId}` : null;
@@ -318,6 +327,14 @@ export function useNotifications(
   const loadMore = React.useCallback(() => {
     setLoadedPages((current) => Math.min(current + 1, NOTIFICATION_PAGE_MAX));
   }, []);
+  /* Paging widens the polled read, and the poll does not stop when the panel
+   * closes — only when the tab is backgrounded. Left alone, a reader who paged
+   * to the ceiling would keep 20 serial requests every ten seconds running
+   * behind a closed panel, forever. Collapse back to the head on close: the
+   * badge is all that a closed panel shows, and reopening pages again. */
+  const collapsePages = React.useCallback(() => {
+    setLoadedPages(1);
+  }, []);
   /* With the count out of the key, a bump changes no identity React Query
    * watches, so ask for the wider read explicitly. The rows already on screen
    * stay put while it runs. */
@@ -354,6 +371,7 @@ export function useNotifications(
     archiveMessage,
     canLoadMore,
     loadMore,
+    collapsePages,
     pageLimitReached,
     loadedPages,
   };

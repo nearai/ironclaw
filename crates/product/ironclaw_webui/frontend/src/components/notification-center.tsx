@@ -35,18 +35,22 @@ export function NotificationCenter({ state }) {
   const error = state?.error || null;
   const refetch = state?.refetch;
 
+  const collapsePages = state?.collapsePages;
+
   const close = React.useCallback(() => {
     setOpen(false);
+    collapsePages?.();
     triggerRef.current?.focus?.();
-  }, []);
+  }, [collapsePages]);
 
   const toggleOpen = React.useCallback(() => {
     const nextOpen = !open;
     setOpen(nextOpen);
     if (!nextOpen) {
+      collapsePages?.();
       triggerRef.current?.focus?.();
     }
-  }, [open]);
+  }, [collapsePages, open]);
 
   React.useEffect(() => {
     if (!open || typeof document === "undefined") return;
