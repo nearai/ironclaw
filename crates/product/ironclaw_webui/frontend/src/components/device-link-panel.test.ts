@@ -48,11 +48,14 @@ function response(frame, { flowId = "flow-1" } = {}) {
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 function tForTest(key, params = {}) {
-  const rendered = Object.entries(params).reduce(
-    (text, [name, value]) => text.replace(`{${name}}`, String(value)),
-    key,
+  const translations = {
+    "deviceLink.personalDisclosure":
+      "Link your personal {name} account as a third-party device. When you ask IronClaw, it can read your {name} chats and send messages that recipients see as coming from you. Revoke access at any time in {name} Settings → Devices.",
+  };
+  return Object.entries(params).reduce(
+    (text, [name, value]) => text.replaceAll(`{${name}}`, String(value)),
+    translations[key] || key,
   );
-  return rendered;
 }
 
 function createHarness({ startResponses = [], pollResponses = [], submitResponses = [] } = {}) {
@@ -245,12 +248,20 @@ test("DeviceLinkPanel explains personal-account authority in every entry point",
   const harness = createHarness({
     startResponses: [response(wireFrame({ qr_payload: "scheme://login?token=AAAA" }))],
   });
+  const props = { displayName: "Telegram" };
+  const expectedDisclosure =
+    "Link your personal Telegram account as a third-party device. When you ask IronClaw, it can read your Telegram chats and send messages that recipients see as coming from you. Revoke access at any time in Telegram Settings → Devices.";
 
-  const rendered = await harness.mount();
-
+  const loading = harness.render(props);
   assert.ok(
-    stringify(rendered).includes("deviceLink.personalDisclosure"),
-    "the shared panel carries the disclosure into Extensions, chat, and onboarding",
+    stringify(loading).includes(expectedDisclosure),
+    "the loading state must disclose the personal-account authority before linking starts",
+  );
+
+  const rendered = await harness.mount(props);
+  assert.ok(
+    stringify(rendered).includes(expectedDisclosure),
+    "the settled shared panel carries the disclosure into Extensions, chat, and onboarding",
   );
 });
 

@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
-use ironclaw_extension_registry::{CapabilitySurfaceDeclV2, ExtensionManifest, ExtensionPackage};
+use crate::package_declares_inbound_product_adapter;
+use ironclaw_extension_registry::{ExtensionManifest, ExtensionPackage};
 use ironclaw_host_api::{
     capability::{RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource},
     decision::RuntimeCredentialAuthRequirement,
@@ -33,11 +34,7 @@ pub(crate) fn activation_requirement_applies(
     package: &ExtensionPackage,
     requirement: &RuntimeCredentialAuthRequirement,
 ) -> bool {
-    let declares_channel = package
-        .manifest
-        .host_api_surfaces
-        .iter()
-        .any(|surface| matches!(surface, CapabilitySurfaceDeclV2::Channel { .. }));
+    let declares_channel = package_declares_inbound_product_adapter(package);
     !declares_channel
         || !matches!(
             requirement.setup,

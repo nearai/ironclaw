@@ -793,8 +793,10 @@ fn reborn_services(group: &RebornIntegrationGroup) -> &RebornRuntime {
 }
 
 async fn pair_telegram_bot_actor(
+    ingress: &VendorIngress,
     services: &RebornRuntime,
     user_id: &ironclaw_host_api::ids::UserId,
+    update_id: u64,
     external_actor_id: &str,
     conversation_id: &str,
 ) {
@@ -808,33 +810,39 @@ async fn pair_telegram_bot_actor(
             .is_some_and(|link| link.contains(&format!("start={code}"))),
         "Telegram pairing issue must carry the manifest-derived bot deep link"
     );
-    let service = services
-        .channel_pairing_registry()
-        .expect("Telegram pairing registry")
-        .get("telegram")
-        .expect("Telegram generated-code pairing service");
-    let installation_id =
-        AdapterInstallationId::new(TELEGRAM_INSTALLATION).expect("Telegram installation id");
-    let outcome = service
-        .consume(
-            &installation_id,
-            &code,
-            ironclaw_telegram_extension::TELEGRAM_USER_ACTOR_KIND,
-            external_actor_id,
-            None,
-            conversation_id,
+    let actor_id = external_actor_id
+        .parse::<i64>()
+        .expect("Telegram actor id is numeric");
+    let chat_id = conversation_id
+        .parse::<i64>()
+        .expect("Telegram conversation id is numeric");
+    let body = json!({
+        "update_id": update_id,
+        "message": {
+            "message_id": update_id + 10,
+            "date": 1710000000,
+            "text": format!("/start {code}"),
+            "from": {"id": actor_id, "is_bot": false, "first_name": "Paired user"},
+            "chat": {"id": chat_id, "type": "private"}
+        }
+    })
+    .to_string();
+    let status = ingress
+        .post(
+            TELEGRAM_ROUTE,
+            &body,
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
         )
-        .await
-        .expect("Telegram workspace-bot pairing code consumes");
-    assert!(
-        matches!(
-            outcome,
-            ironclaw_extension_host::channel_pairing::ChannelPairingConsumeOutcome::Paired {
-                user_id: paired_user
-            } if paired_user.eq(user_id)
-        ),
-        "Telegram pairing must bind the verified bot actor to the requesting user"
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the production Telegram ingress must accept the pairing command"
     );
+    ingress.drain().await;
 }
 
 async fn configure_admin_group(
@@ -1594,9 +1602,12 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         .expect("Telegram installation state reads")
         .expect("Telegram installation exists after activation");
     assert!(installation.owner().visible_to(&paired_user));
-    pair_telegram_bot_actor(services, &paired_user, "424242", "424242").await;
-    let telegram_binding_service =
-        wait_for_production_registration(&assembly, services, "telegram").await;
+    let ingress = VendorIngress::production(
+        services
+            .extension_ingress_parts()
+            .expect("composition built the generic ingress"),
+    );
+    pair_telegram_bot_actor(&ingress, services, &paired_user, 500, "424242", "424242").await;
     let channel_connection = group
         .channel_connection()
         .expect("delivery group composes production channel connection");
@@ -1652,16 +1663,6 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         .assert_conversation_history_lacks(TELEGRAM_WEBHOOK_SECRET)
         .await
         .expect("the webhook secret must not appear in the model-visible transcript");
-
-    // The PRODUCTION assembly reconciled the activation into an ingress
-    // registration: dynamic administrator-configuration verification secrets, the
-    // per-extension durable workflow, and the run-delivery observer — this
-    // test registers nothing.
-    let ingress = VendorIngress::production(
-        services
-            .extension_ingress_parts()
-            .expect("composition built the generic ingress"),
-    );
 
     let body = json!({
         "update_id": 501,
@@ -1890,7 +1891,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
     // The second user independently pairs their verified Telegram bot identity.
     // The generated code binds the actor; personal-account device linking is a
     // separate credential path.
-    pair_telegram_bot_actor(services, &second_user, "9912", "9912").await;
+    pair_telegram_bot_actor(&ingress, services, &second_user, 549, "9912", "9912").await;
 
     let second_topic_body = json!({
         "update_id": 550,
@@ -2686,15 +2687,13 @@ async fn paired_telegram_bot_actor_turns_attribute_to_the_user_and_disconnect_re
 
     // 2. Generated-code pairing supplies the verified Bot API actor identity.
     // No personal-account credential is created or consulted.
-    pair_telegram_bot_actor(services, &paired_user, "424242", "515151").await;
+    pair_telegram_bot_actor(&ingress, services, &paired_user, 604, "424242", "515151").await;
     assert!(
         channel_connection
             .caller_channel_connected("telegram", &paired_user)
             .await
             .expect("connection state reads")
     );
-    let telegram_binding_service =
-        wait_for_production_registration(&assembly, services, "telegram").await;
     for intercepted_text in [
         "hello, are you there?",
         "still there?",
@@ -2814,7 +2813,7 @@ async fn paired_telegram_bot_actor_turns_attribute_to_the_user_and_disconnect_re
 
     // 5. Pairing the same verified bot actor with a fresh code restores
     // admission without linking a personal account.
-    pair_telegram_bot_actor(services, &paired_user, "424242", "515151").await;
+    pair_telegram_bot_actor(&ingress, services, &paired_user, 608, "424242", "515151").await;
 
     // 6. The same external actor/conversation is admitted again through the
     // workspace-bot pairing and coordinated delivery remains healthy.

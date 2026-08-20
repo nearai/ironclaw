@@ -81,7 +81,9 @@ mod tests {
         ExtensionActivationCredentialGate, ExtensionActivationCredentialReadiness,
         UnavailableExtensionActivationCredentialGate, missing_activation_credentials_error,
     };
-    use ironclaw_extension_registry::{ExtensionManifest, ExtensionPackage, ManifestSource};
+    use ironclaw_extension_registry::{
+        ExtensionManifest, ExtensionManifestRecord, ExtensionPackage, ManifestSource,
+    };
     use ironclaw_host_api::path::VirtualPath;
     use ironclaw_product_contracts::error::ProductOperationFailure;
 
@@ -156,14 +158,18 @@ required = true
     fn package_from(manifest_toml: &str, id: &str) -> ExtensionPackage {
         let contracts =
             crate::product_extension_host_api_contract_registry().expect("host API contracts");
-        let manifest = ExtensionManifest::parse(
+        let root = VirtualPath::new(format!("/system/extensions/{id}")).expect("extension root");
+        let record = ExtensionManifestRecord::from_toml(
             manifest_toml,
             ManifestSource::HostBundled,
             &ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
+            None,
             &contracts,
+            Some(root.clone()),
         )
         .expect("fixture manifest");
-        let root = VirtualPath::new(format!("/system/extensions/{id}")).expect("extension root");
+        let manifest =
+            ExtensionManifest::try_from(record.manifest().clone()).expect("legacy package view");
         ExtensionPackage::from_manifest_toml(manifest, root, manifest_toml)
             .expect("fixture package")
     }
@@ -243,6 +249,26 @@ required = true
                 .expect("readiness reports what is missing rather than erroring"),
             ExtensionActivationCredentialReadiness::Missing(declared),
             "readiness must hand back the unmet requirements so the UI can offer the connect step"
+        );
+    }
+
+    #[test]
+    fn channel_activation_excludes_its_caller_owned_device_link_credential() {
+        let channel = package_from(
+            crate::test_support::DEVICE_LINK_CHANNEL_MANIFEST,
+            "acme-link",
+        );
+        let runtime_requirements = crate::package_runtime_credential_auth_requirements(&channel);
+        assert!(
+            runtime_requirements.iter().any(|requirement| matches!(
+                requirement.setup,
+                ironclaw_host_api::capability::RuntimeCredentialAccountSetup::DeviceLink
+            )),
+            "the fixture must retain its caller-owned device-link dispatch gate"
+        );
+        assert!(
+            crate::package_activation_credential_auth_requirements(&channel).is_empty(),
+            "a channel must activate before its caller-owned connection ceremony can complete"
         );
     }
 
