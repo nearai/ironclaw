@@ -185,9 +185,10 @@ function renderChat({
   return { tree, components };
 }
 
-function renderWithPendingNotification(messages) {
+function renderWithPendingNotification(messages, activeThreadId = "thread-1") {
   const acknowledgements = [];
   renderChat({
+    activeThreadId,
     runEffects: true,
     pendingRenderedNotification: {
       notificationId: "notification-1",
@@ -254,6 +255,19 @@ test("a pending notification is not acknowledged by another run's final reply", 
     }]),
     [],
     "acknowledging here would mark a notification read for a reply it does not describe",
+  );
+});
+
+test("a pending notification is not acknowledged from another active thread", () => {
+  assert.deepEqual(
+    renderWithPendingNotification([{
+      id: "message-final",
+      role: "assistant",
+      isFinalReply: true,
+      turnRunId: "run-1",
+    }], "thread-2"),
+    [],
+    "a matching run id is insufficient when the rendered thread is different",
   );
 });
 

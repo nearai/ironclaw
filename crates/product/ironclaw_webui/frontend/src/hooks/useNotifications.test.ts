@@ -97,6 +97,11 @@ function instantiate({
   const seenCalls = [];
   const archiveCalls = [];
   const optimisticWrites = [];
+  const queryKeys = [];
+  const refetchCalls = [];
+  const refetch = () => {
+    refetchCalls.push(true);
+  };
   let storedState = { initialized: true, seenIds: new Set() };
   const react = createReactStub();
   /* A real query cache composes: the second optimistic write starts from the
@@ -122,7 +127,13 @@ function instantiate({
     THREAD_STATE: { NEEDS_ATTENTION: "needs_attention" },
     useQuery: (options) => {
       queryOptions = options;
-      return { data: cached, isLoading: false, error: null, refetch: () => {} };
+      queryKeys.push(options.queryKey);
+      return {
+        data: cached,
+        isLoading: false,
+        error: null,
+        refetch,
+      };
     },
     useMutation: ({ mutationFn, onMutate }) => {
       mutationIndex += 1;
@@ -189,15 +200,22 @@ function instantiate({
     globalThis: {},
   };
   vm.runInNewContext(sourceForTest(), context);
+  /* Settle the hook the way React would, then hand back converged state. If it
+   * never settles, say so: returning the last mid-flight attempt would make a
+   * render loop in `useNotifications` read as green, with every assertion after
+   * it measuring unconverged state. */
+  const MAX_RENDER_ATTEMPTS = 5;
   const render = () => {
     let hook;
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < MAX_RENDER_ATTEMPTS; attempt += 1) {
       react.beginRender();
       mutationIndex = 0;
       hook = context.globalThis.__testExports.useNotifications({ profile, activeThreadId });
-      if (!react.didScheduleUpdate()) break;
+      if (!react.didScheduleUpdate()) return hook;
     }
-    return hook;
+    throw new Error(
+      `useNotifications still scheduled an update after ${MAX_RENDER_ATTEMPTS} renders`,
+    );
   };
   return {
     hook: render(),
@@ -206,10 +224,13 @@ function instantiate({
     readCalls,
     allReadCalls,
     inboxCalls,
+    queryKeys,
+    refetchCalls,
     threadCalls,
     seenCalls,
     archiveCalls,
     optimisticWrites,
+    setProfile(next) { profile = next; },
   };
 }
 
@@ -234,7 +255,7 @@ function flushAsyncWork() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-test("queries the durable inbox and legacy approvals after profile hydration", async () => {
+test("a working inbox is read alone, without paying for the fallback", async () => {
   const harness = instantiate({
     data: {
       inbox: { notifications: [], unread_count: 0 },
@@ -246,10 +267,12 @@ test("queries the durable inbox and legacy approvals after profile hydration", a
   assert.deepEqual(JSON.parse(JSON.stringify(harness.inboxCalls)), [
     { limit: 30, signal: {} },
   ], "every page carries the query's abort signal");
-  assert.deepEqual(JSON.parse(JSON.stringify(harness.threadCalls)), [
-    { limit: 20, needsApproval: true, signal: {} },
-  ]);
-  assert.equal(result.compatibility[0].id, "approval:thread-transition");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(harness.threadCalls)),
+    [],
+    "the poll runs every ten seconds, so a discarded approval-thread read is not free",
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(result.compatibility)), []);
   assert.equal(result.inboxSupported, true);
 
   const pending = instantiate({ data: {}, profile: null });
@@ -280,22 +303,11 @@ test("surfaces transient inbox failures without activating the compatibility pat
     inboxError,
   });
   await assert.rejects(harness.queryOptions.queryFn({ signal: new AbortController().signal }), inboxError);
-  assert.deepEqual(JSON.parse(JSON.stringify(harness.threadCalls)), [
-    { limit: 20, needsApproval: true, signal: {} },
-  ]);
-});
-
-test("keeps durable notifications when the legacy approval query fails", async () => {
-  const harness = instantiate({
-    data: {
-      inbox: { notifications: [notification()], unread_count: 1 },
-    },
-    approvalError: new Error("legacy approvals unavailable"),
-  });
-  const result = await harness.queryOptions.queryFn({ signal: new AbortController().signal });
-  assert.equal(result.inboxSupported, true);
-  assert.equal(result.inbox.notifications[0].id, "notification-1");
-  assert.deepEqual(JSON.parse(JSON.stringify(result.compatibility)), []);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(harness.threadCalls)),
+    [],
+    "a 503 says the inbox is there and unwell, so the fallback stays unused",
+  );
 });
 
 test("surfaces the legacy approval failure when no durable inbox is available", async () => {
@@ -307,17 +319,29 @@ test("surfaces the legacy approval failure when no durable inbox is available", 
   await assert.rejects(harness.queryOptions.queryFn({ signal: new AbortController().signal }), approvalError);
 });
 
-test("deduplicates fallback approvals when the durable inbox has the same thread", () => {
+test("an answering inbox leaves out every compatibility row, matched or not", () => {
   const harness = instantiate({
     data: {
       inbox: { notifications: [notification()], unread_count: 1 },
-      compatibility: [{
-        id: "approval:thread-1",
-        type: "approval",
-        href: "/chat/thread-1",
-        timestamp: 1,
-        read: false,
-      }],
+      compatibility: [
+        {
+          // Same thread as the durable record.
+          id: "approval:thread-1",
+          type: "approval",
+          href: "/chat/thread-1",
+          timestamp: 1,
+          read: false,
+        },
+        {
+          // A thread the durable inbox says nothing about — dropped just the
+          // same, which is what makes this suppression rather than matching.
+          id: "approval:thread-unrelated",
+          type: "approval",
+          href: "/chat/thread-unrelated",
+          timestamp: 2,
+          read: false,
+        },
+      ],
     },
   });
   assert.deepEqual(
@@ -732,4 +756,36 @@ test("archiving twice composes instead of resurrecting the first record", async 
     "the second archive builds on the first rather than restoring it",
   );
   assert.equal(harness.optimisticWrites.at(-1).inbox.unread_count, 1);
+});
+
+test("loading more keeps one cache entry so the open panel never blanks", async () => {
+  const harness = instantiate({ data: PAGED_INBOX });
+  const firstKey = harness.queryKeys.at(-1);
+
+  harness.hook.loadMore();
+  harness.render();
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(harness.queryKeys.at(-1))),
+    JSON.parse(JSON.stringify(firstKey)),
+    "the page count is a request parameter, so it must not split the cache",
+  );
+  assert.ok(
+    harness.refetchCalls.length > 0,
+    "a stable key means the wider read has to be asked for explicitly",
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(harness.hook.messages.map((message) => message.id))),
+    ["page1-a", "page1-b"],
+    "the rows already on screen survive the transition",
+  );
+  assert.equal(harness.hook.unreadCount, 5, "and so does the badge");
+
+  harness.setProfile({ tenant_id: "other-tenant", user_id: "other-user" });
+  harness.render();
+  assert.notDeepEqual(
+    JSON.parse(JSON.stringify(harness.queryKeys.at(-1))),
+    JSON.parse(JSON.stringify(firstKey)),
+    "changing recipient scope selects a different cache entry",
+  );
 });

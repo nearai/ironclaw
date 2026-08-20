@@ -53,6 +53,7 @@ registerPack("zh-CN", {
   "notifications.errorTitle": "通知暂时不可用",
   "notifications.errorDescription": "无法加载通知，请重试。",
   "notifications.retry": "重试",
+  "notifications.archive": "归档",
   "notifications.pageLimit": "\u66f4\u65e9\u7684\u901a\u77e5\u4e0d\u5728\u6b64\u5904\u663e\u793a\u3002",
   "notifications.allCaughtUp": "已全部查看",
   "notifications.unreadCount": "{count} 条新通知",

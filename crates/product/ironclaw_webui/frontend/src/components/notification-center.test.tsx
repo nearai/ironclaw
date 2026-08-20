@@ -169,17 +169,16 @@ test("load-more appears only while more pages remain", async () => {
   const loadMore = vi.fn();
   const messages = [{ id: "n-1", title: "One", body: "b", href: "/chat/t-1", durable: true }];
 
-  const open = async (state) => {
+  /* Render only — the bell is a toggle, so clicking it again to "make sure the
+   * panel is open" is what shuts it. Open once, below, and then re-render. */
+  const show = async (state) => {
     await act(async () => {
       root.render(<NotificationCenter state={{ messages, unreadIds: new Set(), ...state }} />);
     });
-    const bell = container.querySelector<HTMLButtonElement>("[data-testid='notification-bell']");
-    if (!document.querySelector("[data-testid='notification-load-more']") && bell) {
-      await act(async () => bell.click());
-    }
   };
 
-  await open({ canLoadMore: true, loadMore });
+  await show({ canLoadMore: true, loadMore });
+  await openPanel(container);
   const button = document.querySelector<HTMLButtonElement>(
     "[data-testid='notification-load-more']",
   );
@@ -187,7 +186,11 @@ test("load-more appears only while more pages remain", async () => {
   await act(async () => button.click());
   assert.equal(loadMore.mock.calls.length, 1);
 
-  await open({ canLoadMore: false, loadMore });
+  await show({ canLoadMore: false, loadMore });
+  assert.ok(
+    document.querySelector("[data-testid='notification-panel']"),
+    "the panel is still open, so the next assertion is about the control",
+  );
   assert.equal(
     document.querySelector("[data-testid='notification-load-more']"),
     null,
@@ -224,6 +227,67 @@ test("a cold-loaded panel takes focus off the bell", async () => {
     "true",
     "a portalled dialog over the page announces itself as modal",
   );
+});
+
+test("Tab and Shift+Tab stay inside the notification dialog", async () => {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  roots.push(root);
+
+  await act(async () => {
+    root.render(
+      <NotificationCenter
+        state={{
+          messages: [{
+            id: "notification-1",
+            title: "Finished",
+            body: "The run completed",
+            href: "/chat/thread-1",
+            durable: true,
+          }],
+          unreadIds: new Set(["notification-1"]),
+          unreadCount: 1,
+          markAllRead: vi.fn(),
+          archiveMessage: vi.fn(),
+          canLoadMore: true,
+          loadMore: vi.fn(),
+        }}
+      />,
+    );
+  });
+  await openPanel(container);
+
+  const panel = document.querySelector<HTMLElement>("[data-testid='notification-panel']");
+  assert.ok(panel);
+  const controls = [...panel.querySelectorAll<HTMLElement>(
+    "button:not([disabled]):not([tabindex='-1'])",
+  )];
+  assert.ok(controls.length > 1, "the fixture exposes both ends of the focus ring");
+  const first = controls[0];
+  const last = controls.at(-1);
+  assert.ok(last);
+
+  await act(async () => {
+    panel.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+  });
+  assert.equal(document.activeElement, first, "Tab from the dialog enters its first control");
+
+  last.focus();
+  await act(async () => {
+    last.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+  });
+  assert.equal(document.activeElement, first, "Tab wraps from the last control");
+
+  first.focus();
+  await act(async () => {
+    first.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Tab",
+      shiftKey: true,
+      bubbles: true,
+    }));
+  });
+  assert.equal(document.activeElement, last, "Shift+Tab wraps from the first control");
 });
 
 test("a failure while rows are on screen stays visible", async () => {

@@ -112,11 +112,11 @@ async fn knowing_a_notification_id_is_not_authority_over_it() {
         store.resolve(intrusion.clone()).await,
     ] {
         assert!(
-            !matches!(
+            matches!(
                 outcome,
-                Ok(ironclaw_notifications::NotificationMutationOutcome::Applied)
+                Err(ironclaw_notifications::NotificationInboxError::NotificationNotFound)
             ),
-            "a mutation aimed at another recipient's record must not apply: {outcome:?}"
+            "a foreign notification id must be an exact not-found denial: {outcome:?}"
         );
     }
     store

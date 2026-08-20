@@ -66,14 +66,6 @@ function normalizeThread(record) {
   };
 }
 
-function notificationOptions(options) {
-  return options;
-}
-
-function notificationQueryData(value) {
-  return value;
-}
-
 /* Optimistic cache transform shared by mark-read and archive: a read record
  * stays in the list, an archived one leaves it, and both drop out of the badge
  * only when they were still unread — so a repeated or concurrent call cannot
@@ -104,9 +96,9 @@ function optimisticHandlers(queryClient, queryKey, archive) {
   return {
     onMutate: async (notificationId) => {
       await queryClient.cancelQueries({ queryKey });
-      const previous = notificationQueryData(queryClient.getQueryData(queryKey));
+      const previous = queryClient.getQueryData(queryKey);
       queryClient.setQueryData(queryKey, (value) =>
-        inboxCacheAfter(notificationQueryData(value), notificationId, archive),
+        inboxCacheAfter(value, notificationId, archive),
       );
       return { previous };
     },
@@ -117,8 +109,10 @@ function optimisticHandlers(queryClient, queryKey, archive) {
   };
 }
 
-export function useNotifications(options = {}) {
-  const { profile, enabled = true } = notificationOptions(options);
+export function useNotifications(
+  options: { profile?: any; enabled?: boolean } = {},
+) {
+  const { profile, enabled = true } = options;
   const { t } = useI18n();
   const queryClient = /** @type {any} */ (useQueryClient());
   const threadStates = useThreadStates();
@@ -131,63 +125,54 @@ export function useNotifications(options = {}) {
   /* How many pages the reader has asked to keep loaded. The polled query owns
    * them all, so there is no second list to fall out of step with the head. */
   const [loadedPages, setLoadedPages] = React.useState(1);
+  /* The page count is a request parameter, not an identity, so it stays out of
+   * the key. Keying on it splits the cache: "load more" would land on an entry
+   * with no data yet, blanking the open panel and clearing the badge until the
+   * refetch returned, and every optimistic write and invalidation below would
+   * reach only the current page count while entries under the others kept
+   * stale read/unread state. One entry, refetched when the count changes. */
   const queryKey = React.useMemo(
-    () => ["notifications", "inbox", tenantId, userId, loadedPages],
-    [loadedPages, tenantId, userId],
+    () => ["notifications", "inbox", tenantId, userId],
+    [tenantId, userId],
   );
 
   const query = useQuery({
     queryKey,
     queryFn: async ({ signal }) => {
-      /* Both reads are attempted on every poll: the compatibility read is what
-       * a surface without the durable inbox falls back to, and which one wins
-       * is decided once `inboxSupported` is known. */
-      const [inboxResult, approvalResult] = await Promise.allSettled([
-        readInboxPages(loadedPages, signal),
-        listThreads({
+      /* Read the inbox first and fall back only where it does not exist. These
+       * used to run as a pair on every poll, which cost a discarded
+       * approval-thread query — and a dynamic import of the presenter — every
+       * ten seconds in every signed-in tab, for a result the surface throws
+       * away as soon as the inbox answers. The fallback surface pays one extra
+       * round-trip instead; it is the surface that has no inbox at all. */
+      let inbox;
+      try {
+        inbox = await readInboxPages(loadedPages, signal);
+      } catch (error) {
+        if (!isNotificationInboxUnsupported(error)) throw error;
+        const approvalThreads = await listThreads({
           limit: NOTIFICATION_THREAD_LIMIT,
           needsApproval: true,
           signal,
-        }),
-      ]);
-
-      let inboxSupported = true;
-      let inbox;
-      if (inboxResult.status === "fulfilled") {
-        inbox = inboxResult.value;
-      } else if (isNotificationInboxUnsupported(inboxResult.reason)) {
-        inboxSupported = false;
-        inbox = { notifications: [], unread_count: 0 };
-      } else {
-        throw inboxResult.reason;
+        });
+        const presenter = await import("../lib/notification-approval-compat");
+        const seenIds = presenter.getNotificationState(scope).seenIds;
+        const records = Array.isArray(approvalThreads?.threads)
+          ? approvalThreads.threads
+          : [];
+        return {
+          inbox: { notifications: [], unread_count: 0 },
+          inboxSupported: false,
+          compatibility: presenter
+            .approvalThreadNotifications(records.map(normalizeThread), threadStates, t)
+            .map((message) => ({
+              ...message,
+              durable: false,
+              read: seenIds.has(message.id),
+            })),
+        };
       }
-
-      if (approvalResult.status === "rejected") {
-        // The legacy path is supplemental once the durable inbox exists. Do
-        // not hide durable notifications because the compatibility read
-        // failed; without an inbox, however, there is no usable data source.
-        if (!inboxSupported) throw approvalResult.reason;
-        return { inbox, inboxSupported, compatibility: [] };
-      }
-
-      const approvalThreads = approvalResult.value;
-      const presenter = await import("../lib/notification-approval-compat");
-      const seenIds = presenter.getNotificationState(scope).seenIds;
-      const records = Array.isArray(approvalThreads?.threads)
-        ? approvalThreads.threads
-        : [];
-      const compatibility = presenter
-        .approvalThreadNotifications(records.map(normalizeThread), threadStates, t)
-        .map((message) => ({
-          ...message,
-          durable: false,
-          read: seenIds.has(message.id),
-        }));
-      return {
-        inbox,
-        inboxSupported,
-        compatibility,
-      };
+      return { inbox, inboxSupported: true, compatibility: [] };
     },
     enabled: enabled && Boolean(tenantId && userId),
     refetchInterval: NOTIFICATION_REFETCH_MS,
@@ -333,6 +318,13 @@ export function useNotifications(options = {}) {
   const loadMore = React.useCallback(() => {
     setLoadedPages((current) => Math.min(current + 1, NOTIFICATION_PAGE_MAX));
   }, []);
+  /* With the count out of the key, a bump changes no identity React Query
+   * watches, so ask for the wider read explicitly. The rows already on screen
+   * stay put while it runs. */
+  const refetch = query.refetch;
+  React.useEffect(() => {
+    if (loadedPages > 1) refetch?.();
+  }, [loadedPages, refetch]);
 
   const serverUnreadCount = Number(query.data?.inbox?.unread_count || 0);
   const compatibilityUnreadCount = messages.filter(

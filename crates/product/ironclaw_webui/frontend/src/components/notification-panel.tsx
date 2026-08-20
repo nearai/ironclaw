@@ -10,6 +10,15 @@ import React from "react";
 import { useT } from "../lib/i18n";
 import { cn } from "../utils/cn";
 
+const FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled]):not([tabindex='-1'])",
+  "input:not([disabled]):not([tabindex='-1'])",
+  "select:not([disabled]):not([tabindex='-1'])",
+  "textarea:not([disabled]):not([tabindex='-1'])",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
+
 function NotificationRow({ message, unread, onOpen, onArchive }) {
   const t = useT();
   // The row and the archive control are siblings, never nested buttons: a
@@ -63,8 +72,8 @@ function NotificationRow({ message, unread, onOpen, onArchive }) {
         type="button"
         data-testid="notification-archive"
         onClick={() => onArchive(message.id)}
-        aria-label={t("common.dismiss")}
-        title={t("common.dismiss")}
+        aria-label={t("notifications.archive")}
+        title={t("notifications.archive")}
         className={cn(
           "grid h-7 w-7 shrink-0 place-items-center rounded-[8px]",
           "text-[var(--v2-text-faint)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
@@ -100,6 +109,30 @@ export function NotificationPanel({
   React.useEffect(() => {
     panelRef?.current?.focus?.();
   }, [panelRef]);
+  const containFocus = React.useCallback((event) => {
+    if (event.key !== "Tab") return;
+    const panel = panelRef?.current;
+    if (!panel) return;
+    const focusable = [...panel.querySelectorAll(FOCUSABLE_SELECTOR)];
+    if (focusable.length === 0) {
+      event.preventDefault();
+      panel.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = document.activeElement;
+    if (!panel.contains(active)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && (active === first || active === panel)) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (active === last || active === panel)) {
+      event.preventDefault();
+      first.focus();
+    }
+  }, [panelRef]);
   if (typeof document === "undefined") return null;
   return createPortal(
         <React.Fragment>
@@ -117,6 +150,7 @@ export function NotificationPanel({
             data-testid="notification-panel"
             ref={panelRef}
             tabIndex={-1}
+            onKeyDown={containFocus}
             className={cn(
               "fixed inset-x-0 bottom-0 z-[9999] max-h-[78dvh] overflow-hidden",
               "rounded-t-[16px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] shadow-[0_24px_70px_-24px_rgba(0,0,0,0.8)]",
