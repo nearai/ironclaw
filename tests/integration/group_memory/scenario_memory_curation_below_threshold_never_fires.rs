@@ -14,11 +14,10 @@
 //! the SAME script is watched until it is used. An "empty" reading that was
 //! really slowness could not turn into a real pass one turn later.
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironclaw_host_api::ids::ThreadId;
-use ironclaw_host_api::turn::TurnScope;
 use ironclaw_host_runtime::MEMORY_WRITE_CAPABILITY_ID;
 use serde_json::json;
 
@@ -35,7 +34,9 @@ const CURATED_DOCUMENT: &str = "the user stores a bicycle in the hallway";
 
 pub async fn run() -> HarnessResult<()> {
     let group = RebornIntegrationGroup::builder()
-        .with_memory_curation_interval(CURATION_INTERVAL)
+        .with_memory_curation_interval(
+            NonZeroU32::new(CURATION_INTERVAL).ok_or("the curation interval must be non-zero")?,
+        )
         .builtin_tools_with_native_memory_libsql()
         .await?;
 
@@ -55,21 +56,16 @@ pub async fn run() -> HarnessResult<()> {
     let binding = conversation.binding.clone();
     let user_id = group.canonical_actor_user();
 
-    // Same deterministic pass id the positive scenario reconstructs. Scripting
-    // it here is what turns "no pass ran" into an assertion rather than an
-    // absence of evidence.
+    // Same owner-scoped thread prefix the positive scenario scripts: a pass is
+    // keyed on the run that triggered it, so no test can name the thread in
+    // advance. Scripting the prefix here is what turns "no pass ran" into an
+    // assertion rather than an absence of evidence.
     let curation_llm = group
-        .register_scope_script_for_test(
-            TurnScope::new_with_owner(
-                binding.tenant_id.clone(),
-                binding.agent_id.clone(),
-                binding.project_id.clone(),
-                ThreadId::new(format!(
-                    "memory-curation-{}-{}-1",
-                    binding.tenant_id.as_str(),
-                    user_id.as_str()
-                ))?,
-                Some(user_id.clone()),
+        .register_scope_script_prefix_for_test(
+            format!(
+                "memory-curation-{}-{}-",
+                binding.tenant_id.as_str(),
+                user_id.as_str()
             ),
             "memory-curation-below-threshold",
             [

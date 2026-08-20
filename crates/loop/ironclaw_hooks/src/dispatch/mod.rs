@@ -5206,6 +5206,7 @@ mod tests {
     fn after_turn_ctx() -> AfterTurnHookContext {
         AfterTurnHookContext {
             tenant_id: tenant(),
+            run_id: ironclaw_host_api::turn::TurnRunId::new(),
             user_id: ironclaw_host_api::ids::UserId::new("u").expect("user id ok"),
             agent_id: None,
             project_id: None,

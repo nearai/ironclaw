@@ -6,36 +6,73 @@
 //!
 //! Two guards, enforced centrally so no individual hook has to remember them:
 //!
-//! - **Unbound runs never fire the point.** Work started BY a hook runs
-//!   unbound, so firing on unbound completion would let each background pass
-//!   schedule its own successor — a self-sustaining loop nobody asked for and
-//!   nothing stops. `AfterTurnMemoryRecorder` skips unbound runs for the
-//!   adjacent reason (their exchange is caller data, not a user observation).
+//! - **Only a real conversation turn fires the point.** The admitted set is an
+//!   ALLOWLIST of the profiles a human-in-the-loop conversation resolves to,
+//!   not a denylist of everything else, because the point may start follow-on
+//!   work with the run's actor's authority and no user present. A denylist
+//!   fails open: the next non-conversation profile anyone adds inherits the
+//!   right to trigger background work simply by not having been listed.
+//!   [`is_conversation_turn_profile`] documents each excluded family.
 //! - **A run with no actor is skipped.** There is nothing to attribute
 //!   follow-on work to, and [`AfterTurnHookContext::user_id`] is non-optional
 //!   precisely because of this guard.
 //!
-//! Any TERMINAL state of an ordinary actor-bearing run fires the point;
-//! `completed` distinguishes success from failure or cancellation, and a hook
-//! that only cares about successes checks that flag. The call site invokes this
-//! only after the run has reached a terminal state, so a non-terminal status is
-//! not a case this function is asked to judge — it derives a context from
-//! whatever status the state carries and lets `completed` speak for it.
+//! Any TERMINAL state of an ordinary actor-bearing conversation run fires the
+//! point; `completed` distinguishes success from failure or cancellation, and a
+//! hook that only cares about successes checks that flag. The call site invokes
+//! this only after the run has reached a terminal state, so a non-terminal
+//! status is not a case this function is asked to judge — it derives a context
+//! from whatever status the state carries and lets `completed` speak for it.
 
 use ironclaw_hooks::points::AfterTurnHookContext;
+use ironclaw_host_api::turn::RunProfileId;
 use ironclaw_turns::{TurnRunState, TurnStatus};
 use tracing::debug;
+
+use crate::planned_driver_factory::PLANNED_DEFAULT_PROFILE_ID;
+
+/// True only for the run profiles an ordinary conversation turn resolves to.
+///
+/// The three admitted ids are the whole conversation surface:
+/// `reborn-planned-default` is what production resolves for a WebUI or channel
+/// turn (both submit with no requested profile, and the planned resolver's
+/// implicit default is this id); `interactive_default` is the same role under
+/// the non-planned resolver; `default` is the generic alias compositions and
+/// harnesses resolve when they register no planned profile at all.
+///
+/// Deliberately NOT admitted:
+///
+/// - `unbound_default` / `unbound_structured` — work started BY a hook runs
+///   unbound, so admitting these would let each background pass schedule its
+///   own successor, an unbounded self-feeding chain with no user to stop it.
+/// - `scheduled_trigger` — a trusted trigger fire keeps its creator as the
+///   actor and passes the actor guard, but no human is present: firing here
+///   would let a background schedule alone drive write-capable follow-on work.
+/// - `reborn-planned-subagent` — a child run is conversation-adjacent
+///   machinery, not a turn. One user turn can spawn many children, so firing
+///   per child would multiply every interval a hook counts.
+/// - Anything else, including deployment-registered profiles. An unknown
+///   profile is unknown authority; it must opt in here explicitly.
+fn is_conversation_turn_profile(profile: &RunProfileId) -> bool {
+    profile.is_interactive_default()
+        || profile == &RunProfileId::default_profile()
+        || profile.as_str() == PLANNED_DEFAULT_PROFILE_ID
+}
 
 /// Derive the `after_turn` context from a terminal run, or `None` when this run
 /// must not fire the point.
 pub fn after_turn_hook_context(state: &TurnRunState) -> Option<AfterTurnHookContext> {
-    if state.resolved_run_profile_id.is_unbound() {
-        debug!("after-turn hooks: unbound run; not a hook trigger");
+    if !is_conversation_turn_profile(&state.resolved_run_profile_id) {
+        debug!(
+            profile = state.resolved_run_profile_id.as_str(),
+            "after-turn hooks: not a conversation turn; not a hook trigger"
+        );
         return None;
     }
     let actor = state.actor.as_ref()?;
     Some(AfterTurnHookContext::new(
         state.scope.tenant_id.clone(),
+        state.run_id,
         actor.user_id.clone(),
         state.scope.agent_id.clone(),
         state.scope.project_id.clone(),

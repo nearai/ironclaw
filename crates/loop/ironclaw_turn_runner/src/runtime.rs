@@ -333,10 +333,16 @@ pub struct AfterTurnHookDeps {
     pub thread_scope: ThreadScope,
 }
 
-/// Builds the process-lifetime `after_turn` dispatcher from the pieces above,
-/// or declines with `None`. Consumed once, at runtime build.
+/// Builds the process-lifetime `after_turn` dispatcher from the pieces above.
+/// Consumed once, at runtime build.
+///
+/// Declining is expressed by not supplying a factory at all
+/// (`after_turn_hook_dispatcher_factory: None`), never by a factory that
+/// returns an empty success: once a deployment has asked for lifecycle hooks,
+/// a factory that cannot build them fails the build. A hook silently absent is
+/// a behavior nothing surfaces afterwards.
 pub type AfterTurnHookDispatcherFactory =
-    Box<dyn FnOnce(AfterTurnHookDeps) -> Option<Arc<HookDispatcher>> + Send>;
+    Box<dyn FnOnce(AfterTurnHookDeps) -> Result<Arc<HookDispatcher>, String> + Send>;
 
 pub struct DefaultPlannedRuntimeParts<G>
 where
@@ -478,6 +484,7 @@ pub enum DefaultPlannedRuntimeBuildError {
     RunProfile(String),
     SubagentCompletion(String),
     SteeringReconcileObserver(String),
+    AfterTurnHooks(String),
 }
 
 impl fmt::Display for DefaultPlannedRuntimeBuildError {
@@ -494,6 +501,9 @@ impl fmt::Display for DefaultPlannedRuntimeBuildError {
                     formatter,
                     "steering reconcile observer wiring failed: {error}"
                 )
+            }
+            Self::AfterTurnHooks(error) => {
+                write!(formatter, "after-turn hook wiring failed: {error}")
             }
         }
     }
@@ -959,13 +969,13 @@ where
     if let Some(recorder) = after_turn_memory_recorder {
         executor = executor.with_after_turn_memory_recorder(recorder);
     }
-    if let Some(factory) = parts.after_turn_hook_dispatcher_factory
-        && let Some(dispatcher) = factory(AfterTurnHookDeps {
+    if let Some(factory) = parts.after_turn_hook_dispatcher_factory {
+        let dispatcher = factory(AfterTurnHookDeps {
             thread_service: Arc::clone(&parts.thread_service),
             coordinator: Arc::clone(&coordinator),
             thread_scope: after_turn_thread_scope,
         })
-    {
+        .map_err(DefaultPlannedRuntimeBuildError::AfterTurnHooks)?;
         executor = executor.with_after_turn_hooks(dispatcher);
     }
     let executor = Arc::new(executor);

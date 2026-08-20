@@ -3769,16 +3769,16 @@ pub(crate) async fn build_runtime_with_resource_governor(
                         deps.thread_scope.agent_id,
                         deps.thread_scope.project_id,
                     ));
+                    // Fail closed: an operator who configured an interval and a
+                    // provider asked for curation. If the hook cannot install,
+                    // swallowing it would leave a deployment that believes
+                    // memory is being tidied while nothing ever runs — a
+                    // difference nothing surfaces later. The build carries this
+                    // out as a startup error instead.
                     ironclaw_assistant::memory_curation::after_turn_curation_dispatcher(
                         submitter,
                         interval_turns,
                     )
-                    .inspect_err(|reason| {
-                        // `debug!`: a chore that could not be wired must not
-                        // corrupt the REPL, and must not fail startup.
-                        tracing::debug!("memory curation hook not installed: {reason}");
-                    })
-                    .ok()
                 },
             ) as ironclaw_turn_runner::runtime::AfterTurnHookDispatcherFactory
         });

@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -227,7 +228,7 @@ pub struct RebornHostBindings {
     /// Interval, in completed user turns, between periodic memory-curation
     /// passes (issue #7276). `None` — the default, and the value every existing
     /// deployment resolves — means the curation hook is never registered.
-    pub(crate) memory_curation_interval_turns: Option<u32>,
+    pub(crate) memory_curation_interval_turns: Option<NonZeroU32>,
 }
 
 /// One channel extension's binary-assembled vendor binding
@@ -424,15 +425,16 @@ impl RebornHostBindings {
     /// `[memory].curation_interval_turns`; leaving it unset keeps the hook
     /// unregistered, which is what every deployment that predates the key
     /// gets. Curation is disabled by NOT calling this, never by passing a
-    /// sentinel interval.
-    pub fn with_memory_curation_interval_turns(mut self, interval_turns: u32) -> Self {
+    /// sentinel interval — which `NonZeroU32` makes unrepresentable rather
+    /// than merely discouraged.
+    pub fn with_memory_curation_interval_turns(mut self, interval_turns: NonZeroU32) -> Self {
         self.memory_curation_interval_turns = Some(interval_turns);
         self
     }
 
     /// The configured curation interval, if any. Read once at runtime build,
     /// before this input is consumed by the substrate assembly.
-    pub(crate) fn memory_curation_interval_turns(&self) -> Option<u32> {
+    pub(crate) fn memory_curation_interval_turns(&self) -> Option<NonZeroU32> {
         self.memory_curation_interval_turns
     }
 

@@ -178,7 +178,7 @@ pub struct RebornTurnRunExecutor {
     /// Hook dispatcher fired at the `after_turn` lifecycle point. Optional for
     /// the same reason as the recorder above: only compositions that register
     /// lifecycle hooks attach one, and a run finishes cleanly without it.
-    // arch-exempt: optional_arc, lifecycle hooks are opt-in per composition, issue #7276
+    // arch-exempt: optional_arc, lifecycle hooks are opt-in per composition, plan #7770
     after_turn_hooks: Option<Arc<ironclaw_hooks::dispatch::HookDispatcher>>,
 }
 

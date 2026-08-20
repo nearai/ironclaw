@@ -66,7 +66,7 @@ impl RebornIntegrationGroupBuilder {
     /// wires this only when `[memory].curation_interval_turns` is set AND a
     /// memory provider resolved, so a group that does not call this leaves the
     /// point un-wired and is behavior-identical to today.
-    pub fn with_memory_curation_interval(mut self, interval_turns: u32) -> Self {
+    pub fn with_memory_curation_interval(mut self, interval_turns: std::num::NonZeroU32) -> Self {
         self.memory_curation_interval_turns = Some(interval_turns);
         self
     }

@@ -1,10 +1,12 @@
 //! The `after_turn` hook-context derivation (#7276).
 //!
 //! These pin which finished runs may fire the `after_turn` lifecycle point. The
-//! unbound-run case is the load-bearing one: work a hook starts is ITSELF an
-//! unbound run, so a derivation that accepted unbound completions would let each
-//! background pass schedule its successor — an unbounded background loop that no
-//! user asked for and nothing stops.
+//! admitted set is an allowlist of conversation profiles, and the excluded ones
+//! are each excluded for a reason a test states: work a hook starts is ITSELF an
+//! unbound run (so accepting unbound completions would let each background pass
+//! schedule its successor forever); a scheduled-trigger fire keeps its creator
+//! as actor but has no human present; a subagent child is machinery, not a turn,
+//! and one user turn can spawn many.
 
 use chrono::Utc;
 use ironclaw_host_api::ids::{TenantId, ThreadId, UserId};
@@ -83,6 +85,66 @@ fn an_unbound_run_never_fires_the_point() {
             "{profile:?} must not fire after_turn: a pass would schedule its own successor"
         );
     }
+}
+
+/// A trusted scheduled-trigger fire is the case a denylist got wrong: it keeps
+/// its creator as the `TurnActor` and runs an ordinary (non-unbound) profile, so
+/// both original guards passed it. Nobody is present at a fire, and the point
+/// may start write-capable follow-on work with that actor's authority — so the
+/// profile itself has to be the thing that excludes it.
+#[test]
+fn a_scheduled_trigger_fire_never_fires_the_point() {
+    let state = run_state(
+        TurnStatus::Completed,
+        RunProfileId::scheduled_trigger(),
+        actor(),
+    );
+
+    assert!(
+        after_turn_hook_context(&state).is_none(),
+        "a background schedule alone must not drive hook-started work"
+    );
+}
+
+/// A subagent child run is conversation-adjacent machinery, not a turn. One user
+/// turn can spawn many children, so firing per child would multiply whatever
+/// interval a hook counts.
+#[test]
+fn a_subagent_child_run_never_fires_the_point() {
+    let profile = ironclaw_turn_runner::planned_driver_factory::subagent_planned_profile_id()
+        .expect("the subagent profile id is valid");
+    let state = run_state(TurnStatus::Completed, profile, actor());
+
+    assert!(after_turn_hook_context(&state).is_none());
+}
+
+/// The production conversation profile: what a WebUI or channel turn actually
+/// resolves to (both submit with no requested profile, and the planned
+/// resolver's implicit default is this id). If this stopped firing, curation
+/// would go silently dead in production while every other test still passed.
+#[test]
+fn the_production_conversation_profile_fires_the_point() {
+    let profile = ironclaw_turn_runner::planned_driver_factory::planned_default_profile_id()
+        .expect("the planned default profile id is valid");
+    let state = run_state(TurnStatus::Completed, profile, actor());
+
+    assert!(after_turn_hook_context(&state).is_some());
+}
+
+/// The context carries the triggering run, which is what lets a hook derive a
+/// per-trigger identity without inventing a counter: distinct per run, and
+/// replayed as-is by a crash-retry of the same run.
+#[test]
+fn the_context_carries_the_triggering_run_id() {
+    let state = run_state(
+        TurnStatus::Completed,
+        RunProfileId::interactive_default(),
+        actor(),
+    );
+
+    let ctx = after_turn_hook_context(&state).expect("an ordinary completed turn");
+
+    assert_eq!(ctx.run_id, state.run_id);
 }
 
 /// A trigger-fired or host-initiated run has no actor, so there is nothing to

@@ -22,11 +22,10 @@
 //!   successor forever. Pinned by the pass's model being called exactly the
 //!   scripted number of times.
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironclaw_host_api::ids::ThreadId;
-use ironclaw_host_api::turn::TurnScope;
 use ironclaw_host_runtime::MEMORY_WRITE_CAPABILITY_ID;
 use serde_json::json;
 
@@ -48,7 +47,9 @@ const CURATED_DOCUMENT: &str = "the user drinks tea unsweetened (merged from two
 
 pub async fn run() -> HarnessResult<()> {
     let group = RebornIntegrationGroup::builder()
-        .with_memory_curation_interval(CURATION_INTERVAL)
+        .with_memory_curation_interval(
+            NonZeroU32::new(CURATION_INTERVAL).ok_or("the curation interval must be non-zero")?,
+        )
         .builtin_tools_with_native_memory_libsql()
         .await?;
 
@@ -71,21 +72,17 @@ pub async fn run() -> HarnessResult<()> {
     let binding = conversation.binding.clone();
     let user_id = group.canonical_actor_user();
 
-    // The pass's thread id is deterministic by construction — it IS the pass's
-    // idempotency key, so a crash-retry of the triggering turn converges on the
-    // same run instead of minting a second pass over the same document. That
-    // determinism is what lets this test script the pass's model at all, and
-    // reconstructing the id here pins it as contract.
-    let curation_scope = TurnScope::new_with_owner(
-        binding.tenant_id.clone(),
-        binding.agent_id.clone(),
-        binding.project_id.clone(),
-        ThreadId::new(format!(
-            "memory-curation-{}-{}-1",
-            binding.tenant_id.as_str(),
-            user_id.as_str()
-        ))?,
-        Some(user_id.clone()),
+    // The pass's thread id is its own idempotency key, and its distinguishing
+    // part is the id of the RUN that triggered it — which is what makes each
+    // interval a new pass rather than a replay of the first, and is also why
+    // this test cannot name the thread in advance. It scripts the pass by the
+    // owner-scoped PREFIX instead, which is the part that is knowable and is
+    // itself contract: a pass belongs to the tenant/user whose turns triggered
+    // it.
+    let curation_thread_prefix = format!(
+        "memory-curation-{}-{}-",
+        binding.tenant_id.as_str(),
+        user_id.as_str()
     );
 
     // Script the pass BEFORE any turn runs: it is submitted from a background
@@ -94,8 +91,8 @@ pub async fn run() -> HarnessResult<()> {
     // shape: the rewrite, an ordinary work-phase candidate, then the one
     // host-owned finalizer call that records the validated report.
     let curation_llm = group
-        .register_scope_script_for_test(
-            curation_scope,
+        .register_scope_script_prefix_for_test(
+            curation_thread_prefix,
             "memory-curation-pass",
             [
                 RebornScriptedReply::tool_call(

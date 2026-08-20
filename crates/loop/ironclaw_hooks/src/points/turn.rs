@@ -23,6 +23,7 @@
 //! is non-optional: an actorless run has no `AfterTurn` dispatch at all.
 
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::turn::TurnRunId;
 
 /// Read-only context handed to an `after_turn` hook. As with the other
 /// points, `#[non_exhaustive]` so additional fields can land without breaking
@@ -31,6 +32,11 @@ use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 #[non_exhaustive]
 pub struct AfterTurnHookContext {
     pub tenant_id: TenantId,
+    /// The terminal run that fired the point. It gives a hook a per-trigger
+    /// identity it does not have to invent: stable across crash-retries of the
+    /// same trigger (the retry replays the same run), distinct for every other
+    /// trigger, and needing no durable counter to stay that way.
+    pub run_id: TurnRunId,
     /// Actor the completed run was bound to. Non-optional: the dispatch site
     /// never fires this point for actorless runs (see the module docs).
     pub user_id: UserId,
@@ -50,6 +56,7 @@ impl AfterTurnHookContext {
     /// docs: a run with no bound actor never reaches this point at all.
     pub fn new(
         tenant_id: TenantId,
+        run_id: TurnRunId,
         user_id: UserId,
         agent_id: Option<AgentId>,
         project_id: Option<ProjectId>,
@@ -57,6 +64,7 @@ impl AfterTurnHookContext {
     ) -> Self {
         Self {
             tenant_id,
+            run_id,
             user_id,
             agent_id,
             project_id,

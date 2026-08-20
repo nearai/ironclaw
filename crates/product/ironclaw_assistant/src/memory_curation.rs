@@ -37,6 +37,7 @@
 //! what makes the pass safe without batch-atomic memory operations.
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -47,7 +48,7 @@ use ironclaw_hooks::points::AfterTurnHookContext;
 use ironclaw_hooks::registry::HookRegistry;
 use ironclaw_hooks::sink::PrivilegedAfterTurnHook;
 use ironclaw_hooks::trust::HookTrustClass;
-use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_host_api::ids::{CapabilityId, TenantId, UserId};
 use ironclaw_host_api::output::OutputContract;
 use ironclaw_host_api::prepared_context::TurnLimits;
 use ironclaw_memory::{
@@ -57,7 +58,7 @@ use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_threads::agent_message::{AgentMessage, AgentMessageRole, ContentPart};
 use tracing::debug;
 
-use crate::unbound_turn::{UnboundTurnService, UnboundTurnSubmission};
+use crate::unbound_turn::{UnboundTurnError, UnboundTurnService, UnboundTurnSubmission};
 
 /// The curation instruction. A prompt asset, not a Rust string: multi-line
 /// prompts live in `prompts/*.md` in the crate that owns the behavior.
@@ -77,7 +78,11 @@ const MEMORY_CURATION_OUTPUT_NAME: &str = "memory_curation_report_v1";
 /// fork. It is a rate, not a deadline: too frequent burns tokens re-reading a
 /// document that has not changed, too rare lets redundancy accumulate past the
 /// point where a single pass can fix it.
-pub const DEFAULT_CURATION_INTERVAL_TURNS: u32 = 10;
+pub const DEFAULT_CURATION_INTERVAL_TURNS: NonZeroU32 = match NonZeroU32::new(10) {
+    Some(value) => value,
+    // Invariant: 10 is a non-zero literal interval.
+    None => unreachable!(),
+};
 
 /// Iteration ceiling for one pass: read, decide, write, report, plus room for
 /// one retry. A pass that cannot finish in this many steps is not converging,
@@ -143,26 +148,44 @@ fn curation_report_schema() -> serde_json::Value {
 /// is what lets the policy be tested without a coordinator or a thread store.
 #[async_trait]
 pub trait CurationPassSubmitter: Send + Sync {
-    async fn submit_pass(&self, submission: UnboundTurnSubmission) -> Result<(), String>;
+    /// The door's own typed error, carried whole: a `String` here would flatten
+    /// "the caller built an invalid submission" and "the services are down" into
+    /// one indistinguishable line at the `debug!` boundary below.
+    async fn submit_pass(&self, submission: UnboundTurnSubmission) -> Result<(), UnboundTurnError>;
 }
 
 #[async_trait]
 impl CurationPassSubmitter for UnboundTurnService {
-    async fn submit_pass(&self, submission: UnboundTurnSubmission) -> Result<(), String> {
+    async fn submit_pass(&self, submission: UnboundTurnSubmission) -> Result<(), UnboundTurnError> {
         // Fire-and-forget by design: the pass runs on the scheduler like any
         // other turn. Nothing waits for its result, and nothing reads it back —
         // its effect is the memory it rewrote.
-        self.accept_and_submit(submission)
-            .await
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+        self.accept_and_submit(submission).await.map(|_| ())
+    }
+}
+
+/// Who a set of counted turns belongs to. Typed rather than a formatted
+/// `"{tenant}/{user}"` string so two owners can never collide through a
+/// separator that happens to appear inside an id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CurationOwner {
+    tenant_id: TenantId,
+    user_id: UserId,
+}
+
+impl CurationOwner {
+    fn from_context(ctx: &AfterTurnHookContext) -> Self {
+        Self {
+            tenant_id: ctx.tenant_id.clone(),
+            user_id: ctx.user_id.clone(),
+        }
     }
 }
 
 /// Policy: counts completed turns per owner and submits a pass every Nth one.
 pub struct MemoryCurationService {
     submitter: Arc<dyn CurationPassSubmitter>,
-    interval_turns: u32,
+    interval_turns: NonZeroU32,
     /// Completed turns since each owner's last pass.
     ///
     /// In-memory on purpose, with a bounded consequence: a restart resets the
@@ -171,17 +194,19 @@ pub struct MemoryCurationService {
     /// pass is not a defect — and paying for durable per-user counters to avoid
     /// it would buy nothing a user could perceive. Made durable only if the
     /// interval ever becomes something a user configures and expects to hold.
-    counters: Mutex<HashMap<String, u32>>,
+    counters: Mutex<HashMap<CurationOwner, u32>>,
 }
 
 impl MemoryCurationService {
-    pub fn new(submitter: Arc<dyn CurationPassSubmitter>, interval_turns: u32) -> Self {
+    /// The interval is `NonZeroU32` so "a pass after every single turn while
+    /// reading as disabled to whoever wrote the config" is not a representable
+    /// state here at all. Zero is rejected where an operator can still see why
+    /// — `[memory].curation_interval_turns` validation in `ironclaw_config` —
+    /// and curation is disabled by NOT WIRING the service, never by a sentinel.
+    pub fn new(submitter: Arc<dyn CurationPassSubmitter>, interval_turns: NonZeroU32) -> Self {
         Self {
             submitter,
-            // A zero interval would submit a pass after every turn (and, worse,
-            // read as "disabled" to anyone skimming a config file). Curation is
-            // disabled by NOT WIRING the service, never by a sentinel value.
-            interval_turns: interval_turns.max(1),
+            interval_turns,
             counters: Mutex::new(HashMap::new()),
         }
     }
@@ -195,40 +220,42 @@ impl MemoryCurationService {
     /// A poisoned lock declines rather than panicking: this runs on a
     /// post-terminal background path where a panic would be far worse than a
     /// skipped chore.
-    fn count_and_check(&self, key: &str) -> bool {
+    fn count_and_check(&self, owner: CurationOwner) -> bool {
         let Ok(mut counters) = self.counters.lock() else {
             debug!("memory curation: counter lock poisoned; skipping this turn");
             return false;
         };
-        let counter = counters.entry(key.to_string()).or_insert(0);
+        let counter = counters.entry(owner).or_insert(0);
         *counter += 1;
-        if *counter < self.interval_turns {
+        if *counter < self.interval_turns.get() {
             return false;
         }
         *counter = 0;
         true
     }
 
-    /// Deterministic per-pass key so a crash-retry of the triggering turn
-    /// converges on the SAME prepared context and run instead of minting a
-    /// second pass over the same document.
-    fn pass_id(ctx: &AfterTurnHookContext, epoch: u64) -> String {
+    /// Per-pass identity, taken from the run that triggered it.
+    ///
+    /// Two properties at once, which is why it is the triggering run and not a
+    /// counter or a clock: a crash-retry of that same run replays the same id,
+    /// so the accept door converges on ONE pass instead of minting a second
+    /// over the same document; and every other interval is triggered by a
+    /// different run, so it gets a different id instead of being replayed as
+    /// the first pass forever.
+    fn pass_id(ctx: &AfterTurnHookContext) -> String {
         format!(
             "memory-curation-{}-{}-{}",
             ctx.tenant_id.as_str(),
             ctx.user_id.as_str(),
-            epoch
+            ctx.run_id
         )
     }
 
-    fn build_submission(
-        ctx: &AfterTurnHookContext,
-        epoch: u64,
-    ) -> Result<UnboundTurnSubmission, String> {
+    fn build_submission(ctx: &AfterTurnHookContext) -> Result<UnboundTurnSubmission, String> {
         let output =
             OutputContract::try_json_schema(MEMORY_CURATION_OUTPUT_NAME, curation_report_schema())
                 .map_err(|error| format!("curation report schema is invalid: {error}"))?;
-        let public_id = Self::pass_id(ctx, epoch);
+        let public_id = Self::pass_id(ctx);
         Ok(UnboundTurnSubmission {
             // The pass acts AS the owner. Memory is per-user: a pass acting as
             // anything else would read and write the wrong scope. Never an
@@ -286,7 +313,7 @@ const MEMORY_CURATION_HOOK_PATH: &str =
 /// no gain.
 pub fn after_turn_curation_dispatcher(
     submitter: Arc<dyn CurationPassSubmitter>,
-    interval_turns: u32,
+    interval_turns: NonZeroU32,
 ) -> Result<Arc<HookDispatcher>, String> {
     let service = MemoryCurationService::new(submitter, interval_turns);
     Ok(HookDispatcherBuilder::new(HookRegistry::new())
@@ -315,20 +342,10 @@ impl PrivilegedAfterTurnHook for MemoryCurationService {
         }
         // Per-owner key: each user's turns count toward their OWN pass, so a
         // busy user cannot trigger curation over a quiet user's memory.
-        let key = format!("{}/{}", ctx.tenant_id.as_str(), ctx.user_id.as_str());
-        if !self.count_and_check(&key) {
+        if !self.count_and_check(CurationOwner::from_context(ctx)) {
             return;
         }
-        // The epoch makes each pass's id distinct across intervals while staying
-        // deterministic within one: it is the count of passes, not a clock, so a
-        // replayed trigger produces the same id.
-        let epoch = {
-            let Ok(counters) = self.counters.lock() else {
-                return;
-            };
-            counters.len() as u64
-        };
-        let submission = match Self::build_submission(ctx, epoch) {
+        let submission = match Self::build_submission(ctx) {
             Ok(submission) => submission,
             Err(reason) => {
                 debug!("memory curation: could not build pass: {reason}");
@@ -357,8 +374,8 @@ impl PrivilegedAfterTurnHook for MemoryCurationService {
         // Every failure is swallowed at `debug!`. This runs after a terminal run
         // on a background path: `info!`/`warn!` would corrupt the REPL, and a
         // failed chore must never surface as a user-visible problem.
-        if let Err(reason) = self.submitter.submit_pass(submission).await {
-            debug!("memory curation: pass submission failed: {reason}");
+        if let Err(error) = self.submitter.submit_pass(submission).await {
+            debug!("memory curation: pass submission failed: {error}");
         }
     }
 }
@@ -367,9 +384,14 @@ impl PrivilegedAfterTurnHook for MemoryCurationService {
 mod tests {
     use std::sync::Mutex as StdMutex;
 
-    use ironclaw_host_api::ids::{TenantId, UserId};
+    use ironclaw_host_api::turn::TurnRunId;
 
     use super::*;
+
+    /// Non-zero intervals for the tests, built where a `NonZeroU32` is needed.
+    fn interval(value: u32) -> NonZeroU32 {
+        NonZeroU32::new(value).expect("test interval is non-zero")
+    }
 
     #[derive(Default)]
     struct RecordingSubmitter {
@@ -379,13 +401,16 @@ mod tests {
 
     #[async_trait]
     impl CurationPassSubmitter for RecordingSubmitter {
-        async fn submit_pass(&self, submission: UnboundTurnSubmission) -> Result<(), String> {
+        async fn submit_pass(
+            &self,
+            submission: UnboundTurnSubmission,
+        ) -> Result<(), UnboundTurnError> {
             self.submissions
                 .lock()
                 .expect("submissions lock")
                 .push(submission);
             if self.fail {
-                return Err("submitter is down".to_string());
+                return Err(UnboundTurnError::Unavailable);
             }
             Ok(())
         }
@@ -394,6 +419,9 @@ mod tests {
     impl RecordingSubmitter {
         fn count(&self) -> usize {
             self.submissions.lock().expect("submissions lock").len()
+        }
+        fn all(&self) -> Vec<UnboundTurnSubmission> {
+            self.submissions.lock().expect("submissions lock").clone()
         }
         fn last(&self) -> UnboundTurnSubmission {
             self.submissions
@@ -410,8 +438,13 @@ mod tests {
     }
 
     fn ctx_for_status(user: &str, completed: bool) -> AfterTurnHookContext {
+        ctx_for_run(user, completed, TurnRunId::new())
+    }
+
+    fn ctx_for_run(user: &str, completed: bool, run_id: TurnRunId) -> AfterTurnHookContext {
         AfterTurnHookContext::new(
             TenantId::new("tenant-a").expect("tenant id"),
+            run_id,
             UserId::new(user).expect("user id"),
             None,
             None,
@@ -419,12 +452,12 @@ mod tests {
         )
     }
 
-    fn service(interval: u32) -> (MemoryCurationService, Arc<RecordingSubmitter>) {
+    fn service(interval_turns: u32) -> (MemoryCurationService, Arc<RecordingSubmitter>) {
         let submitter = Arc::new(RecordingSubmitter::default());
         (
             MemoryCurationService::new(
                 Arc::clone(&submitter) as Arc<dyn CurationPassSubmitter>,
-                interval,
+                interval(interval_turns),
             ),
             submitter,
         )
@@ -565,8 +598,10 @@ mod tests {
             submissions: StdMutex::new(Vec::new()),
             fail: true,
         });
-        let service =
-            MemoryCurationService::new(Arc::clone(&submitter) as Arc<dyn CurationPassSubmitter>, 1);
+        let service = MemoryCurationService::new(
+            Arc::clone(&submitter) as Arc<dyn CurationPassSubmitter>,
+            interval(1),
+        );
 
         service.on_turn(&ctx_for("user-a")).await;
 
@@ -605,7 +640,7 @@ mod tests {
         let submitter = Arc::new(RecordingSubmitter::default());
         let dispatcher = after_turn_curation_dispatcher(
             Arc::clone(&submitter) as Arc<dyn CurationPassSubmitter>,
-            1,
+            interval(1),
         )
         .expect("the curation hook installs");
 
@@ -619,13 +654,47 @@ mod tests {
         assert_eq!(submitter.last().caller.user_id.as_str(), "user-a");
     }
 
-    /// Zero would submit a pass after every single turn while reading as
-    /// "disabled" to anyone skimming config. Curation is disabled by not wiring
-    /// the service, never by a sentinel.
+    /// THE identity bug this replaced: a pass id derived from anything that
+    /// does not change per trigger (a per-owner counter, say) means every
+    /// interval after the first reuses the first pass's idempotency key, and
+    /// the accept door REPLAYS that first pass instead of running a new one —
+    /// so the document is curated exactly once, ever, and nothing surfaces the
+    /// fact.
     #[tokio::test]
-    async fn a_zero_interval_is_clamped_not_treated_as_disabled() {
-        let (service, submitter) = service(0);
+    async fn each_triggering_run_yields_a_distinct_pass() {
+        let (service, submitter) = service(1);
+
         service.on_turn(&ctx_for("user-a")).await;
-        assert_eq!(submitter.count(), 1);
+        service.on_turn(&ctx_for("user-a")).await;
+
+        let submissions = submitter.all();
+        assert_eq!(submissions.len(), 2, "two triggers, two passes");
+        assert_ne!(
+            submissions[0].public_id, submissions[1].public_id,
+            "a second interval must be a NEW pass, not a replay of the first"
+        );
+        assert_ne!(
+            submissions[0].idempotency_key, submissions[1].idempotency_key,
+            "the accept door replays on this key, so it must differ too"
+        );
+    }
+
+    /// The other half of the same property: a crash-retry of the SAME
+    /// triggering run must converge on one pass rather than starting a second
+    /// one over the same document.
+    #[tokio::test]
+    async fn the_same_triggering_run_converges_on_one_pass_id() {
+        let (service, submitter) = service(1);
+        let run_id = TurnRunId::new();
+
+        service.on_turn(&ctx_for_run("user-a", true, run_id)).await;
+        service.on_turn(&ctx_for_run("user-a", true, run_id)).await;
+
+        let submissions = submitter.all();
+        assert_eq!(submissions.len(), 2, "both retries reached the submitter");
+        assert_eq!(
+            submissions[0].public_id, submissions[1].public_id,
+            "a replayed trigger must produce the same pass, which the accept door dedupes"
+        );
     }
 }

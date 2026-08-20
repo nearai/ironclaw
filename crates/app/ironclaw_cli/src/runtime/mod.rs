@@ -797,6 +797,9 @@ pub(crate) fn build_services_input_with_options(
         .as_ref()
         .and_then(|file| file.memory.as_ref())
         .and_then(|memory| memory.curation_interval_turns)
+        // Cannot silently drop a configured interval: the config layer above
+        // rejects `0` outright, so every value reaching here is non-zero.
+        .and_then(std::num::NonZeroU32::new)
     {
         services_input = services_input.with_memory_curation_interval_turns(interval_turns);
     }
