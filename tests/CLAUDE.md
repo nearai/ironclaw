@@ -252,7 +252,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | An extension installs and activates through the real generic runtime | `extension_runtime.rs` |
 | An inbound channel message is verified and routed by the real generic ingress mount | `extension_ingress.rs` |
 | An outbound reply is delivered through the real inbound→outbound pipeline | `extension_delivery.rs` |
-| A Telegram reply quotes the message it answers; a DM arriving mid-run gets an immediate busy notice quoting that DM, and the late reply still quotes its own prompt (#6643/#6644) | `extension_delivery.rs::linked_telegram_actor_turns_attribute_to_the_linking_user_and_unlink_revokes_admission` (anchored delivery evidence) |
+| Paired Telegram bot actors run as the verified user; replies quote the prompting message, a DM arriving mid-run gets an immediate quoted busy notice, and the late reply still quotes its own prompt (#6643/#6644) | `extension_delivery.rs::telegram_update_becomes_a_turn_and_a_coordinated_reply` (generated-code pairing and anchored delivery evidence) |
 | Tenant-admin configuration and per-user install/remove stay separate state machines | `extension_user_lifecycle_isolation.rs` |
 | The model sees Telegram's generated-code bot connection and independently protected linked-account tools | `channel_connection_projection.rs` |
 | An ordinary Telegram user sees personal device-link setup without deployment secrets and can independently mint a workspace-bot pairing code | `webui_v2_product_api.rs::telegram_setup_separates_bot_pairing_from_personal_device_link` |

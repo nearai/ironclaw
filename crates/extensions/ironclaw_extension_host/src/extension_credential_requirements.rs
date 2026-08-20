@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use ironclaw_extension_registry::{ExtensionManifest, ExtensionPackage};
+use ironclaw_extension_registry::{CapabilitySurfaceDeclV2, ExtensionManifest, ExtensionPackage};
 use ironclaw_host_api::{
     capability::{RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource},
     decision::RuntimeCredentialAuthRequirement,
@@ -12,6 +12,33 @@ pub fn package_runtime_credential_auth_requirements(
     package: &ExtensionPackage,
 ) -> Vec<RuntimeCredentialAuthRequirement> {
     manifest_runtime_credential_auth_requirements(&package.manifest)
+}
+
+/// Credentials that must exist before any extension surface can activate.
+///
+/// A channel must publish before its caller-owned connection ceremony can
+/// complete. Device-link credentials on the same package protect personal
+/// account tools and therefore remain dispatch-time requirements rather than
+/// blocking the independent channel surface from starting.
+pub fn package_activation_credential_auth_requirements(
+    package: &ExtensionPackage,
+) -> Vec<RuntimeCredentialAuthRequirement> {
+    package_runtime_credential_auth_requirements(package)
+        .into_iter()
+        .filter(|requirement| activation_requirement_applies(package, requirement))
+        .collect()
+}
+
+pub(crate) fn activation_requirement_applies(
+    package: &ExtensionPackage,
+    requirement: &RuntimeCredentialAuthRequirement,
+) -> bool {
+    let declares_channel = package
+        .manifest
+        .host_api_surfaces
+        .iter()
+        .any(|surface| matches!(surface, CapabilitySurfaceDeclV2::Channel { .. }));
+    !declares_channel || !matches!(requirement.setup, RuntimeCredentialAccountSetup::DeviceLink)
 }
 
 pub fn manifest_runtime_credential_auth_requirements(
