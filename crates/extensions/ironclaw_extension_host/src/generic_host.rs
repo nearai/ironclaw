@@ -663,14 +663,17 @@ impl ToolAdapter for SettlingToolAdapter {
         let reservation = call.resources.reservation.take();
         let reservation = match reservation {
             Some(reservation) => reservation,
-            None => self
-                .governor
-                .reserve(scope, estimate)
-                .map_err(|_| ToolError::Rejected {
+            None => self.governor.reserve(scope, estimate).map_err(|error| {
+                // The tool boundary deliberately exposes only the stable
+                // resource failure class. Keep the governor's cause in the
+                // host log before it is redacted from the adapter result.
+                tracing::warn!(%error, "native extension tool resource reservation failed");
+                ToolError::Rejected {
                     kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
                     diagnostic: None,
                     detail: None,
-                })?,
+                }
+            })?,
         };
         match self.inner.invoke(call, ports).await {
             Ok(result) => {

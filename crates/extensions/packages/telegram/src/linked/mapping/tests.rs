@@ -3,7 +3,7 @@
 //! fabricated ref, a silently restarted cursor, a filtered sticker.
 
 use grammers_client::{InvocationError, sender::RpcError, session::types::PeerAuth};
-use ironclaw_host_api::{dispatch::DispatchFailureDetail, messaging::StandardMessagingErrorCode};
+use ironclaw_host_api::messaging::StandardMessagingErrorCode;
 
 use super::*;
 
@@ -27,12 +27,13 @@ fn rpc(name: &str, value: Option<u32>) -> InvocationError {
 
 fn code_of(error: &ToolError) -> String {
     match error {
-        ToolError::Rejected { kind, detail, .. } => match detail {
-            Some(DispatchFailureDetail::HostSummary { summary, .. }) => {
-                summary.as_str().to_string()
-            }
-            _ => kind.human_summary().to_string(),
-        },
+        ToolError::Rejected {
+            kind, diagnostic, ..
+        } => diagnostic
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.code.as_ref())
+            .map(|code| code.as_str().to_string())
+            .unwrap_or_else(|| kind.human_summary().to_string()),
         ToolError::AuthRequired { .. } => "auth_required".to_string(),
     }
 }
@@ -336,7 +337,7 @@ fn an_unknown_write_outcome_is_a_vendor_error_and_never_sent_unverified() {
 }
 
 #[test]
-fn a_flood_wait_carries_its_retry_after_as_prose_only() {
+fn a_flood_wait_carries_its_retry_after_as_bounded_diagnostic_prose() {
     let mapped = map_vendor_error(OpFamily::Write, &rpc("FLOOD_WAIT", Some(31)));
     let ToolError::Rejected {
         detail, diagnostic, ..
@@ -344,26 +345,21 @@ fn a_flood_wait_carries_its_retry_after_as_prose_only() {
     else {
         panic!("flood wait is a rejection");
     };
-    // The fixed half names only the canonical code; the vendor's number rides
-    // the free-form half, because no structured retry-after slot exists.
-    let Some(DispatchFailureDetail::HostSummary {
-        summary: safe_summary,
-        ..
-    }) = detail
-    else {
-        panic!("flood waits carry a host summary");
-    };
     assert!(
-        safe_summary
-            .as_str()
-            .contains(StandardMessagingErrorCode::RateLimited.as_str())
+        detail.is_none(),
+        "the extension must not mint a host summary"
     );
-    assert!(!safe_summary.as_str().contains("31"));
     assert!(
         diagnostic
-            .and_then(|diagnostic| diagnostic.message)
-            .expect("cause")
-            .as_str()
-            .contains("31")
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.code.as_ref())
+            .is_some_and(|code| code.as_str() == StandardMessagingErrorCode::RateLimited.as_str()),
+        "canonical messaging code must cross the adapter boundary"
+    );
+    assert!(
+        diagnostic
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.message.as_ref())
+            .is_some_and(|message| message.as_str().contains("31"))
     );
 }

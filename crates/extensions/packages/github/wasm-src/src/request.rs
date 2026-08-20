@@ -27,16 +27,8 @@ pub(crate) fn take_last_error_message() -> Option<String> {
     LAST_ERROR_MESSAGE.with(|cell| cell.borrow_mut().take())
 }
 
-#[cfg(not(test))]
 fn set_last_error_message(body: &[u8]) {
-    let message = serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|parsed| {
-            parsed
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .map(bounded_message)
-        });
+    let message = provider_error_message(body);
     LAST_ERROR_MESSAGE.with(|cell| *cell.borrow_mut() = message);
 }
 
@@ -89,7 +81,6 @@ pub(crate) fn github_request(
 /// host's own `MAX_WASM_GUEST_MESSAGE_BYTES` backstop.
 const MAX_PROVIDER_MESSAGE_CHARS: usize = 512;
 
-#[cfg(test)]
 fn provider_error_message(body: &[u8]) -> Option<String> {
     let parsed: serde_json::Value = serde_json::from_slice(body).ok()?;
     let message = parsed.get("message")?.as_str()?.trim();
@@ -197,7 +188,10 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_github_validation_error_body, provider_error_message};
+    use super::{
+        is_github_validation_error_body, provider_error_message, set_last_error_message,
+        take_last_error_message,
+    };
 
     #[test]
     fn provider_error_message_carries_the_rejection_text() {
@@ -229,6 +223,13 @@ mod tests {
         let message = provider_error_message(body.as_bytes()).expect("message present");
 
         assert_eq!(message.chars().count(), 512);
+    }
+
+    #[test]
+    fn production_capture_uses_the_validated_provider_message_parser() {
+        set_last_error_message(br#"{"message":"   "}"#);
+
+        assert!(take_last_error_message().is_none());
     }
 
     #[test]

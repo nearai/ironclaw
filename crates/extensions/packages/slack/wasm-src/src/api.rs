@@ -191,11 +191,9 @@ fn next_cursor_from_response(parsed: &serde_json::Value) -> Option<String> {
 /// string-matching an already-mapped error.
 #[derive(Debug)]
 enum RawSlackFailure {
-    /// A host-level transport failure (network denial, timeout, ...): the
-    /// guest has no closed vocabulary for the host's free-text transport
-    /// message, so it rides the `operation_failed` bucket with the raw text
-    /// as `code`, except for the one literal the host boundary itself uses
-    /// for a missing/invalid credential (`AuthRequired`).
+    /// A host-level transport failure. The host supplies a closed error kind,
+    /// optional stable code, and bounded message; `structured_error_for`
+    /// preserves that typed classification in the guest response.
     Transport(host::HttpFailure),
     /// Non-2xx HTTP status that was not itself a recognized rate limit.
     HttpStatus(u16),

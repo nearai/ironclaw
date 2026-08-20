@@ -239,7 +239,9 @@ async fn sandbox_runtime_adapter_governor_failure_surfaces_script_dispatch_error
     match result {
         Err(DispatchError::Rejected {
             runtime: Some(RuntimeKind::Sandbox),
-            ..
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+            diagnostic: None,
+            detail: None,
         }) => {}
         other => {
             panic!(

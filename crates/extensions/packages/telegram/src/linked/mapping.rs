@@ -32,12 +32,11 @@ use ironclaw_host_api::{
     capability::RuntimeCredentialAccountSetup,
     decision::RuntimeCredentialAuthRequirement,
     dispatch::{
-        DispatchAuthRequirement, DispatchFailureDetail, DispatchFailureKind, ProviderDiagnostic,
+        DispatchAuthRequirement, DispatchFailureKind, ProviderDiagnostic, ProviderErrorCode,
         RuntimeDispatchErrorKind, UntrustedProviderMessage,
     },
     ids::{ExtensionId, SecretHandle, VendorId},
     messaging::StandardMessagingErrorCode,
-    safe_summary::SafeSummary,
 };
 use serde_json::{Value, json};
 
@@ -71,30 +70,19 @@ const CURSOR_TAG: &str = "p1";
 // Failure construction
 // ---------------------------------------------------------------------------
 
-pub(crate) fn host_summary(text: impl Into<String>) -> DispatchFailureDetail {
-    let summary = match SafeSummary::new(text) {
-        Ok(summary) => summary,
-        Err(_) => SafeSummary::placeholder(),
-    };
-    DispatchFailureDetail::HostSummary {
-        summary,
-        detail: None,
-    }
-}
-
-/// A canonical messaging rejection. `HostSummary` carries only the fixed
-/// canonical code string (never vendor payload); `ProviderDiagnostic` carries
-/// the one piece of vendor detail worth surfacing — today, a flood wait's
-/// retry-after — as typed provider text, because no structured retry-after
-/// slot is plumbed through tool dispatch (§6.6).
+/// A canonical messaging rejection. The closed code crosses the adapter
+/// boundary as a typed value; the extension host turns it into the trusted
+/// public summary. `ProviderDiagnostic` carries only vendor detail and is
+/// scrubbed by the host before model visibility.
 pub(crate) fn failed(code: StandardMessagingErrorCode) -> ToolError {
     ToolError::Rejected {
         kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
-        diagnostic: None,
-        detail: Some(host_summary(format!(
-            "telegram rejected the request: {}",
-            code.as_str()
-        ))),
+        diagnostic: Some(Box::new(ProviderDiagnostic {
+            code: Some(ProviderErrorCode::new(code.as_str())),
+            message: None,
+            retry_after: None,
+        })),
+        detail: None,
     }
 }
 
@@ -104,14 +92,11 @@ pub(crate) fn failed_because(code: StandardMessagingErrorCode, cause: String) ->
     ToolError::Rejected {
         kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
         diagnostic: Some(Box::new(ProviderDiagnostic {
-            code: None,
+            code: Some(ProviderErrorCode::new(code.as_str())),
             message: Some(UntrustedProviderMessage::new(cause)),
             retry_after: None,
         })),
-        detail: Some(host_summary(format!(
-            "telegram rejected the request: {}",
-            code.as_str()
-        ))),
+        detail: None,
     }
 }
 
@@ -120,28 +105,27 @@ pub(crate) fn failed_because(code: StandardMessagingErrorCode, cause: String) ->
 /// run and offers the connect affordance, which is a thing the user can fix,
 /// whereas a messaging code would tell the model to rephrase its arguments.
 pub(crate) fn auth_required() -> ToolError {
+    let (Ok(required_secret), Ok(provider), Ok(requester_extension)) = (
+        SecretHandle::new(TELEGRAM_LINKED_SESSION_HANDLE),
+        VendorId::new(TELEGRAM_VENDOR_ID),
+        ExtensionId::new(TELEGRAM_EXTENSION_ID),
+    ) else {
+        return ToolError::Rejected {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Manifest),
+            diagnostic: None,
+            detail: None,
+        };
+    };
+
     ToolError::AuthRequired {
         requirement: Box::new(DispatchAuthRequirement {
-            required_secrets: SecretHandle::new(TELEGRAM_LINKED_SESSION_HANDLE)
-                .map(|handle| vec![handle])
-                .unwrap_or_default(),
-            credential_requirements: match (
-                VendorId::new(TELEGRAM_VENDOR_ID),
-                ExtensionId::new(TELEGRAM_EXTENSION_ID),
-            ) {
-                (Ok(provider), Ok(requester_extension)) => {
-                    vec![RuntimeCredentialAuthRequirement {
-                        provider,
-                        setup: RuntimeCredentialAccountSetup::DeviceLink,
-                        requester_extension,
-                        provider_scopes: Vec::new(),
-                    }]
-                }
-                // Both ids are compile-time literals that satisfy their
-                // validators; an empty requirement list still parks the run on the
-                // generic re-auth gate, so this arm degrades rather than panics.
-                _ => Vec::new(),
-            },
+            required_secrets: vec![required_secret],
+            credential_requirements: vec![RuntimeCredentialAuthRequirement {
+                provider,
+                setup: RuntimeCredentialAccountSetup::DeviceLink,
+                requester_extension,
+                provider_scopes: Vec::new(),
+            }],
             model_visible_cause: None,
         }),
     }
@@ -693,11 +677,8 @@ pub(crate) fn map_vendor_error(family: OpFamily, error: &InvocationError) -> Too
     match rpc.name.as_str() {
         "FLOOD_WAIT" | "FLOOD_PREMIUM_WAIT" | "SLOWMODE_WAIT" | "FLOOD_TEST_PHONE_WAIT" => {
             match rpc.value {
-                // Prose is the only carrier available: `HostSummary` is fixed
-                // host-authored text and may not interpolate a vendor value,
-                // and nothing plumbs a tool-dispatch retry-after into the
-                // structured `ToolRecoveryObservation` slot today. Do not read
-                // this as a machine-readable back-off.
+                // Keep the vendor's wait in the bounded diagnostic prose;
+                // retry scheduling remains outside this adapter contract.
                 Some(seconds) => failed_because(
                     RateLimited,
                     format!("telegram asked us to wait {seconds} seconds before retrying"),

@@ -1816,23 +1816,23 @@ async fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
             RecordingWasmHostHttp::err(WasmHostError::Unavailable(
                 "missing auth token ghp_fake_fixture_token".to_string(),
             )),
-            "AuthRequired",
+            "github_api_executor_failed",
         ),
         (
             RecordingWasmHostHttp::err(WasmHostError::Failed(
                 "deadline exceeded while token ghp_fake_fixture_token was present".to_string(),
             )),
-            "AuthRequired",
+            "github_api_request_failed",
         ),
         (
             RecordingWasmHostHttp::err(WasmHostError::Failed("redirect blocked".to_string())),
-            "github_api_redirect_denied",
+            "github_api_request_failed",
         ),
         (
             RecordingWasmHostHttp::err(WasmHostError::FailedAfterRequestSent(
                 "response body too large".to_string(),
             )),
-            "github_api_body_limit",
+            "github_api_request_failed",
         ),
         (
             RecordingWasmHostHttp::err(WasmHostError::Denied(
@@ -1962,14 +1962,14 @@ fn bundled_google_drive_wasm_rejects_invalid_context_derived_dispatch_inputs() {
 
     let missing_context = execute_bundled_google_drive_wasm(json!({}), None, Arc::clone(&http));
     assert_eq!(
-        wasm_error_code_or_text(&missing_context).as_deref(),
+        structured_wasm_error_code(&missing_context).as_deref(),
         Some("missing_invocation_context")
     );
 
     let malformed_context =
         execute_bundled_google_drive_wasm(json!({}), Some("not-json"), Arc::clone(&http));
     assert_eq!(
-        wasm_error_code_or_text(&malformed_context).as_deref(),
+        structured_wasm_error_code(&malformed_context).as_deref(),
         Some("invalid_invocation_context")
     );
 
@@ -1979,7 +1979,7 @@ fn bundled_google_drive_wasm_rejects_invalid_context_derived_dispatch_inputs() {
         Arc::clone(&http),
     );
     assert_eq!(
-        wasm_error_code_or_text(&unsupported_capability).as_deref(),
+        structured_wasm_error_code(&unsupported_capability).as_deref(),
         Some("unsupported_google_drive_capability")
     );
 
@@ -1989,7 +1989,7 @@ fn bundled_google_drive_wasm_rejects_invalid_context_derived_dispatch_inputs() {
         Arc::clone(&http),
     );
     assert_eq!(
-        wasm_error_code_or_text(&action_collision).as_deref(),
+        structured_wasm_error_code(&action_collision).as_deref(),
         Some("invalid_parameters")
     );
 
@@ -2013,24 +2013,20 @@ fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected_kind: Failu
 fn wasm_output_json(execution: &WitToolExecution) -> Option<String> {
     match &execution.outcome {
         WitToolOutcome::Success(output) => Some(output.clone()),
-        _ => None,
+        WitToolOutcome::Failure(_) => None,
     }
 }
 
 fn wasm_typed_failure(execution: &WitToolExecution) -> Option<&WitGuestFailure> {
     match &execution.outcome {
         WitToolOutcome::Failure(failure) => Some(failure),
-        _ => None,
+        WitToolOutcome::Success(_) => None,
     }
 }
 
 fn structured_wasm_error_code(execution: &WitToolExecution) -> Option<String> {
     let failure = wasm_typed_failure(execution)?;
     failure.code.clone()
-}
-
-fn wasm_error_code_or_text(execution: &WitToolExecution) -> Option<String> {
-    structured_wasm_error_code(execution)
 }
 
 #[derive(Debug, Clone)]

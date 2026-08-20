@@ -54,28 +54,35 @@ fn first_party_dispatch_error(
     safe_summary: Option<String>,
     detail: Option<ironclaw_host_api::dispatch::DispatchFailureDetail>,
 ) -> DispatchError {
-    let detail = match safe_summary {
+    let (detail, cause) = match safe_summary {
         Some(summary) => {
-            let summary = match ironclaw_host_api::safe_summary::SafeSummary::new(summary) {
-                Ok(summary) => summary,
-                Err(_) => {
-                    tracing::warn!("first-party capability supplied an invalid safe summary");
-                    ironclaw_host_api::safe_summary::SafeSummary::placeholder()
-                }
-            };
-            Some(
-                ironclaw_host_api::dispatch::DispatchFailureDetail::HostSummary {
-                    summary,
-                    detail: detail.map(Box::new),
-                },
+            let (safe_summary, cause) =
+                match ironclaw_host_api::safe_summary::SafeSummary::new(summary.as_str()) {
+                    Ok(safe_summary) => (safe_summary, None),
+                    Err(_) => {
+                        tracing::warn!("first-party capability supplied an invalid safe summary");
+                        (
+                            ironclaw_host_api::safe_summary::SafeSummary::placeholder(),
+                            Some(summary),
+                        )
+                    }
+                };
+            (
+                Some(
+                    ironclaw_host_api::dispatch::DispatchFailureDetail::HostSummary {
+                        summary: safe_summary,
+                        detail: detail.map(Box::new),
+                    },
+                ),
+                cause,
             )
         }
-        None => detail,
+        None => (detail, None),
     };
     DispatchError::provider_rejected(
         Some(RuntimeKind::FirstParty),
         DispatchFailureKind::Runtime(kind),
-        None,
+        cause,
         detail,
     )
 }
@@ -522,7 +529,7 @@ where
                 error => dispatch_error_for_runtime(
                     RuntimeKind::Mcp,
                     mcp_error_kind(&error),
-                    Some(error.to_string()),
+                    Some(sanitize_mcp_client_error(&error)),
                 ),
             })?;
 
@@ -1242,7 +1249,7 @@ where
 /// Builds a provider-rejection `DispatchError` for a given runtime lane.
 /// `cause` rides the typed diagnostic channel (#5965): raw-or-better cause
 /// text, scrubbed downstream at the model-visible Diagnostic seam.
-fn dispatch_error_for_runtime(
+pub(super) fn dispatch_error_for_runtime(
     runtime: RuntimeKind,
     kind: RuntimeDispatchErrorKind,
     cause: Option<String>,
@@ -1319,7 +1326,15 @@ pub(super) fn wasm_error_kind(error: &WasmError) -> RuntimeDispatchErrorKind {
         WasmError::StoreConfiguration(_) => RuntimeDispatchErrorKind::Executor,
         WasmError::LinkerConfiguration(_) => RuntimeDispatchErrorKind::Executor,
         WasmError::InstantiationFailed(_) => RuntimeDispatchErrorKind::MethodMissing,
+        WasmError::UnsupportedContract(_) => RuntimeDispatchErrorKind::Manifest,
         WasmError::ExecutionFailed { .. } => RuntimeDispatchErrorKind::Guest,
         WasmError::InvalidSchema(_) => RuntimeDispatchErrorKind::Manifest,
     }
+}
+
+fn sanitize_mcp_client_error(error: &McpError) -> String {
+    let raw = error.to_string();
+    let sanitized = ironclaw_safety::sanitize_display_text(&raw);
+    tracing::debug!(reason = %sanitized, "MCP client failure sanitized for provider diagnostic");
+    sanitized
 }

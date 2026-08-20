@@ -48,10 +48,6 @@ pub(crate) fn serialization_failure(error: &serde_json::Error) -> GuestFailure {
     }
 }
 
-/// A host-level transport failure (network denial, timeout, credential
-/// unavailable, ...): the guest has no closed vocabulary for the host's
-/// free-text transport message, so it rides the `operation_failed` bucket
-/// with the raw text bounded as `message`.
 /// Build an `input`-kind guest failure for a caller-supplied argument that
 /// fails local validation before any egress.
 fn input_failure(code: &'static str, message: impl Into<String>) -> GuestFailure {

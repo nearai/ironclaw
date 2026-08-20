@@ -251,7 +251,12 @@ fn truncate_log_message(message: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_LOG_MESSAGE_BYTES, truncate_log_message};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::{MAX_LOG_MESSAGE_BYTES, StoreData, bindings, truncate_log_message};
+    use crate::WasmHostError;
+    use crate::host::{RecordingWasmHostHttp, WitToolHost};
 
     #[test]
     fn truncate_log_message_respects_utf8_boundaries() {
@@ -259,5 +264,62 @@ mod tests {
         let truncated = truncate_log_message(message);
         assert!(truncated.len() <= MAX_LOG_MESSAGE_BYTES);
         assert!(truncated.is_char_boundary(truncated.len()));
+    }
+
+    #[test]
+    fn wit_http_failure_mapping_preserves_network_code_and_request_sent() {
+        let network = Arc::new(RecordingWasmHostHttp::err(WasmHostError::Network {
+            message: "provider rejected request".to_string(),
+            code: Some("provider_code".to_string()),
+            request_sent: true,
+        }));
+        let mut store = StoreData::new(
+            WitToolHost::deny_all().with_http(network),
+            1024 * 1024,
+            Duration::from_secs(5),
+        );
+        let network_failure = <StoreData as bindings::near::agent::host::Host>::http_request(
+            &mut store,
+            "POST".to_string(),
+            "https://example.test".to_string(),
+            "{}".to_string(),
+            Some(b"body".to_vec()),
+            None,
+        )
+        .expect_err("the recording host must return the configured network failure");
+
+        assert_eq!(
+            network_failure.kind,
+            bindings::near::agent::host::HttpErrorKind::Client
+        );
+        assert_eq!(network_failure.code.as_deref(), Some("provider_code"));
+        assert!(network_failure.message.is_some());
+        assert!(network_failure.request_sent);
+
+        let after_send = Arc::new(RecordingWasmHostHttp::err(
+            WasmHostError::FailedAfterRequestSent("response failed".to_string()),
+        ));
+        let mut store = StoreData::new(
+            WitToolHost::deny_all().with_http(after_send),
+            1024 * 1024,
+            Duration::from_secs(5),
+        );
+        let after_send_failure = <StoreData as bindings::near::agent::host::Host>::http_request(
+            &mut store,
+            "POST".to_string(),
+            "https://example.test".to_string(),
+            "{}".to_string(),
+            Some(b"body".to_vec()),
+            None,
+        )
+        .expect_err("the recording host must return the configured after-send failure");
+
+        assert_eq!(
+            after_send_failure.kind,
+            bindings::near::agent::host::HttpErrorKind::OperationFailed
+        );
+        assert_eq!(after_send_failure.code, None);
+        assert!(after_send_failure.message.is_some());
+        assert!(after_send_failure.request_sent);
     }
 }

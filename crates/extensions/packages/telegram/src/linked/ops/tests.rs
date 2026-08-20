@@ -5,7 +5,7 @@
 //! account-resolution error projection. The vendor-call paths are exercised
 //! against a scripted fake at the integration tier (PROPOSAL §10).
 
-use ironclaw_host_api::{dispatch::DispatchFailureDetail, messaging::StandardMessagingErrorCode};
+use ironclaw_host_api::messaging::StandardMessagingErrorCode;
 use serde_json::json;
 
 use super::*;
@@ -13,12 +13,13 @@ use crate::linked::mapping::{ConversationRef, UserRef};
 
 fn summary(error: &ToolError) -> String {
     match error {
-        ToolError::Rejected { kind, detail, .. } => match detail {
-            Some(DispatchFailureDetail::HostSummary { summary, .. }) => {
-                summary.as_str().to_string()
-            }
-            _ => kind.human_summary().to_string(),
-        },
+        ToolError::Rejected {
+            kind, diagnostic, ..
+        } => diagnostic
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.code.as_ref())
+            .map(|code| code.as_str().to_string())
+            .unwrap_or_else(|| kind.human_summary().to_string()),
         ToolError::AuthRequired { .. } => "auth_required".to_string(),
     }
 }

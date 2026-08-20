@@ -38,12 +38,16 @@ a typed `wit-result`-shaped `variant response`:
 
 `code` and `message` are free-text carriers: the host scrubs both for
 secret-shaped values at the sandbox-exit chokepoint before either is visible
-outside the guest, and `message` is additionally bounded and re-validated
-downstream before it reaches the model.
+outside the guest. The WASM lane bounds each buffered guest log record to 4 KiB;
+`ironclaw_host_runtime` redacts and applies the canonical
+`MODEL_DIAGNOSTIC_MAX_BYTES` bound before tracing, then narrows typed provider
+messages to 2 KiB before they enter dispatch metadata and are re-validated at
+the model-visible seam.
 
 `near:agent@0.4.1` typed responses are the sole supported tool contract.
 Components targeting another WIT contract version fail closed during
-instantiation with an unsupported-contract error.
+instantiation with `WasmError::UnsupportedContract`; unrelated or unknown
+imports remain `WasmError::InstantiationFailed`.
 
 The same ABI revision makes `host.http-request` failures typed. Its coarse
 `http-error-kind` mirrors the guest failure categories; provider-specific

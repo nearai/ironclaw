@@ -16,6 +16,8 @@ pub enum WasmError {
     LinkerConfiguration(String),
     #[error("failed to instantiate WIT component: {0}")]
     InstantiationFailed(String),
+    #[error("unsupported WASM WIT contract: {0}")]
+    UnsupportedContract(String),
     #[error("failed to execute WIT component: {message}")]
     ExecutionFailed {
         message: String,

@@ -276,21 +276,35 @@ fn create_linker(engine: &Engine) -> Result<Linker<StoreData>, WasmError> {
     Ok(linker)
 }
 
-/// Wraps a raw wasmtime instantiation error with a decent, actionable
-/// message when it looks like a version/import mismatch rather than a real
-/// component bug. Wasmtime names the missing import in its instantiation
-/// error text (e.g. `near:agent/host@0.4.1`), so a plain substring check on
-/// `near:agent`/`import` is enough to distinguish "this component targets an
-/// unsupported WIT contract version" from "this component is broken" and
-/// name the one contract version the host actually supports.
+/// Classify a WIT contract-version mismatch separately from an unrelated
+/// instantiation failure. Wasmtime includes the imported interface reference
+/// (for example, `near:agent/host@0.3.0`) in these errors; generic imports and
+/// same-version missing imports must remain ordinary instantiation failures.
 fn classify_instantiation_error(message: String) -> WasmError {
-    if message.contains("near:agent") || message.contains("import") {
-        WasmError::InstantiationFailed(format!(
+    if has_unsupported_wit_contract_version(&message) {
+        WasmError::UnsupportedContract(format!(
             "{message}. This component targets an unsupported WIT contract version — the host only supports near:agent@{WIT_TOOL_VERSION}."
         ))
     } else {
         WasmError::InstantiationFailed(message)
     }
+}
+
+fn has_unsupported_wit_contract_version(message: &str) -> bool {
+    message
+        .split(|character: char| {
+            character.is_whitespace() || matches!(character, '`' | '"' | '\'' | ',' | '(' | ')')
+        })
+        .filter_map(|token| token.strip_prefix("near:agent"))
+        .filter(|reference| reference.starts_with('/') || reference.starts_with('@'))
+        .filter_map(|reference| {
+            reference.rsplit_once('@').map(|(_, version)| {
+                version
+                    .split_once('#')
+                    .map_or(version, |(version, _)| version)
+            })
+        })
+        .any(|version| version != WIT_TOOL_VERSION)
 }
 
 #[cfg(test)]
@@ -346,8 +360,8 @@ mod classify_instantiation_error_tests {
              was not found in the linker"
                 .to_string(),
         );
-        let WasmError::InstantiationFailed(message) = error else {
-            panic!("expected InstantiationFailed");
+        let WasmError::UnsupportedContract(message) = error else {
+            panic!("expected UnsupportedContract");
         };
         assert!(message.contains("near:agent/host@0.3.0"));
         assert!(message.contains("unsupported WIT contract version"));
@@ -355,13 +369,27 @@ mod classify_instantiation_error_tests {
     }
 
     #[test]
-    fn generic_import_error_gains_the_unsupported_contract_hint() {
+    fn generic_import_error_remains_an_instantiation_failure() {
         let error =
             classify_instantiation_error("missing import `some-other-interface`".to_string());
         let WasmError::InstantiationFailed(message) = error else {
             panic!("expected InstantiationFailed");
         };
-        assert!(message.contains("unsupported WIT contract version"));
+        assert_eq!(message, "missing import `some-other-interface`");
+    }
+
+    #[test]
+    fn same_version_unknown_import_remains_an_instantiation_failure() {
+        let error = classify_instantiation_error(
+            "missing import `near:agent/host@0.4.1` function `unknown-interface`".to_string(),
+        );
+        let WasmError::InstantiationFailed(message) = error else {
+            panic!("expected InstantiationFailed");
+        };
+        assert_eq!(
+            message,
+            "missing import `near:agent/host@0.4.1` function `unknown-interface`"
+        );
     }
 
     #[test]

@@ -57,10 +57,6 @@ pub(crate) fn serialization_failure(error: &serde_json::Error) -> GuestFailure {
     }
 }
 
-/// A host-level transport failure (network denial, timeout, credential
-/// unavailable, ...): the guest has no closed vocabulary for the host's
-/// free-text transport message, so it rides the `operation_failed` bucket
-/// with the raw text bounded as `message`.
 fn utf8_decode_failure(error: &std::string::FromUtf8Error) -> GuestFailure {
     GuestFailure {
         kind: ErrorKind::Executor,

@@ -36,7 +36,7 @@ use std::panic::{self, AssertUnwindSafe};
 
 use ironclaw_extension_contracts::tool_adapter::ToolError;
 use ironclaw_host_api::{
-    dispatch::{DispatchFailureDetail, DispatchFailureKind, RuntimeDispatchErrorKind},
+    dispatch::{DispatchFailureKind, RuntimeDispatchErrorKind},
     messaging::{StandardMessagingErrorCode, StandardMessagingOp},
     test_support::messaging_conformance::{
         assert_canonical_input_accepted, assert_canonical_output, message_ref_from_output,
@@ -83,12 +83,13 @@ fn failure_kind(error: &ToolError) -> Option<RuntimeDispatchErrorKind> {
 
 fn failure_summary(error: &ToolError) -> String {
     match error {
-        ToolError::Rejected { kind, detail, .. } => match detail {
-            Some(DispatchFailureDetail::HostSummary { summary, .. }) => {
-                summary.as_str().to_string()
-            }
-            _ => kind.human_summary().to_string(),
-        },
+        ToolError::Rejected {
+            kind, diagnostic, ..
+        } => diagnostic
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.code.as_ref())
+            .map(|code| code.as_str().to_string())
+            .unwrap_or_else(|| kind.human_summary().to_string()),
         ToolError::AuthRequired { .. } => "auth_required".to_string(),
     }
 }

@@ -164,13 +164,11 @@ async fn run(
     }
 }
 
-fn undeclared_capability(id: &str) -> ToolError {
+fn undeclared_capability(_id: &str) -> ToolError {
     ToolError::Rejected {
         kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability),
         diagnostic: None,
-        detail: Some(mapping::host_summary(format!(
-            "the telegram extension does not implement the capability {id}"
-        ))),
+        detail: None,
     }
 }
 

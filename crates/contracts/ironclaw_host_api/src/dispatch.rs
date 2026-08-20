@@ -679,14 +679,19 @@ impl fmt::Debug for DispatchError {
                     ),
                 )
                 .finish(),
-            // `detail` may carry `DispatchFailureDetail::Diagnostic { text }`,
-            // an untrusted raw provider/backend cause — redact it here too,
-            // the same as `diagnostic`, so Debug output never leaks it.
-            Self::Rejected { runtime, kind, .. } => f
+            // `DispatchFailureDetail`'s Debug implementation selectively
+            // preserves structured input issues while redacting raw
+            // provider/backend causes.
+            Self::Rejected {
+                runtime,
+                kind,
+                detail,
+                ..
+            } => f
                 .debug_struct("Rejected")
                 .field("runtime", runtime)
                 .field("kind", kind)
-                .field("detail", &"<redacted>")
+                .field("detail", detail)
                 .field("diagnostic", &"<redacted>")
                 .finish(),
         }
@@ -749,9 +754,8 @@ impl DispatchError {
     /// Builds a provider-rejection [`Self::Rejected`] from an optional cause
     /// string. `cause` rides the typed diagnostic channel (#5965):
     /// raw-or-better cause text, scrubbed downstream at the model-visible
-    /// Diagnostic seam. `detail` is `None`; chain
-    /// [`Self::with_detail`] when a caller has a structured
-    /// [`DispatchFailureDetail`] to carry through.
+    /// Diagnostic seam. `detail` carries an optional structured
+    /// [`DispatchFailureDetail`] when the caller has one.
     ///
     /// This is the single construction site for cause-only provider
     /// rejections; runtime-lane callers wrap it with a thin constant-runtime
@@ -869,5 +873,24 @@ mod tests {
         assert!(!debug_output.contains("leak-me-not"));
         assert!(!debug_output.contains("/secret/path"));
         assert!(!debug_output.contains("abc123"));
+    }
+
+    #[test]
+    fn dispatch_error_rejected_debug_keeps_structured_input_detail_visible() {
+        let error = DispatchError::Rejected {
+            runtime: Some(RuntimeKind::FirstParty),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
+            diagnostic: None,
+            detail: Some(DispatchFailureDetail::InvalidInput {
+                issues: vec![DispatchInputIssue::new(
+                    "schedule.kind",
+                    DispatchInputIssueCode::MissingRequired,
+                )],
+            }),
+        };
+
+        let debug_output = format!("{error:?}");
+        assert!(debug_output.contains("InvalidInput"));
+        assert!(debug_output.contains("schedule.kind"));
     }
 }

@@ -3,6 +3,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use tokio::sync::Semaphore;
 
+use super::runtime_adapters::dispatch_error_for_runtime;
 use super::wasm_blocking::run_wasm_execution_blocking;
 #[cfg(test)]
 use super::wasm_blocking::{
@@ -33,18 +34,6 @@ use ironclaw_host_api::runtime::RuntimeKind;
 /// real provider explanation now has room to survive intact instead of being
 /// clipped to a near-useless 256 bytes.
 const MAX_WASM_GUEST_MESSAGE_BYTES: usize = 2048;
-
-/// Builds a provider-rejection `DispatchError` for the WASM lane. `cause`
-/// rides the typed diagnostic channel (#5965): raw-or-better cause text,
-/// scrubbed downstream at the model-visible Diagnostic seam.
-fn wasm_dispatch_error(kind: RuntimeDispatchErrorKind, cause: Option<String>) -> DispatchError {
-    DispatchError::provider_rejected(
-        Some(RuntimeKind::Wasm),
-        DispatchFailureKind::Runtime(kind),
-        cause,
-        None,
-    )
-}
 
 /// RAII guard over an in-flight `ResourceGovernor` reservation.
 ///
@@ -199,7 +188,11 @@ where
             .governor
             .reserve(request.scope.clone(), request.estimate.clone())
             .map_err(|error| {
-                wasm_dispatch_error(RuntimeDispatchErrorKind::Resource, Some(error.to_string()))
+                dispatch_error_for_runtime(
+                    RuntimeKind::Wasm,
+                    RuntimeDispatchErrorKind::Resource,
+                    Some(error.to_string()),
+                )
             })?,
     };
     // Hold the reservation in an RAII guard from here on. The guard is carried
@@ -208,12 +201,14 @@ where
     // releases the reservation instead of leaking it permanently. Every early
     // `return` below drops the still-armed guard, which releases.
     let guard = ReservationGuard::new(request.governor, reservation.id);
-    let wasm_resource_error = || wasm_dispatch_error(RuntimeDispatchErrorKind::Resource, None);
+    let wasm_resource_error =
+        || dispatch_error_for_runtime(RuntimeKind::Wasm, RuntimeDispatchErrorKind::Resource, None);
     let input_json = match serde_json::to_string(&request.input) {
         Ok(json) => json,
         Err(error) => {
             // Dropping `guard` releases the reservation.
-            return Err(wasm_dispatch_error(
+            return Err(dispatch_error_for_runtime(
+                RuntimeKind::Wasm,
                 RuntimeDispatchErrorKind::InputEncode,
                 Some(error.to_string()),
             ));
@@ -246,7 +241,8 @@ where
                 preserved_wasm_error_usage(error.source()).as_ref(),
                 wasm_resource_error,
             )?;
-            return Err(wasm_dispatch_error(
+            return Err(dispatch_error_for_runtime(
+                RuntimeKind::Wasm,
                 error.kind(),
                 Some(error.source().to_string()),
             ));
@@ -271,7 +267,8 @@ where
         Ok(output) => output,
         Err(error) => {
             guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
-            return Err(wasm_dispatch_error(
+            return Err(dispatch_error_for_runtime(
+                RuntimeKind::Wasm,
                 RuntimeDispatchErrorKind::OutputDecode,
                 Some(error.to_string()),
             ));
@@ -554,7 +551,11 @@ mod tests {
         let guard = ReservationGuard::new(&governor, id);
         let receipt = guard
             .reconcile(accountable_usage(), || {
-                wasm_dispatch_error(RuntimeDispatchErrorKind::Resource, None)
+                dispatch_error_for_runtime(
+                    RuntimeKind::Wasm,
+                    RuntimeDispatchErrorKind::Resource,
+                    None,
+                )
             })
             .expect("reconcile must succeed");
         assert_eq!(receipt.status, ReservationStatus::Reconciled);
@@ -574,7 +575,11 @@ mod tests {
         let guard = ReservationGuard::new(&governor, id);
         guard
             .account_failed(Some(&accountable_usage()), || {
-                wasm_dispatch_error(RuntimeDispatchErrorKind::Resource, None)
+                dispatch_error_for_runtime(
+                    RuntimeKind::Wasm,
+                    RuntimeDispatchErrorKind::Resource,
+                    None,
+                )
             })
             .expect("account_failed with accountable usage must reconcile");
         assert_eq!(governor.reconcile_calls(), 1);
@@ -593,7 +598,11 @@ mod tests {
         // No usage → release path; guard consumed, so Drop does not fire again.
         guard
             .account_failed(None, || {
-                wasm_dispatch_error(RuntimeDispatchErrorKind::Resource, None)
+                dispatch_error_for_runtime(
+                    RuntimeKind::Wasm,
+                    RuntimeDispatchErrorKind::Resource,
+                    None,
+                )
             })
             .expect("account_failed with no usage releases and returns Ok");
         assert_eq!(

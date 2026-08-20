@@ -27,10 +27,12 @@ use ironclaw_extension_contracts::tool_adapter::{
     ToolCall, ToolCallResources, ToolError, ToolPorts,
 };
 use ironclaw_host_api::{
-    dispatch::DispatchError,
+    dispatch::{DispatchError, DispatchFailureDetail, ProviderDiagnostic},
     ids::{CapabilityId, ExtensionId},
+    messaging::StandardMessagingErrorCode,
     resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
     runtime::RuntimeKind,
+    safe_summary::SafeSummary,
 };
 
 use crate::active::ResolvedToolBinding;
@@ -146,23 +148,74 @@ fn dispatch_error_for_tool_error(
             diagnostic,
             detail,
             ..
-        } => DispatchError::Rejected {
-            // Runtime provenance belongs to the trusted resolved binding, not
-            // to the extension-supplied error payload.
-            runtime: Some(runtime),
-            kind,
-            diagnostic,
-            detail,
-        },
-        // Every non-auth adapter failure is already represented by the
-        // canonical Rejected payload; only runtime provenance is host-owned.
+        } => {
+            let messaging_code = standard_messaging_code(diagnostic.as_deref());
+            DispatchError::Rejected {
+                // Runtime provenance belongs to the trusted resolved binding,
+                // not to the extension-supplied error payload.
+                runtime: Some(runtime),
+                kind,
+                diagnostic,
+                detail: dispatch_detail_for_tool_error(messaging_code, detail),
+            }
+        }
+    }
+}
+
+/// Resolve the only trusted text an extension may select — a closed standard
+/// messaging code — after the adapter boundary. Raw host-summary variants are
+/// intentionally discarded here because an extension cannot attest to host
+/// authorship. Other detail variants retain their existing untrusted/typed
+/// semantics and continue through the downstream scrubbers.
+fn dispatch_detail_for_tool_error(
+    messaging_code: Option<StandardMessagingErrorCode>,
+    detail: Option<DispatchFailureDetail>,
+) -> Option<DispatchFailureDetail> {
+    messaging_code
+        .map(trusted_standard_messaging_summary)
+        .or_else(|| extension_detail_without_host_summary(detail))
+}
+
+/// Recognize only an exact member of the closed standard-messaging code set.
+/// Provider text never undergoes substring or keyword interpretation here.
+fn standard_messaging_code(
+    diagnostic: Option<&ProviderDiagnostic>,
+) -> Option<StandardMessagingErrorCode> {
+    let code = diagnostic?.code.as_ref()?.as_str();
+    StandardMessagingErrorCode::ALL
+        .iter()
+        .copied()
+        .find(|candidate| candidate.as_str() == code)
+}
+
+fn trusted_standard_messaging_summary(code: StandardMessagingErrorCode) -> DispatchFailureDetail {
+    let summary = match SafeSummary::new(format!("messaging operation failed: {}", code.as_str())) {
+        Ok(summary) => summary,
+        Err(_) => SafeSummary::placeholder(),
+    };
+    DispatchFailureDetail::HostSummary {
+        summary,
+        detail: None,
+    }
+}
+
+fn extension_detail_without_host_summary(
+    detail: Option<DispatchFailureDetail>,
+) -> Option<DispatchFailureDetail> {
+    match detail {
+        Some(DispatchFailureDetail::HostSummary { .. })
+        | Some(DispatchFailureDetail::HostRemediation { .. }) => None,
+        other => other,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::dispatch::{DispatchFailureKind, RuntimeDispatchErrorKind};
+    use ironclaw_host_api::{
+        dispatch::{DispatchFailureKind, RuntimeDispatchErrorKind},
+        messaging::StandardMessagingErrorCode,
+    };
 
     fn cause_of(error: &DispatchError) -> Option<&str> {
         match error {
@@ -172,6 +225,46 @@ mod tests {
             } => diagnostic.message.as_ref().map(|message| message.as_str()),
             _ => None,
         }
+    }
+
+    #[test]
+    fn standard_messaging_code_becomes_a_host_summary_at_the_resolver_boundary() {
+        let cap = CapabilityId::new("telegram.send_message").unwrap();
+        let dispatch = dispatch_error_for_tool_error(
+            &cap,
+            RuntimeKind::FirstParty,
+            ToolError::Rejected {
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+                diagnostic: Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
+                    code: Some(ironclaw_host_api::dispatch::ProviderErrorCode::new(
+                        StandardMessagingErrorCode::RateLimited.as_str(),
+                    )),
+                    message: None,
+                    retry_after: None,
+                })),
+                detail: None,
+            },
+        );
+        let DispatchError::Rejected { detail, .. } = dispatch else {
+            panic!("expected Rejected dispatch error");
+        };
+        assert!(matches!(
+            detail,
+            Some(ironclaw_host_api::dispatch::DispatchFailureDetail::HostSummary {
+                summary,
+                detail: None,
+            }) if summary.as_str().contains(StandardMessagingErrorCode::RateLimited.as_str())
+        ));
+    }
+
+    #[test]
+    fn extension_host_remediation_is_not_trusted_at_the_resolver_boundary() {
+        let detail = DispatchFailureDetail::HostRemediation {
+            text: ironclaw_host_api::host_remediation::HostRemediation::new("connect the account")
+                .unwrap(),
+        };
+
+        assert!(extension_detail_without_host_summary(Some(detail)).is_none());
     }
 
     /// The generic extension lanes must carry a provider diagnostic across the
@@ -207,11 +300,10 @@ mod tests {
         }
     }
 
-    /// When the adapter supplied only a fixed host-authored summary
-    /// (no raw cause), the lane arms preserve it on the host-summary channel
-    /// instead of collapsing to the kind's generic sentence.
+    /// An adapter cannot attest to host authorship, so a summary supplied in
+    /// the tool error is discarded when no closed standard code is present.
     #[test]
-    fn lane_summary_stays_on_the_host_summary_channel_when_no_raw_cause() {
+    fn lane_summary_is_dropped_when_no_closed_code_is_present() {
         let cap = CapabilityId::new("acme.cap").unwrap();
         let error = ToolError::Rejected {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
@@ -234,15 +326,11 @@ mod tests {
             panic!("expected Rejected dispatch error");
         };
         assert!(diagnostic.is_none());
-        assert!(matches!(
-            detail,
-            Some(ironclaw_host_api::dispatch::DispatchFailureDetail::HostSummary { summary, detail })
-                if summary.as_str() == "vendor unavailable" && detail.is_none()
-        ));
+        assert!(detail.is_none());
     }
 
     #[test]
-    fn rejected_tool_error_keeps_host_summary_separate_from_vendor_cause() {
+    fn rejected_tool_error_drops_extension_summary_but_keeps_vendor_cause() {
         let cap = CapabilityId::new("acme.cap").unwrap();
         let dispatch = dispatch_error_for_tool_error(
             &cap,
@@ -285,11 +373,7 @@ mod tests {
                 .map(|message| message.as_str()),
             Some("vendor backend returned 503")
         );
-        assert!(matches!(
-            detail,
-            Some(ironclaw_host_api::dispatch::DispatchFailureDetail::HostSummary { summary, detail })
-                if summary.as_str() == "the tool's backend failed" && detail.is_none()
-        ));
+        assert!(detail.is_none());
     }
 
     #[test]

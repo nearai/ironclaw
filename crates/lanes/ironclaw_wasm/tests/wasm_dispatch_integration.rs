@@ -323,8 +323,8 @@ async fn wasm_lane_invalid_output_json_returns_sanitized_output_error() {
             r#"(data (i32.const 3072) "not-json")"#,
         )
         .replace(
-            "i32.const 60\n    i32.const 1\n    i32.store",
-            "i32.const 60\n    i32.const 8\n    i32.store",
+            "i32.const 56\n    i32.const 1\n    i32.store",
+            "i32.const 56\n    i32.const 8\n    i32.store",
         );
     assert_ne!(
         invalid_output_wat, COUNTER_TOOL_WAT,
@@ -1072,6 +1072,7 @@ fn wasm_error_kind(error: &ironclaw_wasm::WasmError) -> RuntimeDispatchErrorKind
         ironclaw_wasm::WasmError::StoreConfiguration(_) => RuntimeDispatchErrorKind::Executor,
         ironclaw_wasm::WasmError::LinkerConfiguration(_) => RuntimeDispatchErrorKind::Executor,
         ironclaw_wasm::WasmError::InstantiationFailed(_) => RuntimeDispatchErrorKind::MethodMissing,
+        ironclaw_wasm::WasmError::UnsupportedContract(_) => RuntimeDispatchErrorKind::Manifest,
         ironclaw_wasm::WasmError::ExecutionFailed { .. } => RuntimeDispatchErrorKind::Guest,
         ironclaw_wasm::WasmError::InvalidSchema(_) => RuntimeDispatchErrorKind::Manifest,
     }
@@ -1136,10 +1137,10 @@ const COUNTER_TOOL_WAT: &str = r#"
     i32.const 48
     i32.const 0
     i32.store
-    i32.const 56
+    i32.const 52
     i32.const 3072
     i32.store
-    i32.const 60
+    i32.const 56
     i32.const 1
     i32.store
     i32.const 48)

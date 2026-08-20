@@ -292,9 +292,9 @@ pinned at plan time with a regression test asserting model-visibility.
 ## 8. Error taxonomy
 
 Closed code vocabulary, host-owned. Codes ride the existing channels — structured
-WASM guest errors (`{code, kind}`) and `ToolError::Rejected` host summaries for
-first-party adapters — so no new plumbing. The standard defines the codes, their meaning, and
-their failure class:
+WASM `guest-failure` records (`kind` plus optional `code` and `message`) and
+`ToolError::Rejected` host summaries for first-party adapters — so no new
+plumbing. The standard defines the codes, their meaning, and their failure class:
 
 **Amended 2026-07-29 post-audit** (pre-merge amendment wave W6): added
 `messaging.outside_messaging_window` (row marked †, 11 → 12 codes). Also

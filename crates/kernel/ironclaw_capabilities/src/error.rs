@@ -256,19 +256,21 @@ impl fmt::Debug for CapabilityInvocationError {
             Self::Process(source) => f.debug_tuple("Process").field(source).finish(),
             // `safe_summary` carries the same untrusted provider text as
             // `provider_diagnostic` (see `From<DispatchError>`), so it is
-            // redacted here too — never log or render it directly. `detail`
-            // may carry `DispatchFailureDetail::Diagnostic { text }`, an
-            // untrusted raw provider/backend cause, so it is redacted too.
+            // redacted here too — never log or render it directly.
             Self::Dispatch {
                 kind,
                 provider_diagnostic,
+                detail,
                 ..
             } => f
                 .debug_struct("Dispatch")
                 .field("kind", kind)
                 .field("provider_diagnostic", provider_diagnostic)
                 .field("safe_summary", &"<redacted>")
-                .field("detail", &"<redacted>")
+                // `DispatchFailureDetail`'s Debug implementation selectively
+                // preserves structured input issues while redacting raw
+                // provider/backend causes.
+                .field("detail", detail)
                 .finish(),
         }
     }
@@ -638,6 +640,25 @@ mod tests {
         assert!(!debug_output.contains("leak-me-not"));
         assert!(!debug_output.contains("/secret/path"));
         assert!(!debug_output.contains("abc123"));
+    }
+
+    #[test]
+    fn capability_invocation_error_dispatch_debug_keeps_structured_input_detail_visible() {
+        let err = CapabilityInvocationError::from(DispatchError::Rejected {
+            runtime: Some(RuntimeKind::FirstParty),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
+            diagnostic: None,
+            detail: Some(DispatchFailureDetail::InvalidInput {
+                issues: vec![DispatchInputIssue::new(
+                    "schedule.kind",
+                    DispatchInputIssueCode::MissingRequired,
+                )],
+            }),
+        });
+
+        let debug_output = format!("{err:?}");
+        assert!(debug_output.contains("InvalidInput"));
+        assert!(debug_output.contains("schedule.kind"));
     }
 
     /// Invariant pin, tier 1: a `Rejected` carrying BOTH a host-authored

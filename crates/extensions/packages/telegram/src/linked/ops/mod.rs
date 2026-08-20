@@ -141,13 +141,11 @@ where
 // and silently substituting an empty string would send a message nobody asked
 // for.
 
-fn missing_field(field: &str) -> ToolError {
+fn missing_field(_field: &str) -> ToolError {
     ToolError::Rejected {
         kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Unknown),
         diagnostic: None,
-        detail: Some(mapping::host_summary(format!(
-            "the telegram adapter received input without its required {field} field"
-        ))),
+        detail: None,
     }
 }
 

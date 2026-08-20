@@ -83,8 +83,7 @@ pub enum ToolError {
         /// Provider-authored metadata remains typed so its `Debug` output is
         /// redacted until the host's model-diagnostic scrub/fence seam.
         diagnostic: Option<Box<ProviderDiagnostic>>,
-        /// Fixed host-authored public text, kept separate from the untrusted
-        /// provider diagnostic so the host summary remains authoritative.
+        /// Structured failure detail carried across the adapter boundary.
         detail: Option<DispatchFailureDetail>,
     },
 }
@@ -139,7 +138,10 @@ impl PartialEq for ToolError {
             (
                 Self::AuthRequired { requirement: left },
                 Self::AuthRequired { requirement: right },
-            ) => left == right,
+            ) => {
+                left.required_secrets == right.required_secrets
+                    && left.credential_requirements == right.credential_requirements
+            }
             (
                 Self::Rejected {
                     kind: left_kind,
