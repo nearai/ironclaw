@@ -253,6 +253,17 @@ test("AutomationDetailPanel disables Run now unless the automation is runnable",
   assert.deepEqual(calls, ["automation-alpha"]);
 
   rendered = harness.render({
+    automation: { ...automation(), state: "scheduled" },
+    onRunAutomation: (automationId) => calls.push(automationId),
+  });
+  runButton = componentProps(rendered, harness.Button).find(
+    (button) => button["data-testid"] === "automation-run-now-button",
+  );
+  assert.equal(runButton.disabled, false, "scheduled automation must be runnable");
+  runButton.onClick();
+  assert.deepEqual(calls, ["automation-alpha", "automation-alpha"]);
+
+  rendered = harness.render({
     automation: { ...automation(), has_active_fire: true },
     onRunAutomation: (automationId) => calls.push(automationId),
   });

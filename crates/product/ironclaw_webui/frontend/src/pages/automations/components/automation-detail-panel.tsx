@@ -72,7 +72,8 @@ export function AutomationDetailPanel({
 
   const activeRun = automation.current_run;
   const canResume = automation.state === "paused";
-  const canPause = automation.state === "active" || automation.state === "scheduled";
+  const canRun = automation.state === "active" || automation.state === "scheduled";
+  const canPause = canRun;
   const canRename = Boolean(onRenameAutomation);
   const runNowLabel = t("automations.action.runNow");
   const runNowTitle = `${runNowLabel}: ${automation.display_name}`;
@@ -230,7 +231,7 @@ export function AutomationDetailPanel({
               title={runNowTitle}
               disabled={
                 isMutating ||
-                automation.state !== "active" ||
+                !canRun ||
                 automation.has_active_fire ||
                 !schedulerEnabled
               }

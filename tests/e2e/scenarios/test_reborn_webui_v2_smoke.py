@@ -2253,7 +2253,7 @@ async def test_reborn_v2_automation_run_now_respects_active_fire_and_scheduler(
                 "cron": "0 9 * * *",
                 "timezone": "UTC",
             },
-            "state": "active",
+            "state": "scheduled",
             "next_run_at": "2026-07-18T09:00:00Z",
             "has_active_fire": has_active_fire,
             "recent_runs": [],
