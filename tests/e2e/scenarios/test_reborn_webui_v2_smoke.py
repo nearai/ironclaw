@@ -2239,7 +2239,10 @@ async def test_reborn_v2_automation_run_now_respects_active_fire_and_scheduler(
     runnable_id = "11111111-2222-3333-4444-555555555555"
     active_id = "22222222-3333-4444-5555-666666666666"
     scheduler_enabled = True
+    runnable_active = False
     run_requests: list[str] = []
+    request_started = asyncio.Event()
+    release_response = asyncio.Event()
 
     def automation(automation_id: str, name: str, has_active_fire: bool) -> dict:
         return {
@@ -2257,7 +2260,7 @@ async def test_reborn_v2_automation_run_now_respects_active_fire_and_scheduler(
         }
 
     async def handle_automations(route) -> None:
-        nonlocal scheduler_enabled
+        nonlocal runnable_active, scheduler_enabled
         path = urlparse(route.request.url).path
         if route.request.method == "GET":
             await route.fulfill(
@@ -2267,7 +2270,7 @@ async def test_reborn_v2_automation_run_now_respects_active_fire_and_scheduler(
                     {
                         "scheduler_enabled": scheduler_enabled,
                         "automations": [
-                            automation(runnable_id, "Runnable automation", False),
+                            automation(runnable_id, "Runnable automation", runnable_active),
                             automation(active_id, "Already running", True),
                         ],
                     }
@@ -2276,7 +2279,9 @@ async def test_reborn_v2_automation_run_now_respects_active_fire_and_scheduler(
             return
 
         run_requests.append(path)
-        scheduler_enabled = False
+        request_started.set()
+        await release_response.wait()
+        runnable_active = True
         await route.fulfill(
             status=200,
             content_type="application/json",
@@ -2303,9 +2308,26 @@ async def test_reborn_v2_automation_run_now_respects_active_fire_and_scheduler(
     await page.locator(
         SEL_V2["automation_name_button_for"].format(id=runnable_id)
     ).click()
-    await runnable_button.click()
+    click_task = asyncio.create_task(runnable_button.click())
+    try:
+        await asyncio.wait_for(request_started.wait(), timeout=10)
+        await expect(runnable_button).to_be_disabled()
+        await runnable_button.click(force=True)
+        assert run_requests == [f"/api/webchat/v2/automations/{runnable_id}/run"]
+    finally:
+        release_response.set()
+    await click_task
+
     await expect(runnable_button).to_be_disabled(timeout=10000)
     assert run_requests == [f"/api/webchat/v2/automations/{runnable_id}/run"]
+
+    runnable_active = False
+    scheduler_enabled = False
+    await page.reload()
+    await page.locator(
+        SEL_V2["automation_name_button_for"].format(id=runnable_id)
+    ).click()
+    await expect(runnable_button).to_be_disabled(timeout=10000)
 
 
 async def test_reborn_v2_automation_failed_run_actions_are_clickable(

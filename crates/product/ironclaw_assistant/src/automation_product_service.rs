@@ -256,10 +256,14 @@ impl AutomationProductService for RebornAutomationProductService {
                 }
             }
             TriggerManualFireOutcome::AlreadyActive { .. } => {
-                return Err(automation_conflict(true));
+                return Err(automation_conflict("automation_already_active", true));
             }
-            TriggerManualFireOutcome::Paused => return Err(automation_conflict(false)),
-            TriggerManualFireOutcome::Completed => return Err(automation_conflict(false)),
+            TriggerManualFireOutcome::Paused => {
+                return Err(automation_conflict("automation_paused", false));
+            }
+            TriggerManualFireOutcome::Completed => {
+                return Err(automation_conflict("automation_completed", false));
+            }
             TriggerManualFireOutcome::NotFound => {
                 return Ok(RebornAutomationMutationResponse {
                     updated: false,
@@ -604,17 +608,19 @@ fn backend_timeout_error() -> ProductSurfaceError {
     )
 }
 
-fn automation_conflict(retryable: bool) -> ProductSurfaceError {
-    ProductSurfaceError::from_status(ProductSurfaceErrorCode::Conflict, 409, retryable)
+fn automation_conflict(field: &'static str, retryable: bool) -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Conflict,
+        kind: ProductSurfaceErrorKind::Conflict,
+        status_code: 409,
+        retryable,
+        field: Some(field.to_string()),
+        validation_code: None,
+    }
 }
 
 fn scheduler_disabled() -> ProductSurfaceError {
-    services_error(
-        ProductSurfaceErrorCode::Conflict,
-        ProductSurfaceErrorKind::Conflict,
-        409,
-        false,
-    )
+    automation_conflict("scheduler_disabled", false)
 }
 
 fn automation_run_failed() -> ProductSurfaceError {

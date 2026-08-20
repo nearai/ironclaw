@@ -235,7 +235,7 @@ test("AutomationDetailPanel exposes stable lifecycle action selectors", () => {
   assert.equal(actionButton.title, "Resume: Daily status");
 });
 
-test("AutomationDetailPanel disables Run now for an active fire or disabled scheduler", () => {
+test("AutomationDetailPanel disables Run now unless the automation is runnable", () => {
   const calls = [];
   const harness = createHarness();
 
@@ -269,6 +269,17 @@ test("AutomationDetailPanel disables Run now for an active fire or disabled sche
     (button) => button["data-testid"] === "automation-run-now-button",
   );
   assert.equal(runButton.disabled, true);
+
+  for (const state of ["paused", "completed"]) {
+    rendered = harness.render({
+      automation: { ...automation(), state },
+      onRunAutomation: (automationId) => calls.push(automationId),
+    });
+    runButton = componentProps(rendered, harness.Button).find(
+      (button) => button["data-testid"] === "automation-run-now-button",
+    );
+    assert.equal(runButton.disabled, true, `${state} automation must not run`);
+  }
 });
 
 test("AutomationDetailPanel deletes only after confirming the shared dialog", () => {

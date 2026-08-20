@@ -2374,6 +2374,19 @@ pub trait ProductCapabilityInvoker: Send + Sync {
         input: serde_json::Value,
         activity_id: ActivityId,
     ) -> Result<Resolution, ProductSurfaceError>;
+
+    /// Persist structured output produced by product-owned capability
+    /// handlers through the same durable result boundary as runtime-owned
+    /// capabilities.
+    async fn complete_product_result(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _output: serde_json::Value,
+        _activity_id: ActivityId,
+        _summary: &'static str,
+    ) -> Result<Resolution, ProductSurfaceError> {
+        Err(ProductSurfaceError::service_unavailable(false))
+    }
 }
 
 /// Fail-closed default for compositions that have not attached the product
@@ -3389,8 +3402,9 @@ where
         if let Some(operation) =
             product_capability_handlers::ProductCapabilityHandler::parse(&capability)
         {
+            let completion_caller = caller.clone();
             let run_result = operation.invoke(self, caller, input).await?;
-            let summary = match run_result.map(|result| result.status) {
+            let summary = match run_result.as_ref().map(|result| result.status) {
                 Some(RebornAutomationRunMutationStatus::Replayed) => {
                     "automation run was already submitted"
                 }
@@ -3398,6 +3412,14 @@ where
                     operation.success_summary()
                 }
             };
+            if let Some(run_result) = run_result {
+                let output =
+                    serde_json::to_value(run_result).map_err(ProductSurfaceError::internal_from)?;
+                return self
+                    .product_capability_invoker
+                    .complete_product_result(completion_caller, output, activity_id, summary)
+                    .await;
+            }
             return self.api_capability_success(activity_id, summary);
         }
         self.product_capability_invoker

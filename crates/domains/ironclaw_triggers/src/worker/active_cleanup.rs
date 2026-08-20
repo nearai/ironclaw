@@ -221,9 +221,13 @@ impl TriggerPollerWorker {
         let runs = self
             .deps
             .repository
-            .list_trigger_run_history(record.tenant_id.clone(), record.trigger_id, 1)
+            .list_trigger_run_history(record.tenant_id.clone(), record.trigger_id, 2)
             .await?;
-        let Some(run) = runs.into_iter().find(|run| run.fire_slot == fire_slot) else {
+        let Some(run) = runs.into_iter().find(|run| {
+            run.fire_slot == fire_slot
+                && run.status == crate::TriggerRunHistoryStatus::Running
+                && run.completed_at.is_none()
+        }) else {
             return Ok(None);
         };
         let Ok(age) = now.signed_duration_since(run.submitted_at).to_std() else {

@@ -476,6 +476,10 @@ identity policy.
 
 Slot bookkeeping is tied to acceptance, not merely polling:
 
+The failure-settlement rules below apply to scheduled fires. Manual settlement
+always follows the override in §4.3: it preserves `next_run_at` and never
+completes a one-shot trigger.
+
 - accepted or replayed fires write `last_run_at`, `last_fired_slot`,
   `last_status = Ok`, `next_run_at`, `active_fire_slot`, and `active_run_ref`
   in that order; `active_fire_slot` is written before turn submission and

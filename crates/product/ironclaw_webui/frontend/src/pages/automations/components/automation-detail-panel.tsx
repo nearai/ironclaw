@@ -228,7 +228,12 @@ export function AutomationDetailPanel({
               data-automation-id={automation.automation_id}
               aria-label={runNowTitle}
               title={runNowTitle}
-              disabled={isMutating || automation.has_active_fire || !schedulerEnabled}
+              disabled={
+                isMutating ||
+                automation.state !== "active" ||
+                automation.has_active_fire ||
+                !schedulerEnabled
+              }
               onClick={() => onRunAutomation?.(automation.automation_id)}
             >
               <Icon name="play" className="h-4 w-4" />

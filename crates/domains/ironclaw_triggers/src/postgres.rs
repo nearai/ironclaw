@@ -1231,7 +1231,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                          WHERE tenant_id = $1 AND trigger_id = ANY($2::text[])
                      ) AS ranked_trigger_run_history
                      WHERE row_rank <= $3
-                     ORDER BY trigger_id, fire_slot DESC"
+                     ORDER BY trigger_id, fire_slot DESC, source"
                 ),
                 &[&tenant_id.as_str(), &trigger_ids, &limit],
             )

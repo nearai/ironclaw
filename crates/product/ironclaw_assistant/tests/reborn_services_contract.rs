@@ -1329,6 +1329,57 @@ struct RecordingAutomationService {
     run_result: Option<RebornAutomationRunMutationResult>,
 }
 
+#[derive(Clone, Default)]
+struct RecordingProductResultInvoker {
+    outputs: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+impl RecordingProductResultInvoker {
+    fn outputs(&self) -> Vec<serde_json::Value> {
+        self.outputs.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl ProductCapabilityInvoker for RecordingProductResultInvoker {
+    async fn invoke(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _capability: CapabilityId,
+        _input: serde_json::Value,
+        _activity_id: ActivityId,
+    ) -> Result<Resolution, ProductSurfaceError> {
+        panic!("runtime-owned capability invocation is not expected")
+    }
+
+    async fn complete_product_result(
+        &self,
+        _caller: ProductSurfaceCaller,
+        output: serde_json::Value,
+        activity_id: ActivityId,
+        summary: &'static str,
+    ) -> Result<Resolution, ProductSurfaceError> {
+        let byte_len = serde_json::to_vec(&output)
+            .expect("recorded product result serializes")
+            .len() as u64;
+        self.outputs.lock().expect("lock").push(output);
+        Ok(Resolution::Done(Outcome {
+            refs: OutcomeRefs {
+                result: ResultRef::from_uuid(activity_id.as_uuid()),
+                byte_len,
+                preview: None,
+                preview_meta: ResultPreviewMeta::default(),
+                origin: None,
+                output_digest: None,
+            },
+            verdict: ToolVerdict::Success,
+            summary: SafeSummary::new(summary).expect("static summary is safe"),
+            progress: ResultProgress::MadeProgress,
+            terminate_hint: TerminateHint::Continue,
+        }))
+    }
+}
+
 impl RecordingAutomationService {
     fn with_run_result(run_result: RebornAutomationRunMutationResult) -> Self {
         Self {
@@ -8213,10 +8264,15 @@ async fn automation_run_capability_distinguishes_submitted_from_replayed() {
                 run_id: TurnRunId::new(),
             },
         ));
-        let services = session_services(
+        let result_invoker = RecordingProductResultInvoker::default();
+        let services = RebornServices::new_with_product_capability_invoker(
             Arc::new(InMemorySessionThreadService::default()),
             Arc::new(FakeTurnCoordinator::default()),
+            result_invoker.clone(),
         )
+        .with_session_channel_directory(Arc::new(StaticSessionChannelDirectory {
+            session_channels: vec!["web-app"],
+        }))
         .with_automation_product_service(automation_service);
 
         let resolution = invoke_json_product_capability(
@@ -8234,6 +8290,11 @@ async fn automation_run_capability_distinguishes_submitted_from_replayed() {
             panic!("automation run must return a completed outcome");
         };
         assert_eq!(outcome.summary.as_str(), expected_summary);
+        assert!(outcome.refs.byte_len > 0);
+        let outputs = result_invoker.outputs();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0]["status"], json!(status));
+        assert!(outputs[0]["run_id"].as_str().is_some());
     }
 
     let services = session_services(

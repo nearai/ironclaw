@@ -2908,6 +2908,59 @@ async fn builtin_trigger_run_dispatches_submitted_and_replayed_through_host_runt
         assert_eq!(calls[0].0, expected_tenant_id);
         assert_eq!(calls[0].1.to_string(), trigger_id);
     }
+
+    for (outcome, expected_kind, expected_summary) in [
+        (
+            TriggerManualFireOutcome::Failed {
+                reason: ironclaw_triggers::TriggerPollerFailureReason::Backend,
+            },
+            FailureKind::OperationFailed,
+            Some("trigger run failed"),
+        ),
+        (
+            TriggerManualFireOutcome::NotFound,
+            FailureKind::InputEncode,
+            Some("trigger_run input failed validation"),
+        ),
+    ] {
+        let repository = Arc::new(InMemoryTriggerRepository::default());
+        let runner = Arc::new(FixedTriggerManualFireRunner {
+            outcome,
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let runtime = runtime_with_trigger_repository_and_manual_runner(repository, runner.clone());
+        let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_RUN_CAPABILITY_ID]);
+        let created = invoke_with_context(
+            &runtime,
+            TRIGGER_CREATE_CAPABILITY_ID,
+            json!({
+                "name": "Manual runtime failure",
+                "execution_contract": trigger_execution_contract("Run work"),
+                "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
+            }),
+            context.clone(),
+        )
+        .await
+        .expect("create caller-visible trigger through host runtime");
+        let trigger_id = created["trigger"]["trigger_id"]
+            .as_str()
+            .expect("trigger id");
+
+        let failure = invoke_failure_with_context(
+            &runtime,
+            TRIGGER_RUN_CAPABILITY_ID,
+            json!({"trigger_id": trigger_id}),
+            context,
+        )
+        .await;
+
+        assert_eq!(failure.kind, expected_kind);
+        assert_eq!(failure.safe_summary().as_deref(), expected_summary);
+        assert_eq!(
+            runner.calls.lock().expect("manual fire calls lock").len(),
+            1
+        );
+    }
 }
 
 #[tokio::test]

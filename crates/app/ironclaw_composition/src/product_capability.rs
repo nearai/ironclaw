@@ -165,6 +165,31 @@ impl ProductCapabilityInvoker for RuntimeProductCapabilityInvoker {
             .await;
         result
     }
+
+    async fn complete_product_result(
+        &self,
+        caller: ProductSurfaceCaller,
+        output: serde_json::Value,
+        activity_id: ActivityId,
+        summary: &'static str,
+    ) -> Result<Resolution, ProductSurfaceError> {
+        let invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
+        let scope = product_resource_scope(&caller, invocation_id);
+        if let Some(replayed) = self.results.replay(&scope, invocation_id).await? {
+            return Ok(replayed);
+        }
+        let activity_lock = self.lock_for_activity(activity_id).await;
+        let _activity_guard = activity_lock.lock().await;
+        let result = if let Some(replayed) = self.results.replay(&scope, invocation_id).await? {
+            Ok(replayed)
+        } else {
+            persist_product_output(&self.results, &scope, invocation_id, output, summary).await
+        };
+        drop(_activity_guard);
+        self.release_activity_lock(activity_id, &activity_lock)
+            .await;
+        result
+    }
 }
 
 fn product_execution_context(
@@ -333,29 +358,14 @@ async fn product_resolution(
 ) -> Result<Resolution, ProductSurfaceError> {
     match outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
-            let body = serde_json::to_vec(&completed.output)
-                .map_err(ProductSurfaceError::internal_from)?;
-            if body.len() > PRODUCT_RESULT_MAX_BYTES {
-                return Err(ProductSurfaceError::internal_from(
-                    "product capability result exceeded the durable output bound",
-                ));
-            }
-            let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
-            results.persist(scope, result_ref, body.clone()).await?;
-            Ok(Resolution::Done(Outcome {
-                refs: OutcomeRefs {
-                    result: result_ref,
-                    byte_len: body.len() as u64,
-                    preview: None,
-                    preview_meta: ResultPreviewMeta::default(),
-                    origin: None,
-                    output_digest: None,
-                },
-                verdict: ToolVerdict::Success,
-                summary: fixed_summary("capability completed"),
-                progress: ResultProgress::MadeProgress,
-                terminate_hint: TerminateHint::Continue,
-            }))
+            persist_product_output(
+                results,
+                scope,
+                invocation_id,
+                completed.output,
+                "capability completed",
+            )
+            .await
         }
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
             let resume = ResumeToken::new(invocation_id.to_string())
@@ -415,6 +425,37 @@ async fn product_resolution(
             ))
         }
     }
+}
+
+async fn persist_product_output(
+    results: &ProductResultFilesystem,
+    scope: &ResourceScope,
+    invocation_id: InvocationId,
+    output: serde_json::Value,
+    summary: &'static str,
+) -> Result<Resolution, ProductSurfaceError> {
+    let body = serde_json::to_vec(&output).map_err(ProductSurfaceError::internal_from)?;
+    if body.len() > PRODUCT_RESULT_MAX_BYTES {
+        return Err(ProductSurfaceError::internal_from(
+            "product capability result exceeded the durable output bound",
+        ));
+    }
+    let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
+    results.persist(scope, result_ref, body.clone()).await?;
+    Ok(Resolution::Done(Outcome {
+        refs: OutcomeRefs {
+            result: result_ref,
+            byte_len: body.len() as u64,
+            preview: None,
+            preview_meta: ResultPreviewMeta::default(),
+            origin: None,
+            output_digest: None,
+        },
+        verdict: ToolVerdict::Success,
+        summary: fixed_summary(summary),
+        progress: ResultProgress::MadeProgress,
+        terminate_hint: TerminateHint::Continue,
+    }))
 }
 
 fn recoverable_failure(

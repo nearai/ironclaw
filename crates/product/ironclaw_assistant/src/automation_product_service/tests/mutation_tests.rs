@@ -230,13 +230,21 @@ async fn run_automation_uses_one_timeout_budget_across_backend_calls() {
 
 #[tokio::test]
 async fn run_automation_maps_active_and_paused_to_conflict() {
-    for outcome in [
-        TriggerManualFireOutcome::AlreadyActive {
-            active_fire_slot: Some(now()),
-            active_run_ref: None,
-        },
-        TriggerManualFireOutcome::Paused,
-        TriggerManualFireOutcome::Completed,
+    for (outcome, expected_field, expected_retryable) in [
+        (
+            TriggerManualFireOutcome::AlreadyActive {
+                active_fire_slot: Some(now()),
+                active_run_ref: None,
+            },
+            "automation_already_active",
+            true,
+        ),
+        (TriggerManualFireOutcome::Paused, "automation_paused", false),
+        (
+            TriggerManualFireOutcome::Completed,
+            "automation_completed",
+            false,
+        ),
     ] {
         let repo = Arc::new(InMemoryTriggerRepository::default());
         let c = caller();
@@ -258,6 +266,8 @@ async fn run_automation_maps_active_and_paused_to_conflict() {
             .await
             .expect_err("manual fire conflict");
         assert_eq!(error.status_code, 409);
+        assert_eq!(error.field.as_deref(), Some(expected_field));
+        assert_eq!(error.retryable, expected_retryable);
         assert_eq!(
             error.code,
             ironclaw_product_contracts::surface::ProductSurfaceErrorCode::Conflict
@@ -279,6 +289,7 @@ async fn run_automation_distinguishes_disabled_scheduler_from_backend_outage() {
     assert_eq!(error.code, ProductSurfaceErrorCode::Conflict);
     assert_eq!(error.kind, ProductSurfaceErrorKind::Conflict);
     assert!(!error.retryable);
+    assert_eq!(error.field.as_deref(), Some("scheduler_disabled"));
 }
 
 #[tokio::test]

@@ -2735,6 +2735,12 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
          registration attempt made from inside the fired run: {registration_outcomes:?}"
     );
     assert_eq!(
+        registration_outcomes.get(TRIGGER_RUN_CAPABILITY_ID),
+        Some(&Err(DENIED_SUMMARY.to_string())),
+        "expected the scheduled_trigger surface to deny the trigger_run \
+         registration attempt made from inside the fired run: {registration_outcomes:?}"
+    );
+    assert_eq!(
         registration_outcomes.get(TRIGGER_PAUSE_CAPABILITY_ID),
         Some(&Err(DENIED_SUMMARY.to_string())),
         "expected the scheduled_trigger surface to deny the trigger_pause \

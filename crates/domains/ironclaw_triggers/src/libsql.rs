@@ -984,7 +984,12 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 active_run_ref: record.active_run_ref,
             });
         }
-        Ok(ClaimDueFireOutcome::NotDue { record })
+        // This record is still runnable, so treating the missed update as a
+        // terminal NotDue outcome would let callers report a live automation
+        // as completed. Surface the unexplained claim loss instead.
+        Err(TriggerError::Backend {
+            reason: "manual trigger claim lost without an observable competing state".to_string(),
+        })
     }
 
     async fn mark_fire_accepted(

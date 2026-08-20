@@ -393,6 +393,13 @@ impl TriggerManualFireRunner for TriggerPollerWorker {
             }
             ClaimDueFireOutcome::Paused { .. } => return Ok(TriggerManualFireOutcome::Paused),
             ClaimDueFireOutcome::NotFound => return Ok(TriggerManualFireOutcome::NotFound),
+            ClaimDueFireOutcome::NotDue { record }
+                if record.state == crate::TriggerState::Scheduled =>
+            {
+                return Ok(TriggerManualFireOutcome::Failed {
+                    reason: TriggerPollerFailureReason::Backend,
+                });
+            }
             ClaimDueFireOutcome::NotDue { .. } => return Ok(TriggerManualFireOutcome::Completed),
         };
         Ok(match processed {
