@@ -1,6 +1,7 @@
 use std::sync::LazyLock;
 use std::time::Instant;
 
+use ironclaw_host_api::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES;
 use ironclaw_safety::LeakDetector;
 use wasmtime::component::Linker;
 use wasmtime::{Config, Engine, Store};
@@ -26,13 +27,20 @@ use crate::wasm_sandbox_core::SandboxLimits;
 static GUEST_ERROR_LEAK_DETECTOR: LazyLock<LeakDetector> = LazyLock::new(LeakDetector::new);
 
 /// Redact secret-shaped values from a guest-authored error string before it
-/// becomes guest-visible (`WitToolExecution::error`). Downstream seams (the
+/// becomes host-visible (`WitToolExecution::error`). Downstream seams (the
 /// model-visible diagnostic seam in `ironclaw_loop_host`) still apply their
 /// own scrubbing and injection fencing; this is the earlier, sandbox-exit
-/// boundary and only redacts secret values in place — it never blocks or
-/// truncates the string, so the descriptive cause survives.
+/// boundary and redacts secret values in place before truncating the result to
+/// the canonical model-diagnostic byte budget on a UTF-8 boundary.
 fn scrub_guest_error(error: String) -> String {
-    let (scrubbed, _redacted) = GUEST_ERROR_LEAK_DETECTOR.redact_all_secrets(&error);
+    let (mut scrubbed, _redacted) = GUEST_ERROR_LEAK_DETECTOR.redact_all_secrets(&error);
+    if scrubbed.len() > MODEL_DIAGNOSTIC_MAX_BYTES {
+        let mut end = MODEL_DIAGNOSTIC_MAX_BYTES;
+        while end > 0 && !scrubbed.is_char_boundary(end) {
+            end -= 1;
+        }
+        scrubbed.truncate(end);
+    }
     scrubbed
 }
 

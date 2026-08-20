@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use ironclaw_host_api::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES;
 use ironclaw_wasm::{
     DenyWasmHostHttp, RecordingWasmHostHttp, WasmError, WasmHostError, WasmHostHttp,
     WasmHttpRequest, WasmHttpResponse, WitToolHost, WitToolRequest, WitToolRuntime,
@@ -469,6 +470,41 @@ fn execution_failure_scrubs_secret_from_call_execute_trap_message() {
 }
 
 #[test]
+fn execute_bounds_multibyte_guest_error_on_a_utf8_boundary() {
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+    let guest_error = format!("a{}", "é".repeat(MODEL_DIAGNOSTIC_MAX_BYTES));
+    let prepared = runtime
+        .prepare(
+            "guest-error",
+            &tool_component(&guest_error_wat(&guest_error)),
+        )
+        .unwrap();
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: Vec::new(),
+    }));
+
+    let executed = runtime
+        .execute(
+            &prepared,
+            WitToolHost::deny_all().with_http(http),
+            WitToolRequest::new("{}"),
+        )
+        .unwrap();
+    let error = executed
+        .error
+        .expect("guest error should cross execute seam");
+    let expected = format!(
+        "a{}",
+        "é".repeat((MODEL_DIAGNOSTIC_MAX_BYTES - 1) / "é".len())
+    );
+
+    assert_eq!(error, expected);
+    assert_eq!(error.len(), MODEL_DIAGNOSTIC_MAX_BYTES - 1);
+}
+
+#[test]
 fn allows_multiple_linear_memories_within_aggregate_memory_budget() {
     let runtime = WitToolRuntime::new(WitToolRuntimeConfig {
         default_limits: ironclaw_wasm::wasm_sandbox_core::SandboxLimits::default()
@@ -684,4 +720,23 @@ fn trap_after_http_wat() -> String {
         "i32.const 48\n    i32.const 1\n    i32.store",
         "unreachable\n\n    i32.const 48\n    i32.const 1\n    i32.store",
     )
+}
+
+fn guest_error_wat(error: &str) -> String {
+    HTTP_TOOL_WAT
+        .replace(
+            "  (data (i32.const 3072) \"1\")",
+            &format!("  (data (i32.const 3072) \"1\")\n  (data (i32.const 16384) \"{error}\")"),
+        )
+        .replace(
+            "i32.const 48\n    i32.const 1\n    i32.store\n    i32.const 52",
+            "i32.const 48\n    i32.const 0\n    i32.store\n    i32.const 52",
+        )
+        .replace(
+            "i32.const 60\n    i32.const 0\n    i32.store\n    i32.const 48)",
+            &format!(
+                "i32.const 60\n    i32.const 1\n    i32.store\n    i32.const 64\n    i32.const 16384\n    i32.store\n    i32.const 68\n    i32.const {}\n    i32.store\n    i32.const 48)",
+                error.len()
+            ),
+        )
 }
