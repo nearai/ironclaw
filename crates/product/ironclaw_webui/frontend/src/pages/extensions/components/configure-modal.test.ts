@@ -47,7 +47,7 @@ function configureModalSourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { ConfigureModal, ModalShell };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { ConfigureModal, ModalShell, SetupReadiness };`;
 }
 
 function renderModal({
@@ -126,7 +126,13 @@ function renderModal({
         ...oauthMutationState,
       };
     },
-    useSetupSubmit: () => ({ mutate() {}, isPending: false, error: null }),
+    useSetupSubmit: () => ({
+      mutate(payload) {
+        calls.push(payload);
+      },
+      isPending: false,
+      error: null,
+    }),
     useHostedMcpAuthSelection: (...args) => {
       hostedMcpAuthArgs.push(args);
       return {
@@ -179,6 +185,7 @@ function renderModal({
     context,
     DeviceLinkPanel: context.DeviceLinkPanel,
     PairingWebCodePanel: context.PairingWebCodePanel,
+    SetupReadiness: context.globalThis.__testExports.SetupReadiness,
     invalidations,
     notifications,
     oauthCalls,
@@ -268,10 +275,108 @@ test("ConfigureModal keeps setup open when Bearer selection still requires a cre
   assert.equal(closeCalls, 0);
 });
 
+test("ConfigureModal surfaces every setup blocker without exposing internal refs", () => {
+  const blockerKinds = [
+    "setup",
+    "auth",
+    "pairing",
+    "approval",
+    "policy",
+    "credential",
+    "runtime",
+  ];
+  const view = renderModal({
+    surfaces: toolSurfaces,
+    setupResult: {
+      phase: "setup_needed",
+      blockers: blockerKinds.map((kind) => ({
+        kind,
+        ref_id: `internal-${kind}-diagnostic`,
+      })),
+      secrets: [],
+      fields: [],
+      onboarding: null,
+      isLoading: false,
+      error: null,
+    },
+  });
+
+  const readiness = renderFirstComponent(view.rendered, view.SetupReadiness);
+  const body = JSON.stringify(readiness);
+  assert.match(body, /extensions\.setupPhase\.setup_needed/);
+  for (const kind of blockerKinds) {
+    assert.match(body, new RegExp(`extensions\\.setupBlocker\\.${kind}`));
+    assert.doesNotMatch(body, new RegExp(`internal-${kind}-diagnostic`));
+  }
+  assert.doesNotMatch(body, /extensions\.noConfigRequired/);
+});
+
+test("ConfigureModal reserves channel configuration fields for administrators", () => {
+  const { rendered } = renderModal({
+    surfaces: channelSurfaces,
+    setupResult: {
+      phase: "setup_needed",
+      blockers: [],
+      secrets: [],
+      fields: [
+        {
+          name: "public_url",
+          prompt: "Public webhook URL",
+          optional: false,
+          placeholder: "https://example.test/hook",
+        },
+      ],
+      onboarding: null,
+      isLoading: false,
+      error: null,
+    },
+  });
+
+  const body = JSON.stringify(rendered);
+  assert.match(body, /extensions\.setupFieldsAdminRequired/);
+  assert.doesNotMatch(body, /Public webhook URL/);
+  assert.doesNotMatch(body, /extension-field-public_url/);
+  assert.doesNotMatch(body, /extensions\.noConfigRequired/);
+});
+
+test("ConfigureModal reserves the no-configuration state for a truly empty setup", () => {
+  const onboardingView = renderModal({
+    surfaces: toolSurfaces,
+    setupResult: {
+      phase: "setup_needed",
+      blockers: [],
+      secrets: [],
+      fields: [],
+      onboarding: { credential_next_step: "Finish setup in the provider." },
+      isLoading: false,
+      error: null,
+    },
+  });
+  assert.match(JSON.stringify(onboardingView.rendered), /Finish setup in the provider/);
+  assert.doesNotMatch(
+    JSON.stringify(onboardingView.rendered),
+    /extensions\.noConfigRequired/,
+  );
+
+  const emptyView = renderModal({
+    surfaces: toolSurfaces,
+    setupResult: {
+      phase: "active",
+      blockers: [],
+      secrets: [],
+      fields: [],
+      onboarding: null,
+      isLoading: false,
+      error: null,
+    },
+  });
+  assert.match(JSON.stringify(emptyView.rendered), /extensions\.noConfigRequired/);
+});
+
 function renderFirstComponent(rendered, component, props = {}) {
   if (!rendered || !Array.isArray(rendered.values)) return null;
   if (rendered.values[0] === component) {
-    return component({
+    return component(rendered.props ? { ...rendered.props, ...props } : {
       onClose: rendered.values[1],
       title: rendered.values[2],
       ...props,
@@ -336,6 +441,34 @@ test("ConfigureModal hosts the web-code pairing panel instead of a paste box or 
     !body.includes("extensions.noConfigRequired"),
     "web-code Configure must never claim no configuration is required",
   );
+});
+
+test("ConfigureModal keeps pairing blockers visible beside the pairing panel", () => {
+  const view = renderModal({
+    surfaces: webCodeSurfaces,
+    packageRef: { kind: "extension", id: "acme-messenger" },
+    displayName: "Acme Messenger",
+    setupResult: {
+      phase: "setup_needed",
+      blockers: [
+        { kind: "pairing", ref_id: "internal-pairing-correlation" },
+      ],
+      secrets: [],
+      fields: [],
+      onboarding: null,
+      isLoading: false,
+      error: null,
+    },
+  });
+
+  assert.equal(
+    renderedContainsComponent(view.rendered, view.PairingWebCodePanel),
+    true,
+  );
+  const readiness = renderFirstComponent(view.rendered, view.SetupReadiness);
+  const body = JSON.stringify(readiness);
+  assert.match(body, /extensions\.setupBlocker\.pairing/);
+  assert.doesNotMatch(body, /internal-pairing-correlation/);
 });
 
 test("ConfigureModal keeps the web-code panel for an installed (non-pairing) lifecycle state", () => {
@@ -416,8 +549,6 @@ test("ConfigureModal never renders tenant administrator fields in caller setup",
           },
         },
       ],
-      // A stale or mixed-version server must not make deployment-owned
-      // manifest configuration editable on the caller's Configure surface.
       fields: [
         {
           name: "deployment_provider_id",
@@ -434,6 +565,7 @@ test("ConfigureModal never renders tenant administrator fields in caller setup",
   const body = JSON.stringify(rendered);
   assert.match(body, /Connect your account/);
   assert.match(body, /extensions\.authorize/);
+  assert.match(body, /extensions\.setupFieldsAdminRequired/);
   assert.doesNotMatch(body, /Tenant deployment provider id/);
   assert.doesNotMatch(body, /deployment_provider_id/);
 });

@@ -36,7 +36,10 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
   const t = useT();
   const extensionName = extension?.displayName || extension?.packageRef?.id || t("extensions.defaultName");
   const {
+    phase,
+    blockers = [],
     secrets = [],
+    fields = [],
     onboarding,
     hostedMcpAuthSelectionRequired,
     isLoading,
@@ -149,6 +152,20 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
   const isActive = extensionIsActive(extension);
   const oauthBusy = oauthMutation.isPending || oauthMutation.isAuthorizing;
   const setupUrl = httpsUrl(onboarding?.setup_url);
+  const hasOnboardingActions = Boolean(
+    onboarding?.credential_instructions ||
+      setupUrl ||
+      onboarding?.credential_next_step,
+  );
+  const hasConfiguration =
+    blockers.length > 0 ||
+    secrets.length > 0 ||
+    fields.length > 0 ||
+    hasOnboardingActions;
+  // `ref_id` is internal correlation/diagnostic data. Configure needs only the
+  // typed blocker kind to select localized user copy, so do not pass refs into
+  // the rendered component tree.
+  const readinessBlockers = blockers.map((blocker) => ({ kind: blocker?.kind }));
   if (deviceLinkSecret && !hostedMcpAuthSelectionRequired) {
     // Self-contained: the panel starts (or resumes) the flow, polls it, and
     // stops on a terminal step. The modal only hosts it.
@@ -158,6 +175,7 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
         returnFocusTo={returnFocusTo}
         title={t("extensions.configureName").replace("{name}", extensionName)}
       >
+        <SetupReadiness phase={phase} blockers={readinessBlockers} />
         <DeviceLinkPanel
           provider={deviceLinkSecret.provider}
           extensionName={packageId}
@@ -177,6 +195,7 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
         returnFocusTo={returnFocusTo}
         title={t("extensions.configureName").replace("{name}", extensionName)}
       >
+        <SetupReadiness phase={phase} blockers={readinessBlockers} />
         <PairingWebCodePanel
           extensionId={packageId}
           displayName={extensionName}
@@ -229,6 +248,7 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
         returnFocusTo={returnFocusTo}
         title={t("extensions.configureName").replace("{name}", extensionName)}
       >
+        <SetupReadiness phase={phase} blockers={readinessBlockers} />
         <fieldset className="space-y-2" aria-label={t("extensions.customMcpAuthHint")}>
           {authChoices.map((kind) => (
             <label
@@ -268,13 +288,14 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
     );
   }
 
-  if (secrets.length === 0) {
+  if (!hasConfiguration) {
     return (
       <ModalShell
         onClose={onClose}
         returnFocusTo={returnFocusTo}
         title={t("extensions.configureName").replace("{name}", extensionName)}
       >
+        <SetupReadiness phase={phase} blockers={readinessBlockers} />
         <p className="text-sm text-iron-300">
           {t("extensions.noConfigRequired")}
         </p>
@@ -288,6 +309,15 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
       returnFocusTo={returnFocusTo}
       title={t("extensions.configureName").replace("{name}", extensionName)}
     >
+      <SetupReadiness phase={phase} blockers={readinessBlockers} />
+      {fields.length > 0 && (
+        <div
+          role="status"
+          className="mb-4 rounded-md border border-white/12 bg-white/[0.04] px-3 py-2 text-xs text-iron-300"
+        >
+          {t("extensions.setupFieldsAdminRequired")}
+        </div>
+      )}
       {onboarding?.credential_instructions &&
       (
         <p className="mb-4 text-sm leading-6 text-iron-300">
@@ -448,6 +478,61 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
       </div>
     </ModalShell>
   );
+}
+
+function SetupReadiness({ phase, blockers = [] }) {
+  const t = useT();
+  if (!phase && blockers.length === 0) return null;
+  return (
+    <div className="mb-4 space-y-2">
+      {phase && (
+        <p className="text-xs text-iron-400">
+          {t("extensions.setupPhaseLabel")} {t(setupPhaseKey(phase))}
+        </p>
+      )}
+      {blockers.length > 0 && (
+        <div
+          role="status"
+          className="rounded-md border border-amber-300/20 bg-amber-400/10 px-3 py-2 text-xs text-amber-100"
+        >
+          <p className="font-medium">{t("extensions.configurationRequired")}</p>
+          <ul className="mt-1 list-disc space-y-1 pl-4">
+            {blockers.map((blocker, index) => (
+              <li key={`${blocker?.kind || "unknown"}-${index}`}>
+                {t(setupBlockerKey(blocker?.kind))}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function setupPhaseKey(phase) {
+  switch (phase) {
+    case "uninstalled":
+    case "setup_needed":
+    case "active":
+      return `extensions.setupPhase.${phase}`;
+    default:
+      return "extensions.setupPhase.unknown";
+  }
+}
+
+function setupBlockerKey(kind) {
+  switch (kind) {
+    case "setup":
+    case "auth":
+    case "pairing":
+    case "approval":
+    case "policy":
+    case "credential":
+    case "runtime":
+      return `extensions.setupBlocker.${kind}`;
+    default:
+      return "extensions.setupBlocker.unknown";
+  }
 }
 
 function httpsUrl(value) {
