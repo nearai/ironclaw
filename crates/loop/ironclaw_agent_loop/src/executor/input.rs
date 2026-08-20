@@ -186,11 +186,13 @@ pub(super) fn consume_drainable_inputs(
                 break;
             }
             LoopInput::GateResolved { .. } | LoopInput::CapabilitySurfaceChanged { .. } => break,
-            // UserMessage/FollowUp/Steering/SubagentSettled are each drained
-            // by `user_facing_input_matches_drain_mode` in at least one mode
-            // above (SubagentSettled in both), so this arm is unreachable at
-            // runtime for them; it exists only because the match must stay
-            // exhaustive over every `LoopInput` variant.
+            // UserMessage, Steering, and SubagentSettled are drained by BOTH
+            // mode arms above and never reach here. FollowUp is drained only
+            // by the FollowUp arm, so a FollowUp-variant input still reaches
+            // this branch (and breaks, left unconsumed) when draining in
+            // Steering mode. This arm exists both for that live FollowUp
+            // case and to keep the match exhaustive over every `LoopInput`
+            // variant.
             LoopInput::UserMessage { .. }
             | LoopInput::FollowUp { .. }
             | LoopInput::Steering { .. }
@@ -220,12 +222,14 @@ pub(super) fn consume_drainable_inputs(
 
 fn user_facing_input_matches_drain_mode(input: &LoopInput, mode: UserFacingInputDrainMode) -> bool {
     match mode {
-        UserFacingInputDrainMode::Steering => matches!(
-            input,
-            LoopInput::UserMessage { .. }
-                | LoopInput::Steering { .. }
-                | LoopInput::SubagentSettled { .. }
-        ),
+        UserFacingInputDrainMode::Steering => {
+            matches!(
+                input,
+                LoopInput::UserMessage { .. }
+                    | LoopInput::Steering { .. }
+                    | LoopInput::SubagentSettled { .. }
+            )
+        }
         // Steering inputs are drainable at the reply-only exit boundary too: a
         // steering message that arrives during the run's FINAL model call is
         // never seen by the steering drain (which runs at iteration start), so
