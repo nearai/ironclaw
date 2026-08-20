@@ -197,10 +197,6 @@ fn domain_bounds_match_the_canonical_output_schema() {
         item_schema["properties"]["sources"]["items"]["maxLength"],
         serde_json::json!(MAX_SOURCE_LENGTH)
     );
-    assert_eq!(
-        item_schema["properties"]["sources"]["uniqueItems"],
-        serde_json::json!(true)
-    );
     assert!(item_schema["required"].as_array().is_some_and(|required| {
         required.iter().any(|name| name == "icon") && required.iter().any(|name| name == "sources")
     }));
@@ -364,4 +360,69 @@ fn accepted_start_binding_survives_replacement_generation_clearing_its_card() {
     )
     .expect("replacement generation must not turn an accepted start into an error");
     assert_eq!(result, binding);
+}
+
+/// Structured-output providers accept only a subset of JSON Schema. A
+/// `uniqueItems` on `sources` made every generation request fail with
+/// HTTP 400 before the model was ever called, so the canonical schema is
+/// pinned against the keywords that subset rejects. Source uniqueness is
+/// enforced by `validate_sources` instead.
+#[test]
+fn canonical_schema_avoids_provider_unsupported_structured_output_keywords() {
+    const UNSUPPORTED: [&str; 17] = [
+        "uniqueItems",
+        "contains",
+        "minContains",
+        "maxContains",
+        "unevaluatedItems",
+        "patternProperties",
+        "unevaluatedProperties",
+        "propertyNames",
+        "minProperties",
+        "maxProperties",
+        "allOf",
+        "oneOf",
+        "not",
+        "if",
+        "then",
+        "else",
+        "dependentSchemas",
+    ];
+
+    fn walk(node: &serde_json::Value, path: &str, found: &mut Vec<String>) {
+        match node {
+            serde_json::Value::Object(map) => {
+                for (key, value) in map {
+                    if UNSUPPORTED.contains(&key.as_str()) {
+                        found.push(format!("{path}/{key}"));
+                    }
+                    // Keys under `properties` are field names, not keywords.
+                    if key == "properties"
+                        && let Some(fields) = value.as_object()
+                    {
+                        for (field, schema) in fields {
+                            walk(schema, &format!("{path}/properties/{field}"), found);
+                        }
+                        continue;
+                    }
+                    walk(value, &format!("{path}/{key}"), found);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    walk(item, &format!("{path}/{index}"), found);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let schema: serde_json::Value =
+        serde_json::from_str(SUGGESTIONS_OUTPUT_SCHEMA).expect("canonical schema parses");
+    let mut found = Vec::new();
+    walk(&schema, "", &mut found);
+    assert!(
+        found.is_empty(),
+        "canonical suggestions schema uses provider-unsupported keywords: {found:?}"
+    );
 }
