@@ -57,8 +57,10 @@ permitted to hold one.
 - **Fresh store per call**, aggregate memory accounting across multi-memory
   components, fuel/epoch/table/instance ceilings (via the shared limiter).
 - **Bounded guest diagnostics:** guest-authored execution errors are scrubbed
-  at the sandbox-exit boundary and truncated on a UTF-8 boundary to the
-  canonical `MODEL_DIAGNOSTIC_MAX_BYTES` budget.
+  at the sandbox-exit boundary and bounded to the canonical
+  `MODEL_DIAGNOSTIC_MAX_BYTES` budget; recognized structured JSON envelopes
+  retain a parseable kind/code/message shape while unstructured text truncates
+  on a UTF-8 boundary.
 - **`wasm_sandbox_core` stays domain-free** — no product, capability,
   registry, filesystem, network, secrets, host-runtime, or composition
   references; scanned by

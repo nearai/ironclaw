@@ -505,6 +505,96 @@ fn execute_bounds_multibyte_guest_error_on_a_utf8_boundary() {
 }
 
 #[test]
+fn execute_bounds_structured_guest_error_without_corrupting_json() {
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+    let guest_message = format!(
+        "provider said \"no\" \\\\ {}",
+        "é".repeat(MODEL_DIAGNOSTIC_MAX_BYTES)
+    );
+    let guest_error = json!({
+        "code": "provider_rejected",
+        "kind": "operation_failed",
+        "message": guest_message,
+    })
+    .to_string();
+    let prepared = runtime
+        .prepare(
+            "guest-structured-error",
+            &tool_component(&guest_error_wat(&guest_error)),
+        )
+        .unwrap();
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: Vec::new(),
+    }));
+
+    let executed = runtime
+        .execute(
+            &prepared,
+            WitToolHost::deny_all().with_http(http),
+            WitToolRequest::new("{}"),
+        )
+        .unwrap();
+    let error = executed
+        .error
+        .expect("structured guest error should cross execute seam");
+    let payload: serde_json::Value =
+        serde_json::from_str(&error).expect("bounded structured error must remain JSON");
+
+    assert!(error.len() <= MODEL_DIAGNOSTIC_MAX_BYTES);
+    assert_eq!(payload["kind"], "operation_failed");
+    assert_eq!(payload["code"], "provider_rejected");
+    assert!(payload["message"].as_str().is_some());
+    assert!(payload["message"].as_str().unwrap().len() < guest_message.len());
+}
+
+#[test]
+fn execute_bounds_oversized_structured_code_without_corrupting_json() {
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+    let guest_code = "x".repeat(MODEL_DIAGNOSTIC_MAX_BYTES * 2);
+    let guest_error = json!({
+        "code": guest_code,
+        "kind": "operation_failed",
+        "message": "provider rejected request",
+        "unknown": "discarded guest metadata",
+    })
+    .to_string();
+    let prepared = runtime
+        .prepare(
+            "guest-oversized-code",
+            &tool_component(&guest_error_wat(&guest_error)),
+        )
+        .unwrap();
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: Vec::new(),
+    }));
+
+    let executed = runtime
+        .execute(
+            &prepared,
+            WitToolHost::deny_all().with_http(http),
+            WitToolRequest::new("{}"),
+        )
+        .unwrap();
+    let error = executed
+        .error
+        .expect("structured guest error should cross execute seam");
+    let payload: serde_json::Value =
+        serde_json::from_str(&error).expect("bounded structured error must remain JSON");
+
+    assert!(error.len() <= MODEL_DIAGNOSTIC_MAX_BYTES);
+    assert_eq!(payload["kind"], "operation_failed");
+    assert!(payload["code"]
+        .as_str()
+        .is_some_and(|code| code.len() < guest_code.len()));
+    assert_eq!(payload["message"], "provider rejected request");
+    assert!(payload.get("unknown").is_none());
+}
+
+#[test]
 fn allows_multiple_linear_memories_within_aggregate_memory_budget() {
     let runtime = WitToolRuntime::new(WitToolRuntimeConfig {
         default_limits: ironclaw_wasm::wasm_sandbox_core::SandboxLimits::default()
@@ -723,10 +813,13 @@ fn trap_after_http_wat() -> String {
 }
 
 fn guest_error_wat(error: &str) -> String {
+    let wat_error = error.replace('\\', "\\\\").replace('"', "\\\"");
     HTTP_TOOL_WAT
         .replace(
             "  (data (i32.const 3072) \"1\")",
-            &format!("  (data (i32.const 3072) \"1\")\n  (data (i32.const 16384) \"{error}\")"),
+            &format!(
+                "  (data (i32.const 3072) \"1\")\n  (data (i32.const 16384) \"{wat_error}\")"
+            ),
         )
         .replace(
             "i32.const 48\n    i32.const 1\n    i32.store\n    i32.const 52",
