@@ -1,8 +1,17 @@
 # Design System — Execution Plan (Phased)
 
-**Status:** Proposal, under review · **Authored against:** `origin/main` @ `d3791e0f8` · **Tracks:** Epic [#7038](https://github.com/nearai/ironclaw/issues/7038)
+**Status:** Proposal, under review · **Authored against:** `origin/main` @ `d3791e0f8` · **Tracks:** Epics [#7038](https://github.com/nearai/ironclaw/issues/7038) (Phases 1–2) · [#7781](https://github.com/nearai/ironclaw/issues/7781) (Phase 3) · [#7782](https://github.com/nearai/ironclaw/issues/7782) (Phases 4–5)
 
-This is the **when and how**; [CHECKLIST.md](CHECKLIST.md) is the **what** (definition of done); [PROPOSAL.md](PROPOSAL.md) is the frozen decision record. The five phases are **predefined** (Epic #7038) and executed in order. Nothing here is sacred except the ordering constraints marked **⚠**.
+This is the **when and how**; [CHECKLIST.md](CHECKLIST.md) is the **what** (definition of done); [PROPOSAL.md](PROPOSAL.md) is the frozen decision record. The five phases are **predefined** and executed in order; they are tracked across three Epics — **#7038** (Phases 1–2), **#7781** (Phase 3), **#7782** (Phases 4–5). Nothing here is sacred except the ordering constraints marked **⚠**.
+
+> **Epic ownership.** The original Epic #7038 was split into three so each wave has its own
+> tracking issue. This package is shared by all three:
+>
+> | Epic | Phases | Scope |
+> |---|---|---|
+> | [#7038](https://github.com/nearai/ironclaw/issues/7038) | 1–2 | Storybook integration scaffolding · `DESIGN.md` governance & documentation |
+> | [#7781](https://github.com/nearai/ironclaw/issues/7781) | 3 | Theme update & UI reskin — token values, dark palette, fonts, visual assets |
+> | [#7782](https://github.com/nearai/ironclaw/issues/7782) | 4–5 | Agentic interactions & components · Information architecture |
 
 **Operating principles:**
 1. **Docs first** — each phase updates `DESIGN.md` / this package before or with the code (APDD Rule 1).
@@ -12,40 +21,52 @@ This is the **when and how**; [CHECKLIST.md](CHECKLIST.md) is the **what** (defi
 
 ```mermaid
 flowchart LR
-  P1["Phase 1 · Storybook ✅ #7039"] --> P2["Phase 2 · DESIGN.md ✅ #7043"] --> P3["Phase 3 · Theme & reskin"] --> P4["Phase 4 · Interactions"] --> P5["Phase 5 · IA"]
+  P1["Phase 1 · Storybook · #7750"] --> P2["Phase 2 · DESIGN.md · #7042"] --> P3["Phase 3 · Theme & reskin"] --> P4["Phase 4 · Interactions"] --> P5["Phase 5 · IA"]
+  subgraph E1["Epic #7038"]
+    P1
+    P2
+  end
+  subgraph E2["Epic #7781"]
+    P3
+  end
+  subgraph E3["Epic #7782"]
+    P4
+    P5
+  end
 ```
 
-## Phase 1 — Storybook integration ✅ (LANDED — PR #7039)
+## Phase 1 — Storybook integration (PR #7750 — in review) · Epic #7038
 *Stand up the workbench + catalog.* Storybook 10 (react-vite, pnpm), wired to `app.css` + light/dark toolbar; ~33 stories in five categories; vitest split (`pnpm test` node-only, `pnpm test:storybook` in Chromium); addon-mcp.
-**Milestone:** catalog live; 106 story tests + 1021 node tests green.
+**Milestone:** catalog live; story + node suites green at the `crates/product/ironclaw_webui/frontend` path (103 story tests · 1355 node tests on #7750).
+**Note:** originally PR #7039 — closed and recreated as **#7750**, clean and non-stacked off current `main`.
 
-## Phase 2 — DESIGN.md governance & guidelines ✅ (LANDED — PR #7043)
+## Phase 2 — DESIGN.md governance & guidelines (issue #7042) · Epic #7038
 *Make the design system governed.* `DESIGN.md` (M3X spec + IronClaw appendix), Storybook `Design/Guidelines` page, `.claude/rules/design-system.md`, `CLAUDE.md` Module Specs pointer.
 **Milestone:** source of truth + agent rules in place; build-storybook green.
-**⚠ Ordering:** #7043 is stacked on #7039 — merge #7039, then retarget #7043 to `main` (PROPOSAL §7.6).
+**⚠ Ordering:** the original #7043 was stacked on #7039; both were closed for the resulting merge tangle. Merge **#7750** first, then land the Phase-2 changeset as a fresh PR off `main` (PROPOSAL §7.6).
 
-## Phase 3 — Theme update & UI reskin
+## Phase 3 — Theme update & UI reskin · Epic #7781
 *Change token values + assets to the M3X look; validate in Storybook.*
 - Resolve the Phase-3 dependencies first: **dark palette derivation**, **WCAG contrast validation**, **fonts/licensing** (PROPOSAL §7.3–§7.5).
 - Land M3 → `--v2-*` token *values* (light + dark) in `app.css`; refresh color/type/space/radius scales; vendor fonts.
 - Reskin primitives/composites against the new tokens; every change validated by its story + `CssCheck` + a11y.
 **Milestone:** new palette live in both themes, all `Tokens/*` stories pass contrast, primitives reskinned with green story tests.
-**⚠ Ordering:** token values land **before** component restyle; Phase 3 branches off `main` **after** #7039 + #7043 merge.
+**⚠ Ordering:** token values land **before** component restyle; Phase 3 branches off `main` **after** #7750 and the Phase-2 PR merge.
 
-## Phase 4 — Interaction & component updates (agentic-first)
+## Phase 4 — Interaction & component updates (agentic-first) · Epic #7782
 *Add the expressive, agent-first interactions + new components.*
 - Resolve the **animation approach** (reduced-motion-gated) and **MSW** for network-story happy-paths (PROPOSAL §7.2, §7.5).
 - Build the agentic components (composer toolbar, FAB speed-dial, chat bubbles, agent-activity/reasoning cards, branded progress, connected button groups); each ships with stories + play coverage.
 **Milestone:** agentic component set catalogued + story-tested; motion honors `prefers-reduced-motion`.
 **⚠ Ordering:** depends on Phase 3 tokens.
 
-## Phase 5 — Information architecture
+## Phase 5 — Information architecture · Epic #7782
 *Reshape navigation/routes/page structure to foreground agentic workflows.*
 - Revisit `app/routes.ts`, `pages/`, sidebar / `gateway-layout`; adopt the M3X navigation-rail pattern where it fits; ensure multi-channel parity.
 **Milestone:** IA restructured; CUJs (chat, approvals, projects, settings) verified unbroken.
 
 ## Suggested next PRs (concrete, in order)
-1. **Merge #7039**, then retarget + merge **#7043** (unblocks Phase 3).
+1. **Merge #7750**, then land the Phase-2 (#7042) changeset as a fresh PR off `main` — together they close Epic #7038 and unblock #7781.
 2. **Phase 3a — token foundation:** dark-palette + contrast + font vendoring in `app.css` (+ updated `Tokens/*` stories). No component restyle yet.
 3. **Phase 3b — primitive reskin:** restyle `design-system/` primitives against the new tokens, story-by-story.
 4. **Phase 4a — motion foundation:** choose + wire the animation approach behind the reduced-motion gate; add MSW.
@@ -53,5 +74,5 @@ flowchart LR
 
 ## Coordination notes
 - This is a **docs-only** PR; it changes no code. It references the open Phase-1/2 PRs by number.
-- Each later phase gets its **own sub-issue** under Epic #7038, spun up when the phase starts (per the Epic's tracking decision).
+- Each phase is tracked under its owning Epic — #7038 (1–2), #7781 (3), #7782 (4–5) — with per-phase sub-issues (e.g. #7042) spun up as work starts.
 - The APDD-kit evaluation (`docs/plans/apdd-governance-kit/`, PR #7255) is a sibling initiative that motivated this design-governance track; the two do not depend on each other.
