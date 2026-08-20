@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn thread_id_none_uses_and_reuses_the_user_container() {
-    let Some(_image) = docker_worker_image("optional thread identity test") else {
+    let Some((_image, _serial)) = docker_worker_image("optional thread identity test").await else {
         return;
     };
     let user = TestScope::unique("optional-thread");
@@ -63,7 +63,7 @@ async fn thread_id_none_uses_and_reuses_the_user_container() {
 
 #[tokio::test]
 async fn restarted_transport_reconciles_and_idles_an_unrequested_container() {
-    let Some(_image) = docker_worker_image("restart reconciliation test") else {
+    let Some((_image, _serial)) = docker_worker_image("restart reconciliation test").await else {
         return;
     };
     let user = TestScope::unique("reconcile");
@@ -100,7 +100,7 @@ async fn restarted_transport_reconciles_and_idles_an_unrequested_container() {
 #[tokio::test]
 #[ignore = "requires public DNS and Internet access; run as a live egress canary"]
 async fn sandbox_profile_allows_public_https_egress() {
-    let Some(_image) = docker_worker_image("sandbox egress canary") else {
+    let Some((_image, _serial)) = docker_worker_image("sandbox egress canary").await else {
         return;
     };
 

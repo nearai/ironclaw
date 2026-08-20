@@ -121,6 +121,7 @@ ironclaw_host_ingress = { path = "crates/product/ironclaw_host_ingress", version
 ironclaw_runtime_policy = { path = "crates/kernel/ironclaw_runtime_policy", version = "0.1.0" }
 ironclaw_common = { path = "crates/contracts/ironclaw_common" }
 ironclaw_safety = { path = "crates/substrates/ironclaw_safety" }
+ironclaw_sandbox = { path = "crates/lanes/ironclaw_sandbox" }
 ironclaw_trace_commons = { path = "crates/domains/ironclaw_trace_commons", version = "0.1.0" }
 # The Reborn integration harness provisions Postgres testcontainers in every
 # feature lane (StorageMode::Postgres skips at runtime when unavailable), so

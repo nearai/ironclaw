@@ -526,172 +526,105 @@ async fn explicit_invalidate_forces_a_requery() {
     assert_eq!(resolver.lookup.call_count(), 2);
 }
 
-/// Real-Docker check: a live container on the real egress network
-/// resolves to its real `{tenant, user}` labels via the production
-/// `NetworkContainerLookup for Docker` impl, not just the fake seam
-/// above. Follows this crate's existing gated-real-Docker convention
-/// (see `attribution.rs`'s `docker_gate` declaration).
-///
-/// Connects via `super::super::connect_docker()` — the same
-/// local-defaults-then-`unix_socket_candidates()` (`~/.colima/...`,
-/// `~/.rd/...`, etc.) fallback production uses — rather than
-/// `Docker::connect_with_local_defaults()` directly. `docker_gate::
-/// docker_available()` shells out to the `docker` CLI, which resolves
-/// the daemon through whatever context is active (Colima, Docker
-/// Desktop, a remote host); `connect_with_local_defaults()` alone only
-/// honors `DOCKER_HOST` or the hardcoded `/var/run/docker.sock`, so the
-/// CLI gate could report "available" while that direct connect still
-/// fails on any machine using a non-default socket. Reusing
-/// `connect_docker()` makes "available" mean the same thing to the gate
-/// and the connection, and — since even that broader fallback can't
-/// cover every possible context (e.g. a genuinely remote `DOCKER_HOST`)
-/// — a failure here is still a `SKIP`, never a panic/unwrap.
+/// Real-Docker proof that the production per-user transport creates labels
+/// which the production Docker attribution lookup can resolve.
 #[tokio::test]
-async fn real_docker_resolves_a_live_container_on_the_egress_network() {
+async fn real_docker_resolves_a_production_user_container() {
     if !docker_gate::docker_available() {
-        eprintln!(
-            "SKIP: no docker daemon reachable — real_docker_resolves_a_live_container_on_the_egress_network requires a real Docker daemon (CI/hosted Docker lane only)"
-        );
+        eprintln!("SKIP: production attribution proof requires a Docker daemon");
+        return;
+    }
+    let image = std::env::var("IRONCLAW_REBORN_SANDBOX_IMAGE")
+        .or_else(|_| std::env::var("IRONCLAW_SANDBOX_IMAGE"));
+    let image = match image {
+        Ok(image) => image,
+        Err(_) if !docker_gate::docker_tests_required() => {
+            eprintln!(
+                "SKIP: production attribution proof requires an explicitly configured worker image"
+            );
+            return;
+        }
+        Err(_) => docker_gate::configured_sandbox_image(),
+    };
+    if !docker_gate::docker_image_available(&image) {
+        eprintln!("SKIP: production attribution proof requires worker image {image:?}");
         return;
     }
 
     let docker = match super::super::connect_docker().await {
         Ok(docker) => docker,
-        Err(error) => {
-            // `docker_available()` reached a daemon through the `docker`
-            // CLI's context resolution, but `connect_docker()`'s
-            // narrower local-defaults + known-socket fallback could
-            // not — e.g. a `DOCKER_HOST` context the CLI understands but
-            // this fallback list doesn't cover. Under
-            // `IRONCLAW_REQUIRE_DOCKER_TESTS=1` that gap must not
-            // silently pass this required security test without ever
-            // exercising attribution, so panic here exactly like
-            // `docker_gate::docker_available()` does for its own
-            // required-but-unreachable case; only the optional local
-            // path gets the visible skip-and-return.
-            if docker_gate::docker_tests_required() {
-                panic!(
-                    "IRONCLAW_REQUIRE_DOCKER_TESTS=1 but connect_docker() could not reach \
-                     the daemon docker_available() found via the `docker` CLI ({error}) — \
-                     docker-gated tests must not silently skip in CI"
-                );
-            }
-            eprintln!(
-                "SKIP: docker_available() reported a reachable daemon via the `docker` CLI \
-                 (context-aware), but connect_docker()'s local-defaults + known-socket \
-                 fallback could not reach it ({error}) — \
-                 real_docker_resolves_a_live_container_on_the_egress_network requires a \
-                 daemon reachable at one of those paths (CI/hosted Docker lane only)"
-            );
+        Err(error) if !docker_gate::docker_tests_required() => {
+            eprintln!("SKIP: production attribution proof cannot connect to Docker: {error}");
             return;
         }
+        Err(error) => panic!(
+            "IRONCLAW_REQUIRE_DOCKER_TESTS=1 but production Docker connection failed: {error}"
+        ),
     };
-    let network_name = format!("ironclaw-test-attribution-{}", uuid::Uuid::new_v4());
+    let temp = tempfile::tempdir().expect("attribution workspace tempdir");
     let tenant = TenantId::new("attribution-tenant").unwrap();
     let user = UserId::new("attribution-user").unwrap();
-
-    // The CI Docker runner has a working daemon but not necessarily this
-    // image cached — pull it explicitly rather than relying on whatever
-    // happens to already be present (a bare `create_container` below
-    // would otherwise pass only on a machine that already has the image,
-    // which is exactly the gap that let this test fail in CI while
-    // passing on a developer's laptop). Draining the stream to
-    // completion waits for the pull to finish before we try to use the
-    // image.
-    use futures_util::StreamExt as _;
-    let mut pull_stream = docker.create_image(
-        Some(bollard::image::CreateImageOptions {
-            from_image: "busybox",
-            tag: "1.36",
-            ..Default::default()
-        }),
-        None,
-        None,
-    );
-    while let Some(progress) = pull_stream.next().await {
-        progress.expect("busybox:1.36 image pull succeeds");
-    }
-
-    docker
-        .create_network(bollard::network::CreateNetworkOptions {
-            name: network_name.clone(),
-            internal: true,
-            ..Default::default()
-        })
+    let scope = ironclaw_host_api::resource::ResourceScope {
+        tenant_id: tenant.clone(),
+        user_id: user.clone(),
+        agent_id: Some(ironclaw_host_api::ids::AgentId::new("attribution-agent").unwrap()),
+        project_id: Some(ironclaw_host_api::ids::ProjectId::new("attribution-project").unwrap()),
+        mission_id: None,
+        thread_id: Some(ironclaw_host_api::ids::ThreadId::new("attribution-thread").unwrap()),
+        invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+    };
+    let key = super::super::RebornSandboxUserKey::from_scope(&scope);
+    let container_name = key.container_name();
+    let config = super::super::RebornSandboxConfig::new(temp.path().join("workspaces"))
+        .with_image(image)
+        .with_network_enabled();
+    let transport = super::super::RebornScopedSandboxCommandTransport::connect(config)
         .await
-        .expect("test network create succeeds");
-
-    let container_name = format!("ironclaw-test-attribution-c-{}", uuid::Uuid::new_v4());
-    // The security-posture stamp (W16) is irrelevant to attribution — this
-    // test only cares that the tenant/user labels resolve from an IP — so
-    // any non-empty stamp value works here.
-    let create_labels = super::super::registry::build_user_container_labels(
-        PREFIX,
-        &tenant,
-        &user,
-        "attribution-test-posture-stamp",
-    );
-    let created = docker
-        .create_container(
-            Some(bollard::container::CreateContainerOptions {
-                name: container_name.clone(),
-                platform: None,
-            }),
-            bollard::container::Config {
-                image: Some("busybox:1.36".to_string()),
-                cmd: Some(vec!["sleep".to_string(), "60".to_string()]),
-                labels: Some(create_labels),
-                host_config: Some(bollard::models::HostConfig {
-                    network_mode: Some(network_name.clone()),
-                    auto_remove: Some(false),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("test container create succeeds");
-    docker
-        .start_container(
-            &created.id,
-            None::<bollard::container::StartContainerOptions<String>>,
-        )
-        .await
-        .expect("test container start succeeds");
+        .expect("production sandbox transport connects");
+    let command = ironclaw_host_api::process::CommandExecutionRequest {
+        scope,
+        mounts: None,
+        command: "true".to_string(),
+        workdir: Some("/workspace".to_string()),
+        timeout_secs: Some(30),
+        extra_env: HashMap::new(),
+    };
+    let command_output =
+        ironclaw_host_api::process::SandboxCommandTransport::run_command(&transport, command)
+            .await
+            .expect("production transport creates and executes in the user container");
+    assert_eq!(command_output.exit_code, 0);
 
     let inspected = docker
         .inspect_container(
-            &created.id,
+            &container_name,
             None::<bollard::container::InspectContainerOptions>,
         )
         .await
-        .expect("test container inspect succeeds");
+        .expect("production user container remains available for attribution");
+    let network_name = "bridge";
     let ip: IpAddr = inspected
         .network_settings
         .and_then(|settings| settings.networks)
-        .and_then(|networks| networks.get(&network_name).cloned())
+        .and_then(|networks| networks.get(network_name).cloned())
         .and_then(|endpoint| endpoint.ip_address)
         .filter(|ip| !ip.is_empty())
-        .expect("test container has an ip on the test network")
+        .expect("production user container has an IP on the Docker bridge")
         .parse()
-        .expect("test container ip parses");
-
-    let resolver = ConnectionAttributionResolver::new(docker.clone(), network_name.clone(), PREFIX);
+        .expect("production user-container IP parses");
+    let resolver = ConnectionAttributionResolver::new(docker.clone(), network_name, PREFIX);
     let outcome = resolver.resolve(ip).await;
 
-    // Best-effort cleanup regardless of assertion outcome, so a failed
-    // assertion never leaves the daemon dirty.
+    drop(transport);
     let _ = docker
         .remove_container(
-            &created.id,
+            &container_name,
             Some(bollard::container::RemoveContainerOptions {
                 force: true,
                 ..Default::default()
             }),
         )
         .await;
-    let _ = docker.remove_network(&network_name).await;
-
     assert_eq!(
         outcome,
         ConnectionAttribution::Attributed {

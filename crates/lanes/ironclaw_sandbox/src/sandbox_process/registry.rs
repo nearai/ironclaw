@@ -21,6 +21,12 @@ use ironclaw_host_api::{
 
 use crate::sandbox_process::user_key::RebornSandboxUserKey;
 
+pub(crate) const USER_CONTAINER_LABEL_PREFIX: &str = "ironclaw";
+pub(crate) const USER_CONTAINER_LABEL_TENANT: &str = "ironclaw.tenant";
+pub(crate) const USER_CONTAINER_LABEL_USER: &str = "ironclaw.user";
+pub(crate) const USER_CONTAINER_LABEL_IMAGE: &str = "ironclaw.image";
+pub(crate) const USER_CONTAINER_LABEL_SECURITY_POSTURE: &str = "ironclaw.security_posture";
+
 pub(crate) fn label_tenant(prefix: &str) -> String {
     format!("{prefix}.tenant")
 }

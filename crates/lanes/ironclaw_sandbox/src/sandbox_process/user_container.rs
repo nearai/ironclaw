@@ -28,7 +28,7 @@ use super::{
     user_key::RebornSandboxUserKey,
 };
 
-pub(super) const LABEL_PREFIX: &str = "ironclaw";
+pub(super) const LABEL_PREFIX: &str = super::registry::USER_CONTAINER_LABEL_PREFIX;
 const EXEC_HELPER: &str = "/usr/local/bin/ironclaw-exec";
 const HOST_TIMEOUT_GRACE: Duration = Duration::from_secs(5);
 const CONTAINER_STOP_TIMEOUT_SECS: i64 = 10;
@@ -40,6 +40,11 @@ pub(super) struct UserContainerLaunch {
     pub(super) labels: HashMap<String, String>,
 }
 
+/// Transport-local idle Docker cleanup.
+///
+/// This never owns durable run state; `ironclaw_processes` remains the process
+/// lifecycle authority. Reconciliation after a host restart is demand-driven
+/// by the next command, not by this in-memory task.
 pub(super) struct UserContainerSweeper {
     shutdown: tokio::sync::watch::Sender<bool>,
     task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -77,16 +82,40 @@ impl UserContainerSweeper {
         })
     }
 
-    pub(super) async fn shutdown(&self) {
-        let _ = self.shutdown.send(true);
-        let task = self
-            .task
+    fn take_task(&self) -> Option<tokio::task::JoinHandle<()>> {
+        self.task
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
-            .take();
-        if let Some(task) = task {
+            .take()
+    }
+
+    pub(super) async fn shutdown(&self) {
+        let _ = self.shutdown.send(true);
+        if let Some(task) = self.take_task() {
             let _ = task.await;
         }
+    }
+}
+
+impl Drop for UserContainerSweeper {
+    fn drop(&mut self) {
+        let _ = self.shutdown.send(true);
+        if let Some(task) = self.take_task() {
+            task.abort();
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) mod test_support {
+    use super::*;
+
+    pub(in crate::sandbox_process) fn disabled_sweeper() -> Arc<UserContainerSweeper> {
+        let (shutdown, _receiver) = tokio::sync::watch::channel(false);
+        Arc::new(UserContainerSweeper {
+            shutdown,
+            task: std::sync::Mutex::new(None),
+        })
     }
 }
 
@@ -508,7 +537,14 @@ async fn sweep_idle_user_containers(
                 }
                 registry.forget_if_inactive(&key);
             }
-            ExistingContainerDecision::StartStopped | ExistingContainerDecision::Recreate => {
+            ExistingContainerDecision::StartStopped => {
+                registry.forget_if_inactive(&key);
+            }
+            ExistingContainerDecision::Recreate => {
+                if let Err(error) = remove_user_container(docker, &name).await {
+                    tracing::debug!(?error, container_name = name, "idle sandbox recycle failed");
+                    continue;
+                }
                 registry.forget_if_inactive(&key);
             }
         }
@@ -746,6 +782,65 @@ mod tests {
         assert_eq!(
             user_container_adoption_decision(&wrong_posture, &expected),
             ExistingContainerDecision::Recreate
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_container_removal_is_reported_and_retained_for_retry() {
+        let unavailable = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", unavailable.local_addr().unwrap());
+        drop(unavailable);
+        let docker = Docker::connect_with_http(&endpoint, 1, bollard::API_DEFAULT_VERSION).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let transport = super::super::test_support::transport(
+            docker,
+            super::super::RebornSandboxConfig::new(temp.path().join("workspaces")),
+        );
+        let tenant = TenantId::new("recycle-failure-tenant").unwrap();
+        let user = UserId::new("recycle-failure-user").unwrap();
+        let key = RebornSandboxUserKey::from_tenant_user(&tenant, &user);
+        let _activity = transport.activity.begin(&key).unwrap();
+        let container_name = key.container_name();
+
+        let error = remove_user_container(&transport.docker, &container_name)
+            .await
+            .expect_err("Docker removal failure must reach the caller");
+        assert!(
+            error
+                .to_string()
+                .contains("sandbox container recycle failed"),
+            "removal error lost its operation context: {error}"
+        );
+
+        recycle_untrusted_user_container(&transport, &key, &container_name).await;
+        assert!(
+            transport.activity.recycle_required(&key),
+            "failed cleanup must remain marked so the next serialized command retries it"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_last_sweeper_owner_aborts_its_task() {
+        let registry = Arc::new(SandboxActivityRegistry::new());
+        let registry_weak = Arc::downgrade(&registry);
+        let task_registry = Arc::clone(&registry);
+        let (shutdown, _receiver) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move {
+            std::future::pending::<()>().await;
+            drop(task_registry);
+        });
+        let sweeper = Arc::new(UserContainerSweeper {
+            shutdown,
+            task: std::sync::Mutex::new(Some(task)),
+        });
+
+        drop(registry);
+        drop(sweeper);
+        tokio::task::yield_now().await;
+
+        assert!(
+            registry_weak.upgrade().is_none(),
+            "dropping the final sweeper owner must release task captures"
         );
     }
 }

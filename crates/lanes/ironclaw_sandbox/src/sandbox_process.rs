@@ -19,6 +19,7 @@ use bollard::{
     container::Config,
     models::{HostConfig, HostConfigLogConfig},
 };
+use fs2::FileExt;
 use ironclaw_host_api::resource::ResourceScope;
 
 use ironclaw_host_api::process::{
@@ -60,9 +61,26 @@ pub use registry::SandboxActivityRegistry;
 pub use scope_key::RebornSandboxScopeKey;
 pub use user_key::RebornSandboxUserKey;
 
+/// Stable Docker container-name prefix used by the local per-user sandbox.
+pub const USER_SANDBOX_CONTAINER_NAME_PREFIX: &str = user_key::USER_CONTAINER_NAME_PREFIX;
+/// Number of hexadecimal digest characters in a local per-user container name.
+pub const USER_SANDBOX_CONTAINER_DIGEST_HEX_LEN: usize = user_key::USER_CONTAINER_DIGEST_HEX_LEN;
+/// Stable tenant label on local per-user sandbox containers.
+pub const USER_SANDBOX_LABEL_TENANT: &str = registry::USER_CONTAINER_LABEL_TENANT;
+/// Stable user label on local per-user sandbox containers.
+pub const USER_SANDBOX_LABEL_USER: &str = registry::USER_CONTAINER_LABEL_USER;
+/// Stable immutable-image label on local per-user sandbox containers.
+pub const USER_SANDBOX_LABEL_IMAGE: &str = registry::USER_CONTAINER_LABEL_IMAGE;
+/// Stable security-posture label on local per-user sandbox containers.
+pub const USER_SANDBOX_LABEL_SECURITY_POSTURE: &str =
+    registry::USER_CONTAINER_LABEL_SECURITY_POSTURE;
+
 const DEFAULT_IMAGE: &str = "ironclaw-worker:latest";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(shell_limits::SHELL_TIMEOUT_DEFAULT_SECS);
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+// Cover the longest admitted shell command plus host-kill and reconcile grace.
+const USER_LIFECYCLE_GATE_ACQUIRE_TIMEOUT: Duration =
+    Duration::from_secs(shell_limits::SHELL_TIMEOUT_MAX_SECS + 10);
 const DEFAULT_MEMORY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DEFAULT_CPU_SHARES: u32 = 1024;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = shell_limits::SHELL_OUTPUT_LIMIT_DEFAULT_BYTES as usize;
@@ -245,12 +263,83 @@ impl RebornSandboxConfig {
     }
 }
 
+struct LocalDockerOwnerLock {
+    _file: std::fs::File,
+}
+
+impl LocalDockerOwnerLock {
+    async fn acquire(workspace_root: &Path) -> Result<Arc<Self>, RuntimeProcessError> {
+        tokio::fs::create_dir_all(workspace_root)
+            .await
+            .map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox workspace root could not be initialized: {error}"
+                ))
+            })?;
+        let lock_path = workspace_root.join(".ironclaw-sandbox-owner.lock");
+        let file = tokio::task::spawn_blocking(move || {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(lock_path)
+                .map_err(|error| {
+                    RuntimeProcessError::ExecutionFailed(format!(
+                        "sandbox workspace ownership could not be opened: {error}"
+                    ))
+                })?;
+            file.try_lock_exclusive().map_err(|error| {
+                if error.kind() == std::io::ErrorKind::WouldBlock {
+                    RuntimeProcessError::ExecutionFailed(
+                        "sandbox Docker workspace is already owned by another IronClaw process"
+                            .to_string(),
+                    )
+                } else {
+                    RuntimeProcessError::ExecutionFailed(format!(
+                        "sandbox workspace ownership could not be acquired: {error}"
+                    ))
+                }
+            })?;
+            Ok(file)
+        })
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox workspace ownership task failed: {error}"
+            ))
+        })??;
+        Ok(Arc::new(Self { _file: file }))
+    }
+}
+
 #[derive(Clone)]
 pub struct RebornScopedSandboxCommandTransport {
     docker: Docker,
     config: RebornSandboxConfig,
     activity: Arc<SandboxActivityRegistry>,
-    sweeper: Option<Arc<user_container::UserContainerSweeper>>,
+    sweeper: Arc<user_container::UserContainerSweeper>,
+    _owner_lock: Arc<LocalDockerOwnerLock>,
+}
+
+#[cfg(test)]
+mod test_support {
+    use super::*;
+
+    pub(super) fn transport(
+        docker: Docker,
+        config: RebornSandboxConfig,
+    ) -> RebornScopedSandboxCommandTransport {
+        RebornScopedSandboxCommandTransport {
+            docker,
+            config,
+            activity: Arc::new(SandboxActivityRegistry::new()),
+            sweeper: user_container::test_support::disabled_sweeper(),
+            _owner_lock: Arc::new(LocalDockerOwnerLock {
+                _file: tempfile::tempfile().expect("create test-only ownership handle"),
+            }),
+        }
+    }
 }
 
 impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
@@ -269,36 +358,25 @@ impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
 
 impl RebornScopedSandboxCommandTransport {
     pub async fn connect(config: RebornSandboxConfig) -> Result<Self, RuntimeProcessError> {
+        let owner_lock = LocalDockerOwnerLock::acquire(&config.workspace_root).await?;
         let docker = connect_docker().await?;
-        Ok(Self::new(docker, config).with_sweeper())
-    }
-
-    /// Construct a side-effect-free transport around an existing Docker client.
-    ///
-    /// This constructor does not require an active Tokio runtime. Idle cleanup
-    /// is enabled by the async production constructor [`Self::connect`].
-    pub fn new(docker: Docker, config: RebornSandboxConfig) -> Self {
-        Self {
+        let activity = Arc::new(SandboxActivityRegistry::new());
+        let sweeper = user_container::UserContainerSweeper::spawn(
+            docker.clone(),
+            Arc::clone(&activity),
+            config.idle_timeout,
+        );
+        Ok(Self {
             docker,
             config,
-            activity: Arc::new(SandboxActivityRegistry::new()),
-            sweeper: None,
-        }
-    }
-
-    fn with_sweeper(mut self) -> Self {
-        self.sweeper = Some(user_container::UserContainerSweeper::spawn(
-            self.docker.clone(),
-            Arc::clone(&self.activity),
-            self.config.idle_timeout,
-        ));
-        self
+            activity,
+            sweeper,
+            _owner_lock: owner_lock,
+        })
     }
 
     pub async fn shutdown(&self) {
-        if let Some(sweeper) = &self.sweeper {
-            sweeper.shutdown().await;
-        }
+        self.sweeper.shutdown().await;
     }
 
     // `into_process_port` was deleted with the lane merge: it returned
@@ -497,7 +575,8 @@ impl RebornScopedSandboxCommandTransport {
             resolved_image,
         );
         launch.config.labels = Some(launch.labels.clone());
-        let _user_lifecycle = gate.lock().await;
+        let _user_lifecycle =
+            acquire_user_lifecycle_gate(&gate, USER_LIFECYCLE_GATE_ACQUIRE_TIMEOUT).await?;
         let container_name =
             user_container::ensure_user_container(&self, &user_key, launch).await?;
         let result = user_container::execute_in_user_container(
@@ -512,6 +591,20 @@ impl RebornScopedSandboxCommandTransport {
         drop(activity);
         result
     }
+}
+
+async fn acquire_user_lifecycle_gate(
+    gate: &tokio::sync::Mutex<()>,
+    timeout: Duration,
+) -> Result<tokio::sync::MutexGuard<'_, ()>, RuntimeProcessError> {
+    tokio::time::timeout(timeout, gate.lock())
+        .await
+        .map_err(|error| {
+            tracing::debug!(?error, "sandbox user lifecycle gate acquisition timed out");
+            RuntimeProcessError::ExecutionFailed(
+                "sandbox is busy: timed out waiting for another command for this user".to_string(),
+            )
+        })
 }
 
 #[async_trait]
@@ -705,13 +798,29 @@ mod tests {
     }
 
     #[test]
-    fn direct_constructor_is_side_effect_free_without_tokio_runtime() {
+    fn test_constructor_works_without_tokio_runtime() {
         let docker = Docker::connect_with_local_defaults().expect("construct Docker client");
-        let transport = RebornScopedSandboxCommandTransport::new(
+        let _transport = test_support::transport(
             docker,
             RebornSandboxConfig::new("/tmp/reborn-sandbox-pure-constructor"),
         );
-        assert!(transport.sweeper.is_none());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_gate_wait_is_bounded() {
+        let gate = tokio::sync::Mutex::new(());
+        let _held = gate.lock().await;
+
+        let error = acquire_user_lifecycle_gate(&gate, Duration::from_millis(1))
+            .await
+            .expect_err("contended lifecycle gate must time out");
+
+        assert_eq!(
+            error,
+            RuntimeProcessError::ExecutionFailed(
+                "sandbox is busy: timed out waiting for another command for this user".to_string()
+            )
+        );
     }
 
     #[test]
@@ -932,10 +1041,8 @@ mod tests {
             .unwrap()
             .with_secret_broker_unix_socket(&secret_socket)
             .unwrap();
-        let transport = RebornScopedSandboxCommandTransport::new(
-            Docker::connect_with_local_defaults().unwrap(),
-            config,
-        );
+        let transport =
+            test_support::transport(Docker::connect_with_local_defaults().unwrap(), config);
         // Config-shape tests inject an immutable identity directly; only the
         // real run path resolves the configured reference through Docker.
         let launch = transport
@@ -1020,10 +1127,8 @@ mod tests {
         let config = RebornSandboxConfig::new(temp.path().join("workspaces"))
             .with_network_broker_proxy_url("http://broker.internal:8181")
             .unwrap();
-        let transport = RebornScopedSandboxCommandTransport::new(
-            Docker::connect_with_local_defaults().unwrap(),
-            config,
-        );
+        let transport =
+            test_support::transport(Docker::connect_with_local_defaults().unwrap(), config);
         let launch = transport
             .user_container_launch_config(
                 &CommandExecutionRequest {
@@ -1062,7 +1167,7 @@ mod tests {
         let unavailable = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}", unavailable.local_addr().unwrap());
         let docker = Docker::connect_with_http(&endpoint, 1, bollard::API_DEFAULT_VERSION).unwrap();
-        let transport = RebornScopedSandboxCommandTransport::new(
+        let transport = test_support::transport(
             docker,
             RebornSandboxConfig::new(temp.path().join("workspaces")),
         );
@@ -1086,7 +1191,7 @@ mod tests {
     async fn run_command_rejects_unconfigured_scoped_mount_before_container_create() {
         let temp = tempfile::tempdir().unwrap();
         let docker = Docker::connect_with_local_defaults().unwrap();
-        let transport = RebornScopedSandboxCommandTransport::new(
+        let transport = test_support::transport(
             docker,
             RebornSandboxConfig::new(temp.path().join("workspaces")),
         );

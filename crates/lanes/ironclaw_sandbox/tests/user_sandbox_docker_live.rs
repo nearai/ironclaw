@@ -14,7 +14,11 @@ mod docker_gate;
 mod user_sandbox_live;
 use user_sandbox_live::*;
 
-fn docker_worker_image(test_name: &str) -> Option<String> {
+static LIVE_DOCKER_TEST_SERIALIZER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn docker_worker_image(
+    test_name: &str,
+) -> Option<(String, tokio::sync::MutexGuard<'static, ()>)> {
     if !docker_gate::docker_available() {
         eprintln!("SKIP: {test_name} — no Docker daemon is reachable");
         return None;
@@ -24,7 +28,19 @@ fn docker_worker_image(test_name: &str) -> Option<String> {
         eprintln!("SKIP: {test_name} — worker image {image:?} is not built");
         return None;
     }
-    Some(image)
+    let serial = LIVE_DOCKER_TEST_SERIALIZER.lock().await;
+    Some((image, serial))
+}
+
+async fn wait_for_host_path(path: &std::path::Path, timeout: Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if path.exists() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("host path {path:?} was not created within {timeout:?}");
 }
 
 #[path = "user_sandbox_docker_live/extra.rs"]
@@ -32,7 +48,7 @@ mod extra;
 
 #[tokio::test]
 async fn user_container_reuses_state_across_threads_and_isolates_other_users_and_tenants() {
-    let Some(_image) = docker_worker_image("user container reuse test") else {
+    let Some((_image, _serial)) = docker_worker_image("user container reuse test").await else {
         return;
     };
     let primary = TestScope::unique("reuse");
@@ -183,7 +199,7 @@ async fn user_container_reuses_state_across_threads_and_isolates_other_users_and
 
 #[tokio::test]
 async fn concurrent_first_calls_from_threads_converge_then_new_transport_adopts_user_container() {
-    let Some(_image) = docker_worker_image("user container adoption test") else {
+    let Some((_image, _serial)) = docker_worker_image("user container adoption test").await else {
         return;
     };
     let primary = TestScope::unique("adopt");
@@ -248,8 +264,118 @@ async fn concurrent_first_calls_from_threads_converge_then_new_transport_adopts_
 }
 
 #[tokio::test]
+async fn workspace_owner_lock_rejects_a_second_live_transport() {
+    let Some((_image, _serial)) = docker_worker_image("workspace owner lock test").await else {
+        return;
+    };
+    let temp = docker_visible_tempdir();
+    let config = RebornSandboxConfig::new(temp.path().join("sandbox-workspaces"));
+    let first = RebornScopedSandboxCommandTransport::connect(config.clone())
+        .await
+        .expect("first transport acquires workspace ownership");
+
+    let error = RebornScopedSandboxCommandTransport::connect(config.clone())
+        .await
+        .expect_err("second live transport must not share workspace ownership");
+    assert!(
+        error.to_string().contains("already owned"),
+        "ownership error must be sanitized and actionable: {error}"
+    );
+
+    drop(first);
+    RebornScopedSandboxCommandTransport::connect(config)
+        .await
+        .expect("workspace ownership releases with the final transport");
+}
+
+#[tokio::test]
+#[ignore = "subprocess entrypoint for workspace ownership proof"]
+async fn workspace_owner_lock_child_process() {
+    let Ok(role) = std::env::var("IRONCLAW_SANDBOX_OWNER_LOCK_CHILD") else {
+        return;
+    };
+    let workspace_root = std::env::var("IRONCLAW_SANDBOX_OWNER_LOCK_ROOT")
+        .expect("owner-lock child receives workspace root");
+    let ready_path = std::env::var("IRONCLAW_SANDBOX_OWNER_LOCK_READY")
+        .expect("owner-lock child receives ready path");
+    let release_path = std::env::var("IRONCLAW_SANDBOX_OWNER_LOCK_RELEASE")
+        .expect("owner-lock child receives release path");
+    let config = RebornSandboxConfig::new(workspace_root);
+
+    match role.as_str() {
+        "owner" => {
+            let transport = RebornScopedSandboxCommandTransport::connect(config)
+                .await
+                .expect("owner child acquires workspace ownership");
+            std::fs::write(&ready_path, b"ready").expect("owner child signals readiness");
+            wait_for_host_path(std::path::Path::new(&release_path), Duration::from_secs(30)).await;
+            drop(transport);
+        }
+        "contender" => {
+            let error = RebornScopedSandboxCommandTransport::connect(config)
+                .await
+                .expect_err("independent process must not share workspace ownership");
+            assert!(
+                error.to_string().contains("already owned"),
+                "cross-process ownership error must be sanitized and actionable: {error}"
+            );
+        }
+        unexpected => panic!("unexpected owner-lock child role {unexpected:?}"),
+    }
+}
+
+#[tokio::test]
+async fn workspace_owner_lock_rejects_an_independent_process() {
+    let Some((_image, _serial)) =
+        docker_worker_image("cross-process workspace owner lock test").await
+    else {
+        return;
+    };
+    let temp = docker_visible_tempdir();
+    let workspace_root = temp.path().join("sandbox-workspaces");
+    let ready_path = temp.path().join("owner-ready");
+    let release_path = temp.path().join("owner-release");
+    let test_binary = std::env::current_exe().expect("current integration-test binary is known");
+    let child_args = [
+        "--exact",
+        "workspace_owner_lock_child_process",
+        "--ignored",
+        "--nocapture",
+    ];
+
+    let mut owner = Command::new(&test_binary)
+        .args(child_args)
+        .env("IRONCLAW_SANDBOX_OWNER_LOCK_CHILD", "owner")
+        .env("IRONCLAW_SANDBOX_OWNER_LOCK_ROOT", &workspace_root)
+        .env("IRONCLAW_SANDBOX_OWNER_LOCK_READY", &ready_path)
+        .env("IRONCLAW_SANDBOX_OWNER_LOCK_RELEASE", &release_path)
+        .spawn()
+        .expect("owner child process starts");
+    wait_for_host_path(&ready_path, Duration::from_secs(10)).await;
+
+    let contender = Command::new(&test_binary)
+        .args(child_args)
+        .env("IRONCLAW_SANDBOX_OWNER_LOCK_CHILD", "contender")
+        .env("IRONCLAW_SANDBOX_OWNER_LOCK_ROOT", &workspace_root)
+        .env("IRONCLAW_SANDBOX_OWNER_LOCK_READY", &ready_path)
+        .env("IRONCLAW_SANDBOX_OWNER_LOCK_RELEASE", &release_path)
+        .output()
+        .expect("contender child process runs");
+    std::fs::write(&release_path, b"release").expect("parent releases owner child");
+    let owner_status = owner.wait().expect("owner child process exits");
+
+    assert!(
+        contender.status.success(),
+        "contender child did not observe the ownership rejection: {}",
+        String::from_utf8_lossy(&contender.stderr)
+    );
+    assert!(owner_status.success(), "owner child exited unsuccessfully");
+}
+
+#[tokio::test]
 async fn same_user_shell_commands_are_intentionally_serialized_across_threads() {
-    let Some(_image) = docker_worker_image("same-user command serialization test") else {
+    let Some((_image, _serial)) = docker_worker_image("same-user command serialization test").await
+    else {
         return;
     };
     let primary = TestScope::unique("serialize");
@@ -376,7 +502,7 @@ async fn same_user_shell_commands_are_intentionally_serialized_across_threads() 
 
 #[tokio::test]
 async fn different_users_execute_in_parallel() {
-    let Some(_image) = docker_worker_image("cross-user parallelism test") else {
+    let Some((_image, _serial)) = docker_worker_image("cross-user parallelism test").await else {
         return;
     };
     let first_user = TestScope::unique("parallel-a");
@@ -442,7 +568,8 @@ async fn different_users_execute_in_parallel() {
 
 #[tokio::test]
 async fn aborting_caller_does_not_release_same_user_serialization() {
-    let Some(_image) = docker_worker_image("user container cancellation test") else {
+    let Some((_image, _serial)) = docker_worker_image("user container cancellation test").await
+    else {
         return;
     };
     let primary = TestScope::unique("cancel");
@@ -504,7 +631,7 @@ async fn aborting_caller_does_not_release_same_user_serialization() {
 
 #[tokio::test]
 async fn stopped_user_container_restarts_and_image_mismatch_recycles_it() {
-    let Some(_image) = docker_worker_image("user container recycle test") else {
+    let Some((_image, _serial)) = docker_worker_image("user container recycle test").await else {
         return;
     };
     let primary = TestScope::unique("recycle");
@@ -591,7 +718,8 @@ async fn stopped_user_container_restarts_and_image_mismatch_recycles_it() {
 
 #[tokio::test]
 async fn foreground_exit_reaps_descendant_that_detaches_into_a_new_session() {
-    let Some(_image) = docker_worker_image("detached descendant cleanup test") else {
+    let Some((_image, _serial)) = docker_worker_image("detached descendant cleanup test").await
+    else {
         return;
     };
     let user = TestScope::unique("detached");
@@ -647,7 +775,8 @@ async fn foreground_exit_reaps_descendant_that_detaches_into_a_new_session() {
 
 #[tokio::test]
 async fn mutable_image_tag_retarget_recycles_existing_user_container() {
-    let Some(base_image) = docker_worker_image("mutable sandbox image test") else {
+    let Some((base_image, _serial)) = docker_worker_image("mutable sandbox image test").await
+    else {
         return;
     };
     let user = TestScope::unique("mutable-image");
@@ -695,8 +824,34 @@ async fn mutable_image_tag_retarget_recycles_existing_user_container() {
 }
 
 #[tokio::test]
+async fn idle_sweeper_reclaims_an_incompatible_running_container() {
+    let Some((_image, _serial)) = docker_worker_image("incompatible idle container test").await
+    else {
+        return;
+    };
+    let user = TestScope::unique("incompatible-idle");
+    let temp = docker_visible_tempdir();
+    let mut cleanup = DockerCleanup::with_scopes([user.clone()]);
+    let transport = RebornScopedSandboxCommandTransport::connect(
+        RebornSandboxConfig::new(temp.path().join("sandbox-workspaces"))
+            .with_idle_timeout(Duration::from_secs(1)),
+    )
+    .await
+    .expect("Docker transport connects");
+    transport
+        .run_command(request(user.resource_scope(), "echo READY_TO_RECYCLE"))
+        .await
+        .expect("user container starts");
+    let container = cleanup.capture(&user);
+
+    docker_command(&["container", "pause", &container.id]);
+    wait_for_container_absent(&container.id, Duration::from_secs(10)).await;
+    cleanup.container_ids.remove(&container.id);
+}
+
+#[tokio::test]
 async fn timeout_kills_descendants_while_nonzero_exit_remains_output() {
-    let Some(_image) = docker_worker_image("user container timeout test") else {
+    let Some((_image, _serial)) = docker_worker_image("user container timeout test").await else {
         return;
     };
     let thread = TestScope::unique("timeout");
@@ -784,7 +939,9 @@ async fn timeout_kills_descendants_while_nonzero_exit_remains_output() {
 
 #[tokio::test]
 async fn idle_stop_respects_one_active_serialized_command_and_restarts_the_same_container() {
-    let Some(_image) = docker_worker_image("serialized user container idle-stop test") else {
+    let Some((_image, _serial)) =
+        docker_worker_image("serialized user container idle-stop test").await
+    else {
         return;
     };
     let primary = TestScope::unique("idle");

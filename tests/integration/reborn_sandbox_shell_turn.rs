@@ -9,184 +9,22 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
-use std::{
-    collections::{HashMap, HashSet},
-    process::Command,
-};
+#[allow(dead_code)]
+#[path = "../../crates/lanes/ironclaw_sandbox/tests/support/user_sandbox_live.rs"]
+mod user_sandbox_live;
 
 use ironclaw_host_api::ids::InvocationId;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
+use user_sandbox_live::{
+    CONTAINER_DIGEST_HEX_LEN, CONTAINER_PREFIX, ContainerIdentity, DockerCleanup, LABEL_TENANT,
+    LABEL_USER,
+};
 
-const CONTAINER_PREFIX: &str = "ironclaw-reborn-sandbox-user-";
-const LABEL_TENANT: &str = "ironclaw.tenant";
-const LABEL_USER: &str = "ironclaw.user";
 const CONTAINER_MARKER: &str = "SANDBOX_SHELL_IN_CONTAINER";
 const EPHEMERAL_MARKER: &str = "SANDBOX_CONTAINER_STATE_PERSISTED";
 const PERSISTENCE_MARKER: &str = "SANDBOX_WORKSPACE_PERSISTED";
-
-#[derive(Clone)]
-struct ContainerIdentity {
-    tenant: String,
-    user: String,
-}
-
-struct DockerCleanup {
-    identity: Option<ContainerIdentity>,
-    container_ids: HashSet<String>,
-}
-
-impl DockerCleanup {
-    fn new() -> Self {
-        Self {
-            identity: None,
-            container_ids: HashSet::new(),
-        }
-    }
-
-    fn bind(&mut self, identity: ContainerIdentity) {
-        self.identity = Some(identity);
-    }
-
-    fn capture(&mut self) -> ContainerSnapshot {
-        let identity = self
-            .identity
-            .as_ref()
-            .expect("Docker cleanup is bound to the harness identity");
-        let matches = containers_matching_labels(&[
-            (LABEL_TENANT, &identity.tenant),
-            (LABEL_USER, &identity.user),
-        ]);
-        self.container_ids
-            .extend(matches.iter().map(|container| container.id.clone()));
-        assert_eq!(
-            matches.len(),
-            1,
-            "full-turn sandbox must leave exactly one stable user container"
-        );
-        matches.into_iter().next().expect("length checked")
-    }
-}
-
-impl Drop for DockerCleanup {
-    fn drop(&mut self) {
-        let Some(identity) = &self.identity else {
-            return;
-        };
-        let tenant = format!("{LABEL_TENANT}={}", identity.tenant);
-        let user = format!("{LABEL_USER}={}", identity.user);
-        let tenant_filter = format!("label={tenant}");
-        let user_filter = format!("label={user}");
-        if let Ok(output) = Command::new("docker")
-            .args([
-                "container",
-                "list",
-                "--all",
-                "--quiet",
-                "--filter",
-                tenant_filter.as_str(),
-                "--filter",
-                user_filter.as_str(),
-            ])
-            .output()
-        {
-            if output.status.success() {
-                self.container_ids.extend(
-                    String::from_utf8_lossy(&output.stdout)
-                        .lines()
-                        .map(str::to_string),
-                );
-            }
-        }
-        for id in &self.container_ids {
-            let _ = Command::new("docker")
-                .args(["container", "rm", "--force", id])
-                .output();
-        }
-    }
-}
-
-struct ContainerSnapshot {
-    id: String,
-    name: String,
-    running: bool,
-    labels: HashMap<String, String>,
-}
-
-fn containers_matching_labels(labels: &[(&str, &str)]) -> Vec<ContainerSnapshot> {
-    let mut command = Command::new("docker");
-    command.args(["container", "list", "--all"]);
-    for (key, value) in labels {
-        command.arg("--filter").arg(format!("label={key}={value}"));
-    }
-    let output = command
-        .args(["--format", "{{.ID}}"])
-        .output()
-        .expect("docker container list starts");
-    assert!(
-        output.status.success(),
-        "docker container list failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|id| inspect_container(id.trim()))
-        .collect()
-}
-
-fn inspect_container(id: &str) -> ContainerSnapshot {
-    let output = docker_command(&["container", "inspect", id]);
-    let value: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("docker inspect returns JSON");
-    let container = value
-        .as_array()
-        .and_then(|containers| containers.first())
-        .expect("docker inspect returns one container");
-    let labels = container["Config"]["Labels"]
-        .as_object()
-        .expect("sandbox container has labels")
-        .iter()
-        .map(|(key, value)| {
-            (
-                key.clone(),
-                value
-                    .as_str()
-                    .unwrap_or_else(|| panic!("label {key:?} is not a string"))
-                    .to_string(),
-            )
-        })
-        .collect();
-    ContainerSnapshot {
-        id: container["Id"]
-            .as_str()
-            .expect("container has an id")
-            .to_string(),
-        name: container["Name"]
-            .as_str()
-            .expect("container has a name")
-            .trim_start_matches('/')
-            .to_string(),
-        running: container["State"]["Running"]
-            .as_bool()
-            .expect("container running state is boolean"),
-        labels,
-    }
-}
-
-fn docker_command(args: &[&str]) -> std::process::Output {
-    let output = Command::new("docker")
-        .args(args)
-        .output()
-        .unwrap_or_else(|error| panic!("docker {args:?} could not start: {error}"));
-    assert!(
-        output.status.success(),
-        "docker {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output
-}
 
 #[test]
 fn sandbox_shell_turn_executes_in_a_real_container() {
@@ -227,21 +65,22 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
         .expect("sandbox-shell harness builds");
         let expected_tenant = harness.binding.tenant_id.as_str().to_string();
         let expected_user = harness.binding.actor_user_id.as_str().to_string();
-        cleanup.bind(ContainerIdentity {
+        let identity = ContainerIdentity {
             tenant: expected_tenant.clone(),
             user: expected_user.clone(),
-        });
+        };
+        cleanup.track_identity(identity.clone());
 
         harness
             .submit_turn("run two sandboxed shell commands")
             .await
             .expect("turn completes");
-        let container = cleanup.capture();
+        let container = cleanup.capture_identity(&identity);
         let digest = container
             .name
             .strip_prefix(CONTAINER_PREFIX)
             .expect("sandbox uses the stable user-container prefix");
-        assert_eq!(digest.len(), 24);
+        assert_eq!(digest.len(), CONTAINER_DIGEST_HEX_LEN);
         assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert!(container.running);
         assert_eq!(

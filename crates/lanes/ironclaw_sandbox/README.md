@@ -53,15 +53,23 @@ calls on one container. Active-exec accounting prevents the idle sweeper from
 stopping it until all commands finish. The sweeper stops an inactive container;
 the next command adopts and restarts it.
 
+One IronClaw process owns a local Docker workspace root at a time. The
+transport acquires a kernel-held advisory owner lock before container
+reconciliation and fails closed if another live process holds that workspace.
+The lock, not the file's metadata, grants authority; a stale lock file after a
+crash grants nothing. This keeps process-local activity counters from
+authorizing cleanup of another process's active container.
+
 The idle sweeper is a narrow provider-resource cleanup loop, not a second
 durable process lifecycle: it never claims runs, changes
 `ironclaw_processes` run/lifecycle state, or decides whether work may execute.
-`ironclaw_processes` remains the only lifecycle authority. The sweeper may
-stop an inactive Docker container only as transport-local resource cleanup.
-This transport-local cleanup exists so abandoned Docker resources cannot
-remain active after a host restart; composition owns its
-startup/shutdown through `SandboxCommandTransport::shutdown`. If cleanup later
-needs durable policy or cross-host coordination, move the timer behind a
+`ironclaw_processes` remains the only lifecycle authority. During the current
+IronClaw process lifetime, the sweeper stops inactive containers so they do not
+consume Docker resources indefinitely. After a host restart, reconciliation
+happens only when the next command adopts, restarts, or replaces that user's
+container. Composition owns sweeper startup/shutdown through
+`SandboxCommandTransport::shutdown`. If cleanup must later happen without a
+new command, move that durable timer and ownership decision behind a
 kernel-owned lifecycle port rather than expanding this lane's authority.
 
 `HostedSingleTenantVolumeSandboxedRailway` remains a separate transport. It
@@ -111,7 +119,9 @@ That mediation is deferred to #7732 Step 2.
 ## Tests
 
 ```bash
-cargo test -p ironclaw_sandbox              # real-Docker suites skip without a daemon (#7081)
+cargo test -p ironclaw_sandbox              # unit suites; Docker cases skip without a daemon
+cargo test -p ironclaw_sandbox --test user_sandbox_docker_live -- --test-threads=1
+                                            # real-Docker lifecycle suite; serialized per daemon
 cargo test -p ironclaw_architecture_tests   # egress scan + layer matrix
 ```
 

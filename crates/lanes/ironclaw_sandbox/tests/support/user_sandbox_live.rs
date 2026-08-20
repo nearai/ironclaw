@@ -12,6 +12,14 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 
+pub(crate) use ironclaw_sandbox::sandbox_process::{
+    USER_SANDBOX_CONTAINER_DIGEST_HEX_LEN as CONTAINER_DIGEST_HEX_LEN,
+    USER_SANDBOX_CONTAINER_NAME_PREFIX as CONTAINER_PREFIX,
+    USER_SANDBOX_LABEL_IMAGE as LABEL_IMAGE,
+    USER_SANDBOX_LABEL_SECURITY_POSTURE as LABEL_SECURITY_POSTURE,
+    USER_SANDBOX_LABEL_TENANT as LABEL_TENANT, USER_SANDBOX_LABEL_USER as LABEL_USER,
+};
+
 pub(crate) fn scope(tenant: &str, user: &str, project: &str, thread: &str) -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new(tenant).expect("tenant id"),
@@ -34,12 +42,6 @@ pub(crate) fn request(scope: ResourceScope, command: impl Into<String>) -> Comma
         extra_env: HashMap::new(),
     }
 }
-
-pub(crate) const CONTAINER_PREFIX: &str = "ironclaw-reborn-sandbox-user-";
-pub(crate) const LABEL_TENANT: &str = "ironclaw.tenant";
-pub(crate) const LABEL_USER: &str = "ironclaw.user";
-pub(crate) const LABEL_IMAGE: &str = "ironclaw.image";
-pub(crate) const LABEL_SECURITY_POSTURE: &str = "ironclaw.security_posture";
 
 #[derive(Clone, Debug)]
 pub(crate) struct TestScope {
@@ -66,6 +68,21 @@ impl TestScope {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct ContainerIdentity {
+    pub(crate) tenant: String,
+    pub(crate) user: String,
+}
+
+impl From<&TestScope> for ContainerIdentity {
+    fn from(scope: &TestScope) -> Self {
+        Self {
+            tenant: scope.tenant.clone(),
+            user: scope.user.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct ContainerSnapshot {
     pub(crate) id: String,
     pub(crate) name: String,
@@ -77,30 +94,47 @@ pub(crate) struct ContainerSnapshot {
 
 #[derive(Default)]
 pub(crate) struct DockerCleanup {
-    pub(crate) scopes: Vec<TestScope>,
+    identities: Vec<ContainerIdentity>,
     pub(crate) container_ids: HashSet<String>,
-    pub(crate) image_tags: Vec<String>,
+    image_tags: Vec<String>,
 }
 
 impl DockerCleanup {
+    #[allow(dead_code)] // used by the root full-turn integration consumer
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
     pub(crate) fn with_scopes(scopes: impl IntoIterator<Item = TestScope>) -> Self {
         Self {
-            scopes: scopes.into_iter().collect(),
+            identities: scopes
+                .into_iter()
+                .map(|scope| ContainerIdentity::from(&scope))
+                .collect(),
             container_ids: HashSet::new(),
             image_tags: Vec::new(),
         }
     }
 
+    #[allow(dead_code)] // used by the root full-turn integration consumer
+    pub(crate) fn track_identity(&mut self, identity: ContainerIdentity) {
+        self.identities.push(identity);
+    }
+
     pub(crate) fn capture(&mut self, scope: &TestScope) -> ContainerSnapshot {
-        let matches = containers_for_user(scope);
+        self.capture_identity(&ContainerIdentity::from(scope))
+    }
+
+    pub(crate) fn capture_identity(&mut self, identity: &ContainerIdentity) -> ContainerSnapshot {
+        let matches = containers_for_identity(&identity.tenant, &identity.user);
         self.container_ids
             .extend(matches.iter().map(|container| container.id.clone()));
         assert_eq!(
             matches.len(),
             1,
             "expected exactly one container for tenant {:?} and user {:?}, found {matches:?}",
-            scope.tenant,
-            scope.user,
+            identity.tenant,
+            identity.user,
         );
         matches.into_iter().next().expect("length checked")
     }
@@ -112,9 +146,9 @@ impl DockerCleanup {
 
 impl Drop for DockerCleanup {
     fn drop(&mut self) {
-        for scope in &self.scopes {
-            let tenant = format!("{LABEL_TENANT}={}", scope.tenant);
-            let user = format!("{LABEL_USER}={}", scope.user);
+        for identity in &self.identities {
+            let tenant = format!("{LABEL_TENANT}={}", identity.tenant);
+            let user = format!("{LABEL_USER}={}", identity.user);
             let tenant_filter = format!("label={tenant}");
             let user_filter = format!("label={user}");
             if let Ok(output) = Command::new("docker")
@@ -243,7 +277,11 @@ pub(crate) fn assert_stable_identity(container: &ContainerSnapshot, scope: &Test
         .name
         .strip_prefix(CONTAINER_PREFIX)
         .unwrap_or_else(|| panic!("unexpected sandbox container name: {}", container.name));
-    assert_eq!(suffix.len(), 24, "stable name uses a 96-bit hex digest");
+    assert_eq!(
+        suffix.len(),
+        CONTAINER_DIGEST_HEX_LEN,
+        "stable name uses a 96-bit hex digest"
+    );
     assert!(
         suffix.bytes().all(|byte| byte.is_ascii_hexdigit()),
         "stable name digest is hexadecimal: {}",
@@ -281,6 +319,24 @@ pub(crate) async fn wait_for_running_state(
         assert!(
             Instant::now() < deadline,
             "container {id} did not reach running={running} within {timeout:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+pub(crate) async fn wait_for_container_absent(id: &str, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let output = Command::new("docker")
+            .args(["container", "inspect", id])
+            .output()
+            .expect("docker container inspect starts");
+        if !output.status.success() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "container {id} was not reclaimed within {timeout:?}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
