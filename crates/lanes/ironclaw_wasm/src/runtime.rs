@@ -140,7 +140,7 @@ fn bound_structured_guest_error(error: &str) -> Option<String> {
 }
 
 fn serialized_guest_error_fits(payload: &Map<String, Value>) -> bool {
-    serde_json::to_vec(&Value::Object(payload.clone()))
+    serde_json::to_vec(payload)
         .is_ok_and(|serialized| serialized.len() <= MODEL_DIAGNOSTIC_MAX_BYTES)
 }
 
@@ -445,7 +445,7 @@ mod tests {
 
         assert!(scrubbed.len() <= MODEL_DIAGNOSTIC_MAX_BYTES);
         assert_eq!(payload["kind"], "operation_failed");
-        assert!(payload["code"].as_str().unwrap().len() > 0);
+        assert!(!payload["code"].as_str().unwrap().is_empty());
         assert_eq!(payload["message"], "");
         assert!(payload.get("unknown").is_none());
     }
@@ -463,7 +463,7 @@ mod tests {
 
         assert!(scrubbed.len() <= MODEL_DIAGNOSTIC_MAX_BYTES);
         assert_eq!(payload["kind"], "operation_failed");
-        assert!(payload["message"].as_str().unwrap().len() > 0);
+        assert!(!payload["message"].as_str().unwrap().is_empty());
         assert!(payload.get("code").is_none());
     }
 

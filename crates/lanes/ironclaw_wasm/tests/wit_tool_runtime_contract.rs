@@ -815,12 +815,24 @@ fn trap_after_http_wat() -> String {
 }
 
 fn guest_error_wat(error: &str) -> String {
+    const GUEST_ERROR_OFFSET: usize = 16_384;
+    const GUEST_MEMORY_BYTES: usize = 64 * 1024;
+    const GUEST_ERROR_CAPACITY: usize = GUEST_MEMORY_BYTES - GUEST_ERROR_OFFSET;
+
+    assert!(
+        error.len() <= GUEST_ERROR_CAPACITY,
+        "guest_error_wat fixture error is too long: {} bytes; only {} bytes fit in the single 64 KiB memory after offset {}",
+        error.len(),
+        GUEST_ERROR_CAPACITY,
+        GUEST_ERROR_OFFSET,
+    );
+
     let wat_error = error.replace('\\', "\\\\").replace('"', "\\\"");
     HTTP_TOOL_WAT
         .replace(
             "  (data (i32.const 3072) \"1\")",
             &format!(
-                "  (data (i32.const 3072) \"1\")\n  (data (i32.const 16384) \"{wat_error}\")"
+                "  (data (i32.const 3072) \"1\")\n  (data (i32.const {GUEST_ERROR_OFFSET}) \"{wat_error}\")"
             ),
         )
         .replace(
@@ -830,7 +842,7 @@ fn guest_error_wat(error: &str) -> String {
         .replace(
             "i32.const 60\n    i32.const 0\n    i32.store\n    i32.const 48)",
             &format!(
-                "i32.const 60\n    i32.const 1\n    i32.store\n    i32.const 64\n    i32.const 16384\n    i32.store\n    i32.const 68\n    i32.const {}\n    i32.store\n    i32.const 48)",
+                "i32.const 60\n    i32.const 1\n    i32.store\n    i32.const 64\n    i32.const {GUEST_ERROR_OFFSET}\n    i32.store\n    i32.const 68\n    i32.const {}\n    i32.store\n    i32.const 48)",
                 error.len()
             ),
         )
