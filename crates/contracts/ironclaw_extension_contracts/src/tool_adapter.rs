@@ -19,8 +19,8 @@ use ironclaw_host_api::{
     action::NetworkMethod,
     decision::RuntimeCredentialAuthRequirement,
     dispatch::{
-        CapabilityDisplayOutputPreview, DispatchFailureDetail, DispatchFailureKind,
-        ProviderDiagnostic, RuntimeDispatchErrorKind,
+        CapabilityDisplayOutputPreview, DispatchAuthRequirement, DispatchFailureDetail,
+        DispatchFailureKind, ProviderDiagnostic, RuntimeDispatchErrorKind,
     },
     ids::{CapabilityId, SecretHandle},
     mount::MountView,
@@ -72,12 +72,7 @@ pub struct ToolResult {
 pub enum ToolError {
     #[error("tool invocation requires authorization")]
     AuthRequired {
-        required_secrets: Vec<SecretHandle>,
-        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
-        /// Raw provider rejection retained for the host's downstream
-        /// model-diagnostic scrub/fence seam. Its `Debug` representation is
-        /// redacted; never log or render it directly.
-        model_visible_cause: Option<Box<ProviderDiagnostic>>,
+        requirement: Box<DispatchAuthRequirement>,
     },
     #[error("tool provider rejected invocation ({kind})")]
     Rejected {
@@ -106,16 +101,16 @@ impl PartialEq for ToolError {
         match (self, other) {
             (
                 Self::AuthRequired {
-                    required_secrets: left_secrets,
-                    credential_requirements: left_requirements,
-                    ..
+                    requirement: left_requirement,
                 },
                 Self::AuthRequired {
-                    required_secrets: right_secrets,
-                    credential_requirements: right_requirements,
-                    ..
+                    requirement: right_requirement,
                 },
-            ) => left_secrets == right_secrets && left_requirements == right_requirements,
+            ) => {
+                left_requirement.required_secrets == right_requirement.required_secrets
+                    && left_requirement.credential_requirements
+                        == right_requirement.credential_requirements
+            }
             (
                 Self::Failed {
                     kind: left_kind,
@@ -334,18 +329,22 @@ mod tests {
     fn auth_required_equality_ignores_model_visible_cause() {
         let secrets = vec![SecretHandle::new("notion-token").unwrap()];
         let left = ToolError::AuthRequired {
-            required_secrets: secrets.clone(),
-            credential_requirements: Vec::new(),
-            model_visible_cause: Some(Box::new(ProviderDiagnostic {
-                code: None,
-                message: None,
-                retry_after: None,
-            })),
+            requirement: Box::new(DispatchAuthRequirement {
+                required_secrets: secrets.clone(),
+                credential_requirements: Vec::new(),
+                model_visible_cause: Some(ProviderDiagnostic {
+                    code: None,
+                    message: None,
+                    retry_after: None,
+                }),
+            }),
         };
         let right = ToolError::AuthRequired {
-            required_secrets: secrets,
-            credential_requirements: Vec::new(),
-            model_visible_cause: None,
+            requirement: Box::new(DispatchAuthRequirement {
+                required_secrets: secrets,
+                credential_requirements: Vec::new(),
+                model_visible_cause: None,
+            }),
         };
 
         assert_eq!(left, right);
@@ -354,14 +353,18 @@ mod tests {
     #[test]
     fn auth_required_equality_still_compares_required_secrets() {
         let left = ToolError::AuthRequired {
-            required_secrets: vec![SecretHandle::new("notion-token").unwrap()],
-            credential_requirements: Vec::new(),
-            model_visible_cause: None,
+            requirement: Box::new(DispatchAuthRequirement {
+                required_secrets: vec![SecretHandle::new("notion-token").unwrap()],
+                credential_requirements: Vec::new(),
+                model_visible_cause: None,
+            }),
         };
         let right = ToolError::AuthRequired {
-            required_secrets: vec![SecretHandle::new("slack-token").unwrap()],
-            credential_requirements: Vec::new(),
-            model_visible_cause: None,
+            requirement: Box::new(DispatchAuthRequirement {
+                required_secrets: vec![SecretHandle::new("slack-token").unwrap()],
+                credential_requirements: Vec::new(),
+                model_visible_cause: None,
+            }),
         };
 
         assert_ne!(left, right);
@@ -411,9 +414,11 @@ mod tests {
     #[test]
     fn tool_error_of_different_variants_are_never_equal() {
         let auth_required = ToolError::AuthRequired {
-            required_secrets: Vec::new(),
-            credential_requirements: Vec::new(),
-            model_visible_cause: None,
+            requirement: Box::new(DispatchAuthRequirement {
+                required_secrets: Vec::new(),
+                credential_requirements: Vec::new(),
+                model_visible_cause: None,
+            }),
         };
         let failed = ToolError::Failed {
             kind: RuntimeDispatchErrorKind::Backend,
@@ -422,5 +427,11 @@ mod tests {
         };
 
         assert_ne!(auth_required, failed);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn tool_error_stays_within_stack_budget() {
+        assert!(std::mem::size_of::<ToolError>() <= 56);
     }
 }

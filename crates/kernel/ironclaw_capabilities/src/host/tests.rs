@@ -6,7 +6,7 @@
 use ironclaw_host_api::{
     capability::RuntimeCredentialAccountSetup,
     decision::{Decision, Obligation},
-    dispatch::CapabilityDispatchResult,
+    dispatch::{CapabilityDispatchResult, DispatchAuthRequirement},
     ids::{CapabilityId, ExtensionId, SecretHandle, VendorId},
     invocation::Actor,
     lane::RuntimeLane,
@@ -22,18 +22,22 @@ use crate::ports::CredentialPresence;
 fn auth_required_empty(cap: &str) -> DispatchError {
     DispatchError::AuthRequired {
         capability: CapabilityId::new(cap).unwrap(),
-        required_secrets: Vec::new(),
-        credential_requirements: Vec::new(),
-        model_visible_cause: None,
+        requirement: Box::new(DispatchAuthRequirement {
+            required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
+            model_visible_cause: None,
+        }),
     }
 }
 
 fn auth_required_with_secrets(cap: &str) -> DispatchError {
     DispatchError::AuthRequired {
         capability: CapabilityId::new(cap).unwrap(),
-        required_secrets: vec![SecretHandle::new("raw_secret").unwrap()],
-        credential_requirements: Vec::new(),
-        model_visible_cause: None,
+        requirement: Box::new(DispatchAuthRequirement {
+            required_secrets: vec![SecretHandle::new("raw_secret").unwrap()],
+            credential_requirements: Vec::new(),
+            model_visible_cause: None,
+        }),
     }
 }
 
@@ -41,14 +45,16 @@ fn auth_required_with_provider(cap: &str, provider: &str) -> DispatchError {
     use ironclaw_host_api::decision::RuntimeCredentialAuthRequirement;
     DispatchError::AuthRequired {
         capability: CapabilityId::new(cap).unwrap(),
-        required_secrets: Vec::new(),
-        credential_requirements: vec![RuntimeCredentialAuthRequirement {
-            provider: VendorId::new(provider).unwrap(),
-            setup: RuntimeCredentialAccountSetup::ManualToken,
-            requester_extension: ExtensionId::new(provider).unwrap(),
-            provider_scopes: Vec::new(),
-        }],
-        model_visible_cause: None,
+        requirement: Box::new(DispatchAuthRequirement {
+            required_secrets: Vec::new(),
+            credential_requirements: vec![RuntimeCredentialAuthRequirement {
+                provider: VendorId::new(provider).unwrap(),
+                setup: RuntimeCredentialAccountSetup::ManualToken,
+                requester_extension: ExtensionId::new(provider).unwrap(),
+                provider_scopes: Vec::new(),
+            }],
+            model_visible_cause: None,
+        }),
     }
 }
 
@@ -70,16 +76,12 @@ fn enrich_fills_empty_from_single_credential_obligation() {
 
     let result = enrich_dispatch_error_credential_requirements(error, &obligations);
 
-    let DispatchError::AuthRequired {
-        credential_requirements,
-        ..
-    } = result
-    else {
+    let DispatchError::AuthRequired { requirement, .. } = result else {
         panic!("expected AuthRequired");
     };
-    assert_eq!(credential_requirements.len(), 1);
+    assert_eq!(requirement.credential_requirements.len(), 1);
     assert_eq!(
-        credential_requirements[0].provider,
+        requirement.credential_requirements[0].provider,
         VendorId::new("github").unwrap()
     );
 }
@@ -92,21 +94,16 @@ fn enrich_leaves_required_secrets_populated_unchanged() {
 
     let result = enrich_dispatch_error_credential_requirements(error, &obligations);
 
-    let DispatchError::AuthRequired {
-        required_secrets,
-        credential_requirements,
-        ..
-    } = result
-    else {
+    let DispatchError::AuthRequired { requirement, .. } = result else {
         panic!("expected AuthRequired");
     };
     assert_eq!(
-        required_secrets.len(),
+        requirement.required_secrets.len(),
         1,
         "required_secrets must be preserved"
     );
     assert!(
-        credential_requirements.is_empty(),
+        requirement.credential_requirements.is_empty(),
         "credential_requirements must remain empty when required_secrets are present"
     );
 }
@@ -119,16 +116,12 @@ fn enrich_leaves_non_empty_credential_requirements_unchanged() {
 
     let result = enrich_dispatch_error_credential_requirements(error, &obligations);
 
-    let DispatchError::AuthRequired {
-        credential_requirements,
-        ..
-    } = result
-    else {
+    let DispatchError::AuthRequired { requirement, .. } = result else {
         panic!("expected AuthRequired");
     };
-    assert_eq!(credential_requirements.len(), 1);
+    assert_eq!(requirement.credential_requirements.len(), 1);
     assert_eq!(
-        credential_requirements[0].provider,
+        requirement.credential_requirements[0].provider,
         VendorId::new("mcp_provider").unwrap(),
         "original mcp_provider must be retained, not replaced by github"
     );
@@ -145,15 +138,11 @@ fn enrich_leaves_unchanged_when_zero_credential_obligations() {
 
     let result = enrich_dispatch_error_credential_requirements(error, &obligations);
 
-    let DispatchError::AuthRequired {
-        credential_requirements,
-        ..
-    } = result
-    else {
+    let DispatchError::AuthRequired { requirement, .. } = result else {
         panic!("expected AuthRequired");
     };
     assert!(
-        credential_requirements.is_empty(),
+        requirement.credential_requirements.is_empty(),
         "zero obligations must leave credential_requirements empty"
     );
 }

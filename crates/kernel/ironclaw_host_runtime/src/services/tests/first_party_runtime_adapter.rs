@@ -294,16 +294,15 @@ async fn first_party_adapter_maps_handler_auth_required_to_dispatch_auth_require
     match result {
         Err(DispatchError::AuthRequired {
             capability,
-            required_secrets,
-            credential_requirements,
-            ..
+            requirement,
         }) => {
             assert_eq!(capability, descriptor.id);
             assert!(
-                required_secrets.is_empty(),
-                "auth_required() handler yields no required handles; got {required_secrets:?}"
+                requirement.required_secrets.is_empty(),
+                "auth_required() handler yields no required handles; got {:?}",
+                requirement.required_secrets
             );
-            assert!(credential_requirements.is_empty());
+            assert!(requirement.credential_requirements.is_empty());
         }
         other => panic!("expected AuthRequired, got {other:?}"),
     }
@@ -414,10 +413,8 @@ async fn first_party_adapter_forwards_required_secrets_from_auth_required_handle
         .await;
 
     match result {
-        Err(DispatchError::AuthRequired {
-            required_secrets, ..
-        }) => {
-            assert_eq!(required_secrets, vec![handle]);
+        Err(DispatchError::AuthRequired { requirement, .. }) => {
+            assert_eq!(requirement.required_secrets, vec![handle]);
         }
         other => panic!("expected AuthRequired, got {other:?}"),
     }
@@ -481,10 +478,10 @@ async fn first_party_adapter_forwards_credential_requirements_from_auth_required
 
     match result {
         Err(DispatchError::AuthRequired {
-            credential_requirements,
+            requirement: auth_requirement,
             ..
         }) => {
-            assert_eq!(credential_requirements, vec![requirement]);
+            assert_eq!(auth_requirement.credential_requirements, vec![requirement]);
         }
         other => panic!("expected AuthRequired, got {other:?}"),
     }

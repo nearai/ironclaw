@@ -17,7 +17,9 @@ use ironclaw_host_api::{
         CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
     },
     decision::{Decision, DenyReason},
-    dispatch::{CapabilityDispatchResult, CapabilityDispatcher, DispatchError},
+    dispatch::{
+        CapabilityDispatchResult, CapabilityDispatcher, DispatchAuthRequirement, DispatchError,
+    },
     ids::{
         ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId,
         SecretHandle, UserId,
@@ -35,9 +37,11 @@ use support::*;
 fn dispatch_auth_required(capability: CapabilityId) -> DispatchError {
     DispatchError::AuthRequired {
         capability,
-        required_secrets: vec![SecretHandle::new("echo_token").unwrap()],
-        credential_requirements: Vec::new(),
-        model_visible_cause: None,
+        requirement: Box::new(DispatchAuthRequirement {
+            required_secrets: vec![SecretHandle::new("echo_token").unwrap()],
+            credential_requirements: Vec::new(),
+            model_visible_cause: None,
+        }),
     }
 }
 

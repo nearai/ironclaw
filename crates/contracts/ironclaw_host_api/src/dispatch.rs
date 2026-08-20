@@ -68,6 +68,16 @@ pub struct ProviderDiagnostic {
     pub retry_after: Option<Duration>,
 }
 
+/// Authentication requirements carried across the dispatch and capability
+/// error boundaries. The outer error variants box this aggregate so their
+/// common vector payloads do not inflate every future that returns them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchAuthRequirement {
+    pub required_secrets: Vec<SecretHandle>,
+    pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+    pub model_visible_cause: Option<ProviderDiagnostic>,
+}
+
 impl fmt::Debug for ProviderDiagnostic {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ProviderDiagnostic(<redacted>)")
@@ -548,15 +558,13 @@ pub enum DispatchError {
     MissingProcessAuthorization { capability: CapabilityId },
     /// Authentication is required to dispatch this capability.
     ///
-    /// `required_secrets` names the credentials the caller must stage.  The
-    /// field is intentionally absent from the `Debug` output to avoid leaking
-    /// secret-handle identifiers into logs.
+    /// `requirement.required_secrets` names the credentials the caller must
+    /// stage. The aggregate is intentionally redacted from `Debug` output to
+    /// avoid leaking secret-handle identifiers into logs.
     #[error("capability {capability} dispatch requires authentication")]
     AuthRequired {
         capability: CapabilityId,
-        required_secrets: Vec<SecretHandle>,
-        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
-        model_visible_cause: Option<Box<ProviderDiagnostic>>,
+        requirement: Box<DispatchAuthRequirement>,
     },
     /// Provider/protocol rejection shared across runtime lanes. The lane is
     /// diagnostic metadata; callers branch on `kind`, not implementation.
@@ -656,21 +664,22 @@ impl fmt::Debug for DispatchError {
             // prevent leaking secret identifiers into logs and error chains.
             Self::AuthRequired {
                 capability,
-                required_secrets,
-                credential_requirements,
-                ..
+                requirement,
             } => f
                 .debug_struct("AuthRequired")
                 .field("capability", capability)
                 .field(
                     "required_secrets",
-                    &format!("[{} handle(s) redacted]", required_secrets.len()),
+                    &format!(
+                        "[{} handle(s) redacted]",
+                        requirement.required_secrets.len()
+                    ),
                 )
                 .field(
                     "credential_requirements",
                     &format!(
                         "[{} requirement(s) redacted]",
-                        credential_requirements.len()
+                        requirement.credential_requirements.len()
                     ),
                 )
                 .finish(),
@@ -829,5 +838,11 @@ mod tests {
         assert!(message.as_str().len() <= crate::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES);
         assert!(message.as_str().is_char_boundary(message.as_str().len()));
         assert!(!format!("{diagnostic:?}").contains('é'));
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn dispatch_error_stays_within_stack_budget() {
+        assert!(std::mem::size_of::<DispatchError>() <= 72);
     }
 }

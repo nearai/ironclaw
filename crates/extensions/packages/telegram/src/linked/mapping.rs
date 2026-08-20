@@ -31,7 +31,7 @@ use ironclaw_extension_contracts::tool_adapter::ToolError;
 use ironclaw_host_api::{
     capability::RuntimeCredentialAccountSetup,
     decision::RuntimeCredentialAuthRequirement,
-    dispatch::RuntimeDispatchErrorKind,
+    dispatch::{DispatchAuthRequirement, RuntimeDispatchErrorKind},
     ids::{ExtensionId, SecretHandle, VendorId},
     messaging::StandardMessagingErrorCode,
 };
@@ -96,25 +96,29 @@ pub(crate) fn failed_because(code: StandardMessagingErrorCode, cause: String) ->
 /// whereas a messaging code would tell the model to rephrase its arguments.
 pub(crate) fn auth_required() -> ToolError {
     ToolError::AuthRequired {
-        required_secrets: SecretHandle::new(TELEGRAM_LINKED_SESSION_HANDLE)
-            .map(|handle| vec![handle])
-            .unwrap_or_default(),
-        credential_requirements: match (
-            VendorId::new(TELEGRAM_VENDOR_ID),
-            ExtensionId::new(TELEGRAM_EXTENSION_ID),
-        ) {
-            (Ok(provider), Ok(requester_extension)) => vec![RuntimeCredentialAuthRequirement {
-                provider,
-                setup: RuntimeCredentialAccountSetup::DeviceLink,
-                requester_extension,
-                provider_scopes: Vec::new(),
-            }],
-            // Both ids are compile-time literals that satisfy their
-            // validators; an empty requirement list still parks the run on the
-            // generic re-auth gate, so this arm degrades rather than panics.
-            _ => Vec::new(),
-        },
-        model_visible_cause: None,
+        requirement: Box::new(DispatchAuthRequirement {
+            required_secrets: SecretHandle::new(TELEGRAM_LINKED_SESSION_HANDLE)
+                .map(|handle| vec![handle])
+                .unwrap_or_default(),
+            credential_requirements: match (
+                VendorId::new(TELEGRAM_VENDOR_ID),
+                ExtensionId::new(TELEGRAM_EXTENSION_ID),
+            ) {
+                (Ok(provider), Ok(requester_extension)) => {
+                    vec![RuntimeCredentialAuthRequirement {
+                        provider,
+                        setup: RuntimeCredentialAccountSetup::DeviceLink,
+                        requester_extension,
+                        provider_scopes: Vec::new(),
+                    }]
+                }
+                // Both ids are compile-time literals that satisfy their
+                // validators; an empty requirement list still parks the run on the
+                // generic re-auth gate, so this arm degrades rather than panics.
+                _ => Vec::new(),
+            },
+            model_visible_cause: None,
+        }),
     }
 }
 

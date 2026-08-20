@@ -173,15 +173,9 @@ fn tool_error_to_dispatch_error(
     error: ToolError,
 ) -> DispatchError {
     match error {
-        ToolError::AuthRequired {
-            required_secrets,
-            credential_requirements,
-            model_visible_cause,
-        } => DispatchError::AuthRequired {
+        ToolError::AuthRequired { requirement } => DispatchError::AuthRequired {
             capability: capability_id.clone(),
-            required_secrets,
-            credential_requirements,
-            model_visible_cause,
+            requirement,
         },
         ToolError::Rejected {
             runtime,

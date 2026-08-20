@@ -656,7 +656,10 @@ async fn invalid_json_is_recoverable() {
 /// Bounded collection operations work for both scoped files and inline rows.
 #[tokio::test]
 async fn json_runs_bounded_collection_operations() {
-    let h = run_json_collection_analysis().await;
+    // This debug workflow future exceeds libtest's default 2 MiB thread stack;
+    // box it before awaiting. CI sets no `RUST_MIN_STACK`, and assertions remain
+    // unchanged.
+    let h = Box::pin(run_json_collection_analysis()).await;
     h.assert_tool_result_contains("value-15")
         .await
         .expect("last selects the final item from the scoped JSON array");

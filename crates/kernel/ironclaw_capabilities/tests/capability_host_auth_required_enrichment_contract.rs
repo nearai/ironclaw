@@ -23,7 +23,7 @@ use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::{
     capability::{CapabilityDescriptor, CapabilitySet, RuntimeCredentialAccountSetup},
     decision::{Decision, Obligation, Obligations, RuntimeCredentialAuthRequirement},
-    dispatch::DispatchError,
+    dispatch::{DispatchAuthRequirement, DispatchError},
     ids::{ExtensionId, SecretHandle, VendorId},
     resource::ResourceEstimate,
     scope::ExecutionContext,
@@ -120,26 +120,21 @@ async fn invoke_json_enriches_auth_required_credential_requirements_from_obligat
         .await
         .unwrap_err();
 
-    let CapabilityInvocationError::AuthorizationRequiresAuth {
-        required_secrets,
-        credential_requirements,
-        ..
-    } = err
-    else {
+    let CapabilityInvocationError::AuthorizationRequiresAuth { requirement, .. } = err else {
         panic!("expected AuthorizationRequiresAuth, got {err:?}");
     };
-    assert!(required_secrets.is_empty());
+    assert!(requirement.required_secrets.is_empty());
     assert_eq!(
-        credential_requirements.len(),
+        requirement.credential_requirements.len(),
         1,
         "expected one credential requirement enriched from InjectCredentialAccountOnce obligation"
     );
     assert_eq!(
-        credential_requirements[0].provider, provider,
+        requirement.credential_requirements[0].provider, provider,
         "enriched requirement must carry the declared provider id"
     );
     assert_eq!(
-        credential_requirements[0].setup,
+        requirement.credential_requirements[0].setup,
         RuntimeCredentialAccountSetup::ManualToken,
     );
 }
@@ -163,14 +158,16 @@ async fn invoke_json_preserves_non_empty_credential_requirements_from_dispatcher
     let dispatcher = TestDispatcher::responding(|request, _| {
         Err(DispatchError::AuthRequired {
             capability: request.invocation.capability.clone(),
-            required_secrets: Vec::new(),
-            credential_requirements: vec![RuntimeCredentialAuthRequirement {
-                provider: VendorId::new("mcp_provider").unwrap(),
-                setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
-                requester_extension: ExtensionId::new("mcp_ext").unwrap(),
-                provider_scopes: Vec::new(),
-            }],
-            model_visible_cause: None,
+            requirement: Box::new(DispatchAuthRequirement {
+                required_secrets: Vec::new(),
+                credential_requirements: vec![RuntimeCredentialAuthRequirement {
+                    provider: VendorId::new("mcp_provider").unwrap(),
+                    setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+                    requester_extension: ExtensionId::new("mcp_ext").unwrap(),
+                    provider_scopes: Vec::new(),
+                }],
+                model_visible_cause: None,
+            }),
         })
     });
     let handler = PassthroughObligationHandler;
@@ -190,22 +187,18 @@ async fn invoke_json_preserves_non_empty_credential_requirements_from_dispatcher
         .await
         .unwrap_err();
 
-    let CapabilityInvocationError::AuthorizationRequiresAuth {
-        credential_requirements,
-        ..
-    } = err
-    else {
+    let CapabilityInvocationError::AuthorizationRequiresAuth { requirement, .. } = err else {
         panic!("expected AuthorizationRequiresAuth, got {err:?}");
     };
     assert_eq!(
-        credential_requirements.len(),
+        requirement.credential_requirements.len(),
         1,
         "non-empty runtime requirements must not be replaced by obligation enrichment"
     );
     // The retained requirement must be the one from the dispatcher (mcp_provider),
     // not the one from the obligation (github).
     assert_eq!(
-        credential_requirements[0].provider,
+        requirement.credential_requirements[0].provider,
         VendorId::new("mcp_provider").unwrap(),
     );
 }
@@ -285,21 +278,18 @@ async fn auth_resume_json_enriches_auth_required_credential_requirements_from_ob
         .await
         .unwrap_err();
 
-    let CapabilityInvocationError::AuthorizationRequiresAuth {
-        credential_requirements,
-        ..
-    } = resume_err
+    let CapabilityInvocationError::AuthorizationRequiresAuth { requirement, .. } = resume_err
     else {
         panic!("expected AuthorizationRequiresAuth from auth_resume_json, got {resume_err:?}");
     };
 
     assert_eq!(
-        credential_requirements.len(),
+        requirement.credential_requirements.len(),
         1,
         "resume path must enrich empty credential_requirements from InjectCredentialAccountOnce obligation"
     );
     assert_eq!(
-        credential_requirements[0].provider, provider,
+        requirement.credential_requirements[0].provider, provider,
         "enriched requirement on resume path must carry the declared provider id"
     );
 }
@@ -413,9 +403,11 @@ async fn invoke_json_preserves_required_secrets_from_dispatcher() {
     let dispatcher = TestDispatcher::responding(|request, _| {
         Err(DispatchError::AuthRequired {
             capability: request.invocation.capability.clone(),
-            required_secrets: vec![SecretHandle::new("raw_secret_handle").unwrap()],
-            credential_requirements: Vec::new(),
-            model_visible_cause: None,
+            requirement: Box::new(DispatchAuthRequirement {
+                required_secrets: vec![SecretHandle::new("raw_secret_handle").unwrap()],
+                credential_requirements: Vec::new(),
+                model_visible_cause: None,
+            }),
         })
     });
     let handler = PassthroughObligationHandler;
@@ -435,21 +427,16 @@ async fn invoke_json_preserves_required_secrets_from_dispatcher() {
         .await
         .unwrap_err();
 
-    let CapabilityInvocationError::AuthorizationRequiresAuth {
-        required_secrets,
-        credential_requirements,
-        ..
-    } = err
-    else {
+    let CapabilityInvocationError::AuthorizationRequiresAuth { requirement, .. } = err else {
         panic!("expected AuthorizationRequiresAuth, got {err:?}");
     };
     assert_eq!(
-        required_secrets.len(),
+        requirement.required_secrets.len(),
         1,
         "required_secrets from dispatcher must be preserved when non-empty"
     );
     assert!(
-        credential_requirements.is_empty(),
+        requirement.credential_requirements.is_empty(),
         "credential_requirements must remain empty when required_secrets are present \
          — enrichment from obligations must be suppressed"
     );

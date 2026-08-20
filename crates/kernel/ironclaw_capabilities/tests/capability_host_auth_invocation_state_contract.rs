@@ -56,9 +56,11 @@ async fn capability_host_blocks_auth_when_dispatch_returns_auth_required() {
     let registry = registry_with_echo_capability();
     let dispatcher = TestDispatcher::scripted(vec![Err(DispatchError::AuthRequired {
         capability: capability_id(),
-        required_secrets: vec![SecretHandle::new("echo_token").unwrap()],
-        credential_requirements: Vec::new(),
-        model_visible_cause: None,
+        requirement: Box::new(ironclaw_host_api::dispatch::DispatchAuthRequirement {
+            required_secrets: vec![SecretHandle::new("echo_token").unwrap()],
+            credential_requirements: Vec::new(),
+            model_visible_cause: None,
+        }),
     })]);
     let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
     let authorizer = PlainAllowAuthorizer;

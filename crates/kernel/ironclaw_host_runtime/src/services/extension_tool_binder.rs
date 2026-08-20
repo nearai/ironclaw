@@ -189,16 +189,7 @@ where
 /// flow is preserved end to end.
 pub(super) fn tool_error_from_dispatch(error: DispatchError) -> ToolError {
     match error {
-        DispatchError::AuthRequired {
-            required_secrets,
-            credential_requirements,
-            model_visible_cause,
-            ..
-        } => ToolError::AuthRequired {
-            required_secrets,
-            credential_requirements,
-            model_visible_cause,
-        },
+        DispatchError::AuthRequired { requirement, .. } => ToolError::AuthRequired { requirement },
         DispatchError::Wasm {
             kind,
             model_visible_cause,

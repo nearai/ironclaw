@@ -740,15 +740,20 @@ impl HostRuntime for DefaultHostRuntime {
                 match error {
                     CapabilityInvocationError::AuthorizationRequiresAuth {
                         capability,
-                        required_secrets,
-                        credential_requirements,
-                        model_visible_cause,
-                    } => Ok(auth_required_outcome(
-                        capability,
-                        required_secrets,
-                        credential_requirements,
-                        model_visible_cause,
-                    )),
+                        requirement,
+                    } => {
+                        let ironclaw_host_api::dispatch::DispatchAuthRequirement {
+                            required_secrets,
+                            credential_requirements,
+                            model_visible_cause,
+                        } = *requirement;
+                        Ok(auth_required_outcome(
+                            capability,
+                            required_secrets,
+                            credential_requirements,
+                            model_visible_cause.map(Box::new),
+                        ))
+                    }
                     other => {
                         let is_standard_write =
                             capability_is_standard_write(&registry, &capability_id);

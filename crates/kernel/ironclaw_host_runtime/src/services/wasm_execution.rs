@@ -17,7 +17,7 @@ use super::{
     RuntimeLaneRequest, WasmError, WitToolHost, WitToolRuntime,
 };
 use ironclaw_host_api::dispatch::{
-    ProviderDiagnostic, ProviderErrorCode, UntrustedProviderMessage,
+    DispatchAuthRequirement, ProviderDiagnostic, ProviderErrorCode, UntrustedProviderMessage,
 };
 use ironclaw_host_api::resource::ResourceReceipt;
 
@@ -296,9 +296,11 @@ fn wasm_guest_dispatch_error(error: &str, capability: &CapabilityId) -> Dispatch
     match wasm_guest_error_kind(error) {
         WasmGuestErrorKind::AuthRequired => DispatchError::AuthRequired {
             capability: capability.clone(),
-            required_secrets: Vec::new(),
-            credential_requirements: Vec::new(),
-            model_visible_cause: wasm_guest_provider_diagnostic(error).map(Box::new),
+            requirement: Box::new(DispatchAuthRequirement {
+                required_secrets: Vec::new(),
+                credential_requirements: Vec::new(),
+                model_visible_cause: wasm_guest_provider_diagnostic(error),
+            }),
         },
         WasmGuestErrorKind::Runtime(kind) => DispatchError::Wasm {
             kind,

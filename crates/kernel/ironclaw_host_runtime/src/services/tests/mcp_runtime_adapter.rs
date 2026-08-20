@@ -59,13 +59,11 @@ async fn mcp_adapter_maps_executor_auth_required_to_dispatch_auth_required() {
     match result {
         Err(DispatchError::AuthRequired {
             capability,
-            required_secrets,
-            credential_requirements,
-            ..
+            requirement: auth_requirement,
         }) => {
             assert_eq!(capability, descriptor.id);
-            assert!(required_secrets.is_empty());
-            assert_eq!(credential_requirements, vec![requirement]);
+            assert!(auth_requirement.required_secrets.is_empty());
+            assert_eq!(auth_requirement.credential_requirements, vec![requirement]);
         }
         other => panic!("expected AuthRequired, got {other:?}"),
     }

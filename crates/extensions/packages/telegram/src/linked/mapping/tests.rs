@@ -301,17 +301,13 @@ fn credential_failures_leave_the_messaging_vocabulary() {
         "SESSION_EXPIRED",
     ] {
         let mapped = map_vendor_error(OpFamily::Read, &rpc(name, None));
-        let ToolError::AuthRequired {
-            required_secrets,
-            credential_requirements,
-            ..
-        } = mapped
-        else {
+        let ToolError::AuthRequired { requirement, .. } = mapped else {
             panic!("{name} must park the run on the re-auth gate, not answer messaging.*");
         };
-        assert_eq!(required_secrets.len(), 1);
+        assert_eq!(requirement.required_secrets.len(), 1);
         assert_eq!(
-            credential_requirements
+            requirement
+                .credential_requirements
                 .first()
                 .map(|requirement| requirement.setup.clone()),
             Some(RuntimeCredentialAccountSetup::DeviceLink)

@@ -1,12 +1,12 @@
 use ironclaw_authorization::CapabilityLeaseError;
 use ironclaw_host_api::{
-    decision::{DenyReason, Obligation, RuntimeCredentialAuthRequirement},
+    decision::{DenyReason, Obligation},
     dispatch::{
-        DispatchError, DispatchFailureDetail, DispatchFailureKind, ProviderDiagnostic,
-        provider_diagnostic_model_cause,
+        DispatchAuthRequirement, DispatchError, DispatchFailureDetail, DispatchFailureKind,
+        ProviderDiagnostic, provider_diagnostic_model_cause,
     },
     error::HostApiError,
-    ids::{CapabilityId, SecretHandle},
+    ids::CapabilityId,
 };
 use ironclaw_processes::{ProcessError, ProcessInvocationError, ProcessInvocationStatus};
 
@@ -53,9 +53,7 @@ pub enum CapabilityInvocationError {
     #[error("capability {capability} invocation requires authentication")]
     AuthorizationRequiresAuth {
         capability: CapabilityId,
-        required_secrets: Vec<SecretHandle>,
-        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
-        model_visible_cause: Option<Box<ProviderDiagnostic>>,
+        requirement: Box<DispatchAuthRequirement>,
     },
     #[error("capability {capability} invocation fingerprint failed: {source}")]
     InvocationFingerprint {
@@ -145,14 +143,10 @@ impl From<DispatchError> for CapabilityInvocationError {
         match error {
             DispatchError::AuthRequired {
                 capability,
-                required_secrets,
-                credential_requirements,
-                model_visible_cause,
+                requirement,
             } => Self::AuthorizationRequiresAuth {
                 capability,
-                required_secrets,
-                credential_requirements,
-                model_visible_cause,
+                requirement,
             },
             DispatchError::Rejected {
                 kind,
@@ -462,20 +456,28 @@ mod tests {
                 .collect();
             let err = CapabilityInvocationError::from(DispatchError::AuthRequired {
                 capability: cap(),
-                required_secrets: secrets.clone(),
-                credential_requirements: Vec::new(),
-                model_visible_cause: None,
+                requirement: Box::new(DispatchAuthRequirement {
+                    required_secrets: secrets.clone(),
+                    credential_requirements: Vec::new(),
+                    model_visible_cause: None,
+                }),
             });
             match err {
                 CapabilityInvocationError::AuthorizationRequiresAuth {
                     capability,
-                    required_secrets,
-                    credential_requirements,
+                    requirement,
                     ..
                 } => {
                     assert_eq!(capability, cap(), "handles: {handles:?}");
-                    assert_eq!(required_secrets, secrets, "handles: {handles:?}");
-                    assert_eq!(credential_requirements, Vec::new(), "handles: {handles:?}");
+                    assert_eq!(
+                        requirement.required_secrets, secrets,
+                        "handles: {handles:?}"
+                    );
+                    assert_eq!(
+                        requirement.credential_requirements,
+                        Vec::new(),
+                        "handles: {handles:?}"
+                    );
                 }
                 other => panic!("expected AuthorizationRequiresAuth, got {other:?}"),
             }
@@ -494,35 +496,39 @@ mod tests {
         };
         let err = CapabilityInvocationError::from(DispatchError::AuthRequired {
             capability: cap(),
-            required_secrets: Vec::new(),
-            credential_requirements: vec![requirement.clone()],
-            model_visible_cause: Some(Box::new(ProviderDiagnostic {
-                code: None,
-                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
-                    "Bad credentials",
-                )),
-                retry_after: None,
-            })),
+            requirement: Box::new(DispatchAuthRequirement {
+                required_secrets: Vec::new(),
+                credential_requirements: vec![requirement.clone()],
+                model_visible_cause: Some(ProviderDiagnostic {
+                    code: None,
+                    message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                        "Bad credentials",
+                    )),
+                    retry_after: None,
+                }),
+            }),
         });
 
         match err {
             CapabilityInvocationError::AuthorizationRequiresAuth {
                 capability,
-                required_secrets,
-                credential_requirements,
-                model_visible_cause,
+                requirement: auth_requirement,
             } => {
                 assert_eq!(capability, cap());
-                assert!(required_secrets.is_empty());
-                assert_eq!(credential_requirements, vec![requirement]);
+                assert!(auth_requirement.required_secrets.is_empty());
+                assert_eq!(auth_requirement.credential_requirements, vec![requirement]);
                 assert_eq!(
-                    model_visible_cause
+                    auth_requirement
+                        .model_visible_cause
                         .as_ref()
                         .and_then(|diagnostic| diagnostic.message.as_ref())
                         .map(|message| message.as_str()),
                     Some("Bad credentials")
                 );
-                assert!(!format!("{model_visible_cause:?}").contains("Bad credentials"));
+                assert!(
+                    !format!("{:?}", auth_requirement.model_visible_cause)
+                        .contains("Bad credentials")
+                );
             }
             other => panic!("expected AuthorizationRequiresAuth, got {other:?}"),
         }

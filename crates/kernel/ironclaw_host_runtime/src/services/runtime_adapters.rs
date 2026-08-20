@@ -11,6 +11,7 @@ use futures_util::FutureExt;
 use ironclaw_extension_registry::ExtensionPackage;
 use ironclaw_host_api::{
     capability::CapabilityDescriptor,
+    dispatch::DispatchAuthRequirement,
     ids::UserId,
     invocation::InvocationOrigin,
     mount::MountView,
@@ -465,9 +466,11 @@ where
                     credential_requirements,
                 } => DispatchError::AuthRequired {
                     capability: request.capability_id.clone(),
-                    required_secrets,
-                    credential_requirements,
-                    model_visible_cause: None,
+                    requirement: Box::new(DispatchAuthRequirement {
+                        required_secrets,
+                        credential_requirements,
+                        model_visible_cause: None,
+                    }),
                 },
                 McpError::ProviderRejected(rejection) => DispatchError::Rejected {
                     runtime: Some(RuntimeKind::Mcp),
@@ -858,9 +861,11 @@ where
                         ..
                     } => Err(DispatchError::AuthRequired {
                         capability: request.capability_id.clone(),
-                        required_secrets,
-                        credential_requirements,
-                        model_visible_cause: None,
+                        requirement: Box::new(DispatchAuthRequirement {
+                            required_secrets,
+                            credential_requirements,
+                            model_visible_cause: None,
+                        }),
                     }),
                     FirstPartyCapabilityError::Dispatch {
                         kind,
