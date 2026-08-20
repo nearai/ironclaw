@@ -277,14 +277,23 @@ impl AutomationProductService for RebornAutomationProductService {
             }
         };
 
-        let record = tokio::time::timeout_at(
+        let record = match tokio::time::timeout_at(
             deadline,
             self.trigger_repository
                 .get_trigger(caller.tenant_id, trigger_id),
         )
         .await
-        .map_err(|_| backend_timeout_error())?
-        .map_err(map_trigger_error)?;
+        {
+            Ok(Ok(record)) => record,
+            Ok(Err(error)) => {
+                tracing::debug!(%error, %trigger_id, "post-submit automation projection refresh failed");
+                None
+            }
+            Err(_) => {
+                tracing::debug!(%trigger_id, "post-submit automation projection refresh timed out");
+                None
+            }
+        };
         Ok(RebornAutomationMutationResponse {
             updated: true,
             automation: record.map(|record| automation_info_from_record(record, &[], None)),

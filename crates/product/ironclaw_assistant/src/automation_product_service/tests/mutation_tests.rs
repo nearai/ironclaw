@@ -219,13 +219,16 @@ async fn run_automation_uses_one_timeout_budget_across_backend_calls() {
     )
     .with_manual_fire_runner(runner);
 
-    let error = service
+    let response = service
         .run_automation(c, trigger_id.to_string())
         .await
-        .expect_err("the final read must share the first read's timeout budget");
-    assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
-    assert_eq!(error.status_code, 503);
-    assert!(error.retryable);
+        .expect("a committed run must survive an optional projection timeout");
+    assert!(response.updated);
+    assert!(response.automation.is_none());
+    assert_eq!(
+        response.run_result.expect("submitted run evidence").status,
+        crate::RebornAutomationRunMutationStatus::Submitted
+    );
 }
 
 #[tokio::test]
