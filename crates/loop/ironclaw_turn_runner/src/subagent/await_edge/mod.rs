@@ -10,8 +10,8 @@ use ironclaw_host_api::turn::{LoopResultRef, TurnGateRef, TurnRunId, TurnScope};
 use ironclaw_loop_host::{SpawnSubagentMode, SubagentKindId};
 use serde::{Deserialize, Serialize};
 
-/// CAS state machine: `Open -> Settled -> Drained`, `Open -> Abandoned`.
-/// `Drained`/`Abandoned`-final edges are deleted — these states are
+/// CAS state machine (§2): `Open -> Settled -> Drained`, `Open -> Abandoned`.
+/// `Drained`/`Abandoned`-final edges are deleted (§2) — these states are
 /// therefore transient on disk, never the long-lived resting state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

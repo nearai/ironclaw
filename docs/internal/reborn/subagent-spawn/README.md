@@ -672,8 +672,11 @@ fn subagent_settled_round_trips_snake_case() {
 **Files:**
 - Modify: `crates/loop/ironclaw_agent_loop/src/executor/input.rs`
 - Modify: `crates/loop/ironclaw_agent_loop/src/executor/post_capability.rs`
-  (delete `drain_settled` + its `let _drained` call site at the `Continue`
-  arm + the retired-seam paragraph of the struct doc)
+  (delete `drain_settled`, its `let _drained` call site at the `Continue`
+  arm, and the stale R2/`LoopBackgroundChildPort` doc paragraphs — the
+  never-built port exists only in these comments; the consolidation PR
+  deliberately left source untouched to stay docs-only, so the comment
+  cleanup lands here with the deletion)
 
 **Interfaces — consumes:** Task 1's variant.
 
