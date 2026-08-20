@@ -45,7 +45,17 @@ impl WasmError {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum WasmHostError {
     #[error("{0}")]
+    AuthRequired(String),
+    #[error("{0}")]
     Denied(String),
+    #[error("{message}")]
+    Network {
+        message: String,
+        code: Option<String>,
+        request_sent: bool,
+    },
+    #[error("{0}")]
+    Timeout(String),
     #[error("{0}")]
     Unavailable(String),
     #[error("{0}")]
@@ -57,5 +67,19 @@ pub enum WasmHostError {
 impl WasmHostError {
     pub(crate) fn request_was_sent(&self) -> bool {
         matches!(self, Self::FailedAfterRequestSent(_))
+            || matches!(
+                self,
+                Self::Network {
+                    request_sent: true,
+                    ..
+                }
+            )
+    }
+
+    pub(crate) fn stable_code(&self) -> Option<&str> {
+        match self {
+            Self::Network { code, .. } => code.as_deref(),
+            _ => None,
+        }
     }
 }

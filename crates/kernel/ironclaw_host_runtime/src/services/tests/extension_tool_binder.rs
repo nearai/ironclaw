@@ -9,8 +9,8 @@ use ironclaw_extension_contracts::tool_adapter::{
     ToolCall, ToolCallResources, ToolError, ToolPorts,
 };
 use ironclaw_host_api::{
-    dispatch::DispatchAuthRequirement, path::VirtualPath, resource::RuntimeResourceBudget,
-    runtime::TrustClass, trust::RequestedTrustClass,
+    path::VirtualPath, resource::RuntimeResourceBudget, runtime::TrustClass,
+    trust::RequestedTrustClass,
 };
 
 use super::super::ExtensionToolBindError;
@@ -142,8 +142,10 @@ async fn binder_routes_by_capability_id_through_the_first_party_lane() {
     assert!(
         matches!(
             undeclared,
-            ToolError::Failed {
-                kind: RuntimeDispatchErrorKind::UndeclaredCapability,
+            ToolError::Rejected {
+                kind: ironclaw_host_api::dispatch::DispatchFailureKind::Runtime(
+                    RuntimeDispatchErrorKind::UndeclaredCapability,
+                ),
                 ..
             }
         ),
@@ -187,7 +189,7 @@ fn binder_preserves_the_raw_auth_diagnostic_across_the_tool_abi() {
     let error = crate::services::extension_tool_binder::tool_error_from_dispatch(
         DispatchError::AuthRequired {
             capability: CapabilityId::new("github.list_issues").unwrap(),
-            requirement: Box::new(DispatchAuthRequirement {
+            requirement: Box::new(ironclaw_host_api::dispatch::DispatchAuthRequirement {
                 required_secrets: Vec::new(),
                 credential_requirements: Vec::new(),
                 model_visible_cause: Some(ironclaw_host_api::dispatch::ProviderDiagnostic {
@@ -206,7 +208,7 @@ fn binder_preserves_the_raw_auth_diagnostic_across_the_tool_abi() {
     };
     let cause = requirement
         .model_visible_cause
-        .expect("binder must preserve the auth diagnostic");
+        .expect("binder preserves auth diagnostic");
     assert_eq!(
         cause.message.as_ref().map(|message| message.as_str()),
         Some(diagnostic)
@@ -250,6 +252,33 @@ fn binder_preserves_provider_rejection_across_the_tool_abi() {
         Some("Bad credentials")
     );
     assert!(!format!("{diagnostic:?}").contains("Bad credentials"));
+}
+
+#[test]
+fn binder_preserves_non_rejected_failure_kind_across_the_tool_abi() {
+    use ironclaw_host_api::dispatch::{DispatchFailureDetail, DispatchFailureKind};
+
+    let error = crate::services::extension_tool_binder::tool_error_from_dispatch(
+        DispatchError::UnknownCapability {
+            capability: CapabilityId::new("missing.tool").unwrap(),
+        },
+    );
+
+    let ToolError::Rejected {
+        kind,
+        diagnostic,
+        detail,
+    } = error
+    else {
+        panic!("non-Rejected routing failures must remain typed Rejected errors");
+    };
+    assert_eq!(kind, DispatchFailureKind::UnknownCapability);
+    assert!(diagnostic.is_none());
+    assert!(matches!(
+        detail,
+        Some(DispatchFailureDetail::HostSummary { summary, detail })
+            if summary.as_str() == "unknown capability" && detail.is_none()
+    ));
 }
 
 #[tokio::test]

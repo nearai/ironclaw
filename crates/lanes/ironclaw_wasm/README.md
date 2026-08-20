@@ -32,9 +32,12 @@ permitted to hold one.
   `WasmRuntimeCredentialProvider`).
 - `wasm_sandbox_core` — engine setup, epoch ticker, minimal WASI p2 linker,
   limits, store-core helpers; deliberately domain-free.
-- The ABI: `wit/tool.wit` (`near:agent@0.3.0`) and `wit/channel.wit`
-  (`near:agent@0.3.1`) — the same WIT package name at two versions, so bindgen
-  is always handed the single file, never the directory.
+- The ABI: `wit/tool.wit` (`near:agent@0.4.1`, typed `wit-result`-shaped
+  `WitToolOutcome::Success`/`Failure` responses) is the sole supported tool
+  contract. `wit/channel.wit` remains `near:agent@0.3.1`; the same WIT package
+  name at two versions means bindgen is always handed the single file, never
+  the directory. Components targeting another tool contract version fail
+  closed during instantiation.
 
 ## Depends on / consumed by
 

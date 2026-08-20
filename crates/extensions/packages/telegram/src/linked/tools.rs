@@ -21,7 +21,10 @@ use ironclaw_extension_contracts::linked_session::LinkedAccountResolver;
 use ironclaw_extension_contracts::tool_adapter::{
     ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
 };
-use ironclaw_host_api::messaging::{StandardMessagingErrorCode, StandardMessagingOp};
+use ironclaw_host_api::{
+    dispatch::{DispatchFailureKind, RuntimeDispatchErrorKind},
+    messaging::{StandardMessagingErrorCode, StandardMessagingOp},
+};
 use serde_json::Value;
 
 use super::{
@@ -162,12 +165,12 @@ async fn run(
 }
 
 fn undeclared_capability(id: &str) -> ToolError {
-    ToolError::Failed {
-        kind: ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::UndeclaredCapability,
-        safe_summary: Some(format!(
+    ToolError::Rejected {
+        kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability),
+        diagnostic: None,
+        detail: Some(mapping::host_summary(format!(
             "the telegram extension does not implement the capability {id}"
-        )),
-        model_visible_cause: None,
+        ))),
     }
 }
 

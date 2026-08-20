@@ -24,14 +24,17 @@ struct GitHubTool;
 impl exports::near::agent::tool::Guest for GitHubTool {
     fn execute(req: exports::near::agent::tool::Request) -> exports::near::agent::tool::Response {
         match dispatch::execute_inner(&req.params, req.context.as_deref()) {
-            Ok(result) => exports::near::agent::tool::Response {
-                output: Some(result),
-                error: None,
-            },
-            Err(error) => exports::near::agent::tool::Response {
-                output: None,
-                error: Some(guest_error_payload(&error)),
-            },
+            Ok(result) => exports::near::agent::tool::Response::Success(result),
+            Err(error) => {
+                let message = request::take_last_error_message();
+                exports::near::agent::tool::Response::Failure(
+                    exports::near::agent::tool::GuestFailure {
+                        kind: guest_error_kind(&error),
+                        code: Some(error),
+                        message,
+                    },
+                )
+            }
         }
     }
 
@@ -45,36 +48,11 @@ impl exports::near::agent::tool::Guest for GitHubTool {
     }
 }
 
-fn guest_error_payload(error: &str) -> String {
-    if is_structured_error_envelope(error) {
-        return error.to_string();
-    }
-    serde_json::json!({
-        "code": error,
-        "kind": guest_error_kind(error),
-    })
-    .to_string()
-}
+fn guest_error_kind(code: &str) -> exports::near::agent::tool::ErrorKind {
+    use exports::near::agent::tool::ErrorKind;
 
-/// A handful of error origins (currently only the 401 path in
-/// `request::unauthorized_error_payload`) pre-build the full `{code, kind,
-/// message}` envelope so they can carry a provider `message` alongside the
-/// stable code. Detect that shape here and pass it through unchanged instead
-/// of re-wrapping it as `{"code": "<the whole json>", "kind": ...}`.
-fn is_structured_error_envelope(error: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(error)
-        .ok()
-        .and_then(|value| {
-            value
-                .as_object()
-                .map(|object| object.contains_key("code") && object.contains_key("kind"))
-        })
-        .unwrap_or(false)
-}
-
-fn guest_error_kind(code: &str) -> &'static str {
     match code {
-        "AuthRequired" => "auth_required",
+        "AuthRequired" => ErrorKind::AuthRequired,
         "missing_invocation_context"
         | "invalid_invocation_context"
         | "unsupported_github_capability"
@@ -105,15 +83,15 @@ fn guest_error_kind(code: &str) -> &'static str {
         | "Invalid path: empty segment not allowed"
         | "Unsupported from_ref: use a branch or tag ref, not a raw commit SHA"
         | "Unsupported from_ref: only refs/heads/* and refs/tags/* are supported"
-        | "Source ref response missing object.sha" => "input",
-        code if is_string_validation_input_error(code) => "input",
-        "github_api_body_limit" => "output_too_large",
-        "github_api_timeout" => "executor",
-        "github_api_egress_denied" | "github_api_redirect_denied" => "network_denied",
-        "github_api_error_status_401" => "auth_required",
-        "github_api_error_status_422_validation" => "input",
-        "github_api_error_status_403" | "github_api_error_status_429" => "client",
-        _ => "operation_failed",
+        | "Source ref response missing object.sha" => ErrorKind::Input,
+        code if is_string_validation_input_error(code) => ErrorKind::Input,
+        "github_api_body_limit" => ErrorKind::OutputTooLarge,
+        "github_api_timeout" => ErrorKind::Executor,
+        "github_api_egress_denied" | "github_api_redirect_denied" => ErrorKind::NetworkDenied,
+        "github_api_error_status_401" => ErrorKind::AuthRequired,
+        "github_api_error_status_422_validation" => ErrorKind::Input,
+        "github_api_error_status_403" | "github_api_error_status_429" => ErrorKind::Client,
+        _ => ErrorKind::OperationFailed,
     }
 }
 
@@ -128,38 +106,15 @@ export!(GitHubTool);
 #[cfg(test)]
 mod tests {
     use super::guest_error_kind;
-    use super::guest_error_payload;
     use super::GitHubTool;
     use crate::dispatch::{action_from_context, execute_inner};
     use crate::exports::near::agent::tool::Guest;
-    use crate::request::{sanitize_host_error, test_support, unauthorized_error_payload};
+    use crate::request::test_support;
     use crate::types::{GitHubAction, GitHubWebhookRequest};
     use crate::validation::{normalize_ref_lookup, validate_repo_path};
     use crate::webhook::handle_webhook;
     use serde_json::json;
     use std::collections::HashMap;
-
-    #[test]
-    fn guest_error_payload_passes_through_a_structured_401_envelope_with_message() {
-        let error = unauthorized_error_payload(br#"{"message":"Bad credentials"}"#);
-
-        let payload = guest_error_payload(&error);
-
-        let value: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
-        assert_eq!(value["code"], "github_api_error_status_401");
-        assert_eq!(value["kind"], "auth_required");
-        assert_eq!(value["message"], "Bad credentials");
-    }
-
-    #[test]
-    fn guest_error_payload_wraps_legacy_plain_codes_unchanged() {
-        let payload = guest_error_payload("github_api_error_status_403");
-
-        let value: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
-        assert_eq!(value["code"], "github_api_error_status_403");
-        assert_eq!(value["kind"], "client");
-        assert!(value.get("message").is_none());
-    }
 
     #[test]
     fn operation_comes_from_host_context_not_param_shape() {
@@ -314,35 +269,9 @@ mod tests {
     }
 
     #[test]
-    fn sanitizes_host_egress_errors_without_leaking_details() {
-        assert_eq!(
-            sanitize_host_error("missing token ghp_secret_value"),
-            "AuthRequired"
-        );
-        assert_eq!(
-            sanitize_host_error("deadline exceeded"),
-            "github_api_timeout"
-        );
-        assert_eq!(
-            sanitize_host_error("redirect blocked"),
-            "github_api_redirect_denied"
-        );
-        assert_eq!(
-            sanitize_host_error("response body too large"),
-            "github_api_body_limit"
-        );
-        assert_eq!(
-            sanitize_host_error("host not allowed"),
-            "github_api_egress_denied"
-        );
-        assert_eq!(
-            sanitize_host_error("connection reset with token ghp_secret_value"),
-            "AuthRequired"
-        );
-    }
-
-    #[test]
     fn guest_error_kind_classifies_string_validation_errors_as_input() {
+        use crate::exports::near::agent::tool::ErrorKind;
+
         for code in [
             "Invalid labels: values cannot be empty",
             "Invalid assignees: values cannot be empty",
@@ -351,15 +280,17 @@ mod tests {
             "invalid_comments: comments serialization failed",
             "github_api_error_status_422_validation",
         ] {
-            assert_eq!(guest_error_kind(code), "input", "{code}");
+            assert_eq!(guest_error_kind(code), ErrorKind::Input, "{code}");
         }
     }
 
     #[test]
     fn guest_error_kind_does_not_classify_generic_422_as_input() {
+        use crate::exports::near::agent::tool::ErrorKind;
+
         assert_eq!(
             guest_error_kind("github_api_error_status_422"),
-            "operation_failed"
+            ErrorKind::OperationFailed
         );
     }
 

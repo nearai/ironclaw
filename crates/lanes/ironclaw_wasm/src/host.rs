@@ -8,8 +8,8 @@ use ironclaw_host_api::{
     action::{NetworkMethod, NetworkPolicy},
     http::{
         RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
-        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-        RuntimeHttpEgressResponse, is_sensitive_runtime_response_header,
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressReasonCode,
+        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, is_sensitive_runtime_response_header,
     },
     ids::{CapabilityId, SecretHandle},
     resource::ResourceScope,
@@ -524,16 +524,25 @@ fn encode_wasm_headers(headers: Vec<(String, String)>) -> Result<String, WasmHos
 fn wasm_http_error(error: RuntimeHttpEgressError) -> WasmHostError {
     let request_was_sent = wasm_http_request_was_sent(&error);
     let reason = wasm_http_error_reason(&error).to_string();
-    if request_was_sent {
-        return WasmHostError::FailedAfterRequestSent(reason);
-    }
-
-    match error {
-        RuntimeHttpEgressError::Credential { .. } => WasmHostError::Unavailable(reason),
-        RuntimeHttpEgressError::Request { .. } | RuntimeHttpEgressError::Network { .. } => {
+    let code = Some(reason.clone());
+    match error.reason_code() {
+        RuntimeHttpEgressReasonCode::CredentialUnavailable => WasmHostError::AuthRequired(reason),
+        RuntimeHttpEgressReasonCode::RequestDenied | RuntimeHttpEgressReasonCode::PolicyDenied => {
             WasmHostError::Denied(reason)
         }
-        RuntimeHttpEgressError::Response { .. } => WasmHostError::Failed(reason),
+        RuntimeHttpEgressReasonCode::NetworkError => WasmHostError::Network {
+            message: reason,
+            code,
+            request_sent: request_was_sent,
+        },
+        RuntimeHttpEgressReasonCode::ResponseError
+        | RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded
+            if request_was_sent =>
+        {
+            WasmHostError::FailedAfterRequestSent(reason)
+        }
+        RuntimeHttpEgressReasonCode::ResponseError
+        | RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded => WasmHostError::Failed(reason),
     }
 }
 
@@ -554,7 +563,7 @@ fn wasm_http_error_reason(error: &RuntimeHttpEgressError) -> &'static str {
 }
 
 fn wasm_credential_provider_error(_error: WasmHostError) -> WasmHostError {
-    WasmHostError::Unavailable("credential_unavailable".to_string())
+    WasmHostError::AuthRequired("credential_unavailable".to_string())
 }
 
 fn redacted_http_url_origin(url: &str) -> String {
