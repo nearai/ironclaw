@@ -18,7 +18,7 @@
 //! ```text
 //! profile status                          provider_fault_proxy.py
 //!   -> "github_api_error_status_{status}"  request.rs:45
-//!   -> guest kind tag                      github wasm-src lib.rs:55 (typed near:agent@0.4.0 `guest-failure`)
+//!   -> guest kind tag                      github wasm-src lib.rs:55 (typed near:agent@0.4.1 `guest-failure`)
 //!   -> WitErrorKind                        guest-computed, carried on `WitGuestFailure::kind`
 //!   -> DispatchError                       typed_wasm_guest_dispatch_error
 //!   -> FailureKind                         From<DispatchFailureKind>
