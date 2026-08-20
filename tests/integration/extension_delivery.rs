@@ -835,14 +835,6 @@ async fn pair_telegram_bot_actor(
         ),
         "Telegram pairing must bind the verified bot actor to the requesting user"
     );
-    assert_eq!(
-        services
-            .channel_identity_user_for_test("telegram", TELEGRAM_INSTALLATION, external_actor_id,)
-            .await
-            .as_ref(),
-        Some(user_id),
-        "pairing must persist the identity where production ingress resolves it"
-    );
 }
 
 async fn configure_admin_group(

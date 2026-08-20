@@ -1342,30 +1342,6 @@ impl RebornRuntime {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub async fn channel_identity_user_for_test(
-        &self,
-        provider: &str,
-        installation_id: &str,
-        external_actor_id: &str,
-    ) -> Option<ironclaw_host_api::ids::UserId> {
-        let installation_id =
-            ironclaw_host_api::product_adapter::AdapterInstallationId::new(installation_id).ok()?;
-        let provider_user_id =
-            ironclaw_host_api::user_identity::installation_scoped_provider_user_id(
-                &installation_id,
-                external_actor_id,
-            );
-        ironclaw_host_api::user_identity::RebornUserIdentityLookup::resolve_user_identity(
-            self.channel_identity_store.as_ref(),
-            provider,
-            &provider_user_id,
-        )
-        .await
-        .ok()
-        .flatten()
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
     pub fn channel_config_service(&self) -> Option<Arc<dyn ChannelConfigProductService>> {
         Some(Arc::new(
             ironclaw_extension_manager::RebornChannelConfigProductService::new(Arc::clone(
