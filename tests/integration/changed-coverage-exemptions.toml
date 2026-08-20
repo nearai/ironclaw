@@ -382,7 +382,7 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/loop/ironclaw_turn_runner/src/subagent/await_edge/resolver.rs"
-lines = [2033]
+lines = [2032]
 owner = "@nearai/reborn"
 reason = "Background subagent spawn-mode arm; base lcov shows 0 hits at the same statement (67088a426 line 2024). Only GateRef::new -> TurnGateRef::new changed."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
@@ -1002,7 +1002,7 @@ review_after = "2026-11-01"
 
 [[exemption]]
 path = "crates/kernel/ironclaw_turns/src/process_projection/metadata.rs"
-lines = [130, 131, 132]
+lines = [123, 124, 125]
 owner = "@nearai/reborn"
 reason = "serde default fn for legacy persisted rows missing steering_allowed; integration always writes the field. Crate-tier legacy-row deserialization test covers it."
 issue = "https://github.com/nearai/ironclaw/issues/7006"
