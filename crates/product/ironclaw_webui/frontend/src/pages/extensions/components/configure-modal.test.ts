@@ -31,6 +31,15 @@ const webCodeSurfaces = [
   },
 ];
 const toolSurfaces = [{ kind: "tool" }];
+const deviceLinkChannelSurfaces = [
+  { kind: "auth" },
+  {
+    kind: "channel",
+    inbound: true,
+    outbound: true,
+    connection: { strategy: "device_link" },
+  },
+];
 
 function configureModalSourceForTest() {
   const source = readFileSync(new URL("./configure-modal.tsx", import.meta.url), "utf8");
@@ -58,6 +67,8 @@ function renderModal({
   installationState = "setup_needed",
   onClose = () => {},
   onSaved,
+  isAdmin = false,
+  onOpenAdminConfiguration = () => {},
   translate,
   setupResult,
   oauthMutationState = {},
@@ -173,6 +184,8 @@ function renderModal({
     },
     onClose,
     onSaved,
+    isAdmin,
+    onOpenAdminConfiguration,
   });
   return {
     calls,
@@ -915,13 +928,9 @@ test("ConfigureModal starts the OAuth flow when the popup pre-open succeeds", ()
   );
 });
 
-test("ConfigureModal routes a device-link credential to the link panel, never a paste box", () => {
-  // `RebornExtensionCredentialSetup::DeviceLink` has no secret for the user to
-  // paste: the vendor issues the payload and the host takes custody of the
-  // resulting session. Falling back to the manual-token form here would ask
-  // for a value that does not exist.
+test("ConfigureModal explains bot and personal-account onboarding before device linking", () => {
   const view = renderModal({
-    surfaces: [{ kind: "auth" }],
+    surfaces: deviceLinkChannelSurfaces,
     packageRef: { kind: "extension", id: "telegram" },
     displayName: "Telegram",
     installationState: "setup_needed",
@@ -941,22 +950,124 @@ test("ConfigureModal routes a device-link credential to the link panel, never a 
     },
   });
 
+  const body = JSON.stringify(view.rendered);
+  assert.match(body, /extensions\.connectionChoice\.title/);
+  assert.match(body, /extensions\.connectionChoice\.workspaceBot/);
+  assert.match(body, /extensions\.connectionChoice\.personalAccount/);
+  assert.match(body, /extensions\.connectionChoice\.adminRequired/);
   assert.equal(
     renderedContainsComponent(view.rendered, view.DeviceLinkPanel),
-    true,
-    "a device-link credential must render the multi-step link panel",
-  );
-  assert.equal(
-    renderedContainsComponent(view.rendered, view.PairingWebCodePanel),
     false,
-    "a device link is not a host-issued pairing code",
+    "opening Configure must not start personal-account linking",
   );
-  const body = JSON.stringify(view.rendered);
-  assert.ok(!body.includes("pairing.placeholder"), "no secret paste box");
-  assert.ok(
-    !body.includes("extensions.noConfigRequired"),
-    "device-link Configure must never claim no configuration is required",
+});
+
+test("ConfigureModal starts personal-account linking only after Continue", () => {
+  const setup = {
+    surfaces: deviceLinkChannelSurfaces,
+    packageRef: { kind: "extension", id: "telegram" },
+    displayName: "Telegram",
+    installationState: "setup_needed",
+    setupResult: {
+      secrets: [
+        {
+          name: "telegram_linked_session",
+          provider: "telegram",
+          prompt: "Link your Telegram account",
+          provided: false,
+          setup: { kind: "device_link" },
+        },
+      ],
+      fields: [],
+      isLoading: false,
+      error: null,
+    },
+  };
+  const choice = renderModal({
+    ...setup,
+    initialState: [undefined, undefined, "personal_account", false],
+  });
+
+  const continueSetup = findHandler(choice.rendered, "setShowDeviceLink");
+  assert.ok(continueSetup, "the selected personal-account option can continue");
+  continueSetup();
+  assert.ok(choice.stateSets.includes(true));
+  assert.equal(renderedContainsComponent(choice.rendered, choice.DeviceLinkPanel), false);
+
+  const linking = renderModal({
+    ...setup,
+    initialState: [undefined, undefined, "personal_account", true],
+  });
+  assert.equal(
+    renderedContainsComponent(linking.rendered, linking.DeviceLinkPanel),
+    true,
+    "the personal DeviceLinkPanel renders only after Continue",
   );
+});
+
+test("ConfigureModal routes workspace-bot onboarding to existing admin configuration", () => {
+  let closeCalls = 0;
+  let adminConfigurationCalls = 0;
+  const view = renderModal({
+    surfaces: deviceLinkChannelSurfaces,
+    packageRef: { kind: "extension", id: "telegram" },
+    displayName: "Telegram",
+    installationState: "setup_needed",
+    isAdmin: true,
+    onClose: () => {
+      closeCalls += 1;
+    },
+    onOpenAdminConfiguration: () => {
+      adminConfigurationCalls += 1;
+    },
+    initialState: [undefined, undefined, "workspace_bot", false],
+    setupResult: {
+      secrets: [
+        {
+          name: "telegram_linked_session",
+          provider: "telegram",
+          prompt: "Link your Telegram account",
+          provided: false,
+          setup: { kind: "device_link" },
+        },
+      ],
+      fields: [],
+      isLoading: false,
+      error: null,
+    },
+  });
+
+  const continueSetup = findHandler(view.rendered, "onOpenAdminConfiguration");
+  assert.ok(continueSetup, "an administrator can continue to workspace-bot setup");
+  continueSetup();
+  assert.equal(closeCalls, 1);
+  assert.equal(adminConfigurationCalls, 1);
+});
+
+test("ConfigureModal keeps an auth-only device link on its existing direct flow", () => {
+  const view = renderModal({
+    surfaces: [{ kind: "auth" }],
+    packageRef: { kind: "extension", id: "provider-neutral-device-link" },
+    displayName: "Provider Neutral",
+    installationState: "setup_needed",
+    setupResult: {
+      secrets: [
+        {
+          name: "linked_session",
+          provider: "provider-neutral",
+          prompt: "Link your account",
+          provided: false,
+          setup: { kind: "device_link" },
+        },
+      ],
+      fields: [],
+      isLoading: false,
+      error: null,
+    },
+  });
+
+  assert.equal(renderedContainsComponent(view.rendered, view.DeviceLinkPanel), true);
+  assert.doesNotMatch(JSON.stringify(view.rendered), /extensions\.connectionChoice\.title/);
 });
 
 test("ConfigureModal leaves a manual-token credential on the paste form", () => {

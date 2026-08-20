@@ -241,6 +241,19 @@ test("DeviceLinkPanel renders the QR display step through the shared payload pan
   assert.ok(stringify(rendered).includes("Scan this from your device settings."));
 });
 
+test("DeviceLinkPanel explains personal-account authority in every entry point", async () => {
+  const harness = createHarness({
+    startResponses: [response(wireFrame({ qr_payload: "scheme://login?token=AAAA" }))],
+  });
+
+  const rendered = await harness.mount();
+
+  assert.ok(
+    stringify(rendered).includes("deviceLink.personalDisclosure"),
+    "the shared panel carries the disclosure into Extensions, chat, and onboarding",
+  );
+});
+
 test("DeviceLinkPanel renders the awaiting-vendor step and paces polling from the vendor back-off", async () => {
   const harness = createHarness({
     startResponses: [

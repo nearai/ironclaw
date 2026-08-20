@@ -41,11 +41,12 @@ function componentProps(root, component) {
   return props;
 }
 
-function renderExtensionsPage(tab, extensionState = {}) {
+function renderExtensionsPage(tab, extensionState = {}, { isAdmin = false } = {}) {
   const hookValues = [];
   let hookCursor = 0;
   const removeCalls = [];
   const timers = [];
+  const navigations = [];
   function ConfirmDialog() {}
   function ConfigureModal() {}
   function CustomMcpRegistrationModal() {}
@@ -135,16 +136,18 @@ function renderExtensionsPage(tab, extensionState = {}) {
       ...extensionState,
     }),
     useParams: () => ({ tab }),
+    useNavigate: () => (path) => navigations.push(path),
     useT: () => (key) => translations[key] || key,
   };
   vm.runInNewContext(extensionsPageSourceForTest(), context);
   const render = () => {
     hookCursor = 0;
-    return context.globalThis.__testExports.ExtensionsPage();
+    return context.globalThis.__testExports.ExtensionsPage({ isAdmin });
   };
   return {
     ...context,
     removeCalls,
+    navigations,
     timers,
     render,
     ActionNotice: context.globalThis.__testExports.ActionNotice,
@@ -350,6 +353,22 @@ test("ExtensionsPage restores install focus to a registry-only installed card", 
     registryOnlyCard,
     "the installed registry card remains a programmatic focus fallback",
   );
+});
+
+test("ExtensionsPage gives setup the existing administrator route", () => {
+  const harness = renderExtensionsPage("registry", {}, { isAdmin: true });
+  const [registry] = componentProps(harness.rendered, harness.RegistryTab);
+  registry.onConfigure({
+    packageRef: { kind: "extension", id: "telegram" },
+    displayName: "Telegram",
+  });
+
+  const [modal] = componentProps(harness.render(), harness.ConfigureModal);
+  assert.equal(modal.isAdmin, true);
+  assert.equal(typeof modal.onOpenAdminConfiguration, "function");
+
+  modal.onOpenAdminConfiguration();
+  assert.deepEqual(harness.navigations, ["/admin/configuration"]);
 });
 
 test("custom MCP Done closes registration without opening configure", () => {

@@ -26,13 +26,28 @@ import { PairingWebCodePanel } from "../../../components/pairing-web-code-panel"
 
 /**
  * @param {{
- *   extension: any;
+ *   extension: {
+ *     displayName?: string;
+ *     packageRef?: string | { id?: string };
+ *     surfaces?: unknown[];
+ *     channel?: unknown;
+ *     installation_state?: string;
+ *   };
  *   onClose: () => void;
  *   onSaved?: (result?: unknown) => void;
+ *   isAdmin?: boolean;
+ *   onOpenAdminConfiguration?: () => void;
  *   returnFocusTo?: FocusTarget | null;
  * }} props
  */
-export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
+export function ConfigureModal({
+  extension,
+  onClose,
+  onSaved,
+  isAdmin = false,
+  onOpenAdminConfiguration,
+  returnFocusTo,
+}) {
   const t = useT();
   const extensionName = extension?.displayName || extension?.packageRef?.id || t("extensions.defaultName");
   const {
@@ -45,6 +60,8 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
     useExtensionSetup(extension?.packageRef);
   const [values, setValues] = React.useState({});
   const [hostedMcpAuthSelection, setHostedMcpAuthSelection] = React.useState(null);
+  const [connectionChoice, setConnectionChoice] = React.useState(null);
+  const [showDeviceLink, setShowDeviceLink] = React.useState(false);
   const queryClient = useQueryClient();
   const packageId =
     typeof extension?.packageRef === "string"
@@ -144,12 +161,125 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
   // A device-link credential is linked, never pasted: route the connect
   // affordance to the multi-step panel instead of a token form.
   const deviceLinkSecret = deviceLinkSetupSecret(secrets);
+  // A channel that is itself reached through a linked account can still have
+  // a separate deployment-owned bot surface. Keep those two existing flows
+  // visible instead of silently treating personal device link as the only
+  // meaning of "Connect".
+  const offersBotAndPersonalSetup =
+    Boolean(deviceLinkSecret) &&
+    hasChannelSurface(extension) &&
+    connection?.strategy === "device_link";
+  const handleConnectionChoice = React.useCallback(() => {
+    if (connectionChoice === "workspace_bot") {
+      if (!isAdmin) return;
+      onClose();
+      onOpenAdminConfiguration?.();
+      return;
+    }
+    if (connectionChoice === "personal_account") {
+      setShowDeviceLink(true);
+    }
+  }, [
+    connectionChoice,
+    isAdmin,
+    onClose,
+    onOpenAdminConfiguration,
+  ]);
 
   const canSave = manualSecrets.length > 0;
   const isActive = extensionIsActive(extension);
   const oauthBusy = oauthMutation.isPending || oauthMutation.isAuthorizing;
   const setupUrl = httpsUrl(onboarding?.setup_url);
-  if (deviceLinkSecret && !hostedMcpAuthSelectionRequired) {
+  if (
+    offersBotAndPersonalSetup &&
+    !showDeviceLink &&
+    !hostedMcpAuthSelectionRequired
+  ) {
+    const workspaceBotDisabled = !isAdmin;
+    const canContinue =
+      Boolean(connectionChoice) &&
+      !(connectionChoice === "workspace_bot" && workspaceBotDisabled);
+    return (
+      <ModalShell
+        onClose={onClose}
+        returnFocusTo={returnFocusTo}
+        title={t("extensions.connectionChoice.title", { name: extensionName })}
+      >
+        <fieldset className="space-y-3">
+          <legend className="sr-only">
+            {t("extensions.connectionChoice.title", { name: extensionName })}
+          </legend>
+          <label
+            className={[
+              "flex gap-3 rounded-md border border-white/12 bg-white/[0.04] p-4",
+              workspaceBotDisabled
+                ? "cursor-not-allowed opacity-60"
+                : "cursor-pointer",
+            ].join(" ")}
+          >
+            <input
+              type="radio"
+              name="extension-connection-choice"
+              value="workspace_bot"
+              checked={connectionChoice === "workspace_bot"}
+              disabled={workspaceBotDisabled}
+              onChange={() => setConnectionChoice("workspace_bot")}
+              className="mt-1 h-4 w-4 accent-signal"
+            />
+            <span>
+              <span className="block text-sm font-medium text-iron-100">
+                {t("extensions.connectionChoice.workspaceBot")}
+              </span>
+              <span className="mt-1 block text-xs leading-5 text-iron-300">
+                {t("extensions.connectionChoice.workspaceBotDisclosure")}
+              </span>
+              {workspaceBotDisabled && (
+                <span className="mt-2 block text-xs text-amber-300">
+                  {t("extensions.connectionChoice.adminRequired")}
+                </span>
+              )}
+            </span>
+          </label>
+          <label className="flex cursor-pointer gap-3 rounded-md border border-white/12 bg-white/[0.04] p-4">
+            <input
+              type="radio"
+              name="extension-connection-choice"
+              value="personal_account"
+              checked={connectionChoice === "personal_account"}
+              onChange={() => setConnectionChoice("personal_account")}
+              className="mt-1 h-4 w-4 accent-signal"
+            />
+            <span>
+              <span className="block text-sm font-medium text-iron-100">
+                {t("extensions.connectionChoice.personalAccount")}
+              </span>
+              <span className="mt-1 block text-xs leading-5 text-iron-300">
+                {t("deviceLink.personalDisclosure", { name: extensionName })}
+              </span>
+            </span>
+          </label>
+        </fieldset>
+        <div className="mt-6 flex justify-end gap-3">
+          <Button variant="ghost" onClick={onClose}>
+            {t("common.cancel")}
+          </Button>
+          <Button
+            variant="primary"
+            onClick={handleConnectionChoice}
+            disabled={!canContinue}
+          >
+            {t("common.continue")}
+          </Button>
+        </div>
+      </ModalShell>
+    );
+  }
+
+  if (
+    deviceLinkSecret &&
+    (!offersBotAndPersonalSetup || showDeviceLink) &&
+    !hostedMcpAuthSelectionRequired
+  ) {
     // Self-contained: the panel starts (or resumes) the flow, polls it, and
     // stops on a terminal step. The modal only hosts it.
     return (
