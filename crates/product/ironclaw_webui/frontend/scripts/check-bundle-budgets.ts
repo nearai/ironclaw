@@ -120,7 +120,23 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // `notifications.archive` key in the eagerly loaded `en.ts` fallback pack.
 // What remains is the control's own necessary weight. 223.0 KB restores
 // about 0.9 KB of headroom over the measured 222.1 KB.
-const CHAT_GZIP_BUDGET = 223_000;
+//
+// Re-measured 223.0 -> 224.0 on the merge of this branch with main. Both sides
+// independently set 223.0 for their own eager increment — main for the OOBE
+// drawer's close/restore gate, this branch for the notification centre and its
+// archive control — and on the merged tree those increments add: main alone
+// measures 222.5 KB, the merged tree 224.0 KB. Neither side is spending the
+// other's headroom by mistake; the ceiling simply had two claimants.
+//
+// /chat is now at its structural limit, and the next eager addition should split
+// rather than raise. The split this file would take is `notification-center.tsx`:
+// the bell and its unread dot must stay eager because the badge is always
+// visible, but the panel body (rows, load-more, empty/error states, ~150 lines
+// of markup) only renders once opened and would move behind `React.lazy` the
+// same way `CommandPalette` already does in `layout/gateway-layout.tsx`. That
+// is a behaviour change — first open would suspend — so it belongs in its own
+// change with its own test updates, not folded into a rebase.
+const CHAT_GZIP_BUDGET = 224_000;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {
