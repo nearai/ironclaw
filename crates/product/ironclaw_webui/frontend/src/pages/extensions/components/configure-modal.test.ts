@@ -487,7 +487,7 @@ test("ConfigureModal keeps pairing blockers visible beside the pairing panel", (
   assert.doesNotMatch(body, /internal-pairing-correlation/);
 });
 
-test("ConfigureModal keeps administrator fields visible beside the pairing panel", () => {
+test("ConfigureModal keeps the administrator-field notice beside the pairing panel", () => {
   const view = renderModal({
     surfaces: webCodeSurfaces,
     packageRef: { kind: "extension", id: "acme-messenger" },
