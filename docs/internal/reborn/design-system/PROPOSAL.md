@@ -1,12 +1,12 @@
 # Proposed: Storybook + Design-System Catalog for the IronClaw WebUI
 
-**Status:** Proposal, under review · **Authored against:** `origin/main` @ `d3791e0f8` · **Tracks:** Epics [#7038](https://github.com/nearai/ironclaw/issues/7038) (Phases 1–2) · [#7781](https://github.com/nearai/ironclaw/issues/7781) (Phase 3) · [#7782](https://github.com/nearai/ironclaw/issues/7782) (Phases 4–5) · **Benchmarks:** [`apdd-kit`](../../../../apdd-kit) · [`docs/internal/reborn/target-architecture/`](../target-architecture/PROPOSAL.md) (PR #6918)
+**Status:** Proposal, under review · **Authored against:** `origin/main` @ `d3791e0f8` · **Tracks:** Epics [#7038](https://github.com/nearai/ironclaw/issues/7038) (Phase 1) · [#7781](https://github.com/nearai/ironclaw/issues/7781) (Phases 2–3) · [#7782](https://github.com/nearai/ironclaw/issues/7782) (Phases 4–5) · **Benchmarks:** [`apdd-kit`](../../../../apdd-kit) · [`docs/internal/reborn/target-architecture/`](../target-architecture/PROPOSAL.md) (PR #6918)
 
 ## 1. Executive decision
 
 Adopt a **governed, catalogued design system** for the IronClaw WebUI and evolve it toward an **AI/agentic-first UX** in five predefined phases. Realize the design language — **Material 3 Expressive (M3X)** — **natively** with the existing React 19 + Tailwind v4 primitives; do **not** adopt Material Web components or a parallel/third-party design-system framework. `DESIGN.md` and the Storybook catalog are the source of truth; the token architecture (`data-theme` + `--v2-*`) is kept.
 
-Phases 1–2 are in flight (PR #7750 in review; the Phase-2 changeset preserved on #7042) and are tracked by Epic #7038; Phase 3 by #7781; Phases 4–5 by #7782. This proposal freezes the framing, records the decisions, and — most importantly — **names the dependencies of Phases 3–5 with a proposed implementation for each** (§7).
+Phases 1–2 are in flight (PR #7750 in review; the Phase-2 changeset preserved on #7042). Phase 1 is tracked by Epic #7038; Phases 2–3 by #7781 (superseding the closed #7733); Phases 4–5 by #7782. This proposal freezes the framing, records the decisions, and — most importantly — **names the dependencies of Phases 3–5 with a proposed implementation for each** (§7).
 
 ## 2. Current-state evidence
 
@@ -22,7 +22,7 @@ Phases 1–2 are in flight (PR #7750 in review; the Phase-2 changeset preserved 
 
 ### 2.3 Landed foundations (`LANDED`)
 - **Phase 1 (#7750, supersedes closed #7039; Epic #7038):** Storybook 10 (`@storybook/react-vite`, pnpm) wired to the real `app.css` + a light/dark toolbar; **~33 stories** in five sidebar categories (Primitives / Components / Composites / Icons / Tokens); a vitest split (`pnpm test` node-only, `pnpm test:storybook` in headless Chromium); `@storybook/addon-mcp` for agent access.
-- **Phase 2 (#7042, changeset from closed #7043; Epic #7038):** `crates/product/ironclaw_webui/frontend/DESIGN.md` (M3X spec + an IronClaw implementation/governance appendix), a Storybook `Design/Guidelines` docs page, and `.claude/rules/design-system.md` agent governance.
+- **Phase 2 (#7042, changeset from closed #7043; Epic #7781):** `crates/product/ironclaw_webui/frontend/DESIGN.md` (M3X spec + an IronClaw implementation/governance appendix), a Storybook `Design/Guidelines` docs page, and `.claude/rules/design-system.md` agent governance.
 
 ### 2.4 Current-state conclusion
 The workbench, catalog, governance doc, and agent rules exist. What remains is the **visual/interaction transformation** (Phases 3–5) — which is where the dependencies and risk concentrate.
@@ -90,7 +90,7 @@ flowchart LR
 
 **7.5 Expressive motion.** *Gates: Phase 4.* Spring physics / shape-morph / speed-dial unfurl require an animation mechanism; none is installed, and the static-motion policy is in force. **Proposal:** evaluate a small JS spring lib (e.g. `motion`) vs. spring→cubic-bezier CSS approximations; whichever is chosen, all expressive motion is **opt-in and `prefers-reduced-motion`-gated**, introduced behind the policy rather than ad-hoc keyframes.
 
-**7.6 Merge-order / stacked PRs.** *Gates: Phase 2→3 landing (Epic #7038 → #7781).* The original Phase-2 PR #7043 was stacked on Phase-1 #7039; both were closed after the stack became an unmergeable merge-commit tangle. **Proposal:** merge the recreated, non-stacked **#7750** first, then land the preserved Phase-2 changeset (#7042) as a fresh PR off `main`; Phase 3 branches off `main` after both land.
+**7.6 Merge-order / stacked PRs.** *Gates: Phase 1→2 landing (Epic #7038 → #7781).* The original Phase-2 PR #7043 was stacked on Phase-1 #7039; both were closed after the stack became an unmergeable merge-commit tangle. **Proposal:** merge the recreated, non-stacked **#7750** first, then land the preserved Phase-2 changeset (#7042) as a fresh PR off `main`; Phase 3 branches off `main` after both land.
 
 ## 8. Alignment with the governance benchmarks
 
@@ -109,4 +109,4 @@ flowchart LR
 
 - APDD kit: [`apdd-kit/guides/design-ux-governance.md`](../../../../apdd-kit/guides/design-ux-governance.md), [`apdd-kit/templates/DESIGN.template.md`](../../../../apdd-kit/templates/DESIGN.template.md)
 - Benchmark package: [`docs/internal/reborn/target-architecture/`](../target-architecture/README.md) (PR #6918)
-- This initiative: `DESIGN.md`, `.claude/rules/design-system.md`, `src/design-system/README.md`; Epics #7038 (Phases 1–2), #7781 (Phase 3), #7782 (Phases 4–5); issue #7042; PRs #7750 (supersedes #7039), #7257 (this package); closed #7039, #7043.
+- This initiative: `DESIGN.md`, `.claude/rules/design-system.md`, `src/design-system/README.md`; Epics #7038 (Phase 1), #7781 (Phases 2–3), #7782 (Phases 4–5); issue #7042; PRs #7750 (supersedes #7039), #7257 (this package); closed #7039, #7043, and Epic #7733 (superseded by #7781).

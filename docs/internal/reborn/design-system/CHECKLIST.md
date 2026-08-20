@@ -1,16 +1,16 @@
 # Design System — Completion Checklist
 
-**Status:** Proposal, under review · **Authored against:** `origin/main` @ `d3791e0f8` · **Tracks:** Epics [#7038](https://github.com/nearai/ironclaw/issues/7038) (Phases 1–2) · [#7781](https://github.com/nearai/ironclaw/issues/7781) (Phase 3) · [#7782](https://github.com/nearai/ironclaw/issues/7782) (Phases 4–5)
+**Status:** Proposal, under review · **Authored against:** `origin/main` @ `d3791e0f8` · **Tracks:** Epics [#7038](https://github.com/nearai/ironclaw/issues/7038) (Phase 1) · [#7781](https://github.com/nearai/ironclaw/issues/7781) (Phases 2–3) · [#7782](https://github.com/nearai/ironclaw/issues/7782) (Phases 4–5)
 
 **Definition of done:** when every box below is checked, the governed, agentic-first WebUI design system is fully realized. A checked box means **landed on `main`**, with the landing PR named inline. `⚠` marks a blocking prerequisite; `[decision]` marks an item gated on a named human call.
 
-> **Epic ownership.** The original Epic #7038 was split into three so each wave has its own
-> tracking issue. This package is shared by all three:
+> **Epic ownership.** The program is tracked across three Epics (the original #7038 was
+> split, then Phase 2 folded in with Phase 3). This package is shared by all three:
 >
 > | Epic | Phases | Scope |
 > |---|---|---|
-> | [#7038](https://github.com/nearai/ironclaw/issues/7038) | 1–2 | Storybook integration scaffolding · `DESIGN.md` governance & documentation |
-> | [#7781](https://github.com/nearai/ironclaw/issues/7781) | 3 | Theme update & UI reskin — token values, dark palette, fonts, visual assets |
+> | [#7038](https://github.com/nearai/ironclaw/issues/7038) | 1 | Storybook integration & design-system catalog — PR #7750 |
+> | [#7781](https://github.com/nearai/ironclaw/issues/7781) | 2–3 | `DESIGN.md` governance & documentation (#7042) · theme update & UI reskin — supersedes the closed #7733 |
 > | [#7782](https://github.com/nearai/ironclaw/issues/7782) | 4–5 | Agentic interactions & components · Information architecture |
 
 ## WS1 — Storybook integration (Phase 1) · Epic #7038
@@ -19,7 +19,7 @@
 - [ ] Vitest split: `pnpm test` node-only, `pnpm test:storybook` in headless Chromium — **#7750**
 - [ ] `@storybook/addon-mcp` available for agent access — **#7750**
 
-## WS2 — DESIGN.md governance (Phase 2) · Epic #7038 · tracked by #7042
+## WS2 — DESIGN.md governance (Phase 2) · Epic #7781 · tracked by #7042
 - [ ] `crates/product/ironclaw_webui/frontend/DESIGN.md` (M3X spec + IronClaw governance appendix) — **changeset preserved from closed #7043; fresh PR off `main`**
 - [ ] Storybook `Design/Guidelines` docs page (`Design` sorts first) — **#7042**
 - [ ] `.claude/rules/design-system.md` + `CLAUDE.md` Module Specs pointer + DS README link — **#7042**
@@ -54,4 +54,4 @@
 - [ ] Light + dark parity and WCAG AA contrast hold across the reskin
 - [ ] The WebUI's theming, assets, interactions, and IA reflect the agentic-first principles in `DESIGN.md`
 - [ ] `DESIGN.md` + the Storybook catalog are the demonstrated source of truth (new UI built through them)
-- [ ] Each phase landed under its owning Epic — #7038 (Phases 1–2) · #7781 (Phase 3) · #7782 (Phases 4–5)
+- [ ] Each phase landed under its owning Epic — #7038 (Phase 1) · #7781 (Phases 2–3) · #7782 (Phases 4–5)

@@ -1,18 +1,18 @@
 # IronClaw WebUI Design System — Storybook + Catalog (Executive Overview)
 
-**Status:** Proposal, under review · **Authored against:** `origin/main` @ `d3791e0f8` · **Tracks:** Epics [#7038](https://github.com/nearai/ironclaw/issues/7038) (Phases 1–2) · [#7781](https://github.com/nearai/ironclaw/issues/7781) (Phase 3) · [#7782](https://github.com/nearai/ironclaw/issues/7782) (Phases 4–5)
+**Status:** Proposal, under review · **Authored against:** `origin/main` @ `d3791e0f8` · **Tracks:** Epics [#7038](https://github.com/nearai/ironclaw/issues/7038) (Phase 1) · [#7781](https://github.com/nearai/ironclaw/issues/7781) (Phases 2–3) · [#7782](https://github.com/nearai/ironclaw/issues/7782) (Phases 4–5)
 
 **Documents:** [PROPOSAL.md](PROPOSAL.md) — the case, decisions & dependencies · [PLAN.md](PLAN.md) — phased execution · [CHECKLIST.md](CHECKLIST.md) — definition of done · [explorer.html](explorer.html) — self-contained interactive review aid (schematics + phase map; also published as a [claude.ai artifact](https://claude.ai/code/artifact/371a2622-054c-404a-8992-f110e1fa3d5a))
 
 > **North star:** a *governed, catalogued* WebUI design system that carries IronClaw to an AI/agentic-first UX — realized **natively** on our React 19 + Tailwind v4 stack, reviewed and regression-tested through **Storybook**, and evolved in **five predefined phases**.
 
-> **Epic ownership.** The original Epic #7038 was split into three so each wave has its own
-> tracking issue. This package is shared by all three:
+> **Epic ownership.** The program is tracked across three Epics (the original #7038 was
+> split, then Phase 2 folded in with Phase 3). This package is shared by all three:
 >
 > | Epic | Phases | Scope |
 > |---|---|---|
-> | [#7038](https://github.com/nearai/ironclaw/issues/7038) | 1–2 | Storybook integration scaffolding · `DESIGN.md` governance & documentation |
-> | [#7781](https://github.com/nearai/ironclaw/issues/7781) | 3 | Theme update & UI reskin — token values, dark palette, fonts, visual assets |
+> | [#7038](https://github.com/nearai/ironclaw/issues/7038) | 1 | Storybook integration & design-system catalog — PR #7750 |
+> | [#7781](https://github.com/nearai/ironclaw/issues/7781) | 2–3 | `DESIGN.md` governance & documentation (#7042) · theme update & UI reskin — supersedes the closed #7733 |
 > | [#7782](https://github.com/nearai/ironclaw/issues/7782) | 4–5 | Agentic interactions & components · Information architecture |
 
 ## What this proposes
@@ -52,7 +52,7 @@ flowchart TD
 | Phase | Scope | Epic | Status | Ships as |
 |---|---|---|---|---|
 | **1** | Storybook integration + design-system catalog | [#7038](https://github.com/nearai/ironclaw/issues/7038) | In review | PR [#7750](https://github.com/nearai/ironclaw/pull/7750) (supersedes closed #7039) |
-| **2** | `DESIGN.md` governance & guidelines | [#7038](https://github.com/nearai/ironclaw/issues/7038) | Ready, PR to follow #7750 | Issue [#7042](https://github.com/nearai/ironclaw/issues/7042) (old PR #7043 closed) |
+| **2** | `DESIGN.md` governance & guidelines | [#7781](https://github.com/nearai/ironclaw/issues/7781) | Ready, PR to follow #7750 | Issue [#7042](https://github.com/nearai/ironclaw/issues/7042) (old PR #7043 closed) |
 | **3** | Theme update & UI reskin (tokens + assets) | [#7781](https://github.com/nearai/ironclaw/issues/7781) | Planned | — |
 | **4** | Interaction & component updates (agentic-first) | [#7782](https://github.com/nearai/ironclaw/issues/7782) | Planned | — |
 | **5** | Information architecture | [#7782](https://github.com/nearai/ironclaw/issues/7782) | Planned | — |
