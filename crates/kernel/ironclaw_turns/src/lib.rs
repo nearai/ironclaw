@@ -80,10 +80,10 @@ pub use loop_exit::{
     LoopExitValidationDecision, LoopExitViolation, LoopExitViolationKind,
 };
 pub use process_projection::{
-    AGENT_TURN_PROCESS_KIND, AgentTurnProcessCommitObserver, AgentTurnProcessMetadata,
-    AgentTurnProcessRuntime, AgentTurnProcessStateMetadata, ProcessJournalStoreTurnAdapter,
-    ProcessLoopCheckpointStore, TurnEventProjectionFromProcessJournal,
-    claimed_turn_run_from_process_claim, turn_run_state_from_process_snapshot,
+    AGENT_TURN_PROCESS_KIND, AgentTurnProcessCommitObserver, AgentTurnProcessRuntime,
+    AgentTurnProcessStateMetadata, ProcessJournalStoreTurnAdapter, ProcessLoopCheckpointStore,
+    TurnEventProjectionFromProcessJournal, claimed_turn_run_from_process_claim,
+    turn_run_state_from_process_snapshot,
 };
 pub use request::{
     ActivateThreadRequest, CancelRunRequest, GetRunStateRequest, ResumeTurnPrecondition,

@@ -545,7 +545,7 @@ mod tests {
             .execute_claimed_process(ClaimedProcess::from(&claimed))
             .await
             .expect_err("executor must surface structured finalization failure");
-        let metadata: ironclaw_turns::process_projection::AgentTurnProcessMetadata =
+        let metadata: ironclaw_turns::process_projection::AgentTurnProcessStateMetadata =
             serde_json::from_value(
                 error
                     .metadata()

@@ -16,10 +16,10 @@ use ironclaw_processes::{
     JournaledProcessSnapshot, ProcessCheckpointId, ProcessCheckpointPort, ProcessCheckpointRef,
     ProcessConcurrencyClass, ProcessControlPort, ProcessJournalCommit,
     ProcessJournalCommitObserver, ProcessJournalCursor, ProcessJournalEntry, ProcessJournalKind,
-    ProcessJournalSource, ProcessKind, ProcessLeaseSnapshot, ProcessLeaseToken,
-    ProcessLifecycleStatus, ProcessOperationId, ProcessOutcome, ProcessRuntimePort,
-    ProcessSnapshotSource, ProcessSubmissionPort, ProcessSuspension, ProcessSuspensionKind,
-    ProcessTreePort, ProcessWorkerId, PruneReleasedProcessRequest, RecordProcessCheckpointRequest,
+    ProcessJournalSource, ProcessKind, ProcessLeaseToken, ProcessLifecycleStatus,
+    ProcessOperationId, ProcessOutcome, ProcessRuntimePort, ProcessSnapshotSource,
+    ProcessSubmissionPort, ProcessSuspension, ProcessSuspensionKind, ProcessTreePort,
+    ProcessWorkerId, PruneReleasedProcessRequest, RecordProcessCheckpointRequest,
     ReleaseProcessTreeRequest, ReserveProcessTreeRequest, ResumeProcessRequest,
     SubmitProcessRequest, SubmitProcessWithCheckpointRequest,
 };
@@ -29,7 +29,7 @@ use super::{
         turn_lifecycle_event_from_process_journal_entry, turn_scope_from_process_scope,
         turn_status_from_process_status,
     },
-    metadata::{AgentTurnProcessMetadata, AgentTurnProcessStateMetadata},
+    metadata::AgentTurnProcessStateMetadata,
     store_adapter::ProcessJournalStoreTurnAdapter,
 };
 use crate::{
@@ -819,40 +819,6 @@ fn resumed_agent_turn_metadata(
     Ok(json!({ "agent_turn": metadata }))
 }
 
-pub trait TurnRunProcessExt {
-    fn to_process_snapshot(&self) -> JournaledProcessSnapshot;
-}
-
-impl TurnRunProcessExt for TurnRunRecord {
-    fn to_process_snapshot(&self) -> JournaledProcessSnapshot {
-        JournaledProcessSnapshot {
-            process_id: process_id_from_turn_run_id(self.run_id),
-            process_kind: ProcessKind::AgentTurn,
-            scope: self.scope.to_resource_scope(),
-            status: process_status_from_turn_status(self.status),
-            suspension: process_suspension_from_record(self),
-            checkpoint_ref: self.checkpoint_id.map(process_checkpoint_ref),
-            // Legacy turn-record projection: the record carries only the
-            // checkpoint id, so the kind reads as unknown.
-            checkpoint_kind: None,
-            input_ref: None,
-            failure: self.failure.clone(),
-            journal_cursor: ProcessJournalCursor(self.event_cursor.0),
-            lease: process_lease_from_record(self),
-            crash_reclaim_count: 0,
-            created_at: self.received_at,
-            owner_user_id: self.scope.explicit_owner_user_id().cloned(),
-            concurrency_class: process_concurrency_class(
-                self.product_context.as_ref(),
-                &self.profile.id,
-            ),
-            parent_process_id: self.parent_run_id.map(process_id_from_turn_run_id),
-            root_process_id: self.spawn_tree_root_run_id.map(process_id_from_turn_run_id),
-            metadata: json!({ "agent_turn": AgentTurnProcessMetadata::from_record(self) }),
-        }
-    }
-}
-
 pub trait TurnRunStateProcessExt {
     fn to_process_state_snapshot(&self) -> JournaledProcessSnapshot;
 }
@@ -998,17 +964,6 @@ pub fn process_journal_kind_from_turn_event_kind(kind: TurnEventKind) -> Process
     }
 }
 
-pub(crate) fn process_suspension_from_record(record: &TurnRunRecord) -> Option<ProcessSuspension> {
-    let kind = GateKind::from_status(record.status).map(process_suspension_kind_from_gate_kind)?;
-    Some(ProcessSuspension {
-        kind,
-        gate_ref: record.gate_ref.clone(),
-        activity_id: record.blocked_activity_id,
-        credential_requirements: record.credential_requirements.clone(),
-        detail: None,
-    })
-}
-
 fn process_suspension_from_state(state: &TurnRunState) -> Option<ProcessSuspension> {
     let kind = GateKind::from_status(state.status).map(process_suspension_kind_from_gate_kind)?;
     Some(ProcessSuspension {
@@ -1028,16 +983,6 @@ fn process_suspension_from_event(event: &TurnLifecycleEvent) -> Option<ProcessSu
         activity_id: gate.activity_id,
         credential_requirements: gate.credential_requirements.clone(),
         detail: None,
-    })
-}
-
-fn process_lease_from_record(record: &TurnRunRecord) -> Option<ProcessLeaseSnapshot> {
-    Some(ProcessLeaseSnapshot {
-        worker_id: ProcessWorkerId::from_trusted(record.runner_id?.to_wire_string()),
-        lease_token: ProcessLeaseToken::from_trusted(record.lease_token?.to_wire_string()),
-        lease_expires_at: record.lease_expires_at,
-        last_heartbeat_at: record.last_heartbeat_at,
-        claim_count: record.claim_count,
     })
 }
 

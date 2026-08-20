@@ -35,20 +35,23 @@ fn profile() -> TurnRunProfile {
     .expect("profile")
 }
 
-fn record_with_status(status: TurnStatus) -> TurnRunRecord {
-    TurnRunRecord {
-        subagent_activation_provenance: None,
-        run_id: TurnRunId::new(),
-        turn_id: TurnId::new(),
+fn state_with_status(status: TurnStatus) -> crate::TurnRunState {
+    crate::TurnRunState {
         scope: scope(),
+        actor: None,
+        turn_id: TurnId::new(),
+        run_id: TurnRunId::new(),
+        status,
         accepted_message_ref: AcceptedMessageRef::new("accepted-process-journal")
             .expect("accepted"),
-        status,
-        profile: profile(),
+        resolved_run_profile_id: profile().id.clone(),
+        resolved_run_profile_version: profile().version,
         output_contract: Default::default(),
+        allow_steering: profile().allow_steering,
         resolved_model_route: None,
         model_usage: None,
         execution_outcome: None,
+        received_at: Utc::now(),
         checkpoint_id: None,
         gate_ref: GateKind::from_status(status)
             .map(|_| TurnGateRef::new("gate:process-journal").expect("gate")),
@@ -56,15 +59,6 @@ fn record_with_status(status: TurnStatus) -> TurnRunRecord {
         credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor(7),
-        runner_id: None,
-        lease_token: None,
-        lease_expires_at: None,
-        last_heartbeat_at: None,
-        claim_count: 0,
-        received_at: Utc::now(),
-        parent_run_id: None,
-        subagent_depth: 0,
-        spawn_tree_root_run_id: None,
         product_context: None,
         resume_disposition: None,
     }
@@ -219,9 +213,10 @@ fn legacy_agent_turn_metadata_without_activation_provenance_defaults_to_none() {
 }
 
 #[test]
-fn legacy_agent_turn_process_metadata_without_output_contract_defaults_to_assistant_message() {
-    let metadata = AgentTurnProcessMetadata {
+fn legacy_agent_turn_metadata_without_output_contract_defaults_to_assistant_message() {
+    let metadata = AgentTurnProcessStateMetadata {
         turn_id: TurnId::new(),
+        actor: None,
         accepted_message_ref: AcceptedMessageRef::new("accepted-metadata-output-contract")
             .expect("accepted message"),
         resolved_run_profile_id: RunProfileId::default_profile(),
@@ -233,10 +228,13 @@ fn legacy_agent_turn_process_metadata_without_output_contract_defaults_to_assist
             schema: serde_json::json!({"type": "object"}),
         },
         allow_steering: false,
+        resolved_run_profile: None,
         resolved_model_route: None,
         model_usage: None,
         execution_outcome: None,
         subagent_depth: 0,
+        subagent_activation_provenance: None,
+        spawn_tree_descendant_cap: None,
         product_context: None,
         resume_disposition: None,
         ownerless_thread: false,
@@ -249,7 +247,7 @@ fn legacy_agent_turn_process_metadata_without_output_contract_defaults_to_assist
             .is_some(),
         "current wire shape must serialize a non-default output contract"
     );
-    let restored: AgentTurnProcessMetadata =
+    let restored: AgentTurnProcessStateMetadata =
         serde_json::from_value(wire).expect("restore legacy metadata");
     assert_eq!(
         restored.output_contract,
@@ -1205,7 +1203,7 @@ fn blocked_turn_statuses_map_to_process_suspension_kinds() {
     ];
 
     for (turn_status, suspension_kind) in cases {
-        let snapshot = record_with_status(turn_status).to_process_snapshot();
+        let snapshot = state_with_status(turn_status).to_process_state_snapshot();
         assert_eq!(snapshot.status, ProcessLifecycleStatus::Suspended);
         assert_eq!(
             snapshot.suspension.expect("suspension").kind,
