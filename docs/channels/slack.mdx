@@ -259,10 +259,10 @@ Slack").
 
 There is no channel allowlist or routing table. Inviting the bot into a channel is what
 enables it: Slack only delivers a channel's events to the app because the bot is a
-member, and each message runs as the person who mentioned the bot. In shared channels the
-bot answers only when explicitly mentioned — a plain thread reply without a mention is
-ignored, though approve/deny replies and `/ironclaw` commands still work; in DMs it answers
-every message.
+member, and each message runs as the person who mentioned the bot. In channels — shared
+or not — the bot answers only when explicitly mentioned: a plain thread reply without a
+mention is dropped without starting a run, though approve/deny replies and `/ironclaw`
+commands still work; in DMs it answers every message.
 
 There is no key that turns Slack on. The webhook route is always mounted, and it starts
 accepting events once the Slack extension is installed and its signing secret is
