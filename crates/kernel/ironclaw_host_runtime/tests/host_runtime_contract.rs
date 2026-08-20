@@ -37,7 +37,7 @@ use ironclaw_host_api::{
         CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
     },
     decision::{Decision, DenyReason, Obligations},
-    dispatch::{CapabilityDispatchResult, DispatchError},
+    dispatch::{CapabilityDispatchResult, DispatchError, RuntimeDispatchErrorKind},
     host_port::HostPortCatalog,
     ids::{
         ApprovalRequestId, CapabilityGrantId, CapabilityId, ExtensionId, InvocationId, PackageId,
@@ -59,9 +59,9 @@ use ironclaw_host_runtime::{
 use ironclaw_processes::{
     ProcessCancellationRegistry, ProcessInvocationError, ProcessInvocationRecord,
     ProcessInvocationStart, ProcessInvocationStatePort, ProcessInvocationStatus,
-    ProcessInvocationStore, ProcessJournalStore, ProcessResultStore, ProcessResultStorePort,
-    ProcessServices, ProcessStart, ProcessStatus, capability_process_record,
-    submit_capability_process,
+    ProcessInvocationStore, ProcessJournalKind, ProcessJournalStore, ProcessKind,
+    ProcessResultStore, ProcessResultStorePort, ProcessServices, ProcessStart, ProcessStatus,
+    capability_process_record, submit_capability_process,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -133,6 +133,75 @@ async fn default_runtime_returns_completed_outcome_for_authorized_dispatch() {
         other => panic!("expected Completed outcome, got {:?}", other),
     }
     assert!(dispatcher.call_count() > 0);
+}
+
+#[tokio::test]
+async fn default_runtime_persists_failed_invocation_when_dispatch_fails() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(TestDispatcher::responding(|_, _| {
+        Err(DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::Backend,
+            model_visible_cause: None,
+        })
+    }));
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let process_runtime = ProcessServices::in_memory().process_runtime();
+    let run_state = Arc::new(ProcessInvocationStore::new(Arc::clone(&process_runtime)));
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
+
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_invocation_state(run_state.clone())
+    .with_approval_requests(approval_requests);
+
+    let context = execution_context_with_dispatch_grant();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let outcome = runtime
+        .invoke_capability((
+            context,
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "dispatch fails"}),
+        ))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(_)
+    ));
+    let run = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .expect("dispatch failure must persist terminal invocation evidence");
+    assert_eq!(run.status, ProcessInvocationStatus::Failed);
+    assert_eq!(run.error_kind.as_deref(), Some("Dispatch"));
+    let entries = process_runtime
+        .read_process_journal_after(&scope, None, None, 16)
+        .await
+        .unwrap()
+        .entries
+        .into_iter()
+        .filter(|entry| entry.process_kind == ProcessKind::CapabilityInvocationState)
+        .collect::<Vec<_>>();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].kind, ProcessJournalKind::Failed);
+
+    let reloaded = ProcessInvocationStore::new(process_runtime)
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .expect("terminal invocation evidence must survive store reconstruction");
+    assert_eq!(reloaded.status, ProcessInvocationStatus::Failed);
+    assert_eq!(reloaded.error_kind.as_deref(), Some("Dispatch"));
 }
 
 /// A capability bound to a standard messaging op (`standard_op:

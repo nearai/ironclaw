@@ -563,7 +563,7 @@ async fn capability_host_returns_specific_error_for_authorizer_fingerprint_misma
 }
 
 #[tokio::test]
-async fn capability_host_discards_fresh_pending_invocation_when_dispatch_fails() {
+async fn capability_host_retains_fresh_pending_invocation_for_outcome_terminalization() {
     let registry = registry_with_echo_capability();
     let dispatcher = TestDispatcher::responding(|_, _| {
         Err(DispatchError::Wasm {
@@ -599,7 +599,13 @@ async fn capability_host_discards_fresh_pending_invocation_when_dispatch_fails()
             ..
         }
     ));
-    assert_eq!(run_state.get(&scope, invocation_id).await.unwrap(), None);
+    let pending = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .expect("outcome layer must receive the fresh pending invocation");
+    assert_eq!(pending.status, ProcessInvocationStatus::Running);
+    assert_eq!(pending.error_kind, None);
 }
 
 #[tokio::test]
