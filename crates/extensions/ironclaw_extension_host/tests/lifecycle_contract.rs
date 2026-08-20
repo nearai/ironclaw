@@ -587,7 +587,7 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
         ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
     };
     use ironclaw_host_api::{
-        dispatch::DispatchError,
+        dispatch::{DispatchError, ProviderDiagnostic, UntrustedProviderMessage},
         ids::{CapabilityId, SecretHandle},
     };
 
@@ -603,6 +603,13 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
             Err(ToolError::AuthRequired {
                 required_secrets: vec![SecretHandle::new("acme_token").unwrap()],
                 credential_requirements: Vec::new(),
+                model_visible_cause: Some(ProviderDiagnostic {
+                    code: None,
+                    message: Some(UntrustedProviderMessage::new(
+                        "provider error code: github_api_error_status_401; provider message: Bad credentials",
+                    )),
+                    retry_after: None,
+                }),
             })
         }
     }
@@ -649,13 +656,113 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
         DispatchError::AuthRequired {
             capability,
             required_secrets,
+            model_visible_cause,
             ..
         } => {
             assert_eq!(capability.as_str(), "acme.ping");
             assert_eq!(required_secrets.len(), 1);
+            assert_eq!(
+                model_visible_cause
+                    .as_ref()
+                    .and_then(|diagnostic| diagnostic.message.as_ref())
+                    .map(|message| message.as_str()),
+                Some(
+                    "provider error code: github_api_error_status_401; provider message: Bad credentials"
+                )
+            );
         }
         other => panic!("expected AuthRequired, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn snapshot_resolver_preserves_typed_provider_rejection() {
+    use ironclaw_capabilities::ToolResolver;
+    use ironclaw_extension_contracts::tool_adapter::{
+        ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
+    };
+    use ironclaw_host_api::{
+        dispatch::{
+            DispatchError, DispatchFailureKind, ProviderDiagnostic, ProviderErrorCode,
+            RuntimeDispatchErrorKind, UntrustedProviderMessage,
+        },
+        ids::CapabilityId,
+        runtime::RuntimeKind,
+    };
+
+    struct RejectingAdapter;
+
+    #[async_trait::async_trait]
+    impl ToolAdapter for RejectingAdapter {
+        async fn invoke(
+            &self,
+            _call: ToolCall,
+            _ports: &ToolPorts<'_>,
+        ) -> Result<ToolResult, ToolError> {
+            Err(ToolError::Rejected {
+                runtime: Some(RuntimeKind::Mcp),
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client),
+                diagnostic: Some(ProviderDiagnostic {
+                    code: Some(ProviderErrorCode::new("mcp_tool_rejected")),
+                    message: Some(UntrustedProviderMessage::new("Bad credentials")),
+                    retry_after: None,
+                }),
+                detail: None,
+            })
+        }
+    }
+
+    let channel = Arc::new(FakeChannelAdapter::default());
+    let h = harness_with(
+        ExtensionBindings {
+            tools: Some(Arc::new(RejectingAdapter)),
+            channel: channel_only_bindings(Arc::clone(&channel)).channel,
+            device_link: None,
+        },
+        channel,
+    )
+    .await;
+    h.host
+        .install(record("acme", tool_and_channel_manifest()))
+        .await
+        .unwrap();
+    h.host.activate("acme").await.unwrap();
+
+    let resolver = ironclaw_extension_host::SnapshotToolResolver::new(h.host.snapshot_watch());
+    let resolved = resolver
+        .resolve(&CapabilityId::new("acme.ping").unwrap())
+        .expect("resolves");
+    let error = resolved
+        .adapter
+        .dispatch_json(ironclaw_capabilities::CapabilityDispatchRequest {
+            run_id: None,
+            origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+            capability_id: CapabilityId::new("acme.ping").unwrap(),
+            scope: sample_scope(),
+            estimate: ironclaw_host_api::resource::ResourceEstimate::default(),
+            mounts: None,
+            resource_reservation: None,
+            authenticated_actor_user_id: None,
+            input: serde_json::json!({}),
+        })
+        .await
+        .unwrap_err();
+
+    let DispatchError::Rejected {
+        diagnostic: Some(diagnostic),
+        ..
+    } = error
+    else {
+        panic!("provider rejection must survive snapshot resolver");
+    };
+    assert_eq!(
+        diagnostic.code.as_ref().map(|code| code.as_str()),
+        Some("mcp_tool_rejected")
+    );
+    assert_eq!(
+        diagnostic.message.as_ref().map(|message| message.as_str()),
+        Some("Bad credentials")
+    );
 }
 
 #[tokio::test]

@@ -89,6 +89,20 @@ registerPack("hi", {
   "chat.suggestion2Desc": "सहीपन के जोखिम, रुकी हुई स्वीकृतियां और फॉलो-अप देखें.",
   "chat.suggestion3": "एक्सटेंशन readiness check ड्राफ्ट करें",
   "chat.suggestion3Desc": "सेटअप, ऑथ, पेयरिंग और उपलब्ध क्षमताओं की पुष्टि करें.",
+  // Chat — OOBE suggestion cards (English placeholder; localized in a later slice)
+  "chat.oobe.heading": "Suggested for you",
+  "chat.oobe.subtitle": "Approve to run",
+  "chat.oobe.showSuggestions": "Show suggestions",
+  "chat.oobe.hideSuggestions": "Hide suggestions",
+  "chat.oobe.from": "From {sources}",
+  "chat.oobe.dismiss": "Dismiss suggestion",
+  "chat.oobe.action.approve": "Approve",
+  "chat.oobe.action.openThread": "View in thread",
+  "chat.oobe.action.generate": "Suggest something for me",
+  "chat.oobe.action.tryAgain": "Try again",
+  "chat.oobe.status.starting": "Starting\u2026",
+  "chat.oobe.status.generating": "Finding things I can do for you\u2026",
+  "chat.oobe.status.generateFailed": "Couldn\u2019t generate suggestions",
 
   // Chat — input
   "chat.placeholder": "IronClaw को संदेश...",
@@ -1422,6 +1436,7 @@ registerPack("hi", {
   "pairing.connectInstructions": "जारी रखने के लिए {name} के कनेक्शन चरणों का पालन करें।",
   "pairing.connectFromExtensions": "जारी रखने के लिए एक्सटेंशन पेज से {name} कनेक्ट करें।",
   "pairing.connectFailedRetry": "कनेक्शन विफल रहा। फिर से प्रयास करें।",
+  "pairing.continueConnect": "{name} कनेक्ट करने के लिए जारी रखें",
   "extensions.authUrlHttpsRequired": "ऑथेंटिकेशन URL में HTTPS होना चाहिए।",
   "tools.available": "उपलब्ध उपकरण",
   "slackSetup.placeholder.keepSecret": "कॉन्फ़िगर है; बनाए रखने के लिए खाली छोड़ें",

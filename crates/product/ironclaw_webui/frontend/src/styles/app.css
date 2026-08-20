@@ -465,6 +465,24 @@ input:focus, select:focus, textarea:focus {
 .near-process.is-busy .near-process-icon .near-comet {
   animation: near-chase 1.1s linear infinite !important;
 }
+
+/* OOBE suggestion cards: a restrained entrance when a fresh set is revealed
+   (docs/internal/design/oobe/VISION-RECONCILIATION.md). Reuses the sanctioned
+   `v2-page-in` keyframe; a class selector + !important outranks the universal
+   `animation: none`, and it is suppressed under prefers-reduced-motion below —
+   the same discipline as `.v2-spin` / `.near-process`, not an ad-hoc bypass. */
+.oobe-card-reveal {
+  animation: v2-page-in 0.42s cubic-bezier(0.2, 0.7, 0.2, 1) both !important;
+}
+
+/* OOBE suggestion strip: horizontal scroll with the scrollbar hidden (the
+   cards themselves signal overflow). Matches the mockup's `.strip`. */
+.oobe-strip {
+  scrollbar-width: none;
+}
+.oobe-strip::-webkit-scrollbar {
+  display: none;
+}
 @keyframes near-chase {
   to { stroke-dashoffset: -66; }
 }
@@ -487,6 +505,7 @@ input:focus, select:focus, textarea:focus {
   .near-process.is-busy .near-process-icon,
   .near-process.is-busy .near-process-icon .near-comet { animation: none !important; }
   .near-process .near-comet { display: none !important; }
+  .oobe-card-reveal { animation: none !important; }
 }
 
 /* ── Markdown body ───────────────────────────────────────────────── */

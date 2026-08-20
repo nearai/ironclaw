@@ -40,9 +40,9 @@ use ironclaw_processes::{
     RecoverExpiredProcessLeasesRequest, RecoverExpiredProcessLeasesResponse, SuspendProcessRequest,
 };
 use ironclaw_turns::{
-    CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
-    RetryTurnRequest, RetryTurnResponse, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator,
-    TurnError, TurnRunId, TurnRunState, TurnScope,
+    ActivateThreadRequest, CancelRunRequest, CancelRunResponse, GetRunStateRequest,
+    ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, SubmitTurnRequest,
+    SubmitTurnResponse, TurnCoordinator, TurnError, TurnRunId, TurnRunState, TurnScope,
 };
 use tracing::debug;
 
@@ -77,6 +77,13 @@ impl TurnCoordinator for CancelReconcilingTurnCoordinator {
         request: SubmitTurnRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
         self.inner.submit_turn(request).await
+    }
+
+    async fn activate(
+        &self,
+        request: ActivateThreadRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        self.inner.activate(request).await
     }
 
     async fn resume_turn(
@@ -341,10 +348,113 @@ mod tests {
     use ironclaw_loop_host::HostInputQueueError;
     use ironclaw_threads::ThreadMessageId;
     use ironclaw_turns::{
-        EventCursor, IdempotencyKey, SanitizedCancelReason, TurnActor, TurnStatus,
+        AcceptedMessageRef, ActivateThreadRequest, ActivationProvenance, EventCursor,
+        IdempotencyKey, SanitizedCancelReason, TurnActor, TurnStatus,
     };
 
     use super::*;
+
+    /// The decorator's contract is "every other method forwards". A method it
+    /// forgets silently inherits the trait's fail-closed default, and because
+    /// this is the ONE coordinator production composes, that turns into "the
+    /// feature is simply off in production" with no compile error to catch it.
+    #[tokio::test]
+    async fn activate_forwards_to_the_inner_coordinator() {
+        struct ActivateRecordingCoordinator {
+            seen: StdMutex<Vec<ActivationProvenance>>,
+        }
+
+        #[async_trait]
+        impl TurnCoordinator for ActivateRecordingCoordinator {
+            async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+                panic!("prepare_turn is not used by this test")
+            }
+            async fn submit_turn(
+                &self,
+                _request: SubmitTurnRequest,
+            ) -> Result<SubmitTurnResponse, TurnError> {
+                panic!("submit_turn is not used by this test")
+            }
+            async fn activate(
+                &self,
+                request: ActivateThreadRequest,
+            ) -> Result<SubmitTurnResponse, TurnError> {
+                self.seen
+                    .lock()
+                    .expect("activation recorder poisoned")
+                    .push(request.provenance);
+                Err(TurnError::Unavailable {
+                    reason: "inner reached".to_string(),
+                })
+            }
+            async fn resume_turn(
+                &self,
+                _request: ResumeTurnRequest,
+            ) -> Result<ResumeTurnResponse, TurnError> {
+                panic!("resume_turn is not used by this test")
+            }
+            async fn retry_turn(
+                &self,
+                _request: RetryTurnRequest,
+            ) -> Result<RetryTurnResponse, TurnError> {
+                panic!("retry_turn is not used by this test")
+            }
+            async fn cancel_run(
+                &self,
+                _request: CancelRunRequest,
+            ) -> Result<CancelRunResponse, TurnError> {
+                panic!("cancel_run is not used by this test")
+            }
+            async fn get_run_state(
+                &self,
+                _request: GetRunStateRequest,
+            ) -> Result<TurnRunState, TurnError> {
+                panic!("get_run_state is not used by this test")
+            }
+        }
+
+        let inner = Arc::new(ActivateRecordingCoordinator {
+            seen: StdMutex::new(Vec::new()),
+        });
+        let decorated = CancelReconcilingTurnCoordinator::new(
+            Arc::clone(&inner) as Arc<dyn TurnCoordinator>,
+            Arc::new(RecordingQueue::default()),
+        );
+
+        let error = decorated
+            .activate(ActivateThreadRequest {
+                scope: TurnScope::new(
+                    TenantId::new("tenant-reconcile").expect("tenant"),
+                    Some(AgentId::new("agent-reconcile").expect("agent")),
+                    Some(ProjectId::new("project-reconcile").expect("project")),
+                    ThreadId::new("thread-reconcile").expect("thread"),
+                ),
+                actor: TurnActor::new(UserId::new("user-forward").expect("user")),
+                accepted_message_ref: AcceptedMessageRef::new("accepted-forward")
+                    .expect("accepted"),
+                provenance: ActivationProvenance::System,
+                idempotency_key: IdempotencyKey::new("forward-key").expect("key"),
+                received_at: chrono::Utc::now(),
+                requested_run_profile: None,
+            })
+            .await
+            .expect_err("the recording inner coordinator always errors");
+
+        assert!(
+            matches!(error, TurnError::Unavailable { .. }),
+            "the decorator must surface the INNER coordinator's outcome, not the \
+             trait's fail-closed default; got {error:?}"
+        );
+        assert_eq!(
+            inner
+                .seen
+                .lock()
+                .expect("activation recorder poisoned")
+                .as_slice(),
+            &[ActivationProvenance::System],
+            "activate must reach the inner coordinator exactly once"
+        );
+    }
 
     struct ScriptedCancelCoordinator {
         cancel_result: StdMutex<Option<Result<CancelRunResponse, TurnError>>>,

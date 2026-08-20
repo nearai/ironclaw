@@ -89,6 +89,20 @@ registerPack("ar", {
   "chat.suggestion2Desc": "ابحث عن مخاطر الصحة والموافقات المحظورة والمتابعات.",
   "chat.suggestion3": "صياغة فحص جاهزية الملحقات",
   "chat.suggestion3Desc": "تحقق من الإعداد والمصادقة والإقران والقدرات المتاحة.",
+  // Chat — OOBE suggestion cards (English placeholder; localized in a later slice)
+  "chat.oobe.heading": "Suggested for you",
+  "chat.oobe.subtitle": "Approve to run",
+  "chat.oobe.showSuggestions": "Show suggestions",
+  "chat.oobe.hideSuggestions": "Hide suggestions",
+  "chat.oobe.from": "From {sources}",
+  "chat.oobe.dismiss": "Dismiss suggestion",
+  "chat.oobe.action.approve": "Approve",
+  "chat.oobe.action.openThread": "View in thread",
+  "chat.oobe.action.generate": "Suggest something for me",
+  "chat.oobe.action.tryAgain": "Try again",
+  "chat.oobe.status.starting": "Starting\u2026",
+  "chat.oobe.status.generating": "Finding things I can do for you\u2026",
+  "chat.oobe.status.generateFailed": "Couldn\u2019t generate suggestions",
 
   // Chat — input
   "chat.placeholder": "راسل IronClaw...",
@@ -1422,6 +1436,7 @@ registerPack("ar", {
   "pairing.connectInstructions": "اتبع خطوات الاتصال الخاصة بـ {name} للمتابعة.",
   "pairing.connectFromExtensions": "اربط {name} من صفحة الإضافات للمتابعة.",
   "pairing.connectFailedRetry": "فشل الاتصال. حاول مرة أخرى.",
+  "pairing.continueConnect": "متابعة لربط {name}",
   "extensions.authUrlHttpsRequired": "يجب أن يستخدم عنوان URL للمصادقة HTTPS.",
   "tools.available": "الأدوات المتاحة",
   "slackSetup.placeholder.keepSecret": "مكوّن؛ اتركه فارغًا للإبقاء عليه",

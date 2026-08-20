@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind;
 use ironclaw_extension_contracts::channel_adapter::{
-    OutboundPart, ProductTriggerReason, ReactionAction, RunReaction,
+    OutboundPart, OutboundVisibility, ProductTriggerReason, ReactionAction, RunReaction,
 };
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
@@ -1301,10 +1301,9 @@ impl RunDeliveryObserver {
     /// in a shared conversation it lands as a reply anchored on the sender's
     /// own message (the envelope's message-scoped conversation ref carries
     /// the anchor — a threading surface roots a thread on the ping, a flat
-    /// surface quotes it), so the nudge addresses the one unpaired sender
-    /// rather than the room. The
-    /// text is fixed, host-authored, and link-free (OAuth links and pairing
-    /// codes stay out of shared surfaces by the private-setup rules).
+    /// surface quotes it), requested `EphemeralTo` the sender so the nudge —
+    /// and the connect link its manifest text may carry — reaches only that
+    /// one unpaired sender rather than the room (#7681).
     /// Deliberately performs NO binding lookup (the sender is unbound by
     /// definition). Transport retries arrive as `Duplicate`, so this fires
     /// at most once per inbound event, and the per-conversation reservation
@@ -1334,15 +1333,21 @@ impl RunDeliveryObserver {
         let Some(reserved_at) = self.reserve_connect_nudge(conversation_key.clone()) else {
             return true;
         };
+        let visibility = if envelope_is_direct_chat(envelope) {
+            OutboundVisibility::Public
+        } else {
+            OutboundVisibility::EphemeralTo(envelope.external_actor_ref().clone())
+        };
         let delivered = self
             .services
-            .post_notice(
+            .post_notice_with_visibility(
                 DeliveryIntent::ConnectRequired,
                 self.services.fallback_notice_scope.clone(),
                 None,
                 envelope.external_conversation_ref(),
                 &self.connection_notices.connect_required,
                 format!("connect-nudge:{}", envelope.external_event_id().as_str()),
+                visibility,
             )
             .await;
         if delivered.is_none() {

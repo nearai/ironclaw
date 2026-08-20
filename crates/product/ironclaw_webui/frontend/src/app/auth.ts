@@ -1,4 +1,5 @@
 import React from "react";
+import { useQuery } from "@tanstack/react-query";
 import { queryClient } from "../lib/query-client";
 import {
   exchangeLoginTicket,
@@ -295,6 +296,10 @@ export function useAuthSession() {
     // Projects surface is hidden until the server sets
     // IRONCLAW_REBORN_PROJECTS, while the surface is being finished.
     rebornProjectsEnabled: Boolean(session?.features?.reborn_projects),
+    // Deployment feature gate for the OOBE first-run suggestion surface. Off by
+    // default (a missing flag → false), so the landing is unchanged for real
+    // users until the server sets `oobe_suggestions`.
+    oobeSuggestionsEnabled: Boolean(session?.features?.oobe_suggestions),
     workspaceRequiresScopedProjection:
       session?.features?.workspace_requires_scoped_projection ?? true,
     regressionArtifactExportEnabled: Boolean(
@@ -307,4 +312,21 @@ export function useAuthSession() {
     signIn,
     signOut,
   };
+}
+
+// Downstream read of the OOBE suggestion feature gate for components below the
+// auth root (the empty-state surface) that cannot receive `useAuthSession`'s
+// return without threading a prop through the whole tree. Reads the shared
+// `["session"]` query (deduped with the auth-layer fetch — no extra request, the
+// same pattern as `useAttachmentConfig`) so no second session lifecycle runs.
+// Default OFF: a missing flag hides the surface for real users.
+export function useOobeSuggestionsEnabled(): boolean {
+  const token = readStoredToken();
+  const query = useQuery({
+    enabled: Boolean(token),
+    queryKey: ["session"],
+    queryFn: fetchSession,
+    staleTime: 5 * 60_000,
+  });
+  return Boolean(query.data?.features?.oobe_suggestions);
 }

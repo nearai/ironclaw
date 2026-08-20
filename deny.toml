@@ -14,9 +14,10 @@ ignore = [
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
-    # h2 empty DATA-frame queueing — 0.3.27 is pinned by libsql 0.9.30 through
-    # hyper 0.14 / tonic 0.11. The independently resolved 0.4 line is upgraded
-    # to 0.4.16; keep this ignored only until the libsql pin is removed.
+    # h2 unbounded empty DATA frames — h2 0.4 is patched in Cargo.lock, but
+    # libsql 0.9.30 still pins tonic/hyper to h2 0.3.27. The advisory provides
+    # no patched 0.3.x release, so keep the legacy line ignored until libsql's
+    # transport stack can move to h2 >=0.4.16.
     "RUSTSEC-2026-0258",
     # rsa Marvin timing side-channel — test-only dependency used to mint
     # throwaway local OIDC JWT fixtures; no production network-observable

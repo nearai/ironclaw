@@ -341,6 +341,7 @@ pub(crate) fn claim_error_may_be_concurrent_resume(error: &CapabilityLeaseError)
 pub(crate) fn invocation_state_error_kind(error: &ProcessInvocationError) -> &'static str {
     match error {
         ProcessInvocationError::UnknownInvocation { .. } => "UnknownInvocation",
+        ProcessInvocationError::LeaseLost { .. } => "LeaseLost",
         ProcessInvocationError::InvocationAlreadyExists { .. } => "InvocationAlreadyExists",
         ProcessInvocationError::Serialization(_) => "Serialization",
         ProcessInvocationError::Deserialization(_) => "Deserialization",
@@ -372,6 +373,7 @@ mod tests {
     fn dispatch_input_encode_returns_no_invocation_state_transition() {
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
+            provider_diagnostic: None,
             safe_summary: None,
             detail: None,
         };
@@ -382,6 +384,7 @@ mod tests {
     fn dispatch_backend_returns_no_invocation_state_transition() {
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            provider_diagnostic: None,
             safe_summary: None,
             detail: None,
         };
@@ -392,6 +395,7 @@ mod tests {
     fn dispatch_unknown_capability_returns_no_invocation_state_transition() {
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::UnknownCapability,
+            provider_diagnostic: None,
             safe_summary: None,
             detail: None,
         };
@@ -418,6 +422,7 @@ mod tests {
             capability: capability(),
             required_secrets: Vec::new(),
             credential_requirements: Vec::new(),
+            model_visible_cause: None,
         };
         let transition = error
             .invocation_state_transition()

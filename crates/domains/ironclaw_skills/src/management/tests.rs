@@ -83,8 +83,7 @@ async fn install_list_and_remove_user_skills_through_scoped_mounts() {
 /// This PR is what lets an agent author a skill containing a script; without this the result is
 /// invisible. The WebUI has rendered a `scripts/` chip since #6194 and the wire field has existed
 /// since #7002, but the server hardcoded `has_scripts: false`, so a scripted skill was
-/// indistinguishable from a prose-only one -- including `portfolio`, a bundled skill shipping four
-/// Python scripts, which displayed as having none.
+/// indistinguishable from a prose-only one.
 #[tokio::test]
 async fn a_skill_bundle_with_scripts_reports_it() {
     let filesystem = Arc::new(InMemoryBackend::default());

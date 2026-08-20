@@ -45,12 +45,31 @@ impl exports::near::agent::tool::Guest for GitHubTool {
     }
 }
 
-fn guest_error_payload(code: &str) -> String {
+fn guest_error_payload(error: &str) -> String {
+    if is_structured_error_envelope(error) {
+        return error.to_string();
+    }
     serde_json::json!({
-        "code": code,
-        "kind": guest_error_kind(code),
+        "code": error,
+        "kind": guest_error_kind(error),
     })
     .to_string()
+}
+
+/// A handful of error origins (currently only the 401 path in
+/// `request::unauthorized_error_payload`) pre-build the full `{code, kind,
+/// message}` envelope so they can carry a provider `message` alongside the
+/// stable code. Detect that shape here and pass it through unchanged instead
+/// of re-wrapping it as `{"code": "<the whole json>", "kind": ...}`.
+fn is_structured_error_envelope(error: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(error)
+        .ok()
+        .and_then(|value| {
+            value
+                .as_object()
+                .map(|object| object.contains_key("code") && object.contains_key("kind"))
+        })
+        .unwrap_or(false)
 }
 
 fn guest_error_kind(code: &str) -> &'static str {
@@ -109,15 +128,38 @@ export!(GitHubTool);
 #[cfg(test)]
 mod tests {
     use super::guest_error_kind;
+    use super::guest_error_payload;
     use super::GitHubTool;
     use crate::dispatch::{action_from_context, execute_inner};
     use crate::exports::near::agent::tool::Guest;
-    use crate::request::{sanitize_host_error, test_support};
+    use crate::request::{sanitize_host_error, test_support, unauthorized_error_payload};
     use crate::types::{GitHubAction, GitHubWebhookRequest};
     use crate::validation::{normalize_ref_lookup, validate_repo_path};
     use crate::webhook::handle_webhook;
     use serde_json::json;
     use std::collections::HashMap;
+
+    #[test]
+    fn guest_error_payload_passes_through_a_structured_401_envelope_with_message() {
+        let error = unauthorized_error_payload(br#"{"message":"Bad credentials"}"#);
+
+        let payload = guest_error_payload(&error);
+
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
+        assert_eq!(value["code"], "github_api_error_status_401");
+        assert_eq!(value["kind"], "auth_required");
+        assert_eq!(value["message"], "Bad credentials");
+    }
+
+    #[test]
+    fn guest_error_payload_wraps_legacy_plain_codes_unchanged() {
+        let payload = guest_error_payload("github_api_error_status_403");
+
+        let value: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
+        assert_eq!(value["code"], "github_api_error_status_403");
+        assert_eq!(value["kind"], "client");
+        assert!(value.get("message").is_none());
+    }
 
     #[test]
     fn operation_comes_from_host_context_not_param_shape() {

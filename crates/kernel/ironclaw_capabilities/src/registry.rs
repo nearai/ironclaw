@@ -176,10 +176,23 @@ fn tool_error_to_dispatch_error(
         ToolError::AuthRequired {
             required_secrets,
             credential_requirements,
+            model_visible_cause,
         } => DispatchError::AuthRequired {
             capability: capability_id.clone(),
             required_secrets,
             credential_requirements,
+            model_visible_cause: model_visible_cause.map(Box::new),
+        },
+        ToolError::Rejected {
+            runtime,
+            kind,
+            diagnostic,
+            detail,
+        } => DispatchError::Rejected {
+            runtime,
+            kind,
+            diagnostic,
+            detail,
         },
         ToolError::Failed {
             kind,
@@ -249,9 +262,13 @@ mod tests {
     };
     use ironclaw_host_api::{
         capability::{CapabilityDescriptor, EffectKind, PermissionMode},
-        dispatch::{CapabilityDispatchRequest, DispatchError},
-        ids::ExtensionId,
-        resource::{ResourceEstimate, ResourceProfile},
+        dispatch::{
+            CapabilityDispatchRequest, DispatchError, DispatchFailureKind, ProviderDiagnostic,
+            ProviderErrorCode, UntrustedProviderMessage,
+        },
+        ids::{ExtensionId, InvocationId, ProductKind, TenantId, UserId},
+        invocation::InvocationOrigin,
+        resource::{ResourceEstimate, ResourceProfile, ResourceScope},
         runtime::{RuntimeKind, TrustClass},
     };
     use serde_json::json;
@@ -395,5 +412,95 @@ mod tests {
             error,
             CapabilityRegistrationError::MissingCapabilityAdapter { .. }
         ));
+    }
+
+    struct RejectingToolAdapter;
+
+    #[async_trait]
+    impl ToolAdapter for RejectingToolAdapter {
+        async fn invoke(
+            &self,
+            _call: ToolCall,
+            _ports: &ToolPorts<'_>,
+        ) -> Result<ToolResult, ToolError> {
+            Err(ToolError::Rejected {
+                runtime: Some(RuntimeKind::FirstParty),
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied),
+                diagnostic: Some(ProviderDiagnostic {
+                    code: Some(ProviderErrorCode::new("channel_not_found")),
+                    message: Some(UntrustedProviderMessage::new("no such channel")),
+                    retry_after: None,
+                }),
+                detail: None,
+            })
+        }
+    }
+
+    fn sample_dispatch_request(capability_id: &str) -> CapabilityDispatchRequest {
+        CapabilityDispatchRequest {
+            capability_id: CapabilityId::new(capability_id).expect("capability id"),
+            scope: ResourceScope {
+                tenant_id: TenantId::new("tenant-a").expect("tenant id"),
+                user_id: UserId::new("user-a").expect("user id"),
+                agent_id: None,
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            },
+            authenticated_actor_user_id: None,
+            run_id: None,
+            origin: InvocationOrigin::Product(ProductKind::new("test").expect("product kind")),
+            estimate: ResourceEstimate::default(),
+            mounts: None,
+            resource_reservation: None,
+            input: json!({}),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_adapter_rejection_maps_to_dispatch_error_rejected_preserving_kind_and_diagnostic()
+    {
+        let mut registry = CapabilityDispatchRegistry::new();
+        registry
+            .register_extension(extension(
+                "provider-a",
+                Some(Arc::new(RejectingToolAdapter)),
+            ))
+            .expect("extension registration");
+
+        let resolved = registry
+            .resolve(&CapabilityId::new("provider-a.echo").expect("capability id"))
+            .expect("resolved");
+
+        let error = resolved
+            .adapter
+            .dispatch_json(sample_dispatch_request("provider-a.echo"))
+            .await
+            .expect_err("rejection propagated");
+
+        match error {
+            DispatchError::Rejected {
+                kind, diagnostic, ..
+            } => {
+                assert_eq!(
+                    kind,
+                    DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied)
+                );
+                let diagnostic = diagnostic.expect("diagnostic preserved");
+                assert_eq!(
+                    diagnostic.code.as_ref().map(ProviderErrorCode::as_str),
+                    Some("channel_not_found")
+                );
+                assert_eq!(
+                    diagnostic
+                        .message
+                        .as_ref()
+                        .map(UntrustedProviderMessage::as_str),
+                    Some("no such channel")
+                );
+            }
+            other => panic!("expected DispatchError::Rejected, got {other:?}"),
+        }
     }
 }

@@ -795,7 +795,23 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // obligations that were previously prose in a design doc no
         // implementor reads. Enforcement of all of it stays where it was.
         // Count read from this test's own failure message.
-        ("ironclaw_extension_contracts", 10_512),
+        // 10_512 -> 10_672 (2026-08-19, #7681 private connect nudge): a union
+        // re-pin, not one change's growth. Main alone had already reached
+        // 10_639 (measured on origin/main with this row at 0), consuming 127
+        // of the 150-line working slack before this branch merged; the
+        // branch's own delta is +33 lines — the `OutboundVisibility` enum and
+        // the `visibility` field on `OutboundEnvelope`, plus
+        // `ChannelReply::supports_private_delivery` and the doc that names it
+        // as the fail-closed input for host decisions that depend on a
+        // delivery staying private. Declaration only: the ephemeral endpoint
+        // routing lives in the Slack package and the link decision in
+        // ironclaw_extension_host. Count read from this test's own failure
+        // message on the merged tree.
+        // 10_672 -> 10_841 (2026-08-14, capability response normalization):
+        // ToolAdapter auth errors carry the neutral bounded provider diagnostic
+        // through the extension ABI. Parsing and model-safety behavior remain
+        // in runtime lanes and loop_host.
+        ("ironclaw_extension_contracts", 10_841),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -851,7 +867,8 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // forever, and `RuntimeCredentialAccountSetup::DeviceLink`.
         // 19_483 -> 19_718 (#7532): the provider-neutral turn execution
         // policy and validated required-skill identity shared by trusted
-        // trigger ingress and the runner.
+        // trigger ingress and the runner. Resolution, activation, and
+        // capability enforcement remain in their owning implementation crates.
         // + (2026-08-13, unbound turns): the `prepared_context` module —
         // `PreparedTurnDeclarations`, `OutputContract`, `TurnLimits`, the
         // `PreparedContextSource` admission-probe trait, and the
@@ -861,7 +878,23 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // this test's own failure message.
         // Reviewed growth: immutable, provider-neutral output-contract DTOs
         // belong beside the turn contract consumed across loop families.
-        ("ironclaw_host_api", 20_156),
+        // 20_156 -> 20_334 (2026-08-19, #7686 restack): capability dispatch-result
+        // declarations retained beside main's provider-neutral output contracts.
+        // 20_334 -> 20_481 (2026-08-14, capability response normalization):
+        // provider diagnostics and rejected-attempt accounting are neutral
+        // dispatch DTOs beside main's provider-neutral output contracts.
+        // Protocol decoding and settlement stay in their owning runtime crates;
+        // the count was re-measured on the merged tree.
+        // 20_481 -> 20_516 (2026-08-19, #7752 merge): +35 lines in `turn.rs`
+        // for `turn::ActivationProvenance`, the enum tagging why a run was
+        // created (Human / ParentAgent / System).
+        // It is turn vocabulary, and `ironclaw_turns` may not own turn
+        // vocabulary — a new turn type goes to `host_api` by that crate's own
+        // charter — so there is no lower crate to move it to. Pure DTO: three
+        // unit variants and a serde derive, no behavior. The 35-line delta is
+        // from the merged `turn.rs`; the resulting ceiling is re-captured from
+        // this test's own report, never counted by eye.
+        ("ironclaw_host_api", 20_516),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
@@ -1007,7 +1040,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // Suggestions add a product-surface-neutral generate/list/start/dismiss
         // contract shared by WebUI and future channel adapters. The DTOs and
         // ProductSurface vocabulary belong here; no orchestration moved in.
-        ("ironclaw_product_contracts", 16_418),
+        // 16_192 -> 16_581 (2026-08-17, #7688 durable notification inbox plus
+        // suggestions):
+        // typed notification records, pagination, and lifecycle command DTOs.
+        // Storage and lifecycle behavior live in ironclaw_notifications;
+        // this crate only owns the authenticated ProductSurface wire contract.
+        ("ironclaw_product_contracts", 16_581),
         // 832 -> 432 (2026-08-12, #7373 refresh merge, main): re-pinned to the
         // measured count — this row still carried the +400 seed pad the
         // 2026-08-07 re-pin removed from its siblings.

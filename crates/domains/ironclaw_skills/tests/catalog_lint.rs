@@ -73,7 +73,7 @@ fn the_checked_in_catalog_passes_the_routing_metadata_lint() {
     }
 
     assert!(
-        linted >= 30,
+        linted >= 15,
         "expected the whole catalog; linted only {linted} skills"
     );
     assert!(

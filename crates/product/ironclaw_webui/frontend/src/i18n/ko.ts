@@ -89,6 +89,20 @@ registerPack("ko", {
   "chat.suggestion2Desc": "정확성 위험, 막힌 승인, 후속 조치를 확인합니다.",
   "chat.suggestion3": "확장 준비 상태 점검 초안 작성",
   "chat.suggestion3Desc": "설정, 인증, 페어링, 사용 가능한 기능을 확인합니다.",
+  // Chat — OOBE suggestion cards (English placeholder; localized in a later slice)
+  "chat.oobe.heading": "Suggested for you",
+  "chat.oobe.subtitle": "Approve to run",
+  "chat.oobe.showSuggestions": "Show suggestions",
+  "chat.oobe.hideSuggestions": "Hide suggestions",
+  "chat.oobe.from": "From {sources}",
+  "chat.oobe.dismiss": "Dismiss suggestion",
+  "chat.oobe.action.approve": "Approve",
+  "chat.oobe.action.openThread": "View in thread",
+  "chat.oobe.action.generate": "Suggest something for me",
+  "chat.oobe.action.tryAgain": "Try again",
+  "chat.oobe.status.starting": "Starting\u2026",
+  "chat.oobe.status.generating": "Finding things I can do for you\u2026",
+  "chat.oobe.status.generateFailed": "Couldn\u2019t generate suggestions",
 
   // Chat — input
   "chat.placeholder": "IronClaw에 메시지 보내기...",
@@ -1422,6 +1436,7 @@ registerPack("ko", {
   "pairing.connectInstructions": "계속하려면 {name} 연결 단계를 따르세요.",
   "pairing.connectFromExtensions": "계속하려면 확장 페이지에서 {name}을 연결하세요.",
   "pairing.connectFailedRetry": "연결에 실패했습니다. 다시 시도하세요.",
+  "pairing.continueConnect": "계속하여 {name} 연결",
   "extensions.authUrlHttpsRequired": "인증 URL은 HTTPS를 사용해야 합니다.",
   "tools.available": "사용 가능한 도구",
   "slackSetup.placeholder.keepSecret": "구성됨; 유지하려면 비워두세요",

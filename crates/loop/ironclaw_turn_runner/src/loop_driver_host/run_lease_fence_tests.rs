@@ -154,6 +154,7 @@ fn claimed_run_matching(
     use ironclaw_turns::{AcceptedMessageRef, TurnRunnerId, TurnStatus};
 
     ironclaw_turns::runner::ClaimedTurnRun {
+        subagent_activation_provenance: None,
         state: ironclaw_turns::TurnRunState {
             scope: scope.clone(),
             actor: None,

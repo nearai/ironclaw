@@ -18,10 +18,14 @@ use ironclaw_host_api::{
     Timestamp,
     action::NetworkMethod,
     decision::RuntimeCredentialAuthRequirement,
-    dispatch::{CapabilityDisplayOutputPreview, RuntimeDispatchErrorKind},
+    dispatch::{
+        CapabilityDisplayOutputPreview, DispatchFailureDetail, DispatchFailureKind,
+        ProviderDiagnostic, RuntimeDispatchErrorKind,
+    },
     ids::{CapabilityId, SecretHandle},
     mount::MountView,
     resource::{ResourceEstimate, ResourceReservation, ResourceScope},
+    runtime::RuntimeKind,
 };
 
 /// One invocation of one declared capability.
@@ -64,12 +68,25 @@ pub struct ToolResult {
 /// Typed invocation failures. The host maps these onto the dispatch port's
 /// redacted failure categories; `AuthRequired` maps to the generic re-auth
 /// gate and resumes through the standard blocked-turn flow.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ToolError {
     #[error("tool invocation requires authorization")]
     AuthRequired {
         required_secrets: Vec<SecretHandle>,
         credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+        /// Raw provider rejection retained for the host's downstream
+        /// model-diagnostic scrub/fence seam. Its `Debug` representation is
+        /// redacted; never log or render it directly.
+        model_visible_cause: Option<ProviderDiagnostic>,
+    },
+    #[error("tool provider rejected invocation ({kind})")]
+    Rejected {
+        runtime: Option<RuntimeKind>,
+        kind: DispatchFailureKind,
+        /// Provider-authored metadata remains typed so its `Debug` output is
+        /// redacted until the host's model-diagnostic scrub/fence seam.
+        diagnostic: Option<ProviderDiagnostic>,
+        detail: Option<DispatchFailureDetail>,
     },
     #[error("tool invocation failed ({kind:?})")]
     Failed {
@@ -83,6 +100,63 @@ pub enum ToolError {
         model_visible_cause: Option<String>,
     },
 }
+
+impl PartialEq for ToolError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::AuthRequired {
+                    required_secrets: left_secrets,
+                    credential_requirements: left_requirements,
+                    ..
+                },
+                Self::AuthRequired {
+                    required_secrets: right_secrets,
+                    credential_requirements: right_requirements,
+                    ..
+                },
+            ) => left_secrets == right_secrets && left_requirements == right_requirements,
+            (
+                Self::Failed {
+                    kind: left_kind,
+                    safe_summary: left_summary,
+                    model_visible_cause: left_cause,
+                },
+                Self::Failed {
+                    kind: right_kind,
+                    safe_summary: right_summary,
+                    model_visible_cause: right_cause,
+                },
+            ) => {
+                left_kind == right_kind
+                    && left_summary == right_summary
+                    && left_cause == right_cause
+            }
+            (
+                Self::Rejected {
+                    runtime: left_runtime,
+                    kind: left_kind,
+                    diagnostic: left_diagnostic,
+                    detail: left_detail,
+                },
+                Self::Rejected {
+                    runtime: right_runtime,
+                    kind: right_kind,
+                    diagnostic: right_diagnostic,
+                    detail: right_detail,
+                },
+            ) => {
+                left_runtime == right_runtime
+                    && left_kind == right_kind
+                    && left_diagnostic == right_diagnostic
+                    && left_detail == right_detail
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ToolError {}
 
 /// Host ports available to an adapter during one invocation — derived from
 /// the resolved contract, nothing wider. A port is `None` exactly when the
@@ -189,6 +263,7 @@ impl ToolCall {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_host_api::dispatch::{DispatchInputIssue, DispatchInputIssueCode};
 
     #[test]
     fn tool_error_display_stays_redacted() {
@@ -203,10 +278,146 @@ mod tests {
     }
 
     #[test]
+    fn rejected_debug_redacts_nested_diagnostic_detail_but_keeps_input_detail() {
+        let marker = "TOOL_DIAGNOSTIC_SECRET_MARKER";
+        let error = ToolError::Rejected {
+            runtime: Some(RuntimeKind::Wasm),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest),
+            diagnostic: None,
+            detail: Some(DispatchFailureDetail::Diagnostic {
+                text: marker.to_string(),
+            }),
+        };
+        let debug = format!("{error:?}");
+        assert!(!debug.contains(marker), "diagnostic text leaked: {debug}");
+        assert!(
+            debug.contains("Diagnostic"),
+            "detail kind was lost: {debug}"
+        );
+        assert!(
+            debug.contains("<redacted>"),
+            "redaction is not visible: {debug}"
+        );
+
+        let useful = ToolError::Rejected {
+            runtime: Some(RuntimeKind::Wasm),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest),
+            diagnostic: None,
+            detail: Some(DispatchFailureDetail::InvalidInput {
+                issues: vec![
+                    DispatchInputIssue::new("/title", DispatchInputIssueCode::TypeMismatch)
+                        .expected("string")
+                        .received("integer"),
+                ],
+            }),
+        };
+        let useful_debug = format!("{useful:?}");
+        assert!(
+            useful_debug.contains("/title"),
+            "input path was lost: {useful_debug}"
+        );
+        assert!(
+            useful_debug.contains("string"),
+            "input detail was lost: {useful_debug}"
+        );
+    }
+
+    #[test]
     fn restricted_egress_errors_name_the_denied_authority() {
         let error = RestrictedEgressError::UndeclaredHost {
             host: "evil.example".to_string(),
         };
         assert!(error.to_string().contains("evil.example"));
+    }
+
+    #[test]
+    fn auth_required_equality_ignores_model_visible_cause() {
+        let secrets = vec![SecretHandle::new("notion-token").unwrap()];
+        let left = ToolError::AuthRequired {
+            required_secrets: secrets.clone(),
+            credential_requirements: Vec::new(),
+            model_visible_cause: Some(ProviderDiagnostic {
+                code: None,
+                message: None,
+                retry_after: None,
+            }),
+        };
+        let right = ToolError::AuthRequired {
+            required_secrets: secrets,
+            credential_requirements: Vec::new(),
+            model_visible_cause: None,
+        };
+
+        assert_eq!(left, right);
+    }
+
+    #[test]
+    fn auth_required_equality_still_compares_required_secrets() {
+        let left = ToolError::AuthRequired {
+            required_secrets: vec![SecretHandle::new("notion-token").unwrap()],
+            credential_requirements: Vec::new(),
+            model_visible_cause: None,
+        };
+        let right = ToolError::AuthRequired {
+            required_secrets: vec![SecretHandle::new("slack-token").unwrap()],
+            credential_requirements: Vec::new(),
+            model_visible_cause: None,
+        };
+
+        assert_ne!(left, right);
+    }
+
+    fn rejected(kind: DispatchFailureKind, diagnostic: Option<ProviderDiagnostic>) -> ToolError {
+        ToolError::Rejected {
+            runtime: Some(RuntimeKind::FirstParty),
+            kind,
+            diagnostic,
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn rejected_equality_compares_kind_and_diagnostic() {
+        let denied = DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied);
+        let network_denied = DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied);
+
+        assert_eq!(
+            rejected(denied, None),
+            rejected(denied, None),
+            "identical Rejected values must be equal"
+        );
+        assert_ne!(
+            rejected(denied, None),
+            rejected(network_denied, None),
+            "differing kind must break equality"
+        );
+        assert_ne!(
+            rejected(
+                denied,
+                Some(ProviderDiagnostic {
+                    code: None,
+                    message: None,
+                    retry_after: None,
+                })
+            ),
+            rejected(denied, None),
+            "differing diagnostic presence must break equality"
+        );
+    }
+
+    #[test]
+    fn tool_error_of_different_variants_are_never_equal() {
+        let auth_required = ToolError::AuthRequired {
+            required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
+            model_visible_cause: None,
+        };
+        let failed = ToolError::Failed {
+            kind: RuntimeDispatchErrorKind::Backend,
+            safe_summary: None,
+            model_visible_cause: None,
+        };
+
+        assert_ne!(auth_required, failed);
     }
 }

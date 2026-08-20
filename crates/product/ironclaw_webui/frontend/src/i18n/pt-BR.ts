@@ -89,6 +89,20 @@ registerPack("pt-BR", {
   "chat.suggestion2Desc": "Procurar riscos de correcao, aprovacoes bloqueadas e acompanhamentos.",
   "chat.suggestion3": "Rascunhar uma checagem de prontidão de extensões",
   "chat.suggestion3Desc": "Verificar configuracao, autenticacao, pareamento e capacidades disponiveis.",
+  // Chat — OOBE suggestion cards (English placeholder; localized in a later slice)
+  "chat.oobe.heading": "Suggested for you",
+  "chat.oobe.subtitle": "Approve to run",
+  "chat.oobe.showSuggestions": "Show suggestions",
+  "chat.oobe.hideSuggestions": "Hide suggestions",
+  "chat.oobe.from": "From {sources}",
+  "chat.oobe.dismiss": "Dismiss suggestion",
+  "chat.oobe.action.approve": "Approve",
+  "chat.oobe.action.openThread": "View in thread",
+  "chat.oobe.action.generate": "Suggest something for me",
+  "chat.oobe.action.tryAgain": "Try again",
+  "chat.oobe.status.starting": "Starting\u2026",
+  "chat.oobe.status.generating": "Finding things I can do for you\u2026",
+  "chat.oobe.status.generateFailed": "Couldn\u2019t generate suggestions",
 
   // Chat — input
   "chat.placeholder": "Mensagem para o IronClaw...",
@@ -1422,6 +1436,7 @@ registerPack("pt-BR", {
   "pairing.connectInstructions": "Siga as etapas de conexão de {name} para continuar.",
   "pairing.connectFromExtensions": "Conecte {name} pela página Extensões para continuar.",
   "pairing.connectFailedRetry": "A conexão falhou. Tente novamente.",
+  "pairing.continueConnect": "Continuar para conectar {name}",
   "extensions.authUrlHttpsRequired": "A URL de autenticação deve usar HTTPS.",
   "tools.available": "Ferramentas disponíveis",
   "slackSetup.placeholder.keepSecret": "Configurado; deixe em branco para manter",

@@ -16,6 +16,7 @@ fn summary(error: &ToolError) -> String {
         ToolError::Failed { safe_summary, .. } => {
             safe_summary.clone().unwrap_or_else(|| "<none>".to_string())
         }
+        ToolError::Rejected { kind, .. } => kind.human_summary().to_string(),
         ToolError::AuthRequired { .. } => "auth_required".to_string(),
     }
 }

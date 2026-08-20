@@ -182,8 +182,7 @@ pub struct SkillSummary {
     /// This PR is what lets an agent author a skill containing a script, so the Skills page has to be
     /// able to show that it did. The WebUI has rendered a `scripts/` chip since #6194 and the wire
     /// field has existed since #7002, but the server hardcoded `false` -- so a scripted skill looked
-    /// identical to a prose-only one, including `portfolio`, a bundled skill shipping four Python
-    /// scripts.
+    /// identical to a prose-only one.
     pub has_scripts: bool,
 }
 

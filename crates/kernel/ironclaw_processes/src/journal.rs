@@ -951,6 +951,16 @@ pub trait ProcessSnapshotSource: Send + Sync {
         &self,
         scope: &ResourceScope,
     ) -> Result<Vec<JournaledProcessSnapshot>, Self::Error>;
+
+    /// Newest-first, bounded read of one scope's agent-turn processes.
+    ///
+    /// Unlike [`Self::process_snapshots`] this is explicitly bounded: callers
+    /// that need a fixed recent window must not enumerate a whole scope.
+    async fn recent_agent_turn_snapshots(
+        &self,
+        scope: &ResourceScope,
+        limit: u32,
+    ) -> Result<Vec<JournaledProcessSnapshot>, Self::Error>;
 }
 
 #[async_trait]

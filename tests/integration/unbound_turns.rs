@@ -121,6 +121,7 @@ fn submit_request(
     idempotency_key: &str,
 ) -> HarnessResult<SubmitTurnRequest> {
     Ok(SubmitTurnRequest {
+        subagent_activation_provenance: None,
         scope,
         actor: TurnActor::new(UserId::new(CALLER)?),
         accepted_message_ref,

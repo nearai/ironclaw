@@ -44,6 +44,17 @@ impl ProcessSnapshotSource for ProcessJournalStoreTurnAdapter {
             .await
             .map_err(turn_error_from_process_journal_store_error)
     }
+
+    async fn recent_agent_turn_snapshots(
+        &self,
+        scope: &ResourceScope,
+        limit: u32,
+    ) -> Result<Vec<JournaledProcessSnapshot>, Self::Error> {
+        self.runtime
+            .recent_agent_turn_snapshots(scope, limit)
+            .await
+            .map_err(turn_error_from_process_journal_store_error)
+    }
 }
 
 #[async_trait]

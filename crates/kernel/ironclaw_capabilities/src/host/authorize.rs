@@ -267,6 +267,7 @@ where
                     capability: request.capability_id.clone(),
                     required_secrets,
                     credential_requirements: requirements,
+                    model_visible_cause: None,
                 };
                 apply_invocation_state_transition_if_configured(
                     self.invocation_state,

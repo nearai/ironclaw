@@ -89,6 +89,12 @@ use ironclaw_product_contracts::inbound_requests::{
 use ironclaw_product_contracts::ironhub::{
     IRONHUB_DELIVER_INSTALL_COMMAND, IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult,
 };
+use ironclaw_product_contracts::notification_inbox::{
+    NOTIFICATIONS_ARCHIVE_COMMAND, NOTIFICATIONS_MARK_ALL_READ_COMMAND,
+    NOTIFICATIONS_MARK_READ_COMMAND, NOTIFICATIONS_VIEW, ProductListNotificationsRequest,
+    ProductListNotificationsResponse, ProductMarkAllNotificationsReadRequest,
+    ProductNotificationMutationRequest, ProductNotificationMutationResponse,
+};
 use ironclaw_product_contracts::notification_setup::{
     NOTIFICATION_SETUP_DISABLE_COMMAND, NOTIFICATION_SETUP_ENABLE_COMMAND,
     NOTIFICATION_SETUP_STATUS_VIEW,
@@ -217,6 +223,10 @@ pub struct WebUiV2Features {
     /// `IRONCLAW_REBORN_PROJECTS`, while the surface is still being
     /// finished.
     pub reborn_projects: bool,
+    /// OOBE first-run suggestion surface (the first-run suggestion cards).
+    /// Hidden unless the deployment sets `IRONCLAW_OOBE_SUGGESTIONS`; gated so
+    /// real users never see fabricated suggestions until it ships.
+    pub oobe_suggestions: bool,
     /// Whether the browser must hide raw workspace fallback and only show the
     /// caller-scoped workspace projection. Hosted deployments enable this to
     /// avoid showing artifacts from a shared `/workspace` root; local
@@ -262,6 +272,7 @@ pub async fn get_session(
         capabilities,
         features: WebUiV2Features {
             reborn_projects: state.reborn_projects_enabled(),
+            oobe_suggestions: state.oobe_suggestions_enabled(),
             workspace_requires_scoped_projection,
             regression_artifact_export: state.regression_artifact_export_enabled(),
             admin_thread_scrape: state.admin_thread_scrape_enabled(),
@@ -1856,6 +1867,83 @@ pub struct ListThreadsQuery {
     pub candidate_thread_id: Option<String>,
     #[serde(default)]
     pub needs_approval: bool,
+}
+
+/// `GET /api/webchat/v2/notifications`
+pub async fn list_notifications(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Query(query): Query<ListNotificationsQuery>,
+) -> Result<Json<ProductListNotificationsResponse>, WebUiV2HttpError> {
+    let surface = state.bind_services(caller);
+    let response = NOTIFICATIONS_VIEW
+        .query_on(
+            &surface,
+            ProductListNotificationsRequest { limit: query.limit },
+            query.cursor,
+        )
+        .await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ListNotificationsQuery {
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NotificationPath {
+    pub notification_id: String,
+}
+
+/// `POST /api/webchat/v2/notifications/{notification_id}/read`
+pub async fn mark_notification_read(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(NotificationPath { notification_id }): Path<NotificationPath>,
+) -> Result<Json<ProductNotificationMutationResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        NOTIFICATIONS_MARK_READ_COMMAND,
+        ProductNotificationMutationRequest { notification_id },
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/notifications/read-all`
+pub async fn mark_all_notifications_read(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<ProductNotificationMutationResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        NOTIFICATIONS_MARK_ALL_READ_COMMAND,
+        ProductMarkAllNotificationsReadRequest {},
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/notifications/{notification_id}/archive`
+pub async fn archive_notification(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(NotificationPath { notification_id }): Path<NotificationPath>,
+) -> Result<Json<ProductNotificationMutationResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        NOTIFICATIONS_ARCHIVE_COMMAND,
+        ProductNotificationMutationRequest { notification_id },
+    )
+    .await?;
+    Ok(Json(response))
 }
 
 /// `GET /api/webchat/v2/commands`

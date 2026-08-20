@@ -58,6 +58,19 @@ pub struct ProcessInvocationStart {
 pub enum ProcessInvocationError {
     #[error("unknown invocation {invocation_id}")]
     UnknownInvocation { invocation_id: InvocationId },
+    /// The invocation's process record exists, but this worker no longer holds
+    /// it: the lease expired and recovery either failed it (`lease_expired` /
+    /// `crash_retry_exhausted`) or requeued it and another claimer took it.
+    ///
+    /// Distinct from [`Self::UnknownInvocation`] on purpose — a lost lease is a
+    /// recoverable ownership loss, and reporting it as "not found" hides the
+    /// write-pressure/lease-expiry cause behind a missing-record message
+    /// (issue #7714).
+    #[error("lease lost for invocation {invocation_id}: {reason}")]
+    LeaseLost {
+        invocation_id: InvocationId,
+        reason: String,
+    },
     #[error("invocation {invocation_id} already exists")]
     InvocationAlreadyExists { invocation_id: InvocationId },
     #[error("process invocation serialization failed: {0}")]
@@ -390,7 +403,26 @@ impl ProcessInvocationStore {
             .into_iter()
             .next()
             .map(|claim| claim.state)
-            .ok_or(ProcessInvocationError::UnknownInvocation { invocation_id })
+            // Every caller reached here through `running_snapshot`, which read
+            // the process record first — so the record exists and an empty
+            // claim means someone else holds it (a racing claimer after
+            // requeue, or a concurrency limit), not a missing invocation.
+            .ok_or_else(|| ProcessInvocationError::LeaseLost {
+                invocation_id,
+                reason: "process is no longer claimable by this worker".to_string(),
+            })
+    }
+
+    /// The sanitized failure category when a terminal process was failed by
+    /// lease recovery, rather than by its own capability outcome.
+    fn lease_expiry_category(snapshot: &JournaledProcessSnapshot) -> Option<&'static str> {
+        let category = snapshot.failure.as_ref()?.category();
+        [
+            crate::journal_store::LEASE_EXPIRED_FAILURE_CATEGORY,
+            crate::journal_store::CRASH_RETRY_EXHAUSTED_FAILURE_CATEGORY,
+        ]
+        .into_iter()
+        .find(|known| *known == category)
     }
 
     async fn running_snapshot(
@@ -416,9 +448,18 @@ impl ProcessInvocationStore {
                     .map_err(|error| map_process_error(error, invocation_id))?;
                 self.claim(scope.clone(), invocation_id).await
             }
-            _ => Err(ProcessInvocationError::Backend(format!(
-                "capability process {invocation_id} is terminal"
-            ))),
+            // A process recovery failed because its lease expired is a lost
+            // lease, not an opaque terminal state — keep the cause legible all
+            // the way to the host-runtime boundary.
+            _ => match Self::lease_expiry_category(&snapshot) {
+                Some(category) => Err(ProcessInvocationError::LeaseLost {
+                    invocation_id,
+                    reason: category.to_string(),
+                }),
+                None => Err(ProcessInvocationError::Backend(format!(
+                    "capability process {invocation_id} is terminal"
+                ))),
+            },
         }
     }
 
@@ -905,6 +946,202 @@ mod tests {
                 .map(|entry| entry.kind)
                 .collect::<Vec<_>>(),
             vec![crate::ProcessJournalKind::Suspended]
+        );
+    }
+
+    /// Regression for issue #7714: write-pressure delays a process-journal
+    /// write, the lease expires, recovery fails the process `lease_expired`,
+    /// and the late transition attempt used to surface as
+    /// `UnknownInvocation` — which the host runtime rendered as "process
+    /// invocation not found", hiding the lease loss behind a missing-record
+    /// message.
+    #[tokio::test]
+    async fn transition_after_lease_expiry_recovery_reports_lease_lost() {
+        let (store, journal) = process_store();
+        let runtime = Arc::clone(&journal) as Arc<dyn ProcessRuntimePort>;
+        let invocation_id = InvocationId::new();
+        let scope = scope(invocation_id);
+        let process_id = ProcessInvocationStore::process_id(invocation_id);
+
+        store
+            .start(ProcessInvocationStart {
+                invocation_id,
+                capability_id: CapabilityId::new("echo.say").unwrap(),
+                scope: scope.clone(),
+                authenticated_actor_user_id: Some(scope.user_id.clone()),
+            })
+            .await
+            .unwrap();
+        // A durable suspension gives the process a checkpoint ref, so lease
+        // recovery fails it rather than requeuing it.
+        store
+            .block_auth(&scope, invocation_id, "credential_required".to_string())
+            .await
+            .unwrap();
+
+        // Take the lease the way `running_snapshot` does: resume, then claim.
+        let suspended = runtime
+            .get_process_snapshot(GetProcessSnapshotRequest {
+                scope: scope.clone(),
+                process_id,
+            })
+            .await
+            .unwrap();
+        runtime
+            .resume_process(ResumeProcessRequest {
+                scope: scope.clone(),
+                process_id,
+                operation_id: None,
+                expected_cursor: Some(suspended.journal_cursor),
+                checkpoint_ref: suspended.checkpoint_ref.clone(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        let claimed = runtime
+            .claim_next_processes(ClaimProcessesRequest {
+                worker_id: ProcessWorkerId::from_trusted(CAPABILITY_RUN_WORKER),
+                scope_filter: Some(scope.clone()),
+                process_id_filter: Some(process_id),
+                process_kind_filter: Some(ProcessKind::CapabilityInvocationState),
+                max_processes: 1,
+            })
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1, "process must be claimed before expiry");
+
+        let recovered = runtime
+            .recover_expired_process_leases(crate::RecoverExpiredProcessLeasesRequest {
+                now: chrono::Utc::now() + chrono::Duration::hours(1),
+                scope_filter: Some(scope.clone()),
+                process_kind_filter: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            recovered.recovered.len(),
+            1,
+            "expired lease must be recovered"
+        );
+
+        let error = store
+            .complete(&scope, invocation_id)
+            .await
+            .expect_err("a transition after lease recovery must fail");
+        assert!(
+            matches!(
+                &error,
+                ProcessInvocationError::LeaseLost { invocation_id: id, reason }
+                    if *id == invocation_id
+                        && reason == crate::journal_store::LEASE_EXPIRED_FAILURE_CATEGORY
+            ),
+            "lost lease must not be reported as a missing invocation, got {error:?}"
+        );
+    }
+
+    /// The other recovery category, driven through the same caller. Without
+    /// this, a regression that stopped classifying `crash_retry_exhausted`
+    /// would surface as a generic `Backend` error and no test would notice.
+    ///
+    /// The process is submitted straight to the journal rather than through
+    /// `ProcessInvocationStore::start`: `start` is worker-local, and every
+    /// durable record it goes on to create carries a checkpoint ref, which is
+    /// the `lease_expired` shape. A checkpointless record is what recovery
+    /// requeues until the reclaim budget runs out.
+    #[tokio::test]
+    async fn transition_after_crash_retry_exhaustion_reports_lease_lost() {
+        let (store, journal) = process_store();
+        let runtime = Arc::clone(&journal) as Arc<dyn ProcessRuntimePort>;
+        let invocation_id = InvocationId::new();
+        let scope = scope(invocation_id);
+        let process_id = ProcessInvocationStore::process_id(invocation_id);
+
+        runtime
+            .submit_process(crate::SubmitProcessRequest {
+                process_id,
+                process_kind: ProcessKind::CapabilityInvocationState,
+                scope: scope.clone(),
+                exclusive_within_scope: false,
+                operation_id: None,
+                owner_user_id: Some(scope.user_id.clone()),
+                concurrency_class: None,
+                parent_process_id: None,
+                root_process_id: None,
+                spawn_tree_descendant_cap: None,
+                dependency: None,
+                checkpoint_ref: None,
+                input: None,
+                created_at: chrono::Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .unwrap();
+
+        for attempt in 0..crate::MAX_CRASH_RECOVERY_RECLAIMS {
+            let claimed = runtime
+                .claim_next_processes(ClaimProcessesRequest {
+                    worker_id: ProcessWorkerId::from_trusted(CAPABILITY_RUN_WORKER),
+                    scope_filter: Some(scope.clone()),
+                    process_id_filter: Some(process_id),
+                    process_kind_filter: Some(ProcessKind::CapabilityInvocationState),
+                    max_processes: 1,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                claimed.len(),
+                1,
+                "process must be claimable on attempt {attempt}"
+            );
+            // Each round has to clear the previous requeue's grace window, so
+            // the clock moves forward rather than repeating one offset.
+            let recovered = runtime
+                .recover_expired_process_leases(crate::RecoverExpiredProcessLeasesRequest {
+                    now: chrono::Utc::now() + chrono::Duration::hours(1 + attempt as i64),
+                    scope_filter: Some(scope.clone()),
+                    process_kind_filter: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                recovered.recovered.len(),
+                1,
+                "expired lease must be recovered on attempt {attempt}"
+            );
+        }
+
+        let error = store
+            .complete(&scope, invocation_id)
+            .await
+            .expect_err("a transition after retry exhaustion must fail");
+        assert!(
+            matches!(
+                &error,
+                ProcessInvocationError::LeaseLost { invocation_id: id, reason }
+                    if *id == invocation_id
+                        && reason == crate::journal_store::CRASH_RETRY_EXHAUSTED_FAILURE_CATEGORY
+            ),
+            "exhausted crash retries must report a lost lease, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn transition_for_an_unknown_invocation_still_reports_unknown_invocation() {
+        let (store, _journal) = process_store();
+        let invocation_id = InvocationId::new();
+        let scope = scope(invocation_id);
+
+        let error = store
+            .complete(&scope, invocation_id)
+            .await
+            .expect_err("an unknown invocation must fail");
+        assert!(
+            matches!(
+                error,
+                ProcessInvocationError::UnknownInvocation { invocation_id: id }
+                    if id == invocation_id
+            ),
+            "a genuinely unknown invocation must stay UnknownInvocation, got {error:?}"
         );
     }
 

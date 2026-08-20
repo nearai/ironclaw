@@ -1584,6 +1584,7 @@ async fn production_postgres_process_journal_pool_writes_rows_the_data_plane_rea
     ironclaw_turns::TurnCoordinator::submit_turn(
         services.turn_coordinator_for_test().as_ref(),
         ironclaw_turns::SubmitTurnRequest {
+            subagent_activation_provenance: None,
             requested_model: None,
             output_contract: None,
             scope,

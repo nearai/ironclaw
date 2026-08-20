@@ -61,6 +61,7 @@ async fn mcp_adapter_maps_executor_auth_required_to_dispatch_auth_required() {
             capability,
             required_secrets,
             credential_requirements,
+            ..
         }) => {
             assert_eq!(capability, descriptor.id);
             assert!(required_secrets.is_empty());

@@ -49,20 +49,51 @@ function NavItem({ route, label, onNavigate }) {
 function ExpandableNavItem({ route, label, subRoutes, onNavigate }) {
   const t = useT();
   const location = useLocation();
-  const isExpanded =
-    location.pathname === route.path ||
-    location.pathname.startsWith(route.path + "/");
+  const isExactRoute =
+    location.pathname === route.path || location.pathname === route.path + "/";
+  const isSubRouteActive =
+    !isExactRoute && location.pathname.startsWith(route.path + "/");
+  const isActive = isExactRoute || isSubRouteActive;
+  const [collapsedLocationKey, setCollapsedLocationKey] = React.useState<
+    string | null
+  >(null);
   const defaultPath = `${route.path}/${subRoutes[0].id}`;
+
+  const handleParentClick = (event: React.MouseEvent<HTMLAnchorElement>) => {
+    const isModifiedClick =
+      event.button !== 0 ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.shiftKey;
+
+    if (isSubRouteActive && !isModifiedClick) {
+      event.preventDefault();
+      setCollapsedLocationKey((collapsedKey) =>
+        collapsedKey === location.key ? null : location.key
+      );
+      return;
+    }
+    onNavigate?.(event);
+  };
+
+  const sectionIsExpanded =
+    isActive && collapsedLocationKey !== location.key;
 
   return (
     <div className="flex flex-col">
       <NavLink
         to={defaultPath}
-        onClick={onNavigate}
+        data-testid={`nav-${route.id}`}
+        onClick={handleParentClick}
+        aria-expanded={sectionIsExpanded ? "true" : "false"}
+        aria-controls={
+          sectionIsExpanded ? `sidebar-${route.id}-subroutes` : undefined
+        }
         className={() =>
           cn(
             "flex items-center gap-3 rounded-[10px] px-3 py-2 text-[13px] font-medium",
-            isExpanded
+            isActive
               ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
               : "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
           )}
@@ -76,14 +107,16 @@ function ExpandableNavItem({ route, label, subRoutes, onNavigate }) {
           name="chevron"
           className={cn(
             "h-3.5 w-3.5 shrink-0 transition-transform duration-150",
-            isExpanded && "rotate-180"
+            sectionIsExpanded && "rotate-180"
           )}
         />
       </NavLink>
 
-      {isExpanded &&
-      (
-        <div className="mt-0.5 flex flex-col gap-0.5 pl-3">
+      {sectionIsExpanded && (
+        <div
+          id={`sidebar-${route.id}-subroutes`}
+          className="mt-0.5 flex flex-col gap-0.5 pl-3"
+        >
           {subRoutes.map(
             (sub) => (
               <NavLink

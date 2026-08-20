@@ -89,6 +89,20 @@ registerPack("zh-CN", {
   "chat.suggestion2Desc": "查找正确性风险、被阻塞的审批和后续事项。",
   "chat.suggestion3": "草拟扩展就绪检查",
   "chat.suggestion3Desc": "验证设置、认证、配对和可用能力。",
+  // Chat — OOBE suggestion cards (English placeholder; localized in a later slice)
+  "chat.oobe.heading": "Suggested for you",
+  "chat.oobe.subtitle": "Approve to run",
+  "chat.oobe.showSuggestions": "Show suggestions",
+  "chat.oobe.hideSuggestions": "Hide suggestions",
+  "chat.oobe.from": "From {sources}",
+  "chat.oobe.dismiss": "Dismiss suggestion",
+  "chat.oobe.action.approve": "Approve",
+  "chat.oobe.action.openThread": "View in thread",
+  "chat.oobe.action.generate": "Suggest something for me",
+  "chat.oobe.action.tryAgain": "Try again",
+  "chat.oobe.status.starting": "Starting\u2026",
+  "chat.oobe.status.generating": "Finding things I can do for you\u2026",
+  "chat.oobe.status.generateFailed": "Couldn\u2019t generate suggestions",
 
   // Chat — input
   "chat.placeholder": "给 IronClaw 发消息...",
@@ -1420,6 +1434,7 @@ registerPack("zh-CN", {
   "pairing.connectInstructions": "请按照 {name} 的连接步骤操作以继续。",
   "pairing.connectFromExtensions": "请从扩展页面连接 {name} 后继续。",
   "pairing.connectFailedRetry": "连接失败。请重试。",
+  "pairing.continueConnect": "继续以连接 {name}",
   "extensions.authUrlHttpsRequired": "认证 URL 必须使用 HTTPS。",
   "tools.available": "可用工具",
   "slackSetup.placeholder.keepSecret": "已配置；留空则保留",
