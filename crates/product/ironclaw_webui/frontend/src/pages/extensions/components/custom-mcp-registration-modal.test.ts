@@ -127,6 +127,18 @@ test("accepts a literal loopback IP over http and advances to review", () => {
   assert.match(document.body.textContent || "", /customMcpReviewHint/);
 });
 
+test("accepts the IPv6 loopback literal over http and advances to review", () => {
+  renderModal();
+  setInput(document.querySelectorAll<HTMLInputElement>("input")[0], "Pantry Host MCP v6");
+  // `::1` is the other half of the loopback contract the modal accepts, and it
+  // exercises the bracketed-authority parse that the IPv4 case cannot.
+  setInput(document.querySelectorAll<HTMLInputElement>("input")[2], "http://[::1]:5001/mcp");
+  clickButton("common.continue");
+
+  assert.doesNotMatch(document.body.textContent || "", /customMcpEndpointHttps/);
+  assert.match(document.body.textContent || "", /customMcpReviewHint/);
+});
+
 test("still rejects localhost as a hosted MCP endpoint", () => {
   renderModal();
   setInput(document.querySelectorAll<HTMLInputElement>("input")[0], "Local MCP");

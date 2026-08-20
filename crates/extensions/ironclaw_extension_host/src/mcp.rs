@@ -137,10 +137,21 @@ impl HostedMcpEgressEndpoint {
         {
             return None;
         }
+        let host_pattern = parsed.host_str()?.to_ascii_lowercase();
+        // The same host rule the admission gate holds, restated here because
+        // this parser also runs for host-bundled manifests, which never pass
+        // through admission: `localhost` is a DNS name a resolver could rebind,
+        // and an IP literal is only ever admitted when it is loopback. Without
+        // this, a bundled manifest declaring `https://localhost/mcp` or
+        // `https://8.8.8.8/mcp` would still yield an egress policy.
+        let is_ip_literal = matches!(host, url::Host::Ipv4(_) | url::Host::Ipv6(_));
+        if host_pattern == "localhost" || (is_ip_literal && !loopback) {
+            return None;
+        }
         Some(Self {
             scheme,
             loopback,
-            host_pattern: parsed.host_str()?.to_ascii_lowercase(),
+            host_pattern,
             port: parsed.port(),
             path: normalize_mcp_path(parsed.path()),
             query: parsed.query().map(str::to_string),
@@ -318,6 +329,104 @@ mod tests {
 
         assert!(plan.credential_injections.is_empty());
         assert!(plan.network_policy.allowed_targets.is_empty());
+    }
+
+    /// The loopback exemption through the real call site: `plan()` resolves the
+    /// package endpoint, matches the request URL, and emits the final policy.
+    /// The parse/policy unit tests above cover the helpers in isolation; this
+    /// asserts the production path a dispatched MCP request actually takes.
+    #[test]
+    fn planner_emits_http_loopback_plan_without_private_range_denial() {
+        let registry = Arc::new(SharedExtensionRegistry::new(registry_with_provider(
+            "local-mcp",
+            "http://127.0.0.1:5001/mcp",
+            "local-mcp.search",
+            "local_token",
+        )));
+        let planner = RegistryMcpEgressPlanner::new(registry);
+        let provider = ExtensionId::new("local-mcp").unwrap();
+        let cap = CapabilityId::new("local-mcp.search").unwrap();
+        let scope = sample_scope();
+
+        let plan = planner.plan(sample_plan_request(
+            &provider,
+            &cap,
+            "http://127.0.0.1:5001/mcp",
+            &scope,
+        ));
+
+        assert_eq!(
+            plan.network_policy.allowed_targets,
+            vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Http),
+                host_pattern: "127.0.0.1".to_string(),
+                port: Some(5001),
+            }]
+        );
+        assert!(
+            !plan.network_policy.deny_private_ip_ranges,
+            "a literal loopback endpoint waives the private-range denial"
+        );
+    }
+
+    /// A non-loopback provider reached over the planner keeps the guard, so the
+    /// exemption above cannot be read as "the planner stopped denying".
+    #[test]
+    fn planner_keeps_private_range_denial_for_a_public_provider() {
+        let registry = Arc::new(SharedExtensionRegistry::new(registry_with_provider(
+            "fixture",
+            "https://fixture.example.com/mcp",
+            "fixture.search",
+            "fixture_token",
+        )));
+        let planner = RegistryMcpEgressPlanner::new(registry);
+        let provider = ExtensionId::new("fixture").unwrap();
+        let cap = CapabilityId::new("fixture.search").unwrap();
+        let scope = sample_scope();
+
+        let plan = planner.plan(sample_plan_request(
+            &provider,
+            &cap,
+            "https://fixture.example.com/mcp",
+            &scope,
+        ));
+
+        assert!(plan.network_policy.deny_private_ip_ranges);
+    }
+
+    /// `localhost` and a non-loopback IP literal never produce an egress plan,
+    /// even though both are `https`. Host-bundled manifests never pass through
+    /// `hosted_mcp_admission`, so this parser is their only host gate.
+    #[test]
+    fn planner_denies_localhost_and_non_loopback_ip_literal_providers() {
+        for url in [
+            "https://localhost/mcp",
+            "https://8.8.8.8/mcp",
+            "https://[2001:db8::1]/mcp",
+        ] {
+            assert!(
+                HostedMcpEgressEndpoint::parse(url).is_none(),
+                "{url} must not yield an egress endpoint"
+            );
+
+            let registry = Arc::new(SharedExtensionRegistry::new(registry_with_provider(
+                "rebindable",
+                url,
+                "rebindable.search",
+                "rebindable_token",
+            )));
+            let planner = RegistryMcpEgressPlanner::new(registry);
+            let provider = ExtensionId::new("rebindable").unwrap();
+            let cap = CapabilityId::new("rebindable.search").unwrap();
+            let scope = sample_scope();
+
+            let plan = planner.plan(sample_plan_request(&provider, &cap, url, &scope));
+
+            assert!(
+                plan.network_policy.allowed_targets.is_empty(),
+                "{url} must not produce an egress allowlist"
+            );
+        }
     }
 
     #[test]
