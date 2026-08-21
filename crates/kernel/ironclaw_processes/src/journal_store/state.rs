@@ -1169,7 +1169,13 @@ impl ProcessJournalMaterializedState {
         let terminal_door = match request.next {
             crate::ProcessDependencyState::Consumed => Some("consume_process_dependency"),
             crate::ProcessDependencyState::Abandoned => Some("abandon_process_dependency"),
-            _ => None,
+            // Enumerated, not a wildcard: a new terminal variant must fail to
+            // compile here, in the one file that owns the paired release.
+            crate::ProcessDependencyState::Open
+            | crate::ProcessDependencyState::Settled
+            | crate::ProcessDependencyState::ResultAppended
+            | crate::ProcessDependencyState::AttentionScheduled
+            | crate::ProcessDependencyState::AttentionDeferred => None,
         };
         if let Some(door) = terminal_door {
             return Err(ProcessJournalStoreError::InvalidRequest(format!(
