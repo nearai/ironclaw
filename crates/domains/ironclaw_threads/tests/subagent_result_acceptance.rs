@@ -20,7 +20,7 @@ use ironclaw_host_api::{
 use ironclaw_threads::{
     AcceptSubagentResultRequest, EnsureThreadRequest, FilesystemSessionThreadService,
     InMemorySessionThreadService, LoadContextMessagesRequest, MessageContent, MessageKind,
-    MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadScope,
+    MessageStatus, SessionThreadError, SessionThreadService, ThreadHistoryRequest, ThreadScope,
 };
 
 fn scope() -> ThreadScope {
@@ -284,4 +284,44 @@ async fn filesystem_subagent_result_resumes_a_claim_whose_row_never_landed() {
         "the crash must not duplicate the row: {rows:?}"
     );
     assert_eq!(rows[0].message_id, resumed.message_id);
+}
+
+/// A child's result may only land in a thread that already exists under the
+/// caller's scope. The door must not conjure a thread, and — because it claims
+/// the acceptance identity before the row on non-transactional backends — a
+/// rejected acceptance must stay rejected rather than burning the identity and
+/// reporting a replay on the retry.
+async fn subagent_result_into_an_unknown_thread_fails_closed(
+    service: Arc<dyn SessionThreadService>,
+) {
+    let unknown = ThreadId::new("thread-never-created").expect("thread id");
+    let request = result_request(&unknown, "child-1", "framed child output");
+
+    let error = service
+        .accept_subagent_result(request.clone())
+        .await
+        .expect_err("an unknown thread must not accept a subagent result");
+    assert!(
+        matches!(&error, SessionThreadError::UnknownThread { thread_id } if thread_id == &unknown),
+        "expected UnknownThread, got {error:?}"
+    );
+
+    let retry = service
+        .accept_subagent_result(request)
+        .await
+        .expect_err("the retry must still be rejected, not reported as a replay");
+    assert!(
+        matches!(&retry, SessionThreadError::UnknownThread { thread_id } if thread_id == &unknown),
+        "expected UnknownThread on retry, got {retry:?}"
+    );
+}
+
+#[tokio::test]
+async fn in_memory_subagent_result_into_an_unknown_thread_fails_closed() {
+    subagent_result_into_an_unknown_thread_fails_closed(in_memory_service()).await;
+}
+
+#[tokio::test]
+async fn filesystem_subagent_result_into_an_unknown_thread_fails_closed() {
+    subagent_result_into_an_unknown_thread_fails_closed(filesystem_service()).await;
 }
