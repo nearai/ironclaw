@@ -136,6 +136,13 @@
   .gate { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase;
     padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
 
+  .dep .owner { font-size: 12.5px; color: var(--text-dim); margin: 8px 0 0; font-family: var(--mono); }
+  .dep .owner b { color: var(--text); font-weight: 600; }
+
+  .callout { border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--radius);
+    background: var(--surface); padding: 14px 18px; margin: 18px 0 0; font-size: 14px; color: var(--text-dim); }
+  .callout b { color: var(--text); font-weight: 600; }
+
   table.docs { width: 100%; border-collapse: collapse; font-size: 14.5px; }
   table.docs th, table.docs td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
   table.docs th { font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-dim); font-weight: 600; }
@@ -165,7 +172,13 @@
       <span class="pill spark">Docs-only proposal</span>
       <span class="provenance">authored against origin/main @ d3791e0f8</span>
       <span>·</span>
-      <span>benchmarks: APDD-kit + PR #6918</span>
+      <span>benchmarks: APDD kit (external) + PR #6918</span>
+    </div>
+    <div class="callout">
+      <b>Read this page as a review aid, not a record.</b> Phase→Epic ownership is defined once, in
+      <a href="README.md#epic-ownership-canonical">README.md</a>; the pills below only echo it.
+      And <b>Phases 1–2 are not on <code>main</code></b> — Phase 1 is in review (PR #7750), Phase 2 is prepared
+      but has no open PR (#7042), so every DESIGN.md / Storybook reference here describes what those phases land.
     </div>
   </header>
 
@@ -173,7 +186,7 @@
     <h2>What this follows — the two benchmarks</h2>
     <div class="grid-2">
       <div class="card">
-        <div class="src">APDD governance kit</div>
+        <div class="src">APDD governance kit — external, not vendored</div>
         <h3>How it should be governed</h3>
         <ul>
           <li><b>Docs are the source of truth</b> — DESIGN.md + the catalog govern how UI is built.</li>
@@ -211,8 +224,8 @@
           <div class="rung tokens">styles/app.css — @theme + --v2-* · data-theme light/dark</div>
         </div>
         <aside class="rail">
-          <div class="note"><b>DESIGN.md</b> + <b>.claude/rules/design-system.md</b> → govern the design-system + tokens</div>
-          <div class="note"><b>Storybook</b> catalog + story tests → catalog &amp; regression-test design-system + components</div>
+          <div class="note"><b>DESIGN.md</b> + <b>.claude/rules/design-system.md</b> → govern the design-system + tokens <i>(lands with Phase 2 — not on <code>main</code>)</i></div>
+          <div class="note"><b>Storybook</b> catalog + story tests → catalog &amp; regression-test design-system + components <i>(lands with Phase 1 — in review)</i></div>
         </aside>
       </div>
     </div>
@@ -282,20 +295,35 @@
         </div>
       </div>
       <div class="crosscut">Cross-cutting: CI Playwright/Chromium (test:storybook) · MSW for network stories</div>
+      <div class="callout"><b>Accountability rule.</b> A dependency's owner is the Epic carrying its gating phase; the accountable individual is the assignee of that Epic's dependency sub-issue, which must be cut and assigned <b>before the gating phase's first PR opens</b>. Every <b>[decision]</b> needs a named caller recorded on the owning Epic. See <a href="PROPOSAL.md#7-dependencies-and-their-implementation-proposals">PROPOSAL §7</a>.</div>
     </div>
     <div class="phases">
       <div class="dep"><div class="dep-head"><h3>Dark palette derivation</h3><span class="gate">Gates Phase 3</span></div>
-        <p class="prop"><b>Proposal:</b> derive dark values per token by tonal shift (not inversion) in <code>:root[data-theme="dark"]</code>; validate in the Tokens/Colors story.</p></div>
+        <p class="prop"><b>Proposal:</b> derive dark values per token by tonal shift (not inversion) in <code>:root[data-theme="dark"]</code>; validate in the Tokens/Colors story.</p><p class="owner"><b>Owner:</b> Epic #7781 · Phase-3a token-foundation PR author</p></div>
       <div class="dep"><div class="dep-head"><h3>WCAG AA contrast</h3><span class="gate">Gates Phase 3</span></div>
-        <p class="prop"><b>Proposal:</b> validate every text/token pairing for the high-chroma palette; the Tokens story asserts computed contrast before adoption.</p></div>
+        <p class="prop"><b>Proposal:</b> validate every text/token pairing for the high-chroma palette; the Tokens story asserts computed contrast before adoption.</p><p class="owner"><b>Owner:</b> Epic #7781 · standing invariant, carried by the palette owner</p></div>
       <div class="dep"><div class="dep-head"><h3>Fonts &amp; licensing</h3><span class="gate">Gates Phase 3</span></div>
-        <p class="prop"><b>Proposal:</b> vendor Roboto Flex + Roboto Mono (OFL); <b>drop Google Sans</b> (not freely redistributable) — [decision] needed on the substitute.</p></div>
+        <p class="prop"><b>Proposal:</b> vendor Roboto Flex + Roboto Mono (OFL); <b>drop Google Sans</b> (not freely redistributable) — [decision] needed on the substitute.</p><p class="owner"><b>Owner:</b> Epic #7781 · <b>[decision]</b> — substitute called on #7781 before Phase 3a</p></div>
       <div class="dep"><div class="dep-head"><h3>Expressive motion</h3><span class="gate">Gates Phase 4</span></div>
-        <p class="prop"><b>Proposal:</b> a small spring lib or spring→bezier CSS, always opt-in and <code>prefers-reduced-motion</code>-gated — never bypassing the static-motion policy.</p></div>
+        <p class="prop"><b>Proposal:</b> a small spring lib or spring→bezier CSS, always opt-in and <code>prefers-reduced-motion</code>-gated — never bypassing the static-motion policy.</p><p class="owner"><b>Owner:</b> Epic #7782 · <b>[decision]</b> — mechanism called on #7782 before Phase 4a</p></div>
       <div class="dep"><div class="dep-head"><h3>CI: Playwright/Chromium</h3><span class="gate">Cross-cutting</span></div>
-        <p class="prop"><b>Proposal:</b> an <b>optional, non-blocking</b> CI job runs <code>playwright install chromium</code> + <code>test:storybook</code>; promote to required only once stable.</p></div>
+        <p class="prop"><b>Proposal:</b> an <b>optional, non-blocking</b> CI job runs <code>playwright install chromium</code> + <code>test:storybook</code>; promote to required only once stable.</p><p class="owner"><b>Owner:</b> Epic #7038 · CI-lane owner; <b>[decision]</b> to promote to required</p></div>
       <div class="dep"><div class="dep-head"><h3>MSW for network stories</h3><span class="gate">Cross-cutting</span></div>
-        <p class="prop"><b>Proposal:</b> add msw + msw-storybook-addon for the two network-backed components' happy paths; keep deterministic cache-seeding elsewhere.</p></div>
+        <p class="prop"><b>Proposal:</b> add msw + msw-storybook-addon for the two network-backed components' happy paths; keep deterministic cache-seeding elsewhere.</p><p class="owner"><b>Owner:</b> Epic #7782 · Phase-4 sub-issue assignee</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Ownership boundary</h2>
+    <p class="caption" style="margin-top:0">Design governance has exactly one owner. This package is it.</p>
+    <div class="callout">
+      <b>This package owns</b> <code>DESIGN.md</code>, the <code>--v2-*</code> token architecture, the Storybook
+      catalog / test-harness / MCP, and <code>.claude/rules/design-system.md</code>. Feature packages
+      <b>consume</b> that governance rather than re-proposing it — including
+      <code>docs/internal/design/oobe/</code>, whose <b>D-F6 “DESIGN.md + design tokens”</b> item is
+      <b>subsumed</b> here and keeps only its pilot role: the OOBE card family is catalogued
+      <i>through</i> this system. Full boundary, including the alternative call:
+      <a href="PROPOSAL.md#9-ownership-boundary-one-canonical-governance-record">PROPOSAL §9</a>.
     </div>
   </section>
 
@@ -321,7 +349,7 @@
   </section>
 
   <div class="footer">
-    docs/internal/reborn/design-system/ · Epics #7038 (Phase 1) · #7781 (Phases 2–3, supersedes #7733) · #7782 (Phases 4–5) · Phase 1 PR #7750 · Phase 2 #7042 · benchmarks: apdd-kit, docs/internal/reborn/target-architecture (PR #6918)
+    docs/internal/reborn/design-system/ · Epics #7038 (Phase 1) · #7781 (Phases 2–3, supersedes #7733) · #7782 (Phases 4–5) · Phase 1 PR #7750 (in review) · Phase 2 #7042 (prepared) · benchmarks: the APDD kit (external, not vendored — in-repo evaluation proposed on PR #7255) and docs/internal/reborn/target-architecture (PR #6918)
   </div>
 
 </div>

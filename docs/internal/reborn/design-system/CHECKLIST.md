@@ -4,14 +4,10 @@
 
 **Definition of done:** when every box below is checked, the governed, agentic-first WebUI design system is fully realized. A checked box means **landed on `main`**, with the landing PR named inline. `⚠` marks a blocking prerequisite; `[decision]` marks an item gated on a named human call.
 
-> **Epic ownership.** The program is tracked across three Epics (the original #7038 was
-> split, then Phase 2 folded in with Phase 3). This package is shared by all three:
->
-> | Epic | Phases | Scope |
-> |---|---|---|
-> | [#7038](https://github.com/nearai/ironclaw/issues/7038) | 1 | Storybook integration & design-system catalog — PR #7750 |
-> | [#7781](https://github.com/nearai/ironclaw/issues/7781) | 2–3 | `DESIGN.md` governance & documentation (#7042) · theme update & UI reskin — supersedes the closed #7733 |
-> | [#7782](https://github.com/nearai/ironclaw/issues/7782) | 4–5 | Agentic interactions & components · Information architecture |
+> **Epic ownership** lives in one place: the canonical table in
+> [README.md](README.md#epic-ownership-canonical). Phase and workstream headings below
+> name their owning Epic inline; when ownership changes, edit the README table — this
+> document is not a second copy of it.
 
 ## WS1 — Storybook integration (Phase 1) · Epic #7038
 - [ ] Storybook 10 (`@storybook/react-vite`, pnpm) wired to `app.css` + light/dark toolbar — **Ships with #7750**
@@ -48,6 +44,8 @@
 - [ ] `.claude/rules/design-system.md` governance kept current with each phase
 - [ ] **[decision]** Optional CI job runs `playwright install chromium` + `pnpm test:storybook`; promote to a required gate only once stable (PROPOSAL §7.1)
 - [ ] `pnpm typecheck` + `pnpm lint:conventions` + `pnpm build-storybook` stay green each phase
+- [ ] **Owners named before each gating phase opens** (PROPOSAL §7 accountability rule): a dependency sub-issue cut and assigned on the owning Epic for §7.1–§7.6, and every **[decision]** recorded with its caller on that Epic
+- [ ] Design governance stays single-owner: no second `DESIGN.md`, token set, or Storybook workbench proposed outside this package (PROPOSAL §9)
 
 ## WS7 — Final verification gate (the 100% gate)
 - [ ] Every primitive/composite/component with meaningful states has a story; `pnpm test:storybook` green

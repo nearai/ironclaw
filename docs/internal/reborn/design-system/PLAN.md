@@ -4,14 +4,10 @@
 
 This is the **when and how**; [CHECKLIST.md](CHECKLIST.md) is the **what** (definition of done); [PROPOSAL.md](PROPOSAL.md) is the frozen decision record. The five phases are **predefined** and executed in order; they are tracked across three Epics — **#7038** (Phase 1), **#7781** (Phases 2–3), **#7782** (Phases 4–5). Nothing here is sacred except the ordering constraints marked **⚠**.
 
-> **Epic ownership.** The program is tracked across three Epics (the original #7038 was
-> split, then Phase 2 folded in with Phase 3). This package is shared by all three:
->
-> | Epic | Phases | Scope |
-> |---|---|---|
-> | [#7038](https://github.com/nearai/ironclaw/issues/7038) | 1 | Storybook integration & design-system catalog — PR #7750 |
-> | [#7781](https://github.com/nearai/ironclaw/issues/7781) | 2–3 | `DESIGN.md` governance & documentation (#7042) · theme update & UI reskin — supersedes the closed #7733 |
-> | [#7782](https://github.com/nearai/ironclaw/issues/7782) | 4–5 | Agentic interactions & components · Information architecture |
+> **Epic ownership** lives in one place: the canonical table in
+> [README.md](README.md#epic-ownership-canonical). Phase and workstream headings below
+> name their owning Epic inline; when ownership changes, edit the README table — this
+> document is not a second copy of it.
 
 **Operating principles:**
 1. **Docs first** — each phase updates `DESIGN.md` / this package before or with the code (APDD Rule 1).
@@ -67,12 +63,14 @@ flowchart LR
 
 ## Suggested next PRs (concrete, in order)
 1. **Merge #7750** — that closes Epic #7038 (Phase 1). Then land the Phase-2 (#7042) changeset as a fresh PR off `main`, opening Epic #7781's first half.
-2. **Phase 3a — token foundation:** dark-palette + contrast + font vendoring in `app.css` (+ updated `Tokens/*` stories). No component restyle yet.
-3. **Phase 3b — primitive reskin:** restyle `design-system/` primitives against the new tokens, story-by-story.
-4. **Phase 4a — motion foundation:** choose + wire the animation approach behind the reduced-motion gate; add MSW.
-5. **Phase 4b — first agentic component:** composer toolbar or agent-activity card, fully catalogued.
+2. **Before Phase 3a opens — name the owners:** cut the dependency sub-issues on #7781 (dark palette + contrast, fonts/licensing **[decision]**) and assign them; PROPOSAL §7's accountability rule is what makes the gates real.
+3. **Phase 3a — token foundation:** dark-palette + contrast + font vendoring in `app.css` (+ updated `Tokens/*` stories). No component restyle yet.
+4. **Phase 3b — primitive reskin:** restyle `design-system/` primitives against the new tokens, story-by-story.
+5. **Phase 4a — motion foundation:** choose + wire the animation approach behind the reduced-motion gate; add MSW.
+6. **Phase 4b — first agentic component:** composer toolbar or agent-activity card, fully catalogued.
 
 ## Coordination notes
-- This is a **docs-only** PR; it changes no code. It references the open Phase-1/2 PRs by number.
+- This is a **docs-only** PR; it changes no code. It references the open Phase-1/2 PRs by number, and adds one cross-link to the OOBE package (PROPOSAL §9).
+- **Design governance has one owner: this package** (PROPOSAL §9). OOBE's D-F6 contributes its card family as a pilot; it does not stand up a second `DESIGN.md`, token set, or workbench.
 - Each phase is tracked under its owning Epic — #7038 (1), #7781 (2–3), #7782 (4–5) — with per-phase sub-issues (e.g. #7042) spun up as work starts. Epic #7733 covered the same Phases 2–3 scope and is closed as superseded by #7781.
-- The APDD-kit evaluation (`docs/plans/apdd-governance-kit/`, PR #7255) is a sibling initiative that motivated this design-governance track; the two do not depend on each other.
+- The APDD-kit evaluation (`docs/internal/apdd-governance-kit/`, [PR #7255](https://github.com/nearai/ironclaw/pull/7255) — open, not yet on `main`) is a sibling initiative that motivated this design-governance track; the two do not depend on each other.

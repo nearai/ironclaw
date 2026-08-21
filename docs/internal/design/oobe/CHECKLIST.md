@@ -52,10 +52,12 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done. Every code box imp
 - [ ] Carousel gate (D-F5) retired — projection is the source of truth.
 - [ ] Foundational demoable end-to-end on a fresh account.
 
-## F5 — Design track (D-F6) — optional, parallel
+## F5 — Design track pilot (D-F6) — optional, parallel
 
-- [ ] `DESIGN.md` finalized (principles · theming · typography · a11y floors · card taxonomy · REJECT list).
-- [ ] (Optional) Storybook workbench for card / action-bar / drawer / mode-pill: smoke play test + token/CSS check + one story per state.
+*✎ 2026-08-21: `DESIGN.md`, tokens and the workbench are owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md) (PR #7257) — OOBE contributes the pilot, not the governance (PROPOSAL §5.6).*
+
+- [ ] OOBE card taxonomy + a11y floors contributed **into** that program's `DESIGN.md` (#7042) — no parallel constitution seeded here.
+- [ ] Card / action-bar / drawer / mode-pill stories added to the Phase-1 catalog (#7750) once it lands: smoke play test + token/CSS check + one story per state.
 - [ ] Design validation gate passes on the OOBE components (1:1 parity vs. mockup; tokens; light+dark; a11y).
 
 ## Foundational exit gate

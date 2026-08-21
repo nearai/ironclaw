@@ -6,20 +6,21 @@
 
 > **North star:** a *governed, catalogued* WebUI design system that carries IronClaw to an AI/agentic-first UX — realized **natively** on our React 19 + Tailwind v4 stack, reviewed and regression-tested through **Storybook**, and evolved in **five predefined phases**.
 
-> **Epic ownership.** The program is tracked across three Epics (the original #7038 was
-> split, then Phase 2 folded in with Phase 3). This package is shared by all three:
->
-> | Epic | Phases | Scope |
-> |---|---|---|
-> | [#7038](https://github.com/nearai/ironclaw/issues/7038) | 1 | Storybook integration & design-system catalog — PR #7750 |
-> | [#7781](https://github.com/nearai/ironclaw/issues/7781) | 2–3 | `DESIGN.md` governance & documentation (#7042) · theme update & UI reskin — supersedes the closed #7733 |
-> | [#7782](https://github.com/nearai/ironclaw/issues/7782) | 4–5 | Agentic interactions & components · Information architecture |
+## Epic ownership (canonical)
+
+This table is the **single source** for phase→Epic ownership across this package. [PLAN.md](PLAN.md), [CHECKLIST.md](CHECKLIST.md) and [explorer.html](explorer.html) name the owning Epic inline per phase/workstream and point back here rather than restating the mapping — when ownership changes, this table is the one edit. The program is tracked across three Epics (the original #7038 was split, then Phase 2 folded in with Phase 3):
+
+| Epic | Phases | Scope |
+|---|---|---|
+| [#7038](https://github.com/nearai/ironclaw/issues/7038) | 1 | Storybook integration & design-system catalog — PR #7750 |
+| [#7781](https://github.com/nearai/ironclaw/issues/7781) | 2–3 | `DESIGN.md` governance & documentation (#7042) · theme update & UI reskin — supersedes the closed #7733 |
+| [#7782](https://github.com/nearai/ironclaw/issues/7782) | 4–5 | Agentic interactions & components · Information architecture |
 
 ## What this proposes
 
-Formalize the design-system work already underway (Storybook integration + a catalogued primitive/component library) into a **benchmarked, phased program** to redefine the WebUI's theming, visual assets, interactions, and information architecture around an agent-first experience. Phases 1–2 are in flight — Phase 1 as PR [#7750](https://github.com/nearai/ironclaw/pull/7750) (recreated non-stacked off current `main`; supersedes the closed #7039) and Phase 2 as issue [#7042](https://github.com/nearai/ironclaw/issues/7042) (the closed #7043's changeset preserved, fresh PR to follow). This package is the north-star that frames every phase and the dependencies they carry.
+Formalize the design-system work already underway (Storybook integration + a catalogued primitive/component library) into a **benchmarked, phased program** to redefine the WebUI's theming, visual assets, interactions, and information architecture around an agent-first experience. Phases 1–2 are in flight — Phase 1 as PR [#7750](https://github.com/nearai/ironclaw/pull/7750) (recreated non-stacked off current `main`; supersedes the closed #7039) and Phase 2 as issue [#7042](https://github.com/nearai/ironclaw/issues/7042) (the closed #7043's changeset preserved, fresh PR to follow). **Neither is on `main` yet** — every `DESIGN.md` / Storybook / `.claude/rules/design-system.md` reference in this package describes what those two phases *land*, not what a reader can check out today ([PROPOSAL §2.3](PROPOSAL.md#23-foundations-in-flight-not-yet-on-main)). This package is the north-star that frames every phase and the dependencies they carry.
 
-It deliberately follows two internal benchmarks: the **APDD governance kit** (`../../../../apdd-kit` — docs-are-source-of-truth, a `DESIGN.md` constitution, Storybook-as-workbench/test/MCP, a design validation gate) and the **target-crate-architecture package** ([`docs/internal/reborn/target-architecture/`](../target-architecture/README.md), PR #6918 — README/PROPOSAL/PLAN/CHECKLIST + interactive explorer).
+It deliberately follows two benchmarks: the **APDD governance kit** (an *external* kit — not vendored into this repo; docs-are-source-of-truth, a `DESIGN.md` constitution, Storybook-as-workbench/test/MCP, a design validation gate — its IronClaw evaluation is proposed at `docs/internal/apdd-governance-kit/` on [PR #7255](https://github.com/nearai/ironclaw/pull/7255), not yet on `main`) and the **target-crate-architecture package** ([`docs/internal/reborn/target-architecture/`](../target-architecture/README.md), PR #6918 — README/PROPOSAL/PLAN/CHECKLIST + interactive explorer). Reference paths and where each resolves: [PROPOSAL §11](PROPOSAL.md#11-references).
 
 ## Why this shape
 
@@ -57,20 +58,24 @@ flowchart TD
 | **4** | Interaction & component updates (agentic-first) | [#7782](https://github.com/nearai/ironclaw/issues/7782) | Planned | — |
 | **5** | Information architecture | [#7782](https://github.com/nearai/ironclaw/issues/7782) | Planned | — |
 
+## Ownership boundary
+
+This package is the **canonical design-system governance record**: it owns `DESIGN.md`, the `--v2-*` token architecture, the Storybook catalog/test-harness/MCP, and `.claude/rules/design-system.md`. Feature packages *consume* that governance instead of re-proposing it — including the OOBE package, whose D-F6 "DESIGN.md + design tokens" item is **subsumed** here, keeping only its pilot role (the OOBE card family is catalogued through this system). Full boundary, with the alternative call spelled out: [PROPOSAL §9](PROPOSAL.md#9-ownership-boundary-one-canonical-governance-record).
+
 ## Dependencies at a glance
 
-The reskin/interaction phases carry hard prerequisites. Each has a proposed implementation in [PROPOSAL §7](PROPOSAL.md#7-dependencies-and-their-implementation-proposals):
+The reskin/interaction phases carry hard prerequisites. Each has a proposed implementation **and a named owner** in [PROPOSAL §7](PROPOSAL.md#7-dependencies-and-their-implementation-proposals) — the owner is the Epic carrying the gating phase, made individual by a dependency sub-issue that must be cut and assigned before that phase's first PR opens:
 
-- **Dark palette derivation** — the supplied M3 palette is light-only; the app is dark-default and dual-theme. *(gates Phase 3)*
-- **WCAG AA contrast validation** for the high-chroma tokens. *(gates Phase 3)*
-- **Fonts** — vendor Roboto Flex/Mono (OFL); drop/replace Google Sans (not freely redistributable). *(gates Phase 3)*
-- **Animation approach** — a spring/motion mechanism gated on `prefers-reduced-motion`; none installed today. *(gates Phase 4)*
-- **CI: Playwright/Chromium** for `pnpm test:storybook` if story tests run in CI. *(cross-cutting)*
-- **MSW** for network-backed component stories' happy paths. *(cross-cutting)*
+- **Dark palette derivation** — the supplied M3 palette is light-only; the app is dark-default and dual-theme. *(gates Phase 3 · Epic #7781)*
+- **WCAG AA contrast validation** for the high-chroma tokens — a standing invariant carried inside the palette work. *(gates Phase 3 · Epic #7781)*
+- **Fonts** — vendor Roboto Flex/Mono (OFL); drop/replace Google Sans (not freely redistributable). *(gates Phase 3 · Epic #7781 · **[decision]**)*
+- **Animation approach** — a spring/motion mechanism gated on `prefers-reduced-motion`; none installed today. *(gates Phase 4 · Epic #7782 · **[decision]**)*
+- **CI: Playwright/Chromium** for `pnpm test:storybook` if story tests run in CI. *(cross-cutting · Epic #7038 · promotion to required is a **[decision]**)*
+- **MSW** for network-backed component stories' happy paths. *(cross-cutting · Epic #7782)*
 
 ## How this aligns with the governance benchmarks
 
-- **APDD kit** → this initiative *is* the kit's design-governance track: `DESIGN.md` (constitution + 5-tier taxonomy), path-scoped `.claude/rules/design-system.md`, Storybook as workbench + test-harness + agent-MCP, and a validation/REJECT gate. See [PROPOSAL §8](PROPOSAL.md#8-alignment-with-the-governance-benchmarks).
+- **APDD kit** (external, not vendored) → this initiative *is* the kit's design-governance track: `DESIGN.md` (constitution + 5-tier taxonomy), path-scoped `.claude/rules/design-system.md`, Storybook as workbench + test-harness + agent-MCP, and a validation/REJECT gate. See [PROPOSAL §8](PROPOSAL.md#8-alignment-with-the-governance-benchmarks).
 - **PR #6918** → this package copies its doc shape (README/PROPOSAL/PLAN/CHECKLIST + interactive artifact + a PR-body file table) and its conventions (provenance shas, phased waves with milestones, `⚠` ordering constraints, "Landed with #NNNN").
 
 ## What is explicitly *not* decided here

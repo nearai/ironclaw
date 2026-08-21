@@ -53,12 +53,12 @@
 - Add the **first-run onboarding CUJ** (PROPOSAL §8.4) to the regression baseline: fresh user → cards → connect → approve → card flips to done → appears in `/automations`.
 - **Milestone:** Foundational is feature-complete and demoable on a fresh account; the carousel gate (D-F5) is retired — the projection is the truth.
 
-## Phase F5 — Design track productionization (D-F6) — optional, parallel
+## Phase F5 — Design track pilot (D-F6) — optional, parallel
 
-*Runs alongside F1–F4 if the pilot is approved (§10.5).*
+*Runs alongside F1–F4. ✎ **2026-08-21:** `DESIGN.md`, tokens and the Storybook workbench are **not** built here — they are owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md) (PR #7257; Phase 1 = #7750, Phase 2 = #7042). What is left in F5 is OOBE's pilot contribution (PROPOSAL §5.6).*
 
-- Finalize `DESIGN.md` (principles, theming, typography, a11y floors, card component taxonomy, REJECT list).
-- Optionally stand up a Storybook workbench for the pure Tier-2/3 card components (card, action bar, drawer, mode pill): smoke play test + token/CSS check + one story per state (PROPOSAL §8.3).
+- Contribute the OOBE card taxonomy + a11y floors **into** that program's `DESIGN.md` rather than seeding a parallel one.
+- Add stories for the pure Tier-2/3 card components (card, action bar, drawer, mode pill) to the Phase-1 catalog once it lands: smoke play test + token/CSS check + one story per state (PROPOSAL §8.3).
 - **Milestone:** the OOBE component family is the design-governance pilot; the validation gate is enforceable on future card work.
 
 ---
