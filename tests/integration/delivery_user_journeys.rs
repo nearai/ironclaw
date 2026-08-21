@@ -668,6 +668,7 @@ fn slack_run_delivery_services(
         outbound_store,
         route_store,
         communication_preferences,
+        notification_inbox: None,
         delivery_targets,
         coordinator,
         extension_id: "slack".to_string(),

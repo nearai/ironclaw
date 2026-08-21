@@ -375,6 +375,7 @@ fn delivery_run_services(
         outbound_store,
         route_store,
         communication_preferences,
+        notification_inbox: None,
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
         delivery_targets,
         coordinator,
