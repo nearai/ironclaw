@@ -39,13 +39,14 @@ use ironclaw_assistant::{
     ADMIN_USER_PUT_SECRET_CAPABILITY, ADMIN_USER_SECRETS_VIEW, ADMIN_USER_SET_ROLE_CAPABILITY,
     ADMIN_USER_SET_STATUS_CAPABILITY, ADMIN_USER_UPDATE_CAPABILITY, ADMIN_USER_VIEW,
     ADMIN_USERS_VIEW, ATTACHMENT_READ_COMMAND, AUTOMATION_DELETE_COMMAND, AUTOMATION_PAUSE_COMMAND,
-    AUTOMATION_RENAME_COMMAND, AUTOMATION_RESUME_COMMAND, AUTOMATIONS_VIEW, CANCEL_RUN_COMMAND,
-    CREATE_THREAD_COMMAND, EXTENSION_IMPORT_CAPABILITY, EXTENSION_INSTALL_CAPABILITY,
-    EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY,
-    EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FS_LIST_VIEW,
-    FS_MOUNTS_VIEW, FS_READ_COMMAND, FS_STAT_VIEW, GLOBAL_AUTO_APPROVE_VIEW,
-    LLM_ACTIVE_SET_CAPABILITY, LLM_CODEX_LOGIN_COMMAND, LLM_CONFIG_VIEW, LLM_LIST_MODELS_COMMAND,
-    LLM_NEARAI_LOGIN_COMMAND, LLM_NEARAI_WALLET_LOGIN_COMMAND, LLM_PROVIDER_DELETE_CAPABILITY,
+    AUTOMATION_RENAME_COMMAND, AUTOMATION_RESUME_COMMAND, AUTOMATION_RUN_COMMAND, AUTOMATIONS_VIEW,
+    CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND, EXTENSION_IMPORT_CAPABILITY,
+    EXTENSION_INSTALL_CAPABILITY, EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY,
+    EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY, EXTENSION_SETUP_SUBMIT_CAPABILITY,
+    EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_READ_COMMAND,
+    FS_STAT_VIEW, GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY, LLM_CODEX_LOGIN_COMMAND,
+    LLM_CONFIG_VIEW, LLM_LIST_MODELS_COMMAND, LLM_NEARAI_LOGIN_COMMAND,
+    LLM_NEARAI_WALLET_LOGIN_COMMAND, LLM_PROVIDER_DELETE_CAPABILITY,
     LLM_PROVIDER_UPSERT_CAPABILITY, LLM_TEST_CONNECTION_COMMAND, LOGS_VIEW,
     NOTIFICATION_CHANNELS_SET_COMMAND, NOTIFICATION_CHANNELS_VIEW, OPERATOR_CONFIG_KEY_VIEW,
     OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY,
@@ -83,9 +84,16 @@ use ironclaw_product_contracts::inbound_requests::{
     ProductCancelRunRequest, ProductCreateThreadRequest, ProductListAutomationsRequest,
     ProductListThreadsRequest, ProductRenameAutomationRequest, ProductResolveGateRequest,
     ProductRetryRunRequest, ProductSetupExtensionRequest, ProductSubmitTurnRequest,
+    RebornSuggestionDismissRequest, RebornSuggestionStartRequest, RebornSuggestionsGenerateRequest,
 };
 use ironclaw_product_contracts::ironhub::{
     IRONHUB_DELIVER_INSTALL_COMMAND, IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult,
+};
+use ironclaw_product_contracts::notification_inbox::{
+    NOTIFICATIONS_ARCHIVE_COMMAND, NOTIFICATIONS_MARK_ALL_READ_COMMAND,
+    NOTIFICATIONS_MARK_READ_COMMAND, NOTIFICATIONS_VIEW, ProductListNotificationsRequest,
+    ProductListNotificationsResponse, ProductMarkAllNotificationsReadRequest,
+    ProductNotificationMutationRequest, ProductNotificationMutationResponse,
 };
 use ironclaw_product_contracts::notification_setup::{
     NOTIFICATION_SETUP_DISABLE_COMMAND, NOTIFICATION_SETUP_ENABLE_COMMAND,
@@ -119,9 +127,10 @@ use ironclaw_product_contracts::product_wire::{
     RebornRenameAutomationProductRequest, RebornResolveGateResponse, RebornRetryRunResponse,
     RebornSetNotificationChannelsRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeProductRequest, RebornTraceHoldAuthorizeResponse,
-    SettingsToolPermissionState,
+    RebornSubmitTurnResponse, RebornSuggestionDismissResponse, RebornSuggestionGenerationStatus,
+    RebornSuggestionStartResponse, RebornSuggestionsResponse, RebornTimelineRequest,
+    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
+    RebornTraceHoldAuthorizeResponse, SettingsToolPermissionState,
 };
 use ironclaw_product_contracts::product_wire::{
     RebornNotificationSetupMutationRequest, RebornNotificationSetupStatusResponse,
@@ -152,6 +161,10 @@ use ironclaw_host_api::{
     resolution::{Blocked, Resolution},
     result_meta::FailureKind,
 };
+use ironclaw_product_contracts::suggestions::{
+    SUGGESTION_DISMISS_COMMAND, SUGGESTION_START_COMMAND, SUGGESTIONS_GENERATE_COMMAND,
+    SUGGESTIONS_LIST_VIEW,
+};
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
     ProductSurfaceErrorKind, ProductSurfaceValidationCode,
@@ -174,6 +187,7 @@ const SETTINGS_TOOL_CONFIG_PREFIX: &str = "tool.";
 const SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES: usize =
     OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_TOOL_CONFIG_PREFIX.len();
 const CLIENT_ACTION_ID_MAX_BYTES: usize = 256;
+const SUGGESTIONS_MAX_RETRY_AFTER_SECONDS: u32 = 60;
 const ADMIN_CONFIGURATION_IDEMPOTENCY_KEY_MAX_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Serialize)]
@@ -209,6 +223,10 @@ pub struct WebUiV2Features {
     /// `IRONCLAW_REBORN_PROJECTS`, while the surface is still being
     /// finished.
     pub reborn_projects: bool,
+    /// OOBE first-run suggestion surface (the first-run suggestion cards).
+    /// Hidden unless the deployment sets `IRONCLAW_OOBE_SUGGESTIONS`; gated so
+    /// real users never see fabricated suggestions until it ships.
+    pub oobe_suggestions: bool,
     /// Whether the browser must hide raw workspace fallback and only show the
     /// caller-scoped workspace projection. Hosted deployments enable this to
     /// avoid showing artifacts from a shared `/workspace` root; local
@@ -254,6 +272,7 @@ pub async fn get_session(
         capabilities,
         features: WebUiV2Features {
             reborn_projects: state.reborn_projects_enabled(),
+            oobe_suggestions: state.oobe_suggestions_enabled(),
             workspace_requires_scoped_projection,
             regression_artifact_export: state.regression_artifact_export_enabled(),
             admin_thread_scrape: state.admin_thread_scrape_enabled(),
@@ -1850,6 +1869,83 @@ pub struct ListThreadsQuery {
     pub needs_approval: bool,
 }
 
+/// `GET /api/webchat/v2/notifications`
+pub async fn list_notifications(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Query(query): Query<ListNotificationsQuery>,
+) -> Result<Json<ProductListNotificationsResponse>, WebUiV2HttpError> {
+    let surface = state.bind_services(caller);
+    let response = NOTIFICATIONS_VIEW
+        .query_on(
+            &surface,
+            ProductListNotificationsRequest { limit: query.limit },
+            query.cursor,
+        )
+        .await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ListNotificationsQuery {
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NotificationPath {
+    pub notification_id: String,
+}
+
+/// `POST /api/webchat/v2/notifications/{notification_id}/read`
+pub async fn mark_notification_read(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(NotificationPath { notification_id }): Path<NotificationPath>,
+) -> Result<Json<ProductNotificationMutationResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        NOTIFICATIONS_MARK_READ_COMMAND,
+        ProductNotificationMutationRequest { notification_id },
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/notifications/read-all`
+pub async fn mark_all_notifications_read(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<ProductNotificationMutationResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        NOTIFICATIONS_MARK_ALL_READ_COMMAND,
+        ProductMarkAllNotificationsReadRequest {},
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/notifications/{notification_id}/archive`
+pub async fn archive_notification(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(NotificationPath { notification_id }): Path<NotificationPath>,
+) -> Result<Json<ProductNotificationMutationResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        NOTIFICATIONS_ARCHIVE_COMMAND,
+        ProductNotificationMutationRequest { notification_id },
+    )
+    .await?;
+    Ok(Json(response))
+}
+
 /// `GET /api/webchat/v2/commands`
 pub async fn list_commands(
     State(state): State<WebUiV2State>,
@@ -1930,6 +2026,22 @@ pub async fn pause_automation(
     Ok(Json(response))
 }
 
+/// `POST /api/webchat/v2/automations/:automation_id/run`
+pub async fn run_automation(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(automation_id): Path<String>,
+) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        AUTOMATION_RUN_COMMAND,
+        RebornAutomationRequest { automation_id },
+    )
+    .await?;
+    Ok(Json(response))
+}
+
 /// `POST /api/webchat/v2/automations/:automation_id/resume`
 pub async fn resume_automation(
     State(state): State<WebUiV2State>,
@@ -1977,6 +2089,100 @@ pub async fn delete_automation(
         caller,
         AUTOMATION_DELETE_COMMAND,
         RebornAutomationRequest { automation_id },
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/suggestions`
+///
+/// Returns the current persisted snapshot without starting generation.
+pub async fn list_suggestions(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<RebornSuggestionsResponse>, WebUiV2HttpError> {
+    let response = query_product_view(
+        state.services(),
+        caller,
+        SUGGESTIONS_LIST_VIEW.descriptor(),
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/suggestions/generate`
+///
+/// Begins or observes one durable, idempotent generation. The request action
+/// id is an idempotency key only; generation identity and authorization remain
+/// owned by the product service and its durable store.
+pub async fn generate_suggestions(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Json(request): Json<RebornSuggestionsGenerateRequest>,
+) -> Result<Response, WebUiV2HttpError> {
+    let client_action_id = parse_client_action_id(Some(request.client_action_id))?;
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        SUGGESTIONS_GENERATE_COMMAND,
+        RebornSuggestionsGenerateRequest {
+            client_action_id: client_action_id.as_str().to_string(),
+        },
+    )
+    .await?;
+    let accepted = response.status == RebornSuggestionGenerationStatus::Generating;
+    let retry_after = response
+        .retry_after_seconds
+        .unwrap_or(1)
+        .clamp(1, SUGGESTIONS_MAX_RETRY_AFTER_SECONDS);
+    let mut http_response = (
+        if accepted {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::OK
+        },
+        Json(response),
+    )
+        .into_response();
+    if accepted {
+        let value = HeaderValue::from_str(&retry_after.to_string())
+            .map_err(ProductSurfaceError::internal_from)?;
+        http_response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, value);
+    }
+    Ok(http_response)
+}
+
+/// `POST /api/webchat/v2/suggestions/:suggestion_id/start`
+pub async fn start_suggestion(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(suggestion_id): Path<String>,
+) -> Result<Json<RebornSuggestionStartResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        SUGGESTION_START_COMMAND,
+        RebornSuggestionStartRequest { suggestion_id },
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `DELETE /api/webchat/v2/suggestions/:suggestion_id`
+pub async fn dismiss_suggestion(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(suggestion_id): Path<String>,
+) -> Result<Json<RebornSuggestionDismissResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        SUGGESTION_DISMISS_COMMAND,
+        RebornSuggestionDismissRequest { suggestion_id },
     )
     .await?;
     Ok(Json(response))

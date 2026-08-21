@@ -291,8 +291,6 @@ fn legacy_turn_metadata(
     }
     for name in [
         "accepted_message_ref",
-        "source_binding_ref",
-        "reply_target_binding_ref",
         "resolved_model_route",
         "model_usage",
         "subagent_depth",

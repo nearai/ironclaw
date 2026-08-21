@@ -11,6 +11,8 @@ use crate::state::{LoopExecutionState, ReplyAdmissionRejection};
 pub(crate) const REPLY_ADMISSION_STOP_CONDITION_CONTROL_TEXT: &str =
     "loop control reply rejected stop condition not met continue";
 
+pub(crate) const REPLY_ADMISSION_STRUCTURED_OUTPUT_CONTROL_TEXT: &str = "loop control reply rejected this run requires structured output call the builtin__structured_result tool with arguments matching its schema";
+
 /// Classifies model replies before they are finalized into the transcript.
 ///
 /// A reply accepted here becomes a user-visible assistant message. A rejected
@@ -58,6 +60,27 @@ impl ReplyAdmissionStrategy for DefaultReplyAdmissionStrategy {
     }
 }
 
+/// Reply admission for the unbound structured family (unbound turns
+/// design §4.5): the run's terminal output is the validated result-tool call,
+/// so EVERY plain-text final-reply candidate is rejected with a repair hint
+/// directing the model to the result tool. Exhausted rejections fail the run
+/// as `invalid_model_output` through the standard stop-condition escape.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct StructuredOutputReplyAdmissionStrategy;
+
+#[async_trait]
+impl ReplyAdmissionStrategy for StructuredOutputReplyAdmissionStrategy {
+    async fn admit_reply(
+        &self,
+        _state: &LoopExecutionState,
+        _reply: &AssistantReply,
+    ) -> ReplyAdmissionOutcome {
+        ReplyAdmissionOutcome::RejectFinal {
+            rejection: ReplyAdmissionRejection::structured_output_required(),
+        }
+    }
+}
+
 fn is_non_final_reply_artifact(content: &str) -> bool {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -92,6 +115,9 @@ fn reply_admission_control_text(rejection: &ReplyAdmissionRejection) -> &'static
         crate::state::ReplyAdmissionRejectionReason::StopConditionNotMet => {
             REPLY_ADMISSION_STOP_CONDITION_CONTROL_TEXT
         }
+        crate::state::ReplyAdmissionRejectionReason::StructuredOutputRequired => {
+            REPLY_ADMISSION_STRUCTURED_OUTPUT_CONTROL_TEXT
+        }
     }
 }
 
@@ -101,6 +127,32 @@ mod tests {
 
     use super::*;
     use crate::test_support::test_run_context;
+
+    #[tokio::test]
+    async fn structured_output_admission_rejects_every_text_final_with_repair_hint() {
+        let context = test_run_context("structured-reply-admission");
+        let state = LoopExecutionState::initial_for_run(&context);
+        let reply = AssistantReply {
+            content: "here is my answer in prose".to_string(),
+        };
+
+        let outcome = StructuredOutputReplyAdmissionStrategy
+            .admit_reply(&state, &reply)
+            .await;
+        match outcome {
+            ReplyAdmissionOutcome::RejectFinal { rejection } => {
+                assert_eq!(
+                    rejection.reason_code,
+                    crate::state::ReplyAdmissionRejectionReason::StructuredOutputRequired
+                );
+                assert!(
+                    reply_admission_control_text(&rejection).contains("builtin__structured_result"),
+                    "the repair hint must direct the model to the result tool"
+                );
+            }
+            other => panic!("plain-text finals must be rejected, got {other:?}"),
+        }
+    }
 
     #[test]
     fn reply_admission_strategy_is_object_safe() {

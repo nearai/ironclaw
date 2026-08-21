@@ -5,9 +5,9 @@
 //!    `telegram_channel` companion identity (the pattern #6116's
 //!    `reborn_retired_taxonomy` gate pins for Slack).
 //! 2. The Reborn context stays free of the v1 pairing surface: no
-//!    `/api/pairing/` route literals in `crates/` or the webui v2 frontend —
-//!    Telegram pairing is the WebGeneratedCode flow under
-//!    the generic `/api/webchat/v2/extensions/{extension_id}/pairing/{action}`.
+//!    `/api/pairing/` route literals in `crates/` or the webui v2 frontend.
+//!    Telegram declares `device_link`, so its authenticated linked account is
+//!    the channel identity and no generated-code pairing service is exposed.
 
 #[allow(dead_code)]
 mod ratchet_support;
@@ -167,6 +167,31 @@ fn generic_extension_lifecycle_has_no_telegram_knowledge() {
     assert!(
         offenders.is_empty(),
         "generic extension lifecycle contains Telegram-only policy symbols: {offenders:?}"
+    );
+}
+
+#[test]
+fn telegram_device_link_is_the_only_personal_channel_connection_ceremony() {
+    let manifest = crate_path(
+        &workspace_root(),
+        "crates/extensions/packages/telegram/manifest.toml",
+    );
+    let source = std::fs::read_to_string(&manifest).expect("Telegram manifest readable");
+    let channel_connection = source
+        .split("[channel.connection]")
+        .nth(1)
+        .and_then(|tail| tail.split("[channel.connection.notices]").next())
+        .expect("Telegram channel connection section");
+
+    assert!(
+        channel_connection.contains("strategy = \"device_link\""),
+        "Telegram must derive channel identity from its authenticated linked device"
+    );
+    assert!(
+        !channel_connection.contains("web_generated_code")
+            && !channel_connection.contains("deep_link_template")
+            && !channel_connection.contains("inbound_code_prefixes"),
+        "Telegram must not retain generated-code pairing metadata"
     );
 }
 

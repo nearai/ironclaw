@@ -55,9 +55,9 @@ The trigger system is owned by `ironclaw_triggers` in implementation terms, but 
 
 ### 3.1 Source kinds
 
-V1 source kind is schedule-only.
-
-- `Schedule` is the only V1 source kind.
+- `Schedule` identifies a fire claimed from the trigger's stored cadence.
+- `Manual` identifies an on-demand fire of a scheduled trigger. It is fire
+  provenance, not a separately persisted trigger-definition kind.
 - Webhook, regex, and internal system-event sources are fast-follow and must not be accepted by the V1 contract.
 
 ### 3.2 Schedule shape and cadence
@@ -97,6 +97,38 @@ the current model-visible catalog and required skills through the normal skill
 selector before writing the trigger. The scheduler continues to submit the
 frozen prompt; only the neutral execution policy crosses the trusted-trigger
 turn boundary.
+
+New `trigger_create` calls must explicitly select
+`execution_contract.policy.result_delivery`; omission is a model-visible input
+error before persistence so the interactive model can ask the user. Legacy
+persisted policies still deserialize as `deliver` for compatibility.
+
+`execution_contract.policy.result_delivery` controls the no-result behavior:
+
+- `deliver` preserves the legacy contract. The rendered
+  prompt asks the model to return the human-readable `no_result_text`, and a
+  completed run has a normal deliverable result.
+- `suppress_when_nothing_to_report` is explicit opt-in. The scheduled-run
+  prompt names the contract's concrete `no_result_text` as the no-result
+  condition and makes that rule override any output instruction to describe a
+  negative, empty, unchanged, or no-match result. It instructs the model to
+  call the host-provided `builtin__structured_result` provider tool (capability
+  `builtin.structured_result`) with the exact argument
+  `{"outcome":"nothing_to_report"}` and not return an assistant response. The
+  loop records the typed result reference, writes a final checkpoint, and
+  produces `LoopCompletionKind::NothingToReport`. The turn kernel accepts that
+  completion kind only for a scheduled run carrying the explicit suppression
+  policy and the exact same-run structured-result evidence, then persists
+  `TurnExecutionOutcome::NothingToReport`. Ordinary assistant text, including
+  `[SILENT]`, and every reply outside the opted-in scheduled context remains a
+  normal deliverable result.
+
+Execution outcome and delivery outcome are separate durable facts. A
+`NothingToReport` completion records delivery as `Suppressed` and performs no
+transport dispatch or delivery reservation, even on replay. A result with no
+configured notification channel remains `NoDefaultConfigured`. Failed,
+cancelled, blocked, and recovery-required runs never qualify for suppression;
+their existing visible notification behavior is unchanged.
 
 Capability allowlists are intersections: absent preserves the scheduled
 surface, an empty list exposes no capabilities, and a non-empty list can only
@@ -198,6 +230,9 @@ UTF-8 bytes for `tenant_id`, `trigger_id`, and `fire_slot`, prefixed by the
 literal version label `ironclaw.trigger-fire.v1`. Implementations must not use
 raw string concatenation. `route_thread_id` uses the domain label
 `route-thread`; `external_event_id` uses the domain label `external-event`.
+Manual fire uses the same length-prefixed `tenant_id`, `trigger_id`, and
+`fire_slot` components with the additive domain labels `manual-route-thread`
+and `manual-external-event`, respectively.
 Each output is encoded from a collision-resistant digest over
 `version_label || domain_label || length_prefixed_components`.
 
@@ -214,6 +249,31 @@ V1 has one provider: a schedule provider.
 
 - The schedule provider is cron-backed.
 - Webhook, regex, and system-event providers are fast-follow and must emit the same `TriggerFire` shape when they are later added.
+
+### 4.3 Manual fire
+
+Manual fire uses the same source evaluation, prompt materialization, trusted
+submission, and settlement path as a scheduled fire, but claims without the
+schedule due-time gate. The repository claim remains atomic and respects the
+single-active-fire lock. Paused triggers return a distinct refusal.
+
+A manual claim, successful submission, failure settlement, and terminal-run
+cleanup must preserve `next_run_at` byte-for-byte and must not complete a
+one-shot trigger. Run history records `Manual` provenance. Manual identities
+use additive manual domain labels: `route_thread_id` uses `manual-route-thread`
+and `external_event_id` uses `manual-external-event`. The scheduled identity
+labels, version label, and digest input ordering remain frozen for replay
+compatibility. Two manual claims in
+the same timestamp resolution cannot both mint an identity while they overlap:
+the atomic active-fire claim rejects the competing call. Run history remains
+observational and is not a permanent idempotency ledger after settlement.
+
+Run-history persistence includes the fire source in its identity:
+`(tenant_id, trigger_id, fire_slot, source)`. A manual fire and a scheduled fire
+may legitimately use the same timestamp after the manual run settles; both
+rows must remain independently observable, and accepting the scheduled row
+must still advance its cadence. Legacy three-column run-history primary keys
+are migrated in place with existing rows classified by their stored source.
 
 ---
 
@@ -386,11 +446,12 @@ active-fire claim and does not become an in-flight sentinel.
 
 V1 also persists bounded per-trigger run-history rows for product-surface inspection:
 
-- each row is scoped by `(tenant_id, trigger_id, fire_slot)` and records the
+- each row is scoped by `(tenant_id, trigger_id, fire_slot, source)` and records the
   deterministic trigger route thread id, optional submitted `TurnRunId`,
   status, `submitted_at`, and optional `completed_at`;
 - `Running` means the fire was claimed or submitted and no terminal cleanup has
-  completed for that `fire_slot`;
+  completed for that `fire_slot` and source. Claiming the same slot from the
+  other source retires any stale `Running` row before recording the new claim;
 - `Ok` means active-run cleanup observed a completed terminal turn and cleared
   the exact active fire;
 - `Error` means poller-owned claim or submit processing failed before an active
@@ -399,7 +460,9 @@ V1 also persists bounded per-trigger run-history rows for product-surface inspec
 - list APIs return newest rows first and clamp caller limits to the repository
   maximum. A zero limit returns no rows. User-facing list paths must use the
   batched repository query when loading histories for multiple triggers;
-- durable repositories retain only the newest 500 run-history rows per trigger.
+- durable repositories retain at most 500 run-history rows per trigger,
+  retaining `Running` rows before completed rows and then the newest fire slots
+  with a deterministic source tie-break.
 
 Run-history rows are observational. They must not be used as the idempotency
 ledger for fire replay; deterministic fire identity and the trusted conversation
@@ -412,6 +475,10 @@ failure requires a later lifecycle-observer contract and a distinct retry
 identity policy.
 
 Slot bookkeeping is tied to acceptance, not merely polling:
+
+The failure-settlement rules below apply to scheduled fires. Manual settlement
+always follows the override in §4.3: it preserves `next_run_at` and never
+completes a one-shot trigger.
 
 - accepted or replayed fires write `last_run_at`, `last_fired_slot`,
   `last_status = Ok`, `next_run_at`, `active_fire_slot`, and `active_run_ref`

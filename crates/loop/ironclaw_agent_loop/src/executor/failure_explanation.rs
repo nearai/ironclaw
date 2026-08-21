@@ -78,6 +78,7 @@ pub(super) async fn explain_failure(
             capability_view: Some(LoopModelCapabilityView {
                 visible_capability_ids: Vec::new(),
             }),
+            tool_choice: None,
         }),
     )
     .await

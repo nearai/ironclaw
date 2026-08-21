@@ -249,7 +249,7 @@ use ironclaw_assistant::{
     DeliveryCoordinator, DeliveryIntent, DeliveryRetryPolicy, NoticeDeliveryRequest,
 };
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelError, DeliveryReport, OutboundEnvelope, PartDeliveryOutcome,
+    ChannelError, DeliveryReport, OutboundEnvelope, OutboundVisibility, PartDeliveryOutcome,
 };
 use ironclaw_product_contracts::delivery::{
     ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
@@ -1959,12 +1959,6 @@ impl OutboundStateStorePort for TerminalDeliveredWriteFailingStore {
     ) -> Result<Option<ironclaw_event_projections::ProjectionCursor>, OutboundError> {
         self.inner.load_subscription_cursor(request).await
     }
-    async fn advance_subscription_cursor(
-        &self,
-        request: ironclaw_outbound::AdvanceSubscriptionCursorRequest,
-    ) -> Result<(), OutboundError> {
-        self.inner.advance_subscription_cursor(request).await
-    }
     async fn record_delivery_attempt(
         &self,
         attempt: OutboundDeliveryAttempt,
@@ -2299,6 +2293,7 @@ fn working_notice(scope: TurnScope, extension_id: &str) -> NoticeDeliveryRequest
         ],
         extension_id,
         notice_ref: "run-42".to_string(),
+        visibility: OutboundVisibility::Public,
     }
 }
 

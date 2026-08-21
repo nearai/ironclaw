@@ -11,11 +11,14 @@ use ironclaw_extension_contracts::tool_adapter::{
 };
 use ironclaw_host_api::{
     action::NetworkMethod,
-    dispatch::RuntimeDispatchErrorKind,
+    dispatch::{
+        DispatchFailureDetail, ProviderDiagnostic, ProviderErrorCode, RuntimeDispatchErrorKind,
+    },
     ids::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId},
     messaging::StandardMessagingErrorCode,
     mount::{MountPermissions, MountView},
     resource::ResourceScope,
+    safe_summary::SafeSummary,
 };
 
 use std::collections::HashMap;
@@ -782,12 +785,13 @@ struct AcmeFixtureFactory {
     fallback_egress: Arc<ScriptedVendorServer>,
 }
 
+#[async_trait::async_trait]
 impl ironclaw_extension_host::NativeExtensionFactory for AcmeFixtureFactory {
     fn service(&self) -> &str {
         ACME_FIXTURE_SERVICE
     }
 
-    fn load(
+    async fn load(
         &self,
         _ctx: &ironclaw_extension_host::LoadContext,
     ) -> Result<
@@ -807,7 +811,7 @@ struct AcmeFixtureEntrypoint {
 impl ironclaw_extension_host::ExtensionEntrypoint for AcmeFixtureEntrypoint {
     fn bind(
         &self,
-        _ctx: ironclaw_extension_host::BindContext,
+        ctx: ironclaw_extension_host::BindContext,
     ) -> Result<ironclaw_extension_host::ExtensionBindings, ironclaw_extension_host::BindError>
     {
         Ok(ironclaw_extension_host::ExtensionBindings {
@@ -821,6 +825,18 @@ impl ironclaw_extension_host::ExtensionEntrypoint for AcmeFixtureEntrypoint {
                     .with_reply(adapter.clone())
                     .with_delivery(adapter)
             },
+            // Bound only when the installed manifest declares a device_link
+            // recipe: `check_binding` proves agreement per axis, and the
+            // stock acme-messenger manifest declares oauth2_code only — an
+            // unconditional adapter fails every acme bind with
+            // `UndeclaredDeviceLinkAdapter`, so activation never completes
+            // and install turns record no capability results.
+            device_link: ironclaw_extension_host::declared_device_link_recipe(&ctx.resolved)
+                .is_some()
+                .then(|| {
+                    Arc::new(super::device_link::ScriptedDeviceLinkAdapter::new())
+                        as Arc<dyn ironclaw_extension_contracts::device_link::DeviceLinkAdapter>
+                }),
         })
     }
 }
@@ -1315,10 +1331,10 @@ impl ToolAdapter for AcmeFixtureToolAdapter {
                 Ok(tool_result(user_ref_entry_from_vendor(&response)?))
             }
 
-            _ => Err(ToolError::Failed {
+            _ => Err(ToolError::Rejected {
                 kind: RuntimeDispatchErrorKind::UndeclaredCapability,
-                safe_summary: None,
-                model_visible_cause: None,
+                diagnostic: None,
+                detail: None,
             }),
         }
     }
@@ -1396,11 +1412,14 @@ fn tool_result(output: serde_json::Value) -> ToolResult {
     }
 }
 
-fn acme_tool_error(kind: RuntimeDispatchErrorKind, safe_summary: String) -> ToolError {
-    ToolError::Failed {
+fn acme_tool_error(kind: RuntimeDispatchErrorKind, host_summary: String) -> ToolError {
+    ToolError::Rejected {
         kind,
-        safe_summary: Some(safe_summary),
-        model_visible_cause: None,
+        diagnostic: None,
+        detail: Some(DispatchFailureDetail::HostSummary {
+            summary: SafeSummary::new(host_summary).unwrap(),
+            detail: None,
+        }),
     }
 }
 
@@ -1472,18 +1491,20 @@ fn acme_error_to_standard_code(vendor_code: &str) -> StandardMessagingErrorCode 
     }
 }
 
-/// Builds the adapter error for a non-2xx vendor response: maps the vendor
-/// code and puts the standard code string in the safe summary — the same
-/// error path `send_note` surfaces through today (`ToolError::Failed`'s
-/// `safe_summary`), which is the channel the standard messaging error
-/// taxonomy is documented to ride
-/// (`ironclaw_host_api::messaging::StandardMessagingErrorCode`).
+/// Builds the adapter error for a non-2xx vendor response. The extension sends
+/// only the closed standard-messaging code; the trusted extension host
+/// recognizes that exact code and mints the public summary.
 fn acme_vendor_error(vendor_code: &str) -> ToolError {
     let code = acme_error_to_standard_code(vendor_code);
-    acme_tool_error(
-        RuntimeDispatchErrorKind::OperationFailed,
-        format!("acme vendor rejected the request: {}", code.as_str()),
-    )
+    ToolError::Rejected {
+        kind: RuntimeDispatchErrorKind::OperationFailed,
+        diagnostic: Some(Box::new(ProviderDiagnostic {
+            code: Some(ProviderErrorCode::new(code.as_str())),
+            message: None,
+            retry_after: None,
+        })),
+        detail: None,
+    }
 }
 
 /// One canonical `message` object (spec appendix) from one vendor-shaped
@@ -1758,12 +1779,20 @@ pub(crate) const TELEGRAM_FIXTURE_SERVICE: &str = "telegram.extension/v1";
 /// and cannot depend on the CLI crate).
 struct TelegramFixtureFactory;
 
+/// Hermetic native factory for WebUI/lifecycle tests that install the bundled
+/// Telegram package outside the full capability-harness profile.
+pub(crate) fn telegram_fixture_factory() -> Arc<dyn ironclaw_extension_host::NativeExtensionFactory>
+{
+    Arc::new(TelegramFixtureFactory)
+}
+
+#[async_trait::async_trait]
 impl ironclaw_extension_host::NativeExtensionFactory for TelegramFixtureFactory {
     fn service(&self) -> &str {
         TELEGRAM_FIXTURE_SERVICE
     }
 
-    fn load(
+    async fn load(
         &self,
         _ctx: &ironclaw_extension_host::LoadContext,
     ) -> Result<
@@ -1779,11 +1808,13 @@ struct TelegramFixtureEntrypoint;
 impl ironclaw_extension_host::ExtensionEntrypoint for TelegramFixtureEntrypoint {
     fn bind(
         &self,
-        _ctx: ironclaw_extension_host::BindContext,
+        ctx: ironclaw_extension_host::BindContext,
     ) -> Result<ironclaw_extension_host::ExtensionBindings, ironclaw_extension_host::BindError>
     {
+        let tools = Arc::new(super::device_link::LinkedAccountFixtureToolAdapter::new());
+        tools.attach_resolver(Arc::clone(&ctx.linked_accounts));
         Ok(ironclaw_extension_host::ExtensionBindings {
-            tools: None,
+            tools: Some(tools as Arc<dyn ironclaw_extension_contracts::tool_adapter::ToolAdapter>),
             channel: {
                 let adapter =
                     Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default());
@@ -1792,6 +1823,10 @@ impl ironclaw_extension_host::ExtensionEntrypoint for TelegramFixtureEntrypoint 
                     .with_reply(adapter.clone())
                     .with_delivery(adapter)
             },
+            device_link: Some(
+                Arc::new(super::device_link::ScriptedDeviceLinkAdapter::new())
+                    as Arc<dyn ironclaw_extension_contracts::device_link::DeviceLinkAdapter>,
+            ),
         })
     }
 }
@@ -2480,14 +2515,20 @@ pub(crate) mod standard_op_contract_tests {
             let error = invoke_acme("send_message", input, &vendor)
                 .await
                 .expect_err("a non-2xx vendor response must surface as an error");
-            let ToolError::Failed { safe_summary, .. } = error else {
-                panic!("expected ToolError::Failed for vendor code {vendor_code}");
+            let ToolError::Rejected {
+                diagnostic, detail, ..
+            } = error
+            else {
+                panic!("expected ToolError::Rejected for vendor code {vendor_code}");
             };
-            let summary = safe_summary.expect("acme vendor errors carry a safe summary");
-            assert!(
-                summary.contains(expected.as_str()),
-                "vendor code {vendor_code}: expected {summary:?} to contain {}",
-                expected.as_str()
+            assert!(detail.is_none(), "extensions must not mint host summaries");
+            assert_eq!(
+                diagnostic
+                    .as_ref()
+                    .and_then(|diagnostic| diagnostic.code.as_ref())
+                    .map(ProviderErrorCode::as_str),
+                Some(expected.as_str()),
+                "vendor code {vendor_code}"
             );
         }
     }

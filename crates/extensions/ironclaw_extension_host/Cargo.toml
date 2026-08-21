@@ -70,6 +70,9 @@ axum = { version = "0.8" }
 fs4 = "1.1"
 futures = "0.3"
 lru = { version = "0.18" }
+# Query-value escaping for the connect link appended to a channel's
+# `connect_required` notice (extension ids come from durable records).
+percent-encoding = "2"
 rand = "0.10"
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 secrecy = "0.10"

@@ -25,7 +25,7 @@ use ironclaw_loop_contracts::{
     AppendCapabilityResultRef, AssistantReply, CancellationPolicy, CapabilityCallCandidate,
     CapabilityDescriptorView, CapabilityFailureDetail, CapabilityInputRef, CapabilityProgress,
     CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId,
-    ConcurrencyClass, ConcurrencyHint, ContentDigest, ContextProfileId, FinalizeAssistantMessage,
+    ConcurrencyClass, ContentDigest, ContextProfileId, FinalizeAssistantMessage,
     LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
     LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest,
     LoopCompactionResponse, LoopContextBundle, LoopContextCompactionMetadata, LoopContextRequest,
@@ -155,10 +155,7 @@ impl MockAgentLoopDriverHostBuilder {
         Self {
             run_context: test_run_context("agent-loop-test"),
             script: ScenarioScript::reply_only("ok"),
-            visible_capabilities: vec![capability_descriptor(
-                capability_id("demo.echo"),
-                ConcurrencyHint::SafeForParallel,
-            )],
+            visible_capabilities: vec![capability_descriptor(capability_id("demo.echo"))],
             prompt_compaction_indexes: VecDeque::new(),
             fail_prompt_with: None,
             fail_model_with: None,
@@ -314,6 +311,8 @@ pub enum MockHostCall {
         result_ref: LoopResultRef,
         /// Provider call metadata linked to the result, when the model emitted the call.
         provider_call: Box<Option<ProviderToolCallReference>>,
+        /// Host-authored intrinsic result evidence, when present.
+        intrinsic_outcome: Option<ironclaw_loop_contracts::CapabilityResultIntrinsicOutcome>,
     },
     /// A checkpoint metadata write was requested.
     SaveCheckpoint(CheckpointKind),
@@ -846,7 +845,7 @@ impl ironclaw_loop_contracts::LoopModelPort for MockAgentLoopDriverHost {
 
 #[async_trait]
 impl ironclaw_loop_contracts::LoopCapabilityPort for MockAgentLoopDriverHost {
-    fn requires_ordered_batch_invocation(&self) -> bool {
+    fn requires_ordered_batch_invocation(&self, _invocations: &[LoopRequest]) -> bool {
         false
     }
 
@@ -930,6 +929,7 @@ impl ironclaw_loop_contracts::LoopTranscriptPort for MockAgentLoopDriverHost {
         self.record_call(MockHostCall::AppendCapabilityResultRef {
             result_ref: request.result_ref.clone(),
             provider_call: Box::new(request.provider_call.clone()),
+            intrinsic_outcome: request.intrinsic_outcome,
         });
         if let Some(kind) = *lock_or_panic(&self.fail_transcript_with) {
             return Err(AgentLoopHostError::new(kind, "scripted transcript failure"));
@@ -1057,12 +1057,14 @@ pub fn test_run_context(label: &str) -> LoopRunContext {
             max_checkpoint_bytes: 64 * 1024,
             require_final_checkpoint: false,
             allow_no_reply_completion: false,
+            before_model_checkpoint_interval: 1,
         },
         resource_budget_policy: ResourceBudgetPolicy {
             tier: ResourceBudgetTier::new(format!("tier_{suffix}"))
                 .unwrap_or_else(|error| panic!("test budget tier should be valid: {error}")),
             max_model_calls: 32,
             max_capability_invocations: 64,
+            max_wall_clock_seconds: None,
         },
         personal_context_policy: ironclaw_loop_contracts::PersonalContextPolicy::Excluded,
         runtime_constraints: RuntimeProfileConstraints {
@@ -1085,10 +1087,7 @@ pub fn test_run_context(label: &str) -> LoopRunContext {
 }
 
 /// Builds a capability descriptor for the mock visible surface.
-pub fn capability_descriptor(
-    id: CapabilityId,
-    concurrency_hint: ConcurrencyHint,
-) -> CapabilityDescriptorView {
+pub fn capability_descriptor(id: CapabilityId) -> CapabilityDescriptorView {
     CapabilityDescriptorView {
         capability_id: id,
         provider: None,
@@ -1096,7 +1095,6 @@ pub fn capability_descriptor(
         safe_name: "demo".to_string(),
         safe_description: "demo capability".to_string(),
         description_trust: Default::default(),
-        concurrency_hint,
         parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
     }
 }

@@ -2948,6 +2948,7 @@ mod tests {
         product_context.execution_policy = Some(TurnExecutionPolicy {
             allowed_capability_ids: None,
             required_skills: vec![RequiredSkill::new(name).unwrap()],
+            ..TurnExecutionPolicy::default()
         });
         context.product_context = Some(product_context);
         context

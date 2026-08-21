@@ -66,10 +66,11 @@ use ironclaw_host_runtime::{
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
     TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
-    ToolCallHttpEgress, TriggerCreateHook, UserSandboxProcessPort, VisibleCapabilityAccess,
-    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
-    builtin_first_party_handlers_for_process_backend,
-    builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
+    TRIGGER_RUN_CAPABILITY_ID, ToolCallHttpEgress, TriggerCreateHook, UserSandboxProcessPort,
+    VisibleCapabilityAccess, VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID,
+    builtin_first_party_handlers, builtin_first_party_handlers_for_process_backend,
+    builtin_first_party_handlers_with_trigger_create_hook,
+    builtin_first_party_handlers_with_trigger_services, builtin_first_party_package,
     builtin_first_party_package_for_process_backend, native_memory_first_party_package,
     register_native_memory_tools,
 };
@@ -86,8 +87,8 @@ use ironclaw_secrets::SecretStore;
 use ironclaw_triggers::{
     ClaimDueFireRequest, ClearActiveFireRequest, FireAcceptedRequest, InMemoryTriggerRepository,
     MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, MissingTriggerActiveRunLookup, TriggerError,
-    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerSchedule,
-    TriggerState,
+    TriggerManualFireOutcome, TriggerManualFireRunner, TriggerRecord, TriggerRepository,
+    TriggerRunHistoryStatus, TriggerRunRecord, TriggerSchedule, TriggerState,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -102,7 +103,8 @@ fn trigger_execution_contract(goal: impl Into<String>) -> Value {
         "goal": goal.into(),
         "success_criteria": ["Complete the requested task"],
         "output_instructions": "Return a concise result",
-        "no_result_text": "No result"
+        "no_result_text": "No result",
+        "policy": { "result_delivery": "deliver" }
     })
 }
 
@@ -132,6 +134,7 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             | TRIGGER_PAUSE_CAPABILITY_ID
             | TRIGGER_REMOVE_CAPABILITY_ID
             | TRIGGER_RESUME_CAPABILITY_ID
+            | TRIGGER_RUN_CAPABILITY_ID
             | TRACE_COMMONS_ONBOARD_CAPABILITY_ID
             | TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID
             | TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID
@@ -339,6 +342,7 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
         HTTP_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
         TRIGGER_CREATE_CAPABILITY_ID,
+        TRIGGER_RUN_CAPABILITY_ID,
         OUTBOUND_DELIVER_CAPABILITY_ID,
     ] {
         assert_eq!(
@@ -687,6 +691,21 @@ async fn builtin_trigger_create_input_schema_declares_schedule_one_of() {
     assert!(
         required_names.contains(&"schedule"),
         "schedule must be listed in required; got {required_names:?}"
+    );
+    assert_eq!(
+        schema["properties"]["execution_contract"]["required"],
+        json!([
+            "version",
+            "goal",
+            "success_criteria",
+            "output_instructions",
+            "no_result_text",
+            "policy"
+        ])
+    );
+    assert_eq!(
+        schema["properties"]["execution_contract"]["properties"]["policy"]["required"],
+        json!(["result_delivery"])
     );
     assert!(
         !required_names.contains(&"completion_policy"),
@@ -1352,6 +1371,46 @@ async fn builtin_trigger_create_rejects_malformed_input_before_persistence() {
 }
 
 #[tokio::test]
+async fn builtin_trigger_create_requires_explicit_result_delivery_before_persistence() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Ambiguous notification",
+            "execution_contract": {
+                "version": 1,
+                "goal": "Check whether example.com is reachable",
+                "success_criteria": ["Reachability checked"],
+                "output_instructions": "Return the result",
+                "no_result_text": "No change"
+            },
+            "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "Europe/Istanbul" }
+        }),
+        context.clone(),
+    )
+    .await;
+
+    assert_failure_input_issue_expected(
+        &failure,
+        "execution_contract.policy.result_delivery",
+        DispatchInputIssueCode::MissingRequired,
+        "deliver or suppress_when_nothing_to_report",
+        "ambiguous delivery choice",
+    );
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn builtin_trigger_create_rejects_invalid_timezone_before_persistence() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository.clone());
@@ -1634,6 +1693,25 @@ async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
                 "schedule": { "kind": 7, "expression": "*/3 * * * *", "timezone": "UTC" }
             }),
             vec![("schedule.kind", DispatchInputIssueCode::TypeMismatch)],
+        ),
+        (
+            "non-string result delivery",
+            json!({
+                "name": "Bad result delivery",
+                "execution_contract": {
+                    "version": 1,
+                    "goal": "Run work",
+                    "success_criteria": ["Work completed"],
+                    "output_instructions": "Return the result",
+                    "no_result_text": "No change",
+                    "policy": { "result_delivery": 7 }
+                },
+                "schedule": { "kind": "cron", "expression": "*/3 * * * *", "timezone": "UTC" }
+            }),
+            vec![(
+                "execution_contract.policy.result_delivery",
+                DispatchInputIssueCode::TypeMismatch,
+            )],
         ),
         (
             "missing schedule timezone",
@@ -2742,6 +2820,146 @@ async fn builtin_trigger_remove_rejects_malformed_input() {
         .unwrap_err();
 
         assert_eq!(error, FailureKind::InputEncode);
+    }
+}
+
+#[derive(Debug)]
+struct FixedTriggerManualFireRunner {
+    outcome: TriggerManualFireOutcome,
+    calls: std::sync::Mutex<Vec<(TenantId, ironclaw_triggers::TriggerId)>>,
+}
+
+#[async_trait]
+impl TriggerManualFireRunner for FixedTriggerManualFireRunner {
+    async fn run_manual_fire(
+        &self,
+        tenant_id: TenantId,
+        trigger_id: ironclaw_triggers::TriggerId,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<TriggerManualFireOutcome, TriggerError> {
+        self.calls
+            .lock()
+            .expect("manual fire calls lock")
+            .push((tenant_id, trigger_id));
+        Ok(self.outcome.clone())
+    }
+}
+
+#[tokio::test]
+async fn builtin_trigger_run_dispatches_submitted_and_replayed_through_host_runtime() {
+    for (outcome, expected_status, expected_run_id) in [
+        {
+            let run_id = TurnRunId::new();
+            (
+                TriggerManualFireOutcome::Submitted { run_id },
+                "submitted",
+                run_id,
+            )
+        },
+        {
+            let run_id = TurnRunId::new();
+            (
+                TriggerManualFireOutcome::Replayed {
+                    original_run_id: run_id,
+                },
+                "replayed",
+                run_id,
+            )
+        },
+    ] {
+        let repository = Arc::new(InMemoryTriggerRepository::default());
+        let runner = Arc::new(FixedTriggerManualFireRunner {
+            outcome,
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let runtime = runtime_with_trigger_repository_and_manual_runner(repository, runner.clone());
+        let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_RUN_CAPABILITY_ID]);
+        let expected_tenant_id = context.tenant_id.clone();
+        let created = invoke_with_context(
+            &runtime,
+            TRIGGER_CREATE_CAPABILITY_ID,
+            json!({
+                "name": "Manual runtime dispatch",
+                "execution_contract": trigger_execution_contract("Run work"),
+                "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
+            }),
+            context.clone(),
+        )
+        .await
+        .expect("create trigger through host runtime");
+        let trigger_id = created["trigger"]["trigger_id"]
+            .as_str()
+            .expect("trigger id");
+
+        let output = invoke_with_context(
+            &runtime,
+            TRIGGER_RUN_CAPABILITY_ID,
+            json!({"trigger_id": trigger_id}),
+            context,
+        )
+        .await
+        .expect("run trigger through host runtime");
+
+        assert_eq!(output["source"], "manual");
+        assert_eq!(output["status"], expected_status);
+        assert_eq!(output["run_id"], expected_run_id.to_string());
+        let calls = runner.calls.lock().expect("manual fire calls lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, expected_tenant_id);
+        assert_eq!(calls[0].1.to_string(), trigger_id);
+    }
+
+    for (outcome, expected_kind, expected_summary) in [
+        (
+            TriggerManualFireOutcome::Failed {
+                reason: ironclaw_triggers::TriggerPollerFailureReason::Backend,
+            },
+            FailureKind::OperationFailed,
+            Some("trigger run failed"),
+        ),
+        (
+            TriggerManualFireOutcome::NotFound,
+            FailureKind::InputEncode,
+            Some("trigger_run input failed validation"),
+        ),
+    ] {
+        let repository = Arc::new(InMemoryTriggerRepository::default());
+        let runner = Arc::new(FixedTriggerManualFireRunner {
+            outcome,
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let runtime = runtime_with_trigger_repository_and_manual_runner(repository, runner.clone());
+        let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_RUN_CAPABILITY_ID]);
+        let created = invoke_with_context(
+            &runtime,
+            TRIGGER_CREATE_CAPABILITY_ID,
+            json!({
+                "name": "Manual runtime failure",
+                "execution_contract": trigger_execution_contract("Run work"),
+                "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
+            }),
+            context.clone(),
+        )
+        .await
+        .expect("create caller-visible trigger through host runtime");
+        let trigger_id = created["trigger"]["trigger_id"]
+            .as_str()
+            .expect("trigger id");
+
+        let failure = invoke_failure_with_context(
+            &runtime,
+            TRIGGER_RUN_CAPABILITY_ID,
+            json!({"trigger_id": trigger_id}),
+            context,
+        )
+        .await;
+
+        assert_eq!(failure.kind, expected_kind);
+        assert_eq!(failure.safe_summary().as_deref(), expected_summary);
+        assert_eq!(
+            runner.calls.lock().expect("manual fire calls lock").len(),
+            1
+        );
     }
 }
 
@@ -9328,6 +9546,37 @@ fn runtime_with_trigger_repository(repository: Arc<dyn TriggerRepository>) -> im
     )
 }
 
+fn runtime_with_trigger_repository_and_manual_runner(
+    trigger_repository: Arc<InMemoryTriggerRepository>,
+    manual_fire_runner: Arc<dyn TriggerManualFireRunner>,
+) -> impl HostRuntime {
+    let trigger_create_hook = Arc::new(PersistedRecordTriggerCreateHook::new(Arc::clone(
+        &trigger_repository,
+    )));
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(DiskFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers_with_trigger_services(
+            trigger_repository,
+            trigger_create_hook,
+            Arc::new(MissingTriggerActiveRunLookup),
+            manual_fire_runner,
+        )
+        .unwrap(),
+    ))
+    .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
+    .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
+    .with_runtime_policy(local_host_policy())
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing()
+}
+
 fn runtime_with_trigger_repository_and_create_hook(
     trigger_repository: Arc<dyn TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
@@ -10326,6 +10575,7 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRIGGER_REMOVE_CAPABILITY_ID,
         TRIGGER_PAUSE_CAPABILITY_ID,
         TRIGGER_RESUME_CAPABILITY_ID,
+        TRIGGER_RUN_CAPABILITY_ID,
     ]
 }
 

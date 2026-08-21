@@ -221,6 +221,20 @@ where
     Ok(Arc::new(root))
 }
 
+/// Build the journal filesystem over libSQL's bounded secondary write lane.
+/// `mount_roots` preserves the data-plane mount layout and row identity; the
+/// runtime owns the writer-admission invariant for #7714.
+pub(crate) fn libsql_journal_lane_filesystem(
+    runtime: &ironclaw_libsql_runtime::LibSqlRuntime,
+    mount_roots: impl FnOnce(
+        Arc<LibSqlRootFilesystem>,
+    ) -> Result<Arc<CompositeRootFilesystem>, RebornBuildError>,
+) -> Result<Arc<CompositeRootFilesystem>, RebornBuildError> {
+    let lane_runtime = Arc::new(runtime.split_journal_lane()?);
+    // The data-plane handle already migrated this database.
+    mount_roots(Arc::new(LibSqlRootFilesystem::from_runtime(lane_runtime)))
+}
+
 pub(crate) fn mount_database_roots<F>(
     root: &mut CompositeRootFilesystem,
     database: Arc<F>,

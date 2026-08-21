@@ -151,10 +151,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let capability_harness = g
         .capability_harness()
         .ok_or("trigger group must expose its capability harness")?;
+    let milestone_sink: Arc<dyn ironclaw_loop_contracts::LoopHostMilestoneSink> =
+        Arc::new(InMemoryLoopHostMilestoneSink::default());
     let raw_port = capability_harness
         .create_recording_capability_port(
             &run_context,
-            &Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            &milestone_sink,
             None,
             ironclaw_host_api::capability_surface::CapabilitySurfacePolicy::allow_all(),
         )

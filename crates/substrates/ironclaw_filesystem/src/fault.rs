@@ -387,6 +387,16 @@ where
         self.inner.list_dir(path).await
     }
 
+    async fn list_dir_page(
+        &self,
+        path: &VirtualPath,
+        after: Option<&str>,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.gate(FilesystemOperation::ListDir, path)?;
+        self.inner.list_dir_page(path, after, max_entries).await
+    }
+
     async fn query(
         &self,
         path: &VirtualPath,

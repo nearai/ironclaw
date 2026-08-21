@@ -261,13 +261,16 @@ where
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
             Arc::new(EphemeralInstructionMaterializationStore::default());
         let context_window_cache = Arc::new(ThreadContextWindowCache::default());
-        self.issue_host_prompt_bundle(
-            &request.context,
-            &request.request,
-            Arc::clone(&instruction_materialization_store),
-            Arc::clone(&context_window_cache),
-        )
-        .await?;
+        let prompt_bundle = self
+            .issue_host_prompt_bundle(
+                &request.context,
+                &request.request,
+                Arc::clone(&instruction_materialization_store),
+                Arc::clone(&context_window_cache),
+            )
+            .await?;
+        let mut request = request;
+        request.request.messages = prompt_bundle.messages;
         let mut port = ThreadBackedLoopModelPort::new(
             Arc::clone(&self.thread_service),
             self.thread_scope.clone(),
@@ -310,7 +313,7 @@ where
         request: &LoopModelRequest,
         instruction_materialization_store: Arc<dyn InstructionMaterializationStore>,
         context_window_cache: Arc<ThreadContextWindowCache>,
-    ) -> Result<(), LoopModelGatewayError> {
+    ) -> Result<ironclaw_loop_contracts::LoopPromptBundle, LoopModelGatewayError> {
         let context_port = Arc::new(
             ThreadBackedLoopContextPort::new(
                 Arc::clone(&self.thread_service),
@@ -335,7 +338,7 @@ where
                 checkpoint_state_ref: None,
                 max_messages: Some(self.max_messages.min(u32::MAX as usize) as u32),
                 inline_messages: request.inline_messages.clone(),
-                capability_view: None,
+                capability_view: request.capability_view.clone(),
             })
             .await
             .map_err(host_error_to_model_gateway_error)?;
@@ -353,7 +356,7 @@ where
             )));
         }
 
-        Ok(())
+        Ok(prompt_bundle)
     }
 }
 
@@ -453,6 +456,7 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
         let diagnostic_effective_model = replay_identity.provider_model_id.clone();
@@ -462,7 +466,8 @@ where
             None,
             None,
             None,
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -502,6 +507,7 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
         let diagnostic_effective_model = replay_identity.provider_model_id.clone();
@@ -511,7 +517,8 @@ where
             None,
             None,
             Some(sink),
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -551,6 +558,7 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
         let provider_turn_scope = format!(
@@ -564,7 +572,8 @@ where
             Some(capabilities),
             Some(provider_turn_scope),
             None,
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -605,6 +614,7 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
         let provider_turn_scope = format!(
@@ -618,7 +628,8 @@ where
             Some(capabilities),
             Some(provider_turn_scope),
             Some(sink),
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -784,6 +795,7 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
@@ -794,7 +806,8 @@ where
             None,
             None,
             None,
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -826,6 +839,7 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
@@ -836,7 +850,8 @@ where
             None,
             None,
             Some(sink),
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -868,6 +883,7 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
@@ -882,7 +898,8 @@ where
             Some(capabilities),
             Some(provider_turn_scope),
             None,
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -915,6 +932,7 @@ where
                 request.fallback_index,
                 request.messages,
             )?;
+        completion.response_format = request.response_format.clone();
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
@@ -929,7 +947,8 @@ where
             Some(capabilities),
             Some(provider_turn_scope),
             Some(sink),
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -1252,6 +1271,8 @@ impl ProviderReplayIdentity {
 struct ProviderRequestContext {
     replay_identity: ProviderReplayIdentity,
     next_fallback_index: Option<u32>,
+    /// Strategy-imposed provider tool-choice constraint for this call.
+    tool_choice: Option<ironclaw_loop_contracts::LoopModelToolChoice>,
 }
 
 impl ProviderRequestContext {
@@ -1259,7 +1280,16 @@ impl ProviderRequestContext {
         Self {
             replay_identity,
             next_fallback_index,
+            tool_choice: None,
         }
+    }
+
+    fn with_tool_choice(
+        mut self,
+        tool_choice: Option<ironclaw_loop_contracts::LoopModelToolChoice>,
+    ) -> Self {
+        self.tool_choice = tool_choice;
+        self
     }
 }
 
@@ -1310,7 +1340,7 @@ impl ProviderStreamSink {
 #[async_trait]
 impl CompletionStreamSink for ProviderStreamSink {
     async fn text_delta(&self, delta: String) {
-        if delta.is_empty() {
+        if delta.is_empty() || !self.inner.accepts_safe_text_updates() {
             return;
         }
         let safe_text = {
@@ -1327,15 +1357,24 @@ impl CompletionStreamSink for ProviderStreamSink {
         self.inner.safe_text_update(safe_text).await;
     }
 
+    fn text_is_visible(&self) -> bool {
+        self.inner.accepts_safe_text_updates()
+    }
+
     fn supports_text_replacement(&self) -> bool {
         true
     }
 
     async fn replace_on_next_text_delta(&self) {
-        self.replace_on_next_delta.store(true, Ordering::SeqCst);
+        if self.inner.accepts_safe_text_updates() {
+            self.replace_on_next_delta.store(true, Ordering::SeqCst);
+        }
     }
 
     async fn finish_text_replacement(&self) {
+        if !self.inner.accepts_safe_text_updates() {
+            return;
+        }
         if !self.replace_on_next_delta.swap(false, Ordering::SeqCst) {
             return;
         }
@@ -1374,6 +1413,7 @@ where
     let ProviderRequestContext {
         replay_identity,
         next_fallback_index,
+        tool_choice,
     } = request_context;
     let redaction_started_at = Instant::now();
     let redaction_count = redact_completion_request(&mut completion);
@@ -1419,6 +1459,27 @@ where
             );
         }
         if !tool_definitions.is_empty() {
+            // A strategy-forced tool choice must name a capability on the
+            // visible tool surface; resolving through the definitions keeps
+            // capability→provider-name mapping in one place and rejects a
+            // forced capability the model could not actually call.
+            let forced_provider_tool_name = match tool_choice.as_ref() {
+                Some(ironclaw_loop_contracts::LoopModelToolChoice::ForcedCapability {
+                    capability_id,
+                }) => Some(
+                    tool_definitions
+                        .iter()
+                        .find(|definition| &definition.capability_id == capability_id)
+                        .map(|definition| definition.name.as_str().to_string())
+                        .ok_or_else(|| {
+                            HostManagedModelError::safe(
+                                HostManagedModelErrorKind::InvalidRequest,
+                                "forced tool choice is not on the visible tool surface",
+                            )
+                        })?,
+                ),
+                None => None,
+            };
             let mut recovery_tool_names = Vec::with_capacity(tool_definitions.len());
             let mut llm_tool_definitions = tool_definitions
                 .into_iter()
@@ -1445,8 +1506,9 @@ where
                 );
             }
             let tool_definitions_hash = tool_definitions_cache_signature(&recovery_tool_names);
-            let tool_request =
+            let mut tool_request =
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
+            tool_request.tool_choice = forced_provider_tool_name;
             debug!("reborn model gateway dispatching tool-capable provider request");
             let provider_started_at = live_latency_started_at();
             let response = match if let Some(stream_sink) = stream_sink.as_ref() {
@@ -1616,6 +1678,15 @@ where
         debug!(
             "reborn model gateway dispatching text-only provider request because no capability port was supplied"
         );
+    }
+
+    if tool_choice.is_some() {
+        // Reaching the text-only path with a forced tool choice means the
+        // caller constrained a call that has no tool surface at all.
+        return Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "forced tool choice requires a tool-capable model call",
+        ));
     }
 
     let provider_started_at = live_latency_started_at();
@@ -1867,7 +1938,8 @@ async fn tool_response_to_host(
     match response.finish_reason {
         FinishReason::Stop => {
             let content = clean_response(&response.content.unwrap_or_default());
-            if content.trim().is_empty() {
+            let reasoning = response.reasoning.filter(|value| !value.trim().is_empty());
+            if content.trim().is_empty() && reasoning.is_none() {
                 return Err(HostManagedModelError::safe(
                     HostManagedModelErrorKind::InvalidOutput,
                     InvalidOutputReason::EmptyAssistantResponse.safe_summary(),
@@ -1877,16 +1949,15 @@ async fn tool_response_to_host(
                 content_bytes = content.len(),
                 "reborn model gateway classified tool-capable provider response as assistant reply"
             );
-            Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
-                content,
-                response.reasoning,
+            Ok(
+                HostManagedModelResponse::assistant_reply_with_reasoning(content, reasoning)
+                    .with_usage(LoopModelUsage {
+                        input_tokens: response.input_tokens,
+                        output_tokens: response.output_tokens,
+                        cache_read_input_tokens: response.cache_read_input_tokens,
+                        cache_creation_input_tokens: response.cache_creation_input_tokens,
+                    }),
             )
-            .with_usage(LoopModelUsage {
-                input_tokens: response.input_tokens,
-                output_tokens: response.output_tokens,
-                cache_read_input_tokens: response.cache_read_input_tokens,
-                cache_creation_input_tokens: response.cache_creation_input_tokens,
-            }))
         }
         FinishReason::Length => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::OutputTruncated,
@@ -2407,6 +2478,14 @@ fn provider_replay_matches_identity(
     provider_call: &ProviderToolCallReferenceEnvelope,
     expected: &ProviderReplayIdentity,
 ) -> bool {
+    // Seeded prepared-context tool history carries the host-owned sentinel
+    // identity: replay it as a faithful tool round on ANY route. The
+    // carve-out is exact-match on the sentinel only; the accept door forces
+    // `signature: None` on seeded envelopes, so this can never smuggle a
+    // real route's replay artifacts.
+    if provider_call.provider_id == ironclaw_threads::PREPARED_SEED_PROVIDER_ID {
+        return true;
+    }
     provider_call.provider_id == expected.provider_id
         && provider_call.provider_model_id == expected.provider_model_id
 }
@@ -2424,6 +2503,13 @@ fn validate_provider_replay_identity(
             error,
         )
     })?;
+    // Seeded prepared-context envelopes carry the host-owned sentinel
+    // identity; route equality is not applicable to them (the match gate in
+    // `provider_replay_matches_identity` admits them on ANY route, and the
+    // accept door forces `signature: None` on seeded envelopes).
+    if provider_call.provider_id == ironclaw_threads::PREPARED_SEED_PROVIDER_ID {
+        return Ok(());
+    }
     if provider_call.provider_id != expected.provider_id
         || provider_call.provider_model_id != expected.provider_model_id
     {
@@ -2800,6 +2886,36 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(safe_text);
         }
+    }
+
+    struct DiscardingSafeTextSink;
+
+    #[async_trait]
+    impl HostManagedModelStreamSink for DiscardingSafeTextSink {
+        fn accepts_safe_text_updates(&self) -> bool {
+            false
+        }
+
+        async fn safe_text_update(&self, _safe_text: String) {
+            panic!("discarding sink must not receive safe text updates");
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_stream_sink_does_not_accumulate_discarded_updates() {
+        let sink = ProviderStreamSink::new(Arc::new(DiscardingSafeTextSink));
+
+        sink.text_delta("partial".to_string()).await;
+        sink.replace_on_next_text_delta().await;
+        sink.finish_text_replacement().await;
+
+        assert!(
+            sink.accumulated_text
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        );
+        assert!(!sink.replace_on_next_delta.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

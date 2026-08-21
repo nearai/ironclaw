@@ -4,7 +4,8 @@ use crate::{
     AutomationListRequest, AutomationProductService, ProductAgentBoundCaller,
     RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationRecentRunStatus, RebornAutomationRunMutationResult,
+    RebornAutomationRunMutationStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, TriggerRunThreadScope,
 };
 use ironclaw_host_api::{Timestamp, ids::ThreadId};
@@ -14,8 +15,9 @@ use ironclaw_product_contracts::surface::{
 use ironclaw_triggers::AutomationName;
 use ironclaw_triggers::{
     ActiveHoldProjection, ActiveHoldReason, TriggerActiveRunLookup, TriggerError, TriggerId,
-    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
-    TriggerSchedule, TriggerSourceKind, TriggerState, active_holds_for_records,
+    TriggerManualFireOutcome, TriggerManualFireRunner, TriggerRecord, TriggerRepository,
+    TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus, TriggerSchedule,
+    TriggerSourceKind, TriggerState, active_holds_for_records,
 };
 
 const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -40,6 +42,7 @@ const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct RebornAutomationProductService {
     trigger_repository: Arc<dyn TriggerRepository>,
     active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    manual_fire_runner: Arc<dyn TriggerManualFireRunner>,
     backend_timeout: Duration,
     /// Whether the background trigger poller is running. Surfaced to the WebUI
     /// so the panel can warn that listed automations will not fire while
@@ -54,6 +57,7 @@ impl std::fmt::Debug for RebornAutomationProductService {
             .debug_struct("RebornAutomationProductService")
             .field("trigger_repository", &"Arc<dyn TriggerRepository>")
             .field("active_run_lookup", &"Arc<dyn TriggerActiveRunLookup>")
+            .field("manual_fire_runner", &"Arc<dyn TriggerManualFireRunner>")
             .finish()
     }
 }
@@ -66,6 +70,7 @@ impl RebornAutomationProductService {
         Self {
             trigger_repository,
             active_run_lookup,
+            manual_fire_runner: Arc::new(ironclaw_triggers::MissingTriggerManualFireRunner),
             backend_timeout: AUTOMATION_BACKEND_TIMEOUT,
             scheduler_enabled: true,
         }
@@ -75,6 +80,14 @@ impl RebornAutomationProductService {
     /// by WebUI composition from runtime readiness.
     pub fn with_scheduler_enabled(mut self, scheduler_enabled: bool) -> Self {
         self.scheduler_enabled = scheduler_enabled;
+        self
+    }
+
+    pub fn with_manual_fire_runner(
+        mut self,
+        manual_fire_runner: Arc<dyn TriggerManualFireRunner>,
+    ) -> Self {
+        self.manual_fire_runner = manual_fire_runner;
         self
     }
 
@@ -191,6 +204,103 @@ impl AutomationProductService for RebornAutomationProductService {
             .await
     }
 
+    async fn run_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
+        if !self.scheduler_enabled {
+            return Err(scheduler_disabled());
+        }
+        let trigger_id = parse_trigger_id(&automation_id)?;
+        let deadline = tokio::time::Instant::now() + self.backend_timeout;
+        let target = tokio::time::timeout_at(
+            deadline,
+            self.trigger_repository
+                .get_trigger(caller.tenant_id.clone(), trigger_id),
+        )
+        .await
+        .map_err(|_| backend_timeout_error())?
+        .map_err(map_trigger_error)?;
+        if !target
+            .as_ref()
+            .is_some_and(|record| trigger_is_caller_visible(record, &caller))
+        {
+            return Ok(RebornAutomationMutationResponse {
+                updated: false,
+                automation: None,
+                run_result: None,
+            });
+        }
+
+        let run_result = match tokio::time::timeout_at(
+            deadline,
+            self.manual_fire_runner.run_manual_fire(
+                caller.tenant_id.clone(),
+                trigger_id,
+                chrono::Utc::now(),
+            ),
+        )
+        .await
+        .map_err(|_| backend_timeout_error())?
+        .map_err(map_trigger_error)?
+        {
+            TriggerManualFireOutcome::Submitted { run_id } => RebornAutomationRunMutationResult {
+                status: RebornAutomationRunMutationStatus::Submitted,
+                run_id,
+            },
+            TriggerManualFireOutcome::Replayed { original_run_id } => {
+                RebornAutomationRunMutationResult {
+                    status: RebornAutomationRunMutationStatus::Replayed,
+                    run_id: original_run_id,
+                }
+            }
+            TriggerManualFireOutcome::AlreadyActive { .. } => {
+                return Err(automation_conflict("automation_already_active", true));
+            }
+            TriggerManualFireOutcome::Paused => {
+                return Err(automation_conflict("automation_paused", false));
+            }
+            TriggerManualFireOutcome::Completed => {
+                return Err(automation_conflict("automation_completed", false));
+            }
+            TriggerManualFireOutcome::NotFound => {
+                return Ok(RebornAutomationMutationResponse {
+                    updated: false,
+                    automation: None,
+                    run_result: None,
+                });
+            }
+            TriggerManualFireOutcome::Failed { reason } => {
+                tracing::debug!(?reason, %trigger_id, "manual automation fire failed");
+                return Err(automation_run_failed());
+            }
+        };
+
+        let record = match tokio::time::timeout_at(
+            deadline,
+            self.trigger_repository
+                .get_trigger(caller.tenant_id, trigger_id),
+        )
+        .await
+        {
+            Ok(Ok(record)) => record,
+            Ok(Err(error)) => {
+                tracing::debug!(%error, %trigger_id, "post-submit automation projection refresh failed");
+                None
+            }
+            Err(_) => {
+                tracing::debug!(%trigger_id, "post-submit automation projection refresh timed out");
+                None
+            }
+        };
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: record.map(|record| automation_info_from_record(record, &[], None)),
+            run_result: Some(run_result),
+        })
+    }
+
     async fn resume_automation(
         &self,
         caller: ProductAgentBoundCaller,
@@ -225,6 +335,7 @@ impl AutomationProductService for RebornAutomationProductService {
         Ok(RebornAutomationMutationResponse {
             updated: record.is_some(),
             automation: record.map(|record| automation_info_from_record(record, &[], None)),
+            run_result: None,
         })
     }
 
@@ -251,6 +362,7 @@ impl AutomationProductService for RebornAutomationProductService {
         Ok(RebornAutomationMutationResponse {
             updated: removed.is_some(),
             automation: None,
+            run_result: None,
         })
     }
 
@@ -318,6 +430,7 @@ impl RebornAutomationProductService {
         Ok(RebornAutomationMutationResponse {
             updated: record.is_some(),
             automation: record.map(|record| automation_info_from_record(record, &[], None)),
+            run_result: None,
         })
     }
 }
@@ -416,12 +529,11 @@ fn wire_hold_from_projection(hold: ActiveHoldProjection) -> RebornAutomationActi
 
 /// Maps a trigger record's source kind + schedule to the wire DTO source.
 ///
-/// This match is exhaustive on purpose: if `TriggerSourceKind` gains a new
-/// variant or `TriggerSchedule` gains a new arm, the compiler rejects the
-/// build here — preventing any new schedule type from being silently dropped.
+/// Manual is fire provenance, not a different stored automation definition,
+/// so it retains the record's schedule shape on this projection.
 fn automation_source_from_record(record: &TriggerRecord) -> RebornAutomationSource {
     match record.source {
-        TriggerSourceKind::Schedule => match &record.schedule {
+        TriggerSourceKind::Schedule | TriggerSourceKind::Manual => match &record.schedule {
             TriggerSchedule::Cron {
                 expression,
                 timezone,
@@ -503,6 +615,25 @@ fn backend_timeout_error() -> ProductSurfaceError {
         503,
         true,
     )
+}
+
+fn automation_conflict(field: &'static str, retryable: bool) -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Conflict,
+        kind: ProductSurfaceErrorKind::Conflict,
+        status_code: 409,
+        retryable,
+        field: Some(field.to_string()),
+        validation_code: None,
+    }
+}
+
+fn scheduler_disabled() -> ProductSurfaceError {
+    automation_conflict("scheduler_disabled", false)
+}
+
+fn automation_run_failed() -> ProductSurfaceError {
+    ProductSurfaceError::service_unavailable(true)
 }
 
 fn map_trigger_error(error: TriggerError) -> ProductSurfaceError {

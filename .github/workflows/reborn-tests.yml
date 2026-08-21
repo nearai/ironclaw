@@ -84,6 +84,7 @@ jobs:
   changes:
     name: Detect Reborn test scope
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       plan_mode: ${{ steps.plan.outputs.plan_mode }}
       run_crate_tests: ${{ steps.plan.outputs.run_crate_tests }}
@@ -659,14 +660,19 @@ jobs:
           shared-key: reborn-sandbox-docker-tests
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
 
-      - name: Build Python sandbox worker
-        run: docker build -f Dockerfile.sandbox-worker -t ironclaw-worker:latest .
+      - name: Prepare sandbox worker and proxy images
+        run: |
+          docker pull ironsh/iron-proxy@sha256:c4628019c24f4cc8d77564a26b7c9cedb00accee6f93d06270e85fb8f9c6a7da
+          docker build -f Dockerfile.sandbox-worker -t ironclaw-worker:latest .
 
       - name: Verify production local-sandbox profile wiring
         run: cargo test -p ironclaw local_sandbox_profile_selects_docker_process_binding_when_required -- --nocapture
 
       - name: Run real-Docker user sandbox contract
-        run: cargo test -p ironclaw_sandbox --test user_sandbox_docker_live -- --nocapture
+        # Each test creates a transport that reconciles the daemon-wide user-container
+        # inventory. Run this shared-Docker contract serially so one test's sweeper
+        # cannot adopt and stop another test's intentionally active container.
+        run: cargo test -p ironclaw_sandbox --test user_sandbox_docker_live -- --nocapture --test-threads=1
 
       - name: Run full-turn sandbox shell integration
         run: cargo test -p ironclaw_integration_tests --test reborn_integration_sandbox_shell_turn -- --nocapture
@@ -1135,6 +1141,7 @@ jobs:
   reborn-tests:
     name: Tests (Reborn)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: always()
     needs:
       - changes

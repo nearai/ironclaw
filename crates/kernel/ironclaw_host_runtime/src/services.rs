@@ -32,12 +32,14 @@ use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    dispatch::{CapabilityDispatcher, DispatchError, RuntimeDispatchErrorKind},
+    dispatch::{
+        CapabilityDispatcher, DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind,
+    },
     http::RuntimeHttpEgress,
     ids::{CapabilityId, ResourceReservationId, SecretHandle},
     lane::RuntimeLane,
     resource::{ResourceScope, ResourceUsage},
-    runtime::{DispatchErrorLane, RuntimeKind},
+    runtime::RuntimeKind,
     runtime_policy::{
         DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode,
         ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -63,8 +65,8 @@ use ironclaw_turns::{
 use ironclaw_wasm::{
     DenyWasmHostHttp, EmptyWasmRuntimeCredentials, PreparedWitTool, WasmError,
     WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder,
-    WasmStagedRuntimeCredentials, WitToolExecution, WitToolHost, WitToolRequest, WitToolRuntime,
-    WitToolRuntimeConfig,
+    WasmStagedRuntimeCredentials, WitErrorKind, WitGuestFailure, WitToolExecution, WitToolHost,
+    WitToolOutcome, WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
 };
 use secrecy::ExposeSecret;
 
@@ -882,6 +884,23 @@ where
                 && descriptor.id.as_str() == crate::SHELL_CAPABILITY_ID
                 && first_party_runtime.contains_handler(&descriptor.id)
         })
+    }
+}
+
+/// Test-only accessors, kept in their own cfg-gated block rather than as
+/// per-method gates inside the production impl above.
+///
+/// The `test-support` half of the gate is load-bearing: the sole caller is
+/// `ironclaw_composition/tests/libsql_substrate.rs`, an integration test in
+/// another crate, which a plain `#[cfg(test)]` would not reach.
+#[cfg(any(test, feature = "test-support"))]
+impl<F, G> HostRuntimeServices<F, G>
+where
+    F: RootFilesystem + 'static,
+    G: ResourceGovernor + 'static,
+{
+    pub fn process_runtime_for_test(&self) -> Arc<dyn ironclaw_processes::ProcessRuntimePort> {
+        self.process_services.process_runtime()
     }
 }
 

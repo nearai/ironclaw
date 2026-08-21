@@ -87,6 +87,10 @@ pub(crate) struct RefreshingCapabilityPortConfig {
     /// call site, `capability_host.rs`'s `create_capability_port`); `Some(set)`
     /// keeps exactly `set`, including `Some(empty)` = zero grants.
     pub(super) capability_id_filter: Option<HashSet<CapabilityId>>,
+    /// Runtime-unavailable builtins omitted from every refreshed grant set.
+    /// Unlike `capability_id_filter`, this production seam is a deny-list and
+    /// therefore preserves dynamically discovered extension capabilities.
+    pub(super) unavailable_capability_ids: HashSet<CapabilityId>,
     /// Synthetic grants for capability ids that neither the static builtin
     /// policy nor `extension_surface_source` produces (ad-hoc test-only
     /// `HostRuntime` backends). Applied in `build_inner` before
@@ -130,6 +134,7 @@ pub(crate) async fn create_refreshing_capability_port(
         capability_execution_mount_overrides: config.capability_execution_mount_overrides,
         additional_provider_trust: config.additional_provider_trust,
         capability_id_filter: config.capability_id_filter,
+        unavailable_capability_ids: config.unavailable_capability_ids,
         additional_capability_grants: config.additional_capability_grants,
         current: StdMutex::new(None),
         refresh_lock: AsyncMutex::new(()),
@@ -170,6 +175,7 @@ struct RefreshingCapabilityPort {
     capability_execution_mount_overrides: HashMap<CapabilityId, MountView>,
     additional_provider_trust: BTreeMap<ExtensionId, TrustDecision>,
     capability_id_filter: Option<HashSet<CapabilityId>>,
+    unavailable_capability_ids: HashSet<CapabilityId>,
     additional_capability_grants: Vec<ironclaw_host_api::capability::CapabilityGrant>,
     current: StdMutex<Option<Arc<dyn LoopCapabilityPort>>>,
     refresh_lock: AsyncMutex<()>,
@@ -248,6 +254,11 @@ impl RefreshingCapabilityPort {
                 .grants
                 .retain(|grant| filter.contains(&grant.capability));
         }
+        visible_request
+            .context
+            .grants
+            .grants
+            .retain(|grant| !self.unavailable_capability_ids.contains(&grant.capability));
         // Test-support-only extra provider-trust entries (empty in production,
         // see the config field doc-comment): merge after the canonical helper
         // has built the base provider-trust map, so the production helper
@@ -334,6 +345,21 @@ impl RefreshingCapabilityPort {
                 Arc::clone(&self.gate_record_store),
             )?);
         }
+        let suppressed_scheduled_run = self
+            .run_context
+            .product_context
+            .as_ref()
+            .filter(|context| {
+                context.origin == ironclaw_host_api::turn::TurnOriginKind::ScheduledTrigger
+            })
+            .and_then(|context| context.execution_policy.as_ref())
+            .is_some_and(|policy| {
+                policy.result_delivery
+                    == ironclaw_host_api::execution_policy::ResultDeliveryPolicy::SuppressWhenNothingToReport
+            });
+        if suppressed_scheduled_run {
+            synthetic_capabilities.push(ironclaw_loop_host::nothing_to_report_result_capability()?);
+        }
         let port = wrap_synthetic_capabilities(
             port,
             synthetic_capabilities,
@@ -364,8 +390,11 @@ impl RefreshingCapabilityPort {
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<(Arc<dyn LoopCapabilityPort>, VisibleCapabilitySurface), AgentLoopHostError> {
-        let port = self.build_inner().await?;
-        let surface = port.visible_capabilities(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let port = Box::pin(self.build_inner()).await?;
+        let surface = Box::pin(port.visible_capabilities(request)).await?;
         Ok((port, surface))
     }
 
@@ -392,7 +421,10 @@ impl RefreshingCapabilityPort {
         request: VisibleCapabilityRequest,
     ) -> Result<(Arc<dyn LoopCapabilityPort>, VisibleCapabilitySurface), AgentLoopHostError> {
         let _guard = self.refresh_lock.lock().await;
-        let (port, surface) = self.refresh_with_surface(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let (port, surface) = Box::pin(self.refresh_with_surface(request)).await?;
         self.replace_current(port.clone())?;
         Ok((port, surface))
     }
@@ -411,9 +443,10 @@ impl RefreshingCapabilityPort {
 
 #[async_trait::async_trait]
 impl LoopCapabilityPort for RefreshingCapabilityPort {
-    fn requires_ordered_batch_invocation(&self) -> bool {
-        self.current_port()
-            .map_or(true, |port| port.requires_ordered_batch_invocation())
+    fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
+        self.current_port().map_or(true, |port| {
+            port.requires_ordered_batch_invocation(invocations)
+        })
     }
 
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
@@ -439,17 +472,21 @@ impl LoopCapabilityPort for RefreshingCapabilityPort {
         &self,
         request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.current_or_refresh()
-            .await?
-            .register_provider_tool_call(request)
-            .await
+        let port = self.current_or_refresh().await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(port.register_provider_tool_call(request)).await
     }
 
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let (_, surface) = self.refresh_current(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let (_, surface) = Box::pin(self.refresh_current(request)).await?;
         Ok(surface)
     }
 
@@ -457,20 +494,22 @@ impl LoopCapabilityPort for RefreshingCapabilityPort {
         &self,
         request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
-        self.current_or_refresh()
-            .await?
-            .invoke_capability(request)
-            .await
+        let port = self.current_or_refresh().await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(port.invoke_capability(request)).await
     }
 
     async fn invoke_capability_batch(
         &self,
         request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
-        self.current_or_refresh()
-            .await?
-            .invoke_capability_batch(request)
-            .await
+        let port = self.current_or_refresh().await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(port.invoke_capability_batch(request)).await
     }
 }
 
@@ -571,6 +610,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
         capability_execution_mount_overrides,
         additional_provider_trust,
         capability_id_filter,
+        unavailable_capability_ids: HashSet::new(),
         additional_capability_grants,
     })
     .await

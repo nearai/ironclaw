@@ -72,14 +72,6 @@ async fn paired_actor_without_binding_creates_thread_binding_message_and_submits
         submitted.accepted_message_ref,
         response.accepted_message.message_ref
     );
-    assert_eq!(
-        submitted.source_binding_ref,
-        response.accepted_message.source_binding_ref
-    );
-    assert_eq!(
-        submitted.reply_target_binding_ref,
-        response.accepted_message.reply_target_binding_ref
-    );
 }
 
 #[tokio::test]
@@ -248,6 +240,67 @@ async fn unpair_external_actor_revokes_direct_conversation_bindings() {
     assert_ne!(
         rebound.turn_scope.thread_id, first.turn_scope.thread_id,
         "unpair must not silently reuse the pre-removal Slack DM thread route"
+    );
+}
+
+#[tokio::test]
+async fn reassigning_external_actor_revokes_the_previous_users_direct_route() {
+    let services = InMemoryConversationServices::default();
+    let actor = external_actor("telegram-user-relinked");
+    let conversation = external_conversation("chat-relinked", None);
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+        )
+        .await;
+    let first = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor.clone(),
+            conversation.clone(),
+            "telegram-event-before-relink",
+        ))
+        .await
+        .expect("first user's direct binding");
+
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("bob"),
+        )
+        .await;
+
+    let missing = services
+        .lookup_binding(resolve_request(
+            telegram(),
+            actor.clone(),
+            conversation.clone(),
+            "telegram-event-after-relink-lookup",
+        ))
+        .await
+        .expect_err("reassigning an actor must revoke the previous user's direct route");
+    assert!(matches!(missing, InboundTurnError::BindingRequired { .. }));
+
+    let rebound = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor,
+            conversation,
+            "telegram-event-after-relink",
+        ))
+        .await
+        .expect("reassigned actor should create a fresh direct binding");
+    assert_eq!(rebound.actor.user_id, user("bob"));
+    assert_ne!(
+        rebound.turn_scope.thread_id, first.turn_scope.thread_id,
+        "the new owner must never inherit the previous user's thread"
     );
 }
 
@@ -4057,12 +4110,12 @@ fn submit_turn_request(submission: ConversationTurnSubmission) -> SubmitTurnRequ
         product_context.execution_policy = submission.execution_policy;
     }
     SubmitTurnRequest {
+        subagent_activation_provenance: None,
         requested_model: None,
+        output_contract: None,
         scope: submission.scope,
         actor: submission.actor,
         accepted_message_ref: submission.accepted_message_ref,
-        source_binding_ref: submission.source_binding_ref,
-        reply_target_binding_ref: submission.reply_target_binding_ref,
         requested_run_profile: submission.requested_run_profile,
         idempotency_key: submission.idempotency_key,
         received_at: submission.received_at,
@@ -4212,6 +4265,5 @@ fn accepted_response(request: SubmitTurnRequest) -> SubmitTurnResponse {
         resolved_run_profile_version: RunProfileVersion::new(1),
         event_cursor: ironclaw_host_api::turn::EventCursor(1),
         accepted_message_ref: request.accepted_message_ref,
-        reply_target_binding_ref: request.reply_target_binding_ref,
     }
 }

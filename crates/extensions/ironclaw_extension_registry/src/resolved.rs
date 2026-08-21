@@ -155,6 +155,11 @@ pub struct ResolvedAuthSurface {
     /// `None` for v2 manifests (no recipe vocabulary); required in v3.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipe: Option<VendorAuthRecipe>,
+    /// OAuth resource admitted from protected-resource metadata for a
+    /// user-registered MCP. Older and static manifests omit this and derive
+    /// the resource from the MCP server endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_resource: Option<ironclaw_extension_contracts::recipe::HttpsEndpoint>,
     /// Exact RFC 9728 document admitted while preparing a user-registered
     /// OAuth MCP. This stays with the recipe so later DCR uses the advertised
     /// location rather than guessing a well-known resource path.
@@ -215,6 +220,7 @@ impl ResolvedExtensionManifest {
                     vendor: provider,
                     setup,
                     recipe: None,
+                    oauth_resource: None,
                     protected_resource_metadata_url: None,
                 }),
                 _ => None,

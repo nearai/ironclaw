@@ -6,11 +6,12 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_loop_contracts::{LoopBlockedKind, LoopCheckpointKind};
+use ironclaw_loop_contracts::{LoopBlockedKind, LoopCheckpointKind, LoopCompletionKind};
 use ironclaw_loop_host::RunCancellationFactory;
 use ironclaw_threads::{
     MessageKind, MessageStatus, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
-    ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
+    ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultIntrinsicOutcome,
+    ToolResultReferenceEnvelope,
 };
 use ironclaw_turns::{
     AgentTurnRuntimePort, GetLoopCheckpointRequest, GetRunStateRequest, LoopGateRef,
@@ -280,11 +281,17 @@ where
         &self,
         request: CompletionEvidenceRequest<'_>,
     ) -> Result<bool, TurnError> {
-        if request.reply_message_refs.is_empty() && request.result_refs.is_empty() {
+        if request.completion_kind != LoopCompletionKind::NothingToReport
+            && request.reply_message_refs.is_empty()
+            && request.result_refs.is_empty()
+        {
             return Ok(true);
         }
+        let thread_scope = self
+            .resolve_thread_scope_for_turn(request.scope, request.run_id)
+            .await?;
         let history = self
-            .load_thread_history_for_turn(request.scope, request.run_id)
+            .load_thread_history_in_scope(request.scope, thread_scope.clone())
             .await?;
         let expected_run_id = request.run_id.to_string();
         let verified_reply_ids = verified_reply_message_ids(&history, expected_run_id.as_str());
@@ -295,7 +302,16 @@ where
         let results_verified = request.result_refs.iter().all(|result_ref| {
             verify_tool_result_ref(&history, result_ref, expected_run_id.as_str())
         });
-        Ok(replies_verified && results_verified)
+        let typed_nothing_to_report_verified = request.completion_kind
+            != LoopCompletionKind::NothingToReport
+            || history.messages.iter().any(|message| {
+                verify_intrinsic_tool_result_message(message, expected_run_id.as_str())
+            });
+        // A typed no-result call is mandatory evidence for suppression, and
+        // every result ref declared by the driver must still be finalized for
+        // this run. An empty result-ref list remains valid when the durable
+        // transcript itself contains the typed terminal call.
+        Ok(replies_verified && results_verified && typed_nothing_to_report_verified)
     }
 
     async fn verify_final_checkpoint(
@@ -475,11 +491,11 @@ impl<S> ThreadCheckpointLoopExitEvidencePort<S>
 where
     S: SessionThreadService + ?Sized + Send + Sync,
 {
-    async fn load_thread_history_for_turn(
+    async fn resolve_thread_scope_for_turn(
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-    ) -> Result<ThreadHistory, TurnError> {
+    ) -> Result<ThreadScope, TurnError> {
         let mut thread_scope = match &self.thread_scope {
             Some(thread_scope) => {
                 ensure_thread_scope_matches_turn_scope(thread_scope, scope)?;
@@ -487,9 +503,6 @@ where
             }
             None => thread_scope_from_turn_scope(scope)?,
         };
-        // Multi-user: the loop host wrote this thread under the run's
-        // authenticated owner (`owners/<caller>`), so evidence reads must use
-        // the same owner or they will look in the wrong subtree.
         if scope.has_explicit_thread_owner() {
             thread_scope = ironclaw_loop_host::ThreadScopeResolver::resolve_for_turn(
                 &thread_scope,
@@ -510,6 +523,26 @@ where
                 run_state.actor.as_ref(),
             );
         }
+        Ok(thread_scope)
+    }
+
+    async fn load_thread_history_for_turn(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<ThreadHistory, TurnError> {
+        // Multi-user: the loop host wrote this thread under the run's
+        // authenticated owner (`owners/<caller>`), so evidence reads must use
+        // the same owner or they will look in the wrong subtree.
+        let thread_scope = self.resolve_thread_scope_for_turn(scope, run_id).await?;
+        self.load_thread_history_in_scope(scope, thread_scope).await
+    }
+
+    async fn load_thread_history_in_scope(
+        &self,
+        scope: &TurnScope,
+        thread_scope: ThreadScope,
+    ) -> Result<ThreadHistory, TurnError> {
         self.thread_service
             .list_thread_history(ThreadHistoryRequest {
                 scope: thread_scope,
@@ -629,13 +662,43 @@ fn verify_tool_result_ref(
     result_ref: &LoopResultRef,
     expected_run_id: &str,
 ) -> bool {
-    history.messages.iter().any(|message| {
-        message.kind == MessageKind::ToolResultReference
-            && message.status == MessageStatus::Finalized
-            && message.turn_run_id.as_deref() == Some(expected_run_id)
-            && message.tool_result_ref.as_deref() == Some(result_ref.as_str())
-            && message_content_matches_result_ref(message, result_ref)
-    })
+    history
+        .messages
+        .iter()
+        .any(|message| verify_tool_result_message(message, result_ref, expected_run_id))
+}
+
+fn verify_tool_result_message(
+    message: &ThreadMessageRecord,
+    result_ref: &LoopResultRef,
+    expected_run_id: &str,
+) -> bool {
+    message.kind == MessageKind::ToolResultReference
+        && message.status == MessageStatus::Finalized
+        && message.turn_run_id.as_deref() == Some(expected_run_id)
+        && message.tool_result_ref.as_deref() == Some(result_ref.as_str())
+        && message_content_matches_result_ref(message, result_ref)
+}
+
+fn verify_intrinsic_tool_result_message(
+    message: &ThreadMessageRecord,
+    expected_run_id: &str,
+) -> bool {
+    message.kind == MessageKind::ToolResultReference
+        && message.status == MessageStatus::Finalized
+        && message.turn_run_id.as_deref() == Some(expected_run_id)
+        && message
+            .tool_result_ref
+            .as_deref()
+            .is_some_and(|result_ref| {
+                message.content.as_deref().is_some_and(|content| {
+                    ToolResultReferenceEnvelope::from_json_str(content).is_ok_and(|envelope| {
+                        envelope.result_ref == result_ref
+                            && envelope.intrinsic_outcome
+                                == Some(ToolResultIntrinsicOutcome::NothingToReport)
+                    })
+                })
+            })
 }
 
 fn message_content_matches_result_ref(

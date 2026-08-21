@@ -1238,6 +1238,80 @@ impl RootFilesystem for LibSqlRootFilesystem {
         children
     }
 
+    async fn list_dir_page(
+        &self,
+        path: &VirtualPath,
+        after: Option<&str>,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        if max_entries == 0 {
+            return Ok(Vec::new());
+        }
+        let exact_entry = self.exact_entry(path).await?;
+        if matches!(exact_entry, Some((_, FileType::File, _))) {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ListDir,
+                reason: "not a directory".to_string(),
+            });
+        }
+        let conn = self.read_connection().await?;
+        let (prefix_lower, prefix_upper) = descendant_path_range(path);
+        let after = after.unwrap_or_default();
+        let limit = i64::try_from(max_entries.min(Page::MAX_LIMIT as usize))
+            .unwrap_or(i64::from(Page::MAX_LIMIT));
+        let mut rows = conn
+            .query(
+                "WITH direct_children AS ( \
+                     SELECT substr(substr(path, length(?1) + 1), 1, \
+                                   CASE WHEN instr(substr(path, length(?1) + 1), '/') = 0 \
+                                        THEN length(substr(path, length(?1) + 1)) \
+                                        ELSE instr(substr(path, length(?1) + 1), '/') - 1 END) AS name, \
+                            max(is_dir OR instr(substr(path, length(?1) + 1), '/') > 0) AS is_dir \
+                     FROM root_filesystem_entries \
+                     WHERE path >= ?1 AND path < ?2 \
+                     GROUP BY 1 \
+                 ) \
+                 SELECT name, is_dir FROM direct_children \
+                 WHERE name > ?3 ORDER BY name LIMIT ?4",
+                libsql::params![prefix_lower, prefix_upper, after, limit],
+            )
+            .await
+            .map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::ListDir, error)
+            })?;
+        let mut page = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ListDir, error))?
+        {
+            let name: String = row.get(0).map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::ListDir, error)
+            })?;
+            let is_dir: i64 = row.get(1).map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::ListDir, error)
+            })?;
+            page.push(DirEntry {
+                path: VirtualPath::new(format!(
+                    "{}/{}",
+                    path.as_str().trim_end_matches('/'),
+                    name
+                ))?,
+                name,
+                file_type: if is_dir != 0 {
+                    FileType::Directory
+                } else {
+                    FileType::File
+                },
+            });
+        }
+        if page.is_empty() && after.is_empty() && exact_entry.is_none() {
+            return Err(not_found(path.clone(), FilesystemOperation::ListDir));
+        }
+        Ok(page)
+    }
+
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         if let Some((len, file_type, modified)) = self.exact_entry(path).await? {
             return Ok(FileStat {

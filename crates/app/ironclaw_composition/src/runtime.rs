@@ -37,9 +37,11 @@ use ironclaw_assistant::{
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
     DefaultApprovalInteractionService, DefaultAuthInteractionService,
     OutboundPreferencesProductService, PersistentApprovalGranteeResolver,
-    RunStateApprovalInteractionReadModel,
+    RunStateApprovalInteractionReadModel, SuggestionsProcessCommitObserver,
 };
-use ironclaw_event_log::{DurableAuditLog, DurableEventLog, RuntimeEvent};
+use ironclaw_event_log::{
+    DurableAuditLog, DurableEventLog, EventError, NonBlockingEventSink, RuntimeEvent,
+};
 use ironclaw_extension_registry::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::{CompositeRootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::turn::{
@@ -220,6 +222,7 @@ struct RuntimeStoreParts {
     loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
     thread_service: Arc<dyn SessionThreadService>,
     event_log: Arc<dyn DurableEventLog>,
+    runtime_event_sink: Arc<dyn NonBlockingEventSink>,
     audit_log: Arc<dyn DurableAuditLog>,
     resource_governor: Arc<dyn ironclaw_resources::ResourceGovernor>,
     budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStorePort>,
@@ -250,6 +253,7 @@ fn runtime_store_parts(services: &RebornRuntimeStores) -> RuntimeStoreParts {
     let budget_gate_store = Arc::clone(&services.budget_gate_store);
     let broadcast_budget_event_sink = Arc::clone(&services.broadcast_budget_event_sink);
     let event_log = Arc::clone(&services.event_log);
+    let runtime_event_sink = Arc::clone(&services.runtime_event_sink);
     let audit_log = Arc::clone(&services.audit_log);
     let admin_secret_provisioner = Arc::clone(&services.admin_secret_provisioner);
     let project_service = Arc::clone(&services.project_service);
@@ -285,6 +289,7 @@ fn runtime_store_parts(services: &RebornRuntimeStores) -> RuntimeStoreParts {
         loop_checkpoint_store,
         thread_service,
         event_log,
+        runtime_event_sink,
         audit_log,
         resource_governor,
         budget_gate_store,
@@ -524,6 +529,8 @@ pub enum RebornRuntimeError {
     SkillExecution(String),
     #[error("user sandbox shutdown failed: {0}")]
     UserSandboxShutdown(#[source] RuntimeProcessError),
+    #[error("runtime event flush failed: {0}")]
+    RuntimeEventFlush(#[source] EventError),
 }
 
 impl From<TurnError> for RebornRuntimeError {
@@ -577,12 +584,16 @@ pub struct RebornRuntime {
     pub(crate) extension_lifecycle_surface_context: LifecycleProductSurfaceContext,
     pub(crate) secret_store: Arc<dyn SecretStorePort>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
+    pub(crate) suggestions_store: Arc<dyn ironclaw_assistant::SuggestionsStore>,
     pub(crate) llm_config_service: Option<Arc<ironclaw_operator::RebornLlmConfigService>>,
     pub(crate) admin_secret_provisioner: Arc<dyn ironclaw_assistant::AdminSecretProvisioner>,
     pub(crate) project_service:
         Arc<dyn ironclaw_product_contracts::project_service::ProjectService>,
     pub(crate) diagnostic_store: Arc<dyn ironclaw_assistant::inspector_store::DiagnosticStorePort>,
     pub(crate) trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    /// Late-bound manual-fire runner shared by product automation actions and
+    /// the scheduler so both surfaces execute through the same worker graph.
+    pub(crate) trigger_manual_fire_runner: Arc<dyn ironclaw_triggers::TriggerManualFireRunner>,
     #[cfg(any(test, feature = "test-support"))]
     #[allow(
         dead_code,
@@ -595,13 +606,6 @@ pub struct RebornRuntime {
     >,
     /// Sibling rebindable slot for the trigger delivery-target service; the
     /// test-support repoint seam swaps both slots together.
-    #[cfg(any(test, feature = "test-support"))]
-    #[allow(
-        dead_code,
-        reason = "held for test-support rebinding after runtime construction"
-    )]
-    pub(crate) trigger_source_turn_state:
-        Arc<std::sync::RwLock<Arc<dyn ironclaw_turns::AgentTurnRuntimePort>>>,
     pub(crate) broadcast_budget_event_sink: Arc<ironclaw_resources::BroadcastBudgetEventSink>,
     pub(crate) external_tool_catalog: Arc<dyn ExternalToolCatalog>,
     pub(crate) persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
@@ -631,6 +635,7 @@ pub struct RebornRuntime {
     pub(crate) workspace_mount_policy: crate::runtime_mounts::WorkspaceMountPolicy,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
+    pub(crate) notification_inbox: Arc<dyn ironclaw_notifications::NotificationInboxStorePort>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) outbound_state: OutboundTestStores,
     #[cfg(any(test, feature = "test-support"))]
@@ -711,7 +716,7 @@ pub struct RebornRuntime {
     auth_interaction_service: Arc<dyn AuthInteractionService>,
     #[cfg(any(test, feature = "test-support"))]
     interaction_service_test_parts: Option<InteractionServiceTestParts>,
-    webui_event_log: Arc<dyn DurableEventLog>,
+    runtime_event_sink: Arc<dyn NonBlockingEventSink>,
     default_run_profile_id: String,
     send_locks: Mutex<HashMap<ConversationId, Arc<Mutex<()>>>>,
     #[cfg(feature = "test-support")]
@@ -1693,6 +1698,14 @@ impl RebornRuntime {
         self.thread_service.clone()
     }
 
+    pub(crate) fn suggestions_store(&self) -> Arc<dyn ironclaw_assistant::SuggestionsStore> {
+        Arc::clone(&self.suggestions_store)
+    }
+
+    pub(crate) fn product_default_thread_scope(&self) -> &ThreadScope {
+        &self.thread_scope
+    }
+
     /// Test-only accessor for the session thread service shared by the trigger
     /// poller, REPL, and WebUI paths. Integration tests use this to enumerate
     /// threads stored by `record_trigger_prompt` without going through the WebUI
@@ -2319,13 +2332,13 @@ impl RebornRuntime {
         let response = match self
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
+                subagent_activation_provenance: None,
                 requested_model: accepted.replay_metadata.resolved_model.clone(),
                 scope: scope.clone(),
                 actor: TurnActor::new(self.actor_user_id.clone()),
                 accepted_message_ref: accepted_message_ref.clone(),
-                source_binding_ref: self.source_binding_ref.clone(),
-                reply_target_binding_ref: self.reply_target_binding_ref.clone(),
                 requested_run_profile: None,
+                output_contract: None,
                 idempotency_key,
                 received_at: Utc::now(),
                 requested_run_id: None,
@@ -2487,6 +2500,10 @@ impl RebornRuntime {
                 .await
                 .map_err(RebornRuntimeError::UserSandboxShutdown)?;
         }
+        self.runtime_event_sink
+            .flush()
+            .await
+            .map_err(RebornRuntimeError::RuntimeEventFlush)?;
         Ok(())
     }
 
@@ -2813,7 +2830,7 @@ impl RebornRuntime {
             TurnStatus::CancelRequested | TurnStatus::Cancelled
         );
         if cancellation_accepted {
-            self.append_webui_loop_cancelled(scope, run_id).await?;
+            self.append_webui_loop_cancelled(scope, run_id);
         }
         self.turn_scheduler.notify(TurnRunWake {
             scope: scope.clone(),
@@ -2908,8 +2925,7 @@ impl RebornRuntime {
                 response.status,
                 TurnStatus::CancelRequested | TurnStatus::Cancelled
             ) {
-                self.append_webui_loop_cancelled(&child.scope, child_run_id)
-                    .await?;
+                self.append_webui_loop_cancelled(&child.scope, child_run_id);
             }
             self.turn_scheduler.notify(TurnRunWake {
                 scope: child_scope,
@@ -2921,18 +2937,17 @@ impl RebornRuntime {
         Ok(())
     }
 
-    async fn append_webui_loop_cancelled(
-        &self,
-        scope: &TurnScope,
-        run_id: TurnRunId,
-    ) -> Result<(), RebornRuntimeError> {
-        let capability_id = CapabilityId::new(LOOP_RUN_CAPABILITY_ID).map_err(|reason| {
-            RebornRuntimeError::InvalidArgument {
-                reason: format!("loop-run capability id: {reason}"),
+    fn append_webui_loop_cancelled(&self, scope: &TurnScope, run_id: TurnRunId) {
+        let capability_id = match CapabilityId::new(LOOP_RUN_CAPABILITY_ID) {
+            Ok(capability_id) => capability_id,
+            Err(error) => {
+                tracing::debug!(error = %error, "loop cancellation runtime event was not built");
+                return;
             }
-        })?;
-        self.webui_event_log
-            .append(RuntimeEvent::loop_cancelled(
+        };
+        if let Err(error) = self
+            .runtime_event_sink
+            .try_emit(RuntimeEvent::loop_cancelled(
                 ResourceScope {
                     tenant_id: scope.tenant_id.clone(),
                     user_id: self.actor_user_id.clone(),
@@ -2944,9 +2959,9 @@ impl RebornRuntime {
                 },
                 capability_id,
             ))
-            .await
-            .map(|_| ())
-            .map_err(|error| RebornRuntimeError::TurnCoordinator(error.to_string()))
+        {
+            tracing::debug!(error = %error, "loop cancellation runtime event was not emitted");
+        }
     }
 
     async fn read_latest_assistant_text(
@@ -3130,6 +3145,12 @@ pub(crate) async fn build_runtime_with_resource_governor(
             limit.get(),
         );
     }
+    if let Some(limit) = runner.max_concurrent_unbound_runs {
+        max_running_by_class.insert(
+            ProcessConcurrencyClass::from_trusted("unbound"),
+            limit.get(),
+        );
+    }
     services_input = services_input.with_process_concurrency_limits(ProcessConcurrencyLimits {
         max_running_per_owner: runner
             .max_concurrent_runs_per_user
@@ -3189,6 +3210,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         loop_checkpoint_store,
         thread_service,
         event_log,
+        runtime_event_sink,
         audit_log,
         resource_governor,
         budget_gate_store,
@@ -3204,6 +3226,20 @@ pub(crate) async fn build_runtime_with_resource_governor(
     let process_journal_source = processes.journal();
     let process_lifecycle_lookup_source = processes.lifecycle();
     let process_gate_query_source = processes.gates();
+    // Suggestion generation is an ordinary durable AgentTurn.  Register its
+    // materializer before the planned runtime starts so replay covers both
+    // prior terminal commits and runs submitted immediately after startup.
+    let suggestions_store: Arc<dyn ironclaw_assistant::SuggestionsStore> = Arc::new(
+        ironclaw_assistant::FilesystemSuggestionsStore::new(Arc::clone(&scoped_filesystem)),
+    );
+    processes
+        .subscribe_process_observer(Arc::new(SuggestionsProcessCommitObserver::new(
+            Arc::clone(&suggestions_store),
+            Arc::clone(&thread_service),
+        )))
+        .map_err(|error| RebornRuntimeError::MalformedConfig {
+            reason: format!("suggestion generation observer wiring failed: {error}"),
+        })?;
     let filesystem_skill_context_runtime = filesystem_skill_context_runtime(&services);
     let (skill_context_source, skill_activation_source, skill_execution_adapter) = match (
         configured_skill_context_source,
@@ -3403,7 +3439,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             reason: error.to_string(),
         })?;
     let durable_milestone_sink: Arc<dyn LoopHostMilestoneSink> = Arc::new(
-        DurableLoopHostMilestoneSink::new(Arc::clone(&event_log), milestone_scope),
+        DurableLoopHostMilestoneSink::new(Arc::clone(&runtime_event_sink), milestone_scope),
     );
     if trusted_laptop_access {
         append_trusted_laptop_access_audit(&audit_log, &thread_scope, &actor_user_id).await?;
@@ -3489,8 +3525,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
             outbound_preferences_facade.clone(),
             trajectory_observer,
             Some(tool_diagnostic_sink),
-        )
-        .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
+            trigger_poller.enabled,
+        )?;
         (
             capability_host.capability_factory,
             capability_host.capability_input_resolver,
@@ -3862,7 +3898,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
             text_only_driver: Default::default(),
             host: Default::default(),
             tool_disclosure: resolved_tool_disclosure,
-            parallel_tool_batch: default_runtime_config.parallel_tool_batch,
             tool_disclosure_profile_pins: default_runtime_config.tool_disclosure_profile_pins,
             planned_default_iteration_limit: optional_nonzero_u32_env(
                 "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",
@@ -4303,6 +4338,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 materializer: trigger_poller_services.materializer,
                 trusted_submitter: trigger_poller_services.trusted_submitter,
                 active_run_lookup,
+                manual_fire_runner: Arc::clone(&services.trigger_manual_fire_runner),
                 post_submit_hook_slot: hook_slot,
             },
         )
@@ -4490,15 +4526,15 @@ pub(crate) async fn build_runtime_with_resource_governor(
         extension_lifecycle_surface_context: services.extension_lifecycle_surface_context.clone(),
         secret_store: Arc::clone(&services.secret_store),
         scoped_filesystem,
+        suggestions_store,
         llm_config_service,
         admin_secret_provisioner,
         project_service,
         diagnostic_store,
         trigger_repository: trigger_repository.clone(),
+        trigger_manual_fire_runner: services.trigger_manual_fire_runner.clone(),
         #[cfg(any(test, feature = "test-support"))]
         trigger_process_lifecycle_source: Arc::clone(&services.trigger_process_lifecycle_source),
-        #[cfg(any(test, feature = "test-support"))]
-        trigger_source_turn_state: Arc::clone(&services.trigger_source_turn_state),
         broadcast_budget_event_sink,
         external_tool_catalog: services.external_tool_catalog.clone(),
         persistent_approval_policies: Arc::clone(&services.persistent_approval_policies),
@@ -4520,6 +4556,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         workspace_mount_policy: services.workspace_mounts.clone(),
         system_extensions_lifecycle_mounts: services.system_extensions_lifecycle_mounts.clone(),
         outbound_preferences: services.outbound_preferences.clone(),
+        notification_inbox: services.notification_inbox.clone(),
         #[cfg(any(test, feature = "test-support"))]
         outbound_state: OutboundTestStores {
             state: services.outbound_state.clone(),
@@ -4574,7 +4611,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         auth_interaction_service,
         #[cfg(any(test, feature = "test-support"))]
         interaction_service_test_parts,
-        webui_event_log: event_log,
+        runtime_event_sink,
         default_run_profile_id,
         send_locks: Mutex::new(HashMap::new()),
         #[cfg(feature = "test-support")]

@@ -75,13 +75,13 @@ fn coordinator_submit_request(submission: ConversationTurnSubmission) -> SubmitT
         product_context.execution_policy = submission.execution_policy;
     }
     SubmitTurnRequest {
+        subagent_activation_provenance: None,
         requested_model: None,
         scope: submission.scope,
         actor: submission.actor,
         accepted_message_ref: submission.accepted_message_ref,
-        source_binding_ref: submission.source_binding_ref,
-        reply_target_binding_ref: submission.reply_target_binding_ref,
         requested_run_profile: submission.requested_run_profile,
+        output_contract: None,
         idempotency_key: submission.idempotency_key,
         received_at: submission.received_at,
         requested_run_id: None,
@@ -140,6 +140,13 @@ pub(crate) fn turn_submission_error(error: TurnError) -> TurnSubmissionError {
                 TurnSubmissionErrorCategory::InvalidRequest,
                 TurnSubmissionRetry::Permanent,
             ),
+            // A thread that spent its autonomous-wake budget is parked pending
+            // human attention, not permanently refused: the trigger poller may
+            // retry, and a human activation restores the budget.
+            AdmissionRejectionReason::SystemWakeStreak => (
+                TurnSubmissionErrorCategory::AdmissionRejected,
+                TurnSubmissionRetry::RetryableAfterKeyRotation,
+            ),
             AdmissionRejectionReason::Policy | AdmissionRejectionReason::Unauthorized => (
                 TurnSubmissionErrorCategory::Unauthorized,
                 TurnSubmissionRetry::Permanent,
@@ -180,9 +187,8 @@ mod tests {
     use super::*;
     use ironclaw_host_api::ids::UserId;
     use ironclaw_host_api::turn::{
-        AcceptedMessageRef, EventCursor, IdempotencyKey, ReplyTargetBindingRef, RunOriginAdapter,
-        SourceBindingRef, TurnActor, TurnOriginKind, TurnRunId, TurnScope, TurnStatus,
-        TurnSurfaceType,
+        AcceptedMessageRef, EventCursor, IdempotencyKey, RunOriginAdapter, TurnActor,
+        TurnOriginKind, TurnRunId, TurnScope, TurnStatus, TurnSurfaceType,
     };
     use ironclaw_turns::{AdmissionRejection, ThreadBusy, TurnCapacityResource};
 
@@ -233,6 +239,13 @@ mod tests {
                 )),
                 TurnSubmissionErrorCategory::InvalidRequest,
                 TurnSubmissionRetry::Permanent,
+            ),
+            (
+                TurnError::AdmissionRejected(AdmissionRejection::new(
+                    AdmissionRejectionReason::SystemWakeStreak,
+                )),
+                TurnSubmissionErrorCategory::AdmissionRejected,
+                TurnSubmissionRetry::RetryableAfterKeyRotation,
             ),
             (
                 TurnError::AdmissionRejected(AdmissionRejection::new(
@@ -353,7 +366,7 @@ mod tests {
             distinct.len(),
             12,
             "TurnError has 12 variants; the class table must name every one \
-             (AdmissionRejected appears four times, once per rejection reason)"
+             (AdmissionRejected appears six times, once per rejection reason)"
         );
     }
 
@@ -368,8 +381,6 @@ mod tests {
             scope: TurnScope::new(tenant, None, None, thread),
             actor: TurnActor::new(UserId::new("alice").expect("user id")),
             accepted_message_ref: AcceptedMessageRef::new("message:1").expect("message ref"),
-            source_binding_ref: SourceBindingRef::new("source:1").expect("source ref"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:1").expect("reply ref"),
             requested_run_profile: None,
             idempotency_key: IdempotencyKey::new("key:1").expect("idempotency key"),
             received_at: chrono::Utc::now(),

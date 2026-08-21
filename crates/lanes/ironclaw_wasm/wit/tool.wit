@@ -1,4 +1,4 @@
-package near:agent@0.3.0;
+package near:agent@0.4.1;
 
 // WASM Tool Sandbox Interface
 //
@@ -52,6 +52,26 @@ interface host {
         body: list<u8>,
     }
 
+    /// Coarse host-owned categories. Provider-specific detail belongs in
+    /// `code`, so adding an extension does not widen this enum.
+    enum http-error-kind {
+        auth-required,
+        input,
+        output-too-large,
+        executor,
+        network-denied,
+        client,
+        operation-failed,
+    }
+
+    record http-failure {
+        kind: http-error-kind,
+        code: option<string>,
+        message: option<string>,
+        /// Resource-accounting fact, not retry policy.
+        request-sent: bool,
+    }
+
     /// Make an HTTP request (if capability granted).
     ///
     /// Security:
@@ -60,7 +80,7 @@ interface host {
     /// - Response is scanned for leaked secrets before returning
     /// - Rate-limited per tool
     ///
-    /// Returns Err with error message if:
+    /// Returns a typed failure if:
     /// - Endpoint not in allowlist
     /// - Rate limit exceeded
     /// - Request/response size limit exceeded
@@ -77,7 +97,7 @@ interface host {
         headers-json: string,
         body: option<list<u8>>,
         timeout-ms: option<u32>,
-    ) -> result<http-response, string>;
+    ) -> result<http-response, http-failure>;
 
     // ==================== Tool Invocation Capability ====================
 
@@ -115,12 +135,42 @@ interface tool {
         context: option<string>,
     }
 
+    /// Stable, closed vocabulary for guest-reported failure causes. Mirrors
+    /// the host-side `RuntimeDispatchErrorKind` mapping table 1:1 (plus
+    /// `auth-required`, which maps to `DispatchError::AuthRequired` instead
+    /// of a `RuntimeDispatchErrorKind`).
+    enum error-kind {
+        auth-required,
+        input,
+        output-too-large,
+        executor,
+        network-denied,
+        client,
+        operation-failed,
+    }
+
+    /// Structured guest-reported failure.
+    ///
+    /// `code` and `message` are free-text carriers: the host scrubs both for
+    /// secret-shaped values at the sandbox-exit chokepoint before either is
+    /// visible outside the guest, and `message` is additionally bounded and
+    /// re-validated downstream before it reaches the model.
+    record guest-failure {
+        /// Closed failure category driving host-side dispatch-error mapping.
+        kind: error-kind,
+        /// Stable, short provider/tool error identifier (e.g. a Slack
+        /// `channel_not_found` code), if the guest has one.
+        code: option<string>,
+        /// Human-readable failure detail, if the guest has one.
+        message: option<string>,
+    }
+
     /// Response from tool execution.
-    record response {
+    variant response {
         /// JSON-encoded output on success.
-        output: option<string>,
-        /// Error message on failure.
-        error: option<string>,
+        success(string),
+        /// Structured failure on error.
+        failure(guest-failure),
     }
 
     /// Execute the tool with the given request.

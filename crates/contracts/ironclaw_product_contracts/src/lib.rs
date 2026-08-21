@@ -50,6 +50,7 @@ pub mod inspector;
 pub mod interaction_commands;
 pub mod ironhub;
 pub mod lifecycle_service;
+pub mod notification_inbox;
 pub mod notification_setup;
 pub mod operator_llm;
 pub mod operator_secrets;
@@ -63,6 +64,7 @@ pub mod projection;
 pub mod prompt_source;
 pub mod session_ingress;
 pub mod shared_admission;
+pub mod suggestions;
 pub mod surface;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

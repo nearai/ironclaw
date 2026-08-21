@@ -157,7 +157,9 @@ def metadata() -> dict:
 
 
 def real_owner_metadata() -> dict:
-    """A workspace named after the crates `EMBEDDED_ASSET_OWNERS` routes to.
+    """A workspace named after the crates real routing tables point at:
+    `EMBEDDED_ASSET_OWNERS` and the doc-fact tables
+    (`DOC_FACT_PAGE_TESTS` / `DOC_FACT_PUBLISHED_SWEEP`).
 
     The rest of this file uses `metadata()`'s `alpha`/`beta`/`gamma`, which
     cannot carry the real table: the planner rejects a changed package outside
@@ -196,11 +198,23 @@ def real_owner_metadata() -> dict:
             "ironclaw_slack_extension",
             "crates/extensions/packages/slack/Cargo.toml",
         ),
+        package(
+            "ironclaw_architecture_tests",
+            "crates/app/ironclaw_architecture_tests/Cargo.toml",
+        ),
         # Not an asset owner: the crate `DOCKER_RUNTIME_CONFIG_OWNERS` routes
         # the shipped container configs to, through the same real manifest
         # paths, so that table is exercised against a real package directory
         # too.
         package("ironclaw", "crates/app/ironclaw_cli/Cargo.toml"),
+        package(
+            "ironclaw_extension_registry",
+            "crates/extensions/ironclaw_extension_registry/Cargo.toml",
+        ),
+        package(
+            "ironclaw_openai_compat",
+            "crates/product/ironclaw_openai_compat/Cargo.toml",
+        ),
     ]
     return {
         "workspace_members": [entry["id"] for entry in packages],
@@ -219,6 +233,7 @@ def real_owner_metadata() -> dict:
 
 class RebornPrTestPlanTests(unittest.TestCase):
     def setUp(self) -> None:
+        planner._sandbox_crate_directory.cache_clear()
         self.original_bucket_packages = planner._bucket_packages
         planner._bucket_packages = lambda packages: (
             [{"name": "selected", "packages": packages}] if packages else []
@@ -227,6 +242,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         planner._bucket_packages = self.original_bucket_packages
+        planner._sandbox_crate_directory.cache_clear()
 
     def plan(
         self,
@@ -569,6 +585,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "crates/kernel/ironclaw_runtime_policy/src/planner.rs",
             "crates/kernel/ironclaw_runtime_policy/src/resolver.rs",
             "crates/lanes/ironclaw_sandbox/tests/user_sandbox_docker_live.rs",
+            "crates/lanes/ironclaw_sandbox/tests/support/user_sandbox_live.rs",
+            "crates/lanes/ironclaw_sandbox/tests/user_sandbox_docker_live/extra.rs",
             "tests/integration/reborn_sandbox_shell_turn.rs",
             "tests/e2e_trace_runtime_policy_serde.rs",
             "tests/fixtures/llm_traces/runtime_policy/hosted_dev_no_shell.json",
@@ -601,6 +619,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 "Cargo.toml",
                 "src/lib.rs",
                 "src/sandbox_process/command.rs",
+                "tests/support/user_sandbox_live.rs",
+                "tests/user_sandbox_docker_live/extra.rs",
             ):
                 with self.subTest(relative_path=relative_path):
                     plan = planner.build_plan(
@@ -634,6 +654,28 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertTrue(docker_only_plan["run_sandbox_docker"])
         self.assertEqual(docker_only_plan["root_partitions"], [])
         self.assertEqual(docker_only_plan["integration_lanes"], [])
+
+    def test_sandbox_worker_helpers_are_not_unclassified_docker_paths(
+        self,
+    ) -> None:
+        for path in (
+            "docker/sandbox/ironclaw-exec",
+            "docker/sandbox/ironclaw-sandbox-idle",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "selected")
+                self.assertTrue(plan["run_sandbox_docker"])
+                self.assertEqual(plan["crate_buckets"], [])
+                self.assertEqual(plan["root_partitions"], [])
+                self.assertEqual(plan["integration_lanes"], [])
+
+        unrelated_path = "docker/unrelated-helper"
+        with (
+            self.subTest(path=unrelated_path),
+            self.assertRaisesRegex(ValueError, "unclassified pull-request path"),
+        ):
+            self.plan("pull_request", [unrelated_path])
 
     def test_empty_diff_fails_fast(self) -> None:
         with self.assertRaisesRegex(ValueError, "empty pull-request diff"):
@@ -1115,12 +1157,31 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertNotEqual(paired["crate_buckets"], [])
 
         # And an unknown `.github/` sibling still refuses.
-        for path in (".github/dependabot.yml", ".github/labeler.yml"):
-            with self.subTest(path=path):
-                with self.assertRaisesRegex(
-                    ValueError, "unclassified pull-request path"
-                ):
-                    self.plan("pull_request", [path])
+        with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
+            self.plan("pull_request", [".github/labeler.yml"])
+
+    def test_dependabot_config_routes_to_linked_device_supply_chain_test(self) -> None:
+        """The config is an asserted input of the linked-device pin test."""
+        plan = self.plan_real_owners([".github/dependabot.yml"])
+
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["affected_packages"], ["ironclaw_architecture_tests"])
+        self.assertEqual(
+            plan["crate_buckets"],
+            [
+                {
+                    "name": "selected",
+                    "packages": ["ironclaw_architecture_tests"],
+                    "exact_targets": [
+                        {
+                            "package": "ironclaw_architecture_tests",
+                            "kind": "test",
+                            "name": "reborn_linked_device_supply_chain_pin",
+                        }
+                    ],
+                }
+            ],
+        )
 
     def test_decided_repo_root_paths_are_owned_by_other_workflows(self) -> None:
         """Repo-root files another workflow owns outright.
@@ -1148,6 +1209,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         shape as the `.claude/` gap the CHECKLIST row already records.
         """
         for path in (
+            "tests/test_smoke_release_binary.py",
             "scripts/no_panics_reborn_baseline.txt",
             "scripts/reborn-e2e-rust.sh",
             "scripts/check-version-bumps.sh",
@@ -1379,9 +1441,9 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "skills/routine-advisor/SKILL.md",
             # Depth-independent: the bundler recurses, so a skill's auxiliary
             # Markdown two levels down is embedded the same as its SKILL.md.
-            "skills/github/references/workflows.md",
+            "skills/example/references/workflows.md",
             # Non-Markdown skill files ride the plain asset arm.
-            "skills/code-review/checklist.toml",
+            "skills/example/checklist.toml",
         ):
             with self.subTest(path=path):
                 plan = self.plan_real_owners([path])
@@ -1619,6 +1681,115 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )
         self.assertEqual(plan["mode"], "selected")
         self.assertNotEqual(plan["crate_buckets"], [])
+
+    def test_published_docs_page_runs_the_registry_docs_sweep(self) -> None:
+        """A published `docs/` page selects the doc-fact sweep instead of
+        planning `mode=none` (#7378: docs-only PRs merged green while cargo
+        tests read their pages)."""
+        plan = self.plan_real_owners(["docs/extensions/building-a-tool.md"])
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["ironclaw_extension_registry"])
+        self.assertEqual(plan["affected_packages"], ["ironclaw_extension_registry"])
+        self.assertEqual(
+            plan["crate_buckets"],
+            [
+                {
+                    "name": "selected",
+                    "packages": ["ironclaw_extension_registry"],
+                    "exact_targets": [
+                        {
+                            "package": "ironclaw_extension_registry",
+                            "kind": "test",
+                            "name": "docs_manifest_schema_version",
+                        }
+                    ],
+                }
+            ],
+        )
+
+    def test_doc_fact_pinned_pages_add_their_owning_crate(self) -> None:
+        """The two pinned pages also select their owning crate's doc-fact
+        test, with no reverse-dependency widening."""
+        cli = self.plan_real_owners(["docs/using/cli.mdx"])
+        self.assertEqual(
+            cli["changed_packages"], ["ironclaw", "ironclaw_extension_registry"]
+        )
+        self.assertEqual(
+            cli["affected_packages"], ["ironclaw", "ironclaw_extension_registry"]
+        )
+        self.assertEqual(
+            cli["crate_buckets"][0]["exact_targets"],
+            [
+                {"package": "ironclaw", "kind": "test", "name": "docs_cli_reference"},
+                {
+                    "package": "ironclaw_extension_registry",
+                    "kind": "test",
+                    "name": "docs_manifest_schema_version",
+                },
+            ],
+        )
+        responses = self.plan_real_owners(["docs/api/responses.mdx"])
+        self.assertEqual(
+            responses["changed_packages"],
+            ["ironclaw_extension_registry", "ironclaw_openai_compat"],
+        )
+        self.assertEqual(
+            responses["crate_buckets"][0]["exact_targets"],
+            [
+                {
+                    "package": "ironclaw_extension_registry",
+                    "kind": "test",
+                    "name": "docs_manifest_schema_version",
+                },
+                {
+                    "package": "ironclaw_openai_compat",
+                    "kind": "test",
+                    "name": "docs_responses_contract",
+                },
+            ],
+        )
+
+    def test_mintignore_edit_runs_the_published_sweep(self) -> None:
+        """A fence edit changes the sweep's scope, so it must run the sweep."""
+        plan = self.plan_real_owners(["docs/.mintignore"])
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["ironclaw_extension_registry"])
+        self.assertEqual(
+            plan["crate_buckets"][0]["exact_targets"],
+            [
+                {
+                    "package": "ironclaw_extension_registry",
+                    "kind": "test",
+                    "name": "docs_manifest_schema_version",
+                }
+            ],
+        )
+
+    def test_absent_mintignore_means_no_fence_not_a_crash(self) -> None:
+        """Deleting docs/.mintignore must widen routing to every page (the
+        boundary script's missing-file semantics), not crash the planner."""
+        planner._publication_fence.cache_clear()
+        self.addCleanup(planner._publication_fence.cache_clear)
+        with mock.patch.object(planner, "DOCS_MINTIGNORE", "docs/.mintignore-gone"):
+            plan = self.plan_real_owners(["docs/internal/plans/whatever.md"])
+        self.assertEqual(plan["changed_packages"], ["ironclaw_extension_registry"])
+
+    def test_fenced_and_non_page_docs_stay_prose(self) -> None:
+        """Fenced trees (unpublished, read by no cargo test) and non-Markdown
+        docs files keep the prose classification."""
+        for path in (
+            "docs/internal/plans/2026-08-07-doc-truth-pipeline.md",
+            "docs/internal/reborn/README.md",
+            "docs/internal/reborn/contracts/extensions.md",
+            "docs/drafts/upcoming.mdx",
+            "docs/using/preview.draft.mdx",
+            "docs/docs.json",
+            "docs/images/logo.png",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none")
+                self.assertEqual(plan["crate_buckets"], [])
 
     def test_agent_guidance_paths_are_prose_and_select_nothing(self) -> None:
         """`.claude/**` is guidance, like `docs/**`.
@@ -1902,7 +2073,11 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertIn("needs.changes.outputs.root_partitions", workflow)
         self.assertIn("needs.changes.outputs.integration_lanes", workflow)
         self.assertIn("needs.changes.outputs.run_sandbox_docker", workflow)
-        self.assertIn("--test user_sandbox_docker_live", workflow)
+        self.assertIn(
+            "cargo test -p ironclaw_sandbox --test user_sandbox_docker_live "
+            "-- --nocapture --test-threads=1",
+            workflow,
+        )
         self.assertIn("--test reborn_integration_sandbox_shell_turn", workflow)
         self.assertIn(
             '"${feature_args[@]}" --ignore-rust-version --all-targets',

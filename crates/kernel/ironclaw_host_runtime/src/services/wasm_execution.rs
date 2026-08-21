@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use serde::Deserialize;
 #[cfg(test)]
 use tokio::sync::Semaphore;
 
+use super::runtime_adapters::dispatch_error_for_runtime;
 use super::wasm_blocking::run_wasm_execution_blocking;
 #[cfg(test)]
 use super::wasm_blocking::{
@@ -14,9 +14,26 @@ use super::wasm_diagnostics::{log_wasm_guest_error, log_wasm_runtime_error};
 use super::{
     CapabilityId, DispatchError, PreparedWitTool, ResourceGovernor, ResourceReservationId,
     ResourceUsage, RootFilesystem, RuntimeAdapterResult, RuntimeDispatchErrorKind,
-    RuntimeLaneRequest, WasmError, WitToolHost, WitToolRuntime,
+    RuntimeLaneRequest, WasmError, WitErrorKind, WitGuestFailure, WitToolHost, WitToolOutcome,
+    WitToolRuntime,
+};
+use ironclaw_host_api::dispatch::{
+    DispatchAuthRequirement, DispatchFailureKind, ProviderDiagnostic, ProviderErrorCode,
+    UntrustedProviderMessage,
 };
 use ironclaw_host_api::resource::ResourceReceipt;
+use ironclaw_host_api::runtime::RuntimeKind;
+
+/// Bound for a guest-supplied provider message before it rides
+/// `model_visible_cause`/`ProviderDiagnostic.message`. Well under the
+/// downstream ceilings that would otherwise re-truncate it: `ProviderDiagnostic`
+/// bounds to `MODEL_DIAGNOSTIC_MAX_BYTES` (4096, via `bound_provider_text` in
+/// `ironclaw_host_api::dispatch`), and the general `Wasm` failure's
+/// `CapabilityFailureDetail::Diagnostic { text }` is bounded to the same 4096
+/// (`MODEL_OBSERVATION_DETAIL_MAX_BYTES` in `ironclaw_loop_contracts`) — so a
+/// real provider explanation now has room to survive intact instead of being
+/// clipped to a near-useless 256 bytes.
+const MAX_WASM_GUEST_MESSAGE_BYTES: usize = 2048;
 
 /// RAII guard over an in-flight `ResourceGovernor` reservation.
 ///
@@ -170,9 +187,12 @@ where
         None => request
             .governor
             .reserve(request.scope.clone(), request.estimate.clone())
-            .map_err(|error| DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Resource,
-                model_visible_cause: Some(error.to_string()),
+            .map_err(|error| {
+                dispatch_error_for_runtime(
+                    RuntimeKind::Wasm,
+                    RuntimeDispatchErrorKind::Resource,
+                    Some(error.to_string()),
+                )
             })?,
     };
     // Hold the reservation in an RAII guard from here on. The guard is carried
@@ -181,18 +201,17 @@ where
     // releases the reservation instead of leaking it permanently. Every early
     // `return` below drops the still-armed guard, which releases.
     let guard = ReservationGuard::new(request.governor, reservation.id);
-    let wasm_resource_error = || DispatchError::Wasm {
-        kind: RuntimeDispatchErrorKind::Resource,
-        model_visible_cause: None,
-    };
+    let wasm_resource_error =
+        || dispatch_error_for_runtime(RuntimeKind::Wasm, RuntimeDispatchErrorKind::Resource, None);
     let input_json = match serde_json::to_string(&request.input) {
         Ok(json) => json,
         Err(error) => {
             // Dropping `guard` releases the reservation.
-            return Err(DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::InputEncode,
-                model_visible_cause: Some(error.to_string()),
-            });
+            return Err(dispatch_error_for_runtime(
+                RuntimeKind::Wasm,
+                RuntimeDispatchErrorKind::InputEncode,
+                Some(error.to_string()),
+            ));
         }
     };
     let context_json = wasm_invocation_context(request.capability_id);
@@ -222,32 +241,37 @@ where
                 preserved_wasm_error_usage(error.source()).as_ref(),
                 wasm_resource_error,
             )?;
-            return Err(DispatchError::Wasm {
-                kind: error.kind(),
-                model_visible_cause: Some(error.source().to_string()),
-            });
+            return Err(dispatch_error_for_runtime(
+                RuntimeKind::Wasm,
+                error.kind(),
+                Some(error.source().to_string()),
+            ));
         }
     };
-    if let Some(error) = execution.error {
-        log_wasm_guest_error(request.capability_id, &execution.logs, &error);
-        guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
-        return Err(wasm_guest_dispatch_error(&error, request.capability_id));
-    }
-    let Some(output_json) = execution.output_json else {
-        guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
-        return Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::InvalidResult,
-            model_visible_cause: Some("WASM execution returned no output".to_string()),
-        });
+    let output_json = match execution.outcome {
+        WitToolOutcome::Success(output_json) => output_json,
+        WitToolOutcome::Failure(failure) => {
+            log_wasm_guest_error(
+                request.capability_id,
+                &execution.logs,
+                &format!("{failure:?}"),
+            );
+            guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
+            return Err(typed_wasm_guest_dispatch_error(
+                failure,
+                request.capability_id,
+            ));
+        }
     };
     let output = match serde_json::from_str(&output_json) {
         Ok(output) => output,
         Err(error) => {
             guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
-            return Err(DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::OutputDecode,
-                model_visible_cause: Some(error.to_string()),
-            });
+            return Err(dispatch_error_for_runtime(
+                RuntimeKind::Wasm,
+                RuntimeDispatchErrorKind::OutputDecode,
+                Some(error.to_string()),
+            ));
         }
     };
     let receipt = guard.reconcile(execution.usage.clone(), wasm_resource_error)?;
@@ -287,127 +311,89 @@ fn has_accountable_effects(usage: &ResourceUsage) -> bool {
         || usage.process_count > 0
 }
 
-fn wasm_guest_dispatch_error(error: &str, capability: &CapabilityId) -> DispatchError {
-    match wasm_guest_error_kind(error) {
-        WasmGuestErrorKind::AuthRequired => DispatchError::AuthRequired {
+/// Maps a typed WIT `guest-failure` (near:agent@0.4.1) directly to a
+/// `DispatchError`. `kind == auth-required` maps to
+/// `DispatchError::AuthRequired` with empty
+/// `required_secrets`/`credential_requirements` (the capability host
+/// enriches these), everything else maps through
+/// `RuntimeDispatchErrorKind`.
+fn typed_wasm_guest_dispatch_error(
+    failure: WitGuestFailure,
+    capability: &CapabilityId,
+) -> DispatchError {
+    if matches!(failure.kind, WitErrorKind::AuthRequired) {
+        return DispatchError::AuthRequired {
             capability: capability.clone(),
-            required_secrets: Vec::new(),
-            credential_requirements: Vec::new(),
-        },
-        WasmGuestErrorKind::Runtime(kind) => DispatchError::Wasm {
-            kind,
-            model_visible_cause: wasm_guest_error_code(error)
-                .map(|code| format!("provider error code: {code}"))
-                .or_else(|| Some(error.to_string())),
-        },
+            requirement: Box::new(DispatchAuthRequirement {
+                required_secrets: Vec::new(),
+                credential_requirements: Vec::new(),
+                model_visible_cause: typed_wasm_guest_provider_diagnostic(&failure),
+            }),
+        };
+    }
+    DispatchError::Rejected {
+        runtime: Some(RuntimeKind::Wasm),
+        kind: DispatchFailureKind::Runtime(typed_wasm_guest_runtime_kind(failure.kind)),
+        diagnostic: typed_wasm_guest_provider_diagnostic(&failure).map(Box::new),
+        detail: None,
     }
 }
 
-/// Extract the stable error `code` from a structured guest error payload so
-/// the model-visible failure keeps its actionable cause (e.g. a Slack
-/// `channel_not_found`) instead of collapsing to the kind's generic sentence.
-///
-/// Guests are sandboxed but not trusted with free text on this channel: the
-/// code is reduced to a short `[A-Za-z0-9_.-]` identifier, and the composed
-/// summary is still re-validated downstream (`LoopSafeSummary`) before it
-/// reaches the model. Returns `None` for legacy plain-string guest errors.
-fn wasm_guest_error_code(error: &str) -> Option<String> {
-    let payload = serde_json::from_str::<StructuredWasmGuestError>(error).ok()?;
-    let code: String = payload
-        .code
+fn typed_wasm_guest_runtime_kind(kind: WitErrorKind) -> RuntimeDispatchErrorKind {
+    match kind {
+        // Handled by the caller before this is reached.
+        WitErrorKind::AuthRequired => RuntimeDispatchErrorKind::OperationFailed,
+        WitErrorKind::Input => RuntimeDispatchErrorKind::InputEncode,
+        WitErrorKind::OutputTooLarge => RuntimeDispatchErrorKind::OutputTooLarge,
+        WitErrorKind::Executor => RuntimeDispatchErrorKind::Executor,
+        WitErrorKind::NetworkDenied => RuntimeDispatchErrorKind::NetworkDenied,
+        WitErrorKind::Client => RuntimeDispatchErrorKind::Client,
+        WitErrorKind::OperationFailed => RuntimeDispatchErrorKind::OperationFailed,
+    }
+}
+
+/// Sanitize a typed guest failure's `code`: reduced to `[A-Za-z0-9_.-]`
+/// identifier characters, bounded to 64, `None` if empty.
+fn sanitized_wasm_guest_code(code: Option<&str>) -> Option<String> {
+    let sanitized: String = code?
         .chars()
         .filter(|character| {
             character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
         })
         .take(64)
         .collect();
-    (!code.is_empty()).then_some(code)
+    (!sanitized.is_empty()).then_some(sanitized)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WasmGuestErrorKind {
-    AuthRequired,
-    Runtime(RuntimeDispatchErrorKind),
+fn typed_wasm_guest_provider_diagnostic(failure: &WitGuestFailure) -> Option<ProviderDiagnostic> {
+    provider_error_diagnostic(failure.code.as_deref(), failure.message.as_deref())
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum StructuredWasmGuestErrorKind {
-    AuthRequired,
-    Input,
-    OutputTooLarge,
-    Executor,
-    NetworkDenied,
-    Client,
-    OperationFailed,
+/// Shared decode over a guest error's `(code, message)` pair.
+fn provider_error_diagnostic(
+    code: Option<&str>,
+    message: Option<&str>,
+) -> Option<ProviderDiagnostic> {
+    let sanitized_code = sanitized_wasm_guest_code(code).map(ProviderErrorCode::new);
+    let bounded_message = bounded_wasm_guest_message(message.unwrap_or_default().trim());
+    let bounded_message =
+        (!bounded_message.is_empty()).then(|| UntrustedProviderMessage::new(bounded_message));
+    (sanitized_code.is_some() || bounded_message.is_some()).then_some(ProviderDiagnostic {
+        code: sanitized_code,
+        message: bounded_message,
+        retry_after: None,
+    })
 }
 
-#[derive(Debug, Deserialize)]
-struct StructuredWasmGuestError {
-    code: String,
-    kind: StructuredWasmGuestErrorKind,
-}
-
-fn wasm_guest_error_kind(error: &str) -> WasmGuestErrorKind {
-    if let Ok(payload) = serde_json::from_str::<StructuredWasmGuestError>(error) {
-        return match payload.kind {
-            StructuredWasmGuestErrorKind::AuthRequired => WasmGuestErrorKind::AuthRequired,
-            StructuredWasmGuestErrorKind::Input => {
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode)
-            }
-            StructuredWasmGuestErrorKind::OutputTooLarge => {
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge)
-            }
-            StructuredWasmGuestErrorKind::Executor => {
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Executor)
-            }
-            StructuredWasmGuestErrorKind::NetworkDenied => {
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied)
-            }
-            StructuredWasmGuestErrorKind::Client => {
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client)
-            }
-            StructuredWasmGuestErrorKind::OperationFailed => {
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed)
-            }
-        };
+fn bounded_wasm_guest_message(message: &str) -> String {
+    let mut bounded = String::new();
+    for character in message.chars() {
+        if bounded.len() + character.len_utf8() > MAX_WASM_GUEST_MESSAGE_BYTES {
+            break;
+        }
+        bounded.push(character);
     }
-
-    match error {
-        "AuthRequired" => WasmGuestErrorKind::AuthRequired,
-        "missing_invocation_context"
-        | "invalid_invocation_context"
-        | "unsupported_capability"
-        | "invalid_parameters"
-        | "invalid_repository"
-        | "invalid_query_empty"
-        | "invalid_query_too_large"
-        | "invalid_author"
-        | "invalid_assignee"
-        | "invalid_involves"
-        | "invalid_state"
-        | "invalid_type"
-        | "invalid_sort"
-        | "invalid_order"
-        | "invalid_page"
-        | "invalid_limit"
-        | "invalid_issue_number"
-        | "invalid_body_empty"
-        | "invalid_body_too_large" => {
-            WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode)
-        }
-        "host_http_body_limit" => {
-            WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge)
-        }
-        "host_http_timeout" => WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Executor),
-        "host_http_network_denied" => {
-            WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied)
-        }
-        "host_http_forbidden" | "host_http_rate_limited" => {
-            WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client)
-        }
-        _ => WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
-    }
+    bounded
 }
 
 #[cfg(test)]
@@ -564,9 +550,12 @@ mod tests {
         let id = ResourceReservationId::new();
         let guard = ReservationGuard::new(&governor, id);
         let receipt = guard
-            .reconcile(accountable_usage(), || DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Resource,
-                model_visible_cause: None,
+            .reconcile(accountable_usage(), || {
+                dispatch_error_for_runtime(
+                    RuntimeKind::Wasm,
+                    RuntimeDispatchErrorKind::Resource,
+                    None,
+                )
             })
             .expect("reconcile must succeed");
         assert_eq!(receipt.status, ReservationStatus::Reconciled);
@@ -585,9 +574,12 @@ mod tests {
         let id = ResourceReservationId::new();
         let guard = ReservationGuard::new(&governor, id);
         guard
-            .account_failed(Some(&accountable_usage()), || DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Resource,
-                model_visible_cause: None,
+            .account_failed(Some(&accountable_usage()), || {
+                dispatch_error_for_runtime(
+                    RuntimeKind::Wasm,
+                    RuntimeDispatchErrorKind::Resource,
+                    None,
+                )
             })
             .expect("account_failed with accountable usage must reconcile");
         assert_eq!(governor.reconcile_calls(), 1);
@@ -605,9 +597,12 @@ mod tests {
         let guard = ReservationGuard::new(&governor, id);
         // No usage → release path; guard consumed, so Drop does not fire again.
         guard
-            .account_failed(None, || DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Resource,
-                model_visible_cause: None,
+            .account_failed(None, || {
+                dispatch_error_for_runtime(
+                    RuntimeKind::Wasm,
+                    RuntimeDispatchErrorKind::Resource,
+                    None,
+                )
             })
             .expect("account_failed with no usage releases and returns Ok");
         assert_eq!(
@@ -648,12 +643,12 @@ mod tests {
   (type (;2;) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
   (type (;3;) (func (param i32 i32 i32 i32 i32)))
   (type (;4;) (func (param i32 i32) (result i32)))
-  (import "near:agent/host@0.3.0" "log" (func $log (type 0)))
-  (import "near:agent/host@0.3.0" "now-millis" (func $now (type 1)))
-  (import "near:agent/host@0.3.0" "workspace-read" (func $workspace_read (type 0)))
-  (import "near:agent/host@0.3.0" "http-request" (func $http_request (type 2)))
-  (import "near:agent/host@0.3.0" "tool-invoke" (func $tool_invoke (type 3)))
-  (import "near:agent/host@0.3.0" "secret-exists" (func $secret_exists (type 4)))
+  (import "near:agent/host@0.4.1" "log" (func $log (type 0)))
+  (import "near:agent/host@0.4.1" "now-millis" (func $now (type 1)))
+  (import "near:agent/host@0.4.1" "workspace-read" (func $workspace_read (type 0)))
+  (import "near:agent/host@0.4.1" "http-request" (func $http_request (type 2)))
+  (import "near:agent/host@0.4.1" "tool-invoke" (func $tool_invoke (type 3)))
+  (import "near:agent/host@0.4.1" "secret-exists" (func $secret_exists (type 4)))
   (memory (export "memory") 1)
   (global $heap (mut i32) (i32.const 4096))
   (data (i32.const 1024) "{\"type\":\"object\"}")
@@ -675,18 +670,20 @@ mod tests {
     i32.const 12
     i32.store
     i32.const 32)
+  ;; Encode `response` as the `success(string)` case of the near:agent@0.4.1
+  ;; typed variant. Canonical ABI layout (align 4, size 32 bytes) for
+  ;; `variant response { success(string), failure(guest-failure) }`:
+  ;;   offset 0:  discriminant (0 = success, 1 = failure)
+  ;;   offset 4:  payload — success case is `string` (ptr: u32, len: u32)
   (func $execute (param i32 i32 i32 i32 i32) (result i32)
     i32.const 48
-    i32.const 1
+    i32.const 0
     i32.store
     i32.const 52
     i32.const 3072
     i32.store
     i32.const 56
     i32.const 1
-    i32.store
-    i32.const 60
-    i32.const 0
     i32.store
     i32.const 48)
   (func $post (param i32))
@@ -700,12 +697,12 @@ mod tests {
     global.set $heap
     local.get $ret)
   (func $_initialize)
-  (export "near:agent/tool@0.3.0#execute" (func $execute))
-  (export "cabi_post_near:agent/tool@0.3.0#execute" (func $post))
-  (export "near:agent/tool@0.3.0#schema" (func $schema))
-  (export "cabi_post_near:agent/tool@0.3.0#schema" (func $post))
-  (export "near:agent/tool@0.3.0#description" (func $description))
-  (export "cabi_post_near:agent/tool@0.3.0#description" (func $post))
+  (export "near:agent/tool@0.4.1#execute" (func $execute))
+  (export "cabi_post_near:agent/tool@0.4.1#execute" (func $post))
+  (export "near:agent/tool@0.4.1#schema" (func $schema))
+  (export "cabi_post_near:agent/tool@0.4.1#schema" (func $post))
+  (export "near:agent/tool@0.4.1#description" (func $description))
+  (export "cabi_post_near:agent/tool@0.4.1#description" (func $post))
   (export "cabi_realloc" (func $realloc))
   (export "_initialize" (func $_initialize))
 )
@@ -721,12 +718,12 @@ mod tests {
   (type (;2;) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
   (type (;3;) (func (param i32 i32 i32 i32 i32)))
   (type (;4;) (func (param i32 i32) (result i32)))
-  (import "near:agent/host@0.3.0" "log" (func $log (type 0)))
-  (import "near:agent/host@0.3.0" "now-millis" (func $now (type 1)))
-  (import "near:agent/host@0.3.0" "workspace-read" (func $workspace_read (type 0)))
-  (import "near:agent/host@0.3.0" "http-request" (func $http_request (type 2)))
-  (import "near:agent/host@0.3.0" "tool-invoke" (func $tool_invoke (type 3)))
-  (import "near:agent/host@0.3.0" "secret-exists" (func $secret_exists (type 4)))
+  (import "near:agent/host@0.4.1" "log" (func $log (type 0)))
+  (import "near:agent/host@0.4.1" "now-millis" (func $now (type 1)))
+  (import "near:agent/host@0.4.1" "workspace-read" (func $workspace_read (type 0)))
+  (import "near:agent/host@0.4.1" "http-request" (func $http_request (type 2)))
+  (import "near:agent/host@0.4.1" "tool-invoke" (func $tool_invoke (type 3)))
+  (import "near:agent/host@0.4.1" "secret-exists" (func $secret_exists (type 4)))
   (memory (export "memory") 1)
   (global $heap (mut i32) (i32.const 4096))
   (data (i32.const 128) "POST")
@@ -752,6 +749,7 @@ mod tests {
     i32.const 12
     i32.store
     i32.const 32)
+  ;; See SIMPLE_TOOL_WAT above for the `response` success-case layout.
   (func $execute (param i32 i32 i32 i32 i32) (result i32)
     i32.const 128
     i32.const 4
@@ -768,16 +766,13 @@ mod tests {
     call $http_request
 
     i32.const 48
-    i32.const 1
+    i32.const 0
     i32.store
     i32.const 52
     i32.const 3072
     i32.store
     i32.const 56
     i32.const 1
-    i32.store
-    i32.const 60
-    i32.const 0
     i32.store
     i32.const 48)
   (func $post (param i32))
@@ -791,12 +786,12 @@ mod tests {
     global.set $heap
     local.get $ret)
   (func $_initialize)
-  (export "near:agent/tool@0.3.0#execute" (func $execute))
-  (export "cabi_post_near:agent/tool@0.3.0#execute" (func $post))
-  (export "near:agent/tool@0.3.0#schema" (func $schema))
-  (export "cabi_post_near:agent/tool@0.3.0#schema" (func $post))
-  (export "near:agent/tool@0.3.0#description" (func $description))
-  (export "cabi_post_near:agent/tool@0.3.0#description" (func $post))
+  (export "near:agent/tool@0.4.1#execute" (func $execute))
+  (export "cabi_post_near:agent/tool@0.4.1#execute" (func $post))
+  (export "near:agent/tool@0.4.1#schema" (func $schema))
+  (export "cabi_post_near:agent/tool@0.4.1#schema" (func $post))
+  (export "near:agent/tool@0.4.1#description" (func $description))
+  (export "cabi_post_near:agent/tool@0.4.1#description" (func $post))
   (export "cabi_realloc" (func $realloc))
   (export "_initialize" (func $_initialize))
 )
@@ -1283,143 +1278,73 @@ mod tests {
         drop(b);
     }
 
-    #[test]
-    fn wasm_guest_error_kind_maps_structured_payloads() {
-        let cases = [
-            (
-                r#"{"code":"AuthRequired","kind":"auth_required"}"#,
-                WasmGuestErrorKind::AuthRequired,
-            ),
-            (
-                r#"{"code":"invalid_repository","kind":"input"}"#,
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
-            ),
-            (
-                r#"{"code":"host_http_body_limit","kind":"output_too_large"}"#,
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge),
-            ),
-            (
-                r#"{"code":"host_http_timeout","kind":"executor"}"#,
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Executor),
-            ),
-            (
-                r#"{"code":"host_http_network_denied","kind":"network_denied"}"#,
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied),
-            ),
-            (
-                r#"{"code":"host_http_forbidden","kind":"client"}"#,
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client),
-            ),
-            (
-                r#"{"code":"host_http_request_failed","kind":"operation_failed"}"#,
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
-            ),
-        ];
-
-        for (error, expected) in cases {
-            assert_eq!(wasm_guest_error_kind(error), expected);
-        }
-    }
-
-    #[test]
-    fn wasm_guest_error_kind_preserves_legacy_error_mapping_without_prefix_catch_all() {
-        let cases = [
-            ("AuthRequired", WasmGuestErrorKind::AuthRequired),
-            (
-                "invalid_repository",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
-            ),
-            (
-                "missing_invocation_context",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
-            ),
-            (
-                "unsupported_capability",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
-            ),
-            (
-                "host_http_body_limit",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge),
-            ),
-            (
-                "host_http_timeout",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Executor),
-            ),
-            (
-                "host_http_network_denied",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied),
-            ),
-            (
-                "host_http_forbidden",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client),
-            ),
-            (
-                "host_http_rate_limited",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client),
-            ),
-            (
-                "invalid_internal_state",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
-            ),
-            (
-                "unknown_error",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
-            ),
-        ];
-
-        for (error, expected) in cases {
-            assert_eq!(wasm_guest_error_kind(error), expected);
-        }
-    }
-
-    /// A structured guest error's `code` must ride the dispatch error as a
+    /// A typed guest failure's `code` must ride the dispatch error as a
     /// sanitized safe summary so the model sees the actionable cause (e.g.
     /// `channel_not_found`), while hostile codes are reduced to identifier
-    /// characters and legacy plain-string errors stay summary-less.
+    /// characters.
     #[test]
-    fn wasm_guest_dispatch_error_carries_sanitized_structured_code() {
+    fn typed_wasm_guest_dispatch_error_carries_sanitized_code() {
         let capability = CapabilityId::new("slack.get_conversation_history").unwrap();
-        match wasm_guest_dispatch_error(
-            r#"{"code":"channel_not_found","kind":"input"}"#,
+        match typed_wasm_guest_dispatch_error(
+            WitGuestFailure {
+                kind: WitErrorKind::Input,
+                code: Some("channel_not_found".to_string()),
+                message: None,
+            },
             &capability,
         ) {
-            DispatchError::Wasm {
-                kind,
-                model_visible_cause,
+            DispatchError::Rejected {
+                kind, diagnostic, ..
             } => {
-                assert_eq!(kind, RuntimeDispatchErrorKind::InputEncode);
                 assert_eq!(
-                    model_visible_cause.as_deref(),
+                    kind,
+                    DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode)
+                );
+                let diagnostic = diagnostic.expect("a structured code must produce a diagnostic");
+                assert_eq!(
+                    ironclaw_host_api::dispatch::provider_diagnostic_model_cause(&diagnostic)
+                        .as_deref(),
                     Some("provider error code: channel_not_found")
                 );
             }
-            other => panic!("expected Wasm dispatch error, got {other:?}"),
+            other => panic!("expected Rejected dispatch error, got {other:?}"),
         }
 
         // Hostile codes are reduced to identifier characters, never free text.
         assert_eq!(
-            wasm_guest_error_code(r#"{"code":"bad {} `code` <script>","kind":"input"}"#).as_deref(),
+            sanitized_wasm_guest_code(Some("bad {} `code` <script>")).as_deref(),
             Some("badcodescript")
         );
-        // Legacy plain-string guest errors carry no structured code, but the
-        // raw text still rides `model_visible_cause` as the best available cause so
-        // the model can recover (secret VALUES are scrubbed downstream at the
-        // model-visible Diagnostic seam) instead of collapsing to the kind's
-        // generic sentence.
-        assert_eq!(wasm_guest_error_code("invalid_parameters"), None);
-        match wasm_guest_dispatch_error("invalid_parameters", &capability) {
-            DispatchError::Wasm {
-                model_visible_cause,
-                ..
-            } => {
-                assert!(
-                    model_visible_cause
-                        .as_deref()
-                        .is_some_and(|summary| summary.contains("invalid_parameters")),
-                    "legacy guest error text must survive as the raw cause: {model_visible_cause:?}"
-                );
-            }
-            other => panic!("expected Wasm dispatch error, got {other:?}"),
-        }
+    }
+
+    #[test]
+    fn bounded_wasm_guest_message_passes_through_short_text_unchanged() {
+        let message = bounded_wasm_guest_message("channel_not_found");
+        assert_eq!(message, "channel_not_found");
+    }
+
+    #[test]
+    fn bounded_wasm_guest_message_truncates_to_the_byte_limit() {
+        let message = bounded_wasm_guest_message(&"a".repeat(MAX_WASM_GUEST_MESSAGE_BYTES + 64));
+
+        assert_eq!(message.len(), MAX_WASM_GUEST_MESSAGE_BYTES);
+        assert_eq!(message, "a".repeat(MAX_WASM_GUEST_MESSAGE_BYTES));
+    }
+
+    #[test]
+    fn bounded_wasm_guest_message_never_splits_a_multi_byte_char_at_the_boundary() {
+        // A 3-byte UTF-8 character ('€', U+20AC) straddling the byte limit
+        // must be dropped whole rather than split into invalid UTF-8: pad
+        // with single-byte 'a's up to one byte short of the limit, then
+        // append the multi-byte char so it would overflow the cap by two
+        // bytes if included.
+        let padding = "a".repeat(MAX_WASM_GUEST_MESSAGE_BYTES - 1);
+        let input = format!("{padding}€");
+
+        let message = bounded_wasm_guest_message(&input);
+
+        assert!(message.is_char_boundary(message.len()));
+        assert_eq!(message, padding);
+        assert!(message.len() < MAX_WASM_GUEST_MESSAGE_BYTES);
     }
 }

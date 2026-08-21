@@ -33,8 +33,7 @@ use ironclaw_turns::{
 
 use super::{AwaitEdge, AwaitEdgeState, EdgeTerminalKind, store::AwaitEdgeStore};
 use crate::subagent::spawn_result::{
-    SpawnedChildRunPayload, SubagentSpawnMode as PayloadSpawnMode,
-    SubagentSpawnStatus as PayloadSpawnStatus, SubagentTerminalEventKind,
+    SpawnedChildRunPayload, SubagentSpawnStatus as PayloadSpawnStatus, SubagentTerminalEventKind,
     SubagentTerminalEventPayload,
 };
 use crate::subagent::untrusted_text::{
@@ -360,16 +359,6 @@ where
             parent_run_context,
             tree_root_run_id: metadata.tree_root_run_id,
             gate_ref,
-            source_binding_ref: ironclaw_host_api::turn::SourceBindingRef::new(format!(
-                "subagent-source:{parent_run_id}:{}",
-                event.run_id
-            ))
-            .map_err(|reason| TurnError::InvalidRequest { reason })?,
-            reply_target_binding_ref: ironclaw_host_api::turn::ReplyTargetBindingRef::new(format!(
-                "subagent-reply:{parent_run_id}:{}",
-                event.run_id
-            ))
-            .map_err(|reason| TurnError::InvalidRequest { reason })?,
             subagent_kind: metadata.subagent_kind,
             spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).map_err(
                 |reason| TurnError::InvalidRequest {
@@ -384,6 +373,8 @@ where
             terminal_byte_len: None,
             terminal_reason: None,
             reservation_release: super::ReservationReleaseState::Unclaimed,
+            appended_message_ref: None,
+            attention_outcome: None,
             created_at: chrono::Utc::now(),
             settled_at: None,
         }))
@@ -529,8 +520,6 @@ where
                 actor,
                 run_id: parent_run_id,
                 gate_resolution_ref: edge.gate_ref.clone(),
-                source_binding_ref: edge.source_binding_ref.clone(),
-                reply_target_binding_ref: edge.reply_target_binding_ref.clone(),
                 idempotency_key: IdempotencyKey::new(format!(
                     "subagent-resume:{parent_run_id}:{child_run_id}"
                 ))
@@ -929,6 +918,7 @@ mod tests {
         resolved_run_profile: ironclaw_loop_contracts::ResolvedRunProfile,
     ) -> TurnRunRecord {
         TurnRunRecord {
+            subagent_activation_provenance: None,
             run_id: child_run_id,
             turn_id: ironclaw_host_api::turn::TurnId::new(),
             scope: TurnScope::new(
@@ -939,16 +929,12 @@ mod tests {
             ),
             accepted_message_ref: ironclaw_host_api::turn::AcceptedMessageRef::new("msg:child")
                 .unwrap(),
-            source_binding_ref: ironclaw_host_api::turn::SourceBindingRef::new("source:child")
-                .unwrap(),
-            reply_target_binding_ref: ironclaw_host_api::turn::ReplyTargetBindingRef::new(
-                "reply:child",
-            )
-            .unwrap(),
             status: TurnStatus::Completed,
             profile: ironclaw_turns::TurnRunProfile::from_resolved(resolved_run_profile),
+            output_contract: Default::default(),
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: None,
             checkpoint_id: None,
             gate_ref: None,
             blocked_activity_id: None,
@@ -1594,6 +1580,7 @@ mod tests {
                 .expect("append child final output");
             thread_service
                 .append_tool_result_reference(AppendToolResultReferenceRequest {
+                    intrinsic_outcome: None,
                     scope: parent_thread_scope.clone(),
                     thread_id: parent_thread_id.clone(),
                     turn_run_id: parent_run_id.to_string(),
@@ -1626,14 +1613,6 @@ mod tests {
                 child_scope: child_scope.clone(),
                 child_run_id,
                 child_thread_id: child_thread_id.clone(),
-                source_binding_ref: ironclaw_host_api::turn::SourceBindingRef::new(format!(
-                    "source:drain-{label}"
-                ))
-                .expect("source"),
-                reply_target_binding_ref: ironclaw_host_api::turn::ReplyTargetBindingRef::new(
-                    format!("reply:drain-{label}"),
-                )
-                .expect("reply"),
                 subagent_kind: SubagentKindId::new("general").expect("kind"),
                 spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
                     .expect("capability"),
@@ -1953,7 +1932,7 @@ fn background_completion_payload(
         child_run_id: event.run_id,
         child_thread_id: edge.child_thread_id.clone(),
         subagent_kind: edge.subagent_kind.clone(),
-        mode: payload_spawn_mode(edge.mode),
+        mode: edge.mode,
         status: payload_spawn_status(event.status)?,
         output_available: event.status == TurnStatus::Completed,
         final_text,
@@ -2114,13 +2093,6 @@ fn thread_scope_from_turn_scope(
         owner_user_id: event.owner_user_id.clone(),
         mission_id: None,
     })
-}
-
-fn payload_spawn_mode(mode: ironclaw_loop_host::SpawnSubagentMode) -> PayloadSpawnMode {
-    match mode {
-        ironclaw_loop_host::SpawnSubagentMode::Blocking => PayloadSpawnMode::Blocking,
-        ironclaw_loop_host::SpawnSubagentMode::Background => PayloadSpawnMode::Background,
-    }
 }
 
 fn payload_spawn_status(status: TurnStatus) -> Result<PayloadSpawnStatus, TurnError> {

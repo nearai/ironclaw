@@ -43,6 +43,7 @@ pub mod planned_driver_factory;
 pub mod production_readiness;
 pub mod runtime;
 pub mod steering_reconcile;
+pub(crate) mod structured_finalization;
 pub mod subagent;
 pub mod text_loop_driver;
 pub mod trace_capture;

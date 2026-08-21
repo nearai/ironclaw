@@ -1,11 +1,14 @@
 use chrono::{DateTime, Utc};
 use ironclaw_common::AttachmentRef;
 use ironclaw_host_api::ids::{AgentId, MissionId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::turn::TurnRunId;
 use serde::{Deserialize, Serialize};
 
 use crate::capability_display_preview::CapabilityDisplayPreviewEnvelope;
 use crate::identifiers::{SummaryArtifactId, ThreadMessageId};
-use crate::tool_result_reference::{ProviderToolCallReferenceEnvelope, ToolResultSafeSummary};
+use crate::tool_result_reference::{
+    ProviderToolCallReferenceEnvelope, ToolResultIntrinsicOutcome, ToolResultSafeSummary,
+};
 
 pub const GOAL_STATEMENT_MAX_CHARS: usize = 4000;
 
@@ -136,6 +139,31 @@ pub(crate) fn validate_attachment_refs(
                     attachment.id
                 ),
             ));
+        }
+    }
+    Ok(())
+}
+
+/// Both halves of a subagent-result acceptance identity must carry a value.
+///
+/// The halves are exactly what the dedupe index hashes, and `("", "")` hashes
+/// to a perfectly valid record key — so a producer that forgets to populate
+/// one would collapse every child of every parent onto a single row and get
+/// `idempotent_replay: true` back for all of them. That is a fail-OPEN shape
+/// in the one door whose whole job is fail-closed dedupe, and it would look
+/// like success at every call site, so it is rejected here rather than hashed.
+pub(crate) fn validate_subagent_acceptance_identity(
+    source_binding_id: &str,
+    external_event_id: &str,
+) -> Result<(), crate::error::SessionThreadError> {
+    for (field, value) in [
+        ("source_binding_id", source_binding_id),
+        ("external_event_id", external_event_id),
+    ] {
+        if value.trim().is_empty() {
+            return Err(crate::error::SessionThreadError::InvalidSubagentResult {
+                reason: format!("{field} must not be empty"),
+            });
         }
     }
     Ok(())
@@ -376,6 +404,48 @@ pub struct AcceptInboundMessageRequest {
     pub content: MessageContent,
 }
 
+/// One background child's framed result, offered to the **parent's** thread.
+///
+/// Both halves of the acceptance identity arrive already resolved as strings.
+/// This crate cannot see run identity — it must not depend on
+/// `ironclaw_processes` — so it stores and hashes what the caller supplies and
+/// derives nothing. The pair is the same `(scope, source_binding_id,
+/// external_event_id)` tuple [`AcceptInboundMessageRequest`] dedupes on, so
+/// both doors share one index rather than each keeping its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptSubagentResultRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    /// `subagent-result:{parent_run_id}` — the acceptance identity's binding half.
+    pub source_binding_id: String,
+    /// `{child_run_id}` — the acceptance identity's event half.
+    pub external_event_id: String,
+    /// The child's output, already framed as untrusted.
+    ///
+    /// Not [`MessageContent`]: this row is persisted as
+    /// [`MessageKind::System`] and a system-kind row reaches the model's
+    /// *system* role, so raw child text here would promote an injected child
+    /// instruction into host authority. [`FramedSubagentText`] can only be
+    /// built by framing ([`FramedSubagentText::frame`](crate::FramedSubagentText::frame)),
+    /// which makes that state
+    /// unrepresentable instead of leaving it to every future caller to
+    /// remember. Attachments are deliberately absent — a delivered child
+    /// result is text (§2.7 `SpawnedChildRunPayload`).
+    pub content: crate::subagent_result::FramedSubagentText,
+}
+
+/// The durable row a [`AcceptSubagentResultRequest`] landed on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedSubagentResult {
+    pub message_id: ThreadMessageId,
+    pub sequence: u64,
+    /// `true` when this acceptance reused an existing durable claim on the
+    /// identity tuple instead of minting a fresh one — either the row was
+    /// already committed, or a prior attempt claimed the key and died before
+    /// writing it. Same meaning as [`AcceptedInboundMessage::idempotent_replay`].
+    pub idempotent_replay: bool,
+}
+
 /// Internal acceptance metadata that must remain stable across retries and
 /// accepted-message replay. This is deliberately separate from transcript
 /// content so product/UI history never renders submission-routing state.
@@ -434,6 +504,24 @@ pub struct AppendFinalizedAssistantMessageRequest {
     pub content: MessageContent,
 }
 
+/// Publish the already-durable structured-finalization output into the exact
+/// finalized assistant row produced by the run.
+///
+/// The service resolves the immutable finalization record by `turn_run_id`
+/// and verifies it against the current message before changing anything. The
+/// message id is deliberately carried by the caller: a run may have more
+/// than one assistant reply after steering, so selecting "the latest" row is
+/// not safe for terminal publication. `replacement` must be that record's
+/// raw JSON representation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishStructuredFinalizationMessageRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub message_id: ThreadMessageId,
+    pub turn_run_id: TurnRunId,
+    pub replacement: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendToolResultReferenceRequest {
     pub scope: ThreadScope,
@@ -443,6 +531,7 @@ pub struct AppendToolResultReferenceRequest {
     pub safe_summary: ToolResultSafeSummary,
     pub provider_call: Option<ProviderToolCallReferenceEnvelope>,
     pub model_observation: Option<serde_json::Value>,
+    pub intrinsic_outcome: Option<ToolResultIntrinsicOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

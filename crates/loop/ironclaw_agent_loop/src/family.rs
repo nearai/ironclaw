@@ -14,6 +14,8 @@ pub struct LoopFamilyId(Cow<'static, str>);
 impl LoopFamilyId {
     pub const DEFAULT: Self = Self(Cow::Borrowed("default"));
     pub const SUBAGENT: Self = Self(Cow::Borrowed("subagent"));
+    pub const UNBOUND_DEFAULT: Self = Self(Cow::Borrowed("unbound_default"));
+    pub const UNBOUND_STRUCTURED: Self = Self(Cow::Borrowed("unbound_structured"));
 
     pub fn new(id: impl Into<Cow<'static, str>>) -> Result<Self, String> {
         let id = id.into();

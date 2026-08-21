@@ -448,8 +448,10 @@ mod tests {
         assert!(api.contains("listAutomations"));
         assert!(api.contains("pauseAutomation"));
         assert!(api.contains("resumeAutomation"));
+        assert!(api.contains("runAutomation"));
         assert!(api.contains("deleteAutomation"));
         assert!(api.contains("/automations"));
+        assert!(api.contains("/run"));
         assert!(api.contains("/pause"));
         assert!(api.contains("/resume"));
         assert!(api.contains(r#"method: "DELETE""#));
@@ -499,6 +501,10 @@ mod tests {
         assert!(
             app_bundle_contains_encoded_automation_route("resume"),
             "served WebUI bundle must include the automation resume endpoint; run the frontend build after editing frontend/src/**"
+        );
+        assert!(
+            app_bundle_contains_encoded_automation_route("run"),
+            "served WebUI bundle must include the automation run endpoint; run the frontend build after editing frontend/src/**"
         );
         let app_bundle_contains_encoded_automation_delete = app_bundle
             .split("/automations/${encodeURIComponent(")
@@ -572,7 +578,11 @@ mod tests {
         assert!(sidebar_threads.contains("t(\"common.deleteChat\")"));
         assert!(sidebar_threads.contains("t(\"thread.deleteConfirm\")"));
         assert!(sidebar_threads.contains("deleteThreadErrorMessage"));
-        assert!(sidebar_threads.contains("window.alert"));
+        assert!(
+            sidebar_threads
+                .contains(r#"toast(deleteThreadErrorMessage(error, t), { tone: "error" });"#)
+        );
+        assert!(!sidebar_threads.contains("window.alert"));
 
         let api = source_text("lib/api.ts");
         assert!(api.contains("export function deleteThread"));
@@ -906,9 +916,15 @@ mod tests {
     fn extension_oauth_setup_refreshes_while_popup_is_open() {
         let use_extensions = source_text("pages/extensions/hooks/useExtensions.ts");
 
+        let oauth_events = source_text("lib/product-auth-oauth-events.ts");
+
         assert!(
-            use_extensions.contains("OAUTH_SETUP_REFRESH_MS = 2000"),
+            oauth_events.contains("OAUTH_FLOW_POLL_MS = 2000"),
             "OAuth setup should poll often enough for setup-complete state to appear promptly"
+        );
+        assert!(
+            use_extensions.contains("OAUTH_FLOW_POLL_MS"),
+            "OAuth setup should poll on the shared product-auth OAuth flow cadence"
         );
         assert!(
             use_extensions.contains("const watchOauthProgress = React.useCallback"),

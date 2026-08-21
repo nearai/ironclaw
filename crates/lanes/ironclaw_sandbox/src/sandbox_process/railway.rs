@@ -47,17 +47,199 @@ const RAILWAY_WORKSPACES_ROOT: &str = "/workspace/ironclaw-users";
 const EXIT_SENTINEL: &str = "__IRONCLAW_RAILWAY_PRIVATE_EXIT_CODE__=";
 const WORKSPACE_BOOTSTRAP_MARKER: &str = "ironclaw-railway-workspace-bootstrap";
 const CHECKPOINT_FAILURE_WARNING: &str = "[IronClaw warning: command completed, but the Railway workspace checkpoint failed; recent state may not survive sandbox restart.]";
+const RAILWAY_PROXY_IP_TOKEN: &str = "__IRONCLAW_PROXY_IP__";
+const RAILWAY_PROXY_BOOTSTRAP_CONFIG: &str = "dns:\n  listen: \"127.0.0.1:53\"\n  proxy_ip: \"127.0.0.1\"\nproxy:\n  http_listen: \"127.0.0.1:80\"\n  https_listen: \"127.0.0.1:443\"\n  tunnel_listen: \"127.0.0.1:3128\"\ntls:\n  mode: \"sni-only\"\ntransforms:\n  - name: allowlist\n    config:\n      domains: []\n";
 
 // The complete Docker command arrives as distinct argv values. In particular,
 // the model command is the final argv value and is never interpolated into
 // this shell program.
 const OUTER_EXEC_WRAPPER: &str = "set +e\n\"$@\"\nstatus=$?\nprintf '\\n__IRONCLAW_RAILWAY_PRIVATE_EXIT_CODE__=%s\\n' \"$status\"\nexit 0";
+const RAILWAY_MANAGED_EGRESS_WRAPPER: &str = r#"set -eu
+proxy_image=$1
+proxy_posture=$2
+config_template=$3
+bootstrap_config=$4
+invocation_id=$5
+worker_image=$6
+shift 6
+
+network=ironclaw-reborn-private
+upstream=ironclaw-reborn-upstream
+proxy=ironclaw-reborn-proxy
+material=/run/ironclaw-reborn-proxy
+config_path=$material/proxy.yaml
+invocation_path=$material/invocation-id
+
+mkdir -p "$material"
+chmod 700 "$material"
+printf %s "$invocation_id" > "$invocation_path"
+# The proxy drops DAC_OVERRIDE and can run under a different host UID.
+# This is attribution metadata, not a credential.
+chmod 644 "$invocation_path"
+
+mkdir -p "$material/audit"
+chmod 700 "$material/audit"
+audit_log="$material/audit/proxy.log"
+audit_capture="$material/audit/.capture"
+audit_cursor="$material/audit/.cursor"
+audit_append="$material/audit/.append"
+
+# Appends only records strictly newer than the cursor. The cursor is the
+# last drained record's own RFC3339Nano timestamp (Docker emits fixed-width
+# UTC, so lexicographic comparison is chronological); the strict `$1 > c`
+# filter makes the boundary exclusive, so back-to-back drains
+# (post-command and next-invocation) never duplicate audit entries.
+drain_proxy_audit() {
+  if ! docker inspect "$proxy" >/dev/null 2>&1; then
+    proxy_matches=$(docker ps --all --filter "name=^/${proxy}$" --format '{{.Names}}') || return 1
+    [ -z "$proxy_matches" ] || return 1
+    return 0
+  fi
+  if [ -f "$audit_log" ] && [ "$(wc -c < "$audit_log")" -gt 8388608 ]; then
+    mv "$audit_log" "$audit_log.$(date +%s).$$"
+  fi
+  if [ -s "$audit_cursor" ]; then
+    cursor=$(cat "$audit_cursor")
+    docker logs --timestamps --since "$cursor" "$proxy" >"$audit_capture.raw" 2>&1 || return 1
+    awk -v c="$cursor" '$1 > c' "$audit_capture.raw" > "$audit_capture"
+    rm -f "$audit_capture.raw"
+  else
+    docker logs --timestamps "$proxy" >"$audit_capture" 2>&1 || return 1
+  fi
+  last_record=$(tail -n 1 "$audit_capture" | cut -d' ' -f1)
+  tail -c 4194304 "$audit_capture" > "$audit_append" || return 1
+  audit_total=$(wc -c < "$audit_append")
+  for audit_file in "$material"/audit/proxy.log*; do
+    [ -f "$audit_file" ] || continue
+    audit_total=$((audit_total + $(wc -c < "$audit_file")))
+  done
+  if [ "$audit_total" -gt 268435456 ]; then
+    rm -f "$audit_append" "$audit_capture"
+    return 1
+  fi
+  cat "$audit_append" >> "$audit_log"
+  chmod 600 "$audit_log"
+  rm -f "$audit_append" "$audit_capture"
+  if [ -n "$last_record" ]; then
+    printf %s "$last_record" > "$audit_cursor"
+  fi
+  return 0
+}
+
+if ! drain_proxy_audit; then
+  printf '%s\n' "Railway sandbox proxy audit capture failed; leaving prior proxy for retry" >&2
+  exit 1
+fi
+docker rm --force "$proxy" >/dev/null 2>&1 || true
+if docker network inspect "$network" >/dev/null 2>&1; then
+  internal=$(docker network inspect --format '{{.Internal}}' "$network")
+  gateway_mode=$(docker network inspect --format '{{index .Options "com.docker.network.bridge.gateway_mode_ipv4"}}' "$network")
+  if [ "$internal" != true ] || [ "$gateway_mode" != isolated ]; then
+    docker rm --force "$proxy" >/dev/null 2>&1 || true
+    docker network rm "$network" >/dev/null
+  fi
+fi
+if ! docker network inspect "$network" >/dev/null 2>&1; then
+  if ! network_error=$(docker network create --internal --opt com.docker.network.bridge.gateway_mode_ipv4=isolated "$network" 2>&1); then
+    case "$network_error" in
+      *non-overlapping*address*pool*|*predefined*address*pools*subnetted*)
+        printf '%s\n' "Railway sandbox private network address pool is exhausted; configure Docker default-address-pools in /etc/docker/daemon.json: $network_error" >&2
+        ;;
+      *)
+        printf '%s\n' "Railway sandbox private network creation failed: $network_error" >&2
+        ;;
+    esac
+    exit 1
+  fi
+fi
+
+if docker network inspect "$upstream" >/dev/null 2>&1; then
+  internal=$(docker network inspect --format '{{.Internal}}' "$upstream")
+  if [ "$internal" != false ]; then
+    docker network rm "$upstream" >/dev/null
+  fi
+fi
+if ! docker network inspect "$upstream" >/dev/null 2>&1; then
+  if ! network_error=$(docker network create "$upstream" 2>&1); then
+    case "$network_error" in
+      *non-overlapping*address*pool*|*predefined*address*pools*subnetted*)
+        printf '%s\n' "Railway sandbox upstream network address pool is exhausted; configure Docker default-address-pools in /etc/docker/daemon.json: $network_error" >&2
+        ;;
+      *)
+        printf '%s\n' "Railway sandbox upstream network creation failed: $network_error" >&2
+        ;;
+    esac
+    exit 1
+  fi
+fi
+printf %s "$bootstrap_config" > "$config_path"
+chmod 600 "$config_path"
+docker create \
+  --name "$proxy" \
+  --network "$network" \
+  --label "ironclaw.proxy.posture=$proxy_posture" \
+  --read-only \
+  --cap-drop ALL \
+  --cap-add NET_BIND_SERVICE \
+  --security-opt no-new-privileges:true \
+  --pids-limit 256 \
+  --memory 128m \
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
+  --log-driver json-file \
+  --log-opt max-size=1m \
+  --log-opt max-file=1 \
+  --mount "type=bind,src=$material,dst=/run/ironclaw-proxy,readonly" \
+  "$proxy_image" -config /run/ironclaw-proxy/proxy.yaml >/dev/null
+docker network connect "$upstream" "$proxy"
+docker start "$proxy" >/dev/null
+proxy_ip=$(docker inspect --format '{{(index .NetworkSettings.Networks "ironclaw-reborn-private").IPAddress}}' "$proxy")
+docker stop --time 10 "$proxy" >/dev/null
+printf %s "$config_template" | \
+  sed "s|__IRONCLAW_PROXY_IP__|$proxy_ip|g" \
+  > "$config_path"
+docker start "$proxy" >/dev/null
+
+attempt=0
+until docker exec "$proxy" nc -z "$proxy_ip" 3128 >/dev/null 2>&1
+do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 20 ]; then
+    printf '%s\n' "Railway sandbox managed proxy failed readiness" >&2
+    exit 1
+  fi
+  sleep 0.1
+done
+
+proxy_url="http://${proxy_ip}:3128"
+set +e
+docker run \
+  --network "$network" \
+  --dns "$proxy_ip" \
+  --env IRONCLAW_REBORN_NETWORK_MODE=brokered \
+  --env "IRONCLAW_REBORN_HTTP_PROXY=$proxy_url" \
+  --env "http_proxy=$proxy_url" \
+  --env "https_proxy=$proxy_url" \
+  --env "HTTP_PROXY=$proxy_url" \
+  --env "HTTPS_PROXY=$proxy_url" \
+  --env NO_PROXY= \
+  --env no_proxy= \
+  "$@"
+worker_status=$?
+set -e
+if ! drain_proxy_audit; then
+  # The proxy and its Docker log survive; the next invocation's
+  # fail-closed drain retries before any removal can destroy evidence.
+  printf '%s\n' "Railway sandbox proxy audit capture failed after command exit" >&2
+  exit 1
+fi
+exit "$worker_status"
+"#;
 
 /// Explicit, host-only configuration for the preview transport.
 ///
 /// Railway auth is not stored here. Each CLI child copies only a selected
 /// `RAILWAY_TOKEN` or `RAILWAY_API_TOKEN` plus minimal CLI runtime variables.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 /// Configuration for the experimental Railway sandbox transport.
 ///
 /// # Deployment constraint
@@ -72,7 +254,9 @@ pub struct RailwayPreviewSandboxConfig {
     cli_path: PathBuf,
     idle_timeout_minutes: u16,
     worker_image: String,
-    disable_network: bool,
+    proxy_image: String,
+    proxy_posture: String,
+    proxy_config_template: String,
 }
 
 impl RailwayPreviewSandboxConfig {
@@ -80,13 +264,28 @@ impl RailwayPreviewSandboxConfig {
         project_id: impl Into<String>,
         environment_id: impl Into<String>,
     ) -> Result<Self, RuntimeProcessError> {
+        let policy = super::network_allowlist::sandbox_network_policy().map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "Railway sandbox managed egress policy is invalid: {error}"
+            ))
+        })?;
+        let proxy_image = super::managed_egress::configured_proxy_image()?;
+        let proxy_posture = super::managed_egress::proxy_posture(
+            &proxy_image,
+            &policy,
+            std::path::Path::new("/run/ironclaw-reborn-proxy"),
+        )?;
+        let proxy_config_template =
+            super::managed_egress::render_proxy_config(&policy, RAILWAY_PROXY_IP_TOKEN)?;
         Ok(Self {
             project_id: required_config_value("project identifier", project_id.into())?,
             environment_id: required_config_value("environment identifier", environment_id.into())?,
             cli_path: PathBuf::from("railway"),
             idle_timeout_minutes: DEFAULT_IDLE_TIMEOUT_MINUTES,
             worker_image: DEFAULT_WORKER_IMAGE.to_string(),
-            disable_network: true,
+            proxy_image,
+            proxy_posture,
+            proxy_config_template,
         })
     }
 
@@ -112,31 +311,20 @@ impl RailwayPreviewSandboxConfig {
         self.worker_image = required_config_value("worker image", image.into())?;
         Ok(self)
     }
+}
 
-    /// Allow the inner worker to use the outer Railway sandbox's NAT egress.
-    ///
-    /// This is deliberately explicit: direct egress is enabled by the
-    /// sandbox deployment factory, while ad-hoc transport construction keeps
-    /// the fail-closed `--network none` default.
-    pub fn with_network_enabled(mut self) -> Self {
-        self.disable_network = false;
-        self
-    }
-
-    fn container_network_mode(&self) -> Option<String> {
-        self.disable_network.then(|| "none".to_string())
-    }
-
-    fn network_mode_env(&self) -> String {
-        format!(
-            "{}={}",
-            super::broker::REBORN_NETWORK_MODE_ENV,
-            if self.disable_network {
-                "disabled"
-            } else {
-                "direct"
-            }
-        )
+impl std::fmt::Debug for RailwayPreviewSandboxConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RailwayPreviewSandboxConfig")
+            .field("project_id", &self.project_id)
+            .field("environment_id", &self.environment_id)
+            .field("cli_path", &self.cli_path)
+            .field("idle_timeout_minutes", &self.idle_timeout_minutes)
+            .field("worker_image", &self.worker_image)
+            .field("proxy_image", &self.proxy_image)
+            .field("proxy_posture", &self.proxy_posture)
+            .finish_non_exhaustive()
     }
 }
 
@@ -341,6 +529,7 @@ impl RailwayPreviewSandboxTransport {
         output_limit: usize,
         execution_error: &RuntimeProcessError,
     ) -> Result<(), RuntimeProcessError> {
+        self.salvage_proxy_audit(sandbox_id, output_limit).await;
         if let Err(cleanup_error) = self.destroy_sandbox(sandbox_id, output_limit).await {
             tracing::error!(
                 ?execution_error,
@@ -372,6 +561,43 @@ impl RailwayPreviewSandboxTransport {
             )
             .await
             .map(|_| ())
+    }
+
+    /// Best-effort: pull the egress audit tail out of a sandbox that is about
+    /// to be destroyed after a transport failure, and record it in host logs
+    /// (the only durable location once the outer sandbox is gone). Salvage
+    /// failure never blocks destruction — the sandbox is already suspect.
+    async fn salvage_proxy_audit(&self, sandbox_id: &str, output_limit: usize) {
+        const SALVAGE_SCRIPT: &str = "docker logs --timestamps ironclaw-reborn-proxy 2>&1 | tail -c 65536; for audit_file in /run/ironclaw-reborn-proxy/audit/proxy.log.* /run/ironclaw-reborn-proxy/audit/proxy.log; do [ ! -f \"$audit_file\" ] || tail -c 65536 \"$audit_file\"; done";
+        let salvage = self
+            .cli
+            .execute(
+                RailwayCliInvocation::new(
+                    self.config.cli_path.clone(),
+                    RailwayCliOperation::ExecuteSandboxCommand,
+                    sandbox_exec_argv(
+                        &self.config,
+                        sandbox_id,
+                        REMOTE_CLEANUP_TIMEOUT,
+                        vec!["sh".into(), "-c".into(), SALVAGE_SCRIPT.into()],
+                    ),
+                    output_limit,
+                ),
+                REMOTE_CLEANUP_TIMEOUT,
+            )
+            .await;
+        match salvage {
+            Ok(output) => tracing::warn!(
+                sandbox_id,
+                audit_tail = %output.stdout,
+                "Railway sandbox egress audit salvaged before destruction"
+            ),
+            Err(error) => tracing::warn!(
+                ?error,
+                sandbox_id,
+                "Railway sandbox egress audit salvage failed before destruction"
+            ),
+        }
     }
 
     async fn shutdown_owned_sandboxes(&self) -> Result<(), RuntimeProcessError> {
@@ -509,6 +735,7 @@ impl SandboxCommandTransport for RailwayPreviewSandboxTransport {
                             &railway_workspace_path(&key),
                             &workdir,
                             &request.command,
+                            &request.scope.invocation_id,
                         ),
                     ),
                     output_limit,
@@ -945,6 +1172,7 @@ fn sandbox_create_argv(
         config.environment_id.clone(),
         "--idle-timeout-minutes".into(),
         config.idle_timeout_minutes.to_string(),
+        "--private-network".into(),
     ];
     if let Some(checkpoint) = checkpoint {
         argv.push("--checkpoint".into());
@@ -1024,15 +1252,11 @@ fn ephemeral_worker_argv(
     railway_workspace: &str,
     workdir: &str,
     model_command: &str,
+    invocation_id: &ironclaw_host_api::ids::InvocationId,
 ) -> Vec<String> {
-    let mut command = vec!["docker".into(), "run".into(), "--rm".into()];
-    command.extend(
-        super::worker_spec::DockerWorkerSecuritySpec::new(config.container_network_mode())
-            .docker_run_args(),
-    );
-    command.extend([
-        "--env".into(),
-        config.network_mode_env(),
+    let mut worker = vec!["--rm".into()];
+    worker.extend(super::worker_spec::DockerWorkerSecuritySpec::new(None).docker_run_args());
+    worker.extend([
         "--mount".into(),
         format!("type=bind,src={railway_workspace},dst={WORKSPACE_ROOT}"),
         "--workdir".into(),
@@ -1049,8 +1273,18 @@ fn ephemeral_worker_argv(
         "-c".into(),
         OUTER_EXEC_WRAPPER.into(),
         "ironclaw-railway-wrapper".into(),
+        "sh".into(),
+        "-c".into(),
+        RAILWAY_MANAGED_EGRESS_WRAPPER.into(),
+        "ironclaw-railway-egress".into(),
+        config.proxy_image.clone(),
+        config.proxy_posture.clone(),
+        config.proxy_config_template.clone(),
+        RAILWAY_PROXY_BOOTSTRAP_CONFIG.into(),
+        invocation_id.to_string(),
+        config.worker_image.clone(),
     ];
-    args.extend(command);
+    args.extend(worker);
     args
 }
 

@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { useNavigate, useParams } from "react-router";
 import { Button } from "../../design-system/button";
+import { InlineNotice } from "../../design-system/inline-notice";
 import { EmptyPanel } from "../../design-system/primitives";
 import React from "react";
 import { useT } from "../../lib/i18n";
@@ -14,32 +15,10 @@ import { useJobDetail } from "./hooks/useJobDetail";
 import { useJobFiles } from "./hooks/useJobFiles";
 import { useJobs } from "./hooks/useJobs";
 
-function FeedbackBanner({ result, onDismiss }) {
-  const t = useT();
-  if (!result) return null;
-
-  const tone = {
-    success: "border-mint/30 bg-mint/10 text-mint",
-    error: "border-red-400/30 bg-red-500/10 text-red-200",
-    info: "border-signal/30 bg-signal/10 text-signal",
-  };
-
-  return (
-    <div
-      className={[
-        "flex items-center gap-3 rounded-xl border px-4 py-3 text-sm",
-        tone[result.type] || tone.info,
-      ].join(" ")}
-    >
-      <span className="min-w-0 flex-1">{result.message}</span>
-      <button
-        onClick={onDismiss}
-        className="shrink-0 opacity-70 hover:opacity-100"
-      >
-        {t("jobs.dismiss")}
-      </button>
-    </div>
-  );
+function resultTone(result) {
+  if (result?.type === "success") return "success";
+  if (result?.type === "error") return "danger";
+  return "info";
 }
 
 export function JobsPage() {
@@ -214,20 +193,30 @@ export function JobsPage() {
           </div>)}
           {jobsState.error &&
           (
-            <div
-              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-            >
+            <InlineNotice tone="danger" role="alert">
               {jobsState.error.message}
-            </div>
+            </InlineNotice>
           )}
-          <FeedbackBanner
-            result={jobsState.actionResult}
-            onDismiss={jobsState.clearActionResult}
-          />
-          <FeedbackBanner
-            result={detailState.promptResult}
-            onDismiss={detailState.clearPromptResult}
-          />
+          {jobsState.actionResult && (
+            <InlineNotice
+              tone={resultTone(jobsState.actionResult)}
+              role={jobsState.actionResult.type === "error" ? "alert" : "status"}
+              onDismiss={jobsState.clearActionResult}
+              dismissLabel={t("jobs.dismiss")}
+            >
+              {jobsState.actionResult.message}
+            </InlineNotice>
+          )}
+          {detailState.promptResult && (
+            <InlineNotice
+              tone={resultTone(detailState.promptResult)}
+              role={detailState.promptResult.type === "error" ? "alert" : "status"}
+              onDismiss={detailState.clearPromptResult}
+              dismissLabel={t("jobs.dismiss")}
+            >
+              {detailState.promptResult.message}
+            </InlineNotice>
+          )}
           <JobsSummaryStrip summary={jobsState.summary} />
           {detailContent}
         </div>

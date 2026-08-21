@@ -52,7 +52,7 @@ async fn capability_host_uses_obligation_handler_before_dispatch() {
         .await
         .unwrap();
 
-    assert_eq!(result.dispatch.output, json!({"ok": true}));
+    assert_eq!(result.output, json!({"ok": true}));
     assert!(dispatcher.call_count() > 0);
     assert_eq!(
         handler.records(),
@@ -198,7 +198,7 @@ async fn capability_host_completes_post_dispatch_obligations_before_returning() 
         .await
         .unwrap();
 
-    assert_eq!(result.dispatch.output, json!({"token": "[REDACTED]"}));
+    assert_eq!(result.output, json!({"token": "[REDACTED]"}));
 }
 
 #[tokio::test]

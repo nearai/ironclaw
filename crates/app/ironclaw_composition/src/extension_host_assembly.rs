@@ -31,6 +31,35 @@ use ironclaw_product_contracts::account_setup::AccountConnectionStatusSource;
 use ironclaw_product_contracts::admin_users::AdminUserService;
 use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;
 
+/// The deployment's public web app origin — the SAME variable that already
+/// builds Reborn's OAuth callback URLs (resolved for that purpose by
+/// `ironclaw_cli`'s `webui_public_base_url_from_env`). Reused deliberately
+/// rather than introducing a second "what is our public host" setting: a
+/// deployment whose OAuth callbacks work is exactly one whose connect link
+/// resolves. Unset (the local-dev default, where Reborn falls back to the
+/// bound listener address) keeps the notice at its static, link-free text
+/// rather than advertising an unreachable loopback URL into a channel.
+const CONNECT_LINK_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
+
+/// Interpret `IRONCLAW_REBORN_WEBUI_BASE_URL` exactly as the OAuth path does
+/// (`ironclaw_cli::commands::serve_sso`'s `non_empty_env` + `normalize_base_url`):
+/// trim whitespace, strip trailing slashes, and treat a value that is empty
+/// afterwards as unset. Without the blank filter, `IRONCLAW_REBORN_WEBUI_BASE_URL=`
+/// in a deployment's `.env` resolves to `Some("")` and the notice advertises the
+/// relative path `/chat?connect=<extension>` into a customer conversation. The OAuth
+/// consumer *fails startup* on a blank value; this consumer has a working
+/// link-free fallback, so it ships dark instead — the two agree on what the
+/// variable means, and differ only in what an unusable value costs.
+fn connect_link_base_url_from_env() -> Option<String> {
+    let raw = std::env::var(CONNECT_LINK_BASE_URL_ENV).ok()?; // silent-ok: optional public-origin env read; unset keeps the notice link-free
+    normalize_connect_link_base_url(&raw)
+}
+
+fn normalize_connect_link_base_url(raw: &str) -> Option<String> {
+    let normalized = raw.trim().trim_end_matches('/');
+    (!normalized.is_empty()).then(|| normalized.to_string())
+}
+
 pub(crate) struct BackendExtensionHostAssemblyInput {
     pub(crate) binder: ExtensionLaneToolBinder,
     pub(crate) native_factories: Vec<Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
@@ -44,6 +73,11 @@ pub(crate) struct BackendExtensionHostAssemblyInput {
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     pub(crate) filesystem: Arc<CompositeRootFilesystem>,
     pub(crate) outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+    /// Linked-account custody over the auth domain's credential service, and
+    /// the per-extension resolver factory built beside it. `None` composes
+    /// fail-closed custody (a deployment without product auth).
+    pub(crate) linked_sessions: Option<Arc<ironclaw_extension_host::LinkedSessionStore>>,
+    pub(crate) linked_accounts: Option<Arc<dyn ironclaw_extension_host::LinkedAccountResolution>>,
     /// Host-owned per-user delivery registrations, handed to the coordinator
     /// so a channel with zero of them resolves to "no target" before any
     /// adapter call (design §8).
@@ -80,6 +114,8 @@ pub(crate) async fn build_backend_extension_host(
         deployment_channels,
         filesystem,
         outbound_state,
+        linked_sessions,
+        linked_accounts,
     } = input;
 
     let channel_egress_credentials = Arc::new(
@@ -130,6 +166,16 @@ pub(crate) async fn build_backend_extension_host(
                 std::time::Duration::from_secs(30),
             ),
             channel_egress_transport: channel_egress_transport.clone(),
+            // A deployment without product auth composes no custody; the
+            // fail-closed shapes are chosen here, at the boundary, so the
+            // host's own dependency struct stays honest about what
+            // production always supplies.
+            linked_sessions: linked_sessions
+                .unwrap_or_else(ironclaw_extension_host::LinkedSessionStore::unavailable),
+            linked_accounts: linked_accounts.unwrap_or_else(|| {
+                Arc::new(ironclaw_extension_host::UnavailableLinkedAccountResolution)
+            }),
+            admin_secrets: Some(Arc::clone(&admin_configuration_resolver)),
         },
     )
     .await;
@@ -560,6 +606,7 @@ pub(crate) fn start_channel_host(
         dm_targets: Some(Arc::clone(dm_targets)),
         channel_pairing: channel_pairing.clone(),
         admin_users,
+        connect_link_base_url: connect_link_base_url_from_env(),
     });
     StartedChannelHost {
         assembly,
@@ -644,6 +691,8 @@ pub(crate) async fn build_runtime_channel_host(
                     assembly: Arc::clone(&assembly),
                     channel_config: Arc::clone(&local_runtime.channel_config_service),
                     dm_targets: local_runtime.channel_dm_target_store.clone(),
+                    identity_lookup: Arc::clone(&local_runtime.channel_identity_store)
+                        as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
                     identity: ironclaw_extension_host::channel_outbound_targets::ChannelOutboundTargetIdentity {
                         tenant_id: thread_scope.tenant_id.clone(),
                         agent_id: thread_scope.agent_id.clone(),
@@ -663,4 +712,30 @@ pub(crate) fn start_channel_host_from_stores(
 ) -> Option<Arc<ironclaw_extension_host::channel_host::GenericChannelHostAssembly>> {
     let source = channel_host_source(services)?;
     Some(start_channel_host(&source, wiring).assembly)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_connect_link_base_url;
+
+    /// #7682: a blank or whitespace-only `IRONCLAW_REBORN_WEBUI_BASE_URL`
+    /// (`IRONCLAW_REBORN_WEBUI_BASE_URL=` in a deployment `.env`) must resolve
+    /// to `None`, not `Some("")` — the latter appends the relative link
+    /// "Or connect directly: /chat?connect=<extension>" to a notice posted into a
+    /// customer conversation. Normalization matches the OAuth consumer's.
+    #[test]
+    fn connect_link_base_url_normalization_matches_the_oauth_consumer() {
+        assert_eq!(normalize_connect_link_base_url(""), None);
+        assert_eq!(normalize_connect_link_base_url("   "), None);
+        assert_eq!(normalize_connect_link_base_url("/"), None);
+        assert_eq!(normalize_connect_link_base_url(" / "), None);
+        assert_eq!(
+            normalize_connect_link_base_url(" https://app.example.com/ "),
+            Some("https://app.example.com".to_string())
+        );
+        assert_eq!(
+            normalize_connect_link_base_url("https://app.example.com"),
+            Some("https://app.example.com".to_string())
+        );
+    }
 }

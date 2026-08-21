@@ -9,7 +9,7 @@ use ironclaw_assistant::{
     ProjectScopedAttachmentReader, ProjectScopedFilesystemReader, RebornAutomationProductService,
     RebornServices as ProductRebornServices, RebornSkillContentResponse, RebornSkillInfo,
     RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, SkillsProductService,
+    RebornSkillTrustLevel, SkillsProductService, UnboundTurnService,
 };
 use ironclaw_attachments::ProjectScopedAttachmentLander;
 use ironclaw_auth::ChannelConnectionService;
@@ -98,6 +98,16 @@ pub(crate) fn build_product_surface_with_channel_connection(
     .with_diagnostic_store(Arc::clone(&runtime.diagnostic_store))
     .with_session_inbound_ledger(Arc::clone(&runtime.session_inbound_ledger))
     .with_session_channel_directory(Arc::clone(&runtime.session_channel_directory));
+    let default_thread_scope = runtime.product_default_thread_scope();
+    api = api.with_suggestions(
+        runtime.suggestions_store(),
+        Arc::new(UnboundTurnService::new(
+            runtime.product_thread_service(),
+            runtime.product_turn_coordinator(),
+            default_thread_scope.agent_id.clone(),
+            default_thread_scope.project_id.clone(),
+        )),
+    );
     if let Some(ironhub_link) = runtime.ironhub_link_service() {
         api = api.with_ironhub_link_service(ironhub_link);
     }
@@ -243,6 +253,7 @@ pub(crate) fn build_product_surface_with_channel_connection(
     );
     api = api.with_automation_product_service(Arc::new(
         RebornAutomationProductService::new(backing.repository, active_run_lookup)
+            .with_manual_fire_runner(Arc::clone(&runtime.trigger_manual_fire_runner))
             .with_scheduler_enabled(runtime.readiness.workers.trigger_poller),
     ));
     // First-class projects + membership (ACL). Built once per runtime over the
@@ -256,6 +267,7 @@ pub(crate) fn build_product_surface_with_channel_connection(
             )),
         ),
     ));
+    api = api.with_notification_inbox(Arc::clone(&runtime.notification_inbox));
     if let Some(resolver) = runtime.channel_delivery_resolver.clone() {
         api = api.with_notification_setup_service(Arc::new(
             ironclaw_assistant::RegistrationChannelNotificationSetupService::new(

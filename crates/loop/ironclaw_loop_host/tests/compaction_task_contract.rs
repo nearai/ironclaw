@@ -2057,6 +2057,7 @@ impl CompactionFixture {
     async fn append_tool_result(&self, result_ref: &str, summary: &str) {
         self.threads
             .append_tool_result_reference(AppendToolResultReferenceRequest {
+                intrinsic_outcome: None,
                 scope: self.scope.clone(),
                 thread_id: self.thread_id.clone(),
                 turn_run_id: format!("run-{result_ref}"),
@@ -2181,6 +2182,7 @@ impl SystemInferencePort for CapturingInference {
             task_id: request.task_id,
             output_text: self.output.clone(),
             elapsed_ms: 1,
+            usage: None,
         })
     }
 }

@@ -158,6 +158,7 @@ async fn build_compaction_ports_dispatches_through_scope_resolved_gateway() {
         Arc::new(InMemoryLoopHostMilestoneSink::default()) as Arc<dyn LoopHostMilestoneSink>,
         TextOnlyLoopHostConfig {
             max_messages: 8,
+            prompt_context_budget: Default::default(),
             require_model_route_snapshot: false,
         },
         InstructionSafetyContext::non_production_noop(),

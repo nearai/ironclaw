@@ -1659,6 +1659,27 @@ pub(crate) struct ReservationRecord {
     pub(crate) tally: ResourceTally,
     pub(crate) status: ReservationStatus,
     pub(crate) actual: Option<ResourceUsage>,
+    /// When the hold was taken. The only age basis a stale-`Active` sweeper
+    /// has: a reservation whose owner died before releasing leaves an
+    /// `Active` record that replays forever. `None` for records written
+    /// before this field existed — those are never swept, because an
+    /// unknown age cannot be proven stale.
+    ///
+    /// Rollback restriction. Reading forward is safe (`serde(default)`), and a
+    /// record without a timestamp still serializes byte-identically
+    /// (`skip_serializing_if`), so snapshots written before this field are
+    /// unaffected. Reading *backward* is not: [`ReservationRecordSerde`] uses
+    /// `deny_unknown_fields`, so a binary predating this field rejects any
+    /// snapshot containing a reservation taken after the upgrade — the whole
+    /// snapshot load fails closed rather than dropping the field. Rolling the
+    /// governor back therefore requires restoring a snapshot written before the
+    /// upgrade and validating that its delta cursor matches the retained delta
+    /// log before starting the old binary (the log replays unchanged from that
+    /// cursor). The schema version is deliberately not bumped, because bumping
+    /// it would fail the same load with a different message and break nothing
+    /// extra.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reserved_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Deserialize)]
@@ -1734,6 +1755,8 @@ struct ReservationRecordSerde {
         deserialize_with = "deserialize_optional_strict_resource_usage"
     )]
     actual: Option<ResourceUsage>,
+    #[serde(default)]
+    reserved_at: Option<DateTime<Utc>>,
 }
 
 impl<'de> Deserialize<'de> for ReservationRecord {
@@ -1748,6 +1771,7 @@ impl<'de> Deserialize<'de> for ReservationRecord {
             tally: value.tally,
             status: value.status,
             actual: value.actual,
+            reserved_at: value.reserved_at,
         })
     }
 }
@@ -2165,6 +2189,7 @@ pub(crate) fn reserve_with_outcome_in_state(
             tally: requested,
             status: ReservationStatus::Active,
             actual: None,
+            reserved_at: Some(now),
         },
     );
 
@@ -2782,6 +2807,59 @@ fn decimal_to_f64(d: Decimal) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A record with no `reserved_at` must stay byte-identical on the wire, so
+    /// snapshots written before that field existed keep loading in a binary
+    /// that predates it. Documented in full on `ReservationRecord::reserved_at`:
+    /// forward reads are safe, backward reads are not, because
+    /// `ReservationRecordSerde` denies unknown fields.
+    #[test]
+    fn reservation_record_without_a_timestamp_omits_the_field_for_older_readers() {
+        /// The pre-`reserved_at` reader, reproduced field for field.
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct LegacyReservationRecordSerde {
+            reservation: serde_json::Value,
+            accounts: serde_json::Value,
+            tally: serde_json::Value,
+            status: serde_json::Value,
+            #[serde(default)]
+            actual: Option<serde_json::Value>,
+        }
+
+        let scope = ResourceScope::system();
+        let record = ReservationRecord {
+            reservation: ResourceReservation {
+                id: ironclaw_host_api::ids::ResourceReservationId::new(),
+                scope: scope.clone(),
+                estimate: ResourceEstimate::default(),
+            },
+            accounts: Vec::new(),
+            tally: ResourceTally::default(),
+            status: ReservationStatus::Active,
+            actual: None,
+            reserved_at: None,
+        };
+        let legacy_shaped = serde_json::to_value(&record).expect("serialize");
+        assert!(
+            legacy_shaped.get("reserved_at").is_none(),
+            "a timestampless record must not grow a key an older reader rejects"
+        );
+        serde_json::from_value::<LegacyReservationRecordSerde>(legacy_shaped)
+            .expect("an older binary must still load a timestampless record");
+
+        let stamped = serde_json::to_value(&ReservationRecord {
+            reserved_at: Some(Utc::now()),
+            ..record
+        })
+        .expect("serialize");
+        assert!(
+            serde_json::from_value::<LegacyReservationRecordSerde>(stamped).is_err(),
+            "a stamped record is not loadable by an older binary — this is the \
+             documented rollback restriction, not an accident"
+        );
+    }
 
     #[test]
     fn resource_value_decimal_uses_stable_string_json() {

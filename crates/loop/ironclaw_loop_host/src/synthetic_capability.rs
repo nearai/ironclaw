@@ -16,7 +16,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityDescriptorView,
-    CapabilityInputRef, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRequest,
+    CapabilityInputRef, CapabilitySurfaceVersion, LoopCapabilityPort, LoopRequest,
     LoopRequestBatch, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
     ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
     VisibleCapabilityRequest, VisibleCapabilitySurface,
@@ -98,7 +98,6 @@ pub struct SyntheticCapabilityDescriptor {
     capability_id: CapabilityId,
     provider_tool_name: ProviderToolName,
     description: String,
-    concurrency_hint: ConcurrencyHint,
     parameters_schema: serde_json::Value,
 }
 
@@ -107,7 +106,6 @@ impl SyntheticCapabilityDescriptor {
         capability_id: &str,
         provider_tool_name: &str,
         description: &str,
-        concurrency_hint: ConcurrencyHint,
         parameters_schema: serde_json::Value,
     ) -> Result<Self, AgentLoopHostError> {
         Ok(Self {
@@ -124,7 +122,6 @@ impl SyntheticCapabilityDescriptor {
                 )
             })?,
             description: description.to_string(),
-            concurrency_hint,
             parameters_schema,
         })
     }
@@ -137,7 +134,6 @@ impl SyntheticCapabilityDescriptor {
             safe_name: self.provider_tool_name.as_str().to_string(),
             safe_description: self.description.clone(),
             description_trust: Default::default(),
-            concurrency_hint: self.concurrency_hint,
             parameters_schema: self.parameters_schema.clone(),
         }
     }
@@ -384,8 +380,11 @@ impl SyntheticCapabilityPort {
 
 #[async_trait]
 impl LoopCapabilityPort for SyntheticCapabilityPort {
-    fn requires_ordered_batch_invocation(&self) -> bool {
-        self.inner.requires_ordered_batch_invocation()
+    fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
+        invocations.iter().any(|invocation| {
+            self.capabilities_by_id
+                .contains_key(&invocation.capability_id)
+        }) || self.inner.requires_ordered_batch_invocation(invocations)
     }
 
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
@@ -457,19 +456,27 @@ impl LoopCapabilityPort for SyntheticCapabilityPort {
                 .register_synthetic_provider_tool_call(tool_call, activity_id)
                 .await;
         }
-        self.inner
-            .register_provider_tool_call(RegisterProviderToolCallRequest {
-                tool_call,
-                activity_id,
-            })
-            .await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(
+            self.inner
+                .register_provider_tool_call(RegisterProviderToolCallRequest {
+                    tool_call,
+                    activity_id,
+                }),
+        )
+        .await
     }
 
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let mut surface = self.inner.visible_capabilities(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let mut surface = Box::pin(self.inner.visible_capabilities(request)).await?;
         for capability_id in self.capabilities_by_id.keys() {
             if surface
                 .descriptors
@@ -503,7 +510,10 @@ impl LoopCapabilityPort for SyntheticCapabilityPort {
         request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         let Some(capability) = self.capabilities_by_id.get(&request.capability_id) else {
-            return self.inner.invoke_capability(request).await;
+            // Chain-boxing: each port delegation is boxed so the stacked
+            // decorator chain never compiles into a single oversized poll
+            // frame (see reborn_integration_model_recovery stack-overflow).
+            return Box::pin(self.inner.invoke_capability(request)).await;
         };
         let handler = Arc::clone(&capability.handler);
         if request.surface_version != self.current_surface_version()? {
@@ -598,7 +608,10 @@ impl LoopCapabilityPort for SyntheticCapabilityPort {
         let mut resolutions = Vec::new();
         let mut stopped_on_suspension = false;
         for invocation in request.invocations {
-            let resolution = self.invoke_capability(invocation).await?;
+            // Chain-boxing: each port delegation is boxed so the stacked
+            // decorator chain never compiles into a single oversized poll
+            // frame (see reborn_integration_model_recovery stack-overflow).
+            let resolution = Box::pin(self.invoke_capability(invocation)).await?;
             // `parks()` is the batch-stop predicate (gates + suspensions), the
             // Resolution-side successor to `CapabilityOutcome::is_suspension`.
             let parks = resolution.parks();
@@ -772,7 +785,6 @@ mod tests {
                 TEST_CAPABILITY_ID,
                 TEST_PROVIDER_TOOL_NAME,
                 "Synthetic test capability",
-                ConcurrencyHint::SafeForParallel,
                 serde_json::json!({"type": "object"}),
             )
             .expect("descriptor"),
@@ -799,6 +811,28 @@ mod tests {
             .await
             .expect("visible surface");
         port
+    }
+
+    #[tokio::test]
+    async fn synthetic_batch_requires_host_batch_entry() {
+        let port = synthetic_port().await;
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_tool_call()))
+            .await
+            .expect("synthetic provider call registers");
+        let synthetic_invocation = LoopRequest {
+            activity_id: candidate.activity_id,
+            surface_version: candidate.surface_version,
+            capability_id: candidate.capability_id,
+            input_ref: candidate.input_ref,
+            approval_resume: None,
+            auth_resume: None,
+        };
+
+        assert!(
+            port.requires_ordered_batch_invocation(&[synthetic_invocation]),
+            "synthetic handlers must retain the decorator's sequential batch contract"
+        );
     }
 
     fn replay_payload_filesystem()
@@ -960,7 +994,6 @@ mod tests {
                 TEST_CAPABILITY_ID,
                 TEST_PROVIDER_TOOL_NAME,
                 "Synthetic test capability",
-                ConcurrencyHint::SafeForParallel,
                 serde_json::json!({"type": "object"}),
             )
             .expect("descriptor"),

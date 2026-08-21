@@ -1274,10 +1274,19 @@ async fn replay_routine_phrase_fires(case: &QaPhrase, cron_fragment: &str) {
         case.fixture
     );
 
-    trigger.next_run_at = Utc::now() - chrono::Duration::try_seconds(120).expect("duration");
-    repo.upsert_trigger(trigger)
-        .await
-        .expect("make replayed routine due");
+    let now = Utc::now();
+    // Make the persisted slot due without moving it behind the current cron
+    // boundary. If this used `now - 120s`, a `*/30` trigger started just after
+    // `:00` or `:30` would reschedule to that already-passed boundary after
+    // the first fire, letting the poller submit the same test routine twice.
+    let already_due_or_fired =
+        trigger.is_due_at(now) || trigger.has_active_fire() || trigger.last_fired_slot.is_some();
+    if !already_due_or_fired {
+        trigger.next_run_at = now;
+        repo.upsert_trigger(trigger)
+            .await
+            .expect("make replayed routine due");
+    }
 
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut settled = repo
@@ -1304,9 +1313,14 @@ async fn replay_routine_phrase_fires(case: &QaPhrase, cron_fragment: &str) {
         }
     }
 
-    // Read the fired run's persisted reply while the runtime is still up; the
-    // assertion happens after the clearer fire-progress asserts below.
-    let fired_reply = fired_routine_finalized_reply(&runtime, &tenant_id, trigger_id).await;
+    // Fire acceptance sets the trigger status before the scheduled turn has
+    // necessarily persisted its final reply. Observe that user-visible result
+    // within the same bounded deadline instead of racing turn finalization.
+    let mut fired_reply = fired_routine_finalized_reply(&runtime, &tenant_id, trigger_id).await;
+    while fired_reply.is_none() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        fired_reply = fired_routine_finalized_reply(&runtime, &tenant_id, trigger_id).await;
+    }
 
     runtime.shutdown().await.expect("runtime shutdown");
 

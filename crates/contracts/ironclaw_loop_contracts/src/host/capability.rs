@@ -15,7 +15,7 @@ pub use ironclaw_host_api::capability::CapabilityDescriptionTrust;
 
 use crate::content_digest::ContentDigest;
 use crate::model_observation::{CapabilityFailureDetail, ModelVisibleToolObservation};
-use ironclaw_host_api::turn::{CapabilityActivityId, LoopResultRef};
+use ironclaw_host_api::turn::{CapabilityActivityId, LoopGateRef, LoopResultRef};
 
 use super::error::{AgentLoopHostError, AgentLoopHostErrorKind, unsupported_host_method};
 use super::model::CapabilityCallCandidate;
@@ -108,23 +108,6 @@ pub struct VisibleCapabilitySurface {
     pub callable_capability_ids: Option<Vec<CapabilityId>>,
 }
 
-/// Concurrency hint for a capability surfaced to an agent loop driver.
-///
-/// Derived at the adapter boundary from the underlying
-/// `CapabilityDescriptor.effects` Vec. The lower-layer `CapabilityDescriptor`
-/// is NOT modified; `effects` remains the source of truth and the hint is a
-/// computed projection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConcurrencyHint {
-    /// Capability has no exclusive side effects; multiple invocations may run
-    /// in parallel without ordering hazards.
-    SafeForParallel,
-    /// Capability must be invoked serially within a loop run — parallel
-    /// invocation would violate ordering or isolation constraints.
-    Exclusive,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityDescriptorView {
     pub capability_id: CapabilityId,
@@ -135,7 +118,6 @@ pub struct CapabilityDescriptorView {
     /// Unknown and legacy sources default to the fully checked path.
     #[serde(default)]
     pub description_trust: CapabilityDescriptionTrust,
-    pub concurrency_hint: ConcurrencyHint,
     #[serde(default)]
     pub parameters_schema: serde_json::Value,
 }
@@ -368,6 +350,10 @@ pub struct AuthResumeApprovalIdentity {
 /// human approval.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityAuthResume {
+    /// The durable auth-gate record whose diagnostic belongs to this resume.
+    /// It is required so a denial can recover the exact model-visible provider
+    /// explanation without copying diagnostic text into checkpoint state.
+    pub gate_ref: LoopGateRef,
     /// Encodes the original activity identity so the host can reuse the
     /// matching execution context after auth completes. A denied gate does not
     /// re-dispatch, so its activity identity is already carried by
@@ -396,18 +382,21 @@ pub struct CapabilityAuthResume {
 
 impl CapabilityAuthResume {
     pub fn resolved(
+        gate_ref: LoopGateRef,
         resume_token: CapabilityResumeToken,
         prior_approval: Option<AuthResumeApprovalIdentity>,
     ) -> Self {
         Self {
+            gate_ref,
             resume_token: Some(resume_token),
             disposition: None,
             prior_approval,
         }
     }
 
-    pub fn denied() -> Self {
+    pub fn denied(gate_ref: LoopGateRef) -> Self {
         Self {
+            gate_ref,
             resume_token: None,
             disposition: Some(ironclaw_host_api::turn::GateResumeDisposition::Denied),
             prior_approval: None,
@@ -418,6 +407,8 @@ impl CapabilityAuthResume {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopRequestBatch {
     pub invocations: Vec<LoopRequest>,
+    /// Stops after the first parking resolution and requires decorators to
+    /// preserve caller-order dispatch rather than re-fanning the batch out.
     pub stop_on_first_suspension: bool,
 }
 
@@ -544,15 +535,14 @@ impl<'de> Deserialize<'de> for CapabilityDeniedReasonKind {
 
 #[async_trait]
 pub trait LoopCapabilityPort: Send + Sync {
-    /// Whether a logical batch must enter through [`Self::invoke_capability_batch`].
+    /// Whether this logical batch must enter through [`Self::invoke_capability_batch`].
     ///
     /// The default is fail-closed: implementations must explicitly opt in to
-    /// concurrent single invocation. Middleware that performs ordered preflight
-    /// or observation across a batch must return `true`; the loop executor will
-    /// then avoid decomposing a parallel-safe batch into concurrent single
-    /// invocations. Decorators must preserve the value reported by their inner
-    /// port unless they require ordered entry themselves.
-    fn requires_ordered_batch_invocation(&self) -> bool {
+    /// concurrent single invocation. Middleware may veto only for operational
+    /// hazards in the concrete batch; semantic independence comes from the
+    /// model emitting multiple calls together. Decorators must preserve the
+    /// value reported by their inner port unless they require ordered entry.
+    fn requires_ordered_batch_invocation(&self, _invocations: &[LoopRequest]) -> bool {
         true
     }
 
@@ -671,7 +661,7 @@ mod tests {
             definitions: Vec::new(),
         };
 
-        assert!(port.requires_ordered_batch_invocation());
+        assert!(port.requires_ordered_batch_invocation(&[]));
     }
 
     #[test]

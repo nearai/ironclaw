@@ -348,6 +348,7 @@ mod tests {
             HostApiError::InvalidSafeSummary { .. } => "InvalidSafeSummary",
             HostApiError::InvalidModelDiagnostic { .. } => "InvalidModelDiagnostic",
             HostApiError::InvalidHostRemediation { .. } => "InvalidHostRemediation",
+            HostApiError::InvalidOutputContract { .. } => "InvalidOutputContract",
             HostApiError::InvariantViolation { .. } => "InvariantViolation",
         }
     }
@@ -403,6 +404,9 @@ mod tests {
             HostApiError::InvalidHostRemediation {
                 reason: "empty".to_string(),
             },
+            HostApiError::InvalidOutputContract {
+                reason: "schema name is invalid".to_string(),
+            },
             HostApiError::InvariantViolation {
                 reason: "port answered for an unrequested id".to_string(),
             },
@@ -416,7 +420,7 @@ mod tests {
         );
         assert_eq!(
             covered.len(),
-            10,
+            11,
             "a HostApiError variant was added without a case here: {covered:?}"
         );
 

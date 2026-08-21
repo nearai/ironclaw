@@ -1,11 +1,22 @@
-// @ts-nocheck
-import React from "react";
+import React, {
+  type AriaAttributes,
+  type ComponentPropsWithoutRef,
+  type FocusEvent,
+  type KeyboardEvent,
+  type RefObject,
+} from "react";
 import { cn } from "../utils/cn";
 import { Icon } from "./icons";
+import type { DataAttributes } from "./types";
+
+type OpenSelectMenuEntry = {
+  close: () => void;
+  rootRef: RefObject<HTMLDivElement | null>;
+};
 
 let nextSelectMenuId = 0;
-const openSelectMenuEntries = new Set();
-let sharedDocumentMouseDownListener = null;
+const openSelectMenuEntries = new Set<OpenSelectMenuEntry>();
+let sharedDocumentMouseDownListener: ((event: MouseEvent) => void) | null = null;
 
 const toneDotClasses = {
   neutral: "bg-[var(--v2-text-faint)]",
@@ -34,28 +45,64 @@ const sizeClasses = {
   },
 };
 
+export type SelectMenuTone = keyof typeof toneDotClasses;
+export type SelectMenuAlign = keyof typeof alignClasses;
+export type SelectMenuSize = keyof typeof sizeClasses;
+
+export type SelectMenuOption = {
+  disabled?: boolean;
+  label?: string;
+  tone?: SelectMenuTone;
+  value: string;
+};
+
+type SelectMenuRootProps = Pick<
+  ComponentPropsWithoutRef<"div">,
+  "id" | "title"
+> &
+  AriaAttributes &
+  DataAttributes;
+
+export type SelectMenuProps = SelectMenuRootProps & {
+  align?: SelectMenuAlign;
+  ariaLabel?: string;
+  buttonClassName?: string;
+  className?: string;
+  disabled?: boolean;
+  menuClassName?: string;
+  onChange?: (value: string) => void;
+  optionClassName?: string;
+  options?: readonly SelectMenuOption[];
+  placeholder?: string;
+  searchAriaLabel?: string;
+  searchable?: boolean;
+  searchPlaceholder?: string;
+  size?: SelectMenuSize;
+  value: string;
+};
+
 function createSelectMenuId() {
   nextSelectMenuId += 1;
   return `v2-select-menu-${nextSelectMenuId}`;
 }
 
-function removeStaleOpenSelectMenuEntries() {
+function removeStaleOpenSelectMenuEntries(): void {
   for (const entry of Array.from(openSelectMenuEntries)) {
     const root = entry.rootRef.current;
     if (!root || root.isConnected === false) openSelectMenuEntries.delete(entry);
   }
 }
 
-function handleSharedDocumentMouseDown(event) {
+function handleSharedDocumentMouseDown(event: MouseEvent): void {
   removeStaleOpenSelectMenuEntries();
   for (const entry of Array.from(openSelectMenuEntries)) {
-    if (entry.rootRef.current?.contains?.(event.target)) continue;
+    if (entry.rootRef.current?.contains(event.target as Node | null)) continue;
     entry.close();
   }
   syncSharedDocumentListener();
 }
 
-function syncSharedDocumentListener() {
+function syncSharedDocumentListener(): void {
   if (typeof document === "undefined") return;
   if (openSelectMenuEntries.size > 0 && !sharedDocumentMouseDownListener) {
     sharedDocumentMouseDownListener = handleSharedDocumentMouseDown;
@@ -68,7 +115,7 @@ function syncSharedDocumentListener() {
   }
 }
 
-function registerOpenSelectMenu(entry) {
+function registerOpenSelectMenu(entry: OpenSelectMenuEntry): () => void {
   removeStaleOpenSelectMenuEntries();
   openSelectMenuEntries.add(entry);
   syncSharedDocumentListener();
@@ -78,16 +125,23 @@ function registerOpenSelectMenu(entry) {
   };
 }
 
-function firstEnabledIndex(options) {
+function firstEnabledIndex(options: readonly SelectMenuOption[]): number {
   return options.findIndex((option) => !option.disabled);
 }
 
-function selectedOptionIndex(options, value) {
+function selectedOptionIndex(
+  options: readonly SelectMenuOption[],
+  value: string,
+): number {
   const index = options.findIndex((option) => option.value === value);
   return index >= 0 ? index : firstEnabledIndex(options);
 }
 
-function nextEnabledIndex(options, currentIndex, direction) {
+function nextEnabledIndex(
+  options: readonly SelectMenuOption[],
+  currentIndex: number,
+  direction: 1 | -1,
+): number {
   const fallbackIndex = firstEnabledIndex(options);
   if (fallbackIndex < 0) return -1;
   const start =
@@ -99,7 +153,10 @@ function nextEnabledIndex(options, currentIndex, direction) {
   return fallbackIndex;
 }
 
-function edgeEnabledIndex(options, direction) {
+function edgeEnabledIndex(
+  options: readonly SelectMenuOption[],
+  direction: 1 | -1,
+): number {
   if (!options.length) return -1;
   const start = direction > 0 ? 0 : options.length - 1;
   const end = direction > 0 ? options.length : -1;
@@ -109,26 +166,31 @@ function edgeEnabledIndex(options, direction) {
   return -1;
 }
 
-function optionLabel(option, fallback = "") {
+function optionLabel(
+  option: SelectMenuOption | null | undefined,
+  fallback = "",
+): string {
   return option?.label ?? option?.value ?? fallback;
 }
 
-function normalizeTone(tone) {
+function normalizeTone(
+  tone: SelectMenuTone | null | undefined,
+): SelectMenuTone | null {
   if (!tone) return null;
   return Object.prototype.hasOwnProperty.call(toneDotClasses, tone) ? tone : "neutral";
 }
 
-function normalizeAlign(align) {
+function normalizeAlign(align: SelectMenuAlign): SelectMenuAlign {
   return Object.prototype.hasOwnProperty.call(alignClasses, align) ? align : "right";
 }
 
-function optionsIdentity(options) {
+function optionsIdentity(options: readonly SelectMenuOption[]): string {
   return options
     .map((option) => `${String(option.value)}:${option.disabled ? "disabled" : "enabled"}`)
     .join("\u001f");
 }
 
-function safeRootProps(props) {
+function safeRootProps(props: SelectMenuRootProps): SelectMenuRootProps {
   return Object.fromEntries(
     Object.entries(props).filter(
       ([key]) =>
@@ -137,10 +199,10 @@ function safeRootProps(props) {
         key.startsWith("data-") ||
         key.startsWith("aria-")
     )
-  );
+  ) as SelectMenuRootProps;
 }
 
-function ToneDot({ tone }) {
+function ToneDot({ tone }: { tone?: SelectMenuTone | null }) {
   const normalizedTone = normalizeTone(tone);
   if (!normalizedTone) return null;
   return (
@@ -153,13 +215,6 @@ function ToneDot({ tone }) {
     />
   );
 }
-
-/**
- * @typedef {"neutral" | "positive" | "warning" | "danger" | "info" | "accent"} SelectMenuTone
- * @typedef {"left" | "right"} SelectMenuAlign
- * @typedef {"md" | "sm"} SelectMenuSize
- * @typedef {{ value: string, label?: string, disabled?: boolean, tone?: SelectMenuTone }} SelectMenuOption
- */
 
 /**
  * Custom listbox-backed select menu.
@@ -187,7 +242,7 @@ export function SelectMenu({
   searchAriaLabel = "Search options",
   searchPlaceholder = "Search options",
   ...rest
-}) {
+}: SelectMenuProps) {
   const [open, setOpen] = React.useState(false);
   const [searchQuery, setSearchQuery] = React.useState("");
   const normalizedSearchQuery = searchQuery.trim().toLowerCase();
@@ -201,12 +256,12 @@ export function SelectMenu({
   const [activeIndex, setActiveIndex] = React.useState(() =>
     selectedOptionIndex(visibleOptions, value)
   );
-  const rootRef = React.useRef(null);
-  const buttonRef = React.useRef(null);
+  const rootRef = React.useRef<HTMLDivElement>(null);
+  const buttonRef = React.useRef<HTMLButtonElement>(null);
   const idRef = React.useRef("");
   const restoreFocusOnCloseRef = React.useRef(false);
   const wasOpenRef = React.useRef(open);
-  const outsideClickEntryRef = React.useRef(null);
+  const outsideClickEntryRef = React.useRef<OpenSelectMenuEntry | null>(null);
   if (!idRef.current) idRef.current = createSelectMenuId();
 
   const selectedIndex = selectedOptionIndex(options, value);
@@ -231,7 +286,7 @@ export function SelectMenu({
       : {}),
   };
 
-  const closeMenu = ({ restoreFocus = true } = {}) => {
+  const closeMenu = ({ restoreFocus = true }: { restoreFocus?: boolean } = {}) => {
     restoreFocusOnCloseRef.current = restoreFocus;
     setOpen(false);
   };
@@ -256,7 +311,9 @@ export function SelectMenu({
 
   React.useEffect(() => {
     if (!open) return undefined;
-    return registerOpenSelectMenu(outsideClickEntryRef.current);
+    const outsideClickEntry = outsideClickEntryRef.current;
+    if (!outsideClickEntry) return undefined;
+    return registerOpenSelectMenu(outsideClickEntry);
   }, [open]);
 
   React.useEffect(() => {
@@ -267,13 +324,13 @@ export function SelectMenu({
     wasOpenRef.current = open;
   }, [open]);
 
-  const chooseOption = (option) => {
+  const chooseOption = (option: SelectMenuOption | undefined) => {
     if (!option || option.disabled) return;
     closeMenu();
     if (option.value !== value) onChange(option.value);
   };
 
-  const openWithIndex = (index) => {
+  const openWithIndex = (index: number) => {
     if (interactionDisabled || index < 0) return;
     setActiveIndex(
       index < visibleOptions.length ? index : firstEnabledIndex(visibleOptions)
@@ -281,11 +338,11 @@ export function SelectMenu({
     setOpen(true);
   };
 
-  const handleKeyDown = (event) => {
+  const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (interactionDisabled) return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
-      const direction = event.key === "ArrowDown" ? 1 : -1;
+      const direction: 1 | -1 = event.key === "ArrowDown" ? 1 : -1;
       const baseIndex = open
         ? activeIndex
         : selectedOptionIndex(visibleOptions, value);
@@ -296,7 +353,7 @@ export function SelectMenu({
 
     if (event.key === "Home" || event.key === "End") {
       event.preventDefault();
-      const direction = event.key === "Home" ? 1 : -1;
+      const direction: 1 | -1 = event.key === "Home" ? 1 : -1;
       openWithIndex(edgeEnabledIndex(visibleOptions, direction));
       return;
     }
@@ -323,7 +380,7 @@ export function SelectMenu({
     if (event.key === "Tab") closeMenu({ restoreFocus: false });
   };
 
-  const handleSearchKeyDown = (event) => {
+  const handleSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (
       event.key === "ArrowDown" ||
       event.key === "ArrowUp" ||
@@ -334,7 +391,7 @@ export function SelectMenu({
     }
   };
 
-  const handleRootBlur = (event) => {
+  const handleRootBlur = (event: FocusEvent<HTMLDivElement>) => {
     if (open && !event.currentTarget.contains(event.relatedTarget)) {
       closeMenu({ restoreFocus: false });
     }

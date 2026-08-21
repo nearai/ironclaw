@@ -100,7 +100,7 @@ TransactionalStore backend transaction boundary for multi-record operations
 These primitives are not replacements for domain APIs. For example, callers
 should still use `ProcessTransitionPort::claim_next_processes`,
 `SessionThreadService::accept_inbound_message`,
-`OutboundStateStore::advance_subscription_cursor`, and the secret-store APIs
+`OutboundStateStore::load_subscription_cursor`, and the secret-store APIs
 instead of reaching into primitive stores directly.
 
 Rules:

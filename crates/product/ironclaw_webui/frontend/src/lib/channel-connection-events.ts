@@ -45,6 +45,12 @@ export async function notifyChannelConnected({
   providerUserId = null,
   sourceThreadId = null,
   source = "webui",
+}: {
+  channel?: string;
+  provider?: string | null;
+  providerUserId?: string | null;
+  sourceThreadId?: string | null;
+  source?: string;
 } = {}) {
   const normalized = normalizeConnectionChannel(channel);
   if (!normalized) return;

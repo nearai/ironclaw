@@ -140,6 +140,36 @@ class GitHubTags:
             raise ReleaseTagError(f"failed to create {tag}: {result.stderr.strip()}")
 
 
+def ensure_stable_changelog_entry(candidate_root: Path, version: str) -> None:
+    """Refuse a stable cut whose candidate `docs/changelog.mdx` has no
+    `<Update description="vX.Y.Z">` entry. Prerelease cuts are exempt;
+    malformed versions are left for `ensure_release_tag` to reject.
+    """
+    if VERSION_PATTERN.fullmatch(version) is None or "-" in version:
+        return
+    changelog = candidate_root / "docs" / "changelog.mdx"
+    try:
+        text = changelog.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ReleaseTagError(
+            f"stable release {version} requires docs/changelog.mdx in the "
+            f"candidate checkout, which cannot be read: {error}"
+        ) from error
+    # Must be the attribute of a real <Update> tag: prose mentions,
+    # rc-labeled entries, and lookalike attributes on other elements
+    # (data-description=…) must not satisfy the stable gate.
+    entry = re.compile(rf'<Update\b[^>]*\sdescription="v{re.escape(version)}"')
+    if entry.search(text) is None:
+        raise ReleaseTagError(
+            f"docs/changelog.mdx has no entry for v{version}. Land an "
+            f'<Update description="v{version}"> entry on main before the '
+            "Monday cut so the candidate inherits it; if the branch is "
+            "already cut, add the entry there and cherry-pick it to main so "
+            "the next candidate keeps it "
+            "(docs/internal/weekly-release-strategy.md, Monday checklist)."
+        )
+
+
 def _checked_out_sha(candidate_root: Path) -> str:
     return subprocess.run(
         ["git", "rev-parse", "HEAD^{commit}"],
@@ -230,6 +260,7 @@ def main() -> int:
     parser.add_argument("--repository", required=True)
     args = parser.parse_args()
 
+    ensure_stable_changelog_entry(args.candidate_root, args.version)
     tags = GitHubTags(args.repository)
     message = ensure_release_tag(
         requested_version=args.version,

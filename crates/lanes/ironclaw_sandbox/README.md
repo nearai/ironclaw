@@ -34,12 +34,75 @@ the point of the crate.
   `DockerScriptBackend`, `ScriptRuntimeHttpAdapter`, normalized
   request/result/error types (`script`).
 
-**Wiring status:** three production paths cross this crate (plan validation on
-the kernel spawn path, the process-executor routing check, the saved-output
-scope digest) but there is **no production execution backend** today —
-`with_script_runtime` and `RebornScopedSandboxCommandTransport::new` have zero
-production callers. Read `AGENTS.md`'s "Wiring status" before deleting
-anything as dead code.
+## Production wiring and lifecycle
+
+The `HostedSingleTenantVolumeSandboxed` profile has a production execution
+backend. Composition connects `RebornScopedSandboxCommandTransport` and installs
+it behind the host runtime's user-sandbox process port. A `builtin.shell` call
+therefore uses Docker Exec inside one persistent local container per
+`(tenant, user)`. `RebornSandboxUserKey` supplies the stable container name and
+tenant/user labels, so every thread owned by that user converges on the same
+container. The host workspace is also scoped per user and mounted at
+`/workspace`; container-local state survives subsequent shell calls while that
+container exists.
+
+Before an exec, the transport adopts a compatible running container, restarts a
+compatible stopped container, or recycles a container whose image or security
+posture no longer matches. A per-user creation gate converges concurrent first
+calls on one container. Active-exec accounting prevents the idle sweeper from
+stopping it until all commands finish. The sweeper stops an inactive container;
+the next command adopts and restarts it.
+For managed egress, idle suspension removes the proxy and its upstream network
+but retains the stopped worker's private network. This keeps the proxy DNS
+endpoint stable and preserves container-local state on wake. Final retention
+cleanup removes the stopped container and private network together.
+
+One IronClaw process owns a local Docker workspace root at a time. The
+transport acquires a transport-local advisory owner lock on the workspace root
+before container reconciliation and fails closed if another live process holds
+that workspace.
+The lock, not the file's metadata, grants authority; a stale lock file after a
+crash grants nothing. This keeps process-local activity counters from
+authorizing cleanup of another process's active container.
+
+The idle sweeper is a narrow provider-resource cleanup loop, not a second
+durable process lifecycle: it never claims runs, changes
+`ironclaw_processes` run/lifecycle state, or decides whether work may execute.
+`ironclaw_processes` remains the only lifecycle authority. During the current
+IronClaw process lifetime, the sweeper stops inactive containers so they do not
+consume Docker resources indefinitely. After a host restart, reconciliation
+happens only when the next command adopts, restarts, or replaces that user's
+container. Composition owns sweeper startup/shutdown through
+`SandboxCommandTransport::shutdown`. If cleanup must later happen without a
+new command, move that durable timer and ownership decision behind a
+kernel-owned lifecycle port rather than expanding this lane's authority.
+
+`HostedSingleTenantVolumeSandboxedRailway` remains a separate transport. It
+keeps a per-user Railway sandbox and checkpointed workspace, but starts a fresh
+inner worker container for each command because Railway does not preserve inner
+mount namespaces across outer exec calls. It does not use the persistent local
+Docker-container lifecycle above.
+
+Sandbox deployment profiles use managed per-user egress. Worker containers
+join an internal Docker network with isolated gateway mode, so the Docker host
+has no bridge endpoint on that subnet. A dedicated `ironsh/iron-proxy` sidecar
+joins that private network and a host-scoped shared
+upstream network. Its DNS and proxy listeners bind only to the private-network
+address, so other proxies on the shared network cannot use its allowlist or
+attribution identity. The proxy applies the configured hostname allowlist,
+rejects private-address destinations, preserves end-to-end TLS with SNI
+inspection, and writes a request audit trail correlated to the capability
+invocation. Before any managed proxy container is removed — idle suspension,
+retention, recycling, rollback, or orphan reconciliation — its structured
+request audit log is drained into a bounded per-proxy file under the
+managed-egress `audit/` directory, so egress evidence survives the container.
+The local runtime resolves the proxy by immutable digest and pulls
+an absent public image before startup. Workers address the proxy by its stable
+per-user container name; transient Docker subnet addresses do not enter the
+persistent worker's compatibility stamp. Railway preview sandboxes retain a
+dedicated two-network shape inside Railway's private outer sandbox. Ad hoc
+transports remain fail-closed on `--network none` unless they receive an
+explicit host broker or managed-egress binding.
 
 ## Depends on / consumed by
 
@@ -52,8 +115,8 @@ anything as dead code.
   [`crates/lanes/AGENTS.md`](../AGENTS.md). `ironclaw_resources` is
   **dev-only** (#7067). External: `bollard`, `rcgen`, `libc`, and friends —
   declared by this crate and no other.
-- **Consumed by (measured 2026-08-05):** `ironclaw_host_runtime` (normal);
-  `ironclaw_loop_host` and `ironclaw_turn_runner` dev-only.
+- **Consumed by:** `ironclaw_composition` and `ironclaw_host_runtime` (normal);
+  `ironclaw_loop_host` and `ironclaw_turn_runner` (dev-only).
 
 ## Invariants
 
@@ -66,25 +129,27 @@ anything as dead code.
 - **Fail closed on missing containment:** a served multi-user deployment must
   never resolve to an unsandboxed host-process backend; a missing backend
   degrades to "no shell", never to a silently unsandboxed one.
-- **No lane-owned networking:** scanned by
+- **Runtime HTTP boundary remains outside this lane:** scanned by
   `reborn_runtime_http_egress_has_single_network_boundary`
-  (`reborn_dependency_boundaries.rs`).
-- **Known debt, not invariant yet:** `script.rs` still shells out directly
-  (`Command::new("docker")`) instead of routing through
-  `SandboxCommandTransport`, and the `IRONCLAW_REQUIRE_DOCKER_TESTS` fail-closed
-  switch is armed by nothing (#7081) — both carried in `AGENTS.md`.
+  (`reborn_dependency_boundaries.rs`). This invariant is separate from the
+  direct process egress called out in the Step 2 limitation above.
+- **Known debt:** the legacy script lane in `script.rs` still shells out
+  directly with `Command::new("docker")` instead of routing through
+  `SandboxCommandTransport`.
 
 ## Tests
 
 ```bash
-cargo test -p ironclaw_sandbox              # real-Docker suites skip without a daemon (#7081)
+cargo test -p ironclaw_sandbox              # unit suites; Docker cases skip without a daemon
+cargo test -p ironclaw_sandbox --test user_sandbox_docker_live -- --test-threads=1
+                                            # real-Docker lifecycle suite; serialized per daemon
 cargo test -p ironclaw_architecture_tests   # egress scan + layer matrix
 ```
 
 ## See also
 
-Working rules, wiring status, and known debt: [`AGENTS.md`](./AGENTS.md)
-(canonical). Family boundary: [`crates/lanes/AGENTS.md`](../AGENTS.md).
+Dependency rules and known debt: [`AGENTS.md`](./AGENTS.md). Family boundary:
+[`crates/lanes/AGENTS.md`](../AGENTS.md).
 Contracts: `docs/internal/reborn/contracts/scripts.md`,
 `docs/internal/reborn/contracts/processes.md`,
 `docs/internal/reborn/contracts/runtime-workflows.md`,

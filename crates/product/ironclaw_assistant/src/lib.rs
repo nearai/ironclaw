@@ -66,6 +66,10 @@ mod reborn_services;
 mod run_delivery;
 mod scoped_fs;
 mod steering;
+mod suggestions;
+mod suggestions_observer;
+mod suggestions_store;
+mod unbound_turn;
 mod workflow;
 
 pub use project_create_capability::{PROJECT_CREATE_CAPABILITY_ID, project_create_capability};
@@ -248,6 +252,9 @@ pub use run_delivery::{
 // Adapter, projection, and event DTOs are re-exported from
 // `ironclaw_host_api::product_adapter` above so product terminals consume a
 // single product service.
+pub use reborn_services::run_artifact::timings::{
+    RunArtifactIterationTiming, RunArtifactTimingTotals, RunArtifactTimings, RunArtifactToolTiming,
+};
 pub use reborn_services::{
     ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID,
     ADMIN_CONFIGURATION_VIEW, ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW,
@@ -263,10 +270,11 @@ pub use reborn_services::{
     AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE, AUTOMATION_PAUSE_CAPABILITY,
     AUTOMATION_PAUSE_CAPABILITY_ID, AUTOMATION_PAUSE_COMMAND, AUTOMATION_RENAME_CAPABILITY,
     AUTOMATION_RENAME_CAPABILITY_ID, AUTOMATION_RENAME_COMMAND, AUTOMATION_RESUME_CAPABILITY,
-    AUTOMATION_RESUME_CAPABILITY_ID, AUTOMATION_RESUME_COMMAND,
-    AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
-    AUTOMATIONS_VIEW, AutomationListRequest, AutomationProductService, CANCEL_RUN_COMMAND,
-    CREATE_THREAD_COMMAND, ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
+    AUTOMATION_RESUME_CAPABILITY_ID, AUTOMATION_RESUME_COMMAND, AUTOMATION_RUN_CAPABILITY,
+    AUTOMATION_RUN_CAPABILITY_ID, AUTOMATION_RUN_COMMAND, AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE,
+    AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATIONS_VIEW, AutomationListRequest,
+    AutomationProductService, CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND,
+    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
     ChannelNotificationSetupService, DeliveryClientBootstrap, DeliveryClientBootstrapError,
     EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY,
@@ -323,6 +331,7 @@ pub use reborn_services::{
     RebornAttachmentRequest, RebornAuthAccount, RebornAutomationActiveHold,
     RebornAutomationHoldReason, RebornAutomationInfo, RebornAutomationMutationResponse,
     RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRequest,
+    RebornAutomationRunMutationResult, RebornAutomationRunMutationStatus,
     RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornCommandRejection, RebornCreateProjectRequest, RebornCreateThreadResponse,
@@ -366,7 +375,7 @@ pub use reborn_services::{
     RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
     RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
     RebornVendorAuthAccounts, RegistrationChannelNotificationSetupService, RunArtifactLogs,
-    RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall,
+    RunArtifactMessage, RunArtifactRedaction, RunArtifactRunTimings, RunArtifactToolCall,
     SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW,
     SKILL_INSTALL_CAPABILITY, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY,
@@ -384,6 +393,11 @@ pub use reborn_services::{
     outbound_delivery_synthetic_provider, outbound_delivery_targets_list_input_schema,
     parse_notification_channels_set_input, parse_outbound_delivery_targets_list_input,
     set_notification_channels_for_model,
+};
+pub use suggestions_observer::SuggestionsProcessCommitObserver;
+pub use suggestions_store::{FilesystemSuggestionsStore, SuggestionsStore};
+pub use unbound_turn::{
+    UnboundTurnError, UnboundTurnOutcome, UnboundTurnService, UnboundTurnSubmission,
 };
 
 pub use product_surface_inbound::{

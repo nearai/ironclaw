@@ -116,6 +116,7 @@ FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bb
 RUN apt-get -o Acquire::Retries=3 update \
     && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
         ca-certificates \
+        curl \
         postgresql-client \
         sqlite3 \
     && rm -rf /var/lib/apt/lists/*

@@ -1,8 +1,11 @@
-import { Icon } from "../../../design-system/icons";
 import { Badge } from "../../../design-system/badge";
 import { Card } from "../../../design-system/card";
+import { Icon } from "../../../design-system/icons";
 import { Skeleton } from "../../../design-system/skeleton";
-import { SelectMenu } from "../../../design-system/select-menu";
+import {
+  SelectMenu,
+  type SelectMenuOption,
+} from "../../../design-system/select-menu";
 import { Switch } from "../../../design-system/switch";
 import { useT } from "../../../lib/i18n";
 import { useTools } from "../hooks/useTools";
@@ -59,7 +62,7 @@ function AutoApproveCard({ settings, onSave, savedKeys, isLoading }) {
 function ToolRow({ tool, pendingPermission, onPermissionChange, isSaved }) {
   const t = useT();
   const description = translatedToolDescription(t, tool);
-  const permissionStates = [
+  const permissionStates: SelectMenuOption[] = [
     { value: "default", label: t("tools.followDefault"), tone: "neutral" },
     { value: "always_allow", label: t("tools.alwaysAllow"), tone: "positive" },
     { value: "ask_each_time", label: t("tools.askEachTime"), tone: "warning" },
@@ -123,7 +126,11 @@ function ToolRow({ tool, pendingPermission, onPermissionChange, isSaved }) {
 
       <div className="flex shrink-0 items-center gap-3">
         {isLocked
-          ? (<Badge tone={current.tone} label={current.label} size="sm" />)
+          ? (<Badge
+              tone={current.tone === "neutral" ? "muted" : current.tone}
+              label={current.label}
+              size="sm"
+            />)
           : (
               <SelectMenu
                 value={selectedState}

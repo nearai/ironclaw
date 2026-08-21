@@ -57,12 +57,8 @@ pub(crate) fn docker_available() -> bool {
 ///
 /// Same "fail instead of skip" behavior as [`docker_available`] under
 /// `IRONCLAW_REQUIRE_DOCKER_TESTS=1`.
-// Used by `tests/docker_security.rs`, which needs the locally-built worker
-// image. Still `allow(dead_code)` because this file is loaded into a second
-// module location — `attribution`'s real-Docker test, which needs
-// `docker_available` only. The remaining consumers
-// (`sandbox_cross_tenant_escape.rs`, `exec_transport`'s docker-gated tests)
-// are out of scope here (see this PR's description).
+// Loaded into several test modules whose individual consumers use different
+// subsets of this shared gate.
 #[allow(dead_code)]
 pub(crate) fn docker_image_available(image: &str) -> bool {
     let available = Command::new("docker")
@@ -82,11 +78,20 @@ pub(crate) fn docker_image_available(image: &str) -> bool {
 /// Resolve the sandbox worker image name the same way
 /// `RebornSandboxConfig::new` does, so the gate checks the image the test
 /// will actually launch.
-// Unused by either consumer in this PR — `docker_security.rs` launches
-// `DEFAULT_PROCESS_SANDBOX_IMAGE` directly. See `docker_image_available` above.
+// Some consumers use a fixed image while the per-user lifecycle and
+// attribution proofs use the configured worker image.
 #[allow(dead_code)]
 pub(crate) fn configured_sandbox_image() -> String {
     std::env::var("IRONCLAW_REBORN_SANDBOX_IMAGE")
         .or_else(|_| std::env::var("IRONCLAW_SANDBOX_IMAGE"))
         .unwrap_or_else(|_| "ironclaw-worker:latest".to_string())
+}
+
+/// Resolve the pinned managed-egress proxy image used by the local sandbox.
+#[allow(dead_code)]
+pub(crate) fn configured_sandbox_proxy_image() -> String {
+    std::env::var("IRONCLAW_REBORN_SANDBOX_PROXY_IMAGE").unwrap_or_else(|_| {
+        "ironsh/iron-proxy@sha256:c4628019c24f4cc8d77564a26b7c9cedb00accee6f93d06270e85fb8f9c6a7da"
+            .to_string()
+    })
 }

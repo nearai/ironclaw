@@ -6,6 +6,7 @@
 
 use base64::Engine as _;
 
+use crate::exports::near::agent::tool::{ErrorKind, GuestFailure};
 use crate::near::agent::host;
 use crate::types::*;
 
@@ -19,8 +20,53 @@ const FILE_FIELDS: &str = "id,name,mimeType,description,size,createdTime,modifie
     webViewLink,parents,shared,starred,trashed,ownedByMe,driveId,\
     owners(emailAddress,displayName)";
 
+/// Bound a free-text message to a sane length before it rides in a
+/// `guest-failure`; the host re-bounds and scrubs downstream, but the guest
+/// should never hand over an unbounded string in the first place.
+pub(crate) fn bounded_message(message: &str) -> String {
+    const MAX_MESSAGE_CHARS: usize = 512;
+    message.chars().take(MAX_MESSAGE_CHARS).collect()
+}
+
+// ponytail: duplicated across isolated WASM guest packages; consolidate only
+// when guests share a supported contracts crate.
+fn transport_failure(failure: &host::HttpFailure) -> GuestFailure {
+    let kind = match failure.kind {
+        host::HttpErrorKind::AuthRequired => ErrorKind::AuthRequired,
+        host::HttpErrorKind::Input => ErrorKind::Input,
+        host::HttpErrorKind::OutputTooLarge => ErrorKind::OutputTooLarge,
+        host::HttpErrorKind::Executor => ErrorKind::Executor,
+        host::HttpErrorKind::NetworkDenied => ErrorKind::NetworkDenied,
+        host::HttpErrorKind::Client => ErrorKind::Client,
+        host::HttpErrorKind::OperationFailed => ErrorKind::OperationFailed,
+    };
+    GuestFailure {
+        kind,
+        code: failure.code.clone().or_else(|| Some("google_api_transport_error".into())),
+        message: failure.message.as_deref().map(bounded_message),
+    }
+}
+
+/// A guest-side JSON encode/decode of an already-well-formed payload failed
+/// — a tool-side processing failure, not anything the caller did wrong.
+pub(crate) fn serialization_failure(error: &serde_json::Error) -> GuestFailure {
+    GuestFailure {
+        kind: ErrorKind::Executor,
+        code: Some("serialization_failed".to_string()),
+        message: Some(bounded_message(&error.to_string())),
+    }
+}
+
+fn utf8_decode_failure(error: &std::string::FromUtf8Error) -> GuestFailure {
+    GuestFailure {
+        kind: ErrorKind::Executor,
+        code: Some("invalid_utf8_response".to_string()),
+        message: Some(bounded_message(&error.to_string())),
+    }
+}
+
 /// Make a Drive API call.
-fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, String> {
+fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, GuestFailure> {
     let url = format!("{}/{}", DRIVE_API_BASE, path);
 
     let headers = if body.is_some() {
@@ -36,7 +82,8 @@ fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, Stri
         &format!("Drive API: {} {}", method, path),
     );
 
-    let response = host::http_request(method, &url, headers, body_bytes.as_deref(), None)?;
+    let response = host::http_request(method, &url, headers, body_bytes.as_deref(), None)
+        .map_err(|e| transport_failure(&e))?;
 
     if response.status < 200 || response.status >= 300 {
         return Err(api_status_error("Drive", response.status, &response.body));
@@ -46,17 +93,18 @@ fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, Stri
         return Ok(String::new());
     }
 
-    String::from_utf8(response.body).map_err(|e| format!("Invalid UTF-8 in response: {}", e))
+    String::from_utf8(response.body).map_err(|e| utf8_decode_failure(&e))
 }
 
 /// Make a raw API call that returns bytes (for file downloads).
-fn api_call_raw(method: &str, url: &str) -> Result<Vec<u8>, String> {
+fn api_call_raw(method: &str, url: &str) -> Result<Vec<u8>, GuestFailure> {
     host::log(
         host::LogLevel::Debug,
         &format!("Drive API raw: {} {}", method, url),
     );
 
-    let response = host::http_request(method, url, "{}", None, None)?;
+    let response =
+        host::http_request(method, url, "{}", None, None).map_err(|e| transport_failure(&e))?;
 
     if response.status < 200 || response.status >= 300 {
         return Err(api_status_error("Drive", response.status, &response.body));
@@ -65,16 +113,22 @@ fn api_call_raw(method: &str, url: &str) -> Result<Vec<u8>, String> {
     Ok(response.body)
 }
 
-fn api_status_error(service: &str, status: u16, body: &[u8]) -> String {
+fn api_status_error(service: &str, status: u16, body: &[u8]) -> GuestFailure {
     if status == 401 {
-        return serde_json::json!({
-            "code": GOOGLE_API_AUTH_REQUIRED_ERROR,
-            "kind": "auth_required",
-        })
-        .to_string();
+        return GuestFailure {
+            kind: ErrorKind::AuthRequired,
+            code: Some(GOOGLE_API_AUTH_REQUIRED_ERROR.to_string()),
+            message: None,
+        };
     }
     let body_text = String::from_utf8_lossy(body);
-    format!("{service} API returned status {status}: {body_text}")
+    GuestFailure {
+        kind: ErrorKind::Client,
+        code: Some(format!("api_status_{status}")),
+        message: Some(bounded_message(&format!(
+            "{service} API returned status {status}: {body_text}"
+        ))),
+    }
 }
 
 /// Parse a file resource from the API response.
@@ -125,7 +179,7 @@ pub fn list_files(
     corpora: &str,
     drive_id: Option<&str>,
     page_token: Option<&str>,
-) -> Result<ListFilesResult, String> {
+) -> Result<ListFilesResult, GuestFailure> {
     let mut params = vec![
         format!("pageSize={}", page_size),
         format!("fields=nextPageToken,files({})", FILE_FIELDS),
@@ -150,7 +204,7 @@ pub fn list_files(
     let path = format!("files?{}", params.join("&"));
     let response = api_call("GET", &path, None)?;
     let parsed: serde_json::Value =
-        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
+        serde_json::from_str(&response).map_err(|e| serialization_failure(&e))?;
 
     let files = parsed["files"]
         .as_array()
@@ -164,7 +218,7 @@ pub fn list_files(
 }
 
 /// Get file metadata.
-pub fn get_file(file_id: &str) -> Result<FileResult, String> {
+pub fn get_file(file_id: &str) -> Result<FileResult, GuestFailure> {
     let path = format!(
         "files/{}?fields={}&supportsAllDrives=true",
         url_encode(file_id),
@@ -172,7 +226,7 @@ pub fn get_file(file_id: &str) -> Result<FileResult, String> {
     );
     let response = api_call("GET", &path, None)?;
     let parsed: serde_json::Value =
-        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
+        serde_json::from_str(&response).map_err(|e| serialization_failure(&e))?;
 
     Ok(FileResult {
         file: parse_file(&parsed),
@@ -183,7 +237,7 @@ pub fn get_file(file_id: &str) -> Result<FileResult, String> {
 pub fn download_file(
     file_id: &str,
     export_mime_type: Option<&str>,
-) -> Result<DownloadResult, String> {
+) -> Result<DownloadResult, GuestFailure> {
     let meta = get_file(file_id)?;
     let is_google_apps = meta
         .file
@@ -300,7 +354,7 @@ pub fn upload_file(
     mime_type: &str,
     parent_id: Option<&str>,
     description: Option<&str>,
-) -> Result<FileResult, String> {
+) -> Result<FileResult, GuestFailure> {
     let mut metadata = serde_json::json!({
         "name": name,
         "mimeType": mime_type,
@@ -312,7 +366,7 @@ pub fn upload_file(
         metadata["description"] = serde_json::Value::String(desc.to_string());
     }
 
-    let metadata_str = serde_json::to_string(&metadata).map_err(|e| e.to_string())?;
+    let metadata_str = serde_json::to_string(&metadata).map_err(|e| serialization_failure(&e))?;
     let boundary = multipart_boundary(&metadata_str, content);
 
     // Build multipart body
@@ -339,16 +393,17 @@ pub fn upload_file(
         "Drive API: POST upload/files (multipart)",
     );
 
-    let response = host::http_request("POST", &url, &headers, Some(body.as_bytes()), None)?;
+    let response = host::http_request("POST", &url, &headers, Some(body.as_bytes()), None)
+        .map_err(|e| transport_failure(&e))?;
 
     if response.status < 200 || response.status >= 300 {
         return Err(api_status_error("Drive", response.status, &response.body));
     }
 
     let parsed: serde_json::Value = serde_json::from_str(
-        &String::from_utf8(response.body).map_err(|e| format!("Invalid UTF-8: {}", e))?,
+        &String::from_utf8(response.body).map_err(|e| utf8_decode_failure(&e))?,
     )
-    .map_err(|e| format!("Failed to parse response: {}", e))?;
+    .map_err(|e| serialization_failure(&e))?;
 
     Ok(FileResult {
         file: parse_file(&parsed),
@@ -379,7 +434,7 @@ pub fn update_file(
     description: Option<&str>,
     move_to_parent: Option<&str>,
     starred: Option<bool>,
-) -> Result<FileResult, String> {
+) -> Result<FileResult, GuestFailure> {
     let mut patch = serde_json::json!({});
 
     if let Some(n) = name {
@@ -413,12 +468,12 @@ pub fn update_file(
         }
     }
 
-    let body = serde_json::to_string(&patch).map_err(|e| e.to_string())?;
+    let body = serde_json::to_string(&patch).map_err(|e| serialization_failure(&e))?;
     let path = format!("files/{}?{}", url_encode(file_id), params.join("&"));
 
     let response = api_call("PATCH", &path, Some(&body))?;
     let parsed: serde_json::Value =
-        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
+        serde_json::from_str(&response).map_err(|e| serialization_failure(&e))?;
 
     Ok(FileResult {
         file: parse_file(&parsed),
@@ -430,7 +485,7 @@ pub fn create_folder(
     name: &str,
     parent_id: Option<&str>,
     description: Option<&str>,
-) -> Result<FileResult, String> {
+) -> Result<FileResult, GuestFailure> {
     let mut metadata = serde_json::json!({
         "name": name,
         "mimeType": "application/vnd.google-apps.folder",
@@ -442,12 +497,12 @@ pub fn create_folder(
         metadata["description"] = serde_json::Value::String(desc.to_string());
     }
 
-    let body = serde_json::to_string(&metadata).map_err(|e| e.to_string())?;
+    let body = serde_json::to_string(&metadata).map_err(|e| serialization_failure(&e))?;
     let path = format!("files?fields={}&supportsAllDrives=true", FILE_FIELDS);
 
     let response = api_call("POST", &path, Some(&body))?;
     let parsed: serde_json::Value =
-        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
+        serde_json::from_str(&response).map_err(|e| serialization_failure(&e))?;
 
     Ok(FileResult {
         file: parse_file(&parsed),
@@ -455,7 +510,7 @@ pub fn create_folder(
 }
 
 /// Delete a file permanently.
-pub fn delete_file(file_id: &str) -> Result<DeleteResult, String> {
+pub fn delete_file(file_id: &str) -> Result<DeleteResult, GuestFailure> {
     let path = format!("files/{}?supportsAllDrives=true", url_encode(file_id));
     api_call("DELETE", &path, None)?;
 
@@ -466,7 +521,7 @@ pub fn delete_file(file_id: &str) -> Result<DeleteResult, String> {
 }
 
 /// Move a file to trash.
-pub fn trash_file(file_id: &str) -> Result<DeleteResult, String> {
+pub fn trash_file(file_id: &str) -> Result<DeleteResult, GuestFailure> {
     let body = r#"{"trashed": true}"#;
     let path = format!(
         "files/{}?fields={}&supportsAllDrives=true",
@@ -488,14 +543,14 @@ pub fn share_file(
     email: &str,
     role: &str,
     message: Option<&str>,
-) -> Result<ShareResult, String> {
+) -> Result<ShareResult, GuestFailure> {
     let permission = serde_json::json!({
         "type": "user",
         "role": role,
         "emailAddress": email,
     });
 
-    let body = serde_json::to_string(&permission).map_err(|e| e.to_string())?;
+    let body = serde_json::to_string(&permission).map_err(|e| serialization_failure(&e))?;
 
     let mut path = format!(
         "files/{}/permissions?supportsAllDrives=true",
@@ -507,7 +562,7 @@ pub fn share_file(
 
     let response = api_call("POST", &path, Some(&body))?;
     let parsed: serde_json::Value =
-        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
+        serde_json::from_str(&response).map_err(|e| serialization_failure(&e))?;
 
     Ok(ShareResult {
         permission_id: parsed["id"].as_str().unwrap_or("").to_string(),
@@ -517,7 +572,7 @@ pub fn share_file(
 }
 
 /// List permissions on a file.
-pub fn list_permissions(file_id: &str) -> Result<ListPermissionsResult, String> {
+pub fn list_permissions(file_id: &str) -> Result<ListPermissionsResult, GuestFailure> {
     let path = format!(
         "files/{}/permissions?fields=permissions(id,role,type,emailAddress,displayName)&supportsAllDrives=true",
         url_encode(file_id)
@@ -525,7 +580,7 @@ pub fn list_permissions(file_id: &str) -> Result<ListPermissionsResult, String> 
 
     let response = api_call("GET", &path, None)?;
     let parsed: serde_json::Value =
-        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
+        serde_json::from_str(&response).map_err(|e| serialization_failure(&e))?;
 
     let permissions = parsed["permissions"]
         .as_array()
@@ -546,7 +601,7 @@ pub fn list_permissions(file_id: &str) -> Result<ListPermissionsResult, String> 
 }
 
 /// Remove a sharing permission.
-pub fn remove_permission(file_id: &str, permission_id: &str) -> Result<DeleteResult, String> {
+pub fn remove_permission(file_id: &str, permission_id: &str) -> Result<DeleteResult, GuestFailure> {
     let path = format!(
         "files/{}/permissions/{}?supportsAllDrives=true",
         url_encode(file_id),
@@ -562,11 +617,11 @@ pub fn remove_permission(file_id: &str, permission_id: &str) -> Result<DeleteRes
 }
 
 /// List shared drives.
-pub fn list_shared_drives(page_size: u32) -> Result<ListSharedDrivesResult, String> {
+pub fn list_shared_drives(page_size: u32) -> Result<ListSharedDrivesResult, GuestFailure> {
     let path = format!("drives?pageSize={}", page_size);
     let response = api_call("GET", &path, None)?;
     let parsed: serde_json::Value =
-        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
+        serde_json::from_str(&response).map_err(|e| serialization_failure(&e))?;
 
     let drives = parsed["drives"]
         .as_array()
@@ -590,6 +645,28 @@ fn url_encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_status_error_401_maps_to_auth_required() {
+        let err = api_status_error("Drive", 401, b"{\"error\":\"invalid_token\"}");
+
+        assert_eq!(err.kind, ErrorKind::AuthRequired);
+        assert_eq!(err.code.as_deref(), Some(GOOGLE_API_AUTH_REQUIRED_ERROR));
+    }
+
+    #[test]
+    fn api_status_error_non_401_maps_to_client() {
+        let err = api_status_error("Drive", 429, b"rate limited");
+
+        assert_eq!(err.kind, ErrorKind::Client);
+        assert_eq!(err.code.as_deref(), Some("api_status_429"));
+        assert!(
+            err.message
+                .as_deref()
+                .is_some_and(|message| message.contains("rate limited")),
+            "{err:?}"
+        );
+    }
 
     #[test]
     fn multipart_boundary_does_not_appear_in_metadata_or_content() {

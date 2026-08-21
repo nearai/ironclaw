@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""Run one sandbox command with bounded, descendant-complete cleanup."""
+
+from __future__ import annotations
+
+import ctypes
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+MAX_TIMEOUT_SECONDS = 86_400
+TERMINATION_GRACE_SECONDS = 1.0
+PR_SET_CHILD_SUBREAPER = 36
+
+
+def usage() -> "NoReturn":
+    print(
+        "usage: ironclaw-exec <timeout-seconds> <outcome-nonce> <command>",
+        file=sys.stderr,
+    )
+    raise SystemExit(64)
+
+
+def parse_args() -> tuple[int, str, str]:
+    if len(sys.argv) != 4:
+        usage()
+    try:
+        timeout = int(sys.argv[1], 10)
+    except ValueError:
+        usage()
+    if not 1 <= timeout <= MAX_TIMEOUT_SECONDS:
+        usage()
+    nonce = sys.argv[2]
+    if not nonce or any(char not in "0123456789abcdef-" for char in nonce):
+        usage()
+    return timeout, nonce, sys.argv[3]
+
+
+def make_subreaper() -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def process_table() -> dict[int, int]:
+    table: dict[int, int] = {}
+    for status in Path("/proc").glob("[0-9]*/status"):
+        try:
+            pid = int(status.parent.name)
+            ppid_line = next(
+                line for line in status.read_text().splitlines() if line.startswith("PPid:")
+            )
+            table[pid] = int(ppid_line.split()[1])
+        except (OSError, StopIteration, ValueError):
+            continue
+    return table
+
+
+def descendant_pids(root_pid: int | None) -> set[int]:
+    table = process_table()
+    descendants: set[int] = set()
+    frontier = {os.getpid()}
+    if root_pid is not None:
+        frontier.add(root_pid)
+    while frontier:
+        parents = frontier
+        frontier = {
+            pid
+            for pid, ppid in table.items()
+            if ppid in parents and pid != os.getpid() and pid not in descendants
+        }
+        descendants.update(frontier)
+    if root_pid is not None:
+        descendants.discard(root_pid)
+    return descendants
+
+
+def signal_processes(root_pid: int | None, sig: signal.Signals) -> None:
+    pids = descendant_pids(root_pid)
+    if root_pid is not None:
+        pids.add(root_pid)
+    groups: set[int] = set()
+    for pid in pids:
+        try:
+            groups.add(os.getpgid(pid))
+        except ProcessLookupError:
+            continue
+    for pgid in groups:
+        if pgid == os.getpgrp():
+            continue
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            pass
+    for pid in pids:
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            pass
+
+
+def reap_children() -> None:
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid == 0:
+            return
+
+
+def cleanup_processes(root_pid: int | None) -> None:
+    signal_processes(root_pid, signal.SIGTERM)
+    deadline = time.monotonic() + TERMINATION_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        if root_pid is None:
+            reap_children()
+        descendants = descendant_pids(root_pid)
+        root_exists = root_pid is not None
+        if root_pid is not None:
+            try:
+                os.kill(root_pid, 0)
+            except ProcessLookupError:
+                root_exists = False
+        if not descendants and not root_exists:
+            return
+        time.sleep(0.02)
+    signal_processes(root_pid, signal.SIGKILL)
+    for _ in range(20):
+        if root_pid is None:
+            reap_children()
+        if not descendant_pids(root_pid):
+            break
+        time.sleep(0.01)
+
+
+def main() -> int:
+    timeout, nonce, command = parse_args()
+    try:
+        make_subreaper()
+    except OSError as error:
+        print(f"ironclaw-exec: cannot become subreaper: {error}", file=sys.stderr)
+        return 70
+
+    process = subprocess.Popen(
+        ["sh", "-c", command],
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    timed_out = False
+    reaped = False
+    try:
+        status = process.wait(timeout=timeout)
+        reaped = True
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        status = 124
+    finally:
+        cleanup_processes(None if reaped else process.pid)
+        if not reaped:
+            try:
+                process.wait(timeout=TERMINATION_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+            cleanup_processes(None)
+        reap_children()
+
+    if timed_out:
+        outcome = "timeout"
+    else:
+        exit_code = 128 + -status if status < 0 else status & 0xFF
+        outcome = f"exit:{min(exit_code, 255)}"
+    print(f"\n__IRONCLAW_EXEC_OUTCOME_{nonce}={outcome}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

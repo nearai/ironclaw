@@ -62,6 +62,8 @@ dumping ground.
 - Context-window limits count the effective model-visible transcript, not
   hidden durable rows. Truncated windows report the exact last omitted
   sequence and kind so loop policy can react without guessing.
+- Exact message lookups by run, tool result, provider call, and first user are
+  indexed projections on the message row; they do not create sibling records.
 - Backend-neutral by construction: persistence is `ScopedFilesystem` only;
   backend choice happens in composition (`.claude/rules/database.md`).
 

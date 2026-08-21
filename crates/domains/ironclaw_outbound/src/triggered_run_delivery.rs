@@ -46,6 +46,9 @@ pub enum TriggeredRunDeliveryOutcomeKind {
     Failed,
     /// Delivery was skipped (e.g. run was already delivered, empty result).
     Skipped,
+    /// Execution intentionally produced no result and ordinary result delivery
+    /// was suppressed before transport dispatch.
+    Suppressed,
 }
 
 /// Sanitized delivery outcome keyed by run id.
@@ -86,6 +89,10 @@ pub struct TriggeredRunDeliveryRequest {
     pub project_scoped: bool,
     /// The trigger prompt; its first line becomes the short footer label.
     pub prompt: String,
+    /// Whether this run can intentionally settle without a deliverable result.
+    /// The notifier uses this only to wait long enough to distinguish that
+    /// outcome from a missing notification-channel configuration.
+    pub result_delivery: ironclaw_host_api::execution_policy::ResultDeliveryPolicy,
 }
 
 /// One permanently failed trigger fire that never produced a run.
@@ -226,6 +233,7 @@ mod tests {
             (TriggeredRunDeliveryOutcomeKind::Denied, "denied"),
             (TriggeredRunDeliveryOutcomeKind::Failed, "failed"),
             (TriggeredRunDeliveryOutcomeKind::Skipped, "skipped"),
+            (TriggeredRunDeliveryOutcomeKind::Suppressed, "suppressed"),
         ];
         for (outcome, expected) in cases {
             let serialized = serde_json::to_string(&outcome).expect("serialize outcome");

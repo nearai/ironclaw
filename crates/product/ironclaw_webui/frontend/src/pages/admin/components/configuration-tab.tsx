@@ -47,6 +47,12 @@ export function buildConfigurationSaveMutation(group, values, idempotencyKey) {
   };
 }
 
+export function configurationSaveErrorMessageKey(error) {
+  return error?.status === 409
+    ? "admin.configuration.saveConflict"
+    : "admin.configuration.saveFailed";
+}
+
 function configurationValuesFromFields(fields) {
   return Object.fromEntries(fields.map((field) => [
     field.handle,
@@ -170,7 +176,9 @@ export function ConfigurationGroup({ group, state }) {
           </Button>
           {saved && <span className="text-sm text-signal" role="status">{t("admin.configuration.saved")}</span>}
           {state.saveError && state.savingGroupId === group.group_id && (
-            <span className="text-sm text-red-200" role="alert">{t("admin.configuration.saveFailed")}</span>
+            <span className="text-sm text-red-200" role="alert">
+              {t(configurationSaveErrorMessageKey(state.saveError))}
+            </span>
           )}
         </div>
       </form>

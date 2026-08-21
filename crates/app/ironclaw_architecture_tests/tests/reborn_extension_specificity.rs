@@ -1068,6 +1068,21 @@ fn collect_workspace_hits(root: &Path, terms: &BTreeSet<String>) -> BTreeSet<(St
     for scan_root in generic_scan_roots(&metadata, root) {
         let src = scan_root.crate_dir.join("src");
         scan_dir(root, &src, terms, &mut hits);
+        // `build.rs` is generic-crate code that ships in the build, and it sat
+        // outside every scan root: a vendor name there was invisible to this
+        // gate (proven by sabotage, 2026-08-13).
+        let build_script = scan_root.crate_dir.join("build.rs");
+        if build_script.is_file() {
+            let matched = scan_file(&build_script, FileKind::Rust, terms);
+            if !matched.is_empty() {
+                let relative = build_script
+                    .strip_prefix(root)
+                    .unwrap_or(&build_script)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                hits.entry(relative).or_default().extend(matched);
+            }
+        }
         let manifest = scan_root.crate_dir.join("Cargo.toml");
         if manifest.exists() {
             let matched = scan_file(&manifest, FileKind::Toml, terms);
@@ -1093,6 +1108,14 @@ fn collect_workspace_hits(root: &Path, terms: &BTreeSet<String>) -> BTreeSet<(St
         frontend.display()
     );
     scan_dir(root, &frontend, terms, &mut hits);
+
+    // The frontend's own build/CI scripts are generic-crate code too, and were
+    // the second hole the same sabotage pass found. Absent by choice in some
+    // checkouts, so this one is scanned when present rather than asserted.
+    let frontend_scripts = crate_path(root, "crates/ironclaw_webui/frontend/scripts");
+    if frontend_scripts.is_dir() {
+        scan_dir(root, &frontend_scripts, terms, &mut hits);
+    }
 
     // Resolved through the inventory: these fragments are matched against
     // paths discovered on disk, so a crate that moved makes every fragment
@@ -1264,13 +1287,8 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "github",
     ),
     ("crates/ironclaw_assistant/src/workflow.rs", "slack"),
-    ("crates/ironclaw_host_api/src/dispatch.rs", "slack"),
     (
         "crates/ironclaw_host_runtime/src/first_party_tools/schemas.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_host_runtime/src/services/wasm_execution.rs",
         "slack",
     ),
     ("crates/ironclaw_loop_host/src/tool_disclosure.rs", "google"),
@@ -1671,7 +1689,13 @@ const ALLOWLIST: &[(&str, &str)] = &[
 // `loop_driver_host.rs`/"slack" carve-out was retired when the channel-context
 // forwarding it described was reworked, so its now-stale allowlist entry was
 // deleted — the ratchet only ever shrinks.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 112;
+// 112 -> 110 (retire lane-named DispatchError variants, PR 4 stage 1): the
+// `ironclaw_host_api/src/dispatch.rs`/"slack" and
+// `ironclaw_host_runtime/src/services/wasm_execution.rs`/"slack" carve-outs
+// named doc-comment examples on the retired `DispatchError::Wasm` variant;
+// deleting the variant deleted the examples, so the now-stale allowlist
+// entries were deleted too.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 110;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///

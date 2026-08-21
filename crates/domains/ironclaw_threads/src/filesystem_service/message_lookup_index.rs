@@ -1,4 +1,7 @@
-use ironclaw_filesystem::{CasExpectation, ContentType, Entry, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{
+    Entry, Filter, IndexKind, IndexSpec, IndexValue, OrderedPage, RootFilesystem, ScopedFilesystem,
+    SortDirection,
+};
 use ironclaw_host_api::{
     ids::{InvocationId, ThreadId},
     path::ScopedPath,
@@ -12,7 +15,8 @@ use crate::{
 };
 
 use super::{
-    PutError, deserialize, put_with_cas, scoped_path, serialize_pretty, thread_root_string,
+    deserialize, fs_index_key, fs_index_name, messages_root, scoped_path, serialize_pretty,
+    thread_root_string,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,168 +40,24 @@ where
         Self { filesystem }
     }
 
-    pub(super) async fn write_for_message(
-        &self,
-        scope: &ThreadScope,
-        thread_id: &ThreadId,
-        message: &ThreadMessageRecord,
-    ) -> Result<(), SessionThreadError> {
-        if message.kind == MessageKind::Assistant
-            && let Some(turn_run_id) = message.turn_run_id.as_deref()
-        {
-            self.write(
-                scope,
-                &assistant_run_index_path(scope, thread_id, turn_run_id)?,
-                thread_id,
-                message.message_id,
-            )
-            .await?;
-        }
-        if message.kind == MessageKind::ToolResultReference
-            && let (Some(turn_run_id), Some(result_ref)) = (
-                message.turn_run_id.as_deref(),
-                message.tool_result_ref.as_deref(),
-            )
-        {
-            self.write(
-                scope,
-                &tool_result_index_path(scope, thread_id, turn_run_id, result_ref)?,
-                thread_id,
-                message.message_id,
-            )
-            .await?;
-            if let Some(provider_call_id) = message
-                .tool_result_provider_call
-                .as_ref()
-                .map(|provider_call| provider_call.provider_call_id.as_str())
-            {
-                self.write(
-                    scope,
-                    &tool_result_provider_call_index_path(
-                        scope,
-                        thread_id,
-                        turn_run_id,
-                        result_ref,
-                        provider_call_id,
-                    )?,
-                    thread_id,
-                    message.message_id,
-                )
-                .await?;
-            }
-        }
-        if message.kind == MessageKind::User {
-            self.write_if_absent(
-                scope,
-                &first_user_index_path(scope, thread_id)?,
-                thread_id,
-                message.message_id,
-            )
-            .await?;
-        }
-        if message.kind == MessageKind::CapabilityDisplayPreview
-            && let (Some(turn_run_id), Some(invocation_id)) = (
-                message.turn_run_id.as_deref(),
-                CapabilityDisplayPreviewEnvelope::invocation_id_from_json(
-                    message.content.as_deref(),
-                )
-                .map_err(SessionThreadError::Serialization)?,
-            )
-        {
-            self.write(
-                scope,
-                &capability_preview_index_path(scope, thread_id, turn_run_id, invocation_id)?,
-                thread_id,
-                message.message_id,
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
-    pub(super) fn entries_for_message(
-        scope: &ThreadScope,
-        thread_id: &ThreadId,
-        message: &ThreadMessageRecord,
-    ) -> Result<Vec<(ScopedPath, Entry, CasExpectation)>, SessionThreadError> {
-        let mut entries = Vec::new();
-        let mut push = |path: ScopedPath, expectation: CasExpectation| {
-            let record = MessageLookupIndexRecord {
-                thread_id: thread_id.clone(),
-                message_id: message.message_id,
-            };
-            let body = serialize_pretty(&record)?;
-            entries.push((
-                path,
-                Entry::bytes(body).with_content_type(ContentType::json()),
-                expectation,
-            ));
-            Ok::<(), SessionThreadError>(())
-        };
-        if message.kind == MessageKind::Assistant
-            && let Some(turn_run_id) = message.turn_run_id.as_deref()
-        {
-            push(
-                assistant_run_index_path(scope, thread_id, turn_run_id)?,
-                CasExpectation::Any,
-            )?;
-        }
-        if message.kind == MessageKind::ToolResultReference
-            && let (Some(turn_run_id), Some(result_ref)) = (
-                message.turn_run_id.as_deref(),
-                message.tool_result_ref.as_deref(),
-            )
-        {
-            push(
-                tool_result_index_path(scope, thread_id, turn_run_id, result_ref)?,
-                CasExpectation::Any,
-            )?;
-            if let Some(provider_call_id) = message
-                .tool_result_provider_call
-                .as_ref()
-                .map(|provider_call| provider_call.provider_call_id.as_str())
-            {
-                push(
-                    tool_result_provider_call_index_path(
-                        scope,
-                        thread_id,
-                        turn_run_id,
-                        result_ref,
-                        provider_call_id,
-                    )?,
-                    CasExpectation::Any,
-                )?;
-            }
-        }
-        if message.kind == MessageKind::User {
-            push(
-                first_user_index_path(scope, thread_id)?,
-                CasExpectation::Absent,
-            )?;
-        }
-        if message.kind == MessageKind::CapabilityDisplayPreview
-            && let (Some(turn_run_id), Some(invocation_id)) = (
-                message.turn_run_id.as_deref(),
-                CapabilityDisplayPreviewEnvelope::invocation_id_from_json(
-                    message.content.as_deref(),
-                )
-                .map_err(SessionThreadError::Serialization)?,
-            )
-        {
-            push(
-                capability_preview_index_path(scope, thread_id, turn_run_id, invocation_id)?,
-                CasExpectation::Any,
-            )?;
-        }
-        Ok(entries)
-    }
-
     pub(super) async fn read_first_user(
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
     ) -> Result<Option<ThreadMessageId>, SessionThreadError> {
-        self.read(scope, thread_id, &first_user_index_path(scope, thread_id)?)
+        if let Some(message_id) = self
+            .query_message_id(
+                scope,
+                thread_id,
+                first_user_index_spec()?,
+                vec![("lookup_first_user", IndexValue::Bool(true))],
+                SortDirection::Ascending,
+            )
+            .await?
+        {
+            return Ok(Some(message_id));
+        }
+        self.read_legacy(scope, thread_id, &first_user_index_path(scope, thread_id)?)
             .await
     }
 
@@ -208,7 +68,28 @@ where
         turn_run_id: &str,
         invocation_id: InvocationId,
     ) -> Result<Option<ThreadMessageId>, SessionThreadError> {
-        self.read(
+        if let Some(message_id) = self
+            .query_message_id(
+                scope,
+                thread_id,
+                capability_preview_index_spec()?,
+                vec![
+                    (
+                        "lookup_capability_run_id",
+                        IndexValue::Text(turn_run_id.to_string()),
+                    ),
+                    (
+                        "lookup_invocation_id",
+                        IndexValue::Text(invocation_id.to_string()),
+                    ),
+                ],
+                SortDirection::Descending,
+            )
+            .await?
+        {
+            return Ok(Some(message_id));
+        }
+        self.read_legacy(
             scope,
             thread_id,
             &capability_preview_index_path(scope, thread_id, turn_run_id, invocation_id)?,
@@ -222,8 +103,27 @@ where
         thread_id: &ThreadId,
         turn_run_id: &str,
     ) -> Result<Option<ThreadMessageId>, SessionThreadError> {
-        let path = assistant_run_index_path(scope, thread_id, turn_run_id)?;
-        self.read(scope, thread_id, &path).await
+        if let Some(message_id) = self
+            .query_message_id(
+                scope,
+                thread_id,
+                assistant_run_index_spec()?,
+                vec![(
+                    "lookup_assistant_run_id",
+                    IndexValue::Text(turn_run_id.to_string()),
+                )],
+                SortDirection::Descending,
+            )
+            .await?
+        {
+            return Ok(Some(message_id));
+        }
+        self.read_legacy(
+            scope,
+            thread_id,
+            &assistant_run_index_path(scope, thread_id, turn_run_id)?,
+        )
+        .await
     }
 
     pub(super) async fn read_tool_result(
@@ -233,8 +133,33 @@ where
         turn_run_id: &str,
         result_ref: &str,
     ) -> Result<Option<ThreadMessageId>, SessionThreadError> {
-        let path = tool_result_index_path(scope, thread_id, turn_run_id, result_ref)?;
-        self.read(scope, thread_id, &path).await
+        if let Some(message_id) = self
+            .query_message_id(
+                scope,
+                thread_id,
+                tool_result_index_spec()?,
+                vec![
+                    (
+                        "lookup_tool_result_run_id",
+                        IndexValue::Text(turn_run_id.to_string()),
+                    ),
+                    (
+                        "lookup_tool_result_ref",
+                        IndexValue::Text(result_ref.to_string()),
+                    ),
+                ],
+                SortDirection::Descending,
+            )
+            .await?
+        {
+            return Ok(Some(message_id));
+        }
+        self.read_legacy(
+            scope,
+            thread_id,
+            &tool_result_index_path(scope, thread_id, turn_run_id, result_ref)?,
+        )
+        .await
     }
 
     pub(super) async fn read_tool_result_provider_call(
@@ -245,17 +170,88 @@ where
         result_ref: &str,
         provider_call_id: &str,
     ) -> Result<Option<ThreadMessageId>, SessionThreadError> {
-        let path = tool_result_provider_call_index_path(
+        if let Some(message_id) = self
+            .query_message_id(
+                scope,
+                thread_id,
+                tool_result_provider_call_index_spec()?,
+                vec![
+                    (
+                        "lookup_tool_result_run_id",
+                        IndexValue::Text(turn_run_id.to_string()),
+                    ),
+                    (
+                        "lookup_tool_result_ref",
+                        IndexValue::Text(result_ref.to_string()),
+                    ),
+                    (
+                        "lookup_provider_call_id",
+                        IndexValue::Text(provider_call_id.to_string()),
+                    ),
+                ],
+                SortDirection::Descending,
+            )
+            .await?
+        {
+            return Ok(Some(message_id));
+        }
+        self.read_legacy(
             scope,
             thread_id,
-            turn_run_id,
-            result_ref,
-            provider_call_id,
-        )?;
-        self.read(scope, thread_id, &path).await
+            &tool_result_provider_call_index_path(
+                scope,
+                thread_id,
+                turn_run_id,
+                result_ref,
+                provider_call_id,
+            )?,
+        )
+        .await
     }
 
-    async fn read(
+    async fn query_message_id(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        index: IndexSpec,
+        lookup_filters: Vec<(&str, IndexValue)>,
+        direction: SortDirection,
+    ) -> Result<Option<ThreadMessageId>, SessionThreadError> {
+        let mut filters = Vec::with_capacity(lookup_filters.len() + 1);
+        filters.push(Filter::Eq {
+            key: fs_index_key("thread_id")?,
+            value: IndexValue::Text(thread_id.to_string()),
+        });
+        for (key, value) in lookup_filters {
+            filters.push(Filter::Eq {
+                key: fs_index_key(key)?,
+                value,
+            });
+        }
+        let page = OrderedPage::new(
+            index.name,
+            fs_index_key("sequence")?,
+            fs_index_key("message_id")?,
+            direction,
+            1,
+        );
+        self.filesystem
+            .query_ordered(
+                &scope.to_resource_scope(),
+                &messages_root(scope, thread_id)?,
+                &Filter::And(filters),
+                &page,
+            )
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| {
+                deserialize::<ThreadMessageRecord>(&row.entry.body).map(|row| row.message_id)
+            })
+            .transpose()
+    }
+
+    async fn read_legacy(
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
@@ -274,63 +270,124 @@ where
         }
         Ok(Some(record.message_id))
     }
+}
 
-    async fn write(
-        &self,
-        scope: &ThreadScope,
-        path: &ScopedPath,
-        thread_id: &ThreadId,
-        message_id: ThreadMessageId,
-    ) -> Result<(), SessionThreadError> {
-        let record = MessageLookupIndexRecord {
-            thread_id: thread_id.clone(),
-            message_id,
-        };
-        let body = serialize_pretty(&record)?;
-        let entry = Entry::bytes(body).with_content_type(ContentType::json());
-        put_with_cas(
-            self.filesystem,
-            &scope.to_resource_scope(),
-            path,
-            entry,
-            CasExpectation::Any,
-        )
-        .await
-        .map_err(|error| match error {
-            PutError::VersionMismatch => SessionThreadError::Backend(format!(
-                "filesystem CAS Any rejected message lookup index at {}",
-                path.as_str()
-            )),
-            PutError::Other(error) => error,
-        })
+pub(super) fn with_message_lookup_projections(
+    mut entry: Entry,
+    message: &ThreadMessageRecord,
+) -> Result<Entry, SessionThreadError> {
+    if message.kind == MessageKind::Assistant
+        && let Some(turn_run_id) = message.turn_run_id.as_deref()
+    {
+        entry.indexed.insert(
+            fs_index_key("lookup_assistant_run_id")?,
+            IndexValue::Text(turn_run_id.to_string()),
+        );
     }
-
-    async fn write_if_absent(
-        &self,
-        scope: &ThreadScope,
-        path: &ScopedPath,
-        thread_id: &ThreadId,
-        message_id: ThreadMessageId,
-    ) -> Result<(), SessionThreadError> {
-        let record = MessageLookupIndexRecord {
-            thread_id: thread_id.clone(),
-            message_id,
-        };
-        let body = serialize_pretty(&record)?;
-        let entry = Entry::bytes(body).with_content_type(ContentType::json());
-        match put_with_cas(
-            self.filesystem,
-            &scope.to_resource_scope(),
-            path,
-            entry,
-            CasExpectation::Absent,
+    if message.kind == MessageKind::ToolResultReference
+        && let (Some(turn_run_id), Some(result_ref)) = (
+            message.turn_run_id.as_deref(),
+            message.tool_result_ref.as_deref(),
         )
-        .await
+    {
+        entry.indexed.insert(
+            fs_index_key("lookup_tool_result_run_id")?,
+            IndexValue::Text(turn_run_id.to_string()),
+        );
+        entry.indexed.insert(
+            fs_index_key("lookup_tool_result_ref")?,
+            IndexValue::Text(result_ref.to_string()),
+        );
+        if let Some(provider_call_id) = message
+            .tool_result_provider_call
+            .as_ref()
+            .map(|provider_call| provider_call.provider_call_id.as_str())
         {
-            Ok(()) | Err(PutError::VersionMismatch) => Ok(()),
-            Err(PutError::Other(error)) => Err(error),
+            entry.indexed.insert(
+                fs_index_key("lookup_provider_call_id")?,
+                IndexValue::Text(provider_call_id.to_string()),
+            );
         }
     }
+    if message.kind == MessageKind::User {
+        entry
+            .indexed
+            .insert(fs_index_key("lookup_first_user")?, IndexValue::Bool(true));
+    }
+    if message.kind == MessageKind::CapabilityDisplayPreview
+        && let (Some(turn_run_id), Some(invocation_id)) = (
+            message.turn_run_id.as_deref(),
+            CapabilityDisplayPreviewEnvelope::invocation_id_from_json(message.content.as_deref())
+                .map_err(SessionThreadError::Serialization)?,
+        )
+    {
+        entry.indexed.insert(
+            fs_index_key("lookup_capability_run_id")?,
+            IndexValue::Text(turn_run_id.to_string()),
+        );
+        entry.indexed.insert(
+            fs_index_key("lookup_invocation_id")?,
+            IndexValue::Text(invocation_id.to_string()),
+        );
+    }
+    Ok(entry)
+}
+
+pub(super) fn lookup_index_specs() -> Result<[IndexSpec; 5], SessionThreadError> {
+    Ok([
+        assistant_run_index_spec()?,
+        tool_result_index_spec()?,
+        tool_result_provider_call_index_spec()?,
+        first_user_index_spec()?,
+        capability_preview_index_spec()?,
+    ])
+}
+
+fn assistant_run_index_spec() -> Result<IndexSpec, SessionThreadError> {
+    lookup_index_spec(
+        "thread_message_assistant_run_v1",
+        &["lookup_assistant_run_id"],
+    )
+}
+
+fn tool_result_index_spec() -> Result<IndexSpec, SessionThreadError> {
+    lookup_index_spec(
+        "thread_message_tool_result_v1",
+        &["lookup_tool_result_run_id", "lookup_tool_result_ref"],
+    )
+}
+
+fn tool_result_provider_call_index_spec() -> Result<IndexSpec, SessionThreadError> {
+    lookup_index_spec(
+        "thread_message_tool_result_provider_call_v1",
+        &[
+            "lookup_tool_result_run_id",
+            "lookup_tool_result_ref",
+            "lookup_provider_call_id",
+        ],
+    )
+}
+
+fn first_user_index_spec() -> Result<IndexSpec, SessionThreadError> {
+    lookup_index_spec("thread_message_first_user_v1", &["lookup_first_user"])
+}
+
+fn capability_preview_index_spec() -> Result<IndexSpec, SessionThreadError> {
+    lookup_index_spec(
+        "thread_message_capability_preview_v1",
+        &["lookup_capability_run_id", "lookup_invocation_id"],
+    )
+}
+
+fn lookup_index_spec(name: &str, lookup_keys: &[&str]) -> Result<IndexSpec, SessionThreadError> {
+    let mut keys = Vec::with_capacity(lookup_keys.len() + 3);
+    keys.push(fs_index_key("thread_id")?);
+    for key in lookup_keys {
+        keys.push(fs_index_key(key)?);
+    }
+    keys.push(fs_index_key("sequence")?);
+    keys.push(fs_index_key("message_id")?);
+    Ok(IndexSpec::new(fs_index_name(name)?, keys, IndexKind::Exact))
 }
 
 fn first_user_index_path(

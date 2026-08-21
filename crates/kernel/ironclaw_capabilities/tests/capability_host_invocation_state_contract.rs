@@ -24,6 +24,7 @@ use ironclaw_host_api::{
     mount::MountView,
     path::VirtualPath,
     resource::{ResourceEstimate, ResourceScope},
+    runtime::RuntimeKind,
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_processes::*;
@@ -563,6 +564,54 @@ async fn capability_host_returns_specific_error_for_authorizer_fingerprint_misma
 }
 
 #[tokio::test]
+async fn capability_host_retains_fresh_pending_invocation_for_outcome_terminalization() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = TestDispatcher::responding(|_, _| {
+        Err(DispatchError::Rejected {
+            runtime: Some(RuntimeKind::Wasm),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            diagnostic: None,
+            detail: None,
+        })
+    });
+    let authorizer = GrantAuthorizer::new();
+    let process_services = ProcessServices::in_memory();
+    let run_state = ProcessInvocationStore::new(process_services.process_runtime());
+    let host =
+        capability_host(&registry, &dispatcher, &authorizer).with_invocation_state(&run_state);
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+
+    let error = host
+        .invoke_json(
+            context,
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "dispatch fails"}),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            ..
+        }
+    ));
+    let pending = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .expect("outcome layer must receive the fresh pending invocation");
+    assert_eq!(pending.status, ProcessInvocationStatus::Running);
+    assert_eq!(pending.error_kind, None);
+}
+
+#[tokio::test]
 async fn capability_host_returns_dispatch_result_when_run_completion_fails_after_invoke() {
     let registry = registry_with_echo_capability();
     let dispatcher = recording_dispatcher();
@@ -584,7 +633,7 @@ async fn capability_host_returns_dispatch_result_when_run_completion_fails_after
         .await
         .unwrap();
 
-    assert_eq!(result.dispatch.output, json!({"ok": true}));
+    assert_eq!(result.output, json!({"ok": true}));
     assert!(dispatcher.call_count() > 0);
 }
 
@@ -691,7 +740,7 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
         .await
         .unwrap();
 
-    assert_eq!(result.dispatch.output, json!({"ok": true}));
+    assert_eq!(result.output, json!({"ok": true}));
     assert_eq!(
         dispatcher
             .last_request()
@@ -769,7 +818,7 @@ async fn capability_host_returns_dispatch_result_when_run_completion_fails_after
         .await
         .unwrap();
 
-    assert_eq!(result.dispatch.output, json!({"ok": true}));
+    assert_eq!(result.output, json!({"ok": true}));
 }
 
 #[tokio::test]
@@ -859,9 +908,11 @@ async fn capability_host_denies_resume_when_trust_ceiling_omits_capability_effec
 async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume() {
     let registry = registry_with_echo_capability();
     let dispatcher = TestDispatcher::responding(|_, _| {
-        Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Backend,
-            model_visible_cause: None,
+        Err(DispatchError::Rejected {
+            runtime: Some(RuntimeKind::Wasm),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            diagnostic: None,
+            detail: None,
         })
     });
     let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
@@ -929,6 +980,7 @@ async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume(
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
             safe_summary: None,
             detail: None,
+            ..
         }
     ));
     // Per PR #4236 disposition policy, the capability host no longer
@@ -1011,7 +1063,7 @@ async fn capability_host_returns_dispatch_result_when_lease_consume_fails_after_
         .await
         .unwrap();
 
-    assert_eq!(result.dispatch.output, json!({"ok": true}));
+    assert_eq!(result.output, json!({"ok": true}));
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, ProcessInvocationStatus::Completed);
     let claimed = leases.get(&scope, lease.grant.id).await.unwrap();

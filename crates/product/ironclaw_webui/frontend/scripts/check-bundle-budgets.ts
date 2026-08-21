@@ -64,10 +64,86 @@ const LOGIN_GZIP_BUDGET = 180_000;
 //  - The shared native file-picker interaction (#7337) replaced three
 //    route-local impls; Vite emits its ~0.3 KB gzip helper as a shared chunk
 //    (Chat/Settings/Extensions all consume it).
-// Re-measured on the merged tree at 217.7 KB gzip. A 219.0 KB budget retains
-// the recovery safeguards and about 1.3 KB of explicit headroom while
-// accounting for these concurrent `main` changes.
-const CHAT_GZIP_BUDGET = 219_000;
+// Re-measured on the MERGED tree with `vite build` + this check. `main`
+// concurrently re-measured 217.7 KB gzip after its own changes (#7480, #7284
+// et al.); both deltas are in the measurement below.
+// The device-link card then added a multi-step link flow to /chat.
+// Everything deferrable was deferred FIRST, and measured at each step:
+//  - `auth-device-link-card.tsx` and the `device-link-panel` /
+//    `device-link-api` modules behind it load through `React.lazy` from
+//    `chat.tsx` (the inspector-panel pattern), so the card, its step machine,
+//    its polling, and its input forms emit as their own chunks and cost the
+//    initial route nothing. Measured: 220.5 KB eager -> 219.5 KB.
+// What stays eager, and why it cannot move:
+//  - `link-payload-panel.tsx` — the extracted QR/countdown/copy/renew
+//    presentation. It is not new weight so much as relocated weight: it
+//    replaces the identical implementation that already shipped inside the
+//    eager `pairing-web-code-panel.tsx`, and it is now shared with the lazy
+//    device-link chunk, so Vite hoists it into a shared chunk the eager
+//    pairing panel pulls anyway. Keeping a second copy to save the hoist is
+//    precisely the drift the extraction exists to prevent.
+//  - `lib/device-link-frame.ts` — the frame normalizer. The gate selector
+//    (`gates.ts`, eager) has to normalize a device-link gate to decide which
+//    card to render at all, so it cannot sit behind the lazy boundary; a
+//    second eager normalizer would let a polled frame and a gate frame
+//    disagree about the same wire object.
+//  - ~31 `deviceLink.*` keys in `en.ts`, which `i18n.tsx` loads eagerly as the
+//    fallback pack on every page. Measured at 0.5 KB gzip; the other ten
+//    locale packs stay lazy per-locale imports and cost nothing here.
+// Measured /chat closure on the merged tree is 220.4 KB gzip; 222.0 KB
+// retains about 1.6 KB of explicit headroom.
+// The OOBE first-run suggestion surface (behind an off-by-default
+// `oobe_suggestions` session flag) — its cards, the `useSuggestions` data hook,
+// the suggestions API client, and the brand-icon SVGs — is lazy-loaded from
+// `empty-state.tsx` (`React.lazy` + `Suspense`), so it lands in its own chunk
+// and costs the eager /chat closure nothing. Only the flag-read gate and the
+// lazy-import decision stay eager (already accounted for above).
+// The OOBE drawer's section close/restore interaction then added a small eager
+// increment in `empty-state.tsx`: the drawer-visibility gate (open/dismissed/
+// gone) plus the `chat.oobe.showSuggestions` / `hideSuggestions` keys in the
+// eager `en.ts` fallback pack (the restore pill's own markup is lazy —
+// `oobe-restore-pill.tsx` loads only after the drawer is dismissed). Measured
+// /chat closure 222.5 KB gzip; 223.0 KB restores ~0.5 KB of explicit headroom.
+// retained about 1.6 KB of explicit headroom.
+//
+// The server-backed notification center consumed nearly all of that: the
+// inbox hook, its presenters and the panel are eager parts of the gateway
+// layout's header, so they land in the /chat closure and moved the measured
+// total to 221.9 KB. Wiring the archive control (the durable inbox exposes
+// archive at every backend layer, and without a caller a recipient's records
+// only ever accumulate toward the fail-closed retention cap) added the last
+// 0.2 KB. Weight was removed first rather than budgeted around: the
+// mark-read and archive mutations now share one optimistic cache transform
+// (`inboxCacheAfter`/`optimisticHandlers` in `hooks/useNotifications.ts`)
+// instead of carrying two near-identical `onMutate` blocks, and the control
+// reuses the existing `common.dismiss` label rather than minting a
+// `notifications.archive` key in the eagerly loaded `en.ts` fallback pack.
+// What remains is the control's own necessary weight. 223.0 KB restores
+// about 0.9 KB of headroom over the measured 222.1 KB.
+//
+// Re-measured 223.0 -> 224.0 on the merge of this branch with main. Both sides
+// independently set 223.0 for their own eager increment — main for the OOBE
+// drawer's close/restore gate, this branch for the notification centre and its
+// archive control — and on the merged tree those increments add: main alone
+// measures 222.5 KB, the merged tree 224.0 KB. Neither side is spending the
+// other's headroom by mistake; the ceiling simply had two claimants.
+//
+// Re-ratcheted 224.0 -> 223.2 in the same change by taking that split rather
+// than banking the raise: `notification-panel.tsx` now holds the opened panel
+// (rows, load-more, empty/error states) and loads through `React.lazy` from
+// `notification-center.tsx`, the way `CommandPalette` already does in
+// `layout/gateway-layout.tsx`. The bell and its unread dot stay eager because
+// the badge is always on screen. The panel leaves the entry closure as its own
+// 5.39 kB chunk and /chat measures 223.2 KB, so the ceiling follows the
+// measurement down instead of holding headroom this tree does not need.
+//
+// Then raised 223.2 -> 223.4 with a margin, because ratcheting to the measured
+// byte turned out to be a trap: rebasing onto main breached the ceiling by
+// roughly a dozen bytes on commits that touch no frontend code at all. The
+// margin is under a kilobyte, so the ratchet still catches anything that
+// actually ships weight into the entry closure, and the two budgets beside
+// this one were never held to the byte either.
+const CHAT_GZIP_BUDGET = 223_400;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {

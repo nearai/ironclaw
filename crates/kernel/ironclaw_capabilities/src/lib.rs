@@ -27,8 +27,8 @@ pub use ironclaw_host_api::{
     authorized::Authorized,
     dispatch::{
         CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
-        CapabilityDisplayOutputPreview, DispatchError, DispatchFailureDetail,
-        RuntimeDispatchErrorKind,
+        CapabilityDisplayOutputPreview, DispatchError, DispatchFailureDetail, DispatchFailureKind,
+        ProviderDiagnostic, RuntimeDispatchErrorKind, UntrustedProviderMessage,
     },
 };
 pub use obligations::{
@@ -45,4 +45,4 @@ pub use registry::{CapabilityDispatchRegistry, CapabilityRegistrationError};
 pub use replay_payload::{
     ReplayPayload, ReplayPayloadStore, ReplayPayloadStoreError, ReplayPayloadStorePort,
 };
-pub use requests::{CapabilityInvocationResult, CapabilitySpawnRequest, CapabilitySpawnResult};
+pub use requests::{CapabilitySpawnRequest, CapabilitySpawnResult};

@@ -212,10 +212,31 @@ observed_date = "2026-08-08"
 # eviction + #7373 re-equalization) into the unified-channel branch: main
 # evicted the memory-save guidance while this branch added the channel
 # registration/capability assembly; the merged tree is measured, not summed.
-# Union re-measured at 41973 on 2026-08-13 after merging that channel assembly
-# and current main into #7532's structured-trigger assembly. The deltas are
+# Union re-measured at 42299 on 2026-08-14 after merging main (#7532/#7548
+# structured-trigger assembly) into the unbound-turns surfaces branch. The
+# surfaces side keeps the prepared-lane behavior in
+# `ironclaw_assistant::UnboundPreparedTurnService`; composition holds only
+# the wire-DTO mapping, port adapter, and mount wiring. The deltas are
 # disjoint and the ceiling is the gate's exact merged-tree measurement.
-loc_ceiling = 41973
+#
+# Re-measured 42299 -> 41991 on 2026-08-14 (post-merge re-measure, same day):
+# this changelog's 42299, the prior loc_ceiling/loc_observed of 42086, and a
+# fresh `--print` run on the current tree had drifted out of agreement — three
+# numbers for the same metric. `bash scripts/ci/check-composition-budget.sh
+# --print` is the single authoritative re-capture and reports "composition
+# absolute: 41991 LOC (production src)"; loc_ceiling, loc_observed, and the
+# mirrored `COMPOSITION_ABSOLUTE_SRC_LOC` constant in
+# crates/app/ironclaw_architecture_tests/tests/reborn_restructure_baselines.rs
+# all move to this figure together, per this file's own re-capture instruction.
+#
+# Re-measured 42198 -> 42198 on 2026-08-19 after merging main into
+# fix/7681-private-connect-nudge-with-one-click-link. Main's own growth
+# (#7712's CheckpointPolicy field, #7717's libSQL write-lane fix) had already
+# consumed the entire prior ceiling+tolerance window on its own; this branch's
+# delta is the #7681 connect-link notice wiring in extension_host_assembly.rs
+# (~11 lines), predating that growth. Measured on the merged tree with
+# `bash scripts/ci/check-composition-budget.sh --print`, not summed.
+loc_ceiling = 42198
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -226,8 +247,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 41973
-loc_observed_date = "2026-08-13"
+loc_observed = 42198
+loc_observed_date = "2026-08-19"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the
@@ -302,6 +323,11 @@ loc_observed_date = "2026-08-13"
 # adds the production preflight seam and carries its existing multi-impl
 # capability/create-hook ports through assembly. The merged tree reports 841;
 # 826 + 15 tolerance = 841, preserving zero hidden headroom.
-arc_dyn_ceiling = 826
+# 826 -> 830 on 2026-08-14 for the shared runtime-event sink: four governed
+# carrier/assembly sites route cancellation and milestone producers through one
+# `EventSink` seam. Production uses `CoalescingEventSink`; the overload fake
+# verifies lossless cancellation behavior. The merged tree reports 845;
+# 830 + 15 tolerance = 845, preserving zero hidden headroom.
+arc_dyn_ceiling = 830
 arc_dyn_tolerance = 15
-arc_dyn_observed = 841
+arc_dyn_observed = 845

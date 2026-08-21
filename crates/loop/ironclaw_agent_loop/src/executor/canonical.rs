@@ -7,10 +7,10 @@ use crate::{family::LoopFamily, state::LoopExecutionState, strategies::TurnEndKi
 
 use super::{
     AgentLoopExecutorError, AssistantReplyInput, BudgetInput, BudgetStep, COMPLETION_NUDGE_LIMIT,
-    CancelCheck, CapabilityInput, CheckpointInput, CheckpointKind, CheckpointStage,
-    DefaultExecutorPipeline, DrainInput, ExecutorStage, ExitInput, InputStep, ModelInput,
-    ModelStep, PromptInput, PromptStep, ReplyAdmissionInput, ReplyAdmissionStep, StageContext,
-    StopInput, StopKind, StopObservationInput, StopObservationStep, StopStep, TurnCompletedStep,
+    CancelCheck, CapabilityInput, CheckpointStage, DefaultExecutorPipeline, DrainInput,
+    ExecutorStage, ExitInput, InputStep, ModelInput, ModelStep, PromptInput, PromptStep,
+    ReplyAdmissionInput, ReplyAdmissionStep, StageContext, StopInput, StopKind,
+    StopObservationInput, StopObservationStep, StopStep, TurnCompletedStep,
     UserFacingInputDrainMode, latency, scheduled_trigger_run,
 };
 
@@ -97,15 +97,8 @@ impl DefaultExecutorPipeline {
                         "checkpoint_before_model",
                         host.run_context(),
                         state.iteration,
-                        CheckpointStage.process(
-                            ctx,
-                            CheckpointInput {
-                                state,
-                                kind: CheckpointKind::BeforeModel,
-                            },
-                        ),
-                    )?
-                    .state;
+                        CheckpointStage.write_before_model_batched(ctx, state),
+                    )?;
                     if prompt.rendered_repeated_call_warning {
                         state.stop_state.mark_repeated_call_warning_rendered();
                         let note_started_at = latency::started_at();

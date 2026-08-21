@@ -57,17 +57,18 @@ use ironclaw_assistant::{
     RebornAdminUserRequest, RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
     RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationSource,
-    RebornAutomationState, RebornCancelRunResponse, RebornCreateProjectRequest,
-    RebornCreateThreadResponse, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
-    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
-    RebornGetProjectRequest, RebornGetRunStateResponse, RebornGlobalAutoApproveRequest,
-    RebornGlobalAutoApproveResponse, RebornListAutomationsResponse, RebornListMembersResponse,
-    RebornListProjectsResponse, RebornListThreadsResponse, RebornNotificationChannel,
-    RebornNotificationChannelsResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunMutationResult,
+    RebornAutomationRunMutationStatus, RebornAutomationSource, RebornAutomationState,
+    RebornCancelRunResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
+    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
+    RebornGetRunStateResponse, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
+    RebornListAutomationsResponse, RebornListMembersResponse, RebornListProjectsResponse,
+    RebornListThreadsResponse, RebornNotificationChannel, RebornNotificationChannelsResponse,
+    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
@@ -85,7 +86,7 @@ use ironclaw_assistant::{
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
     RebornThreadArtifact, RebornThreadArtifactRequest, RebornTimelineRequest,
     RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
-    RebornTraceHoldAuthorizeResponse, RunArtifactLogs, RunArtifactRedaction,
+    RebornTraceHoldAuthorizeResponse, RunArtifactLogs, RunArtifactRedaction, RunArtifactTimings,
     SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
     SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW,
     SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW, THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW,
@@ -118,6 +119,12 @@ use ironclaw_product_contracts::inbound_requests::{
 use ironclaw_product_contracts::ironhub::{
     IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult,
 };
+use ironclaw_product_contracts::notification_inbox::{
+    NOTIFICATIONS_ARCHIVE_COMMAND_ID, NOTIFICATIONS_MARK_ALL_READ_COMMAND_ID,
+    NOTIFICATIONS_MARK_READ_COMMAND_ID, NOTIFICATIONS_VIEW, ProductListNotificationsResponse,
+    ProductNotification, ProductNotificationAction, ProductNotificationKind,
+    ProductNotificationMutationResponse, ProductNotificationSeverity,
+};
 use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
     LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
@@ -132,7 +139,15 @@ use ironclaw_product_contracts::outbound::{
     ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
-use ironclaw_product_contracts::product_wire::{RebornLogQueryRequest, RebornLogQueryResponse};
+use ironclaw_product_contracts::product_wire::{
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornSuggestion,
+    RebornSuggestionDismissResponse, RebornSuggestionGenerationStatus,
+    RebornSuggestionStartResponse, RebornSuggestionsResponse,
+};
+use ironclaw_product_contracts::suggestions::{
+    SUGGESTION_DISMISS_COMMAND_ID, SUGGESTION_START_COMMAND_ID, SUGGESTIONS_GENERATE_COMMAND_ID,
+    SUGGESTIONS_LIST_VIEW,
+};
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
     ProductSurfaceErrorKind, ProductSurfaceEventSubscription, ProductSurfaceStreamResponse,
@@ -178,11 +193,15 @@ enum ProductSurfaceCallId {
     LlmCodexLogin,
     AdminUserCreate,
     AdminUserDeleteSecret,
+    AutomationRun,
     AutomationPause,
     AutomationResume,
     AutomationRename,
     AutomationDelete,
     NotificationChannelsSet,
+    SuggestionsGenerate,
+    SuggestionStart,
+    SuggestionDismiss,
 }
 
 impl ProductSurfaceCallId {
@@ -209,11 +228,15 @@ impl ProductSurfaceCallId {
             Self::LlmCodexLogin => "llm.codex.login",
             Self::AdminUserCreate => "admin.user.create",
             Self::AdminUserDeleteSecret => "admin.user.delete_secret",
+            Self::AutomationRun => "automation.run",
             Self::AutomationPause => "automation.pause",
             Self::AutomationResume => "automation.resume",
             Self::AutomationRename => "automation.rename",
             Self::AutomationDelete => "automation.delete",
             Self::NotificationChannelsSet => NOTIFICATION_CHANNELS_SET_COMMAND_ID,
+            Self::SuggestionsGenerate => SUGGESTIONS_GENERATE_COMMAND_ID,
+            Self::SuggestionStart => SUGGESTION_START_COMMAND_ID,
+            Self::SuggestionDismiss => SUGGESTION_DISMISS_COMMAND_ID,
         }
     }
 
@@ -240,11 +263,15 @@ impl ProductSurfaceCallId {
             "llm.codex.login" => Some(Self::LlmCodexLogin),
             "admin.user.create" => Some(Self::AdminUserCreate),
             "admin.user.delete_secret" => Some(Self::AdminUserDeleteSecret),
+            "automation.run" => Some(Self::AutomationRun),
             "automation.pause" => Some(Self::AutomationPause),
             "automation.resume" => Some(Self::AutomationResume),
             "automation.rename" => Some(Self::AutomationRename),
             "automation.delete" => Some(Self::AutomationDelete),
             NOTIFICATION_CHANNELS_SET_COMMAND_ID => Some(Self::NotificationChannelsSet),
+            SUGGESTIONS_GENERATE_COMMAND_ID => Some(Self::SuggestionsGenerate),
+            SUGGESTION_START_COMMAND_ID => Some(Self::SuggestionStart),
+            SUGGESTION_DISMISS_COMMAND_ID => Some(Self::SuggestionDismiss),
             _ => None,
         }
     }
@@ -407,6 +434,7 @@ fn stub_thread_artifact(thread_id: String) -> RebornThreadArtifact {
             unavailable_reason: None,
             entries: Vec::new(),
         },
+        timings_by_run: Vec::new(),
         redaction: RunArtifactRedaction {
             pipeline: "deterministic-trace-redactor-v1".to_string(),
             applied: false,
@@ -443,6 +471,7 @@ fn stub_run_artifact(thread_id: String, run_id: TurnRunId) -> RebornRunArtifact 
             unavailable_reason: None,
             entries: Vec::new(),
         },
+        timings: RunArtifactTimings::default(),
         redaction: RunArtifactRedaction {
             pipeline: "deterministic-trace-redactor-v1".to_string(),
             applied: false,
@@ -1022,6 +1051,16 @@ impl StubServices {
                     next_cursor: None,
                 })
             }
+            id if id == SUGGESTIONS_LIST_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(RebornSuggestionsResponse {
+                    status: RebornSuggestionGenerationStatus::Ready,
+                    generation_id: Some("generation-list".to_string()),
+                    retry_after_seconds: None,
+                    suggestions: Vec::new(),
+                })
+                .expect("suggestions payload"),
+                next_cursor: None,
+            }),
             id if id == GLOBAL_AUTO_APPROVE_VIEW.id => {
                 let _: RebornGlobalAutoApproveRequest =
                     serde_json::from_value(query.params).expect("global auto approve params");
@@ -1463,6 +1502,28 @@ impl StubServices {
                     next_cursor: None,
                 })
             }
+            id if id == NOTIFICATIONS_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(ProductListNotificationsResponse {
+                    notifications: vec![ProductNotification {
+                        id: "notification-alpha".to_string(),
+                        kind: ProductNotificationKind::AuthenticationRequired,
+                        severity: ProductNotificationSeverity::Warning,
+                        action: ProductNotificationAction::OpenThread {
+                            thread_id: "thread-alpha".to_string(),
+                        },
+                        thread_id: "thread-alpha".to_string(),
+                        turn_run_id: Some("run-alpha".to_string()),
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                        read_at: None,
+                        resolved_at: None,
+                    }],
+                    next_cursor: Some("notification-cursor".to_string()),
+                    unread_count: 1,
+                })
+                .expect("notifications payload"),
+                next_cursor: Some("notification-cursor".to_string()),
+            }),
             _ => Err(rejecting_product_surface_error()),
         }
     }
@@ -1839,6 +1900,22 @@ impl StubServices {
                     deleted: true,
                 })
             }
+            ProductSurfaceCallId::AutomationRun => {
+                let request: RebornAutomationRequest =
+                    serde_json::from_value(request.input).expect("input");
+                RecordedProductSurfaceCallResponse::json(RebornAutomationMutationResponse {
+                    updated: true,
+                    automation: Some(automation_info(
+                        request.automation_id.as_str(),
+                        "Running status",
+                        "*/5 * * * *",
+                    )),
+                    run_result: Some(RebornAutomationRunMutationResult {
+                        status: RebornAutomationRunMutationStatus::Submitted,
+                        run_id: TurnRunId::new(),
+                    }),
+                })
+            }
             ProductSurfaceCallId::AutomationPause => {
                 let request: RebornAutomationRequest =
                     serde_json::from_value(request.input).expect("input");
@@ -1849,6 +1926,7 @@ impl StubServices {
                         "Paused status",
                         "*/5 * * * *",
                     )),
+                    run_result: None,
                 })
             }
             ProductSurfaceCallId::AutomationResume => {
@@ -1861,6 +1939,7 @@ impl StubServices {
                         "Resumed status",
                         "*/5 * * * *",
                     )),
+                    run_result: None,
                 })
             }
             ProductSurfaceCallId::AutomationRename => {
@@ -1873,6 +1952,7 @@ impl StubServices {
                         request.name.as_deref().unwrap_or("Renamed status"),
                         "*/5 * * * *",
                     )),
+                    run_result: None,
                 })
             }
             ProductSurfaceCallId::AutomationDelete => {
@@ -1881,6 +1961,7 @@ impl StubServices {
                 RecordedProductSurfaceCallResponse::json(RebornAutomationMutationResponse {
                     updated: true,
                     automation: None,
+                    run_result: None,
                 })
             }
             ProductSurfaceCallId::NotificationChannelsSet => {
@@ -1892,6 +1973,9 @@ impl StubServices {
                     .push((caller, request));
                 RecordedProductSurfaceCallResponse::json(notification_channels_response())
             }
+            ProductSurfaceCallId::SuggestionsGenerate
+            | ProductSurfaceCallId::SuggestionStart
+            | ProductSurfaceCallId::SuggestionDismiss => Err(service_unavailable_error(false)),
         }
     }
 }
@@ -1906,6 +1990,25 @@ impl ProductSurface for StubServices {
         ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
         ProductSurfaceError,
     > {
+        if matches!(
+            request.operation_id.as_str(),
+            NOTIFICATIONS_MARK_READ_COMMAND_ID
+                | NOTIFICATIONS_MARK_ALL_READ_COMMAND_ID
+                | NOTIFICATIONS_ARCHIVE_COMMAND_ID
+        ) {
+            self.invoke_calls.lock().expect("lock").push((
+                request.operation_id,
+                request.input,
+                request.activity_id,
+            ));
+            let output =
+                serde_json::to_value(ProductNotificationMutationResponse { updated: true })
+                    .map_err(ProductSurfaceError::internal_from)?;
+            return Ok(
+                ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output },
+            );
+        }
+
         if let Some(call_id) = ProductSurfaceCallId::parse(request.operation_id.as_str()) {
             let output = self
                 .record_product_surface_call(
@@ -3252,6 +3355,76 @@ async fn list_threads_forwards_needs_approval_filter() {
 }
 
 #[tokio::test]
+async fn notification_inbox_routes_query_and_mutate_product_surface() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let list = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/notifications?limit=12&cursor=notification-before")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("list notifications");
+    assert_eq!(list.status(), StatusCode::OK);
+    let body = read_json(list).await;
+    assert_eq!(body["notifications"][0]["kind"], "authentication_required");
+    assert_eq!(body["notifications"][0]["turn_run_id"], "run-alpha");
+    assert_eq!(body["unread_count"], 1);
+
+    for (path, operation_id) in [
+        (
+            "/api/webchat/v2/notifications/notification-alpha/read",
+            NOTIFICATIONS_MARK_READ_COMMAND_ID,
+        ),
+        (
+            "/api/webchat/v2/notifications/read-all",
+            NOTIFICATIONS_MARK_ALL_READ_COMMAND_ID,
+        ),
+        (
+            "/api/webchat/v2/notifications/notification-alpha/archive",
+            NOTIFICATIONS_ARCHIVE_COMMAND_ID,
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("mutate notification");
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(read_json(response).await["updated"], true, "{path}");
+        assert_eq!(
+            services
+                .invoke_calls
+                .lock()
+                .expect("lock")
+                .last()
+                .expect("notification invoke")
+                .0
+                .as_str(),
+            operation_id,
+            "{path}"
+        );
+    }
+
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), NOTIFICATIONS_VIEW.id);
+    assert_eq!(queries[0].params["limit"], 12);
+    assert_eq!(queries[0].cursor.as_deref(), Some("notification-before"));
+}
+
+#[tokio::test]
 async fn list_automations_omits_limits_and_forwards_none() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
@@ -3282,9 +3455,27 @@ async fn list_automations_omits_limits_and_forwards_none() {
 }
 
 #[tokio::test]
-async fn pause_and_resume_automation_dispatch_path_id_to_service() {
+async fn run_pause_and_resume_automation_dispatch_path_id_to_service() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
+
+    let run_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/automations/automation-alpha/run")
+                .body(Body::empty())
+                .expect("run request"),
+        )
+        .await
+        .expect("run oneshot");
+    assert_eq!(run_response.status(), StatusCode::OK);
+    let run_body = read_json(run_response).await;
+    assert_eq!(run_body["updated"], true);
+    assert_eq!(run_body["automation"]["automation_id"], "automation-alpha");
+    assert_eq!(run_body["run_result"]["status"], "submitted");
+    assert!(run_body["run_result"]["run_id"].is_string());
 
     let pause_response = router
         .clone()
@@ -3324,10 +3515,10 @@ async fn pause_and_resume_automation_dispatch_path_id_to_service() {
     );
 
     let calls = services.surface_calls.lock().expect("lock").clone();
-    assert_eq!(calls.len(), 2);
+    assert_eq!(calls.len(), 3);
     assert_eq!(
         calls[0].call_id,
-        ProductSurfaceCallId::AutomationPause.as_str()
+        ProductSurfaceCallId::AutomationRun.as_str()
     );
     assert_eq!(
         calls[0].input,
@@ -3335,12 +3526,51 @@ async fn pause_and_resume_automation_dispatch_path_id_to_service() {
     );
     assert_eq!(
         calls[1].call_id,
-        ProductSurfaceCallId::AutomationResume.as_str()
+        ProductSurfaceCallId::AutomationPause.as_str()
     );
     assert_eq!(
         calls[1].input,
         serde_json::json!({ "automation_id": "automation-alpha" })
     );
+    assert_eq!(
+        calls[2].call_id,
+        ProductSurfaceCallId::AutomationResume.as_str()
+    );
+    assert_eq!(
+        calls[2].input,
+        serde_json::json!({ "automation_id": "automation-alpha" })
+    );
+}
+
+#[tokio::test]
+async fn run_automation_conflict_maps_to_409() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_operation_response(Err(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Conflict,
+        kind: ProductSurfaceErrorKind::Conflict,
+        status_code: 409,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }));
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/automations/automation-alpha/run")
+                .body(Body::empty())
+                .expect("run request"),
+        )
+        .await
+        .expect("run oneshot");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "conflict");
+    assert_eq!(body["kind"], "conflict");
+    assert_eq!(body["retryable"], false);
 }
 
 #[tokio::test]
@@ -3637,6 +3867,253 @@ async fn delete_automation_dispatches_path_id_to_service() {
         calls[0].input,
         serde_json::json!({ "automation_id": "automation-alpha" })
     );
+}
+
+#[tokio::test]
+async fn suggestion_routes_dispatch_typed_path_inputs_through_product_surface() {
+    let cases = [
+        (
+            Method::POST,
+            "/api/webchat/v2/suggestions/generate",
+            ProductSurfaceCallId::SuggestionsGenerate,
+            serde_json::json!({ "client_action_id": "suggestions-action-1" }),
+        ),
+        (
+            Method::POST,
+            "/api/webchat/v2/suggestions/suggestion-alpha/start",
+            ProductSurfaceCallId::SuggestionStart,
+            serde_json::json!({ "suggestion_id": "suggestion-alpha" }),
+        ),
+        (
+            Method::DELETE,
+            "/api/webchat/v2/suggestions/suggestion-alpha",
+            ProductSurfaceCallId::SuggestionDismiss,
+            serde_json::json!({ "suggestion_id": "suggestion-alpha" }),
+        ),
+    ];
+
+    for (method, uri, call_id, input) in cases {
+        let services = Arc::new(StubServices::default());
+        services.enqueue_operation_response(Err(service_unavailable_error(true)));
+        let router = router_with(services.clone());
+
+        let body = if method == Method::POST && uri.ends_with("/generate") {
+            Body::from(input.to_string())
+        } else {
+            Body::empty()
+        };
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(body)
+                    .expect("suggestion request"),
+            )
+            .await
+            .expect("suggestion oneshot");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let calls = services.surface_calls.lock().expect("lock").clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].call_id, call_id.as_str());
+        assert_eq!(calls[0].input, input);
+    }
+}
+
+#[tokio::test]
+async fn suggestion_routes_serialize_success_responses() {
+    let cases = [
+        (
+            Method::POST,
+            "/api/webchat/v2/suggestions/generate",
+            ProductSurfaceCallId::SuggestionsGenerate,
+            serde_json::json!({ "client_action_id": "suggestions-action-1" }),
+            RecordedProductSurfaceCallResponse::json(RebornSuggestionsResponse {
+                status: RebornSuggestionGenerationStatus::Ready,
+                generation_id: Some("generation-1".to_string()),
+                retry_after_seconds: None,
+                suggestions: vec![RebornSuggestion {
+                    id: "suggestion-alpha".to_string(),
+                    title: "Review".to_string(),
+                    description: "Review the release".to_string(),
+                    suggested_prompt: "Review the release".to_string(),
+                    icon: "extension".to_string(),
+                    sources: vec!["Web Search".to_string()],
+                    thread_id: None,
+                    run_id: None,
+                }],
+            })
+            .expect("suggestions response serializes"),
+            serde_json::json!({
+                "status": "ready",
+                "generation_id": "generation-1",
+                "suggestions": [{
+                    "id": "suggestion-alpha",
+                    "title": "Review",
+                    "description": "Review the release",
+                    "suggested_prompt": "Review the release",
+                    "icon": "extension",
+                    "sources": ["Web Search"]
+                }]
+            }),
+        ),
+        (
+            Method::POST,
+            "/api/webchat/v2/suggestions/suggestion-alpha/start",
+            ProductSurfaceCallId::SuggestionStart,
+            serde_json::json!({ "suggestion_id": "suggestion-alpha" }),
+            RecordedProductSurfaceCallResponse::json(RebornSuggestionStartResponse {
+                suggestion_id: "suggestion-alpha".to_string(),
+                thread_id: "thread:alpha".to_string(),
+                run_id: "run-alpha".to_string(),
+            })
+            .expect("start response serializes"),
+            serde_json::json!({
+                "suggestion_id": "suggestion-alpha",
+                "thread_id": "thread:alpha",
+                "run_id": "run-alpha"
+            }),
+        ),
+        (
+            Method::DELETE,
+            "/api/webchat/v2/suggestions/suggestion-alpha",
+            ProductSurfaceCallId::SuggestionDismiss,
+            serde_json::json!({ "suggestion_id": "suggestion-alpha" }),
+            RecordedProductSurfaceCallResponse::json(RebornSuggestionDismissResponse {
+                suggestion_id: "suggestion-alpha".to_string(),
+                dismissed: true,
+            })
+            .expect("dismiss response serializes"),
+            serde_json::json!({ "suggestion_id": "suggestion-alpha", "dismissed": true }),
+        ),
+    ];
+
+    for (method, uri, call_id, expected_input, response, expected_body) in cases {
+        let services = Arc::new(StubServices::default());
+        services.enqueue_operation_response(Ok(response));
+        let router = router_with(services.clone());
+
+        let body = if method == Method::POST && uri.ends_with("/generate") {
+            Body::from(expected_input.to_string())
+        } else {
+            Body::empty()
+        };
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(body)
+                    .expect("suggestion request"),
+            )
+            .await
+            .expect("suggestion oneshot");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(read_json(response).await, expected_body);
+        let calls = services.surface_calls.lock().expect("lock").clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].call_id, call_id.as_str());
+        assert_eq!(calls[0].input, expected_input);
+    }
+}
+
+#[tokio::test]
+async fn suggestions_list_is_read_only_and_returns_two_hundred() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/suggestions")
+                .body(Body::empty())
+                .expect("suggestions list request"),
+        )
+        .await
+        .expect("suggestions list oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(read_json(response).await["status"], "ready");
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id, SUGGESTIONS_LIST_VIEW.id);
+    assert_eq!(queries[0].params, serde_json::json!({}));
+    assert!(services.surface_calls.lock().expect("lock").is_empty());
+}
+
+#[tokio::test]
+async fn suggestions_generate_maps_generating_to_accepted_with_retry_after() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_operation_response(RecordedProductSurfaceCallResponse::json(
+        RebornSuggestionsResponse {
+            status: RebornSuggestionGenerationStatus::Generating,
+            generation_id: Some("generation-2".to_string()),
+            retry_after_seconds: Some(2),
+            suggestions: Vec::new(),
+        },
+    ));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/suggestions/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "client_action_id": "action-2" }).to_string(),
+                ))
+                .expect("suggestions generate request"),
+        )
+        .await
+        .expect("suggestions generate oneshot");
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(response.headers()[header::RETRY_AFTER], "2");
+    assert_eq!(read_json(response).await["status"], "generating");
+    let calls = services.surface_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].call_id,
+        ProductSurfaceCallId::SuggestionsGenerate.as_str()
+    );
+    assert_eq!(
+        calls[0].input,
+        serde_json::json!({ "client_action_id": "action-2" })
+    );
+}
+
+#[tokio::test]
+async fn suggestions_generate_rejects_missing_or_oversized_client_action_id() {
+    for (body, expected_status) in [
+        (serde_json::json!({}), StatusCode::UNPROCESSABLE_ENTITY),
+        (
+            serde_json::json!({ "client_action_id": "a".repeat(257) }),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let services = Arc::new(StubServices::default());
+        let router = router_with(services.clone());
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/suggestions/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("suggestions generate request"),
+            )
+            .await
+            .expect("suggestions generate oneshot");
+
+        assert_eq!(response.status(), expected_status);
+        assert!(services.surface_calls.lock().expect("lock").is_empty());
+    }
 }
 
 #[tokio::test]
@@ -4225,6 +4702,43 @@ async fn get_session_reports_reborn_projects_feature_from_state_flag() {
         assert_eq!(
             body["features"]["reborn_projects"], enabled,
             "features.reborn_projects must mirror the state flag (enabled={enabled})"
+        );
+    }
+}
+
+// The browser hides the OOBE first-run suggestion cards unless the deployment
+// opts in. The gate is delivered through the session response's
+// `features.oobe_suggestions` field, fed from
+// `WebUiV2State::with_oobe_suggestions_enabled` at composition. Drive the real
+// router (not just the state accessor) so a handler that forgot to surface the
+// flag is caught — see `.claude/rules/testing.md` "Test Through the Caller".
+#[tokio::test]
+async fn get_session_reports_oobe_suggestions_feature_from_state_flag() {
+    for enabled in [false, true] {
+        let services = Arc::new(StubServices::default());
+        let router = webui_v2_router(
+            WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+                .with_oobe_suggestions_enabled(enabled),
+        )
+        .layer(axum::Extension(caller()))
+        .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/webchat/v2/session")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(
+            body["features"]["oobe_suggestions"], enabled,
+            "features.oobe_suggestions must mirror the state flag (enabled={enabled})"
         );
     }
 }

@@ -70,6 +70,10 @@ use ironclaw_host_api::{
 use ironclaw_loop_host::{HostInputEnqueuePort, RejectingInputEnqueue};
 use ironclaw_product_contracts::outbound::ProjectionCursor;
 use ironclaw_product_contracts::projection::ProjectionSubscriptionRequest;
+use ironclaw_product_contracts::suggestions::{
+    SUGGESTION_DISMISS_COMMAND_ID, SUGGESTION_START_COMMAND_ID, SUGGESTIONS_GENERATE_COMMAND_ID,
+    SUGGESTIONS_LIST_VIEW,
+};
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     ProductSurfaceValidationCode,
@@ -104,10 +108,6 @@ use crate::{
     UnsupportedLifecycleProductService,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
-    binding_ref::{
-        DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_reply_target_binding_ref,
-        bounded_source_binding_ref,
-    },
     declared_command_help_text, is_approval_gate_ref, is_auth_gate_ref,
     policy::{BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest},
     product_command_descriptors, required_audience, thread_metadata_is_automation_trigger,
@@ -148,8 +148,12 @@ mod product_capability_handlers;
 mod product_commands;
 mod project_fs;
 mod projects;
-mod run_artifact;
+// pub(crate): lib.rs re-exports `reborn_services::run_artifact::timings`
+// directly, which needs this segment of the path visible crate-wide; the
+// module's own contents stay unexported except through that re-export.
+pub(crate) mod run_artifact;
 mod thread_artifact;
+mod timings_source;
 mod trace_credits;
 mod types;
 mod views;
@@ -204,6 +208,11 @@ pub use fs_browse::{
     RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
     RebornFsStatResponse,
 };
+use ironclaw_notifications::{
+    ListNotificationsRequest, MarkAllNotificationsReadRequest, NOTIFICATION_PAGE_LIMIT_MAX,
+    NoopNotificationInboxStore, NotificationAction, NotificationInboxStorePort, NotificationKind,
+    NotificationMutationRequest, NotificationRecipient, NotificationSeverity,
+};
 pub use ironclaw_product_contracts::descriptors::{
     EmptyProductCommandInput, ProductCapabilityDescriptor, ProductSurfaceCommandDescriptor,
     ProductView,
@@ -212,15 +221,26 @@ use ironclaw_product_contracts::ironhub::{
     IRONHUB_DELIVER_INSTALL_COMMAND_ID, IronhubInstallDeliveryRequest,
     IronhubInstallDeliveryResult, IronhubLinkService,
 };
+use ironclaw_product_contracts::notification_inbox::{
+    NOTIFICATIONS_ARCHIVE_COMMAND_ID, NOTIFICATIONS_MARK_ALL_READ_COMMAND_ID,
+    NOTIFICATIONS_MARK_READ_COMMAND_ID, NOTIFICATIONS_VIEW,
+};
+use ironclaw_product_contracts::notification_inbox::{
+    ProductListNotificationsRequest, ProductListNotificationsResponse,
+    ProductMarkAllNotificationsReadRequest, ProductNotification, ProductNotificationAction,
+    ProductNotificationKind, ProductNotificationMutationRequest,
+    ProductNotificationMutationResponse, ProductNotificationSeverity,
+};
 pub use ironclaw_product_contracts::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
 pub use ironclaw_product_contracts::product_wire::{
     RebornAccountBindingSource, RebornAttachmentBytes, RebornAttachmentRequest,
     RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
-    RebornChannelConnectAction, RebornCommandRejection, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornExecuteProductCommandRequest, RebornExtensionActionResponse,
+    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunMutationResult,
+    RebornAutomationRunMutationStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
+    RebornCommandRejection, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExecuteProductCommandRequest, RebornExtensionActionResponse,
     RebornExtensionCredentialSetup, RebornExtensionOnboardingPayload,
     RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
     RebornExtensionSetupField, RebornExtensionSetupSecret, RebornExtensionSurface,
@@ -303,8 +323,8 @@ pub use run_artifact::{
     RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall,
 };
 pub use thread_artifact::{
-    RebornThreadArtifact, RebornThreadArtifactRequest, THREAD_ARTIFACT_MAX_MESSAGES,
-    THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW,
+    RebornThreadArtifact, RebornThreadArtifactRequest, RunArtifactRunTimings,
+    THREAD_ARTIFACT_MAX_MESSAGES, THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW,
 };
 pub use types::{
     RebornAuthAccount, RebornCreateThreadResponse, RebornExecuteProductCommandResponse,
@@ -407,6 +427,9 @@ pub const PROJECT_MEMBER_REMOVE_CAPABILITY: ProductCapabilityDescriptor =
 pub const AUTOMATION_PAUSE_CAPABILITY_ID: &str = "builtin.automation_pause";
 pub const AUTOMATION_PAUSE_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(AUTOMATION_PAUSE_CAPABILITY_ID);
+pub const AUTOMATION_RUN_CAPABILITY_ID: &str = "builtin.automation_run";
+pub const AUTOMATION_RUN_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(AUTOMATION_RUN_CAPABILITY_ID);
 pub const AUTOMATION_RESUME_CAPABILITY_ID: &str = "builtin.automation_resume";
 pub const AUTOMATION_RESUME_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(AUTOMATION_RESUME_CAPABILITY_ID);
@@ -530,6 +553,11 @@ pub const AUTOMATION_PAUSE_COMMAND: ProductSurfaceCommandDescriptor<
     RebornAutomationRequest,
     RebornAutomationMutationResponse,
 > = ProductSurfaceCommandDescriptor::new(AUTOMATION_PAUSE_COMMAND_ID);
+pub const AUTOMATION_RUN_COMMAND_ID: &str = "automation.run";
+pub const AUTOMATION_RUN_COMMAND: ProductSurfaceCommandDescriptor<
+    RebornAutomationRequest,
+    RebornAutomationMutationResponse,
+> = ProductSurfaceCommandDescriptor::new(AUTOMATION_RUN_COMMAND_ID);
 pub const AUTOMATION_RESUME_COMMAND_ID: &str = "automation.resume";
 pub const AUTOMATION_RESUME_COMMAND: ProductSurfaceCommandDescriptor<
     RebornAutomationRequest,
@@ -1143,6 +1171,14 @@ pub trait AutomationProductService: Send + Sync {
         Err(automation_unavailable())
     }
 
+    async fn run_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
+        Err(automation_unavailable())
+    }
+
     async fn resume_automation(
         &self,
         _caller: ProductAgentBoundCaller,
@@ -1223,6 +1259,14 @@ impl AutomationProductService for UnsupportedAutomationProductService {
     }
 
     async fn pause_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
+        Err(automation_unavailable())
+    }
+
+    async fn run_automation(
         &self,
         _caller: ProductAgentBoundCaller,
         _automation_id: String,
@@ -1516,6 +1560,86 @@ fn operator_config_capability_forbidden() -> ProductSurfaceError {
 
 fn product_view_forbidden() -> ProductSurfaceError {
     ProductSurfaceError::from_status(ProductSurfaceErrorCode::Forbidden, 403, false)
+}
+
+fn notification_recipient(caller: &ProductSurfaceCaller) -> NotificationRecipient {
+    NotificationRecipient {
+        tenant_id: caller.tenant_id.clone(),
+        user_id: caller.user_id.clone(),
+    }
+}
+
+fn notification_mutation_request(
+    caller: &ProductSurfaceCaller,
+    request: ProductNotificationMutationRequest,
+) -> Result<NotificationMutationRequest, ProductSurfaceError> {
+    let notification_id = ironclaw_notifications::NotificationId::new(request.notification_id)
+        .map_err(|_| {
+            ProductSurfaceError::validation(
+                "notification_id",
+                ProductSurfaceValidationCode::InvalidId,
+            )
+        })?;
+    Ok(NotificationMutationRequest {
+        recipient: notification_recipient(caller),
+        notification_id,
+        occurred_at: Utc::now(),
+    })
+}
+
+fn map_notification_inbox_error(
+    error: ironclaw_notifications::NotificationInboxError,
+) -> ProductSurfaceError {
+    match error {
+        // Unlike the backend and serialization reasons below, this one is a
+        // fixed literal from this crate — never backend text — so it is safe to
+        // record before the boundary sanitizes the client-facing error.
+        ironclaw_notifications::NotificationInboxError::InvalidRequest { reason } => {
+            tracing::warn!(%reason, "notification inbox rejected a request at the product boundary");
+            ProductSurfaceError::validation(
+                "notification",
+                ProductSurfaceValidationCode::InvalidValue,
+            )
+        }
+        ironclaw_notifications::NotificationInboxError::NotificationNotFound => {
+            ProductSurfaceError::not_found()
+        }
+        ironclaw_notifications::NotificationInboxError::AccessDenied => {
+            ProductSurfaceError::from_status(ProductSurfaceErrorCode::Forbidden, 403, false)
+        }
+        // The bound reason is filesystem, CAS, and serde text: it carries host
+        // paths, mount internals, and payload fragments. This boundary logs the
+        // fixed category only, matching how every other backend mapping here
+        // discards its payload.
+        ironclaw_notifications::NotificationInboxError::Backend { .. } => {
+            tracing::warn!("notification inbox backend unavailable at the product boundary");
+            ProductSurfaceError::service_unavailable(true)
+        }
+        ironclaw_notifications::NotificationInboxError::Serialization { .. } => {
+            tracing::warn!("notification inbox serialization failed at the product boundary");
+            ProductSurfaceError::internal()
+        }
+    }
+}
+
+fn product_notification_kind(kind: NotificationKind) -> ProductNotificationKind {
+    match kind {
+        NotificationKind::ApprovalRequired => ProductNotificationKind::ApprovalRequired,
+        NotificationKind::AuthenticationRequired => ProductNotificationKind::AuthenticationRequired,
+        NotificationKind::RunBlocked => ProductNotificationKind::RunBlocked,
+        NotificationKind::RunFailed => ProductNotificationKind::RunFailed,
+        NotificationKind::RunCompleted => ProductNotificationKind::RunCompleted,
+        NotificationKind::DeliveryFailed => ProductNotificationKind::DeliveryFailed,
+    }
+}
+
+fn product_notification_severity(severity: NotificationSeverity) -> ProductNotificationSeverity {
+    match severity {
+        NotificationSeverity::Info => ProductNotificationSeverity::Info,
+        NotificationSeverity::Success => ProductNotificationSeverity::Success,
+        NotificationSeverity::Warning => ProductNotificationSeverity::Warning,
+        NotificationSeverity::Error => ProductNotificationSeverity::Error,
+    }
 }
 
 fn product_view_requires_operator_config(view_id: &str) -> bool {
@@ -2250,6 +2374,19 @@ pub trait ProductCapabilityInvoker: Send + Sync {
         input: serde_json::Value,
         activity_id: ActivityId,
     ) -> Result<Resolution, ProductSurfaceError>;
+
+    /// Persist structured output produced by product-owned capability
+    /// handlers through the same durable result boundary as runtime-owned
+    /// capabilities.
+    async fn complete_product_result(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _output: serde_json::Value,
+        _activity_id: ActivityId,
+        _summary: &'static str,
+    ) -> Result<Resolution, ProductSurfaceError> {
+        Err(ProductSurfaceError::service_unavailable(false))
+    }
 }
 
 /// Fail-closed default for compositions that have not attached the product
@@ -2361,6 +2498,7 @@ pub struct RebornServices<
     channel_config_service: Option<Arc<dyn ChannelConfigProductService>>,
     outbound_preferences_service: Arc<dyn OutboundPreferencesProductService>,
     notification_setup_service: Arc<dyn ChannelNotificationSetupService>,
+    notification_inbox: Arc<dyn NotificationInboxStorePort>,
     session_inbound_ledger: Arc<dyn crate::ledger::IdempotencyLedger>,
     /// The session lane's product surface, built once. Every input is an
     /// immutable builder-wired `Arc`, so rebuilding it per `submit_turn`
@@ -2383,7 +2521,17 @@ pub struct RebornServices<
     active_model_reader: Option<Arc<dyn ActiveModelReader>>,
     operator_approval_config: Option<RebornOperatorApprovalConfig>,
     diagnostic_store: Arc<dyn crate::inspector_store::DiagnosticStorePort>,
+    pub(crate) suggestions: Option<SuggestionsServices>,
     thread_operation_locks: Arc<ThreadOperationLocks>,
+}
+
+/// The suggestion surface needs both durable state and the canonical unbound
+/// submission path. Keep them as one optional capability so a partially wired
+/// surface cannot be represented by the composition root.
+#[derive(Clone)]
+pub(crate) struct SuggestionsServices {
+    pub(crate) store: Arc<dyn crate::suggestions_store::SuggestionsStore>,
+    pub(crate) unbound: Arc<crate::unbound_turn::UnboundTurnService>,
 }
 
 impl RebornServices<UnavailableProductCapabilityInvoker, UnavailableRebornViewProvider> {
@@ -2452,6 +2600,7 @@ where
                 UnsupportedOutboundPreferencesProductService::new_static(),
             ),
             notification_setup_service: Arc::new(UnsupportedChannelNotificationSetupService),
+            notification_inbox: Arc::new(NoopNotificationInboxStore),
             session_inbound_ledger: Arc::new(
                 crate::in_memory_ledger::InMemoryIdempotencyLedger::new(),
             ),
@@ -2471,6 +2620,7 @@ where
             active_model_reader: None,
             operator_approval_config: None,
             diagnostic_store: Arc::new(crate::inspector_store::InMemoryDiagnosticStore::default()),
+            suggestions: None,
             thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
@@ -2487,6 +2637,15 @@ where
 
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
         self.event_stream = Some(event_stream);
+        self
+    }
+
+    pub fn with_suggestions(
+        mut self,
+        store: Arc<dyn crate::suggestions_store::SuggestionsStore>,
+        unbound: Arc<crate::unbound_turn::UnboundTurnService>,
+    ) -> Self {
+        self.suggestions = Some(SuggestionsServices { store, unbound });
         self
     }
 
@@ -2646,6 +2805,14 @@ where
         notification_setup_service: Arc<dyn ChannelNotificationSetupService>,
     ) -> Self {
         self.notification_setup_service = notification_setup_service;
+        self
+    }
+
+    pub fn with_notification_inbox(
+        mut self,
+        notification_inbox: Arc<dyn NotificationInboxStorePort>,
+    ) -> Self {
+        self.notification_inbox = notification_inbox;
         self
     }
 
@@ -2825,6 +2992,111 @@ where
         };
         self.list_visible_threads_for_scope(scope, request, caller)
             .await
+    }
+
+    async fn build_notifications_view(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: ProductListNotificationsRequest,
+        cursor: Option<String>,
+    ) -> Result<ProductListNotificationsResponse, ProductSurfaceError> {
+        let limit = request.limit.unwrap_or(30) as usize;
+        if limit == 0 || limit > NOTIFICATION_PAGE_LIMIT_MAX {
+            return Err(ProductSurfaceError::validation(
+                "limit",
+                ProductSurfaceValidationCode::InvalidValue,
+            ));
+        }
+        let page = self
+            .notification_inbox
+            .list(ListNotificationsRequest {
+                recipient: notification_recipient(&caller),
+                limit,
+                cursor,
+                include_archived: false,
+            })
+            .await
+            .map_err(map_notification_inbox_error)?;
+        Ok(ProductListNotificationsResponse {
+            notifications: page
+                .notifications
+                .into_iter()
+                .map(|record| ProductNotification {
+                    id: record.id.as_str().to_string(),
+                    kind: product_notification_kind(record.kind),
+                    severity: product_notification_severity(record.severity),
+                    action: match record.action {
+                        NotificationAction::OpenThread { thread_id } => {
+                            ProductNotificationAction::OpenThread {
+                                thread_id: thread_id.to_string(),
+                            }
+                        }
+                    },
+                    thread_id: record.source.thread_id.to_string(),
+                    turn_run_id: record.source.turn_run_id.map(|id| id.to_string()),
+                    created_at: record.created_at,
+                    updated_at: record.updated_at,
+                    read_at: record.read_at,
+                    resolved_at: record.resolved_at,
+                })
+                .collect(),
+            next_cursor: page.next_cursor,
+            unread_count: page.unread_count,
+        })
+    }
+
+    async fn mark_notification_read(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: ProductNotificationMutationRequest,
+    ) -> Result<ProductNotificationMutationResponse, ProductSurfaceError> {
+        // Terminal implementation of an authenticated ProductSurface command:
+        // the recipient is always re-derived from the verified caller, never
+        // accepted from the request body.
+        // `updated` reports what the store actually changed. A repeated
+        // mark-read succeeds without changing anything, and answering `true`
+        // there would hand the client evidence of a durable write that never
+        // happened.
+        let outcome = self
+            .notification_inbox
+            .mark_read(notification_mutation_request(&caller, request)?)
+            .await
+            .map_err(map_notification_inbox_error)?;
+        Ok(ProductNotificationMutationResponse {
+            updated: outcome.applied(),
+        })
+    }
+
+    async fn mark_all_notifications_read(
+        &self,
+        caller: ProductSurfaceCaller,
+    ) -> Result<ProductNotificationMutationResponse, ProductSurfaceError> {
+        let outcome = self
+            .notification_inbox
+            .mark_all_read(MarkAllNotificationsReadRequest {
+                recipient: notification_recipient(&caller),
+                occurred_at: Utc::now(),
+            })
+            .await
+            .map_err(map_notification_inbox_error)?;
+        Ok(ProductNotificationMutationResponse {
+            updated: outcome.applied(),
+        })
+    }
+
+    async fn archive_notification(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: ProductNotificationMutationRequest,
+    ) -> Result<ProductNotificationMutationResponse, ProductSurfaceError> {
+        let outcome = self
+            .notification_inbox
+            .archive(notification_mutation_request(&caller, request)?)
+            .await
+            .map_err(map_notification_inbox_error)?;
+        Ok(ProductNotificationMutationResponse {
+            updated: outcome.applied(),
+        })
     }
 
     /// Wire the generic channel-config configure port. Without it, the
@@ -3130,8 +3402,24 @@ where
         if let Some(operation) =
             product_capability_handlers::ProductCapabilityHandler::parse(&capability)
         {
-            let summary = operation.success_summary();
-            operation.invoke(self, caller, input).await?;
+            let completion_caller = caller.clone();
+            let run_result = operation.invoke(self, caller, input).await?;
+            let summary = match run_result.as_ref().map(|result| result.status) {
+                Some(RebornAutomationRunMutationStatus::Replayed) => {
+                    "automation run was already submitted"
+                }
+                Some(RebornAutomationRunMutationStatus::Submitted) | None => {
+                    operation.success_summary()
+                }
+            };
+            if let Some(run_result) = run_result {
+                let output =
+                    serde_json::to_value(run_result).map_err(ProductSurfaceError::internal_from)?;
+                return self
+                    .product_capability_invoker
+                    .complete_product_result(completion_caller, output, activity_id, summary)
+                    .await;
+            }
             return self.api_capability_success(activity_id, summary);
         }
         self.product_capability_invoker
@@ -4236,6 +4524,19 @@ where
                 let next_cursor = response.next_cursor.clone();
                 views::view_page_with_cursor(response, next_cursor)
             }
+            id if id == NOTIFICATIONS_VIEW.id => {
+                let request = serde_json::from_value(query.params).map_err(|_| {
+                    ProductSurfaceError::validation(
+                        "input",
+                        ProductSurfaceValidationCode::InvalidValue,
+                    )
+                })?;
+                let response = self
+                    .build_notifications_view(caller, request, query.cursor)
+                    .await?;
+                let next_cursor = response.next_cursor.clone();
+                views::view_page_with_cursor(response, next_cursor)
+            }
             id if id == AUTOMATIONS_VIEW.id => {
                 let request = serde_json::from_value(query.params)
                     .map_err(ProductSurfaceError::internal_from)?;
@@ -4298,6 +4599,11 @@ where
                     .map_err(ProductSurfaceError::internal_from)?;
                 request.cursor = query.cursor.or(request.cursor);
                 let response = self.get_timeline(caller, request).await?;
+                views::view_page(response)
+            }
+            id if id == SUGGESTIONS_LIST_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.list_suggestions(caller).await?;
                 views::view_page(response)
             }
             id if id == PROJECT_FS_LIST_VIEW.id => {
@@ -4953,21 +5259,12 @@ where
         // (the failed run is terminal) and then deletes the thread while
         // `retry_turn` enqueues a replacement run against it.
         let _thread_operation_guard = self.lock_thread_operation(&access.scope).await;
-        let binding_id = webui_retry_binding_id(&access.scope, run_id, &client_action_id);
         let response = self
             .turn_coordinator
             .retry_turn(RetryTurnRequest {
                 scope: access.scope,
                 actor: access.run_actor,
                 run_id,
-                source_binding_ref: webui_source_binding_ref_from_raw(
-                    "webui-retry-src",
-                    &binding_id,
-                )?,
-                reply_target_binding_ref: webui_reply_target_binding_ref_from_raw(
-                    "webui-retry-reply",
-                    &binding_id,
-                )?,
                 idempotency_key: client_action_id,
             })
             .await
@@ -5027,6 +5324,23 @@ where
         };
         self.automation_service
             .pause_automation(caller, automation_id)
+            .await
+    }
+
+    async fn run_automation(
+        &self,
+        caller: ProductSurfaceCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
+        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(ProductSurfaceError::from_status(
+                ProductSurfaceErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        self.automation_service
+            .run_automation(caller, automation_id)
             .await
     }
 
@@ -6415,7 +6729,6 @@ where
                 if always {
                     return Err(persistent_approval_unavailable());
                 }
-                let binding_id = webui_gate_binding_id(&scope, &gate_ref_string(&gate_ref));
                 let response = self
                     .turn_coordinator
                     .resume_turn(ResumeTurnRequest {
@@ -6424,14 +6737,6 @@ where
                         run_id,
                         gate_resolution_ref: gate_ref,
                         precondition: ResumeTurnPrecondition::AnyBlockedGate,
-                        source_binding_ref: webui_source_binding_ref_from_raw(
-                            "webui-gate-src",
-                            &binding_id,
-                        )?,
-                        reply_target_binding_ref: webui_reply_target_binding_ref_from_raw(
-                            "webui-gate-reply",
-                            &binding_id,
-                        )?,
                         idempotency_key: client_action_id,
                         resume_disposition: None,
                     })
@@ -6714,24 +7019,6 @@ fn parse_run_id_field(
 
 fn parse_persisted_turn_run_id(value: &str) -> Result<TurnRunId, ProductSurfaceError> {
     TurnRunId::parse(value).map_err(ProductSurfaceError::internal_from)
-}
-
-fn webui_source_binding_ref_from_raw(
-    prefix: &str,
-    raw: &str,
-) -> Result<ironclaw_host_api::turn::SourceBindingRef, ProductSurfaceError> {
-    bounded_source_binding_ref(prefix, raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(|_| {
-        ProductSurfaceError::from_status(ProductSurfaceErrorCode::Internal, 500, false)
-    })
-}
-
-fn webui_reply_target_binding_ref_from_raw(
-    prefix: &str,
-    raw: &str,
-) -> Result<ironclaw_host_api::turn::ReplyTargetBindingRef, ProductSurfaceError> {
-    bounded_reply_target_binding_ref(prefix, raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(|_| {
-        ProductSurfaceError::from_status(ProductSurfaceErrorCode::Internal, 500, false)
-    })
 }
 
 /// Transport identity stamped on session-lane submissions that did not name
@@ -7028,35 +7315,6 @@ fn cap_summary_artifacts(
     artifacts
 }
 
-fn webui_gate_binding_id(scope: &TurnScope, gate_ref: &str) -> String {
-    format!(
-        "{}{}{}{}",
-        segment("surface", "webui"),
-        segment("tenant", scope.tenant_id.as_str()),
-        segment("thread", scope.thread_id.as_str()),
-        segment("gate", gate_ref)
-    )
-}
-
-fn webui_retry_binding_id(
-    scope: &TurnScope,
-    run_id: TurnRunId,
-    client_action_id: &IdempotencyKey,
-) -> String {
-    format!(
-        "{}{}{}{}{}",
-        segment("surface", "webui"),
-        segment("tenant", scope.tenant_id.as_str()),
-        segment("thread", scope.thread_id.as_str()),
-        segment("failed_run", run_id.as_uuid().to_string().as_str()),
-        segment("action", client_action_id.as_str())
-    )
-}
-
-fn gate_ref_string(gate_ref: &ironclaw_host_api::turn::TurnGateRef) -> String {
-    gate_ref.as_str().to_string()
-}
-
 fn persistent_approval_unavailable() -> ProductSurfaceError {
     ProductSurfaceError::from_status_kind(
         ProductSurfaceErrorCode::Unavailable,
@@ -7123,21 +7381,29 @@ fn map_thread_error(error: SessionThreadError) -> ProductSurfaceError {
         }
         SessionThreadError::ThreadScopeMismatch { .. }
         | SessionThreadError::IdempotentReplayActorMismatch { .. }
+        | SessionThreadError::StructuredFinalizationConflict { .. }
+        | SessionThreadError::StructuredFinalizationPublishMismatch { .. }
         | SessionThreadError::InvalidMessageTransition { .. }
         | SessionThreadError::MessageNotDraft { .. }
         | SessionThreadError::InvalidSummaryRange { .. }
         | SessionThreadError::OverlappingSummaryRange { .. } => {
             ProductSurfaceError::from_status(ProductSurfaceErrorCode::Conflict, 409, false)
         }
-        SessionThreadError::InvalidAttachment(_) => ProductSurfaceError::from_status_kind(
-            ProductSurfaceErrorCode::InvalidRequest,
-            ProductSurfaceErrorKind::Validation,
-            400,
-            false,
-        ),
+        SessionThreadError::InvalidAttachment(_)
+        | SessionThreadError::InvalidPreparedContext { .. }
+        | SessionThreadError::InvalidSubagentResult { .. }
+        | SessionThreadError::PreparedContextKeyMismatch { .. } => {
+            ProductSurfaceError::from_status_kind(
+                ProductSurfaceErrorCode::InvalidRequest,
+                ProductSurfaceErrorKind::Validation,
+                400,
+                false,
+            )
+        }
         SessionThreadError::GeneratedThreadId(_)
         | SessionThreadError::Serialization(_)
         | SessionThreadError::Deserialization(_)
+        | SessionThreadError::InvalidStructuredFinalization { .. }
         | SessionThreadError::InvalidMessageTimestamp { .. }
         | SessionThreadError::Backend(_) => ProductSurfaceError::service_unavailable(true),
     }
@@ -7567,5 +7833,22 @@ mod tests {
             !unavailable.retryable,
             "false-arg sentinel is non-retryable"
         );
+    }
+
+    #[test]
+    fn structured_finalization_errors_map_to_stable_product_statuses() {
+        let conflict = map_thread_error(SessionThreadError::StructuredFinalizationConflict {
+            turn_run_id: TurnRunId::new(),
+        });
+        assert_eq!(conflict.code, ProductSurfaceErrorCode::Conflict);
+        assert_eq!(conflict.status_code, 409);
+        assert!(!conflict.retryable);
+
+        let invalid = map_thread_error(SessionThreadError::InvalidStructuredFinalization {
+            reason: "malformed JSON".to_string(),
+        });
+        assert_eq!(invalid.code, ProductSurfaceErrorCode::Unavailable);
+        assert_eq!(invalid.status_code, 503);
+        assert!(invalid.retryable);
     }
 }
