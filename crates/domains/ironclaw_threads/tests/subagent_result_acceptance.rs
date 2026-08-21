@@ -975,12 +975,14 @@ async fn filesystem_an_empty_identity_half_is_refused() {
 /// retaining a pending flip that counts against `MAX_QUEUED_INPUTS_PER_RUN`
 /// and blocks `is_settled` (both `input_queue.rs`).
 ///
-/// This case pins today's refusal, and its shape, so the 2b implementer meets
-/// the trap as a red test rather than as a wedged parent run. The fix belongs
-/// in these backends — an already-terminal row has nothing to flip, so the
-/// flip returns it unchanged — never in widening `ensure_user_accepted` to
-/// admit system rows: that would re-open `Queued`/`RejectedBusy` onto a result
-/// row and erase the system-vs-user distinction this door exists to hold.
+/// This case pins today's refusal on the human steering door
+/// (`mark_message_queued`), and — per D14 — the *no-op* the queue's
+/// best-effort `Submitted` flip must get from `mark_message_submitted`: an
+/// already-terminal row has nothing to flip, so the flip returns it
+/// unchanged rather than erroring. Neither half widens `ensure_user_accepted`
+/// to admit system rows: that would re-open `Queued`/`RejectedBusy` onto a
+/// result row and erase the system-vs-user distinction this door exists to
+/// hold.
 async fn a_result_row_is_refused_by_the_steering_ladder(service: Arc<dyn SessionThreadService>) {
     let thread = ensure_thread(&service).await;
     let accepted = service
@@ -1003,6 +1005,19 @@ async fn a_result_row_is_refused_by_the_steering_ladder(service: Arc<dyn Session
         "expected InvalidMessageTransition from Finalized, got {queued:?}"
     );
 
+    // The queued refusal left the row exactly as accepted — still terminal,
+    // still system-class, still model-visible.
+    let before = service
+        .read_thread_message(&scope(), &thread, accepted.message_id)
+        .await
+        .expect("read succeeds")
+        .expect("row exists");
+    assert_eq!(before.kind, MessageKind::System);
+    assert_eq!(before.status, MessageStatus::Finalized);
+
+    // D14: the queue's best-effort Submitted flip treats an already-terminal
+    // row as already-settled — it succeeds and returns the row completely
+    // unchanged, not `InvalidMessageTransition`.
     let submitted = service
         .mark_message_submitted(
             &scope(),
@@ -1012,27 +1027,21 @@ async fn a_result_row_is_refused_by_the_steering_ladder(service: Arc<dyn Session
             "run-1".to_string(),
         )
         .await
-        .expect_err("the queue's best-effort Submitted flip cannot settle a terminal row today");
-    assert!(
-        matches!(
-            &submitted,
-            SessionThreadError::InvalidMessageTransition { message_id, from, attempted }
-                if *message_id == accepted.message_id
-                    && *from == MessageStatus::Finalized
-                    && *attempted == "mark_message_submitted"
-        ),
-        "expected InvalidMessageTransition from Finalized, got {submitted:?}"
+        .expect("the queue's best-effort Submitted flip no-ops on a terminal row");
+    assert_eq!(
+        submitted, before,
+        "a terminal row must come back byte-for-byte unchanged from the Submitted flip"
     );
 
-    // Both refusals left the row exactly as accepted — still terminal, still
-    // system-class, still model-visible.
-    let row = service
+    let after = service
         .read_thread_message(&scope(), &thread, accepted.message_id)
         .await
         .expect("read succeeds")
         .expect("row exists");
-    assert_eq!(row.kind, MessageKind::System);
-    assert_eq!(row.status, MessageStatus::Finalized);
+    assert_eq!(
+        after, before,
+        "the persisted row must be untouched by the Submitted flip"
+    );
 }
 
 #[tokio::test]

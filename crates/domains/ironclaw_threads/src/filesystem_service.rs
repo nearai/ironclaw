@@ -2755,6 +2755,12 @@ where
                 {
                     return Ok(());
                 }
+                // D14: a subagent result row is terminal on arrival. The queue's
+                // best-effort Submitted flip must treat it as already-settled, not as a
+                // transition violation — an already-terminal row has nothing to flip.
+                if message.status == MessageStatus::Finalized {
+                    return Ok(());
+                }
                 ensure_user_accepted(message, "mark_message_submitted")?;
                 if message.status == MessageStatus::Queued
                     && let Some(sequence) = queued_sequence
