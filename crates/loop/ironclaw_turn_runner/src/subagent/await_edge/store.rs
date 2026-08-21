@@ -180,8 +180,22 @@ impl AwaitEdgeStore {
         .await
     }
 
-    /// `ResultAppended -> AttentionScheduled`, recording how the parent was
-    /// made attentive.
+    /// `ResultAppended | AttentionDeferred -> AttentionScheduled`, recording how
+    /// the parent was made attentive.
+    ///
+    /// Two predecessors are legal, because draining a parked edge *is*
+    /// scheduling attention (design §4.1/§4.2: a streak-capped edge stays
+    /// unclosed "until a permitted or human-initiated run start drains it").
+    /// Without the second one `AttentionDeferredStreakCap` would be a dead end:
+    /// no forward path, and `consume` takes only `Settled | AttentionScheduled`.
+    ///
+    /// The kernel CAS asserts one expected state, so read which of the two this
+    /// edge is standing on and hand that observation back as the expectation.
+    /// The read does not weaken the guard: the expectation is still checked
+    /// against the stored state inside the journal command, so a concurrent
+    /// writer that moved the row in between makes this write lose. An edge on
+    /// any other state falls through to `ResultAppended` and is refused by that
+    /// same check — this never advances an edge whose result was never appended.
     pub async fn record_attention(
         &self,
         scope: &TurnScope,
@@ -193,11 +207,17 @@ impl AwaitEdgeStore {
             serde_json::to_value(outcome).map_err(|error| AwaitEdgeStoreError::Backend {
                 reason: format!("attention outcome serialize failed: {error}"),
             })?;
+        let expected = match self.peek(scope, parent_run_id, child_run_id).await? {
+            Some(edge) if edge.state == AwaitEdgeState::AttentionDeferredStreakCap => {
+                ProcessDependencyState::AttentionDeferred
+            }
+            _ => ProcessDependencyState::ResultAppended,
+        };
         self.transition(
             scope,
             parent_run_id,
             child_run_id,
-            ProcessDependencyState::ResultAppended,
+            expected,
             ProcessDependencyState::AttentionScheduled,
             Some(serde_json::json!({"attention_outcome": outcome})),
         )
@@ -776,6 +796,11 @@ mod tests {
         // Attention before the result is durably appended would make the parent
         // attentive to nothing. The expected-state CAS refuses it, and the
         // store propagates that refusal with the kernel's cause intact.
+        //
+        // This also pins that `record_attention`'s two legal predecessors did
+        // not become "advance from anywhere": it reads the edge to pick which
+        // expectation to assert, and an edge on neither legal predecessor still
+        // falls through to `ResultAppended` and is refused right here.
         let error = store
             .record_attention(&scope, parent, child, AttentionOutcome::Activated)
             .await
@@ -795,6 +820,16 @@ mod tests {
                 .state,
             AwaitEdgeState::Settled,
             "a refused transition must leave the edge exactly where it was"
+        );
+        assert_eq!(
+            store
+                .peek(&scope, parent, child)
+                .await
+                .expect("peek edge")
+                .expect("edge exists")
+                .attention_outcome,
+            None,
+            "a refused transition must not record its payload either"
         );
     }
 
@@ -823,8 +858,12 @@ mod tests {
         );
     }
 
+    /// The deferred branch end to end: parked, un-closeable while parked,
+    /// drained forward by a later attention sweep, and only then closeable.
+    /// A state you can enter but not leave would be a trap for the slice that
+    /// builds the sweep.
     #[tokio::test]
-    async fn streak_capped_edges_stay_unclosed() {
+    async fn a_streak_capped_edge_parks_unclosed_until_attention_drains_it() {
         let (store, journal) = new_store();
         let (scope, parent, child) = settled_background_edge(&store, &journal).await;
         store
@@ -862,6 +901,78 @@ mod tests {
                 .expect("edge exists")
                 .state,
             AwaitEdgeState::AttentionDeferredStreakCap
+        );
+
+        // The sweep that drains the park: `AttentionDeferred -> AttentionScheduled`.
+        let drained = store
+            .record_attention(&scope, parent, child, AttentionOutcome::Activated)
+            .await
+            .expect("deferred edge drains forward")
+            .expect("edge exists");
+        assert_eq!(drained.state, AwaitEdgeState::AttentionScheduled);
+        assert_eq!(drained.attention_outcome, Some(AttentionOutcome::Activated));
+        assert_eq!(
+            drained.appended_message_ref.as_ref().map(|r| r.as_str()),
+            Some("msg:child-1"),
+            "draining the park must not lose the already-appended result"
+        );
+
+        // Only now is it closeable — and closing it releases the reservation.
+        store
+            .close(&scope, parent, child)
+            .await
+            .expect("a drained edge closes");
+        assert!(
+            store
+                .peek(&scope, parent, child)
+                .await
+                .expect("peek closed edge")
+                .is_none(),
+            "closing must consume the edge, not leave it claimable"
+        );
+        assert!(
+            journal
+                .unresolved_process_dependencies()
+                .await
+                .expect("unresolved dependencies")
+                .is_empty(),
+            "the deferred branch must end with no dependency left unresolved"
+        );
+    }
+
+    /// Recording attention on an edge already standing on `AttentionScheduled`
+    /// is a replay, not an advance: the kernel's idempotency rule returns the
+    /// stored record untouched, so the first outcome wins.
+    #[tokio::test]
+    async fn recording_attention_twice_keeps_the_first_outcome() {
+        let (store, journal) = new_store();
+        let (scope, parent, child) = settled_background_edge(&store, &journal).await;
+        store
+            .record_result_appended(
+                &scope,
+                parent,
+                child,
+                LoopMessageRef::new("msg:child-1").expect("valid ref"),
+            )
+            .await
+            .expect("append")
+            .expect("edge exists");
+        store
+            .record_attention(&scope, parent, child, AttentionOutcome::Queued)
+            .await
+            .expect("first attention")
+            .expect("edge exists");
+
+        let replay = store
+            .record_attention(&scope, parent, child, AttentionOutcome::Activated)
+            .await
+            .expect("replay")
+            .expect("edge exists");
+        assert_eq!(replay.state, AwaitEdgeState::AttentionScheduled);
+        assert_eq!(
+            replay.attention_outcome,
+            Some(AttentionOutcome::Queued),
+            "replay must return the outcome already durably recorded"
         );
     }
 }

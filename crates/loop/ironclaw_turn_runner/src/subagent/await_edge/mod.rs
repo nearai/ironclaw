@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 
 /// CAS state machine (§2): `Open -> Settled -> Drained`, `Open -> Abandoned`.
 /// A background child's result also walks the delivery chain in between:
-/// `Settled -> ResultAppended -> AttentionScheduled | AttentionDeferredStreakCap`.
+/// `Settled -> ResultAppended -> AttentionScheduled`, with
+/// `ResultAppended -> AttentionDeferredStreakCap -> AttentionScheduled` when a
+/// streak cap parks it. Only `AttentionScheduled` rejoins the closing path, so
+/// the parked state is a detour, never a terminus.
 /// `Drained`/`Abandoned`-final edges are deleted (§2) — these states are
 /// therefore transient on disk, never the long-lived resting state.
 ///
@@ -32,7 +35,9 @@ pub enum AwaitEdgeState {
     AttentionScheduled,
     /// Attention was withheld on purpose because the parent hit its
     /// consecutive-interruption cap. In flight, not closed: the edge stays
-    /// claimable so a later sweep can make the parent attentive.
+    /// claimable, and the next permitted or human-initiated run start drains it
+    /// forward into `AttentionScheduled` (§4.1/§4.2). It is deliberately not
+    /// closeable from here — closing would strand the undelivered result.
     AttentionDeferredStreakCap,
     Drained,
     Abandoned,
