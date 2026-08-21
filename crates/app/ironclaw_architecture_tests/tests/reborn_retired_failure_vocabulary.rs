@@ -186,17 +186,11 @@ fn the_surviving_failure_vocabulary_stays_closed() {
     );
 }
 
-#[test]
-fn extension_tool_errors_cannot_mint_control_plane_failure_kinds() {
-    let root = workspace_root();
-    let tool_adapter = crate_path(
-        &root,
-        "crates/ironclaw_extension_contracts/src/tool_adapter.rs",
-    );
-    let raw = std::fs::read_to_string(&tool_adapter)
-        .unwrap_or_else(|error| panic!("read {}: {error}", tool_adapter.display()));
-    let contents = strip_comments_and_strings(&raw);
+fn assert_tool_error_rejected_uses_runtime_kind(contents: &str) {
     let rejected = contents
+        .split("pub enum ToolError")
+        .nth(1)
+        .expect("pub enum ToolError")
         .split("Rejected {")
         .nth(1)
         .and_then(|tail| tail.split('}').next())
@@ -210,6 +204,36 @@ fn extension_tool_errors_cannot_mint_control_plane_failure_kinds() {
         !rejected.contains("DispatchFailureKind"),
         "ToolError::Rejected must not accept the host's control-plane failure taxonomy"
     );
+}
+
+#[test]
+fn extension_tool_errors_cannot_mint_control_plane_failure_kinds() {
+    let root = workspace_root();
+    let tool_adapter = crate_path(
+        &root,
+        "crates/ironclaw_extension_contracts/src/tool_adapter.rs",
+    );
+    let raw = std::fs::read_to_string(&tool_adapter)
+        .unwrap_or_else(|error| panic!("read {}: {error}", tool_adapter.display()));
+    let contents = strip_comments_and_strings(&raw);
+
+    assert_tool_error_rejected_uses_runtime_kind(&contents);
+}
+
+#[test]
+#[should_panic(expected = "extension adapters may report runtime failures only")]
+fn extension_tool_error_scope_ratchet_rejects_malformed_source() {
+    let malformed = r#"
+        enum UnrelatedError {
+            Rejected { kind: RuntimeDispatchErrorKind },
+        }
+
+        pub enum ToolError {
+            Rejected { kind: DispatchFailureKind },
+        }
+    "#;
+
+    assert_tool_error_rejected_uses_runtime_kind(malformed);
 }
 
 /// The comment contract is a promise this gate makes to every file it scans,

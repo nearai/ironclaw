@@ -1015,10 +1015,10 @@ async fn host_runtime_services_maps_google_docs_sheets_and_slides_wasm_401_to_au
         };
         assert_eq!(gate.capability_id, capability_id);
         assert_eq!(gate.credential_requirements.len(), 1);
-        assert_eq!(
-            gate.credential_requirements[0].provider,
-            VendorId::new("google").unwrap()
-        );
+        let requirement = &gate.credential_requirements[0];
+        assert_eq!(requirement.provider, VendorId::new("google").unwrap());
+        assert_eq!(requirement.requester_extension.as_str(), package_id);
+        assert_eq!(requirement.provider_scopes, required_scopes);
         assert_eq!(network.requests().len(), 1);
     }
 }
