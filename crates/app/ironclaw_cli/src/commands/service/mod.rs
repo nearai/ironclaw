@@ -279,13 +279,12 @@ fn home_dir() -> Result<PathBuf> {
 
 /// The `serve` process's launched cwd, shared by both platforms' installers.
 ///
-/// - Not the Reborn home itself: composition's default skill/extension
-///   roots live under `<reborn_home>/...`, so the home is an *ancestor* of
-///   them and trips `paths_overlap` (prefix match, not just equality).
-/// - `<reborn_home>/workspace` is a leaf dir, neither ancestor nor
-///   descendant of any skill root, so it never overlaps.
+/// Canonical storage keeps state, system content, and caller workspaces in
+/// disjoint namespaces, so the installation root is safe as a process cwd.
+/// Using it avoids creating the retired top-level `workspace/` directory;
+/// user work still goes through the selected leaf under `workspaces/`.
 fn service_working_directory(reborn_home: &Path) -> PathBuf {
-    reborn_home.join("workspace")
+    reborn_home.to_path_buf()
 }
 
 /// Creates [`service_working_directory`] (0700, `create_dir_all` — a no-op
@@ -293,9 +292,8 @@ fn service_working_directory(reborn_home: &Path) -> PathBuf {
 /// `install_with_runner` before writing the unit/plist, so the directory
 /// exists by the time `serve` is ever launched with it as cwd.
 ///
-/// 0700, not 0755: this is a single-user local service directory, not a
-/// shared or world-readable path, so other local accounts must not be able
-/// to list or read it.
+/// 0700, not 0755: this is a single-user installation root, so other local
+/// accounts must not be able to list or read it.
 fn ensure_service_working_directory(reborn_home: &Path) -> Result<PathBuf> {
     let dir = service_working_directory(reborn_home);
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
@@ -889,21 +887,24 @@ mod tests {
         assert!(contents.contains("ExecStart="));
         assert!(contents.contains("IRONCLAW_REBORN_HOME="));
         let reborn_home = context.boot_config().home().path().to_path_buf();
-        let expected_working_directory = reborn_home.join("workspace");
+        let expected_working_directory = reborn_home.clone();
         assert!(
             contents.contains(&format!(
                 "WorkingDirectory={}\n",
                 expected_working_directory.display()
             )),
-            "unit file must anchor cwd at <reborn_home>/workspace, not the Reborn home itself \
-             (an ancestor of every default skill root, so cwd=reborn_home still trips \
-             composition's overlap check — the crash-loop persisted after the first attempt at \
-             this fix), as a bare unquoted path: WorkingDirectory= is never shell-quote-parsed, \
+            "unit file must anchor cwd at the canonical Reborn installation root without \
+             creating a retired top-level workspace directory, as a bare unquoted path: \
+             WorkingDirectory= is never shell-quote-parsed, \
              so a quoted value fails to load with `bad-setting` (issue #6575): {contents}"
         );
         assert!(
             expected_working_directory.is_dir(),
-            "install must create <reborn_home>/workspace so `serve` has somewhere to cd into"
+            "install must create the Reborn installation root so `serve` has somewhere to cd into"
+        );
+        assert!(
+            !reborn_home.join("workspace").exists(),
+            "install must not recreate the retired top-level workspace directory"
         );
         {
             use std::os::unix::fs::PermissionsExt;
@@ -963,20 +964,22 @@ mod tests {
         assert!(contents.contains(SERVICE_LABEL));
         assert!(contents.contains("<key>IRONCLAW_REBORN_HOME</key>"));
         let reborn_home = context.boot_config().home().path().to_path_buf();
-        let expected_working_directory = reborn_home.join("workspace");
+        let expected_working_directory = reborn_home.clone();
         assert!(
             contents.contains(&format!(
                 "<string>{}</string>",
                 expected_working_directory.display()
             )) && contents.contains("<key>WorkingDirectory</key>"),
-            "plist must anchor cwd at <reborn_home>/workspace, not the Reborn home itself \
-             (the Reborn home is an ancestor of every default skill root, so cwd=reborn_home \
-             still trips composition's overlap check — the crash-loop persisted after the first \
-             attempt at this fix): {contents}"
+            "plist must anchor cwd at the canonical Reborn installation root without creating \
+             a retired top-level workspace directory: {contents}"
         );
         assert!(
             expected_working_directory.is_dir(),
-            "install must create <reborn_home>/workspace so `serve` has somewhere to cd into"
+            "install must create the Reborn installation root so `serve` has somewhere to cd into"
+        );
+        assert!(
+            !reborn_home.join("workspace").exists(),
+            "install must not recreate the retired top-level workspace directory"
         );
         {
             use std::os::unix::fs::PermissionsExt;

@@ -3,7 +3,7 @@
 use std::{process::Command, sync::Arc, time::Duration};
 
 use ironclaw_host_api::{
-    ids::InvocationId,
+    ids::{InvocationId, TenantId, TenantUserWorkspaceKey, UserId},
     process::{RuntimeProcessError, SandboxCommandTransport},
 };
 use ironclaw_sandbox::{RebornSandboxConfig, RebornScopedSandboxCommandTransport};
@@ -73,6 +73,69 @@ async fn user_container_reuses_state_across_threads_and_isolates_other_users_and
     let mut other_tenant = primary.clone();
     other_tenant.tenant = format!("other-tenant-{}", InvocationId::new());
     let temp = docker_visible_tempdir();
+    let reborn_home = temp.path().join("reborn-home");
+    let workspace_root = reborn_home.join("workspaces");
+    let caller_key = TenantUserWorkspaceKey::from_tenant_user(
+        &TenantId::new(&primary.tenant).expect("primary tenant id"),
+        &UserId::new(&primary.user).expect("primary user id"),
+    );
+    let sibling_key = TenantUserWorkspaceKey::from_tenant_user(
+        &TenantId::new(&other_user.tenant).expect("sibling tenant id"),
+        &UserId::new(&other_user.user).expect("sibling user id"),
+    );
+    let caller_leaf = workspace_root
+        .join("users")
+        .join(caller_key.digest_segment());
+    let sibling_leaf = workspace_root
+        .join("users")
+        .join(sibling_key.digest_segment());
+    std::fs::create_dir_all(&caller_leaf).expect("selected workspace leaf");
+    std::fs::create_dir_all(&sibling_leaf).expect("sibling workspace leaf");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        for private_namespace in [&workspace_root, &workspace_root.join("users")] {
+            std::fs::set_permissions(private_namespace, std::fs::Permissions::from_mode(0o700))
+                .expect("private workspace namespace");
+        }
+    }
+    std::fs::create_dir_all(reborn_home.join("state")).expect("canonical state root");
+    std::fs::create_dir_all(reborn_home.join("system")).expect("canonical system root");
+    std::fs::write(
+        caller_leaf.join("selected-leaf-sentinel.txt"),
+        "host-selected-leaf",
+    )
+    .expect("selected leaf sentinel");
+    std::fs::write(
+        sibling_leaf.join("sibling-sentinel.txt"),
+        "host-sibling-only",
+    )
+    .expect("sibling leaf sentinel");
+    for (path, value) in [
+        (
+            reborn_home.join("reborn-home-sentinel.txt"),
+            "host-reborn-home-only",
+        ),
+        (
+            reborn_home.join("state/reborn-state-sentinel.txt"),
+            "host-state-only",
+        ),
+        (
+            reborn_home.join("state/.reborn-secrets-master-key"),
+            "host-master-key-only",
+        ),
+        (
+            reborn_home.join("state/provider-credential-sentinel.txt"),
+            "host-provider-credential-only",
+        ),
+        (
+            reborn_home.join("system/system-sentinel.txt"),
+            "host-system-only",
+        ),
+    ] {
+        std::fs::write(path, value).expect("host-only sentinel");
+    }
     let mut cleanup = DockerCleanup::with_scopes([
         primary.clone(),
         other_thread.clone(),
@@ -80,7 +143,7 @@ async fn user_container_reuses_state_across_threads_and_isolates_other_users_and
         other_tenant.clone(),
     ]);
     let transport = RebornScopedSandboxCommandTransport::connect(
-        RebornSandboxConfig::new(temp.path().join("sandbox-workspaces"))
+        RebornSandboxConfig::new(&workspace_root)
             .with_managed_egress_proxy()
             .expect("managed egress policy is valid"),
     )
@@ -99,6 +162,17 @@ async fn user_container_reuses_state_across_threads_and_isolates_other_users_and
                  assert os.getuid() != 0\n\
                  assert Path('/.dockerenv').is_file()\n\
                  assert not Path('/var/run/docker.sock').exists()\n\
+                 assert Path('/workspace/selected-leaf-sentinel.txt').read_text() == 'host-selected-leaf'\n\
+                 hidden_workspace_paths = [\n\
+                 'reborn-home-sentinel.txt',\n\
+                 'state/reborn-state-sentinel.txt',\n\
+                 'state/.reborn-secrets-master-key',\n\
+                 'state/provider-credential-sentinel.txt',\n\
+                 'system/system-sentinel.txt',\n\
+                 'users/{sibling}/sibling-sentinel.txt',\n\
+                 ]\n\
+                 visible_workspace_paths = [relative for relative in hidden_workspace_paths if (Path('/workspace') / relative).exists()]\n\
+                 assert not visible_workspace_paths, visible_workspace_paths\n\
                  forbidden_env = {{\n\
                      'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'NEARAI_API_KEY',\n\
                      'RAILWAY_TOKEN', 'RAILWAY_API_TOKEN', 'AWS_ACCESS_KEY_ID',\n\
@@ -110,9 +184,11 @@ async fn user_container_reuses_state_across_threads_and_isolates_other_users_and
                  assert os.environ['IRONCLAW_REBORN_NETWORK_MODE'] == 'brokered'\n\
                  assert os.environ['HTTPS_PROXY'].startswith('http://')\n\
                  Path('/workspace/state.txt').write_text('{workspace_marker}')\n\
+                 Path('/workspace/container-write.txt').write_text('container-owned-leaf')\n\
                  Path('/tmp/user-state.txt').write_text('{ephemeral_marker}')\n\
                  print('LOCAL_DOCKER_SANDBOX_OK')\n\
-                 PY"
+                 PY",
+                sibling = sibling_key.digest_segment(),
             ),
         ))
         .await
@@ -123,6 +199,16 @@ async fn user_container_reuses_state_across_threads_and_isolates_other_users_and
     assert!(first.sandboxed);
     assert!(first_container.running);
     assert_stable_identity(&first_container, &primary);
+    assert_eq!(
+        std::fs::read_to_string(caller_leaf.join("container-write.txt"))
+            .expect("container write remains in selected leaf"),
+        "container-owned-leaf"
+    );
+    assert_eq!(
+        std::fs::read_to_string(sibling_leaf.join("sibling-sentinel.txt"))
+            .expect("sibling sentinel remains host-only"),
+        "host-sibling-only"
+    );
 
     let cross_thread = transport
         .run_command(request(

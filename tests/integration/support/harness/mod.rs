@@ -32,6 +32,7 @@ use ironclaw_composition::test_support::SkillActivationTestSource;
 use ironclaw_composition::{
     OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts, RebornRuntimeInput,
 };
+use ironclaw_config::{LegacyStorageSource, RebornStoragePaths};
 use ironclaw_filesystem::{
     BackendKind, CompositeRootFilesystem, ContentKind, InMemoryBackend, IndexPolicy,
     RootFilesystem, ScopedFilesystem, StorageClass,
@@ -95,12 +96,12 @@ pub(crate) type HarnessTurnStorageBackend = BlockingTurnStatePutFilesystem<InMem
 pub(crate) type HarnessTurnBackend = CompositeRootFilesystem;
 
 fn write_system_skill_fixture(
-    storage_root: &std::path::Path,
+    system_root: &std::path::Path,
     name: &str,
     description: &str,
     prompt: &str,
 ) -> HarnessResult<()> {
-    let dir = storage_root.join("system").join("skills").join(name);
+    let dir = system_root.join("skills").join(name);
     std::fs::create_dir_all(&dir)?;
     let body = format!(
         "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
@@ -109,11 +110,10 @@ fn write_system_skill_fixture(
     Ok(())
 }
 
-/// Write a USER-scoped skill into the local-dev store, at the path the boot import migrates from.
+/// Write a USER-scoped skill into a fixed legacy snapshot, at the path the boot import migrates from.
 ///
-/// Same layout `seed_user_skill_for_test` writes, extracted so it can run BEFORE the runtime is
-/// built. That ordering is the point: skills are read from the database tree, and the host-disk
-/// store is migrated into it at boot, so a user skill written afterwards is never seen by the run.
+/// This must run before the runtime is built. Skills are read from the database tree, while the
+/// host-disk snapshot is migrated into it once at boot.
 fn write_user_skill_fixture(
     storage_root: &std::path::Path,
     tenant: &TenantId,
@@ -295,6 +295,7 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// thread service is available.
     durable_capability_io_requested: bool,
     root: Arc<tempfile::TempDir>,
+    storage_paths: Option<RebornStoragePaths>,
     workspace_root: PathBuf,
     mounts: MountView,
     capability_mount_overrides: Vec<(CapabilityId, MountView)>,
@@ -756,18 +757,21 @@ impl HostRuntimeCapabilityHarness {
         } else {
             tempfile::tempdir()?
         });
-        let storage_root = root.path().join("local-dev");
-        let workspace_root = storage_root.join("workspace");
+        let storage_paths =
+            RebornStoragePaths::from_installation_root(root.path().join("reborn-home"));
+        let workspace_root = storage_paths.workspace_root().to_path_buf();
         std::fs::create_dir_all(&workspace_root)?;
         for fixture in &system_skill_fixtures {
             write_system_skill_fixture(
-                &storage_root,
+                storage_paths.system_root(),
                 &fixture.name,
                 &fixture.description,
                 &fixture.prompt,
             )?;
         }
-        if !user_skill_fixtures.is_empty() {
+        let legacy_skill_snapshot_source =
+            (!user_skill_fixtures.is_empty()).then_some(LegacyStorageSource::BareHome);
+        if let Some(snapshot_source) = legacy_skill_snapshot_source {
             let tenant = skill_activation_tenant
                 .as_ref()
                 .ok_or("user skill fixtures require with_skill_activation_tenant")?;
@@ -776,7 +780,7 @@ impl HostRuntimeCapabilityHarness {
                 .ok_or("user skill fixtures require with_skill_activation_user")?;
             for fixture in &user_skill_fixtures {
                 write_user_skill_fixture(
-                    &storage_root,
+                    &snapshot_source.snapshot_root(&storage_paths),
                     tenant,
                     user,
                     &fixture.name,
@@ -790,7 +794,10 @@ impl HostRuntimeCapabilityHarness {
         for (source, extension_id) in fixture_extension_dirs {
             copy_dir_recursive(
                 &source,
-                &storage_root.join("system/extensions").join(extension_id),
+                &storage_paths
+                    .system_root()
+                    .join("extensions")
+                    .join(extension_id),
             )?;
         }
         let mut input = if runtime_policy.as_ref().is_some_and(|policy| {
@@ -801,7 +808,7 @@ impl HostRuntimeCapabilityHarness {
             ironclaw_composition::local_runtime_build_input_with_options(
                 ironclaw_composition::RebornCompositionProfile::StandaloneUnrestricted,
                 service_label,
-                storage_root,
+                storage_paths.clone(),
                 ironclaw_composition::RebornRuntimeProfileOptions {
                     confirm_host_access: true,
                 },
@@ -809,23 +816,34 @@ impl HostRuntimeCapabilityHarness {
             .with_local_runtime_confirmed_host_home_root(host_home_root)
         } else if sandboxed_shell {
             let user_sandbox = ironclaw_composition::build_local_docker_user_sandbox_binding(
-                storage_root.join("sandbox-workspaces"),
+                sandbox_workspace_root(&storage_paths),
             )
             .await?;
-            ironclaw_composition::local_filesystem_build_input_with_profile(
+            ironclaw_composition::local_runtime_build_input(
                 ironclaw_composition::RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
                 service_label,
-                storage_root,
-            )
+                storage_paths.clone(),
+            )?
             .with_runtime_process_binding(user_sandbox)
         } else {
-            ironclaw_composition::local_filesystem_build_input(service_label, storage_root)
+            ironclaw_composition::local_runtime_build_input(
+                ironclaw_composition::RebornCompositionProfile::Standalone,
+                service_label,
+                storage_paths.clone(),
+            )?
         };
+        input = ironclaw_composition::test_support::with_local_runtime_workspace_root_for_test(
+            input,
+            workspace_root.clone(),
+        );
         if let Some((tenant_id, agent_id)) = &local_runtime_identity {
             input = input.with_local_runtime_identity(tenant_id.clone(), agent_id.clone());
         }
         if let Some(runtime_policy) = runtime_policy {
             input = input.with_runtime_policy(runtime_policy);
+        }
+        if let Some(snapshot_source) = legacy_skill_snapshot_source {
+            input = input.with_legacy_skill_snapshot_source(snapshot_source)?;
         }
         input = input.with_bundled_first_party_for_test();
         if !extra_first_party_bundles.is_empty() {
@@ -898,7 +916,11 @@ impl HostRuntimeCapabilityHarness {
         // granted at the harness-authority layer.
         for (package, resolved) in &activate_bundled_extensions_for_test {
             services
-                .publish_bundled_extension_for_test(package, resolved.as_ref())
+                .publish_bundled_extension_for_test(
+                    package,
+                    resolved.as_ref(),
+                    ironclaw_extension_registry::InstallationOwner::user(user_id.clone()),
+                )
                 .await
                 .ok_or(
                     "local-dev Reborn services missing extension management for test publish",
@@ -1023,6 +1045,7 @@ impl HostRuntimeCapabilityHarness {
             durable_capability_io_thread_service: Mutex::new(None),
             durable_capability_io_requested: durable_capability_io,
             root,
+            storage_paths: Some(storage_paths),
             workspace_root,
             mounts,
             capability_mount_overrides: Vec::new(),
@@ -1600,15 +1623,18 @@ impl HostRuntimeCapabilityHarness {
             .map(|source| source.context_source())
     }
 
-    /// E-DURABLE: the on-disk local-dev storage root this harness's capability
-    /// stores persist under (`<tempdir>/local-dev`). Mirrors the `storage_root`
-    /// computed inline in `new_with_options`. A durability test reopens a fresh,
+    /// E-DURABLE: the canonical on-disk installation root this harness's capability
+    /// stores persist under (`<tempdir>/reborn-home`). A durability test reopens a fresh,
     /// independent store at this path (see
     /// `open_standalone_extension_installation_store_for_test`) to prove capability
     /// state survives a reopen, paralleling `assert_reply_persists_after_reopen`.
     /// Tests only.
     pub(crate) fn storage_root_for_test(&self) -> PathBuf {
-        self.root.path().join("local-dev")
+        self.storage_paths
+            .as_ref()
+            .expect("durable reopen is available only on composition-built harnesses")
+            .installation_root()
+            .to_path_buf()
     }
 
     /// C-DURABLE: resolve `gate_ref` (a `"gate:approval-<id>"` local-dev
@@ -1635,7 +1661,7 @@ impl HostRuntimeCapabilityHarness {
 
     /// E-SKILL: seed a system-scoped skill on this harness's on-disk skill
     /// filesystem so the model can activate it (`skill_activate`/`$name`). Writes
-    /// `<storage_root>/system/skills/<name>/SKILL.md` — the system bundle root is
+    /// `<installation_root>/system/skills/<name>/SKILL.md` — the system bundle root is
     /// always present in the skills extension's roots regardless of the run's
     /// tenant/user (`FirstPartySkillsExtensionHandles::bundle_roots`), so both
     /// `activate_skills_for_run` (the `skill_activate` capability) and the
@@ -1651,70 +1677,11 @@ impl HostRuntimeCapabilityHarness {
         description: &str,
         prompt: &str,
     ) -> HarnessResult<()> {
-        write_system_skill_fixture(&self.storage_root_for_test(), name, description, prompt)?;
-        Ok(())
-    }
-
-    /// C-SYNTH `skill_activate` `AmbiguousSkill` seeding arm: seed a
-    /// USER-scoped skill (writes
-    /// `<storage_root>/tenants/<tenant>/users/<user>/skills/<name>/SKILL.md`)
-    /// so a name shared with a system-scoped skill
-    /// (`seed_system_skill_for_test`) resolves to TWO Trusted candidates
-    /// (`System` and `User` roots both default `Trusted`), triggering
-    /// `SkillActivationSelectionError::AmbiguousSkill`. `tenant`/`user` must
-    /// match the driving thread's run scope (`harness.binding`), or the user
-    /// root never matches the run's own `/skills` mount. Tests only.
-    pub(crate) fn seed_user_skill_for_test(
-        &self,
-        tenant: &TenantId,
-        user: &UserId,
-        name: &str,
-        description: &str,
-        prompt: &str,
-    ) -> HarnessResult<()> {
-        let dir = self
-            .storage_root_for_test()
-            .join("tenants")
-            .join(tenant.as_str())
-            .join("users")
-            .join(user.as_str())
-            .join("skills")
-            .join(name);
-        std::fs::create_dir_all(&dir)?;
-        let body = format!(
-            "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
-        );
-        std::fs::write(dir.join("SKILL.md"), body)?;
-        Ok(())
-    }
-
-    /// C-SKILL baseline: seed the same user-scoped bundle shape as
-    /// [`Self::seed_user_skill_for_test`], then add the URL-install provenance
-    /// sidecar that makes the production filesystem source downgrade its trust
-    /// to `Installed`. This drives the caller-level "listed but not
-    /// model-activatable" behavior without bypassing descriptor discovery.
-    pub(crate) fn seed_installed_user_skill_for_test(
-        &self,
-        tenant: &TenantId,
-        user: &UserId,
-        name: &str,
-        description: &str,
-        prompt: &str,
-    ) -> HarnessResult<()> {
-        self.seed_user_skill_for_test(tenant, user, name, description, prompt)?;
-        let metadata_path = self
-            .storage_root_for_test()
-            .join("tenants")
-            .join(tenant.as_str())
-            .join("users")
-            .join(user.as_str())
-            .join("skills")
-            .join(name)
-            .join(".ironclaw-install.json");
-        std::fs::write(
-            metadata_path,
-            br#"{"source":"installed_url","source_url":"https://skills.example.test/SKILL.md"}"#,
-        )?;
+        let paths = self
+            .storage_paths
+            .as_ref()
+            .expect("system skill fixtures require a composition-built harness");
+        write_system_skill_fixture(paths.system_root(), name, description, prompt)?;
         Ok(())
     }
 
@@ -1919,20 +1886,20 @@ impl HostRuntimeCapabilityHarness {
         // queried the SAME way `build_extension_management_for_test`
         // -> `extension_surface_source` will read it downstream in
         // `create_refreshing_capability_port_for_test`. NOT the same
-        // as "this harness has `reborn_services` wired": a harness can have
-        // `reborn_services` (so `new_with_options`) while only ever calling
-        // the `publish_bundled_extension_for_test` SHORTCUT (registers the
-        // package in the active registry but creates no enabled
-        // installation), which `active_model_visible_capabilities()` requires
-        // -- such a provider has NO production trust decision to protect, so
-        // this must be an empty set for it, not treated as activation-backed.
+        // as "this harness has `reborn_services` wired": only providers the
+        // lifecycle facade reports as active belong here. The bundled-fixture
+        // shortcut now creates the caller-owned durable installation row and
+        // activates it, so those providers intentionally use production trust.
         let activation_backed_providers: std::collections::HashSet<ExtensionId> =
             if let Some(services) = self.reborn_services.as_ref() {
                 // #6520 folded caller-scoping into the lifecycle facade the
-                // method reads through; provider trust decisions are
-                // tenant-level activation facts, so no per-run caller arg.
+                // Read through the same caller-filtered production surface used
+                // to derive grants and provider trust for this dispatch.
                 match services
-                    .standalone_active_extension_authority_for_test(&execution_extension)
+                    .standalone_active_extension_authority_for_test(
+                        &execution_extension,
+                        &dispatch_user,
+                    )
                     .await
                 {
                     Some(active_authority) => active_authority
@@ -2190,20 +2157,12 @@ impl HostRuntimeCapabilityHarness {
     /// clobber that (potentially narrower) production ceiling.
     ///
     /// The gate is PER-PROVIDER (`activation_backed_providers`), not a
-    /// harness-wide `reborn_services.is_some()` boolean: a harness can have
-    /// `reborn_services` wired (`new_with_options`) while its provider only
-    /// ever reached the registry through the
-    /// `publish_bundled_extension_for_test` SHORTCUT (upserts the package
-    /// into the active registry but creates no ENABLED INSTALLATION) --
-    /// `active_model_visible_capabilities()` requires an enabled
-    /// installation, so such a provider has NO production trust decision at
-    /// all and this entry is the ONLY thing that ever trusts it (see
-    /// `file_and_github_auth_tools_profile` / `extension_visibility_probe_tools_profile`,
-    /// neither of which runs the real install/readiness path). A provider
-    /// IS activation-backed (must be excluded here) only once
+    /// harness-wide `reborn_services.is_some()` boolean: a provider is
+    /// activation-backed (and must be excluded here) only once
     /// `standalone_active_extension_authority_for_test` actually reports a
-    /// trust entry for it -- e.g. `extension_lifecycle_tools_profile`'s real
-    /// credentialed install flow. See `harness_trust_tests` below
+    /// trust entry for it. This includes both the real credentialed install
+    /// flow and the bundled-fixture shortcut, which creates a caller-owned
+    /// durable installation before activation. See `harness_trust_tests` below
     /// for the regression pin covering both shapes.
     fn build_additional_provider_trust(
         provider_id: &ExtensionId,
@@ -2245,6 +2204,13 @@ impl HostRuntimeCapabilityHarness {
             evaluated_at: chrono::Utc::now(),
         }
     }
+}
+
+/// The sandbox transport owns the `users/<tenant-user-digest>` suffix. The
+/// composition harness therefore supplies the canonical `workspaces` root,
+/// never its `users` child.
+pub(crate) fn sandbox_workspace_root(storage_paths: &RebornStoragePaths) -> PathBuf {
+    storage_paths.workspace_root().to_path_buf()
 }
 
 struct HostRuntimeHarnessSurfaceResolver;
@@ -2422,32 +2388,19 @@ mod harness_trust_tests {
         );
     }
 
-    /// The gap this fix closes (CI diagnostician finding, post-#5902
-    /// rebase): `file_and_github_auth_tools_profile` /
-    /// `extension_visibility_probe_tools_profile` build through
-    /// `new_with_options` (so `reborn_services` IS wired) but only ever call
-    /// the `publish_bundled_extension_for_test` shortcut for their provider
-    /// -- no enabled installation, so `standalone_active_extension_authority_for_test`
-    /// never reports a trust entry for it. The OLD `has_reborn_services: bool`
-    /// gate treated "reborn_services wired" as "activation-backed" and
-    /// wrongly suppressed this provider's only trust source. The per-provider
-    /// `activation_backed_providers` set must NOT contain such a
-    /// shortcut-only provider, so its synthetic entry is still minted.
+    /// Bundled fixture publication now creates a durable caller-owned
+    /// installation and activation. Its production trust decision must remain
+    /// authoritative rather than being overwritten by the harness override.
     #[test]
-    fn shortcut_published_provider_without_activation_still_gets_trust_entry() {
+    fn shortcut_published_provider_with_activation_gets_no_synthetic_trust_entry() {
         let builtin_provider =
             ExtensionId::new(ironclaw_host_runtime::BUILTIN_FIRST_PARTY_PROVIDER)
                 .expect("builtin provider id");
         let visprobe_provider = ExtensionId::new("visprobe").expect("visprobe provider id");
         let effects = standalone_all_effects();
         let additional = vec![(visprobe_provider.clone(), effects.clone())];
-        // reborn_services is wired for this harness shape (`new_with_options`)
-        // but `visprobe` was only ever `publish_bundled_extension_for_test`'d,
-        // never installed to active -- so it must be ABSENT from
-        // `activation_backed_providers`, not folded in via a blanket
-        // `reborn_services.is_some()` check.
         let activation_backed_providers: std::collections::HashSet<ExtensionId> =
-            std::collections::HashSet::new();
+            [visprobe_provider.clone()].into_iter().collect();
 
         let result = HostRuntimeCapabilityHarness::build_additional_provider_trust(
             &builtin_provider,
@@ -2456,14 +2409,9 @@ mod harness_trust_tests {
             &activation_backed_providers,
         );
 
-        assert_eq!(
-            result
-                .get(&visprobe_provider)
-                .map(|decision| &decision.authority_ceiling.allowed_effects),
-            Some(&effects),
-            "a publish-only (never installed to active) provider must still get its \
-             synthetic trust entry even when the harness has `reborn_services` wired, \
-             or its capabilities become invisible: {result:?}"
+        assert!(
+            !result.contains_key(&visprobe_provider),
+            "an activated bundled fixture must retain its production trust decision: {result:?}"
         );
     }
 }

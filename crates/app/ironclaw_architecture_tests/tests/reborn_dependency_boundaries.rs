@@ -894,7 +894,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // unit variants and a serde derive, no behavior. The 35-line delta is
         // from the merged `turn.rs`; the resulting ceiling is re-captured from
         // this test's own report, never counted by eye.
-        ("ironclaw_host_api", 20_516),
+        // 20_516 -> 20_678 (2026-08-21, profile-stable storage merge): the
+        // neutral system-mount and tenant/user-workspace identity vocabulary.
+        // Storage placement, bind admission, and provider execution remain in
+        // filesystem, composition, and sandbox owners. The union was measured
+        // from this test's own failure report after merging current main.
+        ("ironclaw_host_api", 20_678),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
@@ -1848,6 +1853,12 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             // `ironclaw_composition`).
             "ironclaw_extension_manager",
             "ironclaw_extension_support",
+            // Offline layout adoption owns the legacy grammar in the binary,
+            // but host-tree traversal is filesystem mechanism. Reuse the
+            // substrate's descriptor-relative no-follow validator instead of
+            // carrying an app-local recursive implementation that can drift
+            // from composition's legacy snapshot validation.
+            "ironclaw_filesystem",
             "ironclaw_host_api",
             "ironclaw_operator",
             // Same class again — the product tier's half of the neutral
@@ -1868,7 +1879,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             "ironclaw_web_app",
             "ironclaw_web_app_extension",
         ],
-        "ironclaw should enter Reborn through ironclaw_composition (assembled runtime), ironclaw_operator (operator/admin control-plane), ironclaw_host_api (neutral provider DTO contracts), ironclaw_extension_contracts (the extension tier's half of those neutral contracts, since WS1.3), ironclaw_product_contracts (the product tier's half, since WS1.4), ironclaw_config (boot-config contract), ironclaw_trace_commons (contributor-side TraceCommons client extracted from the legacy monolith), ironclaw_auth (auth-owned contracts used by binary-assembled first-party credential wiring), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract), ironclaw_extension_manager (the extension/ironhub command surface, since WS2.4), concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates), and ironclaw_web_app (the protocol domain behind the binary-linked web-app adapter and initializer). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw should enter Reborn through ironclaw_composition (assembled runtime), ironclaw_operator (operator/admin control-plane), ironclaw_host_api (neutral provider DTO contracts), ironclaw_filesystem (shared no-follow host-tree mechanism for offline storage adoption), ironclaw_extension_contracts (the extension tier's half of those neutral contracts, since WS1.3), ironclaw_product_contracts (the product tier's half, since WS1.4), ironclaw_config (boot-config contract), ironclaw_trace_commons (contributor-side TraceCommons client extracted from the legacy monolith), ironclaw_auth (auth-owned contracts used by binary-assembled first-party credential wiring), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract), ironclaw_extension_manager (the extension/ironhub command surface, since WS2.4), concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates), and ironclaw_web_app (the protocol domain behind the binary-linked web-app adapter and initializer). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,

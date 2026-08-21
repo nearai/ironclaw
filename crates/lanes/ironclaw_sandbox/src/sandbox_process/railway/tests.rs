@@ -7,8 +7,9 @@ use std::{
 };
 
 use ironclaw_host_api::{
-    ids::{AgentId, InvocationId, TenantId, UserId},
-    mount::MountView,
+    ids::{AgentId, InvocationId, TenantId, TenantUserWorkspaceKey, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
     resource::ResourceScope,
 };
 
@@ -264,8 +265,8 @@ fn request(tenant: &str, user: &str, command: &str) -> CommandExecutionRequest {
     }
 }
 
-fn user_key(tenant: &str, user: &str) -> RebornSandboxUserKey {
-    RebornSandboxUserKey::from_scope(&request(tenant, user, "true").scope)
+fn user_key(tenant: &str, user: &str) -> ironclaw_host_api::ids::TenantUserWorkspaceKey {
+    ironclaw_host_api::ids::TenantUserWorkspaceKey::from_scope(&request(tenant, user, "true").scope)
 }
 
 #[tokio::test]
@@ -623,11 +624,96 @@ async fn accepts_production_shell_mount_metadata_without_materializing_it() {
     let cli = Arc::new(FakeRailwayCli::new());
     let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
     let mut request = request("tenant", "user", "python --version");
-    request.mounts = Some(MountView { mounts: Vec::new() });
+    let mut permissions = MountPermissions::read_write_list_delete();
+    permissions.execute = true;
+    let key = TenantUserWorkspaceKey::from_scope(&request.scope);
+    request.mounts = Some(
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").unwrap(),
+            VirtualPath::new(format!(
+                "/projects/workspace/users/{}",
+                key.digest_segment()
+            ))
+            .unwrap(),
+            permissions,
+        )])
+        .unwrap(),
+    );
 
     transport.run_command(request).await.unwrap();
 
     assert_eq!(count_creates(&cli.invocations().await), 1);
+}
+
+#[tokio::test]
+async fn railway_rejects_noncanonical_or_duplicate_workspace_mount_metadata_before_provisioning() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
+    let mut permissions = MountPermissions::read_write_list_delete();
+    permissions.execute = true;
+    let scope = request("tenant", "user", "true").scope;
+    let target = VirtualPath::new(format!(
+        "/projects/workspace/users/{}",
+        TenantUserWorkspaceKey::from_scope(&scope).digest_segment()
+    ))
+    .unwrap();
+    let workspace_grant = || {
+        MountGrant::new(
+            MountAlias::new("/workspace").unwrap(),
+            target.clone(),
+            permissions.clone(),
+        )
+    };
+
+    for mounts in [
+        MountView {
+            mounts: vec![
+                workspace_grant(),
+                MountGrant::new(
+                    MountAlias::new("/extra").unwrap(),
+                    target.clone(),
+                    permissions.clone(),
+                ),
+            ],
+        },
+        MountView {
+            mounts: vec![MountGrant::new(
+                MountAlias::new("/other").unwrap(),
+                target.clone(),
+                permissions.clone(),
+            )],
+        },
+        MountView {
+            mounts: vec![MountGrant::new(
+                MountAlias::new("/workspace").unwrap(),
+                VirtualPath::new("/projects/workspace").unwrap(),
+                permissions.clone(),
+            )],
+        },
+        MountView {
+            mounts: vec![MountGrant::new(
+                MountAlias::new("/workspace").unwrap(),
+                target.clone(),
+                MountPermissions::read_write(),
+            )],
+        },
+        MountView {
+            mounts: vec![
+                workspace_grant(),
+                MountGrant::new(MountAlias::new("/workspace").unwrap(), target.clone(), {
+                    let mut override_permissions = MountPermissions::read_only();
+                    override_permissions.execute = true;
+                    override_permissions
+                }),
+            ],
+        },
+    ] {
+        let mut invalid = request("tenant", "user", "true");
+        invalid.mounts = Some(mounts);
+        assert_rejected(&transport, invalid).await;
+    }
+
+    assert!(cli.invocations().await.is_empty());
 }
 
 #[tokio::test]
@@ -1086,6 +1172,14 @@ fn railway_exec_exit_124_is_a_timeout_but_other_operations_are_provider_failures
         ),
         RuntimeProcessError::ExecutionFailed(message) if message.contains("create sandbox")
     ));
+}
+
+#[test]
+fn checkpoint_name_preserves_the_released_tenant_user_codec() {
+    assert_eq!(
+        checkpoint_name(&user_key("acme", "alice")),
+        "ironclaw-reborn-sandbox-user-c711caa52fd730885e365ba8-checkpoint"
+    );
 }
 
 async fn assert_rejected(

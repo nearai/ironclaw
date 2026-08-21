@@ -20,7 +20,10 @@ dist = false
 
 [dependencies]
 fs4 = "1.1"
+hex = "0.4"
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.11"
+siphasher = "1"
 tempfile = "3"
 thiserror = "2"
 toml = "1.1"

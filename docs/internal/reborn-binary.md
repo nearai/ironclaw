@@ -120,9 +120,9 @@ the environment. The manual steps below are equivalent.
 ### Quick start
 
 ```bash
-# 1. For serve/run/repl the Reborn home must live OUTSIDE your current working
-#    directory: these commands use the cwd as the local-dev workspace root and
-#    reject overlap with it (see gotchas). Other commands have no such rule.
+# 1. Choose the installation boundary. Durable state, system content,
+#    tenant/user workspaces, and runtime bookkeeping live directly below it;
+#    the current working directory is not used as durable workspace storage.
 export IRONCLAW_REBORN_HOME="$HOME/.ironclaw-reborn-demo"
 
 # 2. Configure a model route. NEAR AI shown here; swap the provider id and key
@@ -201,22 +201,15 @@ single-line `Error:` and exits.
 | --- | --- | --- |
 | `must be set to the WebChat v2 bearer token` | `IRONCLAW_REBORN_WEBUI_TOKEN` unset | Export the token env var (step 3). |
 | `default_owner ... must match the WebChat v2 authenticated user` | `[identity].default_owner` ≠ `IRONCLAW_REBORN_WEBUI_USER_ID` | Set the env user to the config owner (default `reborn-cli`), or remove/align `[identity].default_owner`. |
-| `workspace root must not overlap default skill root /skills` | Reborn home is **inside** the current working directory | Point `IRONCLAW_REBORN_HOME` at a path outside your repo/cwd. |
 
-The workspace-overlap one is the easiest to trip: `serve`/`run`/`repl` use the
-**current working directory** as the local-dev workspace root, and boot is
-rejected if that root overlaps any default storage root Reborn manages —
-`/skills` (`<reborn-home>/local-dev/skills`), `/tenant-shared/skills`,
-`/system/skills`, or `/system/extensions`. If the home is nested inside the cwd
-(e.g. `IRONCLAW_REBORN_HOME="$PWD/.reborn-home"`), those roots fall under the
-workspace root and boot is rejected. Keep the home outside the directory you
-launch from — the default `~/.ironclaw/reborn` already satisfies this.
-
-(Resolved per-user skills live under
-`<reborn-home>/local-dev/tenants/default/users/<owner>/skills`; the flat
-`local-dev/skills` is a legacy root that is backfilled into that tenant-scoped
-path. The validation above guards the legacy/default roots, which is why the
-error names `/skills`.)
+`serve`/`run`/`repl` do not use the current working directory as durable
+workspace storage. The host derives the workspace namespace from
+`<IRONCLAW_REBORN_HOME>/workspaces`; sandboxed callers receive only their
+`users/<tenant-user-digest>` leaf. Physical system content is limited to
+`system/skills` and `system/extensions`. The `/skills` and
+`/tenant-shared/skills` names are virtual, database-backed capability mounts,
+not host directories beside the Reborn home. Historical cwd-backed skill and
+workspace trees are adoption-only legacy sources.
 
 ### Smoke-test a turn over the API
 
@@ -279,7 +272,7 @@ longer exists; do not implement against it.
 
 ### `extension`
 
-Searches and manages local-dev Reborn extensions through the same lifecycle facade exposed to product surfaces. Available extension packages are read from `/system/extensions`, which maps to `<reborn-home>/local-dev/system/extensions` for the local-dev profile.
+Searches and manages local-dev Reborn extensions through the same lifecycle facade exposed to product surfaces. Available extension packages are read from `/system/extensions`, which maps to `<reborn-home>/system/extensions` for every filesystem-backed profile.
 
 ```bash
 cargo run -q -p ironclaw --bin ironclaw -- extension search github
@@ -605,14 +598,11 @@ cargo run -q -p ironclaw --bin ironclaw -- serve --host 127.0.0.1 --port 3000
 
 ### `skills list`
 
-Reports configured Reborn skills from `<reborn-home>/<profile-subdir>/skills`
-and `<reborn-home>/<profile-subdir>/system/skills` through the Reborn
-composition skill listing function, where `<profile-subdir>` is
-`hosted-single-tenant` for that profile, `hosted-single-tenant-volume` for that
-profile, `hosted-single-tenant-volume-sandboxed` for both sandbox profiles, and
-`local-dev` for `local-dev` and `local-dev-yolo`. It does not read v1 skill
-discovery paths, and a missing storage root is reported as an empty skill list
-without creating directories.
+Reports configured Reborn skills from `<reborn-home>/system/skills` through
+the Reborn composition skill listing function. The profile is runtime policy
+only and never changes that physical path. It does not read v1 skill discovery
+paths, and a missing storage root is reported as an empty skill list without
+creating directories.
 
 ```bash
 cargo run -q -p ironclaw --bin ironclaw -- skills list

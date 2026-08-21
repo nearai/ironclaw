@@ -127,6 +127,16 @@ pub enum FilesystemError {
         operation: FilesystemOperation,
         reason: String,
     },
+    /// A local-disk capability operation failed. The display contract exposes
+    /// only the virtual path; the original I/O error remains available through
+    /// [`std::error::Error::source`] for trusted diagnostics.
+    #[error("filesystem backend rejected local directory capability during {operation} at {path}")]
+    LocalCapability {
+        path: VirtualPath,
+        operation: FilesystemOperation,
+        #[source]
+        source: std::io::Error,
+    },
     /// The backend reported a retryable database contention outcome that did
     /// not commit the attempted operation (for example SQLite BUSY/LOCKED or a
     /// PostgreSQL transaction conflict). Unlike [`Self::Backend`], callers may

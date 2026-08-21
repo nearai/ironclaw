@@ -357,8 +357,19 @@ fn local_resolver_rejects_unsupported_filesystem_backend() {
 #[tokio::test]
 async fn hosted_tenant_workspace_uses_the_invocations_scoped_mounts() {
     let backing: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
-    let alice_file = vpath("/projects/workspace/tenants/acme/users/alice/marker.txt");
-    let bob_file = vpath("/projects/workspace/tenants/acme/users/bob/marker.txt");
+    let tenant = ironclaw_host_api::ids::TenantId::new("acme").unwrap();
+    let alice = ironclaw_host_api::ids::UserId::new("alice").unwrap();
+    let bob = ironclaw_host_api::ids::UserId::new("bob").unwrap();
+    let alice_file = vpath(&format!(
+        "/projects/workspace/users/{}/marker.txt",
+        ironclaw_host_api::ids::TenantUserWorkspaceKey::from_tenant_user(&tenant, &alice)
+            .digest_segment()
+    ));
+    let bob_file = vpath(&format!(
+        "/projects/workspace/users/{}/marker.txt",
+        ironclaw_host_api::ids::TenantUserWorkspaceKey::from_tenant_user(&tenant, &bob)
+            .digest_segment()
+    ));
     backing.write_file(&alice_file, b"alice").await.unwrap();
     backing.write_file(&bob_file, b"bob").await.unwrap();
 
@@ -376,7 +387,11 @@ async fn hosted_tenant_workspace_uses_the_invocations_scoped_mounts() {
     plan.filesystem_backend = FilesystemBackendKind::TenantWorkspace;
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/workspace").unwrap(),
-        vpath("/projects/workspace/tenants/acme/users/alice"),
+        vpath(&format!(
+            "/projects/workspace/users/{}",
+            ironclaw_host_api::ids::TenantUserWorkspaceKey::from_tenant_user(&tenant, &alice)
+                .digest_segment()
+        )),
         MountPermissions::read_write(),
     )])
     .unwrap();

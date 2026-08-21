@@ -610,6 +610,8 @@ struct StubServices {
     submit_turn_calls: Mutex<Vec<ProductSubmitTurnRequest>>,
     get_timeline_calls: Mutex<Vec<RebornTimelineRequest>>,
     browse_fs_calls: Mutex<Vec<RebornFsListRequest>>,
+    next_browse_fs_error: Mutex<Option<ProductSurfaceError>>,
+    stat_fs_calls: Mutex<Vec<RebornFsStatRequest>>,
     global_auto_approve_enabled: Mutex<bool>,
     global_auto_approve_calls: Mutex<usize>,
     stall_global_auto_approve: Mutex<bool>,
@@ -676,6 +678,10 @@ struct StubServices {
 }
 
 impl StubServices {
+    fn fail_browse_fs_dir(&self, error: ProductSurfaceError) {
+        *self.next_browse_fs_error.lock().expect("lock") = Some(error);
+    }
+
     fn fail_create_thread(&self, error: ProductSurfaceError) {
         *self.next_create_thread_error.lock().expect("lock") = Some(error);
     }
@@ -1426,6 +1432,9 @@ impl StubServices {
                     .lock()
                     .expect("lock")
                     .push(request.clone());
+                if let Some(error) = self.next_browse_fs_error.lock().expect("lock").take() {
+                    return Err(error);
+                }
                 let entry_path = if request.path.is_empty() {
                     "today.md".to_string()
                 } else {
@@ -1448,6 +1457,10 @@ impl StubServices {
             id if id == FS_STAT_VIEW.id => {
                 let request: RebornFsStatRequest =
                     serde_json::from_value(query.params).expect("fs stat params");
+                self.stat_fs_calls
+                    .lock()
+                    .expect("lock")
+                    .push(request.clone());
                 Ok(RebornViewPage {
                     payload: serde_json::to_value(RebornFsStatResponse {
                         stat: ProjectFsStat {
@@ -9057,6 +9070,51 @@ async fn browse_fs_dir_lists_mount_relative_entries() {
 }
 
 #[tokio::test]
+async fn browse_fs_dir_only_converts_workspace_root_not_found_to_empty_listing() {
+    for (mount, expected_status) in [
+        ("workspace", StatusCode::OK),
+        ("memory", StatusCode::NOT_FOUND),
+    ] {
+        let services = Arc::new(StubServices::default());
+        services.fail_browse_fs_dir(ProductSurfaceError {
+            code: ProductSurfaceErrorCode::NotFound,
+            kind: ProductSurfaceErrorKind::NotFound,
+            status_code: StatusCode::NOT_FOUND.as_u16(),
+            retryable: false,
+            field: None,
+            validation_code: None,
+        });
+        let router = router_with(services);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/webchat/v2/fs/list?mount={mount}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(
+            response.status(),
+            expected_status,
+            "only a fresh Workspace root is lazily created"
+        );
+        if mount == "workspace" {
+            assert!(
+                read_json(response).await["entries"]
+                    .as_array()
+                    .expect("workspace entries array")
+                    .is_empty(),
+                "a fresh Workspace root remains an empty listing"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn browse_fs_dir_forwards_optional_project_selector() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
@@ -9212,11 +9270,9 @@ async fn stat_fs_path_returns_metadata() {
 }
 
 #[tokio::test]
-async fn browse_fs_dir_prefixes_workspace_path_with_scoped_projection() {
-    // Scoped projection ON + non-operator caller: the browser must confine
-    // Workspace reads to the caller's own subtree. The server prepends
-    // `tenants/{tenant}/users/{user}` before forwarding to the product layer,
-    // so one user can never list another user's workspace artifacts.
+async fn browse_fs_dir_keeps_workspace_path_relative_to_caller_scoped_mount() {
+    // Composition already roots the browse filesystem at this caller's
+    // tenant/user digest leaf. The HTTP handler must not scope it a second time.
     let services = Arc::new(StubServices::default());
     let caller = caller_for_user("user-alpha");
     let router = webui_v2_router(
@@ -9241,14 +9297,12 @@ async fn browse_fs_dir_prefixes_workspace_path_with_scoped_projection() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
-    // The response echoes the *requested* mount-relative root, not the prefixed
-    // served path, so the browser never sees the caller storage prefix.
     assert_eq!(body["path"], "");
     let calls = services.browse_fs_calls.lock().expect("lock");
     assert_eq!(calls.len(), 1);
     assert_eq!(
-        calls[0].path, "tenants/tenant-alpha/users/user-alpha",
-        "workspace list must be confined to the caller subtree under scoped projection"
+        calls[0].path, "",
+        "workspace list paths stay relative to the caller-scoped mount"
     );
 }
 
@@ -9290,10 +9344,7 @@ async fn browse_fs_dir_keeps_raw_workspace_root_for_operator_fallback() {
 }
 
 #[tokio::test]
-async fn browse_fs_dir_scopes_workspace_for_non_operator_even_when_state_flag_off() {
-    // Non-operator caller is always scoped (state flag OR not-operator), so a
-    // hosted user without operator capability is confined to their own subtree
-    // even on a deployment that has not set the scoped-projection flag.
+async fn browse_fs_dir_keeps_non_operator_path_mount_relative() {
     let services = Arc::new(StubServices::default());
     let caller = caller_for_user("user-alpha");
     let router = webui_v2_router(
@@ -9320,16 +9371,13 @@ async fn browse_fs_dir_scopes_workspace_for_non_operator_even_when_state_flag_of
     let calls = services.browse_fs_calls.lock().expect("lock");
     assert_eq!(calls.len(), 1);
     assert_eq!(
-        calls[0].path, "tenants/tenant-alpha/users/user-alpha/notes/idea.md",
-        "non-operator callers must be scoped to their own workspace subtree"
+        calls[0].path, "notes/idea.md",
+        "the scoped filesystem, not the HTTP path, owns caller isolation"
     );
 }
 
 #[tokio::test]
-async fn stat_fs_path_prefixes_workspace_path_with_scoped_projection() {
-    // The stat route must apply the same caller-subtree prefixing so a user
-    // cannot stat another user's file. The echoed stat path is stripped back
-    // to the mount-relative request.
+async fn stat_fs_path_keeps_workspace_path_mount_relative() {
     let services = Arc::new(StubServices::default());
     let caller = caller_for_user("user-alpha");
     let router = webui_v2_router(
@@ -9358,13 +9406,16 @@ async fn stat_fs_path_prefixes_workspace_path_with_scoped_projection() {
         body["stat"]["path"], "report.md",
         "stat response must echo the mount-relative path, not the prefixed served path"
     );
+    let calls = services.stat_fs_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].path, "report.md",
+        "stat must dispatch the mount-relative path, not only echo it in the response"
+    );
 }
 
 #[tokio::test]
-async fn read_fs_file_prefixes_workspace_path_with_scoped_projection() {
-    // The download route applies the same caller-subtree prefixing as list/stat.
-    // The stub records the dispatched command input, so assert it received the
-    // prefixed path (the caller can never request another user's subtree).
+async fn read_fs_file_keeps_workspace_path_mount_relative() {
     let services = Arc::new(StubServices::default());
     let caller = caller_for_user("user-alpha");
     let router = webui_v2_router(
@@ -9397,15 +9448,85 @@ async fn read_fs_file_prefixes_workspace_path_with_scoped_projection() {
     let request: RebornFsReadRequest =
         serde_json::from_value(read_call.input.clone()).expect("fs read input");
     assert_eq!(
-        request.path, "tenants/tenant-alpha/users/user-alpha/report.md",
-        "read_fs_file must confine the workspace download to the caller subtree under scoped projection"
+        request.path, "report.md",
+        "the caller-scoped filesystem receives a mount-relative path"
+    );
+}
+
+#[tokio::test]
+async fn workspace_browse_routes_normalize_slash_padded_paths_before_dispatch() {
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(true),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: false,
+    }));
+
+    let list_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/list?mount=workspace&path=/report.md/")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(list_response.status(), StatusCode::OK);
+    assert_eq!(read_json(list_response).await["path"], "report.md");
+    assert_eq!(
+        services.browse_fs_calls.lock().expect("lock")[0].path,
+        "report.md",
+        "list dispatch receives a mount-relative path"
+    );
+
+    let stat_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/stat?mount=workspace&path=/report.md/")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(stat_response.status(), StatusCode::OK);
+    assert_eq!(read_json(stat_response).await["stat"]["path"], "report.md");
+
+    let read_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/content?mount=workspace&path=/report.md/")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(read_response.status(), StatusCode::OK);
+    let calls = services.surface_calls.lock().expect("lock");
+    let read_call = calls
+        .iter()
+        .rev()
+        .find(|call| call.call_id == "fs.read")
+        .expect("fs.read command dispatched");
+    let request: RebornFsReadRequest =
+        serde_json::from_value(read_call.input.clone()).expect("fs read input");
+    assert_eq!(
+        request.path, "report.md",
+        "read dispatch receives a mount-relative path"
     );
 }
 
 #[tokio::test]
 async fn browse_fs_dir_rejects_parent_traversal_under_scoped_projection() {
-    // A `..` segment must be rejected before the caller prefix is prepended, so
-    // `../other-user/secret` can never become `tenants/.../users/.../../other-user`.
+    // Defense in depth rejects `..` before the scoped filesystem sees it.
     let services = Arc::new(StubServices::default());
     let caller = caller_for_user("user-alpha");
     let router = webui_v2_router(
@@ -9441,9 +9562,8 @@ async fn browse_fs_dir_rejects_parent_traversal_under_scoped_projection() {
 }
 
 /// `stat_fs_path` and `read_fs_file` run the identical
-/// `workspace_projection_for` / `workspace_served_path` sequence as
-/// `browse_fs_dir`; the `..` guard must hold on every route that prepends the
-/// caller prefix, not just the listing.
+/// `workspace_served_path` sequence as `browse_fs_dir`; the `..` guard must
+/// hold on every workspace browse route, not just the listing.
 #[tokio::test]
 async fn stat_and_read_fs_routes_reject_parent_traversal_under_scoped_projection() {
     for uri in [
@@ -9485,11 +9605,7 @@ async fn stat_and_read_fs_routes_reject_parent_traversal_under_scoped_projection
 }
 
 #[tokio::test]
-async fn browse_fs_dir_strips_prefixed_entry_paths_under_scoped_projection() {
-    // The stub now echoes entry paths under the served (prefixed) root, as the
-    // product layer does. The handler must strip the caller prefix from every
-    // entry path so the browser navigates with mount-relative paths and never
-    // sees the storage ownership prefix.
+async fn browse_fs_dir_returns_mount_relative_entry_paths() {
     let services = Arc::new(StubServices::default());
     let caller = caller_for_user("user-alpha");
     let router = webui_v2_router(

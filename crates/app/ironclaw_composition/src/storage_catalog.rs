@@ -71,7 +71,7 @@ const REQUIRED_RUNTIME_STORAGE_PLANES: &[RuntimeStoragePlane] = &[
     },
     RuntimeStoragePlane {
         name: "project workspace",
-        path: "/projects",
+        path: "/projects/workspace",
         capabilities: BYTE_STORE_CAPABILITIES,
         txn: TxnCapability::None,
     },
@@ -230,14 +230,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_storage_validation_accepts_complete_composite() {
+    async fn runtime_storage_validation_accepts_mounted_project_workspace_leaf() {
         let mut filesystem = CompositeRootFilesystem::new();
         let backend = Arc::new(InMemoryBackend::new());
         for path in [
             "/tenants",
             "/events",
             "/memory",
-            "/projects",
+            "/projects/workspace",
             "/system/extensions",
             "/system/settings",
             "/system/skills",
@@ -263,7 +263,7 @@ mod tests {
             "/tenants",
             "/events",
             "/memory",
-            "/projects",
+            "/projects/workspace",
             "/system/extensions",
             "/system/settings",
             "/system/skills",

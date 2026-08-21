@@ -34,7 +34,7 @@ use ironclaw_composition::{
     RebornRuntimeInput, RebornRuntimeProfileOptions, RebornTurnDriveOutcome, TriggerPollerSettings,
     build_reborn_runtime, build_runtime, local_runtime_build_input_with_options,
 };
-use ironclaw_config::{RebornConfigFile, RebornHome};
+use ironclaw_config::{RebornConfigFile, RebornHome, RebornStoragePaths};
 use ironclaw_extension_support::GoogleCredentialResolver;
 use ironclaw_host_api::{
     ids::{AgentId, ExtensionId, InvocationId, SecretHandle, TenantId, UserId},
@@ -81,6 +81,39 @@ const QA_CREDENTIAL_SOURCE_TENANT_ENV: &str = "IRONCLAW_REBORN_QA_CREDENTIAL_SOU
 const QA_CREDENTIAL_SOURCE_USER_ENV: &str = "IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_USER";
 const QA_CREDENTIAL_SOURCE_AGENT_ENV: &str = "IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_AGENT";
 const STANDALONE_SECRETS_MASTER_KEY_PATH: &str = ".reborn-local-dev-secrets-master-key";
+
+fn safe_qa_diagnostic_label(value: &str) -> &str {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        value
+    } else {
+        "<redacted>"
+    }
+}
+
+fn qa_source_diagnostic(
+    stage: &'static str,
+    fixture_name: Option<&str>,
+    provider: Option<&str>,
+    account_count: Option<usize>,
+) -> String {
+    let mut diagnostic = format!("Reborn QA credential source stage={stage}");
+    if let Some(fixture_name) = fixture_name {
+        diagnostic.push_str(" fixture=");
+        diagnostic.push_str(safe_qa_diagnostic_label(fixture_name));
+    }
+    if let Some(provider) = provider {
+        diagnostic.push_str(" provider=");
+        diagnostic.push_str(safe_qa_diagnostic_label(provider));
+    }
+    if let Some(account_count) = account_count {
+        diagnostic.push_str(&format!(" accounts={account_count}"));
+    }
+    diagnostic
+}
 
 /// Tenant id the QA-trace runtime is composed with — replay assertions need
 /// it to query tenant-scoped state (e.g. the trigger repository).
@@ -356,10 +389,11 @@ async fn build_qa_trace_runtime_with_http_interceptor_and_trigger_poller(
 ) -> RebornRuntime {
     let host_home_root = root.path().join("host-home");
     std::fs::create_dir_all(&host_home_root).expect("host home root");
+    let storage_paths = RebornStoragePaths::from_installation_root(root.path().join("reborn-home"));
     let mut input = local_runtime_build_input_with_options(
         RebornCompositionProfile::StandaloneUnrestricted,
         QA_USER,
-        root.path().join("local-dev"),
+        storage_paths,
         RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
@@ -491,13 +525,13 @@ async fn seed_live_credentials_for_fixture(
     }
     let source = RebornQaCredentialSource::resolve();
     eprintln!(
-        "[RebornQaTrace] importing {} credential account(s) from Reborn source root {} \
-         tenant={} user={} agent={}",
-        seeds.len(),
-        source.standalone_root.display(),
-        source.tenant,
-        source.user,
-        source.agent
+        "[RebornQaTrace] {}",
+        qa_source_diagnostic(
+            "import-accounts",
+            Some(fixture_name),
+            None,
+            Some(seeds.len())
+        )
     );
     let source_services = source.build_services().await;
     let source_product_auth = source_services.product_auth_for_test();
@@ -521,8 +555,13 @@ async fn seed_live_credentials_for_fixture(
         .await;
         let source_access = source_account.access_secret.as_ref().unwrap_or_else(|| {
             panic!(
-                "configured Reborn product-auth account {:?} for provider {:?} has no access secret",
-                source_account.id, seed.provider
+                "{}",
+                qa_source_diagnostic(
+                    "missing-access-secret",
+                    Some(fixture_name),
+                    Some(seed.provider),
+                    None
+                )
             )
         });
         let access_secret_scope =
@@ -533,7 +572,6 @@ async fn seed_live_credentials_for_fixture(
             &access_secret_scope,
             source_access,
             "access",
-            &source_account,
         )
         .await;
         live_secret_values.push((seed.label, access_material.expose_secret().to_string()));
@@ -541,7 +579,17 @@ async fn seed_live_credentials_for_fixture(
         secret_store
             .put(scope.clone(), access_handle.clone(), access_material, None)
             .await
-            .expect("seed Reborn access secret");
+            .unwrap_or_else(|_| {
+                panic!(
+                    "{}",
+                    qa_source_diagnostic(
+                        "seed-access-secret",
+                        Some(fixture_name),
+                        Some(seed.provider),
+                        None
+                    )
+                )
+            });
 
         let refresh_handle = match (source_account.refresh_secret.as_ref(), seed.refresh_handle) {
             (Some(source_refresh), Some(refresh_handle)) => {
@@ -558,7 +606,6 @@ async fn seed_live_credentials_for_fixture(
                     &refresh_secret_scope,
                     source_refresh,
                     "refresh",
-                    &source_account,
                 )
                 .await;
                 live_secret_values.push((seed.label, refresh_material.expose_secret().to_string()));
@@ -566,14 +613,28 @@ async fn seed_live_credentials_for_fixture(
                 secret_store
                     .put(scope.clone(), handle.clone(), refresh_material, None)
                     .await
-                    .expect("seed Reborn refresh secret");
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "{}",
+                            qa_source_diagnostic(
+                                "seed-refresh-secret",
+                                Some(fixture_name),
+                                Some(seed.provider),
+                                None
+                            )
+                        )
+                    });
                 Some(handle)
             }
             (None, Some(_)) => {
                 eprintln!(
-                    "[RebornQaTrace] source account {:?} for provider {:?} has no refresh \
-                     secret; seeded credential will rely on the stored access secret",
-                    source_account.id, seed.provider
+                    "[RebornQaTrace] {}",
+                    qa_source_diagnostic(
+                        "missing-refresh-secret",
+                        Some(fixture_name),
+                        Some(seed.provider),
+                        None
+                    )
                 );
                 None
             }
@@ -596,7 +657,17 @@ async fn seed_live_credentials_for_fixture(
                 scopes: source_account.scopes,
             })
             .await
-            .expect("seed Reborn credential account");
+            .unwrap_or_else(|_| {
+                panic!(
+                    "{}",
+                    qa_source_diagnostic(
+                        "seed-credential-account",
+                        Some(fixture_name),
+                        Some(seed.provider),
+                        None
+                    )
+                )
+            });
         preflight_seeded_qa_credential(
             fixture_name,
             &product_auth,
@@ -616,48 +687,63 @@ async fn preflight_seeded_qa_credential(
 ) {
     let Some(access_secret) = account.access_secret.as_ref() else {
         panic!(
-            "recording fixture {fixture_name:?} imported credential account {:?} for provider \
-             {:?} without an access secret",
-            account.id, account.provider
+            "{}",
+            qa_source_diagnostic(
+                "preflight-missing-access-secret",
+                Some(fixture_name),
+                Some(account.provider.as_str()),
+                None
+            )
         );
     };
     let metadata = secret_store
         .metadata(&account.scope.resource, access_secret)
         .await
-        .unwrap_or_else(|error| {
+        .unwrap_or_else(|_| {
             panic!(
-                "recording fixture {fixture_name:?} could not inspect imported access secret {} \
-                 for credential account {:?}: {error}",
-                access_secret.as_str(),
-                account.id
+                "{}",
+                qa_source_diagnostic(
+                    "inspect-access-secret",
+                    Some(fixture_name),
+                    Some(account.provider.as_str()),
+                    None
+                )
             )
         });
     assert!(
         metadata.is_some(),
-        "recording fixture {fixture_name:?} imported credential account {:?} with access secret \
-         {} but the QA runtime secret store has no matching secret at that account scope",
-        account.id,
-        access_secret.as_str()
+        "{}",
+        qa_source_diagnostic(
+            "access-secret-not-found",
+            Some(fixture_name),
+            Some(account.provider.as_str()),
+            None
+        )
     );
     if let Some(refresh_secret) = account.refresh_secret.as_ref() {
         let metadata = secret_store
             .metadata(&account.scope.resource, refresh_secret)
             .await
-            .unwrap_or_else(|error| {
+            .unwrap_or_else(|_| {
                 panic!(
-                    "recording fixture {fixture_name:?} could not inspect imported refresh \
-                     secret {} for credential account {:?}: {error}",
-                    refresh_secret.as_str(),
-                    account.id
+                    "{}",
+                    qa_source_diagnostic(
+                        "inspect-refresh-secret",
+                        Some(fixture_name),
+                        Some(account.provider.as_str()),
+                        None
+                    )
                 )
             });
         assert!(
             metadata.is_some(),
-            "recording fixture {fixture_name:?} imported credential account {:?} with refresh \
-             secret {} but the QA runtime secret store has no matching secret at that account \
-             scope",
-            account.id,
-            refresh_secret.as_str()
+            "{}",
+            qa_source_diagnostic(
+                "refresh-secret-not-found",
+                Some(fixture_name),
+                Some(account.provider.as_str()),
+                None
+            )
         );
     }
 
@@ -684,10 +770,14 @@ async fn preflight_seeded_google_credential(
                 .scopes
                 .iter()
                 .any(|scope| scope.as_str() == *required_scope),
-            "recording fixture {fixture_name:?} imported Google credential account {:?} but it \
-             does not include required provider scope {required_scope:?}; configured scopes: {:?}",
-            account.id,
-            account.scopes
+            "{} required_scope={}",
+            qa_source_diagnostic(
+                "required-provider-scope-missing",
+                Some(fixture_name),
+                Some(account.provider.as_str()),
+                None
+            ),
+            safe_qa_diagnostic_label(required_scope)
         );
     }
 
@@ -705,30 +795,40 @@ async fn preflight_seeded_google_credential(
     let credential = resolver
         .resolve(&account.scope.resource, &gmail, &[readonly])
         .await
-        .unwrap_or_else(|error| {
+        .unwrap_or_else(|_| {
             panic!(
-                "recording fixture {fixture_name:?} imported Google credential account {:?}, \
-                 but first-party Gmail could not resolve it: {error:?}",
-                account.id
+                "{}",
+                qa_source_diagnostic(
+                    "resolve-gmail-credential",
+                    Some(fixture_name),
+                    Some(account.provider.as_str()),
+                    None
+                )
             )
         });
     let metadata = secret_store
         .metadata(&credential.access_secret_scope, &credential.access_secret)
         .await
-        .unwrap_or_else(|error| {
+        .unwrap_or_else(|_| {
             panic!(
-                "recording fixture {fixture_name:?} resolved Gmail access secret {} for account \
-                 {:?}, but QA runtime secret metadata lookup failed: {error}",
-                credential.access_secret.as_str(),
-                credential.account_id
+                "{}",
+                qa_source_diagnostic(
+                    "inspect-resolved-gmail-secret",
+                    Some(fixture_name),
+                    Some(account.provider.as_str()),
+                    None
+                )
             )
         });
     assert!(
         metadata.is_some(),
-        "recording fixture {fixture_name:?} resolved Gmail access secret {} for account {:?}, \
-         but QA runtime secret store has no secret at the resolved scope",
-        credential.access_secret.as_str(),
-        credential.account_id
+        "{}",
+        qa_source_diagnostic(
+            "resolved-gmail-secret-not-found",
+            Some(fixture_name),
+            Some(account.provider.as_str()),
+            None
+        )
     );
 }
 
@@ -783,7 +883,7 @@ fn qa_runtime_credential_binding(
 }
 
 struct RebornQaCredentialSource {
-    standalone_root: PathBuf,
+    installation_root: PathBuf,
     tenant: String,
     user: String,
     agent: String,
@@ -791,15 +891,17 @@ struct RebornQaCredentialSource {
 
 impl RebornQaCredentialSource {
     fn resolve() -> Self {
-        let home = RebornHome::resolve_from_env()
-            .unwrap_or_else(|error| panic!("resolve Reborn QA credential source home: {error}"));
-        let config_file = RebornConfigFile::load(&home.config_file_path())
-            .unwrap_or_else(|error| panic!("load Reborn QA credential source config: {error}"));
+        let home = RebornHome::resolve_from_env().unwrap_or_else(|_| {
+            panic!("{}", qa_source_diagnostic("resolve-home", None, None, None))
+        });
+        let config_file = RebornConfigFile::load(&home.config_file_path()).unwrap_or_else(|_| {
+            panic!("{}", qa_source_diagnostic("load-config", None, None, None))
+        });
         let identity = config_file.as_ref().and_then(|file| file.identity.as_ref());
         let default_identity = RebornRuntimeIdentity::reborn_cli();
-        let standalone_root = std::env::var_os(QA_CREDENTIAL_SOURCE_ROOT_ENV)
+        let installation_root = std::env::var_os(QA_CREDENTIAL_SOURCE_ROOT_ENV)
             .map(PathBuf::from)
-            .unwrap_or_else(|| home.path().join("local-dev"));
+            .unwrap_or_else(|| home.path().to_path_buf());
         let tenant = env_or_config_identity(
             QA_CREDENTIAL_SOURCE_TENANT_ENV,
             identity.and_then(|identity| identity.tenant.as_deref()),
@@ -816,7 +918,7 @@ impl RebornQaCredentialSource {
             &default_identity.agent_id,
         );
         Self {
-            standalone_root,
+            installation_root,
             tenant,
             user,
             agent,
@@ -825,9 +927,24 @@ impl RebornQaCredentialSource {
 
     fn scope(&self) -> ResourceScope {
         ResourceScope {
-            tenant_id: TenantId::new(&self.tenant).expect("source tenant id"),
-            user_id: UserId::new(&self.user).expect("source user id"),
-            agent_id: Some(AgentId::new(&self.agent).expect("source agent id")),
+            tenant_id: TenantId::new(&self.tenant).unwrap_or_else(|_| {
+                panic!(
+                    "{}",
+                    qa_source_diagnostic("parse-tenant-id", None, None, None)
+                )
+            }),
+            user_id: UserId::new(&self.user).unwrap_or_else(|_| {
+                panic!(
+                    "{}",
+                    qa_source_diagnostic("parse-user-id", None, None, None)
+                )
+            }),
+            agent_id: Some(AgentId::new(&self.agent).unwrap_or_else(|_| {
+                panic!(
+                    "{}",
+                    qa_source_diagnostic("parse-agent-id", None, None, None)
+                )
+            })),
             project_id: None,
             mission_id: None,
             thread_id: None,
@@ -839,17 +956,45 @@ impl RebornQaCredentialSource {
         let input = local_runtime_build_input_with_options(
             RebornCompositionProfile::Standalone,
             &self.user,
-            self.standalone_root.clone(),
+            self.storage_paths(),
             RebornRuntimeProfileOptions::default(),
         )
-        .expect("Reborn QA credential source input")
+        .unwrap_or_else(|_| {
+            panic!(
+                "{}",
+                qa_source_diagnostic("build-source-input", None, None, None)
+            )
+        })
         .with_local_runtime_identity(
-            TenantId::new(&self.tenant).expect("source tenant id"),
-            AgentId::new(&self.agent).expect("source agent id"),
+            TenantId::new(&self.tenant).unwrap_or_else(|_| {
+                panic!(
+                    "{}",
+                    qa_source_diagnostic("parse-tenant-id", None, None, None)
+                )
+            }),
+            AgentId::new(&self.agent).unwrap_or_else(|_| {
+                panic!(
+                    "{}",
+                    qa_source_diagnostic("parse-agent-id", None, None, None)
+                )
+            }),
         );
         build_runtime(RebornRuntimeInput::from_build_input(input))
             .await
-            .expect("build Reborn QA credential source services")
+            .unwrap_or_else(|_| {
+                panic!(
+                    "{}",
+                    qa_source_diagnostic("build-source-services", None, None, None)
+                )
+            })
+    }
+
+    fn storage_paths(&self) -> RebornStoragePaths {
+        RebornStoragePaths::from_installation_root(&self.installation_root)
+    }
+
+    fn state_root(&self) -> PathBuf {
+        self.storage_paths().state_root().to_path_buf()
     }
 
     fn matches_account_owner(&self, account: &CredentialAccount) -> bool {
@@ -890,16 +1035,19 @@ async fn select_source_credential_account(
         .await
     {
         Ok(account) => account,
-        Err(selection_error) => {
+        Err(_) => {
             let visible_accounts = record_source
                 .accounts_for_owner(source_auth_scope)
                 .await
-                .unwrap_or_else(|accounts_error| {
+                .unwrap_or_else(|_| {
                     panic!(
-                        "recording fixture {fixture_name:?} could not list visible Reborn \
-                         product-auth accounts for provider {:?} after selection failed: \
-                         {selection_error}; list error: {accounts_error}",
-                        provider.as_str()
+                        "{}",
+                        qa_source_diagnostic(
+                            "list-visible-accounts",
+                            Some(fixture_name),
+                            Some(provider.as_str()),
+                            None
+                        )
                     )
                 });
             if let Some(account) =
@@ -910,33 +1058,37 @@ async fn select_source_credential_account(
             match scan_standalone_db_for_source_account(source, &provider).await {
                 Ok(Some(account)) => {
                     eprintln!(
-                        "[RebornQaTrace] product-auth record source did not select provider {} \
-                         ({selection_error}); using matching local-dev account record from {}",
-                        provider.as_str(),
-                        source.standalone_root.display()
+                        "[RebornQaTrace] {}",
+                        qa_source_diagnostic(
+                            "use-db-account-fallback",
+                            Some(fixture_name),
+                            Some(provider.as_str()),
+                            None
+                        )
                     );
                     return account;
                 }
                 Ok(None) => {}
-                Err(error) => {
+                Err(_) => {
                     panic!(
-                        "recording fixture {fixture_name:?} could not scan local-dev product-auth \
-                         accounts for provider {:?} in {} after selection failed: \
-                         {selection_error}; scan error: {error}",
-                        provider.as_str(),
-                        source.standalone_root.display()
+                        "{}",
+                        qa_source_diagnostic(
+                            "scan-db-accounts",
+                            Some(fixture_name),
+                            Some(provider.as_str()),
+                            None
+                        )
                     );
                 }
             }
             panic!(
-                "recording fixture {fixture_name:?} requires exactly one configured \
-                 Reborn product-auth account for provider {:?} in source root {} \
-                 tenant={} user={} agent={}: {selection_error}. Visible accounts: {}",
-                provider.as_str(),
-                source.standalone_root.display(),
-                source.tenant,
-                source.user,
-                source.agent,
+                "{} {}",
+                qa_source_diagnostic(
+                    "select-unique-account",
+                    Some(fixture_name),
+                    Some(provider.as_str()),
+                    Some(visible_accounts.len())
+                ),
                 format_account_summaries(&visible_accounts)
             );
         }
@@ -966,17 +1118,19 @@ async fn scan_standalone_db_for_source_account(
     source: &RebornQaCredentialSource,
     provider: &AuthProviderId,
 ) -> Result<Option<CredentialAccount>, String> {
-    let db_path = source.standalone_root.join("reborn-local-dev.db");
+    let db_path = source.state_root().join("reborn-local-dev.db");
     if !db_path.exists() {
         return Ok(None);
     }
     let db = libsql::Builder::new_local(db_path.clone())
         .build()
         .await
-        .map_err(|error| format!("open local-dev DB {} failed: {error}", db_path.display()))?;
-    let conn = db
-        .connect()
-        .map_err(|error| format!("connect local-dev DB {} failed: {error}", db_path.display()))?;
+        .map_err(|_| {
+            qa_source_diagnostic("open-account-db", None, Some(provider.as_str()), None)
+        })?;
+    let conn = db.connect().map_err(|_| {
+        qa_source_diagnostic("connect-account-db", None, Some(provider.as_str()), None)
+    })?;
     let mut rows = conn
         .query(
             "SELECT contents FROM root_filesystem_entries \
@@ -985,29 +1139,27 @@ async fn scan_standalone_db_for_source_account(
             (),
         )
         .await
-        .map_err(|error| {
-            format!(
-                "query local-dev credential account records in {} failed: {error}",
-                db_path.display()
-            )
+        .map_err(|_| {
+            qa_source_diagnostic("query-account-records", None, Some(provider.as_str()), None)
         })?;
     let mut accounts = Vec::new();
-    while let Some(row) = rows.next().await.map_err(|error| {
-        format!(
-            "iterate local-dev credential account records in {} failed: {error}",
-            db_path.display()
+    while let Some(row) = rows.next().await.map_err(|_| {
+        qa_source_diagnostic(
+            "iterate-account-records",
+            None,
+            Some(provider.as_str()),
+            None,
         )
     })? {
-        let contents: Vec<u8> = row.get(0).map_err(|error| {
-            format!(
-                "read local-dev credential account record contents from {} failed: {error}",
-                db_path.display()
-            )
+        let contents: Vec<u8> = row.get(0).map_err(|_| {
+            qa_source_diagnostic("read-account-record", None, Some(provider.as_str()), None)
         })?;
-        let account = serde_json::from_slice::<CredentialAccount>(&contents).map_err(|error| {
-            format!(
-                "deserialize local-dev credential account record from {} failed: {error}",
-                db_path.display()
+        let account = serde_json::from_slice::<CredentialAccount>(&contents).map_err(|_| {
+            qa_source_diagnostic(
+                "deserialize-account-record",
+                None,
+                Some(provider.as_str()),
+                None,
             )
         })?;
         accounts.push(account);
@@ -1040,21 +1192,19 @@ async fn resolve_source_secret_scope(
     match scan_standalone_db_for_secret_scope(source, handle).await {
         Ok(Some(scope)) => return scope,
         Ok(None) => {}
-        Err(error) => {
+        Err(_) => {
             panic!(
-                "scan local-dev DB for {kind} secret {} scope on source account {:?} failed: \
-                 {error}",
-                handle.as_str(),
-                account.id
+                "{} kind={}",
+                qa_source_diagnostic("scan-secret-scope", None, None, None),
+                safe_qa_diagnostic_label(kind)
             );
         }
     }
 
     eprintln!(
-        "[RebornQaTrace] could not find exact local-dev scope for {kind} secret {} on source \
-         account {:?}; falling back to account resource scope",
-        handle.as_str(),
-        account.id
+        "[RebornQaTrace] {} kind={}",
+        qa_source_diagnostic("fallback-secret-scope", None, None, None),
+        safe_qa_diagnostic_label(kind)
     );
     account.scope.resource.without_thread_and_mission()
 }
@@ -1063,17 +1213,17 @@ async fn scan_standalone_db_for_secret_scope(
     source: &RebornQaCredentialSource,
     handle: &SecretHandle,
 ) -> Result<Option<ResourceScope>, String> {
-    let db_path = source.standalone_root.join("reborn-local-dev.db");
+    let db_path = source.state_root().join("reborn-local-dev.db");
     if !db_path.exists() {
         return Ok(None);
     }
     let db = libsql::Builder::new_local(db_path.clone())
         .build()
         .await
-        .map_err(|error| format!("open local-dev DB {} failed: {error}", db_path.display()))?;
+        .map_err(|_| qa_source_diagnostic("open-secret-scope-db", None, None, None))?;
     let conn = db
         .connect()
-        .map_err(|error| format!("connect local-dev DB {} failed: {error}", db_path.display()))?;
+        .map_err(|_| qa_source_diagnostic("connect-secret-scope-db", None, None, None))?;
     let secret_path_pattern = format!("%/secrets/{}.json", handle.as_str());
     let mut rows = conn
         .query(
@@ -1083,35 +1233,19 @@ async fn scan_standalone_db_for_secret_scope(
             libsql::params![secret_path_pattern],
         )
         .await
-        .map_err(|error| {
-            format!(
-                "query local-dev secret scope records for {} in {} failed: {error}",
-                handle.as_str(),
-                db_path.display()
-            )
-        })?;
+        .map_err(|_| qa_source_diagnostic("query-secret-scope-records", None, None, None))?;
     let mut matching = Vec::new();
-    while let Some(row) = rows.next().await.map_err(|error| {
-        format!(
-            "iterate local-dev secret scope records for {} in {} failed: {error}",
-            handle.as_str(),
-            db_path.display()
-        )
-    })? {
-        let contents: Vec<u8> = row.get(0).map_err(|error| {
-            format!(
-                "read local-dev secret scope record contents for {} from {} failed: {error}",
-                handle.as_str(),
-                db_path.display()
-            )
-        })?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| qa_source_diagnostic("iterate-secret-scope-records", None, None, None))?
+    {
+        let contents: Vec<u8> = row
+            .get(0)
+            .map_err(|_| qa_source_diagnostic("read-secret-scope-record", None, None, None))?;
         let record =
-            serde_json::from_slice::<StoredSecretScopeRecord>(&contents).map_err(|error| {
-                format!(
-                    "deserialize local-dev secret scope record for {} from {} failed: {error}",
-                    handle.as_str(),
-                    db_path.display()
-                )
+            serde_json::from_slice::<StoredSecretScopeRecord>(&contents).map_err(|_| {
+                qa_source_diagnostic("deserialize-secret-scope-record", None, None, None)
             })?;
         if record.handle == *handle && source.matches_secret_owner(&record.scope) {
             matching.push(record.scope);
@@ -1129,25 +1263,14 @@ async fn read_standalone_db_secret_material(
 ) -> Result<ironclaw_secrets::SecretMaterial, String> {
     let record = scan_standalone_db_for_secret_material_record(source, handle)
         .await?
-        .ok_or_else(|| {
-            format!(
-                "no matching encrypted local-dev secret metadata for handle {} in {}",
-                handle.as_str(),
-                source.standalone_root.display()
-            )
-        })?;
+        .ok_or_else(|| qa_source_diagnostic("encrypted-secret-not-found", None, None, None))?;
     let key = read_standalone_secret_master_key(source)?;
     let crypto = ironclaw_secrets::SecretsCrypto::new(SecretString::from(key))
-        .map_err(|error| format!("local-dev secrets master key is invalid: {error}"))?;
+        .map_err(|_| qa_source_diagnostic("validate-master-key", None, None, None))?;
     let aad = ironclaw_secrets::filesystem_secret_aad(&record.scope, &record.handle);
     let decrypted = crypto
         .decrypt(&record.encrypted_value, &record.key_salt, &aad)
-        .map_err(|error| {
-            format!(
-                "decrypt local-dev secret {} with stored scope failed: {error}",
-                handle.as_str()
-            )
-        })?;
+        .map_err(|_| qa_source_diagnostic("decrypt-secret", None, None, None))?;
     Ok(ironclaw_secrets::SecretMaterial::from(
         decrypted.expose().to_string(),
     ))
@@ -1157,17 +1280,17 @@ async fn scan_standalone_db_for_secret_material_record(
     source: &RebornQaCredentialSource,
     handle: &SecretHandle,
 ) -> Result<Option<StoredSecretMaterialRecord>, String> {
-    let db_path = source.standalone_root.join("reborn-local-dev.db");
+    let db_path = source.state_root().join("reborn-local-dev.db");
     if !db_path.exists() {
         return Ok(None);
     }
     let db = libsql::Builder::new_local(db_path.clone())
         .build()
         .await
-        .map_err(|error| format!("open local-dev DB {} failed: {error}", db_path.display()))?;
+        .map_err(|_| qa_source_diagnostic("open-secret-material-db", None, None, None))?;
     let conn = db
         .connect()
-        .map_err(|error| format!("connect local-dev DB {} failed: {error}", db_path.display()))?;
+        .map_err(|_| qa_source_diagnostic("connect-secret-material-db", None, None, None))?;
     let secret_path_pattern = format!("%/secrets/{}.json", handle.as_str());
     let mut rows = conn
         .query(
@@ -1177,35 +1300,19 @@ async fn scan_standalone_db_for_secret_material_record(
             libsql::params![secret_path_pattern],
         )
         .await
-        .map_err(|error| {
-            format!(
-                "query local-dev encrypted secret records for {} in {} failed: {error}",
-                handle.as_str(),
-                db_path.display()
-            )
-        })?;
+        .map_err(|_| qa_source_diagnostic("query-secret-material-records", None, None, None))?;
     let mut matching = Vec::new();
-    while let Some(row) = rows.next().await.map_err(|error| {
-        format!(
-            "iterate local-dev encrypted secret records for {} in {} failed: {error}",
-            handle.as_str(),
-            db_path.display()
-        )
-    })? {
-        let contents: Vec<u8> = row.get(0).map_err(|error| {
-            format!(
-                "read local-dev encrypted secret record contents for {} from {} failed: {error}",
-                handle.as_str(),
-                db_path.display()
-            )
-        })?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| qa_source_diagnostic("iterate-secret-material-records", None, None, None))?
+    {
+        let contents: Vec<u8> = row
+            .get(0)
+            .map_err(|_| qa_source_diagnostic("read-secret-material-record", None, None, None))?;
         let record =
-            serde_json::from_slice::<StoredSecretMaterialRecord>(&contents).map_err(|error| {
-                format!(
-                    "deserialize local-dev encrypted secret record for {} from {} failed: {error}",
-                    handle.as_str(),
-                    db_path.display()
-                )
+            serde_json::from_slice::<StoredSecretMaterialRecord>(&contents).map_err(|_| {
+                qa_source_diagnostic("deserialize-secret-material-record", None, None, None)
             })?;
         if record.handle == *handle && source.matches_secret_owner(&record.scope) {
             matching.push(record);
@@ -1218,80 +1325,38 @@ async fn scan_standalone_db_for_secret_material_record(
 }
 
 fn read_standalone_secret_master_key(source: &RebornQaCredentialSource) -> Result<String, String> {
-    let key_path = source
-        .standalone_root
-        .join(STANDALONE_SECRETS_MASTER_KEY_PATH);
+    let key_path = source.state_root().join(STANDALONE_SECRETS_MASTER_KEY_PATH);
     let key = match std::fs::read_to_string(&key_path) {
         Ok(existing) => existing.trim().to_string(),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             std::env::var(ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV)
                 .map(|value| value.trim().to_string())
-                .map_err(|_| {
-                    format!(
-                        "local-dev secrets master key file {} is missing and env var {} is not set",
-                        key_path.display(),
-                        ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV
-                    )
-                })?
+                .map_err(|_| qa_source_diagnostic("resolve-master-key", None, None, None))?
         }
-        Err(error) => {
-            return Err(format!(
-                "local-dev secrets master key file {} could not be read: {error}",
-                key_path.display()
-            ));
+        Err(_) => {
+            return Err(qa_source_diagnostic("read-master-key", None, None, None));
         }
     };
-    ironclaw_secrets::validate_master_key_material(key.as_bytes()).map_err(|error| {
-        format!(
-            "local-dev secrets master key from {} is malformed: {error}",
-            key_path.display()
-        )
-    })?;
+    ironclaw_secrets::validate_master_key_material(key.as_bytes())
+        .map_err(|_| qa_source_diagnostic("validate-master-key", None, None, None))?;
     Ok(key)
 }
 
 fn format_account_summaries(accounts: &[CredentialAccount]) -> String {
     if accounts.is_empty() {
-        return "<none>".to_string();
+        return "accounts=0 providers=[]".to_string();
     }
-    accounts
+    let mut providers = accounts
         .iter()
-        .map(|account| {
-            format!(
-                "id={} provider={} status={:?} tenant={} user={} agent={} project={} thread={} surface={:?} access={} refresh={}",
-                account.id,
-                account.provider.as_str(),
-                account.status,
-                account.scope.resource.tenant_id.as_str(),
-                account.scope.resource.user_id.as_str(),
-                account
-                    .scope
-                    .resource
-                    .agent_id
-                    .as_ref()
-                    .map(|id| id.as_str())
-                    .unwrap_or("<none>"),
-                account
-                    .scope
-                    .resource
-                    .project_id
-                    .as_ref()
-                    .map(|id| id.as_str())
-                    .unwrap_or("<none>"),
-                account
-                    .scope
-                    .resource
-                    .thread_id
-                    .as_ref()
-                    .map(|id| id.as_str())
-                    .unwrap_or("<none>"),
-                account.scope.surface,
-                account.access_secret.is_some(),
-                account.refresh_secret.is_some()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
+        .map(|account| safe_qa_diagnostic_label(account.provider.as_str()))
+        .collect::<Vec<_>>();
+    providers.sort_unstable();
+    providers.dedup();
+    format!(
+        "accounts={} providers=[{}]",
+        accounts.len(),
+        providers.join(",")
+    )
 }
 
 fn env_or_config_identity(name: &str, config_value: Option<&str>, default: &str) -> String {
@@ -1309,46 +1374,41 @@ async fn consume_source_secret(
     scope: &ResourceScope,
     handle: &SecretHandle,
     kind: &str,
-    account: &CredentialAccount,
 ) -> ironclaw_secrets::SecretMaterial {
     let lease = match store.lease_once(scope, handle).await {
         Ok(lease) => lease,
-        Err(lease_error) => {
+        Err(_) => {
             eprintln!(
-                "[RebornQaTrace] source secret store could not lease {kind} secret {} for \
-                     account {:?} ({lease_error}); reading encrypted local-dev secret record \
-                     directly",
-                handle.as_str(),
-                account.id
+                "[RebornQaTrace] {} kind={}",
+                qa_source_diagnostic("lease-secret-fallback", None, None, None),
+                safe_qa_diagnostic_label(kind)
             );
             return read_standalone_db_secret_material(source, handle)
                 .await
-                .unwrap_or_else(|fallback_error| {
+                .unwrap_or_else(|_| {
                     panic!(
-                        "lease {kind} secret for source Reborn credential account {:?}: \
-                             {lease_error}; local-dev fallback failed: {fallback_error}",
-                        account.id
+                        "{} kind={}",
+                        qa_source_diagnostic("lease-secret-fallback-failed", None, None, None),
+                        safe_qa_diagnostic_label(kind)
                     )
                 });
         }
     };
     match store.consume(scope, lease.id).await {
         Ok(material) => material,
-        Err(consume_error) => {
+        Err(_) => {
             eprintln!(
-                "[RebornQaTrace] source secret store could not consume {kind} secret {} for \
-                     account {:?} ({consume_error}); reading encrypted local-dev secret record \
-                     directly",
-                handle.as_str(),
-                account.id
+                "[RebornQaTrace] {} kind={}",
+                qa_source_diagnostic("consume-secret-fallback", None, None, None),
+                safe_qa_diagnostic_label(kind)
             );
             read_standalone_db_secret_material(source, handle)
                 .await
-                .unwrap_or_else(|fallback_error| {
+                .unwrap_or_else(|_| {
                     panic!(
-                        "consume {kind} secret for source Reborn credential account {:?}: \
-                             {consume_error}; local-dev fallback failed: {fallback_error}",
-                        account.id
+                        "{} kind={}",
+                        qa_source_diagnostic("consume-secret-fallback-failed", None, None, None),
+                        safe_qa_diagnostic_label(kind)
                     )
                 })
         }
@@ -1955,14 +2015,16 @@ mod tests {
     async fn standalone_db_secret_material_reader_decrypts_record() {
         let dir = tempfile::tempdir().unwrap();
         let source = RebornQaCredentialSource {
-            standalone_root: dir.path().to_path_buf(),
+            installation_root: dir.path().to_path_buf(),
             tenant: "reborn-cli".to_string(),
             user: "reborn-cli".to_string(),
             agent: "reborn-cli-agent".to_string(),
         };
+        let state_root = source.state_root();
+        std::fs::create_dir_all(&state_root).unwrap();
         let master_key = ironclaw_secrets::keychain::generate_master_key_hex();
         std::fs::write(
-            dir.path().join(STANDALONE_SECRETS_MASTER_KEY_PATH),
+            state_root.join(STANDALONE_SECRETS_MASTER_KEY_PATH),
             &master_key,
         )
         .unwrap();
@@ -1981,7 +2043,7 @@ mod tests {
             "key_salt": key_salt,
         });
 
-        let db = libsql::Builder::new_local(dir.path().join("reborn-local-dev.db"))
+        let db = libsql::Builder::new_local(state_root.join("reborn-local-dev.db"))
             .build()
             .await
             .unwrap();
@@ -2010,6 +2072,115 @@ mod tests {
         .expect("read encrypted local-dev secret");
 
         assert_eq!(material.expose_secret(), "local-dev-secret-value");
+    }
+
+    #[tokio::test]
+    async fn standalone_db_diagnostics_do_not_expose_source_paths_or_identities() {
+        let dir = tempfile::Builder::new()
+            .prefix("qa-sensitive-installation-root")
+            .tempdir()
+            .unwrap();
+        let source = RebornQaCredentialSource {
+            installation_root: dir.path().to_path_buf(),
+            tenant: "sensitive-tenant-id".to_string(),
+            user: "sensitive-user-id".to_string(),
+            agent: "sensitive-agent-id".to_string(),
+        };
+        let state_root = source.state_root();
+        std::fs::create_dir_all(&state_root).unwrap();
+        std::fs::write(state_root.join("reborn-local-dev.db"), b"not a database").unwrap();
+
+        let error =
+            scan_standalone_db_for_source_account(&source, &AuthProviderId::new("google").unwrap())
+                .await
+                .expect_err("malformed source database should produce a diagnostic");
+
+        for sentinel in [
+            dir.path().to_string_lossy().as_ref(),
+            "sensitive-tenant-id",
+            "sensitive-user-id",
+            "sensitive-agent-id",
+        ] {
+            assert!(
+                !error.contains(sentinel),
+                "source diagnostic leaked sensitive value {sentinel:?}: {error}"
+            );
+        }
+        assert!(
+            error.contains("stage="),
+            "diagnostic retains a safe stage: {error}"
+        );
+    }
+
+    #[test]
+    fn source_account_summaries_report_counts_without_account_or_owner_ids() {
+        let account = CredentialAccount {
+            id: ironclaw_auth::CredentialAccountId::new(),
+            scope: AuthProductScope::new(
+                ResourceScope {
+                    tenant_id: TenantId::new("sensitive-tenant-id").unwrap(),
+                    user_id: UserId::new("sensitive-user-id").unwrap(),
+                    agent_id: Some(AgentId::new("sensitive-agent-id").unwrap()),
+                    project_id: None,
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: InvocationId::new(),
+                },
+                AuthSurface::Api,
+            ),
+            provider: AuthProviderId::new("google").unwrap(),
+            label: ironclaw_auth::CredentialAccountLabel::new("sensitive label").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("sensitive-access-handle").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+            provider_identity: None,
+            link_revision: 0,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let account_id = account.id.to_string();
+
+        let summary = format_account_summaries(&[account]);
+
+        assert_eq!(summary, "accounts=1 providers=[google]");
+        for sentinel in [
+            account_id.as_str(),
+            "sensitive-tenant-id",
+            "sensitive-user-id",
+            "sensitive-agent-id",
+            "sensitive-access-handle",
+        ] {
+            assert!(
+                !summary.contains(sentinel),
+                "account summary leaked sensitive value {sentinel:?}: {summary}"
+            );
+        }
+    }
+
+    #[test]
+    fn master_key_diagnostic_does_not_expose_key_path() {
+        let dir = tempfile::Builder::new()
+            .prefix("qa-sensitive-key-root")
+            .tempdir()
+            .unwrap();
+        let source = RebornQaCredentialSource {
+            installation_root: dir.path().to_path_buf(),
+            tenant: "sensitive-tenant-id".to_string(),
+            user: "sensitive-user-id".to_string(),
+            agent: "sensitive-agent-id".to_string(),
+        };
+        let state_root = source.state_root();
+        std::fs::create_dir_all(state_root.join(STANDALONE_SECRETS_MASTER_KEY_PATH)).unwrap();
+
+        let error = read_standalone_secret_master_key(&source)
+            .expect_err("a directory at the master-key path must be rejected");
+
+        assert!(!error.contains(dir.path().to_string_lossy().as_ref()));
+        assert!(error.contains("stage=read-master-key"));
     }
 
     #[tokio::test]

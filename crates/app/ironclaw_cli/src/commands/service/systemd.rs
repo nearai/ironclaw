@@ -78,10 +78,9 @@ fn unit_content(invocation: &ServeInvocation, working_directory: &Path) -> Resul
         .collect::<Result<Vec<_>>>()?
         .join(" ");
 
-    // WorkingDirectory anchors cwd at `<reborn_home>/workspace`, not
-    // systemd's default and not the Reborn home itself — the home is an
-    // ancestor of every default skill root, so it still trips
-    // composition's `paths_overlap` check (see `service_working_directory`).
+    // WorkingDirectory anchors cwd at the Reborn installation root instead
+    // of systemd's default. Canonical storage namespaces make the root safe
+    // without creating the retired top-level `workspace/` directory.
     let working_directory = unit_verbatim_value(&working_directory.display().to_string())?;
 
     Ok(format!(
@@ -840,11 +839,8 @@ mod tests {
         assert!(unit.contains("WantedBy=default.target"));
     }
 
-    /// Pins the crash-loop fix: without WorkingDirectory, systemd's default
-    /// cwd overlaps a default skill root and composition refuses to boot.
-    /// `unit_content` just writes the caller-supplied path faithfully — see
-    /// `install_with_runner` / `ensure_service_working_directory` for the
-    /// actual path choice.
+    /// Pins the service cwd: `unit_content` writes the caller-supplied Reborn
+    /// installation root faithfully instead of relying on systemd's default.
     #[test]
     fn unit_content_includes_working_directory_line() {
         let unit = unit_content(&sample_invocation(), &sample_reborn_home()).expect("valid unit");

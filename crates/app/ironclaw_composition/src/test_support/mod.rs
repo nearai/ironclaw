@@ -22,9 +22,10 @@
 //!    without duplicating the wiring logic.
 //! 4. [`project_create`] — `project_create` synthetic-capability test support
 //!    (E-PROJ seam).
-//! 5. [`durable`] — extension-installation, approval-request, trigger,
-//!    outbound-preferences, and approval-settings durable-store test support
-//!    (E-DURABLE / C-DURABLE / W6-COLD-SPOTS / W5-WEBUI-API-1 seam).
+//! 5. [`durable`] — thread-service, extension-installation, approval-request,
+//!    trigger, outbound-preferences, and approval-settings durable-store test
+//!    support (DURABLE-COLD / E-DURABLE / C-DURABLE / W6-COLD-SPOTS /
+//!    W5-WEBUI-API-1 seam).
 //! 6. [`skill_activation`] — `skill_activate` synthetic-capability test
 //!    support (E-SKILL seam).
 //! 7. [`user_profile`] — `HostUserProfileSource` test support (E-PROFILE
@@ -64,6 +65,65 @@
 //! 16. [`session_channel`] — `with_test_authenticated_session_channel` — a
 //!     neutral manifest-backed session channel for composition tests that must
 //!     not link the concrete Web App package.
+
+use std::path::PathBuf;
+
+/// Seed one virtual file into the canonical standalone database for a
+/// downstream integration test.
+pub async fn write_standalone_database_file_for_test(
+    state_root: &std::path::Path,
+    virtual_path: &str,
+    contents: &[u8],
+) {
+    crate::filesystem_assembly::write_database_file_for_test(state_root, virtual_path, contents)
+        .await;
+}
+
+/// Override the local runtime workspace root for a test-built composition.
+///
+/// This is intentionally a test-support free function rather than a method on
+/// [`crate::RebornHostBindings`]: production input construction must not grow
+/// test-only configuration seams. It mirrors the workspace-root value supplied
+/// by the local deployment builder before production mount assembly runs.
+pub fn with_local_runtime_workspace_root_for_test(
+    mut bindings: crate::RebornHostBindings,
+    workspace_root: PathBuf,
+) -> crate::RebornHostBindings {
+    match &mut bindings.storage {
+        crate::input::RebornStorageInput::LocalFilesystem {
+            workspace_root_for_test,
+            ..
+        }
+        | crate::input::RebornStorageInput::HostedSingleTenantPostgres {
+            workspace_root_for_test,
+            ..
+        } => {
+            *workspace_root_for_test = Some(workspace_root);
+        }
+        _ => panic!(
+            "with_local_runtime_workspace_root_for_test supports only local filesystem and hosted single-tenant PostgreSQL storage"
+        ),
+    }
+    bindings
+}
+
+/// Read the memory-provider namespace carried by a production-built input.
+///
+/// This stays a test-support free function so production input structs do not
+/// grow inspection methods solely for integration assertions.
+pub fn memory_provider_app_id_for_test(bindings: &crate::RebornHostBindings) -> Option<&str> {
+    bindings.memory_provider_connection.app_id.as_deref()
+}
+
+/// Return the generic extension host assembled into a production-built runtime.
+///
+/// This stays a test-support free function so the runtime service object does
+/// not grow an integration-only inspection method.
+pub fn generic_extension_host_for_test(
+    runtime: &crate::RebornRuntime,
+) -> Option<std::sync::Arc<ironclaw_extension_host::ExtensionHost>> {
+    runtime.extension_management.generic_host()
+}
 
 /// Build the production runtime and return the exact resource governor wired
 /// into its capability path.
@@ -123,13 +183,16 @@ pub use channel_connection::{
     ChannelConnectionTestBundle, ChannelConnectionTestConfig, build_channel_connection_for_test,
 };
 #[cfg(feature = "test-support")]
-pub use durable::open_standalone_extension_installation_store_for_test;
-#[cfg(feature = "test-support")]
 pub use durable::{
     open_standalone_approval_request_store_for_test,
     open_standalone_approval_settings_stores_for_test,
     open_standalone_outbound_preferences_store_for_test,
     open_standalone_trigger_repository_for_test,
+};
+#[cfg(feature = "test-support")]
+pub use durable::{
+    open_standalone_extension_installation_store_for_test,
+    open_standalone_skill_management_for_test, open_standalone_thread_service_for_test,
 };
 pub use libsql_host_bindings::{
     libsql_host_bindings_for_test, libsql_host_bindings_from_runtime_for_test,

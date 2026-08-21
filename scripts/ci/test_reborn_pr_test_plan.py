@@ -1216,6 +1216,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "scripts/run-reborn-webui.sh",
             "scripts/e2e-skill-self-creation.sh",
             "scripts/codebase-graph.sh",
+            "scripts/reset-extension-state.sh",
+            "scripts/test-reset-extension-state.sh",
             "scripts/mutation-audit.sh",
             ".gitignore",
         ):

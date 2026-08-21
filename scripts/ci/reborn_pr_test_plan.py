@@ -423,6 +423,10 @@ PR_STATIC_CONTROL_PATHS = {
     # `codebase-graph.sh` inspects agent-only graph metadata. It does not
     # execute or select a Reborn product test surface. (Arrived with #7215.)
     "scripts/codebase-graph.sh",
+    # Operator-only maintenance helper. Its SQL/path contract is reviewed and
+    # shell-linted, but no Reborn Rust test lane invokes it.
+    "scripts/reset-extension-state.sh",
+    "scripts/test-reset-extension-state.sh",
     # Container build inputs. `platform-and-compat.yml` keys `has_docker_risk`
     # off exactly this pair and owns the image build; Code Style additionally
     # proves every `include_str!` target is inside each build context

@@ -4,12 +4,13 @@
 WebUI v2 and Slack host-beta features enabled. The image defaults to:
 
 ```text
-ironclaw serve --host ${IRONCLAW_REBORN_SERVE_HOST:-127.0.0.1} --port ${PORT:-3000}
+ironclaw serve --host ${IRONCLAW_REBORN_SERVE_HOST:-0.0.0.0} --port ${PORT:-3000}
 ```
 
-Railway supplies `PORT`; set `IRONCLAW_REBORN_SERVE_HOST=0.0.0.0` for
-Railway/public deployments. Local Docker runs can keep the loopback default and
-set `IRONCLAW_REBORN_SERVE_PORT=3000`.
+The entrypoint binds `0.0.0.0` inside the container so Docker-published ports and
+Railway ingress can reach it; bind the published host port to `127.0.0.1` for
+local-only access. Railway's `PORT` is used automatically. An explicit
+`IRONCLAW_REBORN_SERVE_HOST` overrides the container default.
 
 ## Build
 
@@ -31,7 +32,7 @@ docker run --rm \
 Minimum local env shape:
 
 ```bash
-IRONCLAW_REBORN_SERVE_HOST=127.0.0.1
+IRONCLAW_REBORN_SERVE_HOST=0.0.0.0
 IRONCLAW_REBORN_SERVE_PORT=3000
 IRONCLAW_REBORN_PROFILE=local-dev
 IRONCLAW_REBORN_WEBUI_TOKEN=<random-hex-32-bytes-or-longer>
@@ -43,6 +44,37 @@ NEARAI_API_KEY=<nearai-api-key>
 The bundled Docker config selects NearAI in `[llm.default]`; set
 `NEARAI_API_KEY` for that provider. To change provider or model, mount a custom
 config and point `IRONCLAW_REBORN_DEFAULT_CONFIG` at it for the first start.
+
+## Durable storage boundary
+
+Set `IRONCLAW_REBORN_HOME` to one mounted installation directory. Its direct
+namespaces are `state/` (authoritative application state and the local cached
+master key), `system/` (host-managed extensions, prompts, and skills),
+`workspaces/` (tenant-plus-user leaves), and `runtime/` (provider/runtime
+bookkeeping), plus the operational `logs/`, `cache/`, and `tmp/` namespaces.
+`logs/` is retained only according to the operator's logging policy; `cache/`
+and `tmp/` are disposable. None of these three is authoritative application
+state. Do not add a deployment ID or the selected profile to this path.
+
+When upgrading a populated legacy home, stop every old container before the
+new release starts (volume-backed services get recreate deploys, which already
+guarantees this). The first new startup migrates the legacy layout
+automatically: it takes an advisory migration lock, probes the embedded
+database for a live writer, renames the legacy files into the canonical
+namespaces, and binds only after `layout.toml` is committed. Nothing is copied
+or deleted, and a losing candidate stays untouched and is named in
+`runtime/layout-migration.toml`. Set `IRONCLAW_REBORN_STORAGE_MIGRATION=manual`
+to defer migration to an operator-scheduled restart.
+
+Profiles choose policy and a process backend, not a physical storage root. A
+profile change is an operator-controlled restart: startup checks the persisted
+security envelope and rejects an incompatible backend, tenancy, or workspace
+isolation transition before runtime construction. Docker sandboxes receive only
+`workspaces/users/<tenant-user-digest>` as `/workspace`; never mount the Reborn
+home, `state/`, `system/`, `runtime/`, a workspace parent, sibling leaf, Docker
+socket, provider credentials, or the cached master key. See the
+[storage-layout adoption runbook](storage-layout-adoption.md) before changing
+an existing installation.
 
 Google product-auth setup:
 
@@ -74,9 +106,10 @@ https://<public-host>/auth/callback/google
 
 ## Railway
 
-Set the service Dockerfile path to `Dockerfile`. Railway sets `PORT`;
-keep `IRONCLAW_REBORN_SERVE_HOST=0.0.0.0`. The Reborn WebUI service serves
-`/api/health` for Railway's healthcheck.
+Set the service Dockerfile path to `Dockerfile`. The entrypoint binds `0.0.0.0`
+inside the container and uses Railway's `PORT`. The Reborn WebUI service serves
+`/api/health` for Railway's healthcheck. An explicit
+`IRONCLAW_REBORN_SERVE_HOST` still overrides this derived default.
 
 Leave Railway's Start Command empty for the Docker image. The image entrypoint
 builds the `ironclaw serve` arguments from `PORT` and
@@ -170,6 +203,13 @@ hosted single-tenant volume profile stores runtime/control-plane state under
 that Reborn home on the mounted volume and does not require
 `IRONCLAW_REBORN_POSTGRES_URL`. The container workdir is `/workspace` so the
 workspace root stays separate from Reborn's state and skill roots.
+
+Railway sandbox workspace checkpoints are provider-specific and are not a
+portable substitute for the canonical local `workspaces/` namespace. Do not
+claim that switching a profile, backend, Railway environment, or provider moves
+workspace contents; perform and verify a separate operator migration instead.
+Railway and provider credentials remain in the control service and never enter
+the inner worker.
 
 The image includes `sqlite3` and `psql` for terminal inspection from Railway
 shells. Use `sqlite3` for mounted-volume libSQL/SQLite state and `psql` for

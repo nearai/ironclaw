@@ -38,9 +38,10 @@ None consumed in the workspace — it is a binary. Its own structure:
 
 ## Depends on / consumed by
 
-- **Normal workspace deps (14):** `ironclaw_composition`, `ironclaw_config`,
+- **Normal workspace deps (17):** `ironclaw_composition`, `ironclaw_config`,
   `ironclaw_operator`, `ironclaw_webui`, `ironclaw_auth`,
-  `ironclaw_host_api`, `ironclaw_product_contracts`,
+  `ironclaw_host_api`, `ironclaw_filesystem` (the shared host-tree validation
+  mechanism used during offline storage adoption), `ironclaw_product_contracts`,
   `ironclaw_extension_contracts`, `ironclaw_trace_commons`, and — uniquely in
   the workspace — the concrete extension packages and hosting crates the
   binary links directly: `ironclaw_extension_host`,

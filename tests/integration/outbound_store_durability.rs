@@ -7,6 +7,7 @@
 //! PR #5656.
 
 use ironclaw_composition::{RebornRuntimeInput, build_runtime};
+use ironclaw_config::RebornStoragePaths;
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceKey, CommunicationPreferenceRecord,
 };
@@ -16,10 +17,19 @@ use ironclaw_outbound::{
 #[tokio::test]
 async fn filesystem_outbound_state_store_persists_across_reopen() {
     let dir = tempfile::tempdir().expect("tempdir");
+    let storage_paths = RebornStoragePaths::from_installation_root(dir.path().join("reborn-home"));
+    std::fs::create_dir_all(storage_paths.state_root()).expect("create state root");
+    std::fs::write(
+        storage_paths
+            .state_root()
+            .join(".reborn-local-dev-secrets-master-key"),
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+    )
+    .expect("seed test secrets master key");
     let services = build_runtime(RebornRuntimeInput::from_build_input(
         ironclaw_composition::local_filesystem_build_input(
             "w6-outbound-durability",
-            dir.path().join("local-dev"),
+            storage_paths.installation_root().to_path_buf(),
         ),
     ))
     .await
@@ -28,13 +38,8 @@ async fn filesystem_outbound_state_store_persists_across_reopen() {
     let store = services
         .standalone_outbound_preferences_for_test()
         .expect("local-dev outbound_preferences wired");
-    // The runtime canonicalizes the local-dev storage root at build time
-    // (`canonicalize_standalone_path` == `std::fs::canonicalize`), so reproduce
-    // the exact on-disk path the store was opened over from this test's own
-    // input path rather than reaching for a removed runtime accessor. The
-    // build already created (and canonicalized) this directory.
-    let storage_root = std::fs::canonicalize(dir.path().join("local-dev"))
-        .expect("canonicalize local-dev storage root");
+    let installation_root = std::fs::canonicalize(storage_paths.installation_root())
+        .expect("canonicalize Reborn installation root");
 
     let tenant = ironclaw_host_api::ids::TenantId::new("w6-outbound-tenant").unwrap();
     let user = ironclaw_host_api::ids::UserId::new("w6-outbound-user").unwrap();
@@ -69,10 +74,14 @@ async fn filesystem_outbound_state_store_persists_across_reopen() {
         .expect("write preference");
 
     // Reopen: a genuinely fresh store over a NEW libsql connection to the
-    // same on-disk file — not the same Arc as `store` above.
+    // same on-disk file — not the same Arc as `store` above. Drop the live
+    // runtime first so this models a process restart and releases libSQL's
+    // connection resources before the independent reopen.
+    drop(store);
+    drop(services);
     let reopened =
         ironclaw_composition::test_support::open_standalone_outbound_preferences_store_for_test(
-            &storage_root,
+            &installation_root,
         )
         .await
         .expect("reopen outbound store");

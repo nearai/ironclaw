@@ -403,7 +403,7 @@ impl RootFilesystem for InMemoryBackend {
         let fts = PrecomputedFts::from_filter(filter);
         let mut matched: Vec<(&VirtualPath, &StoredEntry)> = candidates
             .into_iter()
-            .filter(|(_, stored)| filter_matches(filter, &stored.entry.indexed, &fts))
+            .filter(|(_, stored)| filter_matches(filter, &stored.entry, &fts))
             .collect();
         matched.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
         let start = page.offset as usize;
@@ -862,13 +862,11 @@ fn push_ordered_result(
     });
 }
 
-fn filter_matches(
-    filter: &Filter,
-    indexed: &std::collections::BTreeMap<IndexKey, IndexValue>,
-    fts: &PrecomputedFts,
-) -> bool {
+fn filter_matches(filter: &Filter, entry: &Entry, fts: &PrecomputedFts) -> bool {
+    let indexed = &entry.indexed;
     match filter {
         Filter::All => true,
+        Filter::Kind { kind } => entry.kind.as_ref() == Some(kind),
         Filter::Eq { key, value } => indexed.get(key) == Some(value),
         Filter::PrefixOn { key, value } => match (indexed.get(key), value) {
             (Some(IndexValue::Text(stored)), IndexValue::Text(prefix)) => {
@@ -912,8 +910,8 @@ fn filter_matches(
         // operation handled at the top of `query`, and nested occurrences are
         // rejected before this loop runs.
         Filter::VectorNearest { .. } | Filter::FtsRanked { .. } => false,
-        Filter::And(children) => children.iter().all(|f| filter_matches(f, indexed, fts)),
-        Filter::Or(children) => children.iter().any(|f| filter_matches(f, indexed, fts)),
+        Filter::And(children) => children.iter().all(|f| filter_matches(f, entry, fts)),
+        Filter::Or(children) => children.iter().any(|f| filter_matches(f, entry, fts)),
     }
 }
 
@@ -1414,6 +1412,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn query_filters_on_structural_record_kind() {
+        let fs = InMemoryBackend::new();
+        let selected = RecordKind::new("selected").unwrap();
+        for (path, kind) in [
+            ("/secrets/kind-query/selected", Some(selected.clone())),
+            (
+                "/secrets/kind-query/other",
+                Some(RecordKind::new("other").unwrap()),
+            ),
+            ("/secrets/kind-query/opaque", None),
+        ] {
+            let entry = match kind {
+                Some(kind) => Entry::record(kind, &serde_json::json!({})).unwrap(),
+                None => Entry::bytes(Vec::new()),
+            };
+            fs.put(&vpath(path), entry, CasExpectation::Absent)
+                .await
+                .unwrap();
+        }
+
+        let results = fs
+            .query(
+                &vpath("/secrets/kind-query"),
+                &Filter::Kind { kind: selected },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, vpath("/secrets/kind-query/selected"));
     }
 
     #[tokio::test]

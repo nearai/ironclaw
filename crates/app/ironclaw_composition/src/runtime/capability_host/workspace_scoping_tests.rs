@@ -3,7 +3,7 @@
 //! The production seam is `RefreshingLoopCapabilityPortFactory::create_capability_port`:
 //! it mints the `mounts = "workspace"` grants every file tool resolves paths
 //! through. On a hosted (multi-user) deployment those grants must point at the
-//! caller's own `tenants/{tenant}/users/{user}` subtree — the same subtree the
+//! caller's own `users/<tenant-user-digest>` subtree — the same subtree the
 //! WebUI workspace browser reads — and on a standalone deployment they must keep
 //! pointing at the shared workspace root.
 
@@ -11,7 +11,10 @@ use std::sync::Arc;
 
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    ids::{AgentId, CapabilityId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId},
+    ids::{
+        AgentId, CapabilityId, ProjectId, ProviderToolName, TenantId, TenantUserWorkspaceKey,
+        ThreadId, UserId,
+    },
     path::VirtualPath,
     resolution::Resolution,
 };
@@ -32,6 +35,17 @@ use crate::RebornCompositionProfile;
 use crate::factory::RebornRuntimeStores;
 
 const TENANT: &str = "workspace-scoping-tenant";
+
+fn caller_workspace_path(user_id: &str, relative_path: &str) -> String {
+    let tenant = TenantId::new(TENANT).expect("tenant id");
+    let user = UserId::new(user_id).expect("user id");
+    let key = TenantUserWorkspaceKey::from_tenant_user(&tenant, &user);
+    format!(
+        "/projects/workspace/users/{}/{}",
+        key.digest_segment(),
+        relative_path
+    )
+}
 
 /// Write `/workspace/{file_name}` through the production capability port for
 /// `user_id`, then return the composed runtime so the caller can assert where
@@ -210,22 +224,16 @@ async fn hosted_profile_lands_agent_workspace_writes_in_the_callers_own_subtree(
     write_workspace_file_as(&services, "bob", "note.txt", "bob-body").await;
 
     assert_eq!(
-        read_composed_path(
-            &services,
-            &format!("/projects/workspace/tenants/{TENANT}/users/alice/note.txt"),
-        )
-        .await
-        .as_deref(),
+        read_composed_path(&services, &caller_workspace_path("alice", "note.txt"),)
+            .await
+            .as_deref(),
         Some("alice-body"),
         "alice's write must land in alice's own subtree"
     );
     assert_eq!(
-        read_composed_path(
-            &services,
-            &format!("/projects/workspace/tenants/{TENANT}/users/bob/note.txt"),
-        )
-        .await
-        .as_deref(),
+        read_composed_path(&services, &caller_workspace_path("bob", "note.txt"),)
+            .await
+            .as_deref(),
         Some("bob-body"),
         "bob writing the same relative path must not overwrite alice's file"
     );
@@ -261,11 +269,7 @@ async fn standalone_profile_keeps_agent_workspace_writes_at_the_shared_root() {
          aliases and browser address"
     );
     assert_eq!(
-        read_composed_path(
-            &services,
-            &format!("/projects/workspace/tenants/{TENANT}/users/solo/note.txt"),
-        )
-        .await,
+        read_composed_path(&services, &caller_workspace_path("solo", "note.txt"),).await,
         None,
         "standalone must not silently relocate writes into a per-user subtree"
     );
@@ -348,7 +352,7 @@ async fn fresh_caller_reads_an_empty_workspace_then_writes_into_it() {
     .expect("hosted services build"); // safety: test-only assertion in #[cfg(test)] module.
 
     // Nothing has ever written for `newcomer`, so their
-    // `tenants/{tenant}/users/newcomer` directory does not exist.
+    // `users/<tenant-user-digest>` directory does not exist.
     let listed = invoke_workspace_tool_as(
         &services,
         "newcomer",
@@ -412,7 +416,7 @@ async fn fresh_caller_reads_an_empty_workspace_then_writes_into_it() {
     assert_eq!(
         read_composed_path(
             &services,
-            &format!("/projects/workspace/tenants/{TENANT}/users/newcomer/notes/deep/second.txt"),
+            &caller_workspace_path("newcomer", "notes/deep/second.txt"),
         )
         .await
         .as_deref(),
@@ -436,12 +440,9 @@ async fn fresh_caller_reads_an_empty_workspace_then_writes_into_it() {
     );
 
     assert_eq!(
-        read_composed_path(
-            &services,
-            &format!("/projects/workspace/tenants/{TENANT}/users/newcomer/first.txt"),
-        )
-        .await
-        .as_deref(),
+        read_composed_path(&services, &caller_workspace_path("newcomer", "first.txt"),)
+            .await
+            .as_deref(),
         Some("newcomer-body"),
         "the write still lands in the caller's own subtree"
     );

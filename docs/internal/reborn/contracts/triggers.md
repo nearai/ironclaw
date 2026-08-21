@@ -357,7 +357,7 @@ A trigger fire is synthetic inbound, not a parallel agent loop.
   tenant-scope placeholder.
 - Local-dev and hosted-single-tenant `run`/`serve` may satisfy that contract by
   seeding active access rows from trusted operator configuration. Local-dev
-  stores those rows in the local `reborn-local-dev.db` sidecar. Hosted
+  stores those rows in the installation's `state/reborn-local-dev.db` sidecar. Hosted
   single-tenant stores the same bootstrap records through the host filesystem
   abstraction backed by its resolved PostgreSQL runtime storage, so access
   survives process restarts and ephemeral local files without adding a
@@ -573,8 +573,8 @@ The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove
   future schedule slot, so slots elapsed during the pause are not replayed as
   catch-up deliveries. A paused fire-once trigger retains its original slot
   and remains eligible to fire exactly once when resumed.
-- Local-dev builds store trigger records in the local-dev libSQL database
-  (`reborn-local-dev.db`) through the same `TriggerRepository` contract used
+- Local-dev builds store trigger records in the installation's `state/` libSQL database
+  (`state/reborn-local-dev.db`) through the same `TriggerRepository` contract used
   by production libSQL.
 - Production libSQL composition constructs one `LibSqlRuntime` for the
   database and passes it to both the root filesystem and trigger repository.

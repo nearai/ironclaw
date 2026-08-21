@@ -129,7 +129,9 @@ async fn hosted_single_tenant_volume_builds_live_runtime() {
         local_runtime_build_input_with_options(
             RebornCompositionProfile::HostedSingleTenantVolume,
             "runtime-hosted-volume-owner",
-            root.path().join("hosted-volume"),
+            ironclaw_config::RebornStoragePaths::from_installation_root(
+                root.path().join("hosted-volume"),
+            ),
             Default::default(),
         )
         .unwrap(),
@@ -425,15 +427,20 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
     let storage_root = root.path().join("standalone");
-    let skill_root = storage_root
-        .join("tenants/runtime-skill-execution-tenant/users/runtime-skill-execution-owner/skills/policy-helper");
-    std::fs::create_dir_all(skill_root.join("references")).unwrap();
-    std::fs::write(
-        skill_root.join("SKILL.md"),
-        skill_md("policy-helper", "policy-helper", "Use policy guidance."),
+    let storage_paths = ironclaw_config::RebornStoragePaths::from_installation_root(&storage_root);
+    let skill_root = "/tenants/runtime-skill-execution-tenant/users/runtime-skill-execution-owner/skills/policy-helper";
+    ironclaw_composition::test_support::write_standalone_database_file_for_test(
+        storage_paths.state_root(),
+        &format!("{skill_root}/SKILL.md"),
+        skill_md("policy-helper", "policy-helper", "Use policy guidance.").as_bytes(),
     )
-    .unwrap();
-    std::fs::write(skill_root.join("references/policy.md"), "filesystem policy").unwrap();
+    .await;
+    ironclaw_composition::test_support::write_standalone_database_file_for_test(
+        storage_paths.state_root(),
+        &format!("{skill_root}/references/policy.md"),
+        b"filesystem policy",
+    )
+    .await;
     let input = RebornRuntimeInput::from_build_input(
         ironclaw_composition::local_filesystem_build_input(
             "runtime-skill-execution-owner",

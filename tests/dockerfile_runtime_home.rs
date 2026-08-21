@@ -151,7 +151,7 @@ fn reborn_dockerfile_keeps_bundled_skills_in_build_context() {
 }
 
 #[test]
-fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
+fn reborn_dockerfile_uses_feature_matched_cache_and_runtime_aware_host_default() {
     let dockerfile = read_repo_file("Dockerfile");
     let chef_stage = dockerfile
         .split_once(" AS chef\n")
@@ -176,8 +176,18 @@ fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
         "cargo chef cook must target the Reborn CLI package"
     );
     assert!(
-        dockerfile.contains("IRONCLAW_REBORN_SERVE_HOST=127.0.0.1"),
-        "image default serve host must stay loopback; Railway should override to 0.0.0.0"
+        !dockerfile.contains("ENV IRONCLAW_REBORN_SERVE_HOST=")
+            && !dockerfile.contains("    IRONCLAW_REBORN_SERVE_HOST="),
+        "the image must not bake a host override; the entrypoint selects loopback locally and wildcard binding only for Railway"
+    );
+    assert!(
+        dockerfile.contains(concat!(
+            "# Run locally:\n",
+            "#   docker run --rm --env-file .env.reborn \\\n",
+            "#     -e IRONCLAW_REBORN_SERVE_HOST=0.0.0.0 \\\n",
+            "#     -p 127.0.0.1:3000:3000 ironclaw-reborn:latest",
+        )),
+        "local Docker instructions must make wildcard binding an explicit operator choice"
     );
     assert!(
         dockerfile.contains("config.hosted-single-tenant.toml"),

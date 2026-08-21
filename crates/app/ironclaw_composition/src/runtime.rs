@@ -21,6 +21,7 @@
 
 // arch-exempt: large_file, needs Reborn runtime helper extraction, plan #4471
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1439,10 +1440,11 @@ impl RebornRuntime {
         &self,
         package: &ironclaw_extension_registry::ExtensionPackage,
         resolved: Option<&ironclaw_extension_registry::ResolvedExtensionManifest>,
+        owner: ironclaw_extension_registry::InstallationOwner,
     ) -> Option<Result<(), ironclaw_assistant::ProductSurfaceFailure>> {
         Some(
             self.extension_management
-                .publish_bundled_package_for_test(package, resolved)
+                .publish_bundled_package_for_test(package, resolved, owner)
                 .await
                 .map_err(ironclaw_assistant::ProductSurfaceFailure::from),
         )
@@ -1452,6 +1454,7 @@ impl RebornRuntime {
     pub async fn standalone_active_extension_authority_for_test(
         &self,
         grantee: &ExtensionId,
+        caller: &UserId,
     ) -> Option<
         Result<
             crate::factory::ActiveExtensionAuthorityForTest,
@@ -1462,6 +1465,7 @@ impl RebornRuntime {
             crate::factory::active_extension_authority_for_test(
                 &self.extension_management,
                 grantee,
+                caller,
             )
             .await,
         )
@@ -1943,9 +1947,12 @@ impl RebornRuntime {
         Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::CompositeRootFilesystem>>,
     > {
         let extension_filesystem = &self.extension_filesystem;
+        let workspace_mount_policy = self.workspace_mount_policy.clone();
         Some(Arc::new(ironclaw_filesystem::ScopedFilesystem::new(
             Arc::clone(extension_filesystem),
-            crate::runtime_mounts::scoped_browse_mount_view,
+            move |scope| {
+                crate::runtime_mounts::webui_browse_mount_view(&workspace_mount_policy, scope)
+            },
         )))
     }
 
@@ -3922,43 +3929,19 @@ pub(crate) async fn build_runtime_with_resource_governor(
         skill_context_source,
         input_queue: Some(host_input_queue_reader),
         input_queue_reconcile: Some(host_input_queue_for_terminal_reconcile),
-        identity_context_source: match (
-            services.standalone_storage_root.clone(),
+        identity_context_source: build_default_identity_context_source_with_protocols(
+            services.system_content_root.clone(),
             services.default_system_prompt_path.clone(),
-        ) {
-            (Some(standalone_storage_root), Some(default_system_prompt_path)) => {
-                Arc::new(
-                    // Standalone seeding validates the prompt path first, so non-file prompt paths fail
-                    // as build errors before this runtime-level identity-source guard is reached.
-                    DefaultSystemPromptIdentitySource::try_new(
-                        standalone_storage_root,
-                        default_system_prompt_path,
-                        SystemPromptProtocols {
-                            // `is_enabled()` (not `is_bridged()`): #7410 widened
-                            // the disclosure protocol to every enabled mode.
-                            disclosure: resolved_tool_disclosure.is_enabled(),
-                            benchmarking_mode: bool_env_flag("BENCHMARKING_MODE"),
-                            // Provider-shipped, not host-owned: whatever the
-                            // bound memory extension declares as its guidance,
-                            // or nothing.
-                            memory_guidance,
-                        },
-                    )
-                    .map_err(|error| RebornRuntimeError::InvalidArgument {
-                        reason: error.to_string(),
-                    })?,
-                ) as Arc<dyn HostIdentityContextSource>
-            }
-            (None, None) => {
-                Arc::new(EmptyIdentityContextSource) as Arc<dyn HostIdentityContextSource>
-            }
-            _ => {
-                return Err(RebornRuntimeError::InvalidArgument {
-                    reason: "assembled runtime must provide local storage root and default system prompt path together"
-                        .to_string(),
-                });
-            }
-        },
+            SystemPromptProtocols {
+                // `is_enabled()` (not `is_bridged()`): #7410 widened the
+                // disclosure protocol to every enabled mode.
+                disclosure: resolved_tool_disclosure.is_enabled(),
+                benchmarking_mode: bool_env_flag("BENCHMARKING_MODE"),
+                // Provider-shipped, not host-owned: whatever the bound memory
+                // extension declares as its guidance, or nothing.
+                memory_guidance,
+            },
+        )?,
         // Resolve the per-user agent-context profile (timezone/locale/location) from
         // `context/profile.json` via the workspace filesystem. When a standalone workspace
         // filesystem is available, the `MemoryBackedUserProfileSource` adapter reads it;
@@ -4742,6 +4725,41 @@ async fn append_trusted_laptop_access_audit(
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("could not record trusted laptop access audit event: {error}"),
         })
+}
+
+/// Builds the default prompt identity source from the system-content namespace selected by
+/// composition. Keeping this seam explicit keeps a `system/prompts` path paired with its
+/// system-content root rather than the unrelated `state` root.
+fn build_default_identity_context_source_with_protocols(
+    system_content_root: Option<PathBuf>,
+    default_system_prompt_path: Option<PathBuf>,
+    protocols: SystemPromptProtocols,
+) -> Result<Arc<dyn HostIdentityContextSource>, RebornRuntimeError> {
+    match (system_content_root, default_system_prompt_path) {
+        (Some(system_content_root), Some(default_system_prompt_path)) => {
+            Ok(Arc::new(
+                // Seeding validates the prompt path first, so non-file prompt paths fail as
+                // build errors before this runtime-level identity-source guard is reached.
+                DefaultSystemPromptIdentitySource::try_new(
+                    system_content_root,
+                    default_system_prompt_path,
+                    protocols,
+                )
+                .map_err(|error| RebornRuntimeError::InvalidArgument {
+                    reason: error.to_string(),
+                })?,
+            ) as Arc<dyn HostIdentityContextSource>)
+        }
+        (None, None) => {
+            Ok(Arc::new(EmptyIdentityContextSource) as Arc<dyn HostIdentityContextSource>)
+        }
+        _ => {
+            Err(RebornRuntimeError::InvalidArgument {
+                reason: "assembled runtime must provide system content root and default system prompt path together"
+                    .to_string(),
+            })
+        }
+    }
 }
 
 struct ComposedSkillContextSource {

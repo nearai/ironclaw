@@ -497,7 +497,7 @@ newer credentials. Similarly, a failed refresh should mark an account
 generation that initiated the provider call.
 
 The composition root may expose an in-memory product-auth bundle only for
-local-dev/testing. Production profiles must receive durable Reborn-native auth
+local-dev and testing. Production profiles must receive durable Reborn-native auth
 services explicitly; they must not fall back to V1 pending maps, V1 route
 state, or V1 secret stores as product authority.
 

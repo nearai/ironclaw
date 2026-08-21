@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ironclaw_filesystem::{CompositeRootFilesystem, ScopedFilesystem};
+use ironclaw_config::RebornStoragePaths;
+use ironclaw_filesystem::{CompositeRootFilesystem, DiskDirectoryCapability, ScopedFilesystem};
 use ironclaw_host_api::mount::MountPermissions;
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, ProcessBackendKind, SecretMode,
@@ -42,18 +43,23 @@ impl HostHomeRoot {
 }
 
 pub(crate) struct HostAccessAssembly {
-    pub(crate) storage_root: PathBuf,
+    pub(crate) state_root: PathBuf,
+    pub(crate) system_root: PathBuf,
     pub(crate) workspace_root: PathBuf,
     pub(crate) host_home_root: Option<HostHomeRoot>,
     pub(crate) process_port: Option<HostProcessPort>,
+    pub(crate) disk_mounts: HostDiskMountCapabilities,
+}
+
+pub(crate) struct HostDiskMountCapabilities {
+    pub(crate) workspace: DiskDirectoryCapability,
+    pub(crate) system_extensions: DiskDirectoryCapability,
+    pub(crate) system_prompts: DiskDirectoryCapability,
+    pub(crate) system_skills: DiskDirectoryCapability,
 }
 
 impl HostAccessAssembly {
-    /// `workspace_scoped_per_caller` is the deployment's single workspace
-    /// scoping decision (see
-    /// [`crate::deployment::DeploymentConfig::workspace_scoped_per_caller`]).
-    /// Passing it here keeps the ambient host aliases below reachable only for
-    /// the deployments that are allowed them.
+    /// Builds workspace views from the deployment's resolved caller-scoping decision.
     pub(crate) fn build_workspace_filesystems(
         &self,
         filesystem: Arc<CompositeRootFilesystem>,
@@ -102,23 +108,58 @@ impl HostAccessAssembly {
 
 /// Materializes host filesystem/process access from resolved policy data.
 pub(crate) fn build_host_access(
-    storage_root: PathBuf,
-    workspace_root: Option<PathBuf>,
+    paths: RebornStoragePaths,
+    workspace_root_for_test: Option<PathBuf>,
     host_home_root: Option<PathBuf>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
     workspace_scoped_per_caller: bool,
 ) -> Result<HostAccessAssembly, RebornBuildError> {
-    initialize_directory(&storage_root, "storage root")?;
-    initialize_directory(
-        &storage_root.join("system/extensions"),
-        "system extensions root",
-    )?;
-    let workspace_root = workspace_root.unwrap_or_else(|| storage_root.join("workspace"));
-    initialize_directory(&workspace_root, "workspace root")?;
+    let configured_workspace_root = workspace_root_for_test
+        .as_deref()
+        .unwrap_or_else(|| paths.workspace_root());
+    preflight_storage_namespace_paths(&paths, configured_workspace_root)?;
 
-    let storage_root = canonicalize_path(&storage_root, "storage root")?;
-    let workspace_root = canonicalize_path(&workspace_root, "workspace root")?;
-    validate_workspace_skill_isolation(&storage_root, &workspace_root)?;
+    let installation =
+        initialize_directory_capability(paths.installation_root(), "installation root")?;
+    let _state = initialize_descendant_capability(
+        &installation,
+        paths.installation_root(),
+        paths.state_root(),
+        "state root",
+    )?;
+    let system = initialize_descendant_capability(
+        &installation,
+        paths.installation_root(),
+        paths.system_root(),
+        "system root",
+    )?;
+    let system_extensions = system
+        .create_dir_capability(Path::new("extensions"))
+        .map_err(|error| directory_initialization_error("system extensions root", error))?;
+    let system_prompts = system
+        .create_dir_capability(Path::new("prompts"))
+        .map_err(|error| directory_initialization_error("system prompts root", error))?;
+    let system_skills = system
+        .create_dir_capability(Path::new("skills"))
+        .map_err(|error| directory_initialization_error("system skills root", error))?;
+    let workspace = initialize_descendant_capability(
+        &installation,
+        paths.installation_root(),
+        configured_workspace_root,
+        "workspace root",
+    )?;
+
+    let installation_root = canonicalize_path(paths.installation_root(), "installation root")?;
+    let state_root = canonicalize_path(paths.state_root(), "state root")?;
+    let system_root = canonicalize_path(paths.system_root(), "system root")?;
+    let workspace_root = canonicalize_path(configured_workspace_root, "workspace root")?;
+    validate_canonical_storage_paths(
+        &installation_root,
+        &state_root,
+        &system_root,
+        &workspace_root,
+    )?;
+    validate_workspace_skill_isolation(&system_root, &workspace_root)?;
 
     let include_host_home = runtime_policy.as_ref().is_some_and(|policy| {
         policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
@@ -147,17 +188,186 @@ pub(crate) fn build_host_access(
     );
 
     Ok(HostAccessAssembly {
-        storage_root,
+        state_root,
+        system_root,
         workspace_root,
         host_home_root,
         process_port,
+        disk_mounts: HostDiskMountCapabilities {
+            workspace,
+            system_extensions,
+            system_prompts,
+            system_skills,
+        },
     })
 }
 
-fn initialize_directory(path: &Path, label: &str) -> Result<(), RebornBuildError> {
-    std::fs::create_dir_all(path).map_err(|error| RebornBuildError::InvalidConfig {
+fn initialize_directory_capability(
+    path: &Path,
+    label: &str,
+) -> Result<DiskDirectoryCapability, RebornBuildError> {
+    // The installation root itself may be an operator-managed alias (for
+    // example a mounted volume), while all namespaces beneath it must reject
+    // aliases. Resolve that one configured boundary first, then perform the
+    // actual creation/admission against its canonical projected path so the
+    // retained descriptor never depends on reopening the alias.
+    let admitted_path = canonicalize_planned_path(path, label)?;
+    DiskDirectoryCapability::admit_or_create(&admitted_path)
+        .map_err(|error| directory_initialization_error(label, error))
+}
+
+fn initialize_descendant_capability(
+    installation: &DiskDirectoryCapability,
+    configured_installation_root: &Path,
+    path: &Path,
+    label: &str,
+) -> Result<DiskDirectoryCapability, RebornBuildError> {
+    let relative = path
+        .strip_prefix(configured_installation_root)
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("{label} must be beneath the selected installation root: {error}"),
+        })?;
+    installation
+        .create_dir_capability(relative)
+        .map_err(|error| directory_initialization_error(label, error))
+}
+
+fn directory_initialization_error(label: &str, error: std::io::Error) -> RebornBuildError {
+    RebornBuildError::InvalidConfig {
         reason: format!("{label} could not be initialized: {error}"),
-    })
+    }
+}
+
+/// Checks every resolved namespace before `create_dir_all` can follow a configured alias.
+///
+/// The roots can be absent on first boot, so this resolves each path through its nearest existing
+/// ancestor and validates the projected canonical result. It then rejects any existing symlink in
+/// the installation or namespace ancestry. Initialization then creates descendants relative to
+/// retained directory capabilities and hands those same capabilities to the disk mount owner.
+fn preflight_storage_namespace_paths(
+    paths: &RebornStoragePaths,
+    workspace_root: &Path,
+) -> Result<(), RebornBuildError> {
+    let installation_root =
+        canonicalize_planned_path(paths.installation_root(), "installation root")?;
+    let state_root = canonicalize_planned_path(paths.state_root(), "state root")?;
+    let system_root = canonicalize_planned_path(paths.system_root(), "system root")?;
+    let canonical_workspace_root = canonicalize_planned_path(workspace_root, "workspace root")?;
+    validate_canonical_storage_paths(
+        &installation_root,
+        &state_root,
+        &system_root,
+        &canonical_workspace_root,
+    )?;
+    validate_workspace_skill_isolation(&system_root, &canonical_workspace_root)?;
+
+    let system_extensions_root = paths.system_root().join("extensions");
+    let system_prompts_root = paths.system_root().join("prompts");
+    let system_skills_root = paths.system_root().join("skills");
+    for (label, path) in [
+        ("state root", paths.state_root()),
+        ("system root", paths.system_root()),
+        ("system extensions root", system_extensions_root.as_path()),
+        ("system prompts root", system_prompts_root.as_path()),
+        ("system skills root", system_skills_root.as_path()),
+        ("workspace root", workspace_root),
+    ] {
+        reject_existing_namespace_symlinks(paths.installation_root(), path, label)?;
+    }
+    Ok(())
+}
+
+/// Resolves an existing path, or projects missing suffixes from the nearest existing ancestor.
+/// This never creates an entry and intentionally follows existing aliases only long enough for the
+/// canonical containment/disjointness validation performed by the caller.
+fn canonicalize_planned_path(path: &Path, label: &str) -> Result<PathBuf, RebornBuildError> {
+    let mut current = path;
+    let mut missing_components = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(current) {
+            Ok(_) => {
+                let canonical = std::fs::canonicalize(current).map_err(|error| {
+                    RebornBuildError::InvalidConfig {
+                        reason: format!("{label} could not be resolved: {error}"),
+                    }
+                })?;
+                let canonical_metadata = std::fs::metadata(&canonical).map_err(|error| {
+                    RebornBuildError::InvalidConfig {
+                        reason: format!("{label} could not be inspected: {error}"),
+                    }
+                })?;
+                if !canonical_metadata.is_dir() {
+                    return Err(RebornBuildError::InvalidConfig {
+                        reason: format!("{label} must be a directory"),
+                    });
+                }
+                let mut projected = canonical;
+                for component in missing_components.iter().rev() {
+                    projected.push(component);
+                }
+                return Ok(projected);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = current.file_name() else {
+                    return Err(RebornBuildError::InvalidConfig {
+                        reason: format!("{label} has no existing ancestor"),
+                    });
+                };
+                missing_components.push(name.to_os_string());
+                let Some(parent) = current.parent() else {
+                    return Err(RebornBuildError::InvalidConfig {
+                        reason: format!("{label} has no existing ancestor"),
+                    });
+                };
+                current = parent;
+            }
+            Err(error) => {
+                return Err(RebornBuildError::InvalidConfig {
+                    reason: format!("{label} could not be inspected: {error}"),
+                });
+            }
+        }
+    }
+}
+
+fn reject_existing_namespace_symlinks(
+    installation_root: &Path,
+    path: &Path,
+    label: &str,
+) -> Result<(), RebornBuildError> {
+    let relative =
+        path.strip_prefix(installation_root)
+            .map_err(|_| RebornBuildError::InvalidConfig {
+                reason: format!("{label} must be beneath the selected installation root"),
+            })?;
+    // The selected installation root may legitimately be an operator-managed
+    // symlink onto a durable volume. Its descendants are still forbidden from
+    // being aliases, so the walk begins at the resolved root.
+    let mut current = canonicalize_planned_path(installation_root, "installation root")?;
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        if !inspect_namespace_component(&current, label)? {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Returns false only when this and every descendant are necessarily absent.
+fn inspect_namespace_component(path: &Path, label: &str) -> Result<bool, RebornBuildError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(RebornBuildError::InvalidConfig {
+            reason: format!("{label} must not contain a symlink: {}", path.display()),
+        }),
+        Ok(metadata) if metadata.is_dir() => Ok(true),
+        Ok(_) => Err(RebornBuildError::InvalidConfig {
+            reason: format!("{label} must be a directory: {}", path.display()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(RebornBuildError::InvalidConfig {
+            reason: format!("{label} could not be inspected: {error}"),
+        }),
+    }
 }
 
 fn canonicalize_path(path: &Path, label: &str) -> Result<PathBuf, RebornBuildError> {
@@ -190,18 +400,43 @@ fn canonicalize_host_home_root(path: &Path) -> Result<PathBuf, RebornBuildError>
     Ok(path)
 }
 
+fn validate_canonical_storage_paths(
+    installation_root: &Path,
+    state_root: &Path,
+    system_root: &Path,
+    workspace_root: &Path,
+) -> Result<(), RebornBuildError> {
+    let roots = [
+        ("state root", state_root),
+        ("system root", system_root),
+        ("workspace root", workspace_root),
+    ];
+    for (label, root) in roots {
+        if root == installation_root || !root.starts_with(installation_root) {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!("{label} must be beneath the selected installation root"),
+            });
+        }
+    }
+    for (index, (left_label, left)) in roots.iter().enumerate() {
+        for (right_label, right) in roots.iter().skip(index + 1) {
+            if paths_overlap(left, right) {
+                return Err(RebornBuildError::InvalidConfig {
+                    reason: format!("{left_label} must not overlap {right_label}"),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_workspace_skill_isolation(
-    storage_root: &Path,
+    system_root: &Path,
     workspace_root: &Path,
 ) -> Result<(), RebornBuildError> {
     for (label, skill_root) in [
-        ("/skills", storage_root.join("skills")),
-        (
-            "/tenant-shared/skills",
-            storage_root.join("tenant-shared/skills"),
-        ),
-        ("/system/skills", storage_root.join("system/skills")),
-        ("/system/extensions", storage_root.join("system/extensions")),
+        ("/system/skills", system_root.join("skills")),
+        ("/system/extensions", system_root.join("extensions")),
     ] {
         if paths_overlap(workspace_root, &skill_root) {
             return Err(RebornBuildError::InvalidConfig {
@@ -233,7 +468,7 @@ fn process_port_for_policy(
     }
     .with_workdir_alias("/workspace", workspace_root)
     // Same scoping the file tools apply. Without it `/workspace` names `<root>` here and
-    // `<root>/tenants/<t>/users/<u>` there, so a file written by one is unreachable by the other.
+    // `<root>/users/<tenant-user-digest>` there, so a file written by one is unreachable by the other.
     .with_workspace_scoped_per_caller(workspace_scoped_per_caller);
     if let Some(host_home_root) = host_home_root {
         process_port =
@@ -248,3 +483,7 @@ fn process_port_for_policy(
     }
     Some(process_port)
 }
+
+#[cfg(all(test, unix))]
+#[path = "host_access_assembly_tests.rs"]
+mod tests;

@@ -242,10 +242,11 @@ then
 fi
 
 # Serve-host resolution: an explicit IRONCLAW_REBORN_SERVE_HOST always wins.
-# Otherwise, on Railway (and any platform that sets the RAILWAY_* markers) the
-# container MUST bind 0.0.0.0 or the platform health check / ingress cannot
-# reach it — a loopback bind fails the deploy. Off-Railway (e.g. a local
-# `docker run`) keeps the conservative loopback default.
+# Railway needs all interfaces for platform ingress. Off Railway, preserve the
+# fail-closed loopback default: publishing a host port does not prevent sibling
+# containers on the same bridge network from reaching a wildcard-bound process.
+# Local Docker operators who want a published port must opt in explicitly with
+# IRONCLAW_REBORN_SERVE_HOST=0.0.0.0 and should publish it on 127.0.0.1.
 if [ -n "${IRONCLAW_REBORN_SERVE_HOST:-}" ]; then
   host="${IRONCLAW_REBORN_SERVE_HOST}"
 elif railway_runtime_detected; then

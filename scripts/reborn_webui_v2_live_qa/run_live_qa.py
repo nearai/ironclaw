@@ -485,7 +485,7 @@ def _auth_user_id() -> str:
 
 
 def _persisted_google_user_id(reborn_home: Path) -> str | None:
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
     if not db_path.exists():
         return None
     with closing(sqlite3.connect(db_path)) as db:
@@ -541,7 +541,7 @@ def prepare_reborn_home(
     prepared_home.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source_home, prepared_home, ignore=_ignore)
     config_path = prepared_home / "config.toml"
-    if not config_path.exists() and (prepared_home / "local-dev" / "reborn-local-dev.db").exists():
+    if not config_path.exists() and (prepared_home / "state" / "reborn-local-dev.db").exists():
         _write_minimal_reborn_config(config_path)
     legacy_setup_cleanup = _remove_legacy_slack_setup_fields(config_path)
     stale_dm_route_cleanup = _remove_dm_slack_channel_routes(config_path)
@@ -2612,7 +2612,7 @@ async def case_qa_3b_endpoint_status_live_chat(ctx: LiveQaContext) -> ProbeResul
 
 
 def _trigger_record_count(reborn_home: Path, routine_name: str | None = None) -> int:
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
     if not db_path.exists():
         return 0
     with closing(sqlite3.connect(db_path)) as db:
@@ -2660,7 +2660,7 @@ async def _wait_for_trigger_record_after_count(
 
 
 def _trigger_run_rows(reborn_home: Path, routine_name: str) -> list[dict[str, object]]:
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
     if not db_path.exists():
         return []
     with closing(sqlite3.connect(db_path)) as db:
@@ -2705,7 +2705,7 @@ def _outbound_final_reply_targets(reborn_home: Path) -> dict[str, object]:
     `final_reply_target` is read too for parity with pre-migration rows (the
     retired single-slot wire name that the notification-channel read path
     folds forward); nothing writes it anymore."""
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
     targets: dict[str, object] = {}
     if not db_path.exists():
         return targets
@@ -2748,7 +2748,7 @@ def _trigger_record_snapshot(reborn_home: Path, routine_name: str) -> dict[str, 
     server version this probe targets, so pre-fix servers still get schedule
     preconditions checked.
     """
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
     snapshot: dict[str, object] = {
         "checked": False,
         "record_count": 0,
@@ -2790,7 +2790,7 @@ def _trigger_record_snapshot(reborn_home: Path, routine_name: str) -> dict[str, 
 
 
 def _triggered_delivery_outcome(reborn_home: Path, run_id: str) -> dict[str, object] | None:
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
     if not db_path.exists():
         return None
     with closing(sqlite3.connect(db_path)) as db:
@@ -2854,7 +2854,7 @@ def _model_delivery_summary(
         "expected_channel_delivered_count": 0,
         "other_status_count": 0,
     }
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
     if not db_path.exists():
         summary["read_error"] = "reborn-local-dev.db missing"
         return summary
@@ -2909,7 +2909,7 @@ def _model_delivery_summary(
 
 
 def _delivered_gate_routes_for_run(reborn_home: Path, run_id: str) -> list[dict[str, object]]:
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
     if not db_path.exists() or not run_id:
         return []
     with closing(sqlite3.connect(db_path)) as db:
@@ -2950,7 +2950,7 @@ def _delivered_gate_routes_for_run(reborn_home: Path, run_id: str) -> list[dict[
 
 
 def _slack_event_run_id_for_event(reborn_home: Path, event_id: str) -> str | None:
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
     if not db_path.exists() or not event_id:
         return None
     with closing(sqlite3.connect(db_path)) as db:
@@ -3515,7 +3515,7 @@ def _slack_delivery_channel_id(ctx: LiveQaContext) -> str | None:
     persisted_channel_id = _persisted_slack_personal_dm_channel_id(ctx.reborn_home, _auth_user_id())
     if persisted_channel_id:
         return persisted_channel_id
-    db_path = ctx.reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = ctx.reborn_home / "state" / "reborn-local-dev.db"
     if not db_path.exists():
         return None
     with closing(sqlite3.connect(db_path)) as db:
@@ -3688,7 +3688,7 @@ def _trigger_run_slack_send_evidence(
         "wrong_channel_marker_send_count": 0,
         "parse_error_count": 0,
     }
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
     if not db_path.exists():
         evidence["read_error"] = "reborn-local-dev.db missing"
         return evidence
@@ -3792,7 +3792,7 @@ def _trigger_run_outbound_deliver_evidence(
         "marker_deliver_count": 0,
         "parse_error_count": 0,
     }
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
     if not db_path.exists():
         evidence["read_error"] = "reborn-local-dev.db missing"
         return evidence
@@ -4420,7 +4420,7 @@ def _capability_run_statuses(
     capability_ids: list[str],
 ) -> dict[str, list[str]]:
     statuses = {capability_id: [] for capability_id in capability_ids}
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
     if not db_path.exists():
         return statuses
     try:
@@ -4500,7 +4500,7 @@ def _current_turn_capability_evidence(
     if not all(identity[field] for field in _SUBMISSION_CORRELATION_FIELDS):
         return evidence
 
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
     if not db_path.exists():
         return evidence
     try:
@@ -9221,7 +9221,7 @@ def export_case_trace(output_dir: Path, case_name: str, reborn_home: Path) -> di
     trace_dir = output_dir / "traces"
     trace_dir.mkdir(parents=True, exist_ok=True)
     trace_path = trace_dir / f"{case_name}.json"
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
     payload: dict[str, object] = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "case": case_name,

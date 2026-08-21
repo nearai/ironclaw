@@ -25,6 +25,8 @@ use tokio_util::sync::CancellationToken;
 use crate::context::RebornCliContext;
 
 mod native_extensions;
+mod storage_boot;
+pub(crate) mod storage_layout;
 // Crate-wide process-env lock lives here (see test_env.rs). `pub(crate)` so
 // non-runtime env-mutating tests (e.g. commands::serve_sso) serialize against
 // the same mutex — all unit tests link into one binary, so a second, separate
@@ -34,7 +36,15 @@ mod native_extensions;
 pub(crate) mod test_env;
 mod trigger_poller;
 
+use storage_boot::ensure_startup_layout;
 use trigger_poller::trigger_poller_settings;
+
+#[cfg(test)]
+pub(crate) use storage_boot::ensure_ready_layout_for_active_profile;
+pub(crate) use storage_boot::{
+    OnboardingSecretStoreMode, ensure_embedded_secret_store_for_active_profile,
+    ensure_ready_layout_for_profile, prepare_onboarding_layout,
+};
 
 pub(crate) fn init_tracing() {
     use tracing_subscriber::Layer;
@@ -408,6 +418,12 @@ pub(crate) enum RuntimeInputCaller {
     Serve,
 }
 
+impl RuntimeInputCaller {
+    fn requires_per_caller_workspace(self) -> bool {
+        self == Self::Serve
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn build_runtime_input(
     config: &RebornBootConfig,
@@ -505,16 +521,16 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
         return Err(error.into());
     };
     let provider_id = provider.clone();
-    let runtime_storage_root = local_runtime_storage_root(config, config.profile());
-    // The runtime storage root is only created lazily (onboarding writing a
-    // key, or a prior `serve` boot). If it was never created there is
-    // definitely no stored key — fail through to the original error instead
-    // of letting the secret-store opener fail on a missing directory.
-    if !runtime_storage_root.exists() {
+    let state_root = local_state_root(config);
+    // Layout admission creates the state directory even when no standalone
+    // store exists. Check the owning database path so a read-only fallback
+    // cannot create a database or master-key cache merely by probing an empty
+    // canonical namespace.
+    if !ironclaw_composition::standalone_db_path(&state_root).exists() {
         return Err(error.into());
     }
     let has_stored_key = block_on_cli(async move {
-        let store = ironclaw_composition::open_standalone_secret_store(&runtime_storage_root)
+        let store = ironclaw_composition::open_standalone_secret_store(&state_root)
             .await
             .map_err(anyhow::Error::from)?;
         ironclaw_operator::LlmKeyStore::new(
@@ -542,6 +558,8 @@ pub(crate) fn build_runtime_input_with_options(
     options: RuntimeInputOptions,
 ) -> anyhow::Result<BuiltRuntimeInput> {
     let runtime_services = build_services_input_with_options(config, caller, options)?;
+    let migration_dry_run =
+        runtime_services.services_input.profile() == RebornCompositionProfile::MigrationDryRun;
 
     let services_input = with_binary_host_extension_bindings(runtime_services.services_input)?;
 
@@ -568,33 +586,37 @@ pub(crate) fn build_runtime_input_with_options(
         // required for both `run` and `serve`; without it `run` resolves the
         // configured provider here but still dispatches through `unconfigured`.
         runtime_input = runtime_input.with_boot_config(config.clone());
-        match resolve_reborn_runtime_llm_with_stored_key_fallback(
-            config,
-            runtime_services.config_file.as_ref(),
-            caller,
-        )? {
-            Some(llm) => {
-                tracing::debug!(
-                    provider_id = %llm.provider_id(),
-                    model = %llm.model(),
-                    base_url = %llm.base_url().unwrap_or_default(),
-                    "resolved LLM selection for Reborn runtime"
-                );
-                // Opt-in LLM trace recording (`IRONCLAW_RECORD_TRACE`). The
-                // serve/run turn provider is built via `wrap_swappable_gateway`,
-                // which never wires `RecordingLlm` itself; this seam attaches the
-                // recorder factory over the gateway's swappable provider so the
-                // live QA lane can harvest replayable per-case traces. No-op when
-                // the env var is unset (production default).
-                runtime_input = runtime_input.with_resolved_llm(llm.with_env_trace_recording());
-            }
-            None => {
-                tracing::warn!(
-                    "no LLM selection configured; set `[llm.default]` in {} or configure \
-                     LLM_BACKEND / provider environment variables. Runs will fail until an \
-                     LLM is wired.",
-                    config.home().config_file_path().display()
-                );
+        if migration_dry_run {
+            tracing::debug!("skipping persisted LLM credential fallback for migration dry-run");
+        } else {
+            match resolve_reborn_runtime_llm_with_stored_key_fallback(
+                config,
+                runtime_services.config_file.as_ref(),
+                caller,
+            )? {
+                Some(llm) => {
+                    tracing::debug!(
+                        provider_id = %llm.provider_id(),
+                        model = %llm.model(),
+                        base_url = %llm.base_url().unwrap_or_default(),
+                        "resolved LLM selection for Reborn runtime"
+                    );
+                    // Opt-in LLM trace recording (`IRONCLAW_RECORD_TRACE`). The
+                    // serve/run turn provider is built via `wrap_swappable_gateway`,
+                    // which never wires `RecordingLlm` itself; this seam attaches the
+                    // recorder factory over the gateway's swappable provider so the
+                    // live QA lane can harvest replayable per-case traces. No-op when
+                    // the env var is unset (production default).
+                    runtime_input = runtime_input.with_resolved_llm(llm.with_env_trace_recording());
+                }
+                None => {
+                    tracing::warn!(
+                        "no LLM selection configured; set `[llm.default]` in {} or configure \
+                         LLM_BACKEND / provider environment variables. Runs will fail until an \
+                         LLM is wired.",
+                        config.home().config_file_path().display()
+                    );
+                }
             }
         }
     }
@@ -688,7 +710,6 @@ fn web_app_vapid_subject_from_env() -> Option<String> {
 
 pub(crate) struct RuntimeServicesInput {
     pub(crate) services_input: RebornHostBindings,
-    pub(crate) profile: RebornProfile,
     config_file: Option<ironclaw_config::RebornConfigFile>,
 }
 
@@ -717,20 +738,35 @@ pub(crate) fn build_services_input_with_options(
 
     let profile = effective_profile(config, config_file.as_ref())?;
     reject_unsupported_runtime_sections(config_file.as_ref(), caller, profile)?;
+    let require_per_caller_workspace = caller.requires_per_caller_workspace();
+    let storage_paths = ensure_startup_layout(config, profile, require_per_caller_workspace)?;
+    let legacy_skill_snapshot_source =
+        storage_layout::ready_legacy_skill_snapshot_source(config.home())?;
     let mut services_input = match profile {
         RebornProfile::Standalone
         | RebornProfile::StandaloneUnrestricted
-        | RebornProfile::HostedSingleTenantVolume => {
-            build_standalone_local_runtime_services_input(profile, owner_id, config, options)?
-        }
+        | RebornProfile::HostedSingleTenantVolume => build_standalone_local_runtime_services_input(
+            profile,
+            owner_id,
+            storage_paths,
+            legacy_skill_snapshot_source,
+            options,
+        )?,
         RebornProfile::HostedSingleTenantVolumeSandboxed
         | RebornProfile::HostedSingleTenantVolumeSandboxedRailway => {
-            build_sandboxed_local_runtime_services_input(profile, owner_id, config, options)?
+            build_sandboxed_local_runtime_services_input(
+                profile,
+                owner_id,
+                storage_paths,
+                legacy_skill_snapshot_source,
+                options,
+            )?
         }
         RebornProfile::HostedSingleTenant => build_hosted_single_tenant_services_input(
             profile,
             owner_id,
-            config,
+            storage_paths,
+            legacy_skill_snapshot_source,
             config_file.as_ref(),
         )?,
         RebornProfile::Production | RebornProfile::MigrationDryRun => {
@@ -740,7 +776,9 @@ pub(crate) fn build_services_input_with_options(
             build_production_services_input(profile, owner_id, config_file.as_ref())?
         }
     };
-    if let Some(ResolvedGoogleOAuthConfig {
+    if profile == RebornProfile::MigrationDryRun {
+        tracing::debug!("skipping persisted OAuth credential fallback for migration dry-run");
+    } else if let Some(ResolvedGoogleOAuthConfig {
         client,
         hosted_domain_hint: _hosted_domain_hint,
     }) = resolve_google_oauth_config_from_env(config, config_file.as_ref())?
@@ -751,6 +789,7 @@ pub(crate) fn build_services_input_with_options(
     let tenant_id = TenantId::new(identity.tenant_id).context("invalid runtime tenant identity")?;
     let agent_id = AgentId::new(identity.agent_id).context("invalid runtime agent identity")?;
     services_input = services_input.with_local_runtime_identity(tenant_id, agent_id);
+    services_input = services_input.with_workspace_scoped_per_caller(require_per_caller_workspace);
 
     // Resolve the memory profile binding from the `[memory]` config section +
     // deployment profile and attach it (issue #3537). Fail-closed: a production
@@ -759,7 +798,7 @@ pub(crate) fn build_services_input_with_options(
     // here, before the runtime is built.
     let memory_binding_policy = ironclaw_composition::resolve_memory_binding_policy(
         config_file.as_ref().and_then(|file| file.memory.as_ref()),
-        composition_profile(profile),
+        profile.into(),
     )?;
     for diagnostic in ironclaw_composition::memory_binding_diagnostics(&memory_binding_policy) {
         // `debug!` (not `info!`/`warn!`) so the REPL/TUI display is not corrupted.
@@ -781,21 +820,23 @@ pub(crate) fn build_services_input_with_options(
             .and_then(|file| file.memory.as_ref())
             .and_then(|memory| memory.mem0_base_url.clone())
     });
+    let mem0_app_id = memory_provider_app_id_for_runtime(
+        config.home(),
+        optional_nonempty_env("MEMORY_MEM0_APP_ID"),
+    )?;
     let memory_provider_connection = ironclaw_composition::Mem0ConnectionConfig {
         base_url: mem0_base_url,
         api_key: optional_nonempty_env("MEMORY_MEM0_API_KEY").map(SecretString::from),
-        app_id: optional_nonempty_env("MEMORY_MEM0_APP_ID"),
+        app_id: mem0_app_id,
     };
     services_input = services_input.with_memory_provider_connection(memory_provider_connection);
 
     Ok(RuntimeServicesInput {
         services_input,
-        profile,
         config_file,
     })
 }
 
-const SANDBOX_WORKSPACES_SUBDIR: &str = "sandbox-workspaces";
 const RAILWAY_SANDBOX_PROJECT_ENV: &str = "IRONCLAW_REBORN_RAILWAY_PROJECT_ID";
 const RAILWAY_SANDBOX_ENVIRONMENT_ENV: &str = "IRONCLAW_REBORN_RAILWAY_ENVIRONMENT_ID";
 const RAILWAY_SANDBOX_CLI_PATH_ENV: &str = "IRONCLAW_REBORN_RAILWAY_CLI_PATH";
@@ -893,13 +934,13 @@ enum SandboxProcessBootError {
 fn build_sandboxed_local_runtime_services_input(
     profile: RebornProfile,
     owner_id: &str,
-    config: &RebornBootConfig,
+    paths: ironclaw_config::RebornStoragePaths,
+    legacy_skill_snapshot_source: Option<ironclaw_config::LegacyStorageSource>,
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RebornHostBindings> {
     let process_binding = match profile {
         RebornProfile::HostedSingleTenantVolumeSandboxed => {
-            let workspace_root =
-                local_runtime_storage_root(config, profile).join(SANDBOX_WORKSPACES_SUBDIR);
+            let workspace_root = paths.workspace_root().to_path_buf();
             block_on_cli(
                 ironclaw_composition::build_local_docker_user_sandbox_binding(workspace_root),
             )
@@ -913,30 +954,35 @@ fn build_sandboxed_local_runtime_services_input(
         }
         _ => return Err(SandboxProcessBootError::UnsupportedProfile { profile }.into()),
     };
-    let services_input =
-        build_standalone_local_runtime_services_input(profile, owner_id, config, options)?;
+    let services_input = build_standalone_local_runtime_services_input(
+        profile,
+        owner_id,
+        paths,
+        legacy_skill_snapshot_source,
+        options,
+    )?;
     Ok(services_input.with_runtime_process_binding(process_binding))
 }
 
 fn build_standalone_local_runtime_services_input(
     profile: RebornProfile,
     owner_id: &str,
-    config: &RebornBootConfig,
+    paths: ironclaw_config::RebornStoragePaths,
+    legacy_skill_snapshot_source: Option<ironclaw_config::LegacyStorageSource>,
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RebornHostBindings> {
-    let local_runtime_root = local_runtime_storage_root(config, profile);
-    let workspace_root = std::env::current_dir()
-        .with_context(|| format!("failed to resolve current directory for {profile} workspace"))?;
     let mut services_input = local_runtime_build_input_with_options(
-        composition_profile(profile),
+        profile.into(),
         owner_id,
-        local_runtime_root,
+        paths,
         RebornRuntimeProfileOptions {
             confirm_host_access: options.confirm_host_access,
         },
     )
-    .with_context(|| format!("failed to build local-runtime services for profile={profile}"))?
-    .with_local_runtime_workspace_root(workspace_root);
+    .with_context(|| format!("failed to build local-runtime services for profile={profile}"))?;
+    if let Some(source) = legacy_skill_snapshot_source {
+        services_input = services_input.with_legacy_skill_snapshot_source(source)?;
+    }
     if services_input.requires_local_runtime_confirmed_host_home_root() {
         let host_home_root =
             confirmed_host_home_root(options).context("standalone-unrestricted host access")?;
@@ -951,27 +997,27 @@ fn build_standalone_local_runtime_services_input(
 fn build_hosted_single_tenant_services_input(
     profile: RebornProfile,
     owner_id: &str,
-    config: &RebornBootConfig,
+    paths: ironclaw_config::RebornStoragePaths,
+    legacy_skill_snapshot_source: Option<ironclaw_config::LegacyStorageSource>,
     config_file: Option<&ironclaw_config::RebornConfigFile>,
 ) -> anyhow::Result<RebornHostBindings> {
-    let workspace_root = std::env::current_dir()
-        .context("failed to resolve current directory for hosted single-tenant workspace")?;
     let runtime_policy = hosted_single_tenant_runtime_policy()
         .context("failed to resolve hosted single-tenant runtime policy")?;
-    Ok(
-        RebornHostBindings::hosted_single_tenant_postgres_from_config_and_env(
-            composition_profile(profile),
-            owner_id,
-            local_runtime_storage_root(config, profile),
-            config_file,
-        )
-        .map_err(anyhow::Error::from)?
-        .with_runtime_policy(runtime_policy)
-        .with_local_runtime_workspace_root(workspace_root)
-        .with_optional_nearai_mcp_bootstrap_config(
-            nearai_mcp_bootstrap_config_from_env().context("NEAR AI MCP bootstrap config")?,
-        ),
+    let mut services_input = RebornHostBindings::hosted_single_tenant_postgres_from_config_and_env(
+        profile.into(),
+        owner_id,
+        paths,
+        config_file,
     )
+    .map_err(anyhow::Error::from)?
+    .with_runtime_policy(runtime_policy)
+    .with_optional_nearai_mcp_bootstrap_config(
+        nearai_mcp_bootstrap_config_from_env().context("NEAR AI MCP bootstrap config")?,
+    );
+    if let Some(source) = legacy_skill_snapshot_source {
+        services_input = services_input.with_legacy_skill_snapshot_source(source)?;
+    }
+    Ok(services_input)
 }
 
 fn build_production_services_input(
@@ -979,12 +1025,8 @@ fn build_production_services_input(
     owner_id: &str,
     config_file: Option<&ironclaw_config::RebornConfigFile>,
 ) -> anyhow::Result<RebornHostBindings> {
-    RebornHostBindings::postgres_from_config_and_env(
-        composition_profile(profile),
-        owner_id,
-        config_file,
-    )
-    .map_err(anyhow::Error::from)
+    RebornHostBindings::postgres_from_config_and_env(profile.into(), owner_id, config_file)
+        .map_err(anyhow::Error::from)
 }
 /// Resolve the Google OAuth backend config for boot, merging env vars with
 /// the operator's `[google]` config.toml section and the encrypted
@@ -1041,14 +1083,14 @@ pub(crate) fn resolve_google_oauth_config_state_from_env(
 fn google_oauth_client_secret_from_store(
     config: &RebornBootConfig,
 ) -> anyhow::Result<Option<SecretString>> {
-    let storage_root = local_runtime_storage_root(config, config.profile());
+    let state_root = local_state_root(config);
     // Boot may open/migrate local runtime state, but it can still avoid all
     // keychain/filesystem writes when no store exists yet.
-    if !ironclaw_composition::standalone_db_path(&storage_root).exists() {
+    if !ironclaw_composition::standalone_db_path(&state_root).exists() {
         return Ok(None);
     }
     block_on_cli(async move {
-        let store = ironclaw_composition::open_standalone_secret_store(&storage_root)
+        let store = ironclaw_composition::open_standalone_secret_store(&state_root)
             .await
             .map_err(anyhow::Error::from)?;
         ironclaw_composition::GoogleOauthSecretStore::new(store)
@@ -1305,6 +1347,16 @@ fn optional_nonempty_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn memory_provider_app_id_for_runtime(
+    home: &ironclaw_config::RebornHome,
+    explicit_app_id: Option<String>,
+) -> anyhow::Result<Option<String>> {
+    match explicit_app_id {
+        Some(app_id) => Ok(Some(app_id)),
+        None => storage_layout::ready_memory_provider_app_id(home),
+    }
+}
+
 pub(crate) fn default_owner_id(config_file: Option<&ironclaw_config::RebornConfigFile>) -> &str {
     config_file
         .and_then(|file| file.identity.as_ref())
@@ -1320,56 +1372,10 @@ fn confirmed_host_home_root(options: RuntimeInputOptions) -> anyhow::Result<Path
         .context("HOME or USERPROFILE must be set")
 }
 
-pub(crate) fn local_runtime_storage_root(
-    config: &RebornBootConfig,
-    profile: RebornProfile,
-) -> PathBuf {
-    config
-        .home()
-        .path()
-        .join(profile.local_runtime_storage_subdir())
-}
-
-pub(crate) async fn initialize_local_runtime_storage_root(
-    config: &RebornBootConfig,
-    profile: RebornProfile,
-) -> anyhow::Result<()> {
-    if matches!(
-        profile,
-        RebornProfile::Standalone
-            | RebornProfile::StandaloneUnrestricted
-            | RebornProfile::HostedSingleTenantVolume
-            | RebornProfile::HostedSingleTenantVolumeSandboxed
-            | RebornProfile::HostedSingleTenantVolumeSandboxedRailway
-    ) {
-        let root = local_runtime_storage_root(config, profile);
-        tokio::fs::create_dir_all(&root).await.with_context(|| {
-            format!(
-                "failed to initialize Reborn runtime state at {}",
-                root.display()
-            )
-        })?;
-    }
-    Ok(())
-}
-
-fn composition_profile(profile: RebornProfile) -> RebornCompositionProfile {
-    match profile {
-        RebornProfile::Standalone => RebornCompositionProfile::Standalone,
-        RebornProfile::StandaloneUnrestricted => RebornCompositionProfile::StandaloneUnrestricted,
-        RebornProfile::HostedSingleTenant => RebornCompositionProfile::HostedSingleTenant,
-        RebornProfile::HostedSingleTenantVolume => {
-            RebornCompositionProfile::HostedSingleTenantVolume
-        }
-        RebornProfile::HostedSingleTenantVolumeSandboxed => {
-            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
-        }
-        RebornProfile::HostedSingleTenantVolumeSandboxedRailway => {
-            RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway
-        }
-        RebornProfile::Production => RebornCompositionProfile::Production,
-        RebornProfile::MigrationDryRun => RebornCompositionProfile::MigrationDryRun,
-    }
+pub(crate) fn local_state_root(config: &RebornBootConfig) -> PathBuf {
+    ironclaw_config::RebornStoragePaths::from_home(config.home())
+        .state_root()
+        .to_path_buf()
 }
 
 pub(crate) fn read_config_file(
@@ -1710,7 +1716,7 @@ mod tests {
         KeepaliveSweepSettings, RebornCompositionProfile, RebornHostBindings, TurnStatus,
         test_support::assistant_reply_without_text_for_test,
     };
-    use ironclaw_config::RebornBootConfig;
+    use ironclaw_config::{RebornBootConfig, RebornProfile};
     use secrecy::SecretString;
 
     use super::apply_run_trigger_fire_access_policy;
@@ -1718,15 +1724,17 @@ mod tests {
     use super::{
         GoogleOAuthConfigState, GoogleOAuthEnvInputs, GoogleOAuthResolution, RuntimeInputCaller,
         RuntimeInputOptions, apply_credential_refresh_override, block_on_cli, build_runtime_input,
-        build_runtime_input_with_options, initialize_local_runtime_storage_root,
-        no_assistant_text_message, protect_reborn_log_filter, resolve_google_oauth_config,
-        resolve_google_oauth_config_state, resolve_google_oauth_config_state_merged,
-        resolve_google_oauth_config_state_with_store_loader, runner_settings,
-        with_binary_host_extension_bindings_from_bundles,
+        build_runtime_input_with_options, ensure_embedded_secret_store_for_active_profile,
+        ensure_ready_layout_for_active_profile, ensure_ready_layout_for_profile,
+        ensure_startup_layout, no_assistant_text_message, protect_reborn_log_filter,
+        resolve_google_oauth_config, resolve_google_oauth_config_state,
+        resolve_google_oauth_config_state_merged,
+        resolve_google_oauth_config_state_with_store_loader, runner_settings, storage_boot,
+        storage_layout, with_binary_host_extension_bindings_from_bundles,
     };
     use ironclaw_config::GoogleSection;
     // Only the hosted-volume tests consume this.
-    use super::local_runtime_storage_root;
+    use super::local_state_root;
     use ironclaw_composition::DEFAULT_TURN_RUNNER_WORKER_COUNT;
 
     struct RuntimeEnvGuard {
@@ -2128,6 +2136,46 @@ mod tests {
     }
 
     #[test]
+    fn serve_admits_the_effective_per_caller_workspace_floor_before_building_services() {
+        let _lock = lock_runtime_env();
+        let _guards = clear_runner_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Serve).expect("runtime input");
+        assert!(
+            runtime_input
+                .config()
+                .expect("runtime input carries deployment config")
+                .workspace_scoped_per_caller(),
+            "serve services must use the same per-caller scope admitted on disk"
+        );
+
+        let weaker = storage_boot::storage_layout_requirement_for_profile(
+            ironclaw_config::RebornProfile::Standalone,
+        )
+        .expect("standalone layout requirement");
+        let error = storage_layout::ensure_ready_layout(config.home(), weaker)
+            .expect_err("the persisted serve floor must reject a weaker later caller");
+        assert!(
+            error
+                .to_string()
+                .contains("workspace access floor cannot weaken"),
+            "unexpected admission error: {error:#}"
+        );
+    }
+
+    #[test]
     fn ironhub_register_gateway_is_disabled_without_an_explicit_shared_key() {
         let _lock = lock_runtime_env();
         let _shared_key = EnvGuard::clear("IRONHUB_AGENT_SHARED_KEY");
@@ -2469,6 +2517,10 @@ api_key_env = "NEARAI_API_KEY"
         )
     }
 
+    #[path = "storage_boot.rs"]
+    mod storage_boot_tests;
+    use storage_boot_tests::{boot_config_with_config_toml, layout_tree_snapshot};
+
     fn clear_credential_refresh_env() -> EnvGuard {
         EnvGuard::clear("IRONCLAW_CREDENTIAL_REFRESH_ENABLED")
     }
@@ -2668,13 +2720,7 @@ regex_activation_enabled = false
         );
         assert_eq!(policy.process_backend.as_str(), "none");
         assert_eq!(policy.filesystem_backend.as_str(), "scoped_virtual");
-        assert_eq!(
-            local_runtime_storage_root(
-                &config,
-                ironclaw_config::RebornProfile::HostedSingleTenantVolume,
-            ),
-            reborn_home.join("hosted-single-tenant-volume")
-        );
+        assert_eq!(local_state_root(&config), reborn_home.join("state"));
     }
 
     #[test]
@@ -2714,7 +2760,7 @@ regex_activation_enabled = false
     }
 
     #[test]
-    fn local_sandbox_profile_selects_docker_process_binding_when_required() {
+    fn cli_sandbox_profile_uses_canonical_workspace_root_and_user_sandbox_binding() {
         if std::env::var_os("IRONCLAW_REQUIRE_DOCKER_TESTS").is_none() {
             eprintln!(
                 "skipping Docker-backed sandbox profile test; set IRONCLAW_REQUIRE_DOCKER_TESTS=1 to require it"
@@ -2729,7 +2775,7 @@ regex_activation_enabled = false
         let reborn_home = temp.path().join("reborn-home");
         std::fs::create_dir_all(&reborn_home).expect("mkdir");
         let config = RebornBootConfig::resolve_from_env_parts(
-            Some(reborn_home.into_os_string()),
+            Some(reborn_home.clone().into_os_string()),
             None,
             None,
             Some("hosted-single-tenant-volume-sandboxed".into()),
@@ -2738,13 +2784,25 @@ regex_activation_enabled = false
 
         let runtime_input =
             build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+        assert!(!runtime_input.grants_trusted_laptop_access());
         let services = runtime_input.services.expect("services input");
         let policy = services.runtime_policy().expect("runtime policy");
+        let paths = ironclaw_config::RebornStoragePaths::from_home(config.home());
         assert_eq!(
             services.profile(),
             RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
         );
+        assert_eq!(paths.installation_root(), reborn_home);
+        assert_eq!(
+            paths.workspace_root(),
+            paths.installation_root().join("workspaces")
+        );
         assert_eq!(policy.process_backend.as_str(), "user_sandbox");
+        assert_eq!(policy.filesystem_backend.as_str(), "tenant_workspace");
+        assert_ne!(
+            policy.filesystem_backend.as_str(),
+            "host_workspace_and_home"
+        );
     }
 
     #[test]
@@ -2860,67 +2918,6 @@ regex_activation_enabled = false
         assert!(error.to_string().contains(
             "IRONCLAW_REBORN_RAILWAY_IDLE_TIMEOUT_MINUTES must be an integer from 1 to 65535"
         ));
-    }
-
-    fn boot_config_with_config_toml(
-        profile: &str,
-        config_toml: &str,
-    ) -> (tempfile::TempDir, RebornBootConfig) {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let reborn_home = temp.path().join("reborn-home");
-        std::fs::create_dir_all(&reborn_home).expect("mkdir");
-        std::fs::write(reborn_home.join("config.toml"), config_toml).expect("write config");
-        let config = RebornBootConfig::resolve_from_env_parts(
-            Some(reborn_home.into_os_string()),
-            None,
-            None,
-            Some(profile.into()),
-        )
-        .expect("boot config");
-        (temp, config)
-    }
-
-    #[tokio::test]
-    async fn local_profiles_initialize_their_runtime_storage_roots() {
-        for profile in [
-            ironclaw_config::RebornProfile::Standalone,
-            ironclaw_config::RebornProfile::StandaloneUnrestricted,
-            ironclaw_config::RebornProfile::HostedSingleTenantVolume,
-            ironclaw_config::RebornProfile::HostedSingleTenantVolumeSandboxed,
-            ironclaw_config::RebornProfile::HostedSingleTenantVolumeSandboxedRailway,
-        ] {
-            let (_temp, config) = boot_config_with_config_toml("local-dev", "");
-            let root = local_runtime_storage_root(&config, profile);
-            assert!(!root.exists());
-            initialize_local_runtime_storage_root(&config, profile)
-                .await
-                .expect("initialize local runtime storage");
-            assert!(root.is_dir());
-        }
-
-        let (_temp, config) = boot_config_with_config_toml("local-dev", "");
-        let hosted = ironclaw_config::RebornProfile::HostedSingleTenant;
-        let root = local_runtime_storage_root(&config, hosted);
-        initialize_local_runtime_storage_root(&config, hosted)
-            .await
-            .expect("hosted profile is a no-op");
-        assert!(!root.exists());
-
-        let (_temp, config) = boot_config_with_config_toml("local-dev", "");
-        let blocked_root =
-            local_runtime_storage_root(&config, ironclaw_config::RebornProfile::Standalone);
-        std::fs::write(&blocked_root, "not a directory").expect("block runtime directory");
-        let error = initialize_local_runtime_storage_root(
-            &config,
-            ironclaw_config::RebornProfile::Standalone,
-        )
-        .await
-        .expect_err("a file at the storage root must fail closed");
-        assert!(
-            error
-                .to_string()
-                .contains("failed to initialize Reborn runtime state")
-        );
     }
 
     #[test]
@@ -3415,6 +3412,16 @@ deployment_mode = "hosted_multi_tenant"
 default_profile = "secure_default"
 "#,
         );
+        let requirement = super::storage_boot::storage_layout_requirement_for_profile(
+            RebornProfile::MigrationDryRun,
+        )
+        .expect("migration dry-run layout requirement");
+        let admission = super::storage_layout::admit_startup_layout(config.home(), requirement)
+            .expect("seed the already-ready layout that migration dry-run inspects");
+        assert!(matches!(
+            admission,
+            super::storage_layout::StartupLayoutAdmission::Ready(_)
+        ));
 
         let runtime_input =
             build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
@@ -3422,6 +3429,122 @@ default_profile = "secure_default"
         assert_eq!(
             services.profile(),
             RebornCompositionProfile::MigrationDryRun
+        );
+    }
+
+    #[test]
+    fn migration_dry_run_never_opens_persisted_oauth_or_llm_fallback_stores() {
+        let _lock = lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _postgres_url = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_URL",
+            "postgres://localhost/ironclaw_reborn_cli_test",
+        );
+        let _secret_master_key =
+            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+        let _disable_keychain = EnvGuard::set("IRONCLAW_DISABLE_OS_KEYCHAIN", "1");
+        let _credential_env = EnvGuard::clear_many(&[
+            "IRONCLAW_REBORN_GOOGLE_CLIENT_ID",
+            "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI",
+            "IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET",
+            "GOOGLE_CLIENT_ID",
+            "GOOGLE_OAUTH_REDIRECT_URI",
+            "GOOGLE_CLIENT_SECRET",
+            "OPENAI_API_KEY",
+        ]);
+        let (_temp, config) = boot_config_with_config_toml(
+            "migration-dry-run",
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
+
+[google]
+client_id = "dry-run-client.apps.googleusercontent.com"
+redirect_uri = "http://127.0.0.1:3000/oauth/google/callback"
+
+[llm.default]
+provider_id = "openai"
+model = "gpt-4o-mini"
+api_key_env = "OPENAI_API_KEY"
+"#,
+        );
+        let requirement = super::storage_boot::storage_layout_requirement_for_profile(
+            super::RebornProfile::MigrationDryRun,
+        )
+        .expect("migration dry-run requirement");
+        let paths = super::storage_layout::ensure_ready_layout(config.home(), requirement)
+            .expect("prepare a valid dry-run layout fixture");
+        let state_root = paths.state_root().to_path_buf();
+        let store_root = state_root.clone();
+        block_on_cli(async move {
+            ironclaw_composition::open_standalone_secret_store(&store_root)
+                .await
+                .map(|_| ())
+                .map_err(anyhow::Error::from)
+        })
+        .expect("seed an existing persisted store");
+        std::fs::remove_file(
+            state_root.join(ironclaw_composition::STANDALONE_SECRETS_MASTER_KEY_PATH),
+        )
+        .expect("remove cached key so a fallback opener would recreate it");
+
+        let before = layout_tree_snapshot(config.home().path());
+        let runtime_input = build_runtime_input(&config, RuntimeInputCaller::Serve)
+            .expect("migration dry-run does not resolve persisted LLM credentials");
+        let after = layout_tree_snapshot(config.home().path());
+
+        let services = runtime_input.services.expect("services input");
+        assert_eq!(
+            services.profile(),
+            RebornCompositionProfile::MigrationDryRun
+        );
+
+        assert_eq!(
+            after, before,
+            "migration dry-run must leave every layout file's bytes and metadata unchanged"
+        );
+    }
+
+    #[test]
+    fn stored_llm_fallback_does_not_create_a_store_in_an_empty_state_namespace() {
+        let _lock = lock_runtime_env();
+        let _credential_env = EnvGuard::clear("OPENAI_API_KEY");
+        let (_temp, config) = boot_config_with_config_toml(
+            "local-dev",
+            r#"
+[llm.default]
+provider_id = "openai"
+model = "gpt-4o-mini"
+api_key_env = "OPENAI_API_KEY"
+"#,
+        );
+        let requirement =
+            super::storage_boot::storage_layout_requirement_for_profile(RebornProfile::Standalone)
+                .expect("standalone requirement");
+        let paths = super::storage_layout::ensure_ready_layout(config.home(), requirement)
+            .expect("initialize empty canonical layout");
+        let config_file = super::read_config_file(&config).expect("config file");
+
+        let error = super::resolve_reborn_runtime_llm_with_stored_key_fallback(
+            &config,
+            config_file.as_ref(),
+            RuntimeInputCaller::Serve,
+        )
+        .expect_err("missing environment key remains visible when no store exists");
+
+        assert!(error.to_string().contains("OPENAI_API_KEY"), "{error:#}");
+        assert!(!ironclaw_composition::standalone_db_path(paths.state_root()).exists());
+        assert!(
+            !paths
+                .state_root()
+                .join(ironclaw_composition::STANDALONE_SECRETS_MASTER_KEY_PATH)
+                .exists()
         );
     }
 
@@ -4573,8 +4696,8 @@ poll_interval_secs = 15
         )
         .expect("boot config");
 
-        let storage_root = super::local_runtime_storage_root(&config, config.profile());
-        std::fs::create_dir_all(&storage_root).expect("create profile storage root");
+        let storage_root = super::local_state_root(&config);
+        std::fs::create_dir_all(&storage_root).expect("create canonical state root");
         // Keep this a hermetic store-wiring test: without a cached key, the
         // production resolver falls through to the real OS keychain while
         // this test holds the process-wide env lock, serializing every other

@@ -1699,7 +1699,7 @@ review_after = "2026-11-30"
 
 [[exemption]]
 path = "crates/app/ironclaw_composition/src/factory/test_support.rs"
-lines = [1150]
+lines = [1119]
 owner = "@serrrfirat"
 reason = "cfg(test)-gated shared_workspace_view helper arm: compiled only into the crate's own unit-test binary, which the integration-tier lcov excludes."
 issue = "https://github.com/nearai/ironclaw/issues/7142"

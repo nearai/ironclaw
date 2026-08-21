@@ -38,6 +38,7 @@ mod host_access_assembly;
 mod input;
 mod ironhub_link_serve;
 mod llm_admin;
+mod local_skill_listing;
 mod memory_binding;
 mod memory_provider_factory;
 mod model_gateway_assembly;
@@ -123,6 +124,8 @@ pub use ironclaw_turn_runner::{
 pub use ironclaw_skills::{
     SkillSummary as RebornSkillSummary, skill_summary_json as reborn_skill_summary_json,
 };
+// consumer: `ironclaw_cli` skills command · pinned by: `ironclaw_cli/tests/smoke.rs`
+pub use local_skill_listing::list_reborn_local_skills_from_state;
 // consumer: `ironclaw_cli` runtime (no `ironclaw_turns` dep) · pinned by: `ironclaw_cli` build
 pub use ironclaw_turns::TurnStatus;
 // consumer: `ironclaw_cli` serve wiring · pinned by: `ironclaw_cli` build

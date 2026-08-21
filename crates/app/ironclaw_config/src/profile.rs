@@ -85,34 +85,6 @@ impl RebornProfile {
         )
     }
 
-    pub fn uses_standalone_local_runtime_volume(self) -> bool {
-        matches!(
-            self,
-            Self::Standalone
-                | Self::StandaloneUnrestricted
-                | Self::HostedSingleTenantVolume
-                | Self::HostedSingleTenantVolumeSandboxed
-                | Self::HostedSingleTenantVolumeSandboxedRailway
-        )
-    }
-
-    pub fn local_runtime_storage_subdir(self) -> &'static str {
-        match self {
-            Self::HostedSingleTenant => "hosted-single-tenant",
-            Self::HostedSingleTenantVolume => "hosted-single-tenant-volume",
-            // The provider profile selects execution transport, not a second
-            // copy of IronClaw's durable application state.
-            Self::HostedSingleTenantVolumeSandboxed
-            | Self::HostedSingleTenantVolumeSandboxedRailway => {
-                "hosted-single-tenant-volume-sandboxed"
-            }
-            Self::Standalone
-            | Self::StandaloneUnrestricted
-            | Self::Production
-            | Self::MigrationDryRun => "local-dev",
-        }
-    }
-
     pub fn supports_local_runtime_skill_management(self) -> bool {
         matches!(
             self,

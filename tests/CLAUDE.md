@@ -216,7 +216,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | An HTTP tool call reaches the real egress boundary and the result reaches the model | `tool_call.rs`, `http_matcher.rs` |
 | Saved, transcript-shaped JSON can be queried through scoped storage with plain or `$`-rooted paths; bounded collection operations can select the last item and aggregate numeric rows; invalid JSON produces model-visible correction guidance | `tool_call.rs` |
 | Shell commands dispatch through the real path without spawning an OS process | `process_port.rs` |
-| A sandbox-profile shell turn executes as an unprivileged user in one reusable per-user Docker container, preserving workspace and container-local state across shell calls and sharing that container across the user's threads | `reborn_sandbox_shell_turn.rs` |
+| A sandbox-profile shell turn executes as an unprivileged user in one reusable per-user Docker container, preserving workspace and container-local state across calls and threads while exposing only that user's canonical workspace leaf (not sibling workspaces, host state, or credentials) | `reborn_sandbox_shell_turn.rs`, `user_sandbox_docker_live.rs` |
 | MCP tools work over a real loopback HTTP MCP server | `mcp.rs` |
 | User-registered and bundled hosted MCP servers register, authenticate, project active, restore, and invoke | `hosted_mcp_registration.rs` |
 | Web search/fetch runs the real Exa MCP handshake | `web_access.rs` |

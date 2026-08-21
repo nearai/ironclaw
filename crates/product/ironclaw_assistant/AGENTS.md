@@ -35,7 +35,7 @@ service over thread, turn, and projection ports.
 | `InboundTurnService` / `DefaultInboundTurnService` | User-message turn submission path |
 | `ConversationBindingService` | Resolves external adapter refs → canonical Reborn identifiers |
 | `ProductConversationBindingService` | Adapter from product workflow bindings to `ironclaw_conversations` with trusted installation→tenant mapping |
-| `StaticProductInstallationResolver` / `ProductInstallationScope` | Host-owned installation registry used by local-dev/tests to select tenant and default agent/project scope |
+| `StaticProductInstallationResolver` / `ProductInstallationScope` | Host-owned installation registry used by local-dev tests to select tenant and default agent/project scope |
 | `SharedConversationAdmission` | Host-owned shared-conversation admission — answers only "is this shared conversation connected", fail-closed both without a wired port and for unlisted conversations; product workflow checks it before binding a shared conversation. **Declared in `ironclaw_product_contracts::shared_admission`** — product consumes it, `ironclaw_extension_host` implements it |
 | `IdempotencyLedger` | Durable action deduplication port |
 | `InMemoryIdempotencyLedger` | Local-dev/test ledger with in-flight lease recovery semantics |

@@ -21,6 +21,22 @@ pub enum RebornCompositionProfile {
 }
 
 impl RebornCompositionProfile {
+    const ALL: [Self; 9] = [
+        Self::Disabled,
+        Self::Standalone,
+        Self::StandaloneUnrestricted,
+        Self::HostedSingleTenant,
+        Self::HostedSingleTenantVolume,
+        Self::HostedSingleTenantVolumeSandboxed,
+        Self::HostedSingleTenantVolumeSandboxedRailway,
+        Self::Production,
+        Self::MigrationDryRun,
+    ];
+
+    pub fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
@@ -75,6 +91,27 @@ impl RebornCompositionProfile {
 
     pub fn to_event_store_profile(self) -> ironclaw_event_store::RebornProfile {
         self.deployment().event_store_profile()
+    }
+}
+
+impl From<ironclaw_config::RebornProfile> for RebornCompositionProfile {
+    fn from(profile: ironclaw_config::RebornProfile) -> Self {
+        match profile {
+            ironclaw_config::RebornProfile::Standalone => Self::Standalone,
+            ironclaw_config::RebornProfile::StandaloneUnrestricted => Self::StandaloneUnrestricted,
+            ironclaw_config::RebornProfile::HostedSingleTenant => Self::HostedSingleTenant,
+            ironclaw_config::RebornProfile::HostedSingleTenantVolume => {
+                Self::HostedSingleTenantVolume
+            }
+            ironclaw_config::RebornProfile::HostedSingleTenantVolumeSandboxed => {
+                Self::HostedSingleTenantVolumeSandboxed
+            }
+            ironclaw_config::RebornProfile::HostedSingleTenantVolumeSandboxedRailway => {
+                Self::HostedSingleTenantVolumeSandboxedRailway
+            }
+            ironclaw_config::RebornProfile::Production => Self::Production,
+            ironclaw_config::RebornProfile::MigrationDryRun => Self::MigrationDryRun,
+        }
     }
 }
 

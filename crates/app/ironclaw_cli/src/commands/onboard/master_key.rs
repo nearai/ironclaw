@@ -22,6 +22,9 @@ pub(crate) enum MasterKeyProvisionOutcome {
     /// falls through to `SECRETS_MASTER_KEY` env var, then dotfile
     /// auto-generation on first boot.
     Suppressed,
+    /// Hosted profiles use an externally managed secret store, so onboarding
+    /// must not provision a standalone OS-keychain master key.
+    SkippedHostedExternal,
 }
 
 impl MasterKeyProvisionOutcome {
@@ -31,6 +34,7 @@ impl MasterKeyProvisionOutcome {
             Self::KeychainAlreadyPresent => "already provisioned in OS keychain",
             Self::Provisioned => "provisioned in OS keychain",
             Self::Suppressed => "OS keychain unavailable; falling back to env/dotfile",
+            Self::SkippedHostedExternal => "skipped (hosted profile uses an external secret store)",
         }
     }
 }
@@ -55,11 +59,11 @@ pub(crate) fn provision_master_key(
     boot: &RebornBootConfig,
 ) -> anyhow::Result<MasterKeyProvisionOutcome> {
     // Must match the root `resolve_standalone_secret_master_key_with_env`
-    // actually reads/writes (`<home>/standalone/…`, not the bare home) — see
-    // `crate::runtime::local_runtime_storage_root`. Checking the bare home
-    // here always misses the cached dotfile, so onboarding would
+    // actually reads/writes (`<home>/state/…`) — see
+    // `crate::runtime::local_state_root`. Checking another path
+    // here could miss the cached dotfile, so onboarding would
     // re-attempt keychain provisioning on every rerun (PR #6174 item D).
-    let dotfile_path = crate::runtime::local_runtime_storage_root(boot, boot.profile())
+    let dotfile_path = crate::runtime::local_state_root(boot)
         .join(ironclaw_composition::STANDALONE_SECRETS_MASTER_KEY_PATH);
     if dotfile_path.exists() {
         return Ok(MasterKeyProvisionOutcome::DotfileAlreadyPresent);
@@ -79,4 +83,17 @@ pub(crate) fn provision_master_key(
             }
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MasterKeyProvisionOutcome;
+
+    #[test]
+    fn hosted_external_skip_has_a_typed_status_line() {
+        assert_eq!(
+            MasterKeyProvisionOutcome::SkippedHostedExternal.display_line(),
+            "skipped (hosted profile uses an external secret store)"
+        );
+    }
 }

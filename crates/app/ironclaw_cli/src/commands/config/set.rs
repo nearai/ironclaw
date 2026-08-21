@@ -5,7 +5,7 @@
 //! from that single chokepoint.
 
 use std::io::{IsTerminal, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use clap::Args;
@@ -141,7 +141,8 @@ fn set_value_key(
     let home = context.boot_config().home();
     match &key {
         ConfigKey::LlmApiKey { provider_id } => {
-            write_llm_api_key(context, provider_id, &value, store_opener)?;
+            let state_root = admit_secret_store_state_root(context)?;
+            write_llm_api_key(context, provider_id, &value, &state_root, store_opener)?;
         }
         ConfigKey::GoogleClientId => {
             write_google_field(home, Some(GoogleFieldUpdate::Set(value.clone())), None)?;
@@ -150,7 +151,8 @@ fn set_value_key(
             write_google_field(home, None, Some(GoogleFieldUpdate::Set(value.clone())))?;
         }
         ConfigKey::GoogleClientSecret => {
-            write_google_client_secret(context, &value, store_opener)?;
+            let state_root = admit_secret_store_state_root(context)?;
+            write_google_client_secret(&value, &state_root, store_opener)?;
         }
         ConfigKey::WebuiToken => unreachable!("handled by execute_webui_token"),
     }
@@ -159,6 +161,17 @@ fn set_value_key(
     print_remaining_setup_guidance(&key);
     print_apply_step();
     Ok(())
+}
+
+/// Admit the canonical durable layout for a secret write and return its state
+/// namespace. Call only from a `SecretStorePort` destination arm: config and
+/// token-file writes must not create durable state as a side effect.
+fn admit_secret_store_state_root(context: &RebornCliContext) -> anyhow::Result<PathBuf> {
+    Ok(
+        crate::runtime::ensure_embedded_secret_store_for_active_profile(context.boot_config())?
+            .state_root()
+            .to_path_buf(),
+    )
 }
 
 /// After a successful write, print the remaining BYO setup steps for the
@@ -202,17 +215,14 @@ fn write_llm_api_key(
     context: &RebornCliContext,
     provider_id: &str,
     value: &str,
+    state_root: &Path,
     store_opener: &dyn SecretStoreOpener,
 ) -> anyhow::Result<()> {
     let admin = ironclaw_operator::RebornProviderAdmin::new(context.boot_config().clone());
     let canonical_provider_id = admin
         .resolve_provider_id(provider_id)
         .map_err(anyhow::Error::from)?;
-    let storage_root = crate::runtime::local_runtime_storage_root(
-        context.boot_config(),
-        context.boot_config().profile(),
-    );
-    let store = store_opener.open_llm_key_store(&storage_root)?;
+    let store = store_opener.open_llm_key_store(state_root)?;
     let value_owned = value.to_string();
     crate::runtime::block_on_cli(async move {
         store
@@ -223,15 +233,11 @@ fn write_llm_api_key(
 }
 
 fn write_google_client_secret(
-    context: &RebornCliContext,
     value: &str,
+    state_root: &Path,
     store_opener: &dyn SecretStoreOpener,
 ) -> anyhow::Result<()> {
-    let storage_root = crate::runtime::local_runtime_storage_root(
-        context.boot_config(),
-        context.boot_config().profile(),
-    );
-    let store = store_opener.open_google_oauth_secret_store(&storage_root)?;
+    let store = store_opener.open_google_oauth_secret_store(state_root)?;
     let value_owned = value.to_string();
     crate::runtime::block_on_cli(async move {
         store
@@ -367,12 +373,12 @@ impl SecretValueSource for StdinSecretValueSource {
 trait SecretStoreOpener {
     fn open_llm_key_store(
         &self,
-        home_path: &Path,
+        state_root: &Path,
     ) -> anyhow::Result<ironclaw_operator::LlmKeyStore>;
 
     fn open_google_oauth_secret_store(
         &self,
-        home_path: &Path,
+        state_root: &Path,
     ) -> anyhow::Result<ironclaw_composition::GoogleOauthSecretStore>;
 }
 
@@ -381,19 +387,12 @@ struct StandaloneSecretStoreOpener;
 impl SecretStoreOpener for StandaloneSecretStoreOpener {
     fn open_llm_key_store(
         &self,
-        home_path: &Path,
+        state_root: &Path,
     ) -> anyhow::Result<ironclaw_operator::LlmKeyStore> {
-        // `config set` is a write command: create the reborn home directory
-        // (if missing) before opening the store, mirroring
-        // `onboard::llm_credentials::open_llm_key_store` — a never-onboarded
-        // home has no directory yet, and `open_standalone_secret_store` opens
-        // a libSQL file directly under it without creating parents itself.
-        std::fs::create_dir_all(home_path).map_err(|error| {
-            anyhow::anyhow!("create reborn home {}: {error}", home_path.display())
-        })?;
-        let home_path = home_path.to_path_buf();
+        prepare_standalone_secret_store_root(state_root)?;
+        let state_root = state_root.to_path_buf();
         crate::runtime::block_on_cli(async move {
-            let store = ironclaw_composition::open_standalone_secret_store(&home_path)
+            let store = ironclaw_composition::open_standalone_secret_store(&state_root)
                 .await
                 .map_err(anyhow::Error::from)?;
             Ok::<_, anyhow::Error>(ironclaw_operator::LlmKeyStore::new(
@@ -404,16 +403,12 @@ impl SecretStoreOpener for StandaloneSecretStoreOpener {
 
     fn open_google_oauth_secret_store(
         &self,
-        home_path: &Path,
+        state_root: &Path,
     ) -> anyhow::Result<ironclaw_composition::GoogleOauthSecretStore> {
-        // See `open_llm_key_store` above: `config set` is a write command,
-        // so create the reborn home directory before opening the store.
-        std::fs::create_dir_all(home_path).map_err(|error| {
-            anyhow::anyhow!("create reborn home {}: {error}", home_path.display())
-        })?;
-        let home_path = home_path.to_path_buf();
+        prepare_standalone_secret_store_root(state_root)?;
+        let state_root = state_root.to_path_buf();
         crate::runtime::block_on_cli(async move {
-            let store = ironclaw_composition::open_standalone_secret_store(&home_path)
+            let store = ironclaw_composition::open_standalone_secret_store(&state_root)
                 .await
                 .map_err(anyhow::Error::from)?;
             Ok::<_, anyhow::Error>(ironclaw_composition::GoogleOauthSecretStore::new(store))
@@ -421,9 +416,49 @@ impl SecretStoreOpener for StandaloneSecretStoreOpener {
     }
 }
 
+/// Prepare a canonical state root before a standalone libSQL-backed secret
+/// store opens files beneath it. Secrets and their database must not retain
+/// group or world access inherited from the process umask.
+fn prepare_standalone_secret_store_root(state_root: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    let create_result = {
+        use std::os::unix::fs::DirBuilderExt as _;
+
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700).create(state_root)
+    };
+    #[cfg(not(unix))]
+    let create_result = std::fs::create_dir_all(state_root);
+
+    create_result.map_err(|error| {
+        anyhow::anyhow!(
+            "create canonical state root {}: {error}",
+            state_root.display()
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        std::fs::set_permissions(state_root, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| {
+                anyhow::anyhow!(
+                    "restrict canonical state root {} to its owner: {error}",
+                    state_root.display()
+                )
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
     use std::sync::{Arc, Mutex};
 
     struct FixedPromptSource {
@@ -542,6 +577,10 @@ mod tests {
         assert!(
             toml.contains("client_id = \"abc123.apps.googleusercontent.com\""),
             "config: {toml}"
+        );
+        assert!(
+            !crate::runtime::local_state_root(context.boot_config()).exists(),
+            "config.toml writes must not admit or create durable state"
         );
     }
 
@@ -763,22 +802,56 @@ mod tests {
                 .lock()
                 .expect("opened paths lock")
                 .as_slice(),
-            &[crate::runtime::local_runtime_storage_root(
-                context.boot_config(),
-                context.boot_config().profile(),
-            )],
-            "Google secrets must use the active profile's runtime storage root"
+            &[crate::runtime::local_state_root(context.boot_config())],
+            "Google secrets must use the canonical Reborn state root"
+        );
+    }
+
+    #[test]
+    fn secret_write_refuses_legacy_state_before_opening_the_store() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let home = context.boot_config().home().path();
+        let legacy_root = home.join("local-dev");
+        std::fs::create_dir_all(&legacy_root).expect("create legacy root");
+        std::fs::write(
+            ironclaw_composition::standalone_db_path(&legacy_root),
+            b"legacy database marker",
+        )
+        .expect("write legacy durable state");
+        let opener = FakeSecretStoreOpener::new();
+
+        let error = set_value_key(
+            &context,
+            ConfigKey::GoogleClientSecret,
+            None,
+            &mut FixedPromptSource::new(vec!["GOCSPX-abc123"]),
+            &opener,
+        )
+        .expect_err("legacy state must be rejected before the secret store opens");
+
+        assert!(
+            error.to_string().contains("legacy"),
+            "unexpected admission error: {error:#}"
+        );
+        assert!(
+            opener
+                .opened_paths
+                .lock()
+                .expect("opened paths lock")
+                .is_empty(),
+            "layout admission must run before opening the secret store"
         );
     }
 
     /// `config set` on a secret-destination key may be the FIRST command a
-    /// never-onboarded home runs, before `onboard` creates the reborn home
-    /// directory. Drives the real `StandaloneSecretStoreOpener` (not
+    /// never-onboarded home runs, before `onboard` creates the canonical
+    /// state namespace. Drives the real `StandaloneSecretStoreOpener` (not
     /// `FakeSecretStoreOpener`) so it actually reaches
     /// `open_standalone_secret_store`'s libSQL file-open and needs
     /// `create_dir_all` to succeed.
     #[test]
-    fn google_client_secret_write_creates_the_reborn_home_directory_on_a_never_onboarded_host() {
+    fn google_client_secret_write_creates_the_canonical_state_directory_on_a_never_onboarded_host()
+    {
         let _guard = crate::runtime::test_env::lock_runtime_env();
         // Snapshot-and-restore rather than an unconditional `remove_var`:
         // the surrounding `cargo test` invocation may itself already export
@@ -806,8 +879,19 @@ mod tests {
         );
 
         result.expect(
-            "writing a secret-destination key must create the reborn home directory \
+            "writing a secret-destination key must create the canonical state directory \
              on first use, not surface a raw SQLITE_CANTOPEN",
+        );
+
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(crate::runtime::local_state_root(context.boot_config()))
+                .expect("canonical state root exists after secret write")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "the canonical secret-store root must be owner-only"
         );
     }
 
@@ -880,11 +964,8 @@ mod tests {
                 .lock()
                 .expect("opened paths lock")
                 .as_slice(),
-            &[crate::runtime::local_runtime_storage_root(
-                context.boot_config(),
-                context.boot_config().profile(),
-            )],
-            "LLM keys must use the active profile's runtime storage root"
+            &[crate::runtime::local_state_root(context.boot_config())],
+            "LLM keys must use the canonical Reborn state root"
         );
     }
 

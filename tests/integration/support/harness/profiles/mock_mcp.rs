@@ -71,6 +71,7 @@ pub(crate) async fn mock_mcp_tools(
         durable_capability_io_thread_service: Mutex::new(None),
         durable_capability_io_requested: false,
         root,
+        storage_paths: None,
         workspace_root,
         mounts,
         capability_mount_overrides: Vec::new(),

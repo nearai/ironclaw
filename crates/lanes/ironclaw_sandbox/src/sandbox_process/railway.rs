@@ -17,13 +17,15 @@ use std::{
 use async_trait::async_trait;
 use tokio::{io::AsyncReadExt, process::Command, sync::Mutex};
 
-use ironclaw_host_api::process::{
-    CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
+use ironclaw_host_api::{
+    ids::TenantUserWorkspaceKey,
+    process::{
+        CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError,
+        SandboxCommandTransport,
+    },
 };
 
-use crate::sandbox_process::RebornSandboxUserKey;
-
-use super::worker_spec::DOCKER_WORKER_USER as WORKER_USER;
+use super::{sandbox_user_container_name, worker_spec::DOCKER_WORKER_USER as WORKER_USER};
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES: u16 = 5;
 // Pin the exact multi-platform manifest exercised by the Railway preview
@@ -338,7 +340,7 @@ impl std::fmt::Debug for RailwayPreviewSandboxConfig {
 pub struct RailwayPreviewSandboxTransport {
     config: RailwayPreviewSandboxConfig,
     cli: Arc<dyn RailwayCli>,
-    users: Arc<Mutex<HashMap<RebornSandboxUserKey, TrackedUserState>>>,
+    users: Arc<Mutex<HashMap<TenantUserWorkspaceKey, TrackedUserState>>>,
     max_tracked_users: usize,
 }
 
@@ -366,7 +368,7 @@ impl RailwayPreviewSandboxTransport {
 
     async fn state_for(
         &self,
-        key: RebornSandboxUserKey,
+        key: TenantUserWorkspaceKey,
     ) -> Result<Arc<Mutex<UserSandboxState>>, RuntimeProcessError> {
         let mut users = self.users.lock().await;
         if let Some(tracked) = users.get_mut(&key) {
@@ -406,7 +408,7 @@ impl RailwayPreviewSandboxTransport {
 
     async fn provision(
         &self,
-        key: &RebornSandboxUserKey,
+        key: &TenantUserWorkspaceKey,
         state: &mut UserSandboxState,
         deadline: Instant,
         output_limit: usize,
@@ -490,7 +492,7 @@ impl RailwayPreviewSandboxTransport {
 
     async fn checkpoint(
         &self,
-        key: &RebornSandboxUserKey,
+        key: &TenantUserWorkspaceKey,
         sandbox_id: &str,
         output_limit: usize,
     ) -> Result<(), RuntimeProcessError> {
@@ -677,13 +679,17 @@ impl SandboxCommandTransport for RailwayPreviewSandboxTransport {
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
         reject_request_environment(&request)?;
+        let _mandatory_workspace_grant = super::mounts::validate_mandatory_workspace_mount_view(
+            &request.scope,
+            request.mounts.as_ref(),
+        )?;
         reject_nul("command", &request.command)?;
         let workdir = validated_workdir(request.workdir.as_deref())?;
         let timeout = request_timeout(request.timeout_secs);
         let output_limit = DEFAULT_OUTPUT_LIMIT;
         let started = Instant::now();
         let deadline = started + timeout;
-        let key = RebornSandboxUserKey::from_scope(&request.scope);
+        let key = TenantUserWorkspaceKey::from_scope(&request.scope);
         let state = self.state_for(key.clone()).await?;
 
         // Per-user lifecycle gate: first provision, worker bootstrap, and all
@@ -1288,12 +1294,15 @@ fn ephemeral_worker_argv(
     args
 }
 
-fn railway_workspace_path(key: &RebornSandboxUserKey) -> String {
-    format!("{RAILWAY_WORKSPACES_ROOT}/{}", key.container_name())
+fn railway_workspace_path(key: &TenantUserWorkspaceKey) -> String {
+    format!(
+        "{RAILWAY_WORKSPACES_ROOT}/{}",
+        sandbox_user_container_name(key)
+    )
 }
 
-fn checkpoint_name(key: &RebornSandboxUserKey) -> String {
-    format!("{}-checkpoint", key.container_name())
+fn checkpoint_name(key: &TenantUserWorkspaceKey) -> String {
+    format!("{}-checkpoint", sandbox_user_container_name(key))
 }
 
 fn request_timeout(requested: Option<u64>) -> Duration {

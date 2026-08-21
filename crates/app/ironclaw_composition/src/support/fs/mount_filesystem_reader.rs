@@ -360,7 +360,12 @@ mod tests {
         let root = Arc::new(InMemoryBackend::new());
         let reader = MountScopedFilesystemReader::new(Arc::new(ScopedFilesystem::new(
             Arc::clone(&root),
-            crate::runtime_mounts::scoped_browse_mount_view,
+            |scope| {
+                crate::runtime_mounts::webui_browse_mount_view(
+                    &crate::runtime_mounts::WorkspaceMountPolicy::PerCaller,
+                    scope,
+                )
+            },
         )));
         let alice = user_scope("alice");
         let bob = user_scope("bob");

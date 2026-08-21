@@ -10,7 +10,7 @@
 //!
 //!    ```bash
 //!    ANTHROPIC_API_KEY=... \
-//!    IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_ROOT=/path/to/reborn/local-dev \
+//!    IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_ROOT=/path/to/ironclaw-reborn \
 //!      cargo test --test reborn_qa_recorded_behavior record_ \
 //!        -- --ignored --test-threads=1 --nocapture
 //!    ```
@@ -37,8 +37,10 @@
 //!
 //!    Fixtures that exercise auth-gated Google integrations import the
 //!    configured Google product-auth account from the local Reborn store.
-//!    By default the source is `$IRONCLAW_REBORN_HOME/local-dev` (or
-//!    `~/.ironclaw/reborn/local-dev`) using `[identity]` from
+//!    By default the source is the Reborn installation root
+//!    `$IRONCLAW_REBORN_HOME` (or `~/.ironclaw/reborn`) — the directory that
+//!    holds `config.toml` and `state/`, not a profile subdirectory and not
+//!    `state/` itself — using `[identity]` from
 //!    `$IRONCLAW_REBORN_HOME/config.toml`; override with
 //!    `IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_ROOT`,
 //!    `IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_TENANT`,

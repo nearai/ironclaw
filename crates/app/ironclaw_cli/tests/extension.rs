@@ -210,7 +210,7 @@ fn preserve_windows_runtime_environment(command: &mut Command) {
 }
 
 fn standalone_runtime_root(reborn_home: &Path) -> std::path::PathBuf {
-    reborn_home.join(ironclaw_config::RebornProfile::Standalone.local_runtime_storage_subdir())
+    reborn_home.to_path_buf()
 }
 
 fn write_extension_fixture(reborn_home: &Path, extension_id: &str) {
@@ -228,6 +228,7 @@ fn write_extension_fixture_with_metadata(
     name: &str,
     description: &str,
 ) {
+    initialize_fresh_canonical_layout(reborn_home);
     let extension_root = standalone_runtime_root(reborn_home)
         .join("system/extensions")
         .join(extension_id);
@@ -272,6 +273,15 @@ prompt_doc_ref = "prompts/zztest-mcp/search_issues.md"
         ),
     )
     .expect("fixture extension manifest");
+}
+
+fn initialize_fresh_canonical_layout(reborn_home: &Path) {
+    let layout = run_extension_json(reborn_home, &["search", "--json"]);
+    assert_eq!(layout["payload"]["kind"], "extension_search");
+    assert!(
+        reborn_home.join("layout.toml").is_file(),
+        "the CLI startup path must publish a canonical layout before the fixture adds system content"
+    );
 }
 
 fn toml_basic_string_value(value: &str) -> String {

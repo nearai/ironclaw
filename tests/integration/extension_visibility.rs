@@ -67,6 +67,66 @@ async fn host_internal_capability_is_hidden_from_the_model_and_uncallable() {
         .expect("run recovered after the rejected call");
 }
 
+/// The caller-owned fixture installation is visible to the owning user but
+/// must not leak into another user's model surface. This goes through the
+/// shared capability harness and its production refreshing-port factory, so a
+/// harness that aggregates active extensions without the caller filter would
+/// advertise `visprobe.search` here.
+#[tokio::test]
+async fn caller_owned_extension_capabilities_are_hidden_from_other_users() {
+    let group = RebornIntegrationGroup::extension_visibility_probe()
+        .await
+        .expect("visibility-probe group builds");
+
+    let owner = group
+        .thread("conv-visprobe-owner")
+        .script([RebornScriptedReply::text("owner sees their extension")])
+        .build()
+        .await
+        .expect("owner thread builds");
+    owner
+        .submit_turn("show my tools")
+        .await
+        .expect("owner turn completes");
+    owner
+        .assert_model_tools_contains("visprobe__search")
+        .await
+        .expect("owning user sees their installed extension capability");
+    let capability_harness = group
+        .capability_harness()
+        .expect("visibility-probe group uses the host-runtime capability harness");
+    let runtime = capability_harness
+        .reborn_services_for_test()
+        .expect("visibility-probe harness has a composed runtime");
+    let generic_host = ironclaw_composition::test_support::generic_extension_host_for_test(runtime)
+        .expect("visibility-probe fixture is mirrored into the generic host");
+    let active_extension = generic_host
+        .snapshot()
+        .await
+        .extension("visprobe")
+        .expect("visibility-probe fixture is active in the generic host");
+    assert_eq!(
+        active_extension.installation_id, "visprobe",
+        "the generic host must receive the same installation id persisted for the fixture"
+    );
+
+    let non_owner = group
+        .thread("conv-visprobe-non-owner")
+        .with_actor_id("reborn-extension-visibility-non-owner")
+        .script([RebornScriptedReply::text("other user has no visprobe tool")])
+        .build()
+        .await
+        .expect("non-owner thread builds");
+    non_owner
+        .submit_turn("show my tools")
+        .await
+        .expect("non-owner turn completes");
+    non_owner
+        .assert_model_tools_excludes("visprobe__search")
+        .await
+        .expect("another user must not see the caller-owned extension capability");
+}
+
 /// Regression for the Attio incident: ordinary authentication vocabulary in
 /// both registry-installed and local package descriptions remains usable
 /// prompt text. Actual credential values are handled later by the

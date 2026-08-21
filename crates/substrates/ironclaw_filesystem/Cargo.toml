@@ -27,6 +27,8 @@ test-support = []
 [dependencies]
 async-trait = "0.1"
 blake3 = "1"
+cap-fs-ext = "4.0.2"
+cap-std = "4.0.2"
 deadpool = { version = "0.13", default-features = false, features = ["managed", "rt_tokio_1"] }
 deadpool-postgres = "0.14"
 ironclaw_host_api = { path = "../../contracts/ironclaw_host_api", version = "0.1.0" }
@@ -36,13 +38,14 @@ ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+same-file = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "sync", "time"] }
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
 tracing = "0.1"
 
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+[target.'cfg(any(target_os = "android", target_os = "ios", target_os = "linux", target_os = "macos", target_os = "redox", target_os = "tvos", target_os = "visionos", target_os = "watchos"))'.dependencies]
+rustix = { version = "1.1.4", features = ["fs"] }
 
 [dev-dependencies]
 tempfile = "3"

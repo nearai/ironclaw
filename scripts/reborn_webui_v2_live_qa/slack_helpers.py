@@ -381,7 +381,7 @@ def _persisted_slack_personal_dm_payload(reborn_home: Path, user_id: str) -> dic
     # The generic channel DM-target store (one record per `(extension, user)`
     # under `/tenants/{tenant}/shared/channel-dm-targets/{extension}/{user}.json`)
     # replaced the Slack-specific `slack-personal-binding/dm-targets` layout.
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
     if not db_path.exists():
         return None
     with closing(sqlite3.connect(db_path)) as db:
@@ -440,7 +440,7 @@ def _slack_host_state_path_segment(value: str) -> str:
 
 
 def _slack_setup_from_reborn_home(reborn_home: Path) -> dict[str, object] | None:
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
     if not db_path.exists():
         return None
     try:
@@ -713,7 +713,7 @@ def _seed_slack_personal_dm_target(
             "error": "slack_dm_channel_id_must_start_with_d",
             "dm_channel_id": dm_channel_id,
         }
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
     _root_filesystem_create_table(db_path)
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     # Generic channel DM-target record: one per `(extension, user)`, carrying
@@ -775,8 +775,8 @@ def _materialize_slack_env_from_reborn_home(
     reborn_home: Path,
     config_text: str,
 ) -> tuple[dict[str, str], dict[str, object]]:
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
-    master_key_path = reborn_home / "local-dev" / ".reborn-local-dev-secrets-master-key"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
+    master_key_path = reborn_home / "state" / ".reborn-local-dev-secrets-master-key"
     preflight: dict[str, object] = {
         "source": "reborn_home",
         "db_present": db_path.exists(),
@@ -916,8 +916,8 @@ def _slack_personal_auth_preflight(
     *,
     requires_slack_personal_auth: bool,
 ) -> dict[str, object]:
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
-    master_key_path = reborn_home / "local-dev" / ".reborn-local-dev-secrets-master-key"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
+    master_key_path = reborn_home / "state" / ".reborn-local-dev-secrets-master-key"
     token_env = _slack_env_field(SLACK_PERSONAL_ACCESS_TOKEN_ENV_NAMES, extra_env)
     preflight: dict[str, object] = {
         "requires_slack_personal_auth": requires_slack_personal_auth,
@@ -1114,8 +1114,8 @@ def _seed_generated_slack_product_auth_if_configured(
         preflight["missing"] = missing
         return preflight
 
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
-    master_key_path = reborn_home / "local-dev" / ".reborn-local-dev-secrets-master-key"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
+    master_key_path = reborn_home / "state" / ".reborn-local-dev-secrets-master-key"
     master_key_path.parent.mkdir(parents=True, exist_ok=True)
     if master_key_path.exists():
         master_key = master_key_path.read_text(encoding="utf-8").strip()
