@@ -113,7 +113,10 @@ mod tests {
             r#"{"user_message":{"message_ref":"msg:a"}}"#,
             r#"{"follow_up":{"message_ref":"msg:b"}}"#,
             r#"{"steering":{"message_ref":"msg:c"}}"#,
+            r#"{"interrupt":{"kind":"user_interrupt"}}"#,
+            r#"{"cancel":{"reason_kind":"user_requested"}}"#,
             r#"{"gate_resolved":{"gate_ref":"gate:d"}}"#,
+            r#"{"capability_surface_changed":{"version":"v1"}}"#,
         ] {
             serde_json::from_str::<LoopInput>(raw)
                 .unwrap_or_else(|error| panic!("{raw} must still parse: {error}"));
