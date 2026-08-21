@@ -1,29 +1,31 @@
-//! Labels-as-identity container registry for the persistent per-user
-//! sandbox model. Three responsibilities:
+//! Docker label identity plus bounded process-local lifecycle bookkeeping.
 //!
-//! 1. Docker label construction/parsing for `{tenant, user, created_at}`
-//!    identity — crash-safe (survives daemon restart), no DB.
-//! 2. A push-based in-memory last-activity map ([`SandboxActivityRegistry`]).
-//!    The exec transport calls [`SandboxActivityRegistry::touch`] after
-//!    every successful command; the reaper only ever reads via
-//!    `idle_for`/`last_activity` — it never inspects container stats to
-//!    infer activity. Labels are immutable post-create and NEVER carry this
-//!    mutable state.
-//! 3. A push-based in-memory per-user background-job map
-//!    ([`BackgroundJobRegistry`]), keyed the same way, so the foreground
-//!    command path can render a "still-live background processes" footer.
+//! User containers carry immutable tenant, user, image, and posture labels so
+//! a new IronClaw process can adopt them safely. Mutable active-exec counts,
+//! activity timestamps, and per-user lifecycle gates remain in
+//! [`SandboxActivityRegistry`]. The background-job registry stays separate
+//! because those jobs track process metadata rather than container lifecycle.
 
 use std::{
     collections::HashMap,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use bollard::models::ContainerSummary;
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::ids::{TenantId, UserId};
+use ironclaw_host_api::{
+    ids::{TenantId, UserId},
+    process::RuntimeProcessError,
+};
 
 use crate::sandbox_process::user_key::RebornSandboxUserKey;
+
+pub(crate) const USER_CONTAINER_LABEL_PREFIX: &str = "ironclaw";
+pub(crate) const USER_CONTAINER_LABEL_TENANT: &str = "ironclaw.tenant";
+pub(crate) const USER_CONTAINER_LABEL_USER: &str = "ironclaw.user";
+pub(crate) const USER_CONTAINER_LABEL_IMAGE: &str = "ironclaw.image";
+pub(crate) const USER_CONTAINER_LABEL_SECURITY_POSTURE: &str = "ironclaw.security_posture";
 
 pub(crate) fn label_tenant(prefix: &str) -> String {
     format!("{prefix}.tenant")
@@ -31,29 +33,20 @@ pub(crate) fn label_tenant(prefix: &str) -> String {
 pub(crate) fn label_user(prefix: &str) -> String {
     format!("{prefix}.user")
 }
-#[allow(dead_code)] // consumed by exec_transport's container-create path, not in this PR
+pub(crate) fn label_image(prefix: &str) -> String {
+    format!("{prefix}.image")
+}
+/// Creation timestamp used by both launch compatibility and attribution.
 pub(crate) fn label_created_at(prefix: &str) -> String {
     format!("{prefix}.created_at")
 }
 
-/// Stamps the container with the security-posture generation
-/// [`super::exec_transport::security_posture_stamp`] computed at create
-/// time — the container-side analogue of `verify_existing_egress_network_
-/// posture`'s network check. `ensure_container` reads this label back on
-/// every subsequent lookup and recycles the container the moment the stamp
-/// no longer matches what the running code would create today, so a
-/// hardening change (e.g. W1's non-root PID 1) reaches existing containers
-/// on their next use instead of waiting up to the reaper's 7-day forced
-/// recycle.
-#[allow(dead_code)] // consumed by exec_transport's container-create path, not in this PR
+/// Label for the deterministic security and mount posture used at creation.
 pub(crate) fn label_security_posture(prefix: &str) -> String {
     format!("{prefix}.security_posture")
 }
 
-// Only called from `#[cfg(test)]` code in this PR (this file's own tests and
-// attribution.rs's `real_docker_resolves_a_live_container_on_the_egress_network`)
-// — dead_code still fires on a non-test build because the real caller
-// (exec_transport's container-create path) is not in this PR.
+// Retained for attribution callers that still need only per-user labels.
 #[allow(dead_code)]
 pub(crate) fn build_user_container_labels(
     prefix: &str,
@@ -71,8 +64,47 @@ pub(crate) fn build_user_container_labels(
         ),
     ])
 }
+pub(crate) fn build_user_container_launch_labels(
+    prefix: &str,
+    tenant_id: &TenantId,
+    user_id: &UserId,
+    image: &str,
+    security_posture_stamp: &str,
+) -> HashMap<String, String> {
+    let mut labels =
+        build_user_container_labels(prefix, tenant_id, user_id, security_posture_stamp);
+    labels.insert(label_image(prefix), image.to_string());
+    labels
+}
 
-// consumed by exec_transport's container-lookup path, not in this PR
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExistingContainerDecision {
+    ReuseRunning,
+    StartStopped,
+    Recreate,
+}
+
+pub(crate) fn existing_container_decision(
+    labels: Option<&HashMap<String, String>>,
+    running: bool,
+    expected: &HashMap<String, String>,
+) -> ExistingContainerDecision {
+    let compatible = labels.is_some_and(|labels| {
+        expected
+            .iter()
+            .filter(|(key, _)| !key.ends_with(".created_at"))
+            .all(|(key, value)| labels.get(key) == Some(value))
+    });
+    if !compatible {
+        ExistingContainerDecision::Recreate
+    } else if running {
+        ExistingContainerDecision::ReuseRunning
+    } else {
+        ExistingContainerDecision::StartStopped
+    }
+}
+
+// Retained for per-user attribution lookup.
 #[allow(dead_code)]
 pub(crate) fn user_container_label_filter(
     prefix: &str,
@@ -88,7 +120,7 @@ pub(crate) fn user_container_label_filter(
     )])
 }
 
-// consumed by exec_transport's container-recycle path, not in this PR
+// Retained for older per-user recycle candidates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) struct UserContainerCandidate {
@@ -117,54 +149,192 @@ impl UserContainerCandidate {
     }
 }
 
-/// Push-based in-memory map of per-user last-activity timestamps, keyed on
-/// [`RebornSandboxUserKey`]. Cross-crate consumers (e.g. the reborn runtime
-/// composition wiring that owns the reaper loop) need to construct and pass
-/// this registry, so it is `pub` and re-exported at the crate root — unlike
-/// the label helpers and candidate type above, which stay internal to this
-/// crate.
-///
-/// No production caller in this PR: the exec transport that calls `touch`
-/// after every command, and the reaper that reads `idle_for`, both land in a
-/// later PR on top of `exec_transport`/`reaper` (out of scope here — see
-/// this PR's description). `#[allow(dead_code)]` keeps the lint gate quiet
-/// rather than adding a fake caller.
+/// Per-user execution activity and lifecycle gates. Each gate serializes shell
+/// commands for one tenant and user; different users have different gates.
+/// Mutable activity is process-local; immutable identity and compatibility
+/// remain in Docker labels.
 #[derive(Debug, Default)]
-#[allow(dead_code)]
 pub struct SandboxActivityRegistry {
-    last_activity: Mutex<HashMap<RebornSandboxUserKey, Instant>>,
+    state: Mutex<HashMap<RebornSandboxUserKey, ActivityEntry>>,
 }
 
-#[allow(dead_code)]
+#[derive(Debug)]
+struct ActivityEntry {
+    last_activity: Instant,
+    active_execs: usize,
+    gate: Arc<tokio::sync::Mutex<()>>,
+    expected_labels: Option<HashMap<String, String>>,
+    recycle_required: bool,
+}
+
+const MAX_TRACKED_USERS: usize = 4096;
+
 impl SandboxActivityRegistry {
     pub fn new() -> Self {
         Self::default()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<RebornSandboxUserKey, Instant>> {
-        // Recover from poisoning rather than panic: a background reaper
-        // must never crash the whole process over a prior panic elsewhere
-        // that poisoned this unrelated mutex.
-        self.last_activity
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<RebornSandboxUserKey, ActivityEntry>> {
+        self.state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
-    pub(crate) fn touch(&self, key: &RebornSandboxUserKey) {
-        self.lock().insert(key.clone(), Instant::now());
+    pub(crate) fn begin(
+        self: &Arc<Self>,
+        key: &RebornSandboxUserKey,
+    ) -> Result<SandboxActivityGuard, RuntimeProcessError> {
+        let mut state = self.lock();
+        if !state.contains_key(key) && state.len() >= MAX_TRACKED_USERS {
+            let oldest_inactive = state
+                .iter()
+                .filter(|(_, entry)| {
+                    entry.active_execs == 0
+                        && !entry.recycle_required
+                        && Arc::strong_count(&entry.gate) == 1
+                        && entry.expected_labels.is_none()
+                })
+                .min_by_key(|(_, entry)| entry.last_activity)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest_inactive {
+                state.remove(&oldest);
+            } else {
+                return Err(RuntimeProcessError::ExecutionFailed(
+                    "sandbox user activity registry is at capacity".to_string(),
+                ));
+            }
+        }
+        let entry = state.entry(key.clone()).or_insert_with(|| ActivityEntry {
+            last_activity: Instant::now(),
+            active_execs: 0,
+            gate: Arc::new(tokio::sync::Mutex::new(())),
+            expected_labels: None,
+            recycle_required: false,
+        });
+        entry.active_execs = entry.active_execs.saturating_add(1);
+        entry.last_activity = Instant::now();
+        Ok(SandboxActivityGuard {
+            registry: Arc::clone(self),
+            key: key.clone(),
+        })
     }
 
-    pub(crate) fn last_activity(&self, key: &RebornSandboxUserKey) -> Option<Instant> {
-        self.lock().get(key).copied()
+    pub(crate) fn gate(&self, key: &RebornSandboxUserKey) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        self.lock().get(key).map(|entry| Arc::clone(&entry.gate))
     }
 
-    pub(crate) fn forget(&self, key: &RebornSandboxUserKey) {
-        self.lock().remove(key);
+    pub(crate) fn set_expected_labels(
+        &self,
+        key: &RebornSandboxUserKey,
+        labels: HashMap<String, String>,
+    ) {
+        if let Some(entry) = self.lock().get_mut(key) {
+            entry.expected_labels = Some(labels);
+        }
     }
 
-    pub(crate) fn idle_for(&self, key: &RebornSandboxUserKey, now: Instant) -> Option<Duration> {
-        self.last_activity(key)
-            .map(|activity| now.saturating_duration_since(activity))
+    pub(crate) fn mark_recycle_required(&self, key: &RebornSandboxUserKey) {
+        if let Some(entry) = self.lock().get_mut(key) {
+            entry.recycle_required = true;
+        }
+    }
+
+    pub(crate) fn clear_recycle_required(&self, key: &RebornSandboxUserKey) {
+        if let Some(entry) = self.lock().get_mut(key) {
+            entry.recycle_required = false;
+        }
+    }
+
+    pub(crate) fn recycle_required(&self, key: &RebornSandboxUserKey) -> bool {
+        self.lock()
+            .get(key)
+            .is_some_and(|entry| entry.recycle_required)
+    }
+
+    pub(crate) fn register_discovered_container(
+        &self,
+        key: RebornSandboxUserKey,
+        labels: HashMap<String, String>,
+    ) -> Result<(), RuntimeProcessError> {
+        let mut state = self.lock();
+        if let Some(entry) = state.get_mut(&key) {
+            entry.expected_labels = Some(labels);
+            return Ok(());
+        }
+        if state.len() >= MAX_TRACKED_USERS {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox user activity registry is at capacity".to_string(),
+            ));
+        }
+        state.insert(
+            key,
+            ActivityEntry {
+                last_activity: Instant::now(),
+                active_execs: 0,
+                gate: Arc::new(tokio::sync::Mutex::new(())),
+                expected_labels: Some(labels),
+                recycle_required: false,
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn sweep_candidates(
+        &self,
+        now: Instant,
+        idle_timeout: Duration,
+    ) -> Vec<(RebornSandboxUserKey, HashMap<String, String>)> {
+        self.lock()
+            .iter()
+            .filter(|(_, entry)| {
+                entry.active_execs == 0
+                    && !entry.recycle_required
+                    && now.saturating_duration_since(entry.last_activity) >= idle_timeout
+            })
+            .filter_map(|(key, entry)| {
+                entry
+                    .expected_labels
+                    .as_ref()
+                    .map(|labels| (key.clone(), labels.clone()))
+            })
+            .collect()
+    }
+
+    pub(crate) fn sweep_eligible(
+        &self,
+        key: &RebornSandboxUserKey,
+        now: Instant,
+        idle_timeout: Duration,
+    ) -> bool {
+        self.lock().get(key).is_some_and(|entry| {
+            entry.active_execs == 0
+                && !entry.recycle_required
+                && now.saturating_duration_since(entry.last_activity) >= idle_timeout
+        })
+    }
+
+    pub(crate) fn forget_if_inactive(&self, key: &RebornSandboxUserKey) {
+        let mut state = self.lock();
+        if state
+            .get(key)
+            .is_some_and(|entry| entry.active_execs == 0 && !entry.recycle_required)
+        {
+            state.remove(key);
+        }
+    }
+}
+
+pub(crate) struct SandboxActivityGuard {
+    registry: Arc<SandboxActivityRegistry>,
+    key: RebornSandboxUserKey,
+}
+
+impl Drop for SandboxActivityGuard {
+    fn drop(&mut self) {
+        if let Some(entry) = self.registry.lock().get_mut(&self.key) {
+            entry.active_execs = entry.active_execs.saturating_sub(1);
+            entry.last_activity = Instant::now();
+        }
     }
 }
 
@@ -182,9 +352,8 @@ pub(crate) struct BackgroundJob {
 }
 
 /// Push-based in-memory map of per-user background job launches, keyed on
-/// [`RebornSandboxUserKey`] the same way [`SandboxActivityRegistry`] is.
-/// Kept as a sibling registry (single responsibility) rather than folded
-/// into the activity map.
+/// [`RebornSandboxUserKey`]. This remains separate from
+/// [`SandboxActivityRegistry`].
 ///
 /// No production caller in this PR — see [`BackgroundJob`].
 ///
@@ -244,7 +413,26 @@ impl BackgroundJobRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::ids::{TenantId, UserId};
+    use ironclaw_host_api::{
+        ids::{TenantId, ThreadId, UserId},
+        resource::ResourceScope,
+    };
+    fn active_execs(registry: &SandboxActivityRegistry, key: &RebornSandboxUserKey) -> usize {
+        registry
+            .lock()
+            .get(key)
+            .map_or(0, |entry| entry.active_execs)
+    }
+
+    fn set_last_activity(
+        registry: &SandboxActivityRegistry,
+        key: &RebornSandboxUserKey,
+        activity: Instant,
+    ) {
+        if let Some(entry) = registry.lock().get_mut(key) {
+            entry.last_activity = activity;
+        }
+    }
 
     #[test]
     fn label_filter_targets_tenant_and_user_labels_only() {
@@ -259,6 +447,41 @@ mod tests {
                 "ironclaw.tenant=tenant-a".to_string(),
                 "ironclaw.user=user-a".to_string(),
             ]
+        );
+    }
+    #[test]
+    fn compatibility_requires_every_user_identity_and_posture_label() {
+        let tenant = TenantId::new("tenant-a").unwrap();
+        let user = UserId::new("user-a").unwrap();
+        let expected =
+            build_user_container_launch_labels("ironclaw", &tenant, &user, "image:v1", "p1");
+
+        assert_eq!(
+            existing_container_decision(Some(&expected), true, &expected),
+            ExistingContainerDecision::ReuseRunning
+        );
+        assert_eq!(
+            existing_container_decision(Some(&expected), false, &expected),
+            ExistingContainerDecision::StartStopped
+        );
+        assert!(!expected.contains_key("ironclaw.thread"));
+
+        for key in [
+            label_tenant("ironclaw"),
+            label_user("ironclaw"),
+            label_image("ironclaw"),
+            label_security_posture("ironclaw"),
+        ] {
+            let mut mismatched = expected.clone();
+            mismatched.insert(key, "different".to_string());
+            assert_eq!(
+                existing_container_decision(Some(&mismatched), true, &expected),
+                ExistingContainerDecision::Recreate
+            );
+        }
+        assert_eq!(
+            existing_container_decision(None, true, &expected),
+            ExistingContainerDecision::Recreate
         );
     }
 
@@ -313,17 +536,20 @@ mod tests {
         assert!(UserContainerCandidate::from_summary(&container, "ironclaw").is_none());
     }
 
-    fn test_key(tenant: &str, user: &str) -> RebornSandboxUserKey {
-        let scope = ironclaw_host_api::resource::ResourceScope {
+    fn test_scope(tenant: &str, user: &str, thread: Option<&str>) -> ResourceScope {
+        ResourceScope {
             tenant_id: TenantId::new(tenant).unwrap(),
             user_id: UserId::new(user).unwrap(),
             agent_id: None,
             project_id: None,
             mission_id: None,
-            thread_id: None,
+            thread_id: thread.map(|value| ThreadId::new(value).unwrap()),
             invocation_id: ironclaw_host_api::ids::InvocationId::new(),
-        };
-        RebornSandboxUserKey::from_scope(&scope)
+        }
+    }
+
+    fn test_key(tenant: &str, user: &str) -> RebornSandboxUserKey {
+        RebornSandboxUserKey::from_scope(&test_scope(tenant, user, None))
     }
 
     #[test]
@@ -449,96 +675,126 @@ mod tests {
     }
 
     #[test]
-    fn activity_registry_touch_then_idle_for_reports_elapsed_duration() {
-        let registry = SandboxActivityRegistry::new();
-        let tenant = TenantId::new("t").unwrap();
-        let user = UserId::new("u").unwrap();
-        let scope = ironclaw_host_api::resource::ResourceScope {
-            tenant_id: tenant,
-            user_id: user,
-            agent_id: None,
-            project_id: None,
-            mission_id: None,
-            thread_id: None,
-            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
-        };
-        let key = RebornSandboxUserKey::from_scope(&scope);
-
-        assert!(registry.last_activity(&key).is_none());
-        registry.touch(&key);
-        let idle = registry.idle_for(&key, Instant::now() + Duration::from_secs(5));
-        assert!(idle.unwrap() >= Duration::from_secs(5));
-    }
-
-    #[test]
-    fn activity_registry_forget_clears_the_entry() {
-        let registry = SandboxActivityRegistry::new();
-        let scope = ironclaw_host_api::resource::ResourceScope {
-            tenant_id: TenantId::new("t").unwrap(),
-            user_id: UserId::new("u").unwrap(),
-            agent_id: None,
-            project_id: None,
-            mission_id: None,
-            thread_id: None,
-            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
-        };
-        let key = RebornSandboxUserKey::from_scope(&scope);
-        registry.touch(&key);
-
-        registry.forget(&key);
-
-        assert!(registry.last_activity(&key).is_none());
-    }
-
-    #[test]
-    fn activity_registry_survives_concurrent_touch_read_and_forget() {
-        // `SandboxActivityRegistry` is a shared `Mutex` meant to be hit
-        // concurrently by exec transport (touch after every command) and the
-        // reaper (idle_for/forget) from separate tasks — every prior test
-        // here is strictly sequential. This drives real concurrent access
-        // from multiple OS threads: the assertion is simply that it
-        // completes without panicking/deadlocking (a poisoned or
-        // deadlocked mutex would hang or panic this test) and that state
-        // from a still-touching thread is observable afterwards.
-        use std::sync::Arc;
-        use std::thread;
-
+    fn lifecycle_gate_serializes_one_user_but_not_different_users() {
         let registry = Arc::new(SandboxActivityRegistry::new());
-        let keys: Vec<RebornSandboxUserKey> = (0..8)
-            .map(|index| test_key("t", &format!("user-{index}")))
-            .collect();
+        let first = RebornSandboxUserKey::from_scope(&test_scope("t", "u", Some("thread-one")));
+        let second = RebornSandboxUserKey::from_scope(&test_scope("t", "u", Some("thread-two")));
+        let without_thread = RebornSandboxUserKey::from_scope(&test_scope("t", "u", None));
+        let other_user = RebornSandboxUserKey::from_scope(&test_scope("t", "other", None));
 
-        let mut handles = Vec::new();
-        for key in keys.clone() {
-            let registry = Arc::clone(&registry);
-            handles.push(thread::spawn(move || {
-                for _ in 0..200 {
-                    registry.touch(&key);
-                    let _ = registry.last_activity(&key);
-                    let _ = registry.idle_for(&key, Instant::now());
-                }
-            }));
-        }
-        // A concurrent forget on a disjoint key set, so touch/read on one
-        // key and forget on another race on the same underlying map.
-        let forget_registry = Arc::clone(&registry);
-        let forget_key = test_key("t", "user-forget-target");
-        forget_registry.touch(&forget_key);
-        handles.push(thread::spawn(move || {
-            for _ in 0..200 {
-                forget_registry.touch(&forget_key);
-                forget_registry.forget(&forget_key);
-            }
-        }));
+        let first_guard = registry.begin(&first).unwrap();
+        let second_guard = registry.begin(&second).unwrap();
+        let other_user_guard = registry.begin(&other_user).unwrap();
 
-        for handle in handles {
-            handle
-                .join()
-                .expect("registry access thread must not panic");
+        assert_eq!(first, second);
+        assert_eq!(first, without_thread);
+        let first_gate = registry.gate(&first).unwrap();
+        let same_user_gate = registry.gate(&without_thread).unwrap();
+        let other_user_gate = registry.gate(&other_user).unwrap();
+        assert!(Arc::ptr_eq(&first_gate, &same_user_gate));
+        assert!(!Arc::ptr_eq(&first_gate, &other_user_gate));
+        let _first_lock = first_gate.try_lock().unwrap();
+        assert!(same_user_gate.try_lock().is_err());
+        assert!(other_user_gate.try_lock().is_ok());
+        assert_eq!(active_execs(&registry, &without_thread), 2);
+
+        drop(first_guard);
+        drop(second_guard);
+        drop(other_user_guard);
+        assert_eq!(active_execs(&registry, &first), 0);
+    }
+
+    #[test]
+    fn activity_guard_tracks_active_exec_and_updates_last_activity_on_drop() {
+        let registry = Arc::new(SandboxActivityRegistry::new());
+        let key = test_key("t", "u");
+        let guard = registry.begin(&key).unwrap();
+        registry.set_expected_labels(
+            &key,
+            HashMap::from([("identity".to_string(), "v".to_string())]),
+        );
+
+        assert_eq!(active_execs(&registry, &key), 1);
+        assert!(
+            registry
+                .sweep_candidates(Instant::now(), Duration::ZERO)
+                .is_empty()
+        );
+
+        drop(guard);
+        assert_eq!(active_execs(&registry, &key), 0);
+        let candidates = registry.sweep_candidates(Instant::now(), Duration::ZERO);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0, key);
+    }
+
+    #[test]
+    fn sweep_eligibility_requires_zero_active_execs_and_elapsed_idle_timeout() {
+        let registry = Arc::new(SandboxActivityRegistry::new());
+        let key = test_key("t", "u");
+        let guard = registry.begin(&key).unwrap();
+        set_last_activity(&registry, &key, Instant::now() - Duration::from_secs(60));
+
+        assert!(!registry.sweep_eligible(&key, Instant::now(), Duration::from_secs(30)));
+        drop(guard);
+        assert!(!registry.sweep_eligible(&key, Instant::now(), Duration::from_secs(30)));
+
+        set_last_activity(&registry, &key, Instant::now() - Duration::from_secs(60));
+        assert!(registry.sweep_eligible(&key, Instant::now(), Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn inactive_entries_can_be_pruned_but_active_entries_cannot() {
+        let registry = Arc::new(SandboxActivityRegistry::new());
+        let key = test_key("t", "u");
+        let guard = registry.begin(&key).unwrap();
+
+        registry.forget_if_inactive(&key);
+        assert_eq!(active_execs(&registry, &key), 1);
+
+        drop(guard);
+        registry.forget_if_inactive(&key);
+        assert!(registry.gate(&key).is_none());
+    }
+    #[test]
+    fn registry_capacity_evicts_only_container_free_entries() {
+        let registry = Arc::new(SandboxActivityRegistry::new());
+        for index in 0..MAX_TRACKED_USERS {
+            let key = test_key("tenant", &format!("free-{index}"));
+            drop(registry.begin(&key).unwrap());
         }
 
-        for key in &keys {
-            assert!(registry.last_activity(key).is_some());
+        let extra = test_key("tenant", "extra");
+        drop(
+            registry
+                .begin(&extra)
+                .expect("container-free entry is evictable"),
+        );
+        assert!(registry.gate(&extra).is_some());
+        assert_eq!(registry.lock().len(), MAX_TRACKED_USERS);
+    }
+
+    #[test]
+    fn registry_capacity_never_evicts_container_backed_entries() {
+        let registry = Arc::new(SandboxActivityRegistry::new());
+        for index in 0..MAX_TRACKED_USERS {
+            let key = test_key("tenant", &format!("container-{index}"));
+            drop(registry.begin(&key).unwrap());
+            registry.set_expected_labels(
+                &key,
+                HashMap::from([("container".to_string(), index.to_string())]),
+            );
         }
+        let result = registry.begin(&test_key("tenant", "overflow"));
+        let Err(error) = result else {
+            panic!("container-backed entries must not be orphaned");
+        };
+        assert_eq!(
+            error,
+            RuntimeProcessError::ExecutionFailed(
+                "sandbox user activity registry is at capacity".to_string()
+            )
+        );
+        assert_eq!(registry.lock().len(), MAX_TRACKED_USERS);
     }
 }

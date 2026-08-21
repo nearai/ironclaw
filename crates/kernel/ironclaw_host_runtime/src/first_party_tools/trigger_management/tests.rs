@@ -1,4 +1,6 @@
 use chrono::{Datelike, TimeZone};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId};
+use ironclaw_turns::TurnRunId;
 
 use super::*;
 
@@ -141,6 +143,23 @@ fn trigger_resume_description_requires_explicit_lifecycle_intent() {
             .contains("explicitly asks to resume or enable"),
         "checking for duplicates or ensuring exactly one routine must stay read-only: {}",
         manifest.description
+    );
+}
+
+#[test]
+fn trigger_run_manifest_is_registered_and_forbids_automation_origin() {
+    let manifest = manifests()
+        .expect("trigger manifests")
+        .into_iter()
+        .find(|manifest| manifest.id.as_str() == TRIGGER_RUN_CAPABILITY_ID)
+        .expect("trigger run manifest");
+
+    assert_eq!(
+        manifest
+            .origin_gate_matrix
+            .expect("trigger run origin gate matrix")
+            .automation,
+        ironclaw_host_api::capability::OriginGatePolicy::Forbidden,
     );
 }
 
@@ -593,6 +612,7 @@ const MUTATION_CAPABILITIES: &[&str] = &[
     TRIGGER_REMOVE_CAPABILITY_ID,
     TRIGGER_PAUSE_CAPABILITY_ID,
     TRIGGER_RESUME_CAPABILITY_ID,
+    TRIGGER_RUN_CAPABILITY_ID,
 ];
 
 fn once_create_input(name: &str) -> Value {
@@ -609,6 +629,7 @@ fn origin_test_handler(create_hook: Arc<dyn TriggerCreateHook>) -> TriggerManage
         create_hook,
         clock: Arc::new(SystemTriggerManagementClock),
         active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
+        manual_fire_runner: Arc::new(MissingTriggerManualFireRunner),
     }
 }
 
@@ -717,7 +738,7 @@ async fn interactive_and_product_origins_may_create_a_routine() {
 
 #[tokio::test]
 async fn scheduled_origin_may_still_list_routines() {
-    // Read-only `trigger_list` is never denied — only the four mutations are.
+    // Read-only `trigger_list` is never denied — only the mutations are.
     let handler = origin_test_handler(Arc::new(NoopTriggerCreateHook));
     let result = dispatch_with_origin(
         &handler,
@@ -730,6 +751,228 @@ async fn scheduled_origin_may_still_list_routines() {
     assert!(
         result.output["triggers"].is_array(),
         "trigger_list must return a triggers array under a scheduled origin"
+    );
+}
+
+#[derive(Debug)]
+struct FixedManualFireRunner {
+    outcome: TriggerManualFireOutcome,
+}
+
+#[derive(Debug, Default)]
+struct RecordingManualFireRunner {
+    calls: std::sync::Mutex<Vec<(TenantId, TriggerId)>>,
+}
+
+#[async_trait]
+impl TriggerManualFireRunner for RecordingManualFireRunner {
+    async fn run_manual_fire(
+        &self,
+        tenant_id: TenantId,
+        trigger_id: TriggerId,
+        _now: DateTime<Utc>,
+    ) -> Result<TriggerManualFireOutcome, TriggerError> {
+        self.calls
+            .lock()
+            .expect("manual fire calls lock")
+            .push((tenant_id, trigger_id));
+        Ok(TriggerManualFireOutcome::Submitted {
+            run_id: TurnRunId::new(),
+        })
+    }
+}
+
+#[async_trait]
+impl TriggerManualFireRunner for FixedManualFireRunner {
+    async fn run_manual_fire(
+        &self,
+        _tenant_id: ironclaw_host_api::ids::TenantId,
+        _trigger_id: TriggerId,
+        _now: DateTime<Utc>,
+    ) -> Result<TriggerManualFireOutcome, TriggerError> {
+        Ok(self.outcome.clone())
+    }
+}
+
+async fn caller_scoped_trigger_fixture()
+-> (Arc<InMemoryTriggerRepository>, ResourceScope, TriggerId) {
+    let scope = ResourceScope::local_default(
+        UserId::new("trigger-run-user").expect("user"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+    let trigger_id = TriggerId::new();
+    let now = Utc::now();
+    let record = TriggerRecord {
+        trigger_id,
+        tenant_id: scope.tenant_id.clone(),
+        creator_user_id: scope.user_id.clone(),
+        agent_id: scope.agent_id.clone(),
+        project_id: scope.project_id.clone(),
+        name: "manual-run-target".to_string(),
+        source: TriggerSourceKind::Schedule,
+        schedule: TriggerSchedule::Cron {
+            expression: "0 9 * * *".to_string(),
+            timezone: "UTC".to_string(),
+        },
+        prompt: "run the routine".to_string(),
+        execution_spec: None,
+        delivery_target: None,
+        state: TriggerState::Scheduled,
+        next_run_at: now + chrono::Duration::hours(8),
+        last_run_at: None,
+        last_fired_slot: None,
+        last_status: None,
+        active_fire_slot: None,
+        active_run_ref: None,
+        created_at: now,
+    };
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    repository
+        .upsert_trigger(record)
+        .await
+        .expect("seed caller-scoped trigger");
+    (repository, scope, trigger_id)
+}
+
+#[tokio::test]
+async fn trigger_run_returns_typed_input_issues_for_bad_and_unknown_ids() {
+    let (repository, scope, _) = caller_scoped_trigger_fixture().await;
+    let runner = FixedManualFireRunner {
+        outcome: TriggerManualFireOutcome::NotFound,
+    };
+
+    for input in [
+        json!({}),
+        json!({"trigger_id": "not-an-id"}),
+        json!({
+            "trigger_id": TriggerId::new().to_string()
+        }),
+    ] {
+        let error = run_trigger(&*repository, &runner, &scope, input, Utc::now())
+            .await
+            .expect_err("bad or unknown trigger id must be rejected");
+        let FirstPartyCapabilityError::Dispatch {
+            kind,
+            detail: Some(detail),
+            ..
+        } = error
+        else {
+            panic!("expected structured dispatch input failure");
+        };
+        assert_eq!(kind, RuntimeDispatchErrorKind::InputEncode);
+        let ironclaw_host_api::dispatch::DispatchFailureDetail::InvalidInput { issues } = *detail
+        else {
+            panic!("expected invalid-input detail");
+        };
+        assert!(!issues.is_empty(), "input failure must carry typed issues");
+    }
+}
+
+#[tokio::test]
+async fn trigger_run_maps_active_and_paused_outcomes_to_safe_failures() {
+    let (repository, scope, trigger_id) = caller_scoped_trigger_fixture().await;
+    for (outcome, expected_kind, expected_summary) in [
+        (
+            TriggerManualFireOutcome::AlreadyActive {
+                active_fire_slot: Some(Utc::now()),
+                active_run_ref: None,
+            },
+            RuntimeDispatchErrorKind::OperationFailed,
+            "trigger is already running",
+        ),
+        (
+            TriggerManualFireOutcome::Paused,
+            RuntimeDispatchErrorKind::PolicyDenied,
+            "paused trigger cannot be run",
+        ),
+        (
+            TriggerManualFireOutcome::Completed,
+            RuntimeDispatchErrorKind::OperationFailed,
+            "completed trigger cannot be run",
+        ),
+    ] {
+        let runner = FixedManualFireRunner { outcome };
+        let error = run_trigger(
+            &*repository,
+            &runner,
+            &scope,
+            json!({"trigger_id": trigger_id.to_string()}),
+            Utc::now(),
+        )
+        .await
+        .expect_err("non-started manual fire must be model-visible failure");
+        let FirstPartyCapabilityError::Dispatch {
+            kind, safe_summary, ..
+        } = error
+        else {
+            panic!("expected dispatch failure");
+        };
+        assert_eq!(kind, expected_kind);
+        assert_eq!(safe_summary.as_deref(), Some(expected_summary));
+    }
+}
+
+#[tokio::test]
+async fn trigger_run_maps_submitted_outcome_to_bounded_success() {
+    let (repository, scope, trigger_id) = caller_scoped_trigger_fixture().await;
+    let run_id = ironclaw_turns::TurnRunId::new();
+    let runner = FixedManualFireRunner {
+        outcome: TriggerManualFireOutcome::Submitted { run_id },
+    };
+
+    let output = run_trigger(
+        &*repository,
+        &runner,
+        &scope,
+        json!({"trigger_id": trigger_id.to_string()}),
+        Utc::now(),
+    )
+    .await
+    .expect("manual trigger fire succeeds");
+
+    assert_eq!(output["trigger_id"], trigger_id.to_string());
+    assert_eq!(output["status"], "submitted");
+    assert_eq!(output["run_id"], run_id.to_string());
+}
+
+#[tokio::test]
+async fn trigger_run_rejects_a_target_outside_the_full_caller_scope() {
+    let (repository, scope, trigger_id) = caller_scoped_trigger_fixture().await;
+    let mut record = repository
+        .get_trigger(scope.tenant_id.clone(), trigger_id)
+        .await
+        .expect("load trigger")
+        .expect("trigger exists");
+    record.creator_user_id = UserId::new("different-user").expect("valid user");
+    record.agent_id = Some(AgentId::new("different-agent").expect("valid agent"));
+    record.project_id = Some(ProjectId::new("different-project").expect("valid project"));
+    repository
+        .upsert_trigger(record)
+        .await
+        .expect("replace trigger scope");
+    let runner = RecordingManualFireRunner::default();
+
+    let error = run_trigger(
+        &*repository,
+        &runner,
+        &scope,
+        json!({"trigger_id": trigger_id.to_string()}),
+        Utc::now(),
+    )
+    .await
+    .expect_err("a trigger outside the caller scope must be hidden");
+    let FirstPartyCapabilityError::Dispatch { kind, .. } = error else {
+        panic!("expected dispatch failure");
+    };
+    assert_eq!(kind, RuntimeDispatchErrorKind::InputEncode);
+    assert!(
+        runner
+            .calls
+            .lock()
+            .expect("manual fire calls lock")
+            .is_empty(),
+        "scope rejection must happen before manual-fire dispatch"
     );
 }
 

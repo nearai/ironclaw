@@ -40,7 +40,9 @@ call the surface, which PROPOSAL §6.1.3 keeps in product — plus **nine** wire
 DTOs whose fields name a crate `ironclaw_product_contracts` may not depend on.
 (Corrected 2026-08-02: this read "eleven". The WS5 `attachments widened` slice in
 the same PR moved `ProductAttachmentCapabilities`/`product_attachment_capabilities`
-into `ironclaw_attachments`, taking the residue baseline **102 → 100**. The
+into `ironclaw_attachments`, taking the residue baseline **102 → 100**;
+subsequent command inventory additions, including automation run-now, raised
+it to **104**. The
 authority is `WEBUI_PRODUCT_SYMBOL_BASELINE` in
 `reborn_transport_product_boundary.rs`, not this prose.) Every
 other DTO, request body, and descriptor *type* now comes from
@@ -139,7 +141,7 @@ candidate module.
 | `streaming` | Both live transports and everything that shapes a frame: SSE poll/keepalive tuning, capacity and concurrency rejection, cursor tokens, the envelope→event mapping, and the WebSocket drain loop | A product decision — a stream carries what the surface already produced | `SSE_POLL_INTERVAL`, `SSE_IDLE_POLL_MAX_INTERVAL`, `SSE_KEEPALIVE_INTERVAL`, `LAST_EVENT_ID_HEADER`, `sse_poll_interval_for_idle_polls`, `stream_events`, `sse_capacity_rejected`, `sse_concurrency_exhausted`, `StreamEventsQuery`, `stream_connection_id`, `SseErrorPayload`, `webchat_sse_event_from_envelope`, `sse_error_event`, `sse_keep_alive_event`, `build_sse_stream`, `parse_cursor_token`, `cursor_token`, `stream_events_ws`, `ws_drain_loop`, `ws_send_with_timeout` |
 | `runs` | Run control: cancel, retry, and gate resolution | Anything that reads a run — that is `threads` or `streaming` | `cancel_run`, `CancelRunPath`, `resolve_gate`, `ResolveGatePath`, `retry_run`, `RetryRunPath` |
 | `commands` | The product command surface: listing and executing | A command *constant* — those are `ironclaw_assistant`'s frozen inventory | `list_commands`, `ExecuteCommandBody`, `execute_command` |
-| `automations` | Automation listing and lifecycle (pause/resume/rename/delete) | Trigger evaluation — that is the triggers domain | `list_automations`, `pause_automation`, `resume_automation`, `rename_automation`, `delete_automation`, `ListAutomationsQuery` |
+| `automations` | Automation listing and lifecycle (run/pause/resume/rename/delete) | Trigger evaluation — that is the triggers domain | `list_automations`, `run_automation`, `pause_automation`, `resume_automation`, `rename_automation`, `delete_automation`, `ListAutomationsQuery` |
 | `suggestions` | Suggestion snapshot reads and generation/start/dismiss actions | Suggestion orchestration and durable state — those belong behind `ProductSurface` | `SUGGESTIONS_MAX_RETRY_AFTER_SECONDS`, `list_suggestions`, `generate_suggestions`, `start_suggestion`, `dismiss_suggestion` |
 | `traces` | Trace credits, account traces, the account login link, and hold authorization | Trace *content* — that is `ironclaw_trace_commons` | `trace_credits`, `trace_account_traces`, `trace_account_login_link`, `authorize_trace_hold` |
 | `outbound` | Outbound notification channels, delivery targets, the generic host-owned delivery-registration surface, and its capability-failure→HTTP classification | Delivery itself — the host owns the coordinator; channel-specific enrollment parsing belongs in the channel package | `get_notification_channels`, `set_notification_channels`, `CapabilityFailureHttpClass`, `capability_failure_http_class`, `capability_failure_bad_request`, `capability_resolution_succeeded`, `parse_thread_id_for_response`, `outbound_preferences_forbidden`, `outbound_preferences_unavailable`, `list_outbound_delivery_targets`, `notification_setup_status`, `notification_setup_enable`, `notification_setup_disable` |
@@ -198,7 +200,7 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.stream_events` | GET | `/api/webchat/v2/threads/{thread_id}/events` | **SSE** | `ProjectionOnly` |
 | `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | **WebSocket** | `ProjectionOnly` |
 | `webui.v2.cancel_run` / `retry_run` / `resolve_gate` | POST | `…/runs/{run_id}/…` | — | `TurnCoordinator` |
-| `webui.v2.list/pause/resume/rename/delete_automation` | GET/POST/DELETE | `/api/webchat/v2/automations…` | — | `ProductSurface` |
+| `webui.v2.list/run/pause/resume/rename/delete_automation` | GET/POST/DELETE | `/api/webchat/v2/automations…` | — | `ProductSurface` |
 | `webui.v2.suggestions.list/generate/start/dismiss` | GET/POST/DELETE | `/api/webchat/v2/suggestions…` | — | `ProductSurface` |
 | `webui.v2.list/install/import/remove/get_setup/setup_extension/register_hosted_mcp` | GET/POST | `/api/webchat/v2/extensions…` | — | `ProjectionOnly` / `ProductSurface` |
 | `webui.v2.ironhub_deliver_install` | POST | `/api/webchat/v2/ironhub/install` | — | `ProductSurface` |

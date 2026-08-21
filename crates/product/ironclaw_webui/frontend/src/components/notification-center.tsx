@@ -1,57 +1,17 @@
 import { useNavigate } from "react-router";
-import { createPortal } from "react-dom";
-import { Button } from "../design-system/button";
 import { Icon } from "../design-system/icons";
 import React from "react";
 import { useT } from "../lib/i18n";
 import { cn } from "../utils/cn";
 
-function NotificationRow({ message, unread, onOpen }) {
-  const t = useT();
-  return (
-    <button
-      type="button"
-      disabled={!message.href}
-      onClick={message.href ? () => onOpen(message) : undefined}
-      data-testid="notification-row"
-      className={cn(
-        "grid w-full grid-cols-[2rem_minmax(0,1fr)] gap-3 border-b border-[var(--v2-panel-border)] px-4 py-3 text-left last:border-0",
-        message.href
-          ? "hover:bg-[var(--v2-surface-soft)]"
-          : "cursor-default opacity-80"
-      )}
-    >
-      <span
-        className="grid h-8 w-8 place-items-center rounded-[8px] bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
-      >
-        <Icon name={message.icon || "bell"} className="h-4 w-4" />
-      </span>
-      <span className="min-w-0">
-        <span className="flex items-center gap-2">
-          <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
-            {message.title}
-          </span>
-          {unread &&
-          (<span
-            aria-label={t("notifications.unread")}
-            className="h-2 w-2 shrink-0 rounded-full bg-[var(--v2-danger-text)]"
-          />)}
-        </span>
-        <span className="mt-0.5 block truncate text-sm text-[var(--v2-text)]">
-          {message.body}
-        </span>
-        <span className="mt-1 flex min-w-0 items-center gap-2 text-[11px] text-[var(--v2-text-faint)]">
-          {message.detail &&
-          (<span className="truncate">{message.detail}</span>)}
-          {message.detail && message.timeLabel &&
-          (<span aria-hidden="true">·</span>)}
-          {message.timeLabel &&
-          (<span className="shrink-0">{message.timeLabel}</span>)}
-        </span>
-      </span>
-    </button>
-  );
-}
+/* The bell and its unread dot are always on screen, so they stay eager; the
+ * panel behind them only renders once opened and loads on demand, keeping its
+ * markup out of the /chat entry closure. */
+const NotificationPanel = React.lazy(() =>
+  import("./notification-panel").then(({ NotificationPanel }) => ({
+    default: NotificationPanel,
+  }))
+);
 
 export function NotificationCenter({ state }) {
   const t = useT();
@@ -64,24 +24,33 @@ export function NotificationCenter({ state }) {
   const hasUnread = state?.hasUnread || false;
   const unreadCount = state?.unreadCount || 0;
   const dismissMessage = state?.dismissMessage;
+  const prepareMessageOpen = state?.prepareMessageOpen;
+  const markAllRead = state?.markAllRead;
+  const archiveMessage = state?.archiveMessage;
+  const canLoadMore = state?.canLoadMore || false;
+  const loadMore = state?.loadMore;
+  const pageLimitReached = state?.pageLimitReached || false;
+  const isMarkingAllRead = state?.isMarkingAllRead || false;
+  const isLoading = state?.isLoading || false;
+  const error = state?.error || null;
+  const refetch = state?.refetch;
+
+  const collapsePages = state?.collapsePages;
 
   const close = React.useCallback(() => {
     setOpen(false);
+    collapsePages?.();
     triggerRef.current?.focus?.();
-  }, []);
+  }, [collapsePages]);
 
   const toggleOpen = React.useCallback(() => {
     const nextOpen = !open;
     setOpen(nextOpen);
     if (!nextOpen) {
+      collapsePages?.();
       triggerRef.current?.focus?.();
     }
-  }, [open]);
-
-  React.useEffect(() => {
-    if (!open) return;
-    panelRef.current?.focus?.();
-  }, [open]);
+  }, [collapsePages, open]);
 
   React.useEffect(() => {
     if (!open || typeof document === "undefined") return;
@@ -96,83 +65,15 @@ export function NotificationCenter({ state }) {
 
   const openMessage = React.useCallback(
     (message) => {
-      if (message?.id) dismissMessage?.(message.id);
+      if (message?.id) {
+        if (prepareMessageOpen) prepareMessageOpen(message);
+        else dismissMessage?.(message.id);
+      }
       close();
       if (message?.href) navigate(message.href);
     },
-    [close, dismissMessage, navigate],
+    [close, dismissMessage, navigate, prepareMessageOpen],
   );
-
-  const overlay = open
-    ? (
-        <React.Fragment>
-          <button
-            type="button"
-            aria-label={t("notifications.close")}
-            onClick={close}
-            tabIndex={-1}
-            className="fixed inset-0 z-[9998] bg-black/35 lg:bg-transparent"
-          />
-          <section
-            role="dialog"
-            aria-label={t("notifications.title")}
-            data-testid="notification-panel"
-            ref={panelRef}
-            tabIndex={-1}
-            className={cn(
-              "fixed inset-x-0 bottom-0 z-[9999] max-h-[78dvh] overflow-hidden",
-              "rounded-t-[16px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] shadow-[0_24px_70px_-24px_rgba(0,0,0,0.8)]",
-              "lg:inset-auto lg:right-12 lg:top-16 lg:w-[24rem] lg:max-h-[min(70vh,32rem)] lg:rounded-[12px]"
-            )}
-          >
-            <div className="flex items-center justify-between gap-3 border-b border-[var(--v2-panel-border)] px-4 py-3">
-              <div className="min-w-0">
-                <h2 className="text-sm font-semibold text-[var(--v2-text-strong)]">
-                  {t("notifications.title")}
-                </h2>
-                <p className="mt-0.5 text-xs text-[var(--v2-text-muted)]">
-                  {unreadCount > 0
-                    ? t("notifications.unreadCount", { count: unreadCount })
-                    : t("notifications.allCaughtUp")}
-                </p>
-              </div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                onClick={close}
-                aria-label={t("notifications.close")}
-                title={t("notifications.close")}
-              >
-                <Icon name="close" className="h-4 w-4" />
-              </Button>
-            </div>
-
-            <div className="max-h-[calc(78dvh-4.5rem)] overflow-y-auto lg:max-h-[calc(min(70vh,32rem)-4.5rem)]">
-              {messages.length === 0
-                ? (
-                    <div className="px-4 py-8 text-center">
-                      <div className="text-sm font-semibold text-[var(--v2-text-strong)]">
-                        {t("notifications.emptyTitle")}
-                      </div>
-                      <div className="mt-1 text-sm text-[var(--v2-text-muted)]">
-                        {t("notifications.emptyDescription")}
-                      </div>
-                    </div>
-                  )
-                : messages.map((message) => (
-                    <NotificationRow
-                      key={message.id}
-                      message={message}
-                      unread={unreadIds.has(message.id)}
-                      onOpen={openMessage}
-                    />
-                  ))}
-            </div>
-          </section>
-        </React.Fragment>
-      )
-    : null;
 
   return (
     <div className="relative">
@@ -200,9 +101,28 @@ export function NotificationCenter({ state }) {
         )}
       </button>
 
-      {overlay && typeof document !== "undefined"
-        ? createPortal(overlay, document.body)
-        : null}
+      {open &&
+      (
+        <React.Suspense fallback={null}>
+          <NotificationPanel
+            messages={messages}
+            unreadIds={unreadIds}
+            unreadCount={unreadCount}
+            isLoading={isLoading}
+            error={error}
+            refetch={refetch}
+            markAllRead={markAllRead}
+            isMarkingAllRead={isMarkingAllRead}
+            canLoadMore={canLoadMore}
+            loadMore={loadMore}
+            pageLimitReached={pageLimitReached}
+            openMessage={openMessage}
+            archiveMessage={archiveMessage}
+            close={close}
+            panelRef={panelRef}
+          />
+        </React.Suspense>
+      )}
     </div>
   );
 }

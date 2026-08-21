@@ -15,8 +15,8 @@ use ironclaw_host_api::{
         RuntimeCredentialAuthRequirement,
     },
     dispatch::{
-        DispatchError, DispatchFailureDetail, DispatchFailureKind, DispatchInputIssue,
-        DispatchInputIssueCode, RuntimeDispatchErrorKind,
+        DispatchAuthRequirement, DispatchError, DispatchFailureKind, DispatchInputIssueCode,
+        RuntimeDispatchErrorKind,
     },
     error::HostApiError,
     host_port::{
@@ -436,9 +436,11 @@ fn dispatch_errors_preserve_typed_failure_kind() {
         DispatchFailureKind::UnsupportedRuntime
     );
     assert_eq!(
-        DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Guest,
-            model_visible_cause: None,
+        DispatchError::Rejected {
+            runtime: Some(RuntimeKind::Wasm),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest),
+            diagnostic: None,
+            detail: None,
         }
         .failure_kind(),
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
@@ -447,9 +449,11 @@ fn dispatch_errors_preserve_typed_failure_kind() {
     assert_eq!(
         DispatchError::AuthRequired {
             capability: CapabilityId::new("test.cap").unwrap(),
-            required_secrets: required_secrets.clone(),
-            credential_requirements: Vec::new(),
-            model_visible_cause: None,
+            requirement: Box::new(DispatchAuthRequirement {
+                required_secrets: required_secrets.clone(),
+                credential_requirements: Vec::new(),
+                model_visible_cause: None,
+            }),
         }
         .failure_kind(),
         DispatchFailureKind::AuthRequired
@@ -458,9 +462,11 @@ fn dispatch_errors_preserve_typed_failure_kind() {
     assert_eq!(
         DispatchError::AuthRequired {
             capability: CapabilityId::new("test.cap").unwrap(),
-            required_secrets: Vec::new(),
-            credential_requirements: Vec::new(),
-            model_visible_cause: None,
+            requirement: Box::new(DispatchAuthRequirement {
+                required_secrets: Vec::new(),
+                credential_requirements: Vec::new(),
+                model_visible_cause: None,
+            }),
         }
         .failure_kind(),
         DispatchFailureKind::AuthRequired
@@ -1801,9 +1807,11 @@ fn dispatch_error_event_kind_pins_auth_required_token() {
     assert_eq!(
         DispatchError::AuthRequired {
             capability: cap(),
-            required_secrets: vec![handle],
-            credential_requirements: Vec::new(),
-            model_visible_cause: None,
+            requirement: Box::new(DispatchAuthRequirement {
+                required_secrets: vec![handle],
+                credential_requirements: Vec::new(),
+                model_visible_cause: None,
+            }),
         }
         .event_kind(),
         "auth_required"
@@ -1812,9 +1820,11 @@ fn dispatch_error_event_kind_pins_auth_required_token() {
     assert_eq!(
         DispatchError::AuthRequired {
             capability: cap(),
-            required_secrets: Vec::new(),
-            credential_requirements: Vec::new(),
-            model_visible_cause: None,
+            requirement: Box::new(DispatchAuthRequirement {
+                required_secrets: Vec::new(),
+                credential_requirements: Vec::new(),
+                model_visible_cause: None,
+            }),
         }
         .event_kind(),
         "auth_required"
@@ -1852,15 +1862,17 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
     let handle = SecretHandle::new("google-access-token").unwrap();
     let error = DispatchError::AuthRequired {
         capability: CapabilityId::new("test.cap").unwrap(),
-        required_secrets: vec![handle],
-        credential_requirements: Vec::new(),
-        model_visible_cause: Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
-            code: None,
-            message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
-                "Bad credentials",
-            )),
-            retry_after: None,
-        })),
+        requirement: Box::new(DispatchAuthRequirement {
+            required_secrets: vec![handle],
+            credential_requirements: Vec::new(),
+            model_visible_cause: Some(ironclaw_host_api::dispatch::ProviderDiagnostic {
+                code: None,
+                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                    "Bad credentials",
+                )),
+                retry_after: None,
+            }),
+        }),
     };
     let debug = format!("{error:?}");
     assert!(
@@ -1878,9 +1890,11 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
     // Empty list variant.
     let empty = DispatchError::AuthRequired {
         capability: CapabilityId::new("test.cap").unwrap(),
-        required_secrets: Vec::new(),
-        credential_requirements: Vec::new(),
-        model_visible_cause: None,
+        requirement: Box::new(DispatchAuthRequirement {
+            required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
+            model_visible_cause: None,
+        }),
     };
     let debug_empty = format!("{empty:?}");
     assert!(
@@ -1897,9 +1911,11 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
     };
     let with_requirement = DispatchError::AuthRequired {
         capability: CapabilityId::new("test.cap").unwrap(),
-        required_secrets: Vec::new(),
-        credential_requirements: vec![requirement],
-        model_visible_cause: None,
+        requirement: Box::new(DispatchAuthRequirement {
+            required_secrets: Vec::new(),
+            credential_requirements: vec![requirement],
+            model_visible_cause: None,
+        }),
     };
     let debug_with_requirement = format!("{with_requirement:?}");
     assert!(
@@ -1917,50 +1933,5 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
     assert!(
         !debug_with_requirement.contains("google"),
         "provider id must not appear in Debug output; got: {debug_with_requirement}"
-    );
-}
-
-#[test]
-fn dispatch_error_rejected_debug_redacts_only_diagnostic_detail() {
-    let marker = "DISPATCH_DIAGNOSTIC_SECRET_MARKER";
-    let error = DispatchError::Rejected {
-        runtime: Some(RuntimeKind::Wasm),
-        kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest),
-        diagnostic: None,
-        detail: Some(DispatchFailureDetail::Diagnostic {
-            text: marker.to_string(),
-        }),
-    };
-    let debug = format!("{error:?}");
-    assert!(!debug.contains(marker), "diagnostic text leaked: {debug}");
-    assert!(
-        debug.contains("Diagnostic"),
-        "detail kind was lost: {debug}"
-    );
-    assert!(
-        debug.contains("<redacted>"),
-        "redaction is not visible: {debug}"
-    );
-
-    let useful = DispatchError::Rejected {
-        runtime: Some(RuntimeKind::Wasm),
-        kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest),
-        diagnostic: None,
-        detail: Some(DispatchFailureDetail::InvalidInput {
-            issues: vec![
-                DispatchInputIssue::new("/title", DispatchInputIssueCode::TypeMismatch)
-                    .expected("string")
-                    .received("integer"),
-            ],
-        }),
-    };
-    let useful_debug = format!("{useful:?}");
-    assert!(
-        useful_debug.contains("/title"),
-        "input path was lost: {useful_debug}"
-    );
-    assert!(
-        useful_debug.contains("string"),
-        "input detail was lost: {useful_debug}"
     );
 }

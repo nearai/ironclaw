@@ -24,7 +24,9 @@ use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
 
-use crate::dispatch::{CapabilityDispatchResult, CapabilityDispatcher, DispatchError};
+use crate::dispatch::{
+    CapabilityDispatchResult, CapabilityDispatcher, DispatchAuthRequirement, DispatchError,
+};
 use crate::{
     Timestamp,
     authorized::Authorized,
@@ -99,9 +101,11 @@ impl TestDispatcher {
         Self::responding(|request, _| {
             Err(DispatchError::AuthRequired {
                 capability: request.invocation.capability.clone(),
-                required_secrets: Vec::new(),
-                credential_requirements: Vec::new(),
-                model_visible_cause: None,
+                requirement: Box::new(DispatchAuthRequirement {
+                    required_secrets: Vec::new(),
+                    credential_requirements: Vec::new(),
+                    model_visible_cause: None,
+                }),
             })
         })
     }
@@ -225,9 +229,11 @@ mod tests {
     fn auth_required_err(cap: &str) -> DispatchError {
         DispatchError::AuthRequired {
             capability: CapabilityId::new(cap).unwrap(),
-            required_secrets: Vec::new(),
-            credential_requirements: Vec::new(),
-            model_visible_cause: None,
+            requirement: Box::new(DispatchAuthRequirement {
+                required_secrets: Vec::new(),
+                credential_requirements: Vec::new(),
+                model_visible_cause: None,
+            }),
         }
     }
 
@@ -295,9 +301,11 @@ mod tests {
             if idx == 0 && req.invocation.capability.as_str() == "test.first" {
                 Err(DispatchError::AuthRequired {
                     capability: req.invocation.capability.clone(),
-                    required_secrets: Vec::new(),
-                    credential_requirements: Vec::new(),
-                    model_visible_cause: None,
+                    requirement: Box::new(DispatchAuthRequirement {
+                        required_secrets: Vec::new(),
+                        credential_requirements: Vec::new(),
+                        model_visible_cause: None,
+                    }),
                 })
             } else {
                 Err(DispatchError::UnknownCapability {

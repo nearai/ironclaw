@@ -24,6 +24,7 @@ use ironclaw_host_api::{
     mount::MountView,
     path::VirtualPath,
     resource::{ResourceEstimate, ResourceScope},
+    runtime::RuntimeKind,
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_processes::*;
@@ -566,9 +567,11 @@ async fn capability_host_returns_specific_error_for_authorizer_fingerprint_misma
 async fn capability_host_retains_fresh_pending_invocation_for_outcome_terminalization() {
     let registry = registry_with_echo_capability();
     let dispatcher = TestDispatcher::responding(|_, _| {
-        Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Backend,
-            model_visible_cause: None,
+        Err(DispatchError::Rejected {
+            runtime: Some(RuntimeKind::Wasm),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            diagnostic: None,
+            detail: None,
         })
     });
     let authorizer = GrantAuthorizer::new();
@@ -905,9 +908,11 @@ async fn capability_host_denies_resume_when_trust_ceiling_omits_capability_effec
 async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume() {
     let registry = registry_with_echo_capability();
     let dispatcher = TestDispatcher::responding(|_, _| {
-        Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Backend,
-            model_visible_cause: None,
+        Err(DispatchError::Rejected {
+            runtime: Some(RuntimeKind::Wasm),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            diagnostic: None,
+            detail: None,
         })
     });
     let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();

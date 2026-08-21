@@ -1,25 +1,25 @@
 //! Reborn-native user sandbox command transport.
 //!
-//! The transport derives host workspace identity from tenant plus user. It
-//! deliberately avoids project-, thread-, and invocation-scoped storage so one
-//! user's workspace persists across turns while different users remain isolated.
+//! Host workspaces and local Docker containers derive from tenant plus user and
+//! persist across threads. Container-local process state is therefore shared by
+//! all threads owned by the same authenticated user.
+//! The per-user lifecycle gate serializes commands for one user while allowing
+//! different users to run in parallel.
 
 use std::{
     collections::HashMap,
     path::{Component, Path, PathBuf},
-    time::{Duration, Instant},
+    sync::Arc,
+    time::Duration,
 };
 
 use async_trait::async_trait;
 use bollard::{
     Docker,
-    container::{
-        Config, CreateContainerOptions, LogOutput, LogsOptions, RemoveContainerOptions,
-        StartContainerOptions, WaitContainerOptions,
-    },
+    container::Config,
     models::{HostConfig, HostConfigLogConfig},
 };
-use futures_util::StreamExt;
+use fs2::FileExt;
 use ironclaw_host_api::resource::ResourceScope;
 
 use ironclaw_host_api::process::{
@@ -37,11 +37,11 @@ mod network_allowlist;
 mod railway;
 mod scope_key;
 pub(crate) mod shell_limits;
+mod user_container;
 mod worker_spec;
 
-// `user_key` is the production per-user workspace identity shared by local
-// Docker and Railway. `registry` and `attribution` remain future egress/lifecycle
-// primitives and stay crate-private.
+// `user_key` is the shared per-user workspace and local Docker container
+// identity. Railway keeps its existing backend-specific lifecycle.
 mod attribution;
 mod registry;
 mod user_key;
@@ -61,8 +61,26 @@ pub use registry::SandboxActivityRegistry;
 pub use scope_key::RebornSandboxScopeKey;
 pub use user_key::RebornSandboxUserKey;
 
+/// Stable Docker container-name prefix used by the local per-user sandbox.
+pub const USER_SANDBOX_CONTAINER_NAME_PREFIX: &str = user_key::USER_CONTAINER_NAME_PREFIX;
+/// Number of hexadecimal digest characters in a local per-user container name.
+pub const USER_SANDBOX_CONTAINER_DIGEST_HEX_LEN: usize = user_key::USER_CONTAINER_DIGEST_HEX_LEN;
+/// Stable tenant label on local per-user sandbox containers.
+pub const USER_SANDBOX_LABEL_TENANT: &str = registry::USER_CONTAINER_LABEL_TENANT;
+/// Stable user label on local per-user sandbox containers.
+pub const USER_SANDBOX_LABEL_USER: &str = registry::USER_CONTAINER_LABEL_USER;
+/// Stable immutable-image label on local per-user sandbox containers.
+pub const USER_SANDBOX_LABEL_IMAGE: &str = registry::USER_CONTAINER_LABEL_IMAGE;
+/// Stable security-posture label on local per-user sandbox containers.
+pub const USER_SANDBOX_LABEL_SECURITY_POSTURE: &str =
+    registry::USER_CONTAINER_LABEL_SECURITY_POSTURE;
+
 const DEFAULT_IMAGE: &str = "ironclaw-worker:latest";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(shell_limits::SHELL_TIMEOUT_DEFAULT_SECS);
+const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+// Cover the longest admitted shell command plus host-kill and reconcile grace.
+const USER_LIFECYCLE_GATE_ACQUIRE_TIMEOUT: Duration =
+    Duration::from_secs(shell_limits::SHELL_TIMEOUT_MAX_SECS + 10);
 const DEFAULT_MEMORY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DEFAULT_CPU_SHARES: u32 = 1024;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = shell_limits::SHELL_OUTPUT_LIMIT_DEFAULT_BYTES as usize;
@@ -98,6 +116,7 @@ pub struct RebornSandboxConfig {
     mount_sources: RebornSandboxMountSources,
     image: String,
     default_timeout: Duration,
+    idle_timeout: Duration,
     memory_bytes: u64,
     cpu_shares: u32,
     max_output_bytes: usize,
@@ -116,6 +135,7 @@ impl RebornSandboxConfig {
                 .or_else(|_| std::env::var("IRONCLAW_SANDBOX_IMAGE"))
                 .unwrap_or_else(|_| DEFAULT_IMAGE.to_string()),
             default_timeout: DEFAULT_TIMEOUT,
+            idle_timeout: DEFAULT_IDLE_TIMEOUT,
             memory_bytes: DEFAULT_MEMORY_BYTES,
             cpu_shares: DEFAULT_CPU_SHARES,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
@@ -133,6 +153,10 @@ impl RebornSandboxConfig {
 
     pub fn with_default_timeout(mut self, timeout: Duration) -> Self {
         self.default_timeout = timeout;
+        self
+    }
+    pub fn with_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.idle_timeout = timeout;
         self
     }
 
@@ -239,10 +263,83 @@ impl RebornSandboxConfig {
     }
 }
 
+struct LocalDockerOwnerLock {
+    _file: std::fs::File,
+}
+
+impl LocalDockerOwnerLock {
+    async fn acquire(workspace_root: &Path) -> Result<Arc<Self>, RuntimeProcessError> {
+        tokio::fs::create_dir_all(workspace_root)
+            .await
+            .map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox workspace root could not be initialized: {error}"
+                ))
+            })?;
+        let lock_path = workspace_root.join(".ironclaw-sandbox-owner.lock");
+        let file = tokio::task::spawn_blocking(move || {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(lock_path)
+                .map_err(|error| {
+                    RuntimeProcessError::ExecutionFailed(format!(
+                        "sandbox workspace ownership could not be opened: {error}"
+                    ))
+                })?;
+            file.try_lock_exclusive().map_err(|error| {
+                if error.kind() == std::io::ErrorKind::WouldBlock {
+                    RuntimeProcessError::ExecutionFailed(
+                        "sandbox Docker workspace is already owned by another IronClaw process"
+                            .to_string(),
+                    )
+                } else {
+                    RuntimeProcessError::ExecutionFailed(format!(
+                        "sandbox workspace ownership could not be acquired: {error}"
+                    ))
+                }
+            })?;
+            Ok(file)
+        })
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox workspace ownership task failed: {error}"
+            ))
+        })??;
+        Ok(Arc::new(Self { _file: file }))
+    }
+}
+
 #[derive(Clone)]
 pub struct RebornScopedSandboxCommandTransport {
     docker: Docker,
     config: RebornSandboxConfig,
+    activity: Arc<SandboxActivityRegistry>,
+    sweeper: Arc<user_container::UserContainerSweeper>,
+    _owner_lock: Arc<LocalDockerOwnerLock>,
+}
+
+#[cfg(test)]
+mod test_support {
+    use super::*;
+
+    pub(super) fn transport(
+        docker: Docker,
+        config: RebornSandboxConfig,
+    ) -> RebornScopedSandboxCommandTransport {
+        RebornScopedSandboxCommandTransport {
+            docker,
+            config,
+            activity: Arc::new(SandboxActivityRegistry::new()),
+            sweeper: user_container::test_support::disabled_sweeper(),
+            _owner_lock: Arc::new(LocalDockerOwnerLock {
+                _file: tempfile::tempfile().expect("create test-only ownership handle"),
+            }),
+        }
+    }
 }
 
 impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
@@ -261,12 +358,25 @@ impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
 
 impl RebornScopedSandboxCommandTransport {
     pub async fn connect(config: RebornSandboxConfig) -> Result<Self, RuntimeProcessError> {
+        let owner_lock = LocalDockerOwnerLock::acquire(&config.workspace_root).await?;
         let docker = connect_docker().await?;
-        Ok(Self::new(docker, config))
+        let activity = Arc::new(SandboxActivityRegistry::new());
+        let sweeper = user_container::UserContainerSweeper::spawn(
+            docker.clone(),
+            Arc::clone(&activity),
+            config.idle_timeout,
+        );
+        Ok(Self {
+            docker,
+            config,
+            activity,
+            sweeper,
+            _owner_lock: owner_lock,
+        })
     }
 
-    pub fn new(docker: Docker, config: RebornSandboxConfig) -> Self {
-        Self { docker, config }
+    pub async fn shutdown(&self) {
+        self.sweeper.shutdown().await;
     }
 
     // `into_process_port` was deleted with the lane merge: it returned
@@ -336,87 +446,30 @@ impl RebornScopedSandboxCommandTransport {
         }
     }
 
-    async fn execute_in_container(
-        &self,
-        request: CommandExecutionRequest,
-        workspace: &Path,
-        workdir: ContainerWorkdir,
-        timeout: Duration,
-    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
-        let user_key = RebornSandboxUserKey::from_scope(&request.scope);
-        let container_name = format!("{}-{}", user_key.container_name(), uuid::Uuid::new_v4());
-        let launch = self
-            .container_launch_config(request, workspace, workdir)
-            .await?;
-
-        let created = self
-            .docker
-            .create_container(
-                Some(CreateContainerOptions {
-                    name: container_name.clone(),
-                    platform: None,
-                }),
-                launch,
-            )
+    async fn resolve_worker_image(&self) -> Result<String, RuntimeProcessError> {
+        self.docker
+            .inspect_image(&self.config.image)
             .await
             .map_err(|error| {
                 RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox container create failed: {error}"
+                    "sandbox worker image could not be resolved: {error}"
                 ))
-            })?;
-        let container_id = created.id;
-        let started_at = Instant::now();
-
-        let result = async {
-            self.docker
-                .start_container(&container_id, None::<StartContainerOptions<String>>)
-                .await
-                .map_err(|error| {
-                    RuntimeProcessError::ExecutionFailed(format!(
-                        "sandbox container start failed: {error}"
-                    ))
-                })?;
-            let exit_code = wait_for_container(&self.docker, &container_id).await?;
-            let output =
-                collect_logs(&self.docker, &container_id, self.config.max_output_bytes).await?;
-            Ok(CommandExecutionOutput {
-                output,
-                // Sandbox logs are pre-capped by `collect_logs`; saved-output
-                // refs are currently local-process only.
-                saved_output: None,
-                exit_code,
-                sandboxed: true,
-                duration: started_at.elapsed(),
+            })?
+            .id
+            .ok_or_else(|| {
+                RuntimeProcessError::ExecutionFailed(
+                    "sandbox worker image resolved without an immutable image id".to_string(),
+                )
             })
-        };
-
-        let result = match tokio::time::timeout(timeout, result).await {
-            Ok(result) => result,
-            Err(_) => Err(RuntimeProcessError::Timeout(timeout)),
-        };
-        if let Err(error) = self
-            .docker
-            .remove_container(
-                &container_id,
-                Some(RemoveContainerOptions {
-                    force: true,
-                    ..Default::default()
-                }),
-            )
-            .await
-        {
-            tracing::debug!(?error, "best-effort removal of sandbox container failed");
-        }
-        result
     }
 
-    async fn container_launch_config(
+    async fn user_container_launch_config(
         &self,
-        request: CommandExecutionRequest,
+        request: &CommandExecutionRequest,
         workspace: &Path,
-        workdir: ContainerWorkdir,
-    ) -> Result<Config<String>, RuntimeProcessError> {
-        let env = self.config.command_env(request.extra_env)?;
+        resolved_image: &str,
+    ) -> Result<user_container::UserContainerLaunch, RuntimeProcessError> {
+        let env = self.config.command_env(request.extra_env.clone())?;
         let container_user = self
             .config
             .container_identity
@@ -433,6 +486,23 @@ impl RebornScopedSandboxCommandTransport {
             .map(|bind| bind.into_docker_bind())
             .collect::<Vec<_>>();
         self.config.append_broker_binds(&mut binds)?;
+        binds.sort();
+        let posture = security_posture_stamp(
+            &container_user,
+            self.config.container_identity.workspace_mode(),
+            self.config.memory_bytes,
+            self.config.cpu_shares,
+            &security,
+            &binds,
+            &env,
+        );
+        let labels = registry::build_user_container_launch_labels(
+            user_container::LABEL_PREFIX,
+            &request.scope.tenant_id,
+            &request.scope.user_id,
+            resolved_image,
+            &posture,
+        );
         let host_config = HostConfig {
             binds: Some(binds),
             memory: Some(self.config.memory_bytes as i64),
@@ -455,18 +525,86 @@ impl RebornScopedSandboxCommandTransport {
             ),
             ..Default::default()
         };
-        Ok(Config {
-            image: Some(self.config.image.clone()),
-            cmd: Some(vec!["sh".to_string(), "-c".to_string(), request.command]),
-            working_dir: Some(workdir.into_string()),
+        let config = Config {
+            image: Some(resolved_image.to_string()),
+            working_dir: Some(CONTAINER_WORKSPACE_ROOT.to_string()),
             env: Some(env),
+            labels: Some(labels.clone()),
             host_config: Some(host_config),
             user: Some(container_user),
             attach_stdout: Some(false),
             attach_stderr: Some(false),
+            open_stdin: Some(false),
             ..Default::default()
-        })
+        };
+        Ok(user_container::UserContainerLaunch { config, labels })
     }
+
+    async fn run_command_owned(
+        self,
+        request: CommandExecutionRequest,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        reject_nul("sandbox command", &request.command)?;
+        let user_key = RebornSandboxUserKey::from_scope(&request.scope);
+        let workdir = Self::resolve_container_workdir(request.workdir.as_deref())?;
+        let timeout = request
+            .timeout_secs
+            .map(Duration::from_secs)
+            .unwrap_or(self.config.default_timeout);
+        if timeout.is_zero() {
+            return Err(RuntimeProcessError::Timeout(timeout));
+        }
+        user_container::exec_helper_timeout_secs(timeout)?;
+        let workspace = self.prepare_workspace(&request.scope).await?;
+        let activity = self.activity.begin(&user_key)?;
+        let gate = self.activity.gate(&user_key).ok_or_else(|| {
+            RuntimeProcessError::ExecutionFailed(
+                "sandbox user container lifecycle gate disappeared".to_string(),
+            )
+        })?;
+        // Validate mounts/environment before touching Docker image state so
+        // malformed requests fail at the original trust boundary even when
+        // the worker image is not installed on this host.
+        let mut launch = self
+            .user_container_launch_config(&request, &workspace, &self.config.image)
+            .await?;
+        let resolved_image = self.resolve_worker_image().await?;
+        launch.config.image = Some(resolved_image.clone());
+        launch.labels.insert(
+            registry::label_image(user_container::LABEL_PREFIX),
+            resolved_image,
+        );
+        launch.config.labels = Some(launch.labels.clone());
+        let _user_lifecycle =
+            acquire_user_lifecycle_gate(&gate, USER_LIFECYCLE_GATE_ACQUIRE_TIMEOUT).await?;
+        let container_name =
+            user_container::ensure_user_container(&self, &user_key, launch).await?;
+        let result = user_container::execute_in_user_container(
+            &self,
+            &user_key,
+            &container_name,
+            request.command,
+            workdir,
+            timeout,
+        )
+        .await;
+        drop(activity);
+        result
+    }
+}
+
+async fn acquire_user_lifecycle_gate(
+    gate: &tokio::sync::Mutex<()>,
+    timeout: Duration,
+) -> Result<tokio::sync::MutexGuard<'_, ()>, RuntimeProcessError> {
+    tokio::time::timeout(timeout, gate.lock())
+        .await
+        .map_err(|error| {
+            tracing::debug!(?error, "sandbox user lifecycle gate acquisition timed out");
+            RuntimeProcessError::ExecutionFailed(
+                "sandbox is busy: timed out waiting for another command for this user".to_string(),
+            )
+        })
 }
 
 #[async_trait]
@@ -475,16 +613,17 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
         &self,
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
-        reject_nul("sandbox command", &request.command)?;
+        let execution = tokio::spawn(self.clone().run_command_owned(request));
+        execution.await.map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox command execution task failed: {error}"
+            ))
+        })?
+    }
 
-        let workspace = self.prepare_workspace(&request.scope).await?;
-        let workdir = Self::resolve_container_workdir(request.workdir.as_deref())?;
-        let timeout = request
-            .timeout_secs
-            .map(Duration::from_secs)
-            .unwrap_or(self.config.default_timeout);
-        self.execute_in_container(request, &workspace, workdir, timeout)
-            .await
+    async fn shutdown(&self) -> Result<(), RuntimeProcessError> {
+        RebornScopedSandboxCommandTransport::shutdown(self).await;
+        Ok(())
     }
 }
 
@@ -495,72 +634,65 @@ async fn connect_docker() -> Result<Docker, RuntimeProcessError> {
     connect_docker_with_retry().await
 }
 
-async fn wait_for_container(
-    docker: &Docker,
-    container_id: &str,
-) -> Result<i64, RuntimeProcessError> {
-    let mut stream = docker.wait_container(
-        container_id,
-        Some(WaitContainerOptions {
-            condition: "not-running",
-        }),
-    );
-    match stream.next().await {
-        Some(Ok(result)) => Ok(result.status_code),
-        // Bollard 0.18 represents every positive container exit status as a
-        // `DockerContainerWaitError`. That is command evidence, not a Docker
-        // transport failure; preserve the status so callers can inspect the
-        // command's bounded stdout/stderr like any other sandbox result.
-        Some(Err(bollard::errors::Error::DockerContainerWaitError { code, .. })) => Ok(code),
-        Some(Err(error)) => Err(RuntimeProcessError::ExecutionFailed(format!(
-            "sandbox container wait failed: {error}"
-        ))),
-        None => Err(RuntimeProcessError::ExecutionFailed(
-            "sandbox container wait stream ended unexpectedly".to_string(),
-        )),
-    }
+fn security_posture_stamp(
+    container_user: &str,
+    workspace_mode: u32,
+    memory_bytes: u64,
+    cpu_shares: u32,
+    security: &worker_spec::DockerWorkerSecuritySpec,
+    binds: &[String],
+    env: &[String],
+) -> String {
+    let framed_binds = frame_string_values("bind", binds);
+    let mut sorted_env = env.to_vec();
+    sorted_env.sort();
+    let framed_env = frame_string_values("env", &sorted_env);
+    let posture = key_codec::encode_parts(&[
+        ("generation", "user-exec-v1".to_string()),
+        ("container_user", container_user.to_string()),
+        ("workspace_mode", workspace_mode.to_string()),
+        ("memory_bytes", memory_bytes.to_string()),
+        ("cpu_shares", cpu_shares.to_string()),
+        (
+            "network_mode",
+            security
+                .network_mode()
+                .unwrap_or_else(|| "default".to_string()),
+        ),
+        ("cap_drop", frame_string_values("cap", &security.cap_drop())),
+        (
+            "security_opt",
+            frame_string_values("option", &security.security_options()),
+        ),
+        ("readonly_rootfs", security.readonly_rootfs().to_string()),
+        ("pids_limit", security.pids_limit().to_string()),
+        ("nano_cpus", security.nano_cpus().to_string()),
+        ("tmpfs", security.tmpfs_options()),
+        ("log_driver", security.log_driver()),
+        (
+            "log_options",
+            frame_string_values(
+                "option",
+                &security
+                    .log_options()
+                    .into_iter()
+                    .map(|(key, value)| format!("{key}={value}"))
+                    .collect::<Vec<_>>(),
+            ),
+        ),
+        ("binds", framed_binds),
+        ("env", framed_env),
+    ]);
+    key_codec::digest_hex(&posture)
 }
 
-async fn collect_logs(
-    docker: &Docker,
-    container_id: &str,
-    limit: usize,
-) -> Result<String, RuntimeProcessError> {
-    let mut stream = docker.logs(
-        container_id,
-        Some(LogsOptions::<String> {
-            stdout: true,
-            stderr: true,
-            follow: false,
-            ..Default::default()
-        }),
-    );
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    let half_limit = limit / 2;
-    while let Some(result) = stream.next().await {
-        match result {
-            Ok(LogOutput::StdOut { message }) => {
-                append_with_limit(&mut stdout, &String::from_utf8_lossy(&message), half_limit);
-            }
-            Ok(LogOutput::StdErr { message }) => {
-                append_with_limit(&mut stderr, &String::from_utf8_lossy(&message), half_limit);
-            }
-            Ok(_) => {}
-            Err(error) => {
-                return Err(RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox log collection failed: {error}"
-                )));
-            }
-        }
-    }
-    if stderr.is_empty() {
-        Ok(stdout)
-    } else if stdout.is_empty() {
-        Ok(stderr)
-    } else {
-        Ok(format!("{stdout}\n\n--- stderr ---\n{stderr}"))
-    }
+fn frame_string_values(label: &str, values: &[String]) -> String {
+    key_codec::encode_parts(
+        &values
+            .iter()
+            .map(|value| (label, value.clone()))
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn append_with_limit(buffer: &mut String, text: &str, limit: usize) {
@@ -662,6 +794,32 @@ mod tests {
         assert!(
             error.to_string().contains("IRONCLAW_REBORN_DOCKER_HOST"),
             "constructor must use the canonical connector, including its bounded retry and override handling: {error}"
+        );
+    }
+
+    #[test]
+    fn test_constructor_works_without_tokio_runtime() {
+        let docker = Docker::connect_with_local_defaults().expect("construct Docker client");
+        let _transport = test_support::transport(
+            docker,
+            RebornSandboxConfig::new("/tmp/reborn-sandbox-pure-constructor"),
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_gate_wait_is_bounded() {
+        let gate = tokio::sync::Mutex::new(());
+        let _held = gate.lock().await;
+
+        let error = acquire_user_lifecycle_gate(&gate, Duration::from_millis(1))
+            .await
+            .expect_err("contended lifecycle gate must time out");
+
+        assert_eq!(
+            error,
+            RuntimeProcessError::ExecutionFailed(
+                "sandbox is busy: timed out waiting for another command for this user".to_string()
+            )
         );
     }
 
@@ -883,14 +1041,14 @@ mod tests {
             .unwrap()
             .with_secret_broker_unix_socket(&secret_socket)
             .unwrap();
-        let transport = RebornScopedSandboxCommandTransport::new(
-            Docker::connect_with_local_defaults().unwrap(),
-            config,
-        );
+        let transport =
+            test_support::transport(Docker::connect_with_local_defaults().unwrap(), config);
+        // Config-shape tests inject an immutable identity directly; only the
+        // real run path resolves the configured reference through Docker.
         let launch = transport
-            .container_launch_config(
-                CommandExecutionRequest {
-                    scope: ResourceScope::system(),
+            .user_container_launch_config(
+                &CommandExecutionRequest {
+                    scope: sandbox_scope(),
                     mounts: None,
                     command: "true".to_string(),
                     workdir: None,
@@ -898,13 +1056,19 @@ mod tests {
                     extra_env: HashMap::new(),
                 },
                 &workspace,
-                ContainerWorkdir::workspace_root(),
+                "sha256:test-worker",
             )
             .await
             .unwrap();
+        let launch = launch.config;
+        assert_eq!(launch.image.as_deref(), Some("sha256:test-worker"));
         let host_config = launch.host_config.unwrap();
         let binds = host_config.binds.unwrap();
         let env = launch.env.unwrap();
+        assert!(
+            launch.cmd.is_none(),
+            "image default idle command must be preserved"
+        );
 
         assert_eq!(host_config.network_mode, Some("none".to_string()));
         assert_eq!(
@@ -963,14 +1127,12 @@ mod tests {
         let config = RebornSandboxConfig::new(temp.path().join("workspaces"))
             .with_network_broker_proxy_url("http://broker.internal:8181")
             .unwrap();
-        let transport = RebornScopedSandboxCommandTransport::new(
-            Docker::connect_with_local_defaults().unwrap(),
-            config,
-        );
+        let transport =
+            test_support::transport(Docker::connect_with_local_defaults().unwrap(), config);
         let launch = transport
-            .container_launch_config(
-                CommandExecutionRequest {
-                    scope: ResourceScope::system(),
+            .user_container_launch_config(
+                &CommandExecutionRequest {
+                    scope: sandbox_scope(),
                     mounts: None,
                     command: "true".to_string(),
                     workdir: None,
@@ -978,10 +1140,11 @@ mod tests {
                     extra_env: HashMap::new(),
                 },
                 &workspace,
-                ContainerWorkdir::workspace_root(),
+                "sha256:test-worker",
             )
             .await
             .unwrap();
+        let launch = launch.config;
         let host_config = launch.host_config.unwrap();
         let binds = host_config.binds.unwrap();
         let env = launch.env.unwrap();
@@ -999,10 +1162,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_command_rejects_timeout_above_exec_helper_limit_before_docker_io() {
+        let temp = tempfile::tempdir().unwrap();
+        let unavailable = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", unavailable.local_addr().unwrap());
+        let docker = Docker::connect_with_http(&endpoint, 1, bollard::API_DEFAULT_VERSION).unwrap();
+        let transport = test_support::transport(
+            docker,
+            RebornSandboxConfig::new(temp.path().join("workspaces")),
+        );
+
+        let error = transport
+            .run_command(CommandExecutionRequest {
+                scope: sandbox_scope(),
+                mounts: None,
+                command: "true".to_string(),
+                workdir: None,
+                timeout_secs: Some(86_401),
+                extra_env: HashMap::new(),
+            })
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error}").contains("must not exceed 86400 seconds"));
+    }
+
+    #[tokio::test]
     async fn run_command_rejects_unconfigured_scoped_mount_before_container_create() {
         let temp = tempfile::tempdir().unwrap();
         let docker = Docker::connect_with_local_defaults().unwrap();
-        let transport = RebornScopedSandboxCommandTransport::new(
+        let transport = test_support::transport(
             docker,
             RebornSandboxConfig::new(temp.path().join("workspaces")),
         );
@@ -1015,7 +1204,7 @@ mod tests {
 
         let error = transport
             .run_command(CommandExecutionRequest {
-                scope: ResourceScope::system(),
+                scope: sandbox_scope(),
                 mounts: Some(mounts),
                 command: "true".to_string(),
                 workdir: None,
@@ -1026,6 +1215,9 @@ mod tests {
             .unwrap_err();
 
         assert!(format!("{error}").contains("no trusted sandbox mount source"));
+    }
+    fn sandbox_scope() -> ResourceScope {
+        ResourceScope::system()
     }
 
     fn process_read_only_permissions() -> MountPermissions {

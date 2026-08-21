@@ -2,11 +2,22 @@
 # Keep the base digest aligned with RailwayPreviewSandboxConfig's default.
 FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        tini \
+        util-linux \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN groupadd --gid 1000 sandbox \
     && useradd --uid 1000 --gid sandbox --create-home --shell /bin/sh sandbox
+
+COPY --chmod=0755 docker/sandbox/ironclaw-exec \
+    docker/sandbox/ironclaw-sandbox-idle \
+    /usr/local/bin/
 
 ENV HOME=/home/sandbox
 WORKDIR /workspace
 USER 1000:1000
 
-CMD ["python", "--version"]
+ENTRYPOINT ["tini", "--"]
+CMD ["/usr/local/bin/ironclaw-sandbox-idle"]

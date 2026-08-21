@@ -1,0 +1,23 @@
+dns:
+  listen: ":53"
+  proxy_ip: "172.28.30.2"
+proxy:
+  http_listen: ":80"
+  https_listen: ":443"
+  max_request_body_bytes: 1048576
+tls:
+  ca_cert: "/etc/iron-proxy/ca.crt"
+  ca_key: "/etc/iron-proxy/ca.key"
+transforms:
+  - name: allowlist
+    config:
+      domains:
+        - "example.com"
+        - "github.com"
+        - "*.github.com"
+        - "*.githubusercontent.com"
+        - "codeload.github.com"
+        - "pypi.org"
+        - "files.pythonhosted.org"
+log:
+  level: debug

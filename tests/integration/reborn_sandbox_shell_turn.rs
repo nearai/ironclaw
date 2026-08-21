@@ -9,11 +9,21 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+#[allow(dead_code)]
+#[path = "../../crates/lanes/ironclaw_sandbox/tests/support/user_sandbox_live.rs"]
+mod user_sandbox_live;
+
+use ironclaw_host_api::ids::InvocationId;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
+use user_sandbox_live::{
+    CONTAINER_DIGEST_HEX_LEN, CONTAINER_PREFIX, ContainerIdentity, DockerCleanup, LABEL_TENANT,
+    LABEL_USER,
+};
 
 const CONTAINER_MARKER: &str = "SANDBOX_SHELL_IN_CONTAINER";
+const EPHEMERAL_MARKER: &str = "SANDBOX_CONTAINER_STATE_PERSISTED";
 const PERSISTENCE_MARKER: &str = "SANDBOX_WORKSPACE_PERSISTED";
 
 #[test]
@@ -29,31 +39,60 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
             return;
         }
 
-        let harness = RebornIntegrationHarness::test_default()
-            .with_sandbox_shell_tools()
-            .script([
-                RebornScriptedReply::tool_call(
-                    "builtin.shell",
-                    json!({
-                        "command": format!(
-                            "test -f /.dockerenv && printf '{PERSISTENCE_MARKER}' > /workspace/persistence-marker.txt && echo {CONTAINER_MARKER}"
-                        )
-                    }),
-                ),
-                RebornScriptedReply::tool_call(
-                    "builtin.shell",
-                    json!({"command": "cat /workspace/persistence-marker.txt && uid=$(id -u) && test \"$uid\" -ne 0 && echo NON_ROOT_UID_OK"}),
-                ),
-                RebornScriptedReply::text("ran in the sandbox"),
-            ])
-            .build()
-            .await
-            .expect("sandbox-shell harness builds");
+        let mut cleanup = DockerCleanup::new();
+        let harness = RebornIntegrationHarness::builder(format!(
+            "sandbox-shell-{}",
+            InvocationId::new()
+        ))
+        .with_sandbox_shell_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.shell",
+                json!({
+                    "command": format!(
+                        "test -f /.dockerenv && printf '{PERSISTENCE_MARKER}' > /workspace/persistence-marker.txt && printf '{EPHEMERAL_MARKER}' > /tmp/container-marker.txt && hostname > /tmp/container-hostname.txt && echo {CONTAINER_MARKER}"
+                    )
+                }),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.shell",
+                json!({"command": "test \"$(cat /tmp/container-hostname.txt)\" = \"$(hostname)\" && cat /workspace/persistence-marker.txt /tmp/container-marker.txt && uid=$(id -u) && test \"$uid\" -ne 0 && echo NON_ROOT_UID_OK"}),
+            ),
+            RebornScriptedReply::text("ran in the sandbox"),
+        ])
+        .build()
+        .await
+        .expect("sandbox-shell harness builds");
+        let expected_tenant = harness.binding.tenant_id.as_str().to_string();
+        let expected_user = harness.binding.actor_user_id.as_str().to_string();
+        let identity = ContainerIdentity {
+            tenant: expected_tenant.clone(),
+            user: expected_user.clone(),
+        };
+        cleanup.track_identity(identity.clone());
 
         harness
-            .submit_turn("run a sandboxed shell command")
+            .submit_turn("run two sandboxed shell commands")
             .await
             .expect("turn completes");
+        let container = cleanup.capture_identity(&identity);
+        let digest = container
+            .name
+            .strip_prefix(CONTAINER_PREFIX)
+            .expect("sandbox uses the stable user-container prefix");
+        assert_eq!(digest.len(), CONTAINER_DIGEST_HEX_LEN);
+        assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(container.running);
+        assert_eq!(
+            container.labels.get(LABEL_TENANT).map(String::as_str),
+            Some(expected_tenant.as_str()),
+            "full-turn container carries its dispatch actor tenant identity"
+        );
+        assert_eq!(
+            container.labels.get(LABEL_USER).map(String::as_str),
+            Some(expected_user.as_str()),
+            "full-turn container carries its dispatch actor user identity"
+        );
         harness
             .assert_model_tools_contains("builtin__shell")
             .await
@@ -74,6 +113,10 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
             .assert_tool_result_contains(PERSISTENCE_MARKER)
             .await
             .expect("workspace persisted across shell calls");
+        harness
+            .assert_tool_result_contains(EPHEMERAL_MARKER)
+            .await
+            .expect("container-local state persisted across shell calls");
         harness
             .assert_reply_contains("ran in the sandbox")
             .await

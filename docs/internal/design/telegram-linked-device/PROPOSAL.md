@@ -842,14 +842,15 @@ One function, enumerated rather than left to the catch-all:
 | `MESSAGE_EDIT_TIME_EXPIRED`, `MESSAGE_AUTHOR_REQUIRED` | `messaging.edit_not_allowed` |
 | `CHANNEL_PRIVATE`, migrated-group refs | `messaging.unknown_conversation` |
 | `AUTH_KEY_UNREGISTERED`, `SESSION_REVOKED` | **not** a messaging code — `ToolError::AuthRequired` |
-| `USER_DEACTIVATED` | `Failed` + `messaging.vendor_error`; the *account* also moves to terminal `Unavailable` (§4.5) |
+| `USER_DEACTIVATED` | `ToolError::Rejected` + `messaging.vendor_error`; the *account* also moves to terminal `Unavailable` (§4.5) |
 | anything else | `messaging.vendor_error` |
 
 **Retry-after is only half-expressible today — do not overclaim it.** A
-first-party adapter returns `ToolError::Failed { safe_summary, model_visible_cause }`;
-`safe_summary` is host-authored fixed text and may **not** interpolate a vendor
-wait value, so the only legal carrier is the free-form `model_visible_cause`
-string. A structured slot exists downstream (`ToolRecoveryObservation.retry_after_ms`)
+first-party adapter returns `ToolError::Rejected` with a
+`DispatchFailureDetail::HostSummary` and, when needed, a typed
+`ProviderDiagnostic`; the host summary is fixed text and may **not** interpolate
+a vendor wait value, so the only current carrier is the diagnostic's provider
+message. A structured slot exists downstream (`ToolRecoveryObservation.retry_after_ms`)
 but nothing plumbs a *tool-dispatch* retry-after into it — every current producer
 is on the model-provider path. Either accept prose, or scope that plumbing as
 new work. Revision 3 implied a machine-readable back-off that does not exist.

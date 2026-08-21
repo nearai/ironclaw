@@ -6,20 +6,54 @@ pub mod store;
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::ids::{CapabilityId, ThreadId};
-use ironclaw_host_api::turn::{LoopResultRef, TurnGateRef, TurnRunId, TurnScope};
+use ironclaw_host_api::turn::{LoopMessageRef, LoopResultRef, TurnGateRef, TurnRunId, TurnScope};
 use ironclaw_loop_host::{SpawnSubagentMode, SubagentKindId};
 use serde::{Deserialize, Serialize};
 
-/// CAS state machine (§2): `Open -> Settled -> Drained`, `Open -> Abandoned`.
+/// CAS state machine (§2): `Open -> Settled -> Drained`; abandon reaches any
+/// non-terminal state, not just `Open` — the kernel's close-dependency guard
+/// only gates the `consume` door.
+/// A background child's result also walks the delivery chain in between:
+/// `Settled -> ResultAppended -> AttentionScheduled`, with
+/// `ResultAppended -> AttentionDeferredStreakCap -> AttentionScheduled` when a
+/// streak cap parks it. Only `AttentionScheduled` rejoins the closing path, so
+/// the parked state is a detour, never a terminus.
 /// `Drained`/`Abandoned`-final edges are deleted (§2) — these states are
 /// therefore transient on disk, never the long-lived resting state.
+///
+/// This enum is a *projection* of the kernel's `ProcessDependencyState`, which
+/// stays domain-neutral: the kernel's `AttentionDeferred` is spelled
+/// `AttentionDeferredStreakCap` here because the loop tier is the layer that
+/// knows what a streak cap is. The names differ on purpose; neither side
+/// renames to match the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AwaitEdgeState {
     Open,
     Settled,
+    /// The settled child's result is durably appended to the parent thread.
+    ResultAppended,
+    /// The parent has been made attentive to that appended result.
+    AttentionScheduled,
+    /// Attention was withheld on purpose because the parent hit its
+    /// consecutive-interruption cap. In flight, not closed: the edge stays
+    /// claimable, and the next permitted or human-initiated run start drains it
+    /// forward into `AttentionScheduled` (§4.1/§4.2). It is deliberately not
+    /// consumable from here — consuming would strand the undelivered result;
+    /// abandoning it is still allowed.
+    AttentionDeferredStreakCap,
     Drained,
     Abandoned,
+}
+
+/// How the parent was made attentive to an appended background result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttentionOutcome {
+    /// The parent was mid-run; the result waits in its steering queue.
+    Queued,
+    /// The parent was idle; attention started a run.
+    Activated,
 }
 
 /// Descendant-reservation release tri-state (§5.5), living on the same edge
@@ -126,6 +160,16 @@ pub struct AwaitEdge {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_reason: Option<String>,
     pub reservation_release: ReservationReleaseState,
+    /// The parent-thread message the child's result was appended as, recorded
+    /// in the same CAS write that moves the edge to `ResultAppended`. It is the
+    /// evidence that the append is durable, so a replayed append returns the
+    /// ref already recorded instead of writing a second message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appended_message_ref: Option<LoopMessageRef>,
+    /// How attention was delivered, recorded in the same CAS write that moves
+    /// the edge to `AttentionScheduled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_outcome: Option<AttentionOutcome>,
     pub created_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<DateTime<Utc>>,

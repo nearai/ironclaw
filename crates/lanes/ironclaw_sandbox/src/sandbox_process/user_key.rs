@@ -11,6 +11,9 @@ use ironclaw_host_api::{
 
 use crate::sandbox_process::key_codec::{digest_hex, encode_parts};
 
+pub(crate) const USER_CONTAINER_NAME_PREFIX: &str = "ironclaw-reborn-sandbox-user-";
+pub(crate) const USER_CONTAINER_DIGEST_HEX_LEN: usize = 24;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RebornSandboxUserKey {
     digest: String,
@@ -42,8 +45,11 @@ impl RebornSandboxUserKey {
     }
 
     pub fn container_name(&self) -> String {
-        let digest_prefix = self.digest.get(..24).unwrap_or(self.digest.as_str());
-        format!("ironclaw-reborn-sandbox-user-{digest_prefix}")
+        let digest_prefix = self
+            .digest
+            .get(..USER_CONTAINER_DIGEST_HEX_LEN)
+            .unwrap_or(self.digest.as_str());
+        format!("{USER_CONTAINER_NAME_PREFIX}{digest_prefix}")
     }
 }
 

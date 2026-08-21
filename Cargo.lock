@@ -4599,6 +4599,7 @@ dependencies = [
  "ironclaw_memory",
  "ironclaw_memory_native",
  "ironclaw_network",
+ "ironclaw_notifications",
  "ironclaw_openai_compat",
  "ironclaw_outbound",
  "ironclaw_processes",
@@ -4606,6 +4607,7 @@ dependencies = [
  "ironclaw_resources",
  "ironclaw_runtime_policy",
  "ironclaw_safety",
+ "ironclaw_sandbox",
  "ironclaw_secrets",
  "ironclaw_slack_extension",
  "ironclaw_stress",
@@ -5070,6 +5072,7 @@ dependencies = [
  "async-trait",
  "bollard",
  "chrono",
+ "fs2",
  "futures-util",
  "hex",
  "ironclaw_common",
@@ -7801,9 +7804,9 @@ dependencies = [
 
 [[package]]
 name = "rig-core"
-version = "0.33.0"
+version = "0.36.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a529b9b72f51a46a9ea87c9ba8031e36593de7a89461983f01d8c24462f9eb06"
+checksum = "9ac7d75266ac1f79b1faeff611c85cb40be00a0a983db10036591424f0433dc1"
 dependencies = [
  "as-any",
  "async-stream",

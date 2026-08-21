@@ -1,190 +1,59 @@
 // @ts-nocheck
-import { authScope } from "./auth-scope";
 
-const STORAGE_PREFIX = "ironclaw:v2-notifications:";
-const MAX_SEEN_IDS = 250;
-const MAX_MESSAGES = 30;
-const APPROVAL_STATES = new Set([
-  "needs_attention",
-  "awaitingapproval",
-  "awaiting_approval",
-]);
-
-const subscribers = new Set();
-let loadedScope = null;
-let state = {
-  initialized: false,
-  seenIds: new Set(),
+const PRESENTATION = {
+  approval_required: { icon: "shield", key: "approval" },
+  authentication_required: { icon: "key", key: "authentication" },
+  run_blocked: { icon: "alert", key: "blocked" },
+  run_failed: { icon: "error", key: "failed" },
+  run_completed: { icon: "check", key: "completed" },
+  delivery_failed: { icon: "send", key: "deliveryFailed" },
 };
 
-function notificationScope(scope) {
-  return scope || authScope();
+function timestamp(value) {
+  const parsed = value ? Date.parse(value) : NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function storageKey(scope) {
-  return `${STORAGE_PREFIX}${notificationScope(scope)}`;
+function notificationHref(notification) {
+  const action = notification?.action;
+  if (action?.kind !== "open_thread" || !action.thread_id) return null;
+  return `/chat/${encodeURIComponent(action.thread_id)}`;
 }
 
-function readPersisted(scope) {
-  try {
-    if (typeof window === "undefined" || !window.localStorage) {
-      return { initialized: false, seenIds: [] };
-    }
-    const raw = window.localStorage.getItem(storageKey(scope));
-    if (!raw) return { initialized: false, seenIds: [] };
-    const parsed = JSON.parse(raw);
-    return {
-      initialized: parsed?.initialized === true,
-      seenIds: Array.isArray(parsed?.seen_ids)
-        ? parsed.seen_ids.filter((id) => typeof id === "string")
-        : [],
-    };
-  } catch (_) {
-    return { initialized: false, seenIds: [] };
-  }
-}
-
-function writePersisted(scope) {
-  try {
-    if (typeof window === "undefined" || !window.localStorage) return;
-    window.localStorage.setItem(
-      storageKey(scope),
-      JSON.stringify({
-        initialized: state.initialized,
-        seen_ids: [...state.seenIds].slice(-MAX_SEEN_IDS),
-      }),
-    );
-  } catch (_) {
-    // Best-effort only; unread state should never block the header.
-  }
-}
-
-function trimSeenIds() {
-  if (state.seenIds.size <= MAX_SEEN_IDS) return;
-  state.seenIds = new Set([...state.seenIds].slice(-MAX_SEEN_IDS));
-}
-
-function ensureScope(scope) {
-  const nextScope = notificationScope(scope);
-  if (nextScope === loadedScope) return;
-  const persisted = readPersisted(nextScope);
-  state = {
-    initialized: persisted.initialized,
-    seenIds: new Set(persisted.seenIds),
-  };
-  loadedScope = nextScope;
-}
-
-function snapshot(scope) {
-  ensureScope(scope);
-  return {
-    initialized: state.initialized,
-    seenIds: new Set(state.seenIds),
-  };
-}
-
-function emit(scope) {
-  const nextScope = notificationScope(scope);
-  const next = snapshot(nextScope);
-  for (const listener of subscribers) {
-    try {
-      listener(next, nextScope);
-    } catch (_) {
-      // Ignore subscriber errors; this is UI convenience state.
-    }
-  }
-}
-
-export function getNotificationState(scope) {
-  return snapshot(scope);
-}
-
-export function subscribeNotifications(listener) {
-  subscribers.add(listener);
-  return () => {
-    subscribers.delete(listener);
-  };
-}
-
-export function markNotificationIdsSeen(messageIds = [], scope) {
-  ensureScope(scope);
-  state.initialized = true;
-  for (const id of messageIds) {
-    if (id) state.seenIds.add(id);
-  }
-  trimSeenIds();
-  writePersisted(scope);
-  emit(scope);
-  return snapshot(scope);
-}
-
-export function isApprovalThread(thread, state) {
-  const summaryState = String(thread?.state || "").toLowerCase();
-  const localState = String(state || "").toLowerCase();
-  return APPROVAL_STATES.has(summaryState) || APPROVAL_STATES.has(localState);
-}
-
-export function approvalThreadNotificationId(thread) {
-  const threadId = thread?.id || thread?.thread_id;
-  if (!threadId) return null;
-  const freshness =
-    thread?.approval_request_id ||
-    thread?.approval_id ||
-    thread?.gate_ref ||
-    thread?.run_id ||
-    thread?.turn_run_id ||
-    thread?.updated_at ||
-    thread?.created_at ||
-    thread?.last_activity ||
-    thread?.last_activity_at ||
-    "pending";
-  return `approval:${threadId}:${encodeURIComponent(String(freshness))}`;
-}
-
-function threadTimestamp(thread) {
-  const value =
-    thread?.updated_at ||
-    thread?.created_at ||
-    thread?.last_activity ||
-    thread?.last_activity_at;
-  const timestamp = value ? Date.parse(value) : NaN;
-  return Number.isFinite(timestamp) ? timestamp : 0;
-}
-
-export function approvalThreadNotifications(
-  threads = [],
-  threadStates = new Map(),
-  t = (key) => key,
-) {
+export function notificationMessages(notifications = [], t = (key) => key) {
   const tx = typeof t === "function" ? t : (key) => key;
-  const messages = [];
-
-  for (const thread of Array.isArray(threads) ? threads : []) {
-    const threadId = thread?.id || thread?.thread_id;
-    const state = threadStates instanceof Map ? threadStates.get(threadId) : null;
-    if (!isApprovalThread(thread, state)) continue;
-    const id = approvalThreadNotificationId(thread);
-    if (!id || !threadId) continue;
-    const timestamp = threadTimestamp(thread);
-    messages.push({
-      id,
-      type: "approval",
-      icon: "shield",
-      title: tx("notifications.approval.title"),
-      body: thread.title || tx("notifications.approval.untitled"),
-      detail: tx("notifications.approval.detail"),
-      timeLabel: timestamp ? new Date(timestamp).toLocaleString([], {
-        month: "short",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-      }) : "",
-      timestamp,
-      href: `/chat/${encodeURIComponent(threadId)}`,
-    });
-  }
-
-  return messages
-    .sort((a, b) => b.timestamp - a.timestamp)
-    .slice(0, MAX_MESSAGES);
+  return (Array.isArray(notifications) ? notifications : [])
+    .map((notification) => {
+      const presentation = PRESENTATION[notification?.kind] || {
+        icon: "bell",
+        key: "generic",
+      };
+      const createdAt = timestamp(notification?.created_at);
+      return {
+        id: notification?.id,
+        type: notification?.kind || "generic",
+        icon: presentation.icon,
+        title: tx(`notifications.${presentation.key}.title`),
+        body: tx(`notifications.${presentation.key}.body`),
+        detail: notification?.resolved_at
+          ? tx("notifications.resolved")
+          : tx(`notifications.${presentation.key}.detail`),
+        timeLabel: createdAt
+          ? new Date(createdAt).toLocaleString([], {
+              month: "short",
+              day: "numeric",
+              hour: "2-digit",
+              minute: "2-digit",
+            })
+          : "",
+        timestamp: createdAt,
+        href: notificationHref(notification),
+        threadId: notification?.thread_id || notification?.action?.thread_id || null,
+        turnRunId: notification?.turn_run_id || null,
+        read: Boolean(notification?.read_at),
+        resolved: Boolean(notification?.resolved_at),
+      };
+    })
+    .filter((message) => Boolean(message.id))
+    .sort((left, right) => right.timestamp - left.timestamp);
 }

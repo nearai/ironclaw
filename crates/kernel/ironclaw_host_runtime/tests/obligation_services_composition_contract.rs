@@ -19,7 +19,8 @@ use ironclaw_host_api::{
     },
     decision::{Decision, Obligation, Obligations},
     dispatch::{
-        CapabilityDispatchResult, CapabilityDispatcher, DispatchError, RuntimeDispatchErrorKind,
+        CapabilityDispatchResult, CapabilityDispatcher, DispatchError, DispatchFailureKind,
+        RuntimeDispatchErrorKind,
     },
     host_port::HostPortCatalog,
     http::{
@@ -292,9 +293,11 @@ impl CapabilityDispatcher for ObligationAwareDispatcher {
                 timeout_ms: None,
             })
             .await
-            .map_err(|_| DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::NetworkDenied,
-                model_visible_cause: None,
+            .map_err(|_| DispatchError::Rejected {
+                runtime: Some(RuntimeKind::Wasm),
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied),
+                diagnostic: None,
+                detail: None,
             })?;
         assert_eq!(egress_response.status, 200);
 

@@ -347,7 +347,7 @@ mod tests {
     use super::*;
     use crate::CapabilityInvocationError;
     use ironclaw_host_api::{
-        dispatch::{DispatchFailureKind, RuntimeDispatchErrorKind},
+        dispatch::{DispatchAuthRequirement, DispatchFailureKind, RuntimeDispatchErrorKind},
         ids::CapabilityId,
     };
 
@@ -413,9 +413,11 @@ mod tests {
     fn authorization_requires_auth_still_blocks_auth() {
         let error = CapabilityInvocationError::AuthorizationRequiresAuth {
             capability: capability(),
-            required_secrets: Vec::new(),
-            credential_requirements: Vec::new(),
-            model_visible_cause: None,
+            requirement: Box::new(DispatchAuthRequirement {
+                required_secrets: Vec::new(),
+                credential_requirements: Vec::new(),
+                model_visible_cause: None,
+            }),
         };
         let transition = error
             .invocation_state_transition()

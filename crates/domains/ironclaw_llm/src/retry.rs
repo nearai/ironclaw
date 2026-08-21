@@ -340,10 +340,14 @@ impl StreamingAttemptSink {
 #[async_trait]
 impl CompletionStreamSink for StreamingAttemptSink {
     async fn text_delta(&self, delta: String) {
-        if !delta.is_empty() {
+        if !delta.is_empty() && self.inner.text_is_visible() {
             self.emitted_text.store(true, Ordering::SeqCst);
         }
         self.inner.text_delta(delta).await;
+    }
+
+    fn text_is_visible(&self) -> bool {
+        self.inner.text_is_visible()
     }
 
     fn supports_text_replacement(&self) -> bool {
@@ -504,6 +508,17 @@ mod tests {
     impl CompletionStreamSink for RecordingCompletionStreamSink {
         async fn text_delta(&self, delta: String) {
             let _ = self.sender.send(delta);
+        }
+    }
+
+    struct DiscardingCompletionStreamSink;
+
+    #[async_trait]
+    impl CompletionStreamSink for DiscardingCompletionStreamSink {
+        async fn text_delta(&self, _delta: String) {}
+
+        fn text_is_visible(&self) -> bool {
+            false
         }
     }
 
@@ -932,6 +947,22 @@ mod tests {
         assert_eq!(inner.calls(), 1);
         assert_eq!(delta_rx.recv().await.as_deref(), Some("partial"));
         assert!(delta_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_retries_all_attempts_when_text_is_discarded() {
+        let inner = Arc::new(StreamingRetryLlm::new(
+            StreamingRetryScript::AlwaysAfterText,
+        ));
+        let retry = RetryProvider::new(inner.clone(), fast_config(3));
+
+        let error = retry
+            .complete_streaming(make_request(), Arc::new(DiscardingCompletionStreamSink))
+            .await
+            .expect_err("discarded partial text must not suppress retries");
+
+        assert!(matches!(error, LlmError::RateLimited { .. }));
+        assert_eq!(inner.calls(), 4);
     }
 
     #[tokio::test]

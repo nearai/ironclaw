@@ -5,8 +5,8 @@
 //! request-hint validation.
 
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rust_decimal::Decimal;
@@ -15,8 +15,9 @@ use serde::{Deserialize, Serialize};
 use ironclaw_llm::LlmError;
 use ironclaw_llm::trace_binding::{ObservedToolResult, resolve_trace_result_bindings};
 use ironclaw_llm::{
-    ChatMessage, CompletionRequest, CompletionResponse, CompletionResponseFormat, FinishReason,
-    LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    ChatMessage, CompletionRequest, CompletionResponse, CompletionResponseFormat,
+    CompletionStreamSink, FinishReason, LlmProvider, Role, ToolCall, ToolCompletionRequest,
+    ToolCompletionResponse, ToolDefinition,
 };
 
 // Re-export shared types from `recording` so downstream test files can
@@ -281,6 +282,9 @@ pub struct TraceLlm {
     steps: Mutex<std::collections::VecDeque<TraceStep>>,
     /// Total non-error calls served, regardless of which step they returned.
     calls_served: AtomicUsize,
+    /// Calls dispatched through the provider streaming method. Kept separate
+    /// from `calls_served` so caller-path tests can prove transport selection.
+    streaming_calls: AtomicUsize,
     hint_mismatches: AtomicUsize,
     /// Every model call's request, tools, and response format are captured as
     /// one record. Keeping these fields under one lock preserves their shared
@@ -437,6 +441,7 @@ impl TraceLlm {
             model_name: trace.model_name,
             steps: Mutex::new(steps),
             calls_served: AtomicUsize::new(0),
+            streaming_calls: AtomicUsize::new(0),
             hint_mismatches: AtomicUsize::new(0),
             captured_calls: Mutex::new(Vec::new()),
         }
@@ -451,6 +456,11 @@ impl TraceLlm {
     /// Number of calls made so far.
     pub fn calls(&self) -> usize {
         self.calls_served.load(Ordering::Relaxed)
+    }
+
+    /// Number of calls dispatched through [`LlmProvider::complete_streaming`].
+    pub fn streaming_calls(&self) -> usize {
+        self.streaming_calls.load(Ordering::Relaxed)
     }
 
     /// Number of request-hint mismatches observed (warnings only).
@@ -813,6 +823,15 @@ impl LlmProvider for TraceLlm {
                 }
             }
         }
+    }
+
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        _sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.streaming_calls.fetch_add(1, Ordering::Relaxed);
+        self.complete(request).await
     }
 
     async fn complete_with_tools(

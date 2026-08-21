@@ -363,8 +363,6 @@ async fn generate_initial_suggestions(
             "ironclaw.memory.read".to_string(),
             "ironclaw.memory.search".to_string(),
             "ironclaw.memory.tree".to_string(),
-            "ironclaw.tool_describe".to_string(),
-            "ironclaw.tool_search".to_string(),
         ]),
         "prepared suggestion context must carry the exact discovery-only allowlist"
     );

@@ -139,7 +139,7 @@ struct InvokedCapabilityBatch {
 }
 
 struct InvokedCapabilityBatchError {
-    error: ironclaw_loop_contracts::AgentLoopHostError,
+    error: Box<ironclaw_loop_contracts::AgentLoopHostError>,
     launched_count: usize,
 }
 
@@ -226,7 +226,7 @@ impl CapabilityStage {
                 .await
                 .map(InvokedCapabilityBatch::from_resolution_batch)
                 .map_err(|error| InvokedCapabilityBatchError {
-                    error,
+                    error: Box::new(error),
                     launched_count: 0,
                 });
         }
@@ -283,10 +283,10 @@ impl CapabilityStage {
                 }
                 None => {
                     return Err(InvokedCapabilityBatchError {
-                        error: ironclaw_loop_contracts::AgentLoopHostError::new(
+                        error: Box::new(ironclaw_loop_contracts::AgentLoopHostError::new(
                             ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
                             "parallel capability invocation completed without an indexed outcome",
-                        ),
+                        )),
                         launched_count: launched,
                     });
                 }
@@ -754,7 +754,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     .completed_turn(ctx, state, result_refs_start, capability_batch)
                     .await;
             }
-            Err(failure) => return Err(capability_host_error(failure.error)),
+            Err(failure) => return Err(capability_host_error(*failure.error)),
         };
 
         let InvokedCapabilityBatch {

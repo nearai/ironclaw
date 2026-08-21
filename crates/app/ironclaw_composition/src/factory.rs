@@ -160,7 +160,7 @@ use ironclaw_host_runtime::{
     builtin_first_party_package,
 };
 use ironclaw_host_runtime::{
-    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
+    builtin_first_party_handlers_with_trigger_services_for_process_backend,
     builtin_first_party_package_for_process_backend,
 };
 use ironclaw_identity::projects::ProjectRepository;
@@ -354,6 +354,8 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) processes: ProcessRuntimeSystem,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
+    pub(crate) trigger_manual_fire_runner:
+        Arc<crate::automation::trigger_poller::LateBoundTriggerManualFireRunner>,
     pub(crate) trigger_create_hook: Arc<TriggerCreatorPairingHook>,
     pub(crate) resource_governor: Arc<dyn ResourceGovernor>,
     pub(crate) budget_gate_store: Arc<dyn BudgetGateStorePort>,
@@ -1218,12 +1220,14 @@ fn production_first_party_registry_with_trigger_create_hook(
     trigger_repository: Arc<dyn TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
     active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    manual_fire_runner: Arc<dyn ironclaw_triggers::TriggerManualFireRunner>,
     process_backend: ProcessBackendKind,
 ) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
-    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
+    builtin_first_party_handlers_with_trigger_services_for_process_backend(
         trigger_repository,
         trigger_create_hook,
         active_run_lookup,
+        manual_fire_runner,
         process_backend,
     )
     .map_err(|error| RebornBuildError::InvalidConfig {

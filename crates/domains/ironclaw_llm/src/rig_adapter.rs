@@ -70,7 +70,7 @@ pub struct RigAdapter<M: CompletionModel> {
     native_streaming: bool,
     /// Whether this rig-core provider serializes `CompletionRequest::output_schema`.
     ///
-    /// rig-core 0.33's dedicated DeepSeek and OpenRouter request paths accept
+    /// rig-core 0.36's dedicated DeepSeek and OpenRouter request paths accept
     /// the field in the shared request type but omit it from their wire
     /// payloads. Keep that limitation explicit at the adapter boundary rather
     /// than silently dispatching a request whose structured-output contract is
@@ -432,21 +432,16 @@ impl<M: CompletionModel> RigAdapter<M> {
         // completed call. Raising it here, before a response object exists,
         // is what lets retry and failover see a failure instead of a success.
         //
-        // What this actually detects, in rig-core 0.33: **Ollama only**. Its
-        // stream yields `FinalResponse` solely inside `if response.done`
-        // (`providers/ollama.rs:706`), so a stream that stops early genuinely
-        // leaves `stream.response` unset. OpenAI
-        // (`providers/openai/completion/streaming.rs:330`), Anthropic
-        // (`providers/anthropic/streaming.rs:333`), Gemini
-        // (`providers/gemini/streaming.rs:233`), OpenRouter
-        // (`providers/openrouter/streaming.rs:323`) and DeepSeek
-        // (`providers/deepseek.rs:862`) all yield a usage-only `FinalResponse`
-        // unconditionally after the SSE loop — including after the plain
-        // `Err(StreamEnded) => break` arm — so on those five a server that
-        // closes mid-answer still sets `stream.response` and this check does
-        // not fire. Catching that needs a terminal-observed signal rig-core
-        // does not carry; it is a known limitation of this adapter, not a
-        // claim it makes.
+        // What this actually detects, in rig-core 0.36: **Ollama only**. Its
+        // stream yields `FinalResponse` solely inside `if response.done`, so a
+        // stream that stops early genuinely leaves `stream.response` unset.
+        // Anthropic and Gemini, plus the shared OpenAI-compatible stream driver
+        // used by OpenAI, OpenRouter, and DeepSeek, all yield a usage-only
+        // `FinalResponse` after the SSE loop — including after the plain
+        // `Err(StreamEnded) => break` arm. On those five a server that closes
+        // mid-answer still sets `stream.response` and this check does not fire.
+        // Catching that needs a terminal-observed signal rig-core does not
+        // carry; it is a known limitation of this adapter, not a claim it makes.
         let Some(terminal_frame) = stream.response.as_ref() else {
             return Err(LlmError::StreamInterrupted {
                 provider: self.model_name.clone(),
@@ -457,7 +452,7 @@ impl<M: CompletionModel> RigAdapter<M> {
         let raw_terminal_frame = serialize_raw_response(terminal_frame);
         let cache_creation_input_tokens = extract_cache_creation(raw_terminal_frame.as_ref());
         let provider_finish = extract_finish_reason(raw_terminal_frame.as_ref());
-        // Note: in rig-core 0.33 only Ollama's terminal frame still carries a
+        // Note: in rig-core 0.36 only Ollama's terminal frame still carries a
         // finish reason (`done_reason`). The other five define
         // `StreamingResponse` as usage-only, so their per-chunk
         // `finish_reason`/`stop_reason` is dropped before it reaches this
@@ -1066,7 +1061,7 @@ fn extract_finish_reason(raw: Option<&serde_json::Value>) -> Option<FinishReason
 
 /// Locate the provider's finish-reason field across the response shapes rig fronts.
 ///
-/// Paths verified against rig-core 0.33:
+/// Paths verified against rig-core 0.36:
 /// - OpenAI-shaped (`openai`, `openai_compatible`, `tinfoil`, `azure`,
 ///   `deepseek`, `openrouter`): `choices[0].finish_reason`
 /// - Anthropic-by-key: `stop_reason`
@@ -1376,7 +1371,7 @@ where
 
         let raw_response = serialize_raw_response(&response.raw_response);
         let provider_finish = extract_finish_reason(raw_response.as_ref());
-        let (text, _tool_calls, finish, _reasoning, _reasoning_details) =
+        let (text, _tool_calls, finish, reasoning, _reasoning_details) =
             extract_response(&response.choice, &response.usage, provider_finish);
 
         let resp = CompletionResponse {
@@ -1384,7 +1379,7 @@ where
             input_tokens: saturate_u32(response.usage.input_tokens),
             output_tokens: saturate_u32(response.usage.output_tokens),
             finish_reason: finish,
-            reasoning: None,
+            reasoning,
             cache_read_input_tokens: saturate_u32(response.usage.cached_input_tokens),
             cache_creation_input_tokens: extract_cache_creation(raw_response.as_ref()),
         };
@@ -2006,6 +2001,7 @@ mod tests {
                     output_tokens: 1,
                     total_tokens: 2,
                     cached_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 },
                 raw_response: serde_json::json!({}),
                 message_id: None,
@@ -2517,6 +2513,7 @@ mod tests {
                 output_tokens: self.output_tokens,
                 total_tokens: self.input_tokens + self.output_tokens,
                 cached_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
     }

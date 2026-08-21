@@ -1213,6 +1213,38 @@ async fn operator_lists_uninstalled_manifest_admin_configuration_with_secrets_re
         expected_fragments.len(),
         "every telegram field is covered by a help-text expectation"
     );
+    let slack_fields = groups
+        .iter()
+        .find(|group| group["group_id"] == "extension.slack")
+        .and_then(|group| group["fields"].as_array())
+        .expect("slack group lists fields");
+    let expected_slack_fragments = [
+        ("slack_bot_token", "xoxb-"),
+        ("slack_signing_secret", "really came from Slack"),
+        ("slack_team_id", "team_id"),
+        ("slack_api_app_id", "api_app_id"),
+        ("slack_installation_id", "label you choose"),
+        ("slack_bot_user_id", "auth.test"),
+        ("slack_oauth_client_id", "personal"),
+        ("slack_oauth_client_secret", "next to the client ID"),
+    ];
+    for (handle, fragment) in expected_slack_fragments {
+        let description = slack_fields
+            .iter()
+            .find(|field| field["handle"] == handle)
+            .and_then(|field| field["description"].as_str())
+            .unwrap_or_else(|| panic!("field {handle} carries help text on the wire"));
+        assert!(
+            description.contains(fragment),
+            "field {handle} must carry its own manifest help text \
+             (expected fragment {fragment:?}): {description}"
+        );
+    }
+    assert_eq!(
+        slack_fields.len(),
+        expected_slack_fragments.len(),
+        "every slack field is covered by a help-text expectation"
+    );
 
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");

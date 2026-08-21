@@ -22,6 +22,7 @@ pub use ports::{
     active_holds_for_records,
 };
 pub use report::{
+    MissingTriggerManualFireRunner, TriggerManualFireOutcome, TriggerManualFireRunner,
     TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerFireReport,
     TriggerPollerTickReport,
 };

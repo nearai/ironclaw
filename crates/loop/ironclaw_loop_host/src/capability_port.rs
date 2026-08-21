@@ -3989,6 +3989,11 @@ fn dispatch_failure_detail_to_loop(
         DispatchFailureDetail::HostRemediation { text } => {
             Some(CapabilityFailureDetail::HostRemediation { text })
         }
+        // Host-authored public label — already surfaced as the failure's
+        // `safe_summary`; no separate model-visible representation, so
+        // dropping it here avoids duplicating the same text onto the
+        // diagnostic detail seam.
+        DispatchFailureDetail::HostSummary { .. } => None,
     }
 }
 

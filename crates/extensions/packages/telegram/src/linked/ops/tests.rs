@@ -13,10 +13,13 @@ use crate::linked::mapping::{ConversationRef, UserRef};
 
 fn summary(error: &ToolError) -> String {
     match error {
-        ToolError::Failed { safe_summary, .. } => {
-            safe_summary.clone().unwrap_or_else(|| "<none>".to_string())
-        }
-        ToolError::Rejected { kind, .. } => kind.human_summary().to_string(),
+        ToolError::Rejected {
+            kind, diagnostic, ..
+        } => diagnostic
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.code.as_ref())
+            .map(|code| code.as_str().to_string())
+            .unwrap_or_else(|| kind.human_summary().to_string()),
         ToolError::AuthRequired { .. } => "auth_required".to_string(),
     }
 }
@@ -122,18 +125,23 @@ fn a_revoked_session_parks_on_the_auth_gate() {
     let poisoned = ToolError::from(SessionPoolError::Poisoned);
     let not_configured = ToolError::from(SessionPoolError::NotConfigured);
     assert!(
-        matches!(&poisoned, ToolError::Failed { .. }),
+        matches!(&poisoned, ToolError::Rejected { .. }),
         "a poisoned pool is a failure, never an auth prompt: {poisoned:?}"
     );
     match &not_configured {
-        ToolError::Failed {
-            model_visible_cause: Some(cause),
+        ToolError::Rejected {
+            diagnostic: Some(diagnostic),
             ..
         } => assert!(
-            cause.contains("MTProto application identity"),
-            "the not-configured cause must name the missing config: {cause}"
+            diagnostic
+                .message
+                .as_ref()
+                .expect("not-configured cause")
+                .as_str()
+                .contains("MTProto application identity"),
+            "the not-configured cause must name the missing config: {not_configured:?}"
         ),
-        other => panic!("expected a Failed with a cause, got {other:?}"),
+        other => panic!("expected a Rejected with a cause, got {other:?}"),
     }
     assert!(summary(&at_capacity).contains(StandardMessagingErrorCode::VendorError.as_str()));
 }
