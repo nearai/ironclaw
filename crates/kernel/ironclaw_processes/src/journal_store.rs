@@ -35,6 +35,7 @@ use crate::journal::{
     ReleaseProcessTreeRequest, ReserveProcessTreeRequest, ResumeProcessRequest,
     SettleProcessDependencyRequest, StopProcessRequest, SubmitProcessAtEdgeRequest,
     SubmitProcessRequest, SubmitProcessWithCheckpointRequest, SuspendProcessRequest,
+    TransitionProcessDependencyRequest,
 };
 use crate::types::{invalid_path, same_scope_owner};
 
@@ -1127,6 +1128,19 @@ where
         {
             StoredCommandOutcome::Dependency(record) => Ok(record),
             outcome => Err(unexpected_outcome("settle_dependency", outcome)),
+        }
+    }
+
+    async fn transition_process_dependency(
+        &self,
+        request: TransitionProcessDependencyRequest,
+    ) -> Result<Option<ProcessDependencyRecord>, Self::Error> {
+        match self
+            .execute(StoredProcessCommand::TransitionDependency(request))
+            .await?
+        {
+            StoredCommandOutcome::Dependency(record) => Ok(record),
+            outcome => Err(unexpected_outcome("transition_dependency", outcome)),
         }
     }
 

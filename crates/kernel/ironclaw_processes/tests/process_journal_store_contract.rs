@@ -20,10 +20,10 @@ use ironclaw_processes::{
     MAX_PROCESS_CHECKPOINT_PAYLOAD_BYTES, MAX_PROCESS_INPUT_PAYLOAD_BYTES,
     OpenProcessDependencyRequest, ProcessCheckpointId, ProcessCheckpointPayload,
     ProcessCheckpointPort, ProcessCheckpointRef, ProcessConcurrencyClass, ProcessConcurrencyLimits,
-    ProcessControlPort, ProcessDependencyPort, ProcessDependencyQuery, ProcessDependencyState,
-    ProcessDependencySubmission, ProcessFailureRecovery, ProcessGateQuery, ProcessGateQuerySource,
-    ProcessGateScopeMatch, ProcessInputPayload, ProcessInputPort, ProcessInputRef,
-    ProcessInputSubmission, ProcessJournalCommit, ProcessJournalCommitObserver,
+    ProcessControlPort, ProcessDependencyPort, ProcessDependencyQuery, ProcessDependencyRecord,
+    ProcessDependencyState, ProcessDependencySubmission, ProcessFailureRecovery, ProcessGateQuery,
+    ProcessGateQuerySource, ProcessGateScopeMatch, ProcessInputPayload, ProcessInputPort,
+    ProcessInputRef, ProcessInputSubmission, ProcessJournalCommit, ProcessJournalCommitObserver,
     ProcessJournalCursor, ProcessJournalEntry, ProcessJournalError, ProcessJournalKind,
     ProcessJournalObserverRegistry, ProcessJournalSource, ProcessJournalStore,
     ProcessJournalStoreError, ProcessKind, ProcessLeaseRequest, ProcessLeaseToken,
@@ -35,6 +35,7 @@ use ironclaw_processes::{
     PruneReleasedProcessRequest, RecordProcessCheckpointRequest, ReleaseProcessTreeRequest,
     ReserveProcessTreeRequest, ResumeProcessRequest, SettleProcessDependencyRequest,
     StopProcessRequest, SubmitProcessAtEdgeRequest, SubmitProcessRequest, SuspendProcessRequest,
+    TransitionProcessDependencyRequest,
 };
 use serde_json::json;
 use std::{
@@ -3099,6 +3100,365 @@ async fn consuming_dependency_atomically_releases_tree_capacity() {
         })
         .await
         .expect("consumed dependency releases capacity");
+}
+
+/// The delivery chain a dependency walks between `Settled` and closure, in
+/// order. `force_state` steps along it one legal transition at a time so the
+/// tests below exercise the real port rather than a back door into stored
+/// state.
+const DEPENDENCY_DELIVERY_CHAIN: [ProcessDependencyState; 4] = [
+    ProcessDependencyState::Settled,
+    ProcessDependencyState::ResultAppended,
+    ProcessDependencyState::AttentionScheduled,
+    ProcessDependencyState::AttentionDeferred,
+];
+
+fn new_store() -> ProcessJournalStore<InMemoryBackend> {
+    ProcessJournalStore::new(in_memory_backed_processes_filesystem())
+}
+
+/// Opens a dependency and settles it, returning `(dependent, dependency)`.
+///
+/// The opened metadata carries an `owner` key the transition tests assert is
+/// still present afterwards, which is what distinguishes a metadata merge from
+/// a metadata overwrite.
+async fn open_settled_dependency<F>(store: &ProcessJournalStore<F>) -> (ProcessId, ProcessId)
+where
+    F: RootFilesystem + Send + Sync + 'static,
+{
+    let dependent = ProcessId::new();
+    submit_internal_process(store, &scope(), dependent).await;
+    let dependency = ProcessId::new();
+    store
+        .open_process_dependency(OpenProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: dependency,
+            root_process_id: dependent,
+            scope: scope(),
+            group_ref: Some("gate:transition".to_string()),
+            created_at: Utc::now(),
+            metadata: json!({"owner": "runner"}),
+        })
+        .await
+        .expect("open dependency");
+    store
+        .settle_process_dependency(SettleProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: dependency,
+            scope: scope(),
+            terminal: ProcessTerminalEvidence {
+                status: ProcessLifecycleStatus::Completed,
+                output_bytes: Some(7),
+                sanitized_reason: None,
+            },
+            settled_at: Utc::now(),
+        })
+        .await
+        .expect("settle dependency")
+        .expect("dependency exists");
+    (dependent, dependency)
+}
+
+async fn stored_dependency<F>(
+    store: &ProcessJournalStore<F>,
+    dependent: ProcessId,
+    dependency: ProcessId,
+) -> ProcessDependencyRecord
+where
+    F: RootFilesystem + Send + Sync + 'static,
+{
+    store
+        .query_process_dependencies(ProcessDependencyQuery {
+            scope: scope(),
+            dependent_process_id: Some(dependent),
+            group_ref: None,
+            include_closed: true,
+        })
+        .await
+        .expect("query dependencies")
+        .into_iter()
+        .find(|record| record.dependency_process_id == dependency)
+        .expect("dependency exists")
+}
+
+/// Walks the dependency forward to `target` through the real port, one adjacent
+/// transition at a time.
+async fn force_state<F>(
+    store: &ProcessJournalStore<F>,
+    dependent: ProcessId,
+    dependency: ProcessId,
+    target: ProcessDependencyState,
+) where
+    F: RootFilesystem + Send + Sync + 'static,
+{
+    let current = stored_dependency(store, dependent, dependency).await.state;
+    let from = DEPENDENCY_DELIVERY_CHAIN
+        .iter()
+        .position(|state| *state == current)
+        .expect("current state is on the delivery chain");
+    let to = DEPENDENCY_DELIVERY_CHAIN
+        .iter()
+        .position(|state| *state == target)
+        .expect("target state is on the delivery chain");
+    assert!(to >= from, "the delivery chain only moves forward");
+    for step in from..to {
+        let advanced = store
+            .transition_process_dependency(TransitionProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: dependency,
+                scope: scope(),
+                expected: DEPENDENCY_DELIVERY_CHAIN[step],
+                next: DEPENDENCY_DELIVERY_CHAIN[step + 1],
+                metadata: None,
+                transitioned_at: Utc::now(),
+            })
+            .await
+            .expect("transition succeeds")
+            .expect("record exists");
+        assert_eq!(advanced.state, DEPENDENCY_DELIVERY_CHAIN[step + 1]);
+    }
+}
+
+#[tokio::test]
+async fn dependency_transition_advances_only_from_the_expected_state() {
+    let store = new_store();
+    let (dependent, dependency) = open_settled_dependency(&store).await;
+
+    let advanced = store
+        .transition_process_dependency(TransitionProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: dependency,
+            scope: scope(),
+            expected: ProcessDependencyState::Settled,
+            next: ProcessDependencyState::ResultAppended,
+            metadata: Some(json!({"message_ref": "msg:r1"})),
+            transitioned_at: Utc::now(),
+        })
+        .await
+        .expect("transition succeeds")
+        .expect("record exists");
+    assert_eq!(advanced.state, ProcessDependencyState::ResultAppended);
+    assert_eq!(advanced.metadata["message_ref"], "msg:r1");
+    assert_eq!(
+        advanced.metadata["owner"], "runner",
+        "a transition merges its payload into the edge metadata, it does not replace it"
+    );
+    assert!(
+        advanced.transitioned_at.is_some(),
+        "the transition instant must be durable, not dropped"
+    );
+
+    // Replaying the same transition is idempotent, not an error.
+    let replay = store
+        .transition_process_dependency(TransitionProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: dependency,
+            scope: scope(),
+            expected: ProcessDependencyState::Settled,
+            next: ProcessDependencyState::ResultAppended,
+            metadata: None,
+            transitioned_at: Utc::now(),
+        })
+        .await
+        .expect("replay succeeds")
+        .expect("record exists");
+    assert_eq!(replay.state, ProcessDependencyState::ResultAppended);
+    assert_eq!(
+        replay.metadata["message_ref"], "msg:r1",
+        "replay must not erase the recorded payload"
+    );
+    assert_eq!(
+        replay.transitioned_at, advanced.transitioned_at,
+        "replay must not restamp the transition instant"
+    );
+
+    // The advance is durable, not just an in-memory mutation.
+    assert_eq!(
+        stored_dependency(&store, dependent, dependency).await,
+        replay
+    );
+}
+
+#[tokio::test]
+async fn dependency_transition_from_a_wrong_expected_state_is_rejected() {
+    let store = new_store();
+    let (dependent, dependency) = open_settled_dependency(&store).await;
+
+    let error = store
+        .transition_process_dependency(TransitionProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: dependency,
+            scope: scope(),
+            expected: ProcessDependencyState::AttentionScheduled,
+            next: ProcessDependencyState::Consumed,
+            metadata: None,
+            transitioned_at: Utc::now(),
+        })
+        .await
+        .expect_err("wrong expected state must be rejected");
+    assert!(
+        format!("{error}").contains("expected"),
+        "error must name the expectation mismatch: {error}"
+    );
+    assert_eq!(
+        stored_dependency(&store, dependent, dependency).await.state,
+        ProcessDependencyState::Settled,
+        "a rejected transition must leave the stored state untouched"
+    );
+}
+
+/// The payload is merged into an object, so a scalar has no keys to merge and
+/// would overwrite whatever the edge already carries. It is rejected before the
+/// state column moves.
+#[tokio::test]
+async fn dependency_transition_rejects_a_metadata_payload_that_is_not_an_object() {
+    let store = new_store();
+    let (dependent, dependency) = open_settled_dependency(&store).await;
+
+    let error = store
+        .transition_process_dependency(TransitionProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: dependency,
+            scope: scope(),
+            expected: ProcessDependencyState::Settled,
+            next: ProcessDependencyState::ResultAppended,
+            metadata: Some(json!("msg:r1")),
+            transitioned_at: Utc::now(),
+        })
+        .await
+        .expect_err("a scalar metadata payload must be rejected");
+    assert!(
+        format!("{error}").contains("JSON object"),
+        "error must name the payload shape: {error}"
+    );
+    let stored = stored_dependency(&store, dependent, dependency).await;
+    assert_eq!(
+        stored.state,
+        ProcessDependencyState::Settled,
+        "a rejected transition must not move the state column"
+    );
+    assert_eq!(stored.metadata["owner"], "runner");
+}
+
+#[tokio::test]
+async fn dependency_transition_is_scope_bound() {
+    let store = new_store();
+    let (dependent, dependency) = open_settled_dependency(&store).await;
+    let mut foreign_scope = scope();
+    foreign_scope.user_id = UserId::new("foreign-transition-user").expect("foreign user");
+
+    let error = store
+        .transition_process_dependency(TransitionProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: dependency,
+            scope: foreign_scope,
+            expected: ProcessDependencyState::Settled,
+            next: ProcessDependencyState::ResultAppended,
+            metadata: None,
+            transitioned_at: Utc::now(),
+        })
+        .await
+        .expect_err("foreign scope must not transition a dependency");
+    assert!(matches!(error, ProcessJournalStoreError::UnauthorizedScope));
+}
+
+#[tokio::test]
+async fn dependency_transition_on_an_unknown_edge_reports_no_record() {
+    let store = new_store();
+
+    let missing = store
+        .transition_process_dependency(TransitionProcessDependencyRequest {
+            dependent_process_id: ProcessId::new(),
+            dependency_process_id: ProcessId::new(),
+            scope: scope(),
+            expected: ProcessDependencyState::Settled,
+            next: ProcessDependencyState::ResultAppended,
+            metadata: None,
+            transitioned_at: Utc::now(),
+        })
+        .await
+        .expect("an absent dependency is not an error");
+    assert!(missing.is_none());
+}
+
+/// The `closed` index derives from the state column alone
+/// (`journal_store/rows.rs`). New in-flight states must index as OPEN or the
+/// recovery sweeps will skip them forever.
+#[tokio::test]
+async fn new_substates_are_not_treated_as_closed() {
+    let store = new_store();
+    let (dependent, dependency) = open_settled_dependency(&store).await;
+    for state in [
+        ProcessDependencyState::ResultAppended,
+        ProcessDependencyState::AttentionScheduled,
+        ProcessDependencyState::AttentionDeferred,
+    ] {
+        force_state(&store, dependent, dependency, state).await;
+        let unclosed = store
+            .query_process_dependencies(ProcessDependencyQuery {
+                scope: scope(),
+                dependent_process_id: Some(dependent),
+                group_ref: None,
+                include_closed: false,
+            })
+            .await
+            .expect("query succeeds");
+        assert_eq!(
+            unclosed.len(),
+            1,
+            "{state:?} must remain visible as unclosed"
+        );
+        let unresolved = store
+            .unresolved_process_dependencies()
+            .await
+            .expect("recovery scan succeeds");
+        assert_eq!(
+            unresolved.len(),
+            1,
+            "{state:?} must stay visible to the host recovery scan"
+        );
+    }
+}
+
+#[test]
+fn historical_dependency_states_still_deserialize() {
+    for (raw, expected) in [
+        ("\"open\"", ProcessDependencyState::Open),
+        ("\"settled\"", ProcessDependencyState::Settled),
+        ("\"consumed\"", ProcessDependencyState::Consumed),
+        ("\"abandoned\"", ProcessDependencyState::Abandoned),
+    ] {
+        assert_eq!(
+            serde_json::from_str::<ProcessDependencyState>(raw).expect("parses"),
+            expected
+        );
+    }
+}
+
+/// These four wire spellings are written into durable journal rows, so they are
+/// part of the persisted format and may not be renamed.
+#[test]
+fn dependency_delivery_substates_have_stable_wire_spellings() {
+    for (state, raw) in [
+        (
+            ProcessDependencyState::ResultAppended,
+            "\"result_appended\"",
+        ),
+        (
+            ProcessDependencyState::AttentionScheduled,
+            "\"attention_scheduled\"",
+        ),
+        (
+            ProcessDependencyState::AttentionDeferred,
+            "\"attention_deferred\"",
+        ),
+    ] {
+        assert_eq!(serde_json::to_string(&state).expect("serializes"), raw);
+        assert_eq!(
+            serde_json::from_str::<ProcessDependencyState>(raw).expect("parses"),
+            state
+        );
+    }
 }
 
 #[tokio::test]

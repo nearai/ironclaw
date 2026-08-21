@@ -278,6 +278,9 @@ impl ProcessJournalMaterializedState {
             StoredProcessCommand::SettleDependency(request) => {
                 self.apply_settle_dependency(request)
             }
+            StoredProcessCommand::TransitionDependency(request) => {
+                self.apply_transition_dependency(request)
+            }
             StoredProcessCommand::ConsumeDependency(request) => {
                 self.apply_close_dependency(request, false)
             }
@@ -443,6 +446,7 @@ impl ProcessJournalMaterializedState {
                     created_at: snapshot.created_at,
                     settled_at: None,
                     consumed_at: None,
+                    transitioned_at: None,
                     metadata: dependency.metadata,
                 },
             );
@@ -1116,6 +1120,7 @@ impl ProcessJournalMaterializedState {
             created_at: request.created_at,
             settled_at: None,
             consumed_at: None,
+            transitioned_at: None,
             metadata: request.metadata,
         };
         self.dependencies.insert(key, record.clone());
@@ -1144,6 +1149,56 @@ impl ProcessJournalMaterializedState {
         record.state = crate::ProcessDependencyState::Settled;
         record.terminal = Some(request.terminal);
         record.settled_at = Some(request.settled_at);
+        Ok(StoredCommandOutcome::Dependency(Some(record.clone())))
+    }
+
+    /// Expected-state compare-and-swap over one dependency's state column.
+    ///
+    /// A transition that already landed replays as a success without
+    /// re-applying its payload; any other stored state is a typed error rather
+    /// than a silent no-op, because the caller's view of the lifecycle is
+    /// wrong.
+    fn apply_transition_dependency(
+        &mut self,
+        request: crate::TransitionProcessDependencyRequest,
+    ) -> Result<StoredCommandOutcome, ProcessJournalStoreError> {
+        // Validated before any mutation: a rejected command must leave the
+        // materialized state exactly as it found it.
+        let merged_metadata = match request.metadata {
+            Some(serde_json::Value::Object(fields)) => Some(fields),
+            Some(_) => {
+                return Err(ProcessJournalStoreError::InvalidRequest(
+                    "process dependency transition metadata must be a JSON object".to_string(),
+                ));
+            }
+            None => None,
+        };
+        let key = (request.dependent_process_id, request.dependency_process_id);
+        let Some(record) = self.dependencies.get_mut(&key) else {
+            return Ok(StoredCommandOutcome::Dependency(None));
+        };
+        if !same_lineage_scope(&record.scope, &request.scope) {
+            return Err(ProcessJournalStoreError::UnauthorizedScope);
+        }
+        if record.state == request.next {
+            return Ok(StoredCommandOutcome::Dependency(Some(record.clone())));
+        }
+        if record.state != request.expected {
+            return Err(ProcessJournalStoreError::InvalidRequest(format!(
+                "process dependency transition to {:?} expected state {:?} but found {:?}",
+                request.next, request.expected, record.state
+            )));
+        }
+        record.state = request.next;
+        record.transitioned_at = Some(request.transitioned_at);
+        // Shallow merge: a delivery step records its own facts without
+        // discarding the ones the edge already carries.
+        if let Some(fields) = merged_metadata {
+            match record.metadata.as_object_mut() {
+                Some(existing) => existing.extend(fields),
+                None => record.metadata = serde_json::Value::Object(fields),
+            }
+        }
         Ok(StoredCommandOutcome::Dependency(Some(record.clone())))
     }
 

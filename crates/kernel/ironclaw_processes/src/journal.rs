@@ -712,6 +712,13 @@ pub struct ProcessTreeReservation {
 pub enum ProcessDependencyState {
     Open,
     Settled,
+    /// The settled dependency's result is durably recorded on the dependent.
+    ResultAppended,
+    /// The dependent has been made attentive to the recorded result.
+    AttentionScheduled,
+    /// Attention was withheld on purpose; the dependent must be made attentive
+    /// later. Not a failure, and not closed.
+    AttentionDeferred,
     Consumed,
     Abandoned,
 }
@@ -741,6 +748,10 @@ pub struct ProcessDependencyRecord {
     pub settled_at: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumed_at: Option<Timestamp>,
+    /// When the state column last moved under an expected-state transition.
+    /// Absent on rows written before delivery substates existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transitioned_at: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
 }
@@ -773,6 +784,22 @@ pub struct CloseProcessDependencyRequest {
     pub dependency_process_id: ProcessId,
     pub scope: ResourceScope,
     pub closed_at: Timestamp,
+}
+
+/// A compare-and-swap over one dependency's state column: the write lands only
+/// if the stored state still equals `expected`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransitionProcessDependencyRequest {
+    pub dependent_process_id: ProcessId,
+    pub dependency_process_id: ProcessId,
+    pub scope: ResourceScope,
+    pub expected: ProcessDependencyState,
+    pub next: ProcessDependencyState,
+    /// Merged into the record's metadata object when present; `None` leaves the
+    /// recorded payload untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+    pub transitioned_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1035,6 +1062,20 @@ pub trait ProcessDependencyPort: Send + Sync {
     async fn abandon_process_dependency(
         &self,
         request: CloseProcessDependencyRequest,
+    ) -> Result<Option<ProcessDependencyRecord>, Self::Error>;
+
+    /// Advances a dependency's state column only if it still holds the
+    /// requested `expected` state, so a delivery step that crashed part-way can
+    /// be replayed without double-applying the next one. Replaying a
+    /// transition that already landed is idempotent; an unknown edge yields
+    /// `Ok(None)`; any other stored state is an error.
+    ///
+    /// Closure stays with `consume_process_dependency` /
+    /// `abandon_process_dependency`, which also release the descendant
+    /// reservation this operation does not touch.
+    async fn transition_process_dependency(
+        &self,
+        request: TransitionProcessDependencyRequest,
     ) -> Result<Option<ProcessDependencyRecord>, Self::Error>;
 
     async fn query_process_dependencies(

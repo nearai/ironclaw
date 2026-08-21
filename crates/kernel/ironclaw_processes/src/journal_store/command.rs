@@ -9,7 +9,7 @@ use crate::{
     ProcessConcurrencyLimits, ProcessLeaseRequest, PruneReleasedProcessRequest,
     RecordProcessCheckpointRequest, RecoverExpiredProcessLeasesRequest, ReleaseProcessTreeRequest,
     ReserveProcessTreeRequest, SettleProcessDependencyRequest, SubmitProcessAtEdgeRequest,
-    SubmitProcessRequest,
+    SubmitProcessRequest, TransitionProcessDependencyRequest,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +51,7 @@ pub(super) enum StoredProcessCommand {
     PruneTree(PruneReleasedProcessRequest),
     OpenDependency(OpenProcessDependencyRequest),
     SettleDependency(SettleProcessDependencyRequest),
+    TransitionDependency(TransitionProcessDependencyRequest),
     ConsumeDependency(CloseProcessDependencyRequest),
     AbandonDependency(CloseProcessDependencyRequest),
     RecordCheckpoint(RecordProcessCheckpointRequest),
@@ -155,6 +156,13 @@ impl StoredProcessCommand {
                     .push((request.dependent_process_id, request.dependency_process_id));
             }
             Self::SettleDependency(request) => {
+                add_dependency_references(
+                    &mut references,
+                    request.dependent_process_id,
+                    request.dependency_process_id,
+                );
+            }
+            Self::TransitionDependency(request) => {
                 add_dependency_references(
                     &mut references,
                     request.dependent_process_id,

@@ -84,7 +84,15 @@ impl AwaitEdgeStore {
         };
         edge.state = match record.state {
             ProcessDependencyState::Open => AwaitEdgeState::Open,
-            ProcessDependencyState::Settled => AwaitEdgeState::Settled,
+            // ponytail: the kernel's three delivery substates all project onto
+            // `Settled` — settled and not yet drained is true of every one of
+            // them, but the projection cannot yet tell them apart. Nothing
+            // writes those states in this slice; the slice that starts walking
+            // the delivery chain gives `AwaitEdgeState` the matching arms.
+            ProcessDependencyState::Settled
+            | ProcessDependencyState::ResultAppended
+            | ProcessDependencyState::AttentionScheduled
+            | ProcessDependencyState::AttentionDeferred => AwaitEdgeState::Settled,
             ProcessDependencyState::Consumed => AwaitEdgeState::Drained,
             ProcessDependencyState::Abandoned => AwaitEdgeState::Abandoned,
         };
@@ -398,6 +406,7 @@ mod tests {
             created_at: edge.created_at,
             settled_at: Some(Utc::now()),
             consumed_at: None,
+            transitioned_at: None,
             metadata: serde_json::to_value(edge).expect("serialize edge"),
         }
     }
@@ -419,6 +428,29 @@ mod tests {
                 ReservationReleaseState::Unclaimed,
                 ProcessLifecycleStatus::Failed,
                 Some(EdgeTerminalKind::Failed),
+            ),
+            // The three kernel delivery substates all project onto `Settled`
+            // today, and none of them may look released.
+            (
+                ProcessDependencyState::ResultAppended,
+                AwaitEdgeState::Settled,
+                ReservationReleaseState::Unclaimed,
+                ProcessLifecycleStatus::Completed,
+                Some(EdgeTerminalKind::Completed),
+            ),
+            (
+                ProcessDependencyState::AttentionScheduled,
+                AwaitEdgeState::Settled,
+                ReservationReleaseState::Unclaimed,
+                ProcessLifecycleStatus::Completed,
+                Some(EdgeTerminalKind::Completed),
+            ),
+            (
+                ProcessDependencyState::AttentionDeferred,
+                AwaitEdgeState::Settled,
+                ReservationReleaseState::Unclaimed,
+                ProcessLifecycleStatus::Completed,
+                Some(EdgeTerminalKind::Completed),
             ),
             (
                 ProcessDependencyState::Consumed,
