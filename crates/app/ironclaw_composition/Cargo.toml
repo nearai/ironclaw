@@ -77,6 +77,7 @@ ironclaw_mcp = { path = "../../lanes/ironclaw_mcp" }
 ironclaw_memory_mem0 = { path = "../../extensions/packages/mem0", optional = true }
 ironclaw_memory_native = { path = "../../extensions/packages/memory-native" }
 ironclaw_network = { path = "../../substrates/ironclaw_network" }
+ironclaw_notifications = { path = "../../domains/ironclaw_notifications" }
 ironclaw_observability = { path = "../../substrates/ironclaw_observability" }
 ironclaw_operator = { path = "../../product/ironclaw_operator" }
 ironclaw_outbound = { path = "../../domains/ironclaw_outbound" }

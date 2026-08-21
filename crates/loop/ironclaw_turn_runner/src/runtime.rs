@@ -947,7 +947,7 @@ where
 }
 
 /// Issue #5505: a scheduled-trigger fire runs through the same agent loop as
-/// an interactive turn, but must not be able to create/remove/pause/resume
+/// an interactive turn, but must not be able to create/remove/pause/resume/run
 /// triggers (a fire mutating the trigger fleet is exactly the reported "a
 /// routine that creates routines" bug). Read-only
 /// [`ironclaw_host_runtime::TRIGGER_LIST_CAPABILITY_ID`] is intentionally
@@ -960,6 +960,7 @@ const SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS: &[&str] = &[
     ironclaw_host_runtime::TRIGGER_REMOVE_CAPABILITY_ID,
     ironclaw_host_runtime::TRIGGER_PAUSE_CAPABILITY_ID,
     ironclaw_host_runtime::TRIGGER_RESUME_CAPABILITY_ID,
+    ironclaw_host_runtime::TRIGGER_RUN_CAPABILITY_ID,
 ];
 
 /// Unbound runs execute a prepared context with no conversation and no
@@ -973,6 +974,7 @@ const UNBOUND_DENIED_CAPABILITY_IDS: &[&str] = &[
     ironclaw_host_runtime::TRIGGER_REMOVE_CAPABILITY_ID,
     ironclaw_host_runtime::TRIGGER_PAUSE_CAPABILITY_ID,
     ironclaw_host_runtime::TRIGGER_RESUME_CAPABILITY_ID,
+    ironclaw_host_runtime::TRIGGER_RUN_CAPABILITY_ID,
 ];
 
 /// Runner-private per-run factory that preserves the canonical wrapper order
@@ -1161,7 +1163,7 @@ mod tests {
     };
     use ironclaw_host_runtime::{
         TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
-        TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+        TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TRIGGER_RUN_CAPABILITY_ID,
     };
     use ironclaw_loop_contracts::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView,
@@ -1743,6 +1745,7 @@ mod tests {
                 descriptor(TRIGGER_REMOVE_CAPABILITY_ID),
                 descriptor(TRIGGER_PAUSE_CAPABILITY_ID),
                 descriptor(TRIGGER_RESUME_CAPABILITY_ID),
+                descriptor(TRIGGER_RUN_CAPABILITY_ID),
                 descriptor("builtin.echo"),
             ],
             callable_capability_ids: None,
@@ -1751,7 +1754,7 @@ mod tests {
 
     /// Derives the test-driven mutator id list directly from the production
     /// `SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS` constant rather than
-    /// re-listing the four capability ids by name. Hand-duplicating the list
+    /// re-listing the capability ids by name. Hand-duplicating the list
     /// here would let the unit tests below keep passing even if the
     /// production const accidentally dropped one of the mutators — deriving
     /// from the const closes that drift risk (PR #5515 review comment).
@@ -1816,6 +1819,7 @@ mod tests {
         assert!(!scheduled_ids.contains(&TRIGGER_REMOVE_CAPABILITY_ID.to_string()));
         assert!(!scheduled_ids.contains(&TRIGGER_PAUSE_CAPABILITY_ID.to_string()));
         assert!(!scheduled_ids.contains(&TRIGGER_RESUME_CAPABILITY_ID.to_string()));
+        assert!(!scheduled_ids.contains(&TRIGGER_RUN_CAPABILITY_ID.to_string()));
         assert!(
             scheduled_ids.contains(&TRIGGER_LIST_CAPABILITY_ID.to_string()),
             "read-only trigger_list must remain visible on scheduled_trigger surface: {scheduled_ids:?}"
@@ -1834,6 +1838,7 @@ mod tests {
         assert!(interactive_ids.contains(&TRIGGER_REMOVE_CAPABILITY_ID.to_string()));
         assert!(interactive_ids.contains(&TRIGGER_PAUSE_CAPABILITY_ID.to_string()));
         assert!(interactive_ids.contains(&TRIGGER_RESUME_CAPABILITY_ID.to_string()));
+        assert!(interactive_ids.contains(&TRIGGER_RUN_CAPABILITY_ID.to_string()));
         assert!(interactive_ids.contains(&TRIGGER_LIST_CAPABILITY_ID.to_string()));
         assert!(
             !interactive_ids
@@ -1876,6 +1881,7 @@ mod tests {
         assert!(!scheduled_ids.contains(&TRIGGER_REMOVE_CAPABILITY_ID.to_string()));
         assert!(!scheduled_ids.contains(&TRIGGER_PAUSE_CAPABILITY_ID.to_string()));
         assert!(!scheduled_ids.contains(&TRIGGER_RESUME_CAPABILITY_ID.to_string()));
+        assert!(!scheduled_ids.contains(&TRIGGER_RUN_CAPABILITY_ID.to_string()));
         assert!(scheduled_ids.contains(&TRIGGER_LIST_CAPABILITY_ID.to_string()));
         // Global list was empty, so the previously-denied spawn_subagent
         // capability is now visible again (expected — this is what "emptying

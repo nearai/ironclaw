@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_assistant::{
-    LifecyclePackageKind, LifecyclePackageRef, RebornOutboundDeliveryTargetId,
+    AUTOMATION_RUN_COMMAND, LifecyclePackageKind, LifecyclePackageRef,
+    RebornAutomationMutationResponse, RebornAutomationRequest, RebornOutboundDeliveryTargetId,
 };
 use ironclaw_composition::{
     ChannelExtensionBinding, RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity,
@@ -32,8 +33,8 @@ use ironclaw_host_api::{
     action::NetworkPolicy,
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
     ids::{
-        AgentId, CapabilityGrantId, CapabilityId, ExtensionId, ProviderToolName, RunId, TenantId,
-        UserId,
+        ActivityId, AgentId, CapabilityGrantId, CapabilityId, ExtensionId, ProviderToolName, RunId,
+        TenantId, UserId,
     },
     mount::MountView,
     resource::ResourceEstimate,
@@ -43,6 +44,7 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     RuntimeCapabilityOutcome, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
     TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    TRIGGER_RUN_CAPABILITY_ID,
 };
 use ironclaw_loop_contracts::{
     LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
@@ -59,11 +61,12 @@ use ironclaw_outbound::{
     CommunicationPreferenceRecord, DeliveryDefaultScope, TriggeredRunDeliveryOutcomeKind,
     TriggeredRunDeliveryStore,
 };
+use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceInvokeRequest};
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerDeliveryTargetId, TriggerExecutionSpec,
-    TriggerId, TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository, TriggerRunStatus,
-    TriggerSchedule, TriggerSourceKind, TriggerState,
+    TriggerId, TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository,
+    TriggerRunHistoryStatus, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId, TurnScope};
 use serde_json::{Value, json};
@@ -353,7 +356,7 @@ impl NetworkHttpEgress for FakeSlackProvider {
 /// Model gateway for T0-5505-E2E: on its FIRST turn of the fired run,
 /// attempts to register EVERY scheduled-trigger mutator capability
 /// (`builtin.trigger_create`, `builtin.trigger_remove`, `builtin.trigger_pause`,
-/// `builtin.trigger_resume`) as real provider tool calls — as a real native
+/// `builtin.trigger_resume`, `builtin.trigger_run`) as real provider tool calls — as a real native
 /// provider tool call would — directly against the fired run's actual
 /// (composed) capability port via `stream_model_with_capabilities`. This is
 /// the same seam a production LLM-provider-backed gateway uses to turn a raw
@@ -365,9 +368,9 @@ impl NetworkHttpEgress for FakeSlackProvider {
 /// Generalized from a single `trigger_create`-only attempt (PR #5515 review:
 /// "production mutator deny set only has create covered end-to-end — the
 /// full-path poller test only attempts `builtin.trigger_create`") to cover
-/// all four mutators from the SAME first turn:
+/// all five mutators from the SAME first turn:
 /// `HostManagedModelResponse::capability_calls` already takes a `Vec`, so all
-/// four registration attempts are made, and any that resolve are forwarded,
+/// five registration attempts are made, and any that resolve are forwarded,
 /// before the turn's single response is returned. This closes the drift risk
 /// where the production `SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS` deny set
 /// could accidentally drop `trigger_remove`/`trigger_pause`/`trigger_resume`
@@ -379,7 +382,7 @@ impl NetworkHttpEgress for FakeSlackProvider {
 /// `provider_tool_call_capability_ids` override (delegating to `inner` so
 /// deferred/disclosed tools still resolve — see #5149's progressive tool
 /// disclosure), then scope-checks the resolved id against its deny set
-/// before ever building a candidate. All four mutator ids are on the fix's
+/// before ever building a candidate. All five mutator ids are on the fix's
 /// scheduled_trigger deny set, so every scope check fails closed with
 /// `AgentLoopHostErrorKind::InvalidInvocation` /
 /// "provider tool call targets a disabled capability" — registration never
@@ -391,7 +394,7 @@ impl NetworkHttpEgress for FakeSlackProvider {
 /// forwarded together as one `capability_calls` response, which the loop
 /// will actually dispatch — including staging the real JSON input through
 /// the run's real `StagedCapabilityIo`, so a genuinely unpatched surface
-/// would really create a second trigger and/or remove/pause/resume the
+/// would really create a second trigger and/or remove/pause/resume/run the
 /// target trigger. If every registration is denied (the fixed, expected
 /// behavior), there is nothing to dispatch and a plain reply is returned
 /// instead so the run still terminates cleanly.
@@ -404,7 +407,7 @@ struct TriggerMutatorAttemptGateway {
     call_count: TokioMutex<usize>,
     /// Set by the test body, before the fire is triggered, to the id of the
     /// already-created legitimate trigger. `trigger_remove`/`trigger_pause`/
-    /// `trigger_resume`'s attempts target this record — a real `trigger_id`
+    /// `trigger_resume`/`trigger_run` attempts target this record — a real `trigger_id`
     /// is required to shape a realistic input for those capabilities' input
     /// schema, even though the scope-check denial happens before the payload
     /// is ever read.
@@ -447,7 +450,8 @@ impl TriggerMutatorAttemptGateway {
             ),
             (TRIGGER_REMOVE_CAPABILITY_ID, mutator_payload.clone()),
             (TRIGGER_PAUSE_CAPABILITY_ID, mutator_payload.clone()),
-            (TRIGGER_RESUME_CAPABILITY_ID, mutator_payload),
+            (TRIGGER_RESUME_CAPABILITY_ID, mutator_payload.clone()),
+            (TRIGGER_RUN_CAPABILITY_ID, mutator_payload),
         ]
         .into_iter()
         .map(|(capability_id, arguments)| {
@@ -668,7 +672,7 @@ async fn wait_for_mutator_registration_outcomes(
     loop {
         let captured_contents = gateway.captured_message_contents().await;
         let outcomes = gateway.registration_outcomes().await;
-        if outcomes.len() == 4 || Instant::now() >= stop {
+        if outcomes.len() == 5 || Instant::now() >= stop {
             return (captured_contents, outcomes);
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1006,6 +1010,65 @@ async fn wait_for_recorded_outcome(
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+async fn wait_for_trigger_run_status(
+    repository: &Arc<dyn TriggerRepository>,
+    trigger_id: TriggerId,
+    run_id: TurnRunId,
+    expected: TriggerRunHistoryStatus,
+) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let history = repository
+            .list_trigger_run_history(
+                TenantId::new(TENANT).expect("valid tenant id"),
+                trigger_id,
+                10,
+            )
+            .await
+            .expect("read trigger run history");
+        if history
+            .iter()
+            .any(|run| run.run_id == Some(run_id) && run.status == expected)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "trigger {trigger_id} run {run_id} did not reach {expected:?} within 15s: {history:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn invoke_run_automation(
+    runtime: &RebornRuntime,
+    trigger_id: TriggerId,
+) -> RebornAutomationMutationResponse {
+    let surface = runtime.product_surface(None).expect("product surface");
+    let response = surface
+        .invoke(
+            ProductSurfaceCaller::new(
+                TenantId::new(TENANT).expect("valid tenant id"),
+                UserId::new(USER).expect("valid user id"),
+                Some(AgentId::new(AGENT).expect("valid agent id")),
+                None,
+            ),
+            ProductSurfaceInvokeRequest {
+                operation_id: AUTOMATION_RUN_COMMAND
+                    .capability_id()
+                    .expect("automation run capability id"),
+                input: serde_json::to_value(RebornAutomationRequest {
+                    automation_id: trigger_id.to_string(),
+                })
+                .expect("automation run request"),
+                activity_id: ActivityId::new(),
+            },
+        )
+        .await
+        .expect("run automation through product surface");
+    serde_json::from_value(response.output).expect("automation run response")
 }
 
 /// Same as [`build_runtime_with`], but with an explicit
@@ -1660,6 +1723,94 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
         2,
         "restart must not rerun or dispatch the suppressed result"
     );
+}
+
+#[tokio::test]
+async fn product_run_now_uses_manual_fire_path_and_reaches_delivery_settlement() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let model_gateway = Arc::new(DeliveryJourneyGateway::default());
+    let slack_provider = Arc::new(FakeSlackProvider::default());
+    let runtime = build_runtime_with_slack_delivery(
+        &root,
+        Arc::clone(&model_gateway),
+        Arc::clone(&slack_provider),
+    )
+    .await;
+    pair_trigger_creator(&runtime).await;
+
+    let repository = runtime.trigger_repository();
+    let tenant_id = TenantId::new(TENANT).expect("valid tenant id");
+    let trigger_id = TriggerId::new();
+    let scheduled_slot = Utc::now() + chrono::Duration::hours(1);
+    repository
+        .upsert_trigger(TriggerRecord {
+            trigger_id,
+            tenant_id: tenant_id.clone(),
+            creator_user_id: UserId::new(USER).expect("valid user id"),
+            agent_id: Some(AgentId::new(AGENT).expect("valid agent id")),
+            project_id: None,
+            name: "manual run delivery journey".to_string(),
+            source: TriggerSourceKind::Schedule,
+            schedule: TriggerSchedule::cron("0 * * * *").expect("valid hourly schedule"),
+            prompt: QA_9B_PROMPT.to_string(),
+            execution_spec: None,
+            delivery_target: None,
+            state: TriggerState::Scheduled,
+            next_run_at: scheduled_slot,
+            last_run_at: None,
+            last_fired_slot: None,
+            last_status: None,
+            active_fire_slot: None,
+            active_run_ref: None,
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("seed future automation");
+
+    let response = invoke_run_automation(&runtime, trigger_id).await;
+    assert!(
+        response.updated,
+        "run-now must report the caller-scoped mutation"
+    );
+
+    let delivery_store = runtime
+        .triggered_run_delivery_store_for_test()
+        .expect("local runtime exposes the production triggered-delivery store");
+    let run_id = wait_for_recorded_outcome(
+        &repository,
+        &delivery_store,
+        trigger_id,
+        TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured,
+    )
+    .await;
+    wait_for_trigger_run_status(&repository, trigger_id, run_id, TriggerRunHistoryStatus::Ok).await;
+
+    let settled = repository
+        .get_trigger(tenant_id.clone(), trigger_id)
+        .await
+        .expect("read manually fired automation")
+        .expect("automation remains present");
+    assert_eq!(
+        settled.next_run_at, scheduled_slot,
+        "manual fire must not advance the recurring schedule"
+    );
+    let history = repository
+        .list_trigger_run_history(tenant_id, trigger_id, 1)
+        .await
+        .expect("read manual run history");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].source, TriggerSourceKind::Manual);
+    assert_eq!(
+        model_gateway.request_count_containing(QA_9B_PROMPT).await,
+        1,
+        "run-now must execute through the canonical trigger runner"
+    );
+    assert!(
+        slack_provider.provider_messages().is_empty(),
+        "manual and scheduled runs share the explicit-delivery policy"
+    );
+
+    runtime.shutdown().await.expect("runtime shutdown");
 }
 
 #[tokio::test]
@@ -2419,25 +2570,25 @@ async fn structured_trigger_empty_allowlist_reaches_the_fired_run_and_exposes_no
 /// T0-5505-E2E: end-to-end proof that issue #5505's fix composes through the
 /// real Reborn runtime — a scheduled-trigger fire resolves the dedicated
 /// `scheduled_trigger` capability surface, and a fired run that tries to
-/// create a *second* trigger, or remove/pause/resume the existing one,
-/// cannot, because all four mutator capabilities are stripped from that
+/// create a *second* trigger, or remove/pause/resume/run the existing one,
+/// cannot, because all five mutator capabilities are stripped from that
 /// surface (`builtin.trigger_list` and firing itself stay intact).
 ///
 /// Unlike the other tests in this file, the fired run's model gateway
 /// (`TriggerMutatorAttemptGateway`) does not just record requests — on the fired
 /// run's first turn it registers real `builtin.trigger_create`,
-/// `builtin.trigger_remove`, `builtin.trigger_pause`, and
-/// `builtin.trigger_resume` provider tool calls against the run's actual
+/// `builtin.trigger_remove`, `builtin.trigger_pause`, `builtin.trigger_resume`,
+/// and `builtin.trigger_run` provider tool calls against the run's actual
 /// composed `LoopCapabilityPort` (the exact seam a native provider tool-call
 /// response goes through in production) — one attempting to create a second
-/// trigger named `SELF_CREATE_MARKER_TRIGGER_NAME`, the other three
+/// trigger named `SELF_CREATE_MARKER_TRIGGER_NAME`, the other four
 /// targeting the already-created legitimate trigger. See
 /// `TriggerMutatorAttemptGateway`'s doc comment for why this exercises the real
 /// `CapabilitySurfacePolicyFilter` and disclosure chain instead of a stand-in,
-/// and for why all four mutators — not just
+/// and for why all five mutators — not just
 /// `trigger_create` — are covered here (PR #5515 review comment: a
 /// full-path test that only exercised `trigger_create` would not catch the
-/// production deny constant accidentally dropping one of the other three).
+/// production deny constant accidentally dropping one of the other four).
 #[tokio::test]
 async fn scheduled_trigger_fire_cannot_invoke_trigger_mutators() {
     scheduled_trigger_denies_mutators_with_tool_disclosure(ToolDisclosureMode::Off).await;
@@ -2454,7 +2605,7 @@ async fn scheduled_trigger_fire_cannot_invoke_trigger_mutators() {
 /// exactly one usage anywhere in the repo (an unrelated system-prompt test),
 /// so nothing exercised that decorator-ordering composition end-to-end; a
 /// decorator-order or bridged-disclosure regression could have re-exposed
-/// `trigger_create`/`remove`/`pause`/`resume` without any whole-path test
+/// `trigger_create`/`remove`/`pause`/`resume`/`run` without any whole-path test
 /// failing. Keep this alongside the `Off` variant rather than folding it in
 /// — it pins the composition order, not just the deny outcome.
 #[tokio::test]
@@ -2542,9 +2693,9 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
 
     assert_eq!(
         registration_outcomes.len(),
-        4,
-        "the fired run must have attempted all 4 scheduled-trigger mutator \
-         registrations (create/remove/pause/resume) — captured_messages: \
+        5,
+        "the fired run must have attempted all 5 scheduled-trigger mutator \
+         registrations (create/remove/pause/resume/run) — captured_messages: \
          {captured_contents:?}, outcomes: {registration_outcomes:?}, \
          settled_record: {settled:?}"
     );
@@ -2581,6 +2732,12 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
         registration_outcomes.get(TRIGGER_REMOVE_CAPABILITY_ID),
         Some(&Err(DENIED_SUMMARY.to_string())),
         "expected the scheduled_trigger surface to deny the trigger_remove \
+         registration attempt made from inside the fired run: {registration_outcomes:?}"
+    );
+    assert_eq!(
+        registration_outcomes.get(TRIGGER_RUN_CAPABILITY_ID),
+        Some(&Err(DENIED_SUMMARY.to_string())),
+        "expected the scheduled_trigger surface to deny the trigger_run \
          registration attempt made from inside the fired run: {registration_outcomes:?}"
     );
     assert_eq!(

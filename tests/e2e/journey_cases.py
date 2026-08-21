@@ -378,7 +378,7 @@ PRODUCT_JOURNEY_CASES = (
         ),
     ),
     ProductJourneyCase(
-        case_id="telegram_linked_identity_chat_unlink_relink",
+        case_id="telegram_bot_pairing_chat_disconnect_repair",
         provider_worlds=(ProviderWorld.TELEGRAM,),
         mutable_provider_worlds=(ProviderWorld.TELEGRAM,),
         ingress=JourneyIngress.TELEGRAM,
@@ -392,8 +392,8 @@ PRODUCT_JOURNEY_CASES = (
         evidence=CargoEvidence(
             source="tests/integration/extension_delivery.rs",
             test=(
-                "linked_telegram_actor_turns_attribute_to_the_linking_user_"
-                "and_unlink_revokes_admission"
+                "paired_telegram_bot_actor_turns_attribute_to_the_user_"
+                "and_disconnect_revokes_admission"
             ),
             target="reborn_integration_extension_delivery",
         ),

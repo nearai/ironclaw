@@ -124,6 +124,11 @@ pub enum AdmissionRejectionReason {
     Policy,
     Unauthorized,
     Unavailable,
+    /// The thread's consecutive autonomous-wake budget is exhausted. Distinct
+    /// from the other reasons because nothing is wrong with the request or the
+    /// caller — the thread is simply parked pending human attention, and a
+    /// caller may retry after a human activates it.
+    SystemWakeStreak,
 }
 
 impl AdmissionRejectionReason {
@@ -134,6 +139,7 @@ impl AdmissionRejectionReason {
             Self::Policy => "policy",
             Self::Unauthorized => "unauthorized",
             Self::Unavailable => "unavailable",
+            Self::SystemWakeStreak => "system_wake_streak",
         }
     }
 }
@@ -309,6 +315,11 @@ impl TurnError {
                     TurnErrorCategory::Unauthorized
                 }
                 AdmissionRejectionReason::Unavailable => TurnErrorCategory::Unavailable,
+                // Capacity-shaped, not caller error: the thread's autonomous
+                // budget is spent and a human activation restores it, which is
+                // the same "retry later, nothing is malformed" shape the
+                // tenant-limit rejection carries.
+                AdmissionRejectionReason::SystemWakeStreak => TurnErrorCategory::AdmissionRejected,
             },
             Self::ScopeNotFound => TurnErrorCategory::ScopeNotFound,
             Self::Unauthorized => TurnErrorCategory::Unauthorized,

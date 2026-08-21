@@ -595,6 +595,21 @@ pub struct RebornAutomationMutationResponse {
     pub updated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub automation: Option<RebornAutomationInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_result: Option<RebornAutomationRunMutationResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAutomationRunMutationResult {
+    pub status: RebornAutomationRunMutationStatus,
+    pub run_id: TurnRunId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornAutomationRunMutationStatus {
+    Submitted,
+    Replayed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

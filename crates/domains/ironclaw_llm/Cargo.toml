@@ -45,7 +45,9 @@ rand = "0.10"
 urlencoding = "2"
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "multipart", "rustls", "stream", "system-proxy"] }
-rig-core = { version = "0.33", default-features = false, features = ["reqwest-rustls"] }
+# Rig 0.36 preserves non-streaming OpenAI-compatible `reasoning_content`.
+# Older releases classify valid reasoning-only Qwen responses as empty.
+rig-core = { version = "0.36", default-features = false, features = ["reqwest", "rustls"] }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
 rust_decimal_macros = "1"
 secrecy = { version = "0.10", features = ["serde"] }

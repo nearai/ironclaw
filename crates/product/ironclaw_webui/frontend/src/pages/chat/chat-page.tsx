@@ -12,6 +12,8 @@ export function ChatPage() {
     gatewayStatus,
     regressionArtifactExportEnabled = false,
     globalAutoApproveEnabled = false,
+    pendingRenderedNotification = null,
+    onNotificationRendered,
     setHeaderStatus,
   } = useOutletContext();
   const { threadId: urlThreadId } = useParams();
@@ -73,6 +75,8 @@ export function ChatPage() {
         gatewayStatus={gatewayStatus}
         regressionArtifactExportEnabled={regressionArtifactExportEnabled}
         globalAutoApproveEnabled={globalAutoApproveEnabled}
+        pendingRenderedNotification={pendingRenderedNotification}
+        onNotificationRendered={onNotificationRendered}
         onConnectionStatusChange={handleConnectionStatusChange}
       />
     </>

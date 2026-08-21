@@ -16,6 +16,7 @@ jobs:
   matrix-config:
     name: Configure Reborn Playwright matrix
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
     steps:
@@ -139,8 +140,8 @@ jobs:
       - name: Install E2E dependencies
         run: |
           cd tests/e2e
-          pip install -e .
-          playwright install --with-deps chromium
+          timeout --signal=INT --kill-after=30s 8m pip install -e .
+          timeout --signal=INT --kill-after=30s 8m playwright install --with-deps chromium
 
       - name: Run Reborn Playwright shard
         env:
@@ -165,6 +166,7 @@ jobs:
   reborn-playwright:
     name: Reborn Playwright
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: always()
     needs: [test]
     steps:

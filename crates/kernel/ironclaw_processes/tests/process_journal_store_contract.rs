@@ -20,10 +20,10 @@ use ironclaw_processes::{
     MAX_PROCESS_CHECKPOINT_PAYLOAD_BYTES, MAX_PROCESS_INPUT_PAYLOAD_BYTES,
     OpenProcessDependencyRequest, ProcessCheckpointId, ProcessCheckpointPayload,
     ProcessCheckpointPort, ProcessCheckpointRef, ProcessConcurrencyClass, ProcessConcurrencyLimits,
-    ProcessControlPort, ProcessDependencyPort, ProcessDependencyQuery, ProcessDependencyState,
-    ProcessDependencySubmission, ProcessFailureRecovery, ProcessGateQuery, ProcessGateQuerySource,
-    ProcessGateScopeMatch, ProcessInputPayload, ProcessInputPort, ProcessInputRef,
-    ProcessInputSubmission, ProcessJournalCommit, ProcessJournalCommitObserver,
+    ProcessControlPort, ProcessDependencyPort, ProcessDependencyQuery, ProcessDependencyRecord,
+    ProcessDependencyState, ProcessDependencySubmission, ProcessFailureRecovery, ProcessGateQuery,
+    ProcessGateQuerySource, ProcessGateScopeMatch, ProcessInputPayload, ProcessInputPort,
+    ProcessInputRef, ProcessInputSubmission, ProcessJournalCommit, ProcessJournalCommitObserver,
     ProcessJournalCursor, ProcessJournalEntry, ProcessJournalError, ProcessJournalKind,
     ProcessJournalObserverRegistry, ProcessJournalSource, ProcessJournalStore,
     ProcessJournalStoreError, ProcessKind, ProcessLeaseRequest, ProcessLeaseToken,
@@ -35,6 +35,7 @@ use ironclaw_processes::{
     PruneReleasedProcessRequest, RecordProcessCheckpointRequest, ReleaseProcessTreeRequest,
     ReserveProcessTreeRequest, ResumeProcessRequest, SettleProcessDependencyRequest,
     StopProcessRequest, SubmitProcessAtEdgeRequest, SubmitProcessRequest, SuspendProcessRequest,
+    TransitionProcessDependencyRequest,
 };
 use serde_json::json;
 use std::{
@@ -3101,6 +3102,604 @@ async fn consuming_dependency_atomically_releases_tree_capacity() {
         .expect("consumed dependency releases capacity");
 }
 
+fn new_store() -> ProcessJournalStore<InMemoryBackend> {
+    ProcessJournalStore::new(in_memory_backed_processes_filesystem())
+}
+
+/// Opens a dependency and settles it, returning `(dependent, dependency)`.
+///
+/// The opened metadata carries an `owner` key the transition tests assert is
+/// still present afterwards, which is what distinguishes a metadata merge from
+/// a metadata overwrite.
+async fn open_settled_dependency<F>(store: &ProcessJournalStore<F>) -> (ProcessId, ProcessId)
+where
+    F: RootFilesystem + Send + Sync + 'static,
+{
+    let dependent = ProcessId::new();
+    submit_internal_process(store, &scope(), dependent).await;
+    let dependency = ProcessId::new();
+    store
+        .open_process_dependency(OpenProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: dependency,
+            root_process_id: dependent,
+            scope: scope(),
+            group_ref: Some("gate:transition".to_string()),
+            created_at: Utc::now(),
+            metadata: json!({"owner": "runner"}),
+        })
+        .await
+        .expect("open dependency");
+    store
+        .settle_process_dependency(SettleProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: dependency,
+            scope: scope(),
+            terminal: ProcessTerminalEvidence {
+                status: ProcessLifecycleStatus::Completed,
+                output_bytes: Some(7),
+                sanitized_reason: None,
+            },
+            settled_at: Utc::now(),
+        })
+        .await
+        .expect("settle dependency")
+        .expect("dependency exists");
+    (dependent, dependency)
+}
+
+async fn stored_dependency<F>(
+    store: &ProcessJournalStore<F>,
+    dependent: ProcessId,
+    dependency: ProcessId,
+) -> ProcessDependencyRecord
+where
+    F: RootFilesystem + Send + Sync + 'static,
+{
+    store
+        .query_process_dependencies(ProcessDependencyQuery {
+            scope: scope(),
+            dependent_process_id: Some(dependent),
+            group_ref: None,
+            include_closed: true,
+        })
+        .await
+        .expect("query dependencies")
+        .into_iter()
+        .find(|record| record.dependency_process_id == dependency)
+        .expect("dependency exists")
+}
+
+/// Walks a freshly settled dependency to `target` through the real port, one
+/// legal edge at a time — never a back door into stored state. The route is a
+/// path through `legal_predecessors`, which is a branch, not a line.
+async fn force_state<F>(
+    store: &ProcessJournalStore<F>,
+    dependent: ProcessId,
+    dependency: ProcessId,
+    target: ProcessDependencyState,
+) where
+    F: RootFilesystem + Send + Sync + 'static,
+{
+    let route: &[ProcessDependencyState] = match target {
+        ProcessDependencyState::Settled => &[],
+        ProcessDependencyState::ResultAppended => &[ProcessDependencyState::ResultAppended],
+        ProcessDependencyState::AttentionScheduled => &[
+            ProcessDependencyState::ResultAppended,
+            ProcessDependencyState::AttentionScheduled,
+        ],
+        ProcessDependencyState::AttentionDeferred => &[
+            ProcessDependencyState::ResultAppended,
+            ProcessDependencyState::AttentionDeferred,
+        ],
+        other => panic!("{other:?} is not reachable through the state-column CAS"),
+    };
+    assert_eq!(
+        stored_dependency(store, dependent, dependency).await.state,
+        ProcessDependencyState::Settled,
+        "force_state routes from a freshly settled edge; give each target its own edge"
+    );
+    for next in route {
+        let advanced = store
+            .transition_process_dependency(TransitionProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: dependency,
+                scope: scope(),
+                next: *next,
+                metadata: None,
+                transitioned_at: Utc::now(),
+            })
+            .await
+            .expect("transition succeeds")
+            .expect("record exists");
+        assert_eq!(advanced.state, *next);
+    }
+}
+
+#[tokio::test]
+async fn dependency_transition_advances_from_a_legal_predecessor_and_replays_idempotently() {
+    let store = new_store();
+    let (dependent, dependency) = open_settled_dependency(&store).await;
+
+    let advanced = store
+        .transition_process_dependency(TransitionProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: dependency,
+            scope: scope(),
+            next: ProcessDependencyState::ResultAppended,
+            metadata: Some(json!({"message_ref": "msg:r1"})),
+            transitioned_at: Utc::now(),
+        })
+        .await
+        .expect("transition succeeds")
+        .expect("record exists");
+    assert_eq!(advanced.state, ProcessDependencyState::ResultAppended);
+    assert_eq!(advanced.metadata["message_ref"], "msg:r1");
+    assert_eq!(
+        advanced.metadata["owner"], "runner",
+        "a transition merges its payload into the edge metadata, it does not replace it"
+    );
+    assert!(
+        advanced.transitioned_at.is_some(),
+        "the transition instant must be durable, not dropped"
+    );
+
+    // Replaying the same transition is idempotent, not an error.
+    let replay = store
+        .transition_process_dependency(TransitionProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: dependency,
+            scope: scope(),
+            next: ProcessDependencyState::ResultAppended,
+            metadata: None,
+            transitioned_at: Utc::now(),
+        })
+        .await
+        .expect("replay succeeds")
+        .expect("record exists");
+    assert_eq!(replay.state, ProcessDependencyState::ResultAppended);
+    assert_eq!(
+        replay.metadata["message_ref"], "msg:r1",
+        "replay must not erase the recorded payload"
+    );
+    assert_eq!(
+        replay.transitioned_at, advanced.transitioned_at,
+        "replay must not restamp the transition instant"
+    );
+
+    // The advance is durable, not just an in-memory mutation.
+    assert_eq!(
+        stored_dependency(&store, dependent, dependency).await,
+        replay
+    );
+}
+
+/// Every ordered pair of non-terminal states the state-column CAS can be asked
+/// for, and whether `legal_predecessors` admits it. A table, not a line: the
+/// lifecycle branches at `ResultAppended` (attention now, or parked for later),
+/// and both branches rejoin at `AttentionScheduled`.
+///
+/// `Settled -> AttentionScheduled` is the load-bearing refusal: accepting it
+/// would let a dependent be made attentive with nothing on record saying its
+/// result was ever appended, and `consume` would then release the descendant
+/// reservation over that hole.
+const DEPENDENCY_TRANSITION_EDGES: &[(ProcessDependencyState, ProcessDependencyState, bool)] = &[
+    // From `Settled`, the only way forward is through the append.
+    (
+        ProcessDependencyState::Settled,
+        ProcessDependencyState::ResultAppended,
+        true,
+    ),
+    (
+        ProcessDependencyState::Settled,
+        ProcessDependencyState::AttentionScheduled,
+        false,
+    ),
+    (
+        ProcessDependencyState::Settled,
+        ProcessDependencyState::AttentionDeferred,
+        false,
+    ),
+    // From `ResultAppended`, attention either happens or is parked.
+    (
+        ProcessDependencyState::ResultAppended,
+        ProcessDependencyState::AttentionScheduled,
+        true,
+    ),
+    (
+        ProcessDependencyState::ResultAppended,
+        ProcessDependencyState::AttentionDeferred,
+        true,
+    ),
+    (
+        ProcessDependencyState::ResultAppended,
+        ProcessDependencyState::Settled,
+        false,
+    ),
+    // A parked edge rejoins at `AttentionScheduled` — draining it *is*
+    // scheduling attention — but cannot walk back to the append.
+    (
+        ProcessDependencyState::AttentionDeferred,
+        ProcessDependencyState::AttentionScheduled,
+        true,
+    ),
+    (
+        ProcessDependencyState::AttentionDeferred,
+        ProcessDependencyState::ResultAppended,
+        false,
+    ),
+    (
+        ProcessDependencyState::AttentionDeferred,
+        ProcessDependencyState::Settled,
+        false,
+    ),
+    // Attention is scheduled; delivery is done and only closure remains.
+    (
+        ProcessDependencyState::AttentionScheduled,
+        ProcessDependencyState::ResultAppended,
+        false,
+    ),
+    (
+        ProcessDependencyState::AttentionScheduled,
+        ProcessDependencyState::AttentionDeferred,
+        false,
+    ),
+    (
+        ProcessDependencyState::AttentionScheduled,
+        ProcessDependencyState::Settled,
+        false,
+    ),
+];
+
+#[tokio::test]
+async fn dependency_transition_walks_only_legal_edges() {
+    for (from, to, allowed) in DEPENDENCY_TRANSITION_EDGES.iter().copied() {
+        let store = new_store();
+        let (dependent, dependency) = open_settled_dependency(&store).await;
+        force_state(&store, dependent, dependency, from).await;
+
+        let outcome = store
+            .transition_process_dependency(TransitionProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: dependency,
+                scope: scope(),
+                next: to,
+                metadata: None,
+                transitioned_at: Utc::now(),
+            })
+            .await;
+        let stored = stored_dependency(&store, dependent, dependency).await.state;
+
+        if allowed {
+            let advanced = outcome
+                .unwrap_or_else(|error| panic!("{from:?} -> {to:?} must be legal: {error}"))
+                .expect("record exists");
+            assert_eq!(advanced.state, to);
+            assert_eq!(stored, to, "{from:?} -> {to:?} must be durable");
+        } else {
+            let error = outcome.expect_err(&format!("{from:?} -> {to:?} must be refused"));
+            let rendered = format!("{error}");
+            assert!(
+                rendered.contains(&format!("{to:?}")) && rendered.contains(&format!("{from:?}")),
+                "the refusal must name both ends of the illegal edge: {rendered}"
+            );
+            assert_eq!(
+                stored, from,
+                "a refused transition must leave the stored state untouched"
+            );
+        }
+    }
+}
+
+/// Replaying a step that already landed is not an illegal edge — it is the
+/// same command driven twice — so it returns the stored record unchanged
+/// rather than erroring, and does not restamp or overwrite what is recorded.
+#[tokio::test]
+async fn dependency_transition_replays_a_landed_step_without_clobbering_it() {
+    for state in [
+        ProcessDependencyState::ResultAppended,
+        ProcessDependencyState::AttentionScheduled,
+        ProcessDependencyState::AttentionDeferred,
+    ] {
+        let store = new_store();
+        let (dependent, dependency) = open_settled_dependency(&store).await;
+        force_state(&store, dependent, dependency, state).await;
+        let before = stored_dependency(&store, dependent, dependency).await;
+
+        let replay = store
+            .transition_process_dependency(TransitionProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: dependency,
+                scope: scope(),
+                next: state,
+                metadata: Some(json!({"owner": "a second driver"})),
+                transitioned_at: Utc::now(),
+            })
+            .await
+            .expect("replaying a landed step is not an error")
+            .expect("record exists");
+        assert_eq!(
+            replay, before,
+            "{state:?} replay must return the record untouched, metadata included"
+        );
+        assert_eq!(
+            stored_dependency(&store, dependent, dependency).await,
+            before
+        );
+    }
+}
+
+/// Consume/abandon and the reservation release are one journal command
+/// (`crates/kernel/ironclaw_processes/AGENTS.md`). The state-column CAS does
+/// not touch the reservation ledger, so letting it write a terminal state
+/// would be exactly the compensating dual write that invariant forbids: the
+/// edge would read closed while its descendant slot leaked forever.
+#[tokio::test]
+async fn dependency_transition_refuses_to_write_a_terminal_state() {
+    for (target, door) in [
+        (
+            ProcessDependencyState::Consumed,
+            "consume_process_dependency",
+        ),
+        (
+            ProcessDependencyState::Abandoned,
+            "abandon_process_dependency",
+        ),
+    ] {
+        let store = new_store();
+        let (dependent, dependency) = open_settled_dependency(&store).await;
+
+        let error = store
+            .transition_process_dependency(TransitionProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: dependency,
+                scope: scope(),
+                next: target,
+                metadata: None,
+                transitioned_at: Utc::now(),
+            })
+            .await
+            .expect_err("a transition must not close the edge");
+        assert!(
+            format!("{error}").contains(door),
+            "the refusal must name the door that also releases the reservation: {error}"
+        );
+        assert_eq!(
+            stored_dependency(&store, dependent, dependency).await.state,
+            ProcessDependencyState::Settled,
+            "{target:?} must not reach the state column through a transition"
+        );
+    }
+}
+
+/// Consuming closes the edge and releases its descendant reservation, so it is
+/// allowed only where delivery is durably far enough along: the result is
+/// appended *and* attention is scheduled. `ResultAppended` has no attention
+/// recorded yet, and `AttentionDeferred` is deliberately parked for a later
+/// sweep — closing either would strand the dependent.
+#[tokio::test]
+async fn consume_closes_a_delivered_edge_only_once_attention_is_scheduled() {
+    for state in [
+        ProcessDependencyState::Settled,
+        ProcessDependencyState::AttentionScheduled,
+    ] {
+        let store = new_store();
+        let (dependent, dependency) = open_settled_dependency(&store).await;
+        force_state(&store, dependent, dependency, state).await;
+
+        let consumed = store
+            .consume_process_dependency(CloseProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: dependency,
+                scope: scope(),
+                closed_at: Utc::now(),
+            })
+            .await
+            .expect("consume succeeds")
+            .expect("dependency exists");
+        assert_eq!(
+            consumed.state,
+            ProcessDependencyState::Consumed,
+            "{state:?} must be closeable, or the delivery chain has a state with no exit"
+        );
+    }
+
+    for state in [
+        ProcessDependencyState::ResultAppended,
+        ProcessDependencyState::AttentionDeferred,
+    ] {
+        let store = new_store();
+        let (dependent, dependency) = open_settled_dependency(&store).await;
+        force_state(&store, dependent, dependency, state).await;
+
+        let error = store
+            .consume_process_dependency(CloseProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: dependency,
+                scope: scope(),
+                closed_at: Utc::now(),
+            })
+            .await
+            .expect_err("consume must be refused");
+        assert!(
+            format!("{error}").contains("AttentionScheduled"),
+            "the refusal must name what closing actually requires: {error}"
+        );
+        assert_eq!(
+            stored_dependency(&store, dependent, dependency).await.state,
+            state,
+            "a refused consume must leave the edge where it was"
+        );
+        let unclosed = store
+            .query_process_dependencies(ProcessDependencyQuery {
+                scope: scope(),
+                dependent_process_id: Some(dependent),
+                group_ref: None,
+                include_closed: false,
+            })
+            .await
+            .expect("query succeeds");
+        assert_eq!(
+            unclosed.len(),
+            1,
+            "{state:?} stays visible to the sweep that will finish delivery"
+        );
+    }
+}
+
+/// The payload is merged into an object, so a scalar has no keys to merge and
+/// would overwrite whatever the edge already carries. It is rejected before the
+/// state column moves.
+#[tokio::test]
+async fn dependency_transition_rejects_a_metadata_payload_that_is_not_an_object() {
+    let store = new_store();
+    let (dependent, dependency) = open_settled_dependency(&store).await;
+
+    let error = store
+        .transition_process_dependency(TransitionProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: dependency,
+            scope: scope(),
+            next: ProcessDependencyState::ResultAppended,
+            metadata: Some(json!("msg:r1")),
+            transitioned_at: Utc::now(),
+        })
+        .await
+        .expect_err("a scalar metadata payload must be rejected");
+    assert!(
+        format!("{error}").contains("JSON object"),
+        "error must name the payload shape: {error}"
+    );
+    let stored = stored_dependency(&store, dependent, dependency).await;
+    assert_eq!(
+        stored.state,
+        ProcessDependencyState::Settled,
+        "a rejected transition must not move the state column"
+    );
+    assert_eq!(stored.metadata["owner"], "runner");
+}
+
+#[tokio::test]
+async fn dependency_transition_is_scope_bound() {
+    let store = new_store();
+    let (dependent, dependency) = open_settled_dependency(&store).await;
+    let mut foreign_scope = scope();
+    foreign_scope.user_id = UserId::new("foreign-transition-user").expect("foreign user");
+
+    let error = store
+        .transition_process_dependency(TransitionProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: dependency,
+            scope: foreign_scope,
+            next: ProcessDependencyState::ResultAppended,
+            metadata: None,
+            transitioned_at: Utc::now(),
+        })
+        .await
+        .expect_err("foreign scope must not transition a dependency");
+    assert!(matches!(error, ProcessJournalStoreError::UnauthorizedScope));
+}
+
+#[tokio::test]
+async fn dependency_transition_on_an_unknown_edge_reports_no_record() {
+    let store = new_store();
+
+    let missing = store
+        .transition_process_dependency(TransitionProcessDependencyRequest {
+            dependent_process_id: ProcessId::new(),
+            dependency_process_id: ProcessId::new(),
+            scope: scope(),
+            next: ProcessDependencyState::ResultAppended,
+            metadata: None,
+            transitioned_at: Utc::now(),
+        })
+        .await
+        .expect("an absent dependency is not an error");
+    assert!(missing.is_none());
+}
+
+/// The `closed` index derives from the state column alone
+/// (`journal_store/rows.rs`). New in-flight states must index as OPEN or the
+/// recovery sweeps will skip them forever.
+#[tokio::test]
+async fn new_substates_are_not_treated_as_closed() {
+    for state in [
+        ProcessDependencyState::ResultAppended,
+        ProcessDependencyState::AttentionScheduled,
+        ProcessDependencyState::AttentionDeferred,
+    ] {
+        // A fresh edge per state: the lifecycle branches at `ResultAppended`,
+        // so these three are not one walk a single edge can take in order.
+        let store = new_store();
+        let (dependent, dependency) = open_settled_dependency(&store).await;
+        force_state(&store, dependent, dependency, state).await;
+        let unclosed = store
+            .query_process_dependencies(ProcessDependencyQuery {
+                scope: scope(),
+                dependent_process_id: Some(dependent),
+                group_ref: None,
+                include_closed: false,
+            })
+            .await
+            .expect("query succeeds");
+        assert_eq!(
+            unclosed.len(),
+            1,
+            "{state:?} must remain visible as unclosed"
+        );
+        let unresolved = store
+            .unresolved_process_dependencies()
+            .await
+            .expect("recovery scan succeeds");
+        assert_eq!(
+            unresolved.len(),
+            1,
+            "{state:?} must stay visible to the host recovery scan"
+        );
+    }
+}
+
+#[test]
+fn historical_dependency_states_still_deserialize() {
+    for (raw, expected) in [
+        ("\"open\"", ProcessDependencyState::Open),
+        ("\"settled\"", ProcessDependencyState::Settled),
+        ("\"consumed\"", ProcessDependencyState::Consumed),
+        ("\"abandoned\"", ProcessDependencyState::Abandoned),
+    ] {
+        assert_eq!(
+            serde_json::from_str::<ProcessDependencyState>(raw).expect("parses"),
+            expected
+        );
+    }
+}
+
+/// These four wire spellings are written into durable journal rows, so they are
+/// part of the persisted format and may not be renamed.
+#[test]
+fn dependency_delivery_substates_have_stable_wire_spellings() {
+    for (state, raw) in [
+        (
+            ProcessDependencyState::ResultAppended,
+            "\"result_appended\"",
+        ),
+        (
+            ProcessDependencyState::AttentionScheduled,
+            "\"attention_scheduled\"",
+        ),
+        (
+            ProcessDependencyState::AttentionDeferred,
+            "\"attention_deferred\"",
+        ),
+    ] {
+        assert_eq!(serde_json::to_string(&state).expect("serializes"), raw);
+        assert_eq!(
+            serde_json::from_str::<ProcessDependencyState>(raw).expect("parses"),
+            state
+        );
+    }
+}
+
 #[tokio::test]
 async fn process_journal_store_owns_lifecycle_and_gate_projection() {
     let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
@@ -4100,10 +4699,11 @@ fn process_input_payload_is_bounded_and_redacted() {
     assert!(!debug.contains("private-goal"));
 }
 
-async fn submit_internal_process<F>(
+async fn submit_internal_process_at<F>(
     store: &ProcessJournalStore<F>,
     scope: &ResourceScope,
     process_id: ProcessId,
+    created_at: chrono::DateTime<Utc>,
 ) -> ironclaw_processes::JournaledProcessSnapshot
 where
     F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
@@ -4123,11 +4723,22 @@ where
             dependency: None,
             checkpoint_ref: None,
             input: None,
-            created_at: Utc::now(),
+            created_at,
             metadata: serde_json::Value::Null,
         })
         .await
         .expect("submit internal process")
+}
+
+async fn submit_internal_process<F>(
+    store: &ProcessJournalStore<F>,
+    scope: &ResourceScope,
+    process_id: ProcessId,
+) -> ironclaw_processes::JournaledProcessSnapshot
+where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    submit_internal_process_at(store, scope, process_id, Utc::now()).await
 }
 
 fn scope() -> ResourceScope {
@@ -4153,4 +4764,273 @@ fn in_memory_backed_processes_filesystem() -> std::sync::Arc<ScopedFilesystem<In
         std::sync::Arc::new(InMemoryBackend::new()),
         mounts,
     ))
+}
+
+/// The derived activation-streak caps read a bounded, newest-first window of a
+/// thread's own agent-turn runs. Two properties are load-bearing and both are
+/// asserted here: ordering must be newest-first (an ascending read returns the
+/// wrong end of history, so a saturated streak would look empty), and the limit
+/// must bound *agent-turn* rows specifically — a thread's scope also holds
+/// non-agent-turn processes, so a naive LIMIT over the scope index can be
+/// filled entirely by rows the cap does not count.
+#[tokio::test]
+async fn recent_agent_turn_snapshots_are_newest_first_and_bounded_by_agent_turn_rows() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    let scope = scope();
+
+    // Interleave agent-turn runs with internal processes in the same scope so
+    // a kind-blind limit would come back short (or empty).
+    // Strictly increasing stamps: the keyset tie-breaker is a random UUID, so
+    // equal timestamps would make the expected order unpredictable.
+    let base = Utc::now();
+    let mut agent_turn_ids = Vec::new();
+    for index in 0..5 {
+        let at = base + chrono::Duration::seconds(index * 2);
+        let agent_turn = ProcessId::new();
+        submit_agent_turn_process_at(&store, &scope, agent_turn, at).await;
+        agent_turn_ids.push(agent_turn);
+        submit_internal_process_at(
+            &store,
+            &scope,
+            ProcessId::new(),
+            at + chrono::Duration::seconds(1),
+        )
+        .await;
+    }
+
+    let recent = store
+        .recent_agent_turn_snapshots(&scope, 3)
+        .await
+        .expect("bounded recent read");
+
+    assert_eq!(
+        recent.len(),
+        3,
+        "the limit must bound agent-turn rows, not rows of any kind"
+    );
+    assert!(
+        recent
+            .iter()
+            .all(|snapshot| snapshot.process_kind == ProcessKind::AgentTurn),
+        "non-agent-turn processes in the same scope must never be returned"
+    );
+
+    let returned: Vec<_> = recent.iter().map(|snapshot| snapshot.process_id).collect();
+    let expected: Vec<_> = agent_turn_ids.iter().rev().take(3).copied().collect();
+    assert_eq!(
+        returned, expected,
+        "must return the newest agent-turn processes, newest first"
+    );
+}
+
+/// A limit larger than the history returns everything without error — the
+/// young-thread case the streak cap reads as "streak not established".
+#[tokio::test]
+async fn recent_agent_turn_snapshots_returns_a_short_window_for_a_young_thread() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    let scope = scope();
+
+    submit_agent_turn_process(&store, &scope, ProcessId::new()).await;
+    submit_agent_turn_process(&store, &scope, ProcessId::new()).await;
+
+    let recent = store
+        .recent_agent_turn_snapshots(&scope, 16)
+        .await
+        .expect("bounded recent read");
+
+    assert_eq!(recent.len(), 2);
+}
+
+async fn submit_agent_turn_process_at<F>(
+    store: &ProcessJournalStore<F>,
+    scope: &ResourceScope,
+    process_id: ProcessId,
+    created_at: chrono::DateTime<Utc>,
+) -> ironclaw_processes::JournaledProcessSnapshot
+where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    store
+        .submit_process(SubmitProcessRequest {
+            process_id,
+            process_kind: ProcessKind::AgentTurn,
+            scope: scope.clone(),
+            exclusive_within_scope: false,
+            operation_id: None,
+            owner_user_id: Some(scope.user_id.clone()),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at,
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("agent-turn process submits")
+}
+
+/// The window walk sorts on `(created_at micros, process_id text)` descending,
+/// and `ProcessId` is a random UUID — so any two rows sharing a microsecond
+/// resolve by UUID, which is not the order a test can predict. Ordering tests
+/// seed strictly increasing stamps through this helper so the tie-breaker is
+/// never reached.
+async fn submit_agent_turn_process<F>(
+    store: &ProcessJournalStore<F>,
+    scope: &ResourceScope,
+    process_id: ProcessId,
+) -> ironclaw_processes::JournaledProcessSnapshot
+where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    submit_agent_turn_process_at(store, scope, process_id, Utc::now()).await
+}
+
+/// The keyset walk pages. With limit=2 the page size is 8, so seeding more
+/// than 8 non-agent-turn processes ahead of the agent-turn rows forces the
+/// walk to advance its cursor and fetch again — the multi-page path, which a
+/// single-page test can never reach.
+#[tokio::test]
+async fn recent_agent_turn_snapshots_walks_past_a_full_page_of_other_kinds() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    let scope = scope();
+
+    let mut agent_turn_ids = Vec::new();
+    for _ in 0..2 {
+        agent_turn_ids.push(ProcessId::new());
+        submit_agent_turn_process(&store, &scope, *agent_turn_ids.last().expect("just pushed"))
+            .await;
+    }
+    // Newer than every agent-turn row, and more than one page of them.
+    for _ in 0..12 {
+        submit_internal_process(&store, &scope, ProcessId::new()).await;
+    }
+
+    let recent = store
+        .recent_agent_turn_snapshots(&scope, 2)
+        .await
+        .expect("bounded recent read");
+
+    let returned: Vec<_> = recent.iter().map(|snapshot| snapshot.process_id).collect();
+    let expected: Vec<_> = agent_turn_ids.iter().rev().copied().collect();
+    assert_eq!(
+        returned, expected,
+        "the walk must page past a full page of non-agent-turn rows to fill the window"
+    );
+}
+
+/// The bounded read carries its own system-scope rejection, distinct from the
+/// unbounded `process_snapshots` it deliberately restricts.
+#[tokio::test]
+async fn recent_agent_turn_snapshots_rejects_a_system_wide_scope() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+
+    let error = store
+        .recent_agent_turn_snapshots(&ResourceScope::system(), 4)
+        .await
+        .expect_err("system-wide reads are unbounded and must be refused");
+
+    assert!(
+        matches!(error, ProcessJournalStoreError::InvalidRequest(_)),
+        "expected InvalidRequest, got {error:?}"
+    );
+}
+
+/// Backend parity for the bounded window read.
+///
+/// This is the first production descending keyset walk with a hand-built
+/// cursor, and it is the only one binding an I64 sort value against a Text
+/// tie-breaker across pages. The two SQL backends compare that cursor very
+/// differently — jsonb operators on PostgreSQL, untyped columns on libSQL — so
+/// `.claude/rules/database.md` "Backend parity" wants the adversarial case in a
+/// shared body rather than an in-memory-only assertion.
+async fn assert_recent_agent_turn_window_parity<F>(store: ProcessJournalStore<F>)
+where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    let scope = scope();
+
+    let base = Utc::now();
+    let mut agent_turn_ids = Vec::new();
+    for index in 0..3 {
+        let id = ProcessId::new();
+        submit_agent_turn_process_at(&store, &scope, id, base + chrono::Duration::seconds(index))
+            .await;
+        agent_turn_ids.push(id);
+    }
+    // Newer than every agent-turn row and more than one page, so the walk must
+    // advance its cursor across pages to fill the window.
+    for index in 0..12 {
+        submit_internal_process_at(
+            &store,
+            &scope,
+            ProcessId::new(),
+            base + chrono::Duration::seconds(100 + index),
+        )
+        .await;
+    }
+
+    let recent = store
+        .recent_agent_turn_snapshots(&scope, 2)
+        .await
+        .expect("bounded recent read");
+
+    assert_eq!(recent.len(), 2, "limit must bound agent-turn rows");
+    assert!(
+        recent
+            .iter()
+            .all(|snapshot| snapshot.process_kind == ProcessKind::AgentTurn),
+        "non-agent-turn processes must never be returned"
+    );
+    let returned: Vec<_> = recent.iter().map(|snapshot| snapshot.process_id).collect();
+    let expected: Vec<_> = agent_turn_ids.iter().rev().take(2).copied().collect();
+    assert_eq!(
+        returned, expected,
+        "must return the newest agent-turn processes, newest first, across pages"
+    );
+}
+
+#[tokio::test]
+async fn recent_agent_turn_snapshots_hold_on_libsql() {
+    let storage = tempfile::tempdir().expect("temporary process journal database");
+    let database = Arc::new(
+        libsql::Builder::new_local(storage.path().join("recent-window.db"))
+            .build()
+            .await
+            .expect("build libsql database"),
+    );
+    let backend = Arc::new(LibSqlRootFilesystem::new(database).expect("libSQL filesystem runtime"));
+    backend
+        .run_migrations()
+        .await
+        .expect("migrate libsql filesystem");
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        backend,
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/processes").expect("mount alias"),
+            VirtualPath::new("/engine/processes").expect("virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view"),
+    ));
+    assert_recent_agent_turn_window_parity(ProcessJournalStore::new(filesystem)).await;
+}
+
+#[tokio::test]
+async fn recent_agent_turn_snapshots_hold_on_postgres() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(backend),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/processes").expect("mount alias"),
+            VirtualPath::new("/engine/processes").expect("virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view"),
+    ));
+    assert_recent_agent_turn_window_parity(ProcessJournalStore::new(filesystem)).await;
 }

@@ -16,9 +16,11 @@ export function AutomationsList({
   isRefreshing,
   isFilterTransition,
   isMutating,
+  schedulerEnabled,
   selectedAutomationId,
   onSelectAutomation,
   onPauseAutomation,
+  onRunAutomation,
   onResumeAutomation,
   onRenameAutomation,
   onDeleteAutomation,
@@ -184,7 +186,9 @@ export function AutomationsList({
               <AutomationDetailPanel
                 automation={selectedAutomation}
                 isMutating={isMutating}
+                schedulerEnabled={schedulerEnabled}
                 onPauseAutomation={onPauseAutomation}
+                onRunAutomation={onRunAutomation}
                 onResumeAutomation={onResumeAutomation}
                 onRenameAutomation={onRenameAutomation}
                 onDeleteAutomation={onDeleteAutomation}

@@ -61,41 +61,6 @@ impl std::fmt::Display for RuntimeKind {
     }
 }
 
-/// Which `DispatchError` variant family a [`RuntimeKind`]'s failures route
-/// to.
-///
-/// Several crates each classify a `RuntimeKind` into the matching
-/// `DispatchError` shape and were independently hand-editing four copies of
-/// this match every time a `RuntimeKind` variant was added (see the
-/// `Sandbox` addition). This type centralizes the *classification* only —
-/// each call site still builds its own `DispatchError` value (different
-/// payload fields, different fallback logic), because `DispatchError`
-/// construction genuinely differs by call site. Living beside `RuntimeKind`
-/// means a new variant here is a single compile error, not four silent
-/// misses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DispatchErrorLane {
-    Wasm,
-    Mcp,
-    Script,
-    FirstParty,
-}
-
-impl RuntimeKind {
-    /// Classify this runtime into its `DispatchError` lane. Exhaustive over
-    /// `RuntimeKind` with no catch-all: adding a new variant forces this
-    /// match to be updated here, not silently misclassified at four call
-    /// sites.
-    pub const fn dispatch_error_lane(self) -> DispatchErrorLane {
-        match self {
-            Self::Wasm => DispatchErrorLane::Wasm,
-            Self::Mcp => DispatchErrorLane::Mcp,
-            Self::Script | Self::Sandbox => DispatchErrorLane::Script,
-            Self::FirstParty | Self::System => DispatchErrorLane::FirstParty,
-        }
-    }
-}
-
 /// Trusted deserialization for [`RuntimeKind`] on **durable host-written
 /// records** (e.g. the process store's `ProcessRecord`). It accepts **every**
 /// variant — including the host-assigned `FirstParty` / `System` that the
@@ -233,30 +198,5 @@ mod tests {
         assert!(serde_json::from_str::<RuntimeKind>("\"wasm\"").is_ok());
         assert!(serde_json::from_str::<RuntimeKind>("\"mcp\"").is_ok());
         assert!(serde_json::from_str::<RuntimeKind>("\"script\"").is_ok());
-    }
-
-    // Regression: this canonical mapping replaced four independently
-    // hand-maintained `RuntimeKind` -> `DispatchError` match arms
-    // (ironclaw_capabilities::dispatch/registry,
-    // ironclaw_extension_host::resolver, ironclaw_host_runtime's
-    // runtime_adapters) that all had to be hand-edited when `Sandbox` was
-    // added. Pin the classification for every `RuntimeKind` variant here so
-    // the next variant is a compile error in exactly one place.
-    #[test]
-    fn dispatch_error_lane_covers_every_runtime_kind() {
-        for (kind, expected) in [
-            (RuntimeKind::Wasm, DispatchErrorLane::Wasm),
-            (RuntimeKind::Mcp, DispatchErrorLane::Mcp),
-            (RuntimeKind::Script, DispatchErrorLane::Script),
-            (RuntimeKind::Sandbox, DispatchErrorLane::Script),
-            (RuntimeKind::FirstParty, DispatchErrorLane::FirstParty),
-            (RuntimeKind::System, DispatchErrorLane::FirstParty),
-        ] {
-            assert_eq!(
-                kind.dispatch_error_lane(),
-                expected,
-                "{kind} classified into the wrong DispatchError lane"
-            );
-        }
     }
 }

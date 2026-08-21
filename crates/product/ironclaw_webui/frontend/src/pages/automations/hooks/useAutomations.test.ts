@@ -16,6 +16,7 @@ const automationApi = vi.hoisted(() => ({
   pauseAutomation: vi.fn(),
   renameAutomation: vi.fn(),
   resumeAutomation: vi.fn(),
+  runAutomation: vi.fn(),
 }));
 
 vi.mock("../../../lib/api", () => automationApi);

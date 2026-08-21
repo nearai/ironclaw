@@ -106,6 +106,7 @@ pub struct ChannelWorkflowDeliveryServices {
     pub outbound_store: Arc<dyn OutboundStateStorePort>,
     pub route_store: Arc<dyn DeliveredGateRouteStore>,
     pub communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
+    pub notification_inbox: Option<Arc<dyn ironclaw_notifications::NotificationInboxStorePort>>,
     /// The owner-scoped outbound target catalog. The background-run notifier
     /// resolves the creator's stored notification-channel ids through it at
     /// fire time.
@@ -198,6 +199,7 @@ impl RebornChannelWorkflowFactory {
             outbound_store: Arc::clone(&delivery.outbound_store),
             route_store: Arc::clone(&delivery.route_store),
             communication_preferences: Arc::clone(&delivery.communication_preferences),
+            notification_inbox: delivery.notification_inbox.clone(),
             delivery_targets: Arc::clone(&delivery.delivery_targets),
             coordinator: Arc::clone(&delivery.coordinator),
             extension_id: BACKGROUND_RUN_NOTIFIER_ID.to_string(),
@@ -470,6 +472,7 @@ impl RebornChannelWorkflowFactory {
             outbound_store: Arc::clone(&delivery.outbound_store),
             route_store: Arc::clone(&delivery.route_store),
             communication_preferences: Arc::clone(&delivery.communication_preferences),
+            notification_inbox: delivery.notification_inbox.clone(),
             delivery_targets: Arc::clone(&delivery.delivery_targets),
             coordinator: Arc::clone(&delivery.coordinator),
             extension_id: extension_id.to_string(),

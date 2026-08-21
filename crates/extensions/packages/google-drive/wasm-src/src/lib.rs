@@ -44,19 +44,15 @@ wit_bindgen::generate!({
     path: "../../../../lanes/ironclaw_wasm/wit/tool.wit",
 });
 
+use exports::near::agent::tool::{ErrorKind, GuestFailure, Response};
+
 struct GoogleDriveTool;
 
 impl exports::near::agent::tool::Guest for GoogleDriveTool {
     fn execute(req: exports::near::agent::tool::Request) -> exports::near::agent::tool::Response {
         match execute_inner(&req.params, req.context.as_deref()) {
-            Ok(result) => exports::near::agent::tool::Response {
-                output: Some(result),
-                error: None,
-            },
-            Err(e) => exports::near::agent::tool::Response {
-                output: None,
-                error: Some(e),
-            },
+            Ok(result) => Response::Success(result),
+            Err(failure) => Response::Failure(failure),
         }
     }
 
@@ -83,11 +79,25 @@ impl exports::near::agent::tool::Guest for GoogleDriveTool {
     }
 }
 
-fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> {
+/// Build an `input`-kind guest failure with a stable code and no free-text
+/// message (the code alone is the actionable signal for these host-plumbing
+/// failures).
+fn input_failure(code: &'static str) -> GuestFailure {
+    GuestFailure {
+        kind: ErrorKind::Input,
+        code: Some(code.to_string()),
+        message: None,
+    }
+}
+
+fn execute_inner(params: &str, context: Option<&str>) -> Result<String, GuestFailure> {
     let action_name = action_from_context(context)?;
     let params = params_with_action(params, action_name)?;
-    let action: GoogleDriveAction =
-        serde_json::from_value(params).map_err(|e| format!("Invalid parameters: {}", e))?;
+    let action: GoogleDriveAction = serde_json::from_value(params).map_err(|e| GuestFailure {
+        kind: ErrorKind::Input,
+        code: Some("invalid_parameters".to_string()),
+        message: Some(api::bounded_message(&e.to_string())),
+    })?;
 
     crate::near::agent::host::log(
         crate::near::agent::host::LogLevel::Debug,
@@ -111,12 +121,12 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
                 drive_id.as_deref(),
                 page_token.as_deref(),
             )?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleDriveAction::GetFile { file_id } => {
             let result = api::get_file(&file_id)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleDriveAction::DownloadFile {
@@ -124,7 +134,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             export_mime_type,
         } => {
             let result = api::download_file(&file_id, export_mime_type.as_deref())?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleDriveAction::UploadFile {
@@ -141,7 +151,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
                 parent_id.as_deref(),
                 description.as_deref(),
             )?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleDriveAction::UpdateFile {
@@ -158,7 +168,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
                 move_to_parent.as_deref(),
                 starred,
             )?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleDriveAction::CreateFolder {
@@ -167,17 +177,17 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             description,
         } => {
             let result = api::create_folder(&name, parent_id.as_deref(), description.as_deref())?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleDriveAction::DeleteFile { file_id } => {
             let result = api::delete_file(&file_id)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleDriveAction::TrashFile { file_id } => {
             let result = api::trash_file(&file_id)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleDriveAction::ShareFile {
@@ -187,12 +197,12 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             message,
         } => {
             let result = api::share_file(&file_id, &email, &role, message.as_deref())?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleDriveAction::ListPermissions { file_id } => {
             let result = api::list_permissions(&file_id)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleDriveAction::RemovePermission {
@@ -200,22 +210,22 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             permission_id,
         } => {
             let result = api::remove_permission(&file_id, &permission_id)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleDriveAction::ListSharedDrives { page_size } => {
             let result = api::list_shared_drives(page_size)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
     };
 
     Ok(result)
 }
 
-fn action_from_context(context: Option<&str>) -> Result<&'static str, String> {
-    let context = context.ok_or_else(|| "missing_invocation_context".to_string())?;
+fn action_from_context(context: Option<&str>) -> Result<&'static str, GuestFailure> {
+    let context = context.ok_or_else(|| input_failure("missing_invocation_context"))?;
     let context: ToolContext =
-        serde_json::from_str(context).map_err(|_| "invalid_invocation_context".to_string())?;
+        serde_json::from_str(context).map_err(|_| input_failure("invalid_invocation_context"))?;
     match context.capability_id.as_str() {
         "google-drive.list_files" => Ok("list_files"),
         "google-drive.get_file" => Ok("get_file"),
@@ -229,21 +239,21 @@ fn action_from_context(context: Option<&str>) -> Result<&'static str, String> {
         "google-drive.list_permissions" => Ok("list_permissions"),
         "google-drive.remove_permission" => Ok("remove_permission"),
         "google-drive.list_shared_drives" => Ok("list_shared_drives"),
-        _ => Err("unsupported_google_drive_capability".to_string()),
+        _ => Err(input_failure("unsupported_google_drive_capability")),
     }
 }
 
-fn params_with_action(params: &str, action: &str) -> Result<serde_json::Value, String> {
+fn params_with_action(params: &str, action: &str) -> Result<serde_json::Value, GuestFailure> {
     let mut params: serde_json::Value = if params.trim().is_empty() {
         serde_json::json!({})
     } else {
-        serde_json::from_str(params).map_err(|_| "invalid_parameters".to_string())?
+        serde_json::from_str(params).map_err(|_| input_failure("invalid_parameters"))?
     };
     let obj = params
         .as_object_mut()
-        .ok_or_else(|| "invalid_parameters".to_string())?;
+        .ok_or_else(|| input_failure("invalid_parameters"))?;
     if obj.contains_key("action") {
-        return Err("invalid_parameters".to_string());
+        return Err(input_failure("invalid_parameters"));
     }
     obj.insert(
         "action".to_string(),

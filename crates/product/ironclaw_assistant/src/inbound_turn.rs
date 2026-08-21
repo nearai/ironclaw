@@ -1537,6 +1537,7 @@ impl AcceptedProductInboundTurn {
             }
         };
         let request = SubmitTurnRequest {
+            subagent_activation_provenance: None,
             scope: turn_scope.clone(),
             actor,
             accepted_message_ref: accepted_message_ref.clone(),

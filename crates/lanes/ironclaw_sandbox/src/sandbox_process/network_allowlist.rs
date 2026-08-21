@@ -1,30 +1,9 @@
-//! Default egress allowlist for the sandboxed (`UserSandbox`) shell
-//! profile.
+//! Host-owned egress allowlist for sandboxed (`UserSandbox`) shell profiles.
 //!
-//! IronClaw's sandboxed shell needs outbound network access for ordinary
-//! package-manager workflows (`pip install`, `npm install`, `git clone`,
-//! `curl` against a registry) without granting the container unrestricted
-//! internet access. The model mirrors legacy IronClaw's sandbox: soft
-//! enforcement through an HTTP(S) forward proxy that only permits requests
-//! to an allowlist of known package-registry and source-hosting domains,
-//! plus any extra domains an operator configures.
-//!
-//! This module owns the *domain list* — the set of hosts the sandboxed
-//! profile's `builtin.shell` grant should carry in its
-//! [`NetworkPolicy`](ironclaw_host_api::action::NetworkPolicy) `allowed_targets`. It
-//! does not itself enforce anything; it is the policy input consumed by two
-//! things that do: the CONNECT/forward proxy
-//! (`ironclaw_host_runtime::sandbox_process::egress_proxy`), spawned and
-//! bound via `crates/ironclaw_composition/src/sandbox_egress_proxy_task.rs`
-//! and `sandbox_boot.rs`'s `with_sandbox_network_broker`, and the topological
-//! guardrail that the container's Docker network is pinned `internal: true`
-//! with no default route off the host, so the proxy is the container's only
-//! path to the outside world.
-//!
-//! Ships unwired: neither of those two enforcers is on `main` yet, so nothing
-//! reads this list in production today. It arrives first because both of them
-//! take it as an input, and because a list of hostnames is reviewable on its
-//! own in a way it will not be once it is buried in a proxy PR.
+//! The same validated [`NetworkPolicy`](ironclaw_host_api::action::NetworkPolicy)
+//! supplies the `builtin.shell` grant and the per-user `iron-proxy` renderer.
+//! The worker has no direct route; the proxy enforces hostnames and rejects
+//! non-public destinations.
 use ironclaw_common::env_helpers::env_or_override;
 use ironclaw_host_api::action::{NetworkPolicy, NetworkTargetPattern};
 use ironclaw_network::NetworkPolicyError;
@@ -33,65 +12,7 @@ use ironclaw_network::NetworkPolicyError;
 /// shell's egress allowlist, on top of [`DEFAULT_SANDBOX_ALLOWED_DOMAINS`].
 /// Comma-separated hostnames (e.g. `example.com,*.internal.example.com`).
 pub const SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV: &str = "IRONCLAW_SANDBOX_EXTRA_ALLOWED_DOMAINS";
-
-/// Environment variable operators can set to override
-/// [`DEFAULT_SANDBOX_MAX_EGRESS_BYTES`] — the per-request egress volume cap
-/// carried on the sandboxed shell's [`NetworkPolicy`]. Same
-/// `env_or_override` precedence as [`SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV`] and
-/// `connect::DOCKER_HOST_ENV`.
-pub const SANDBOX_MAX_EGRESS_BYTES_ENV: &str = "IRONCLAW_SANDBOX_MAX_EGRESS_BYTES";
-
-/// Default per-request egress volume cap for the sandboxed shell profile, in
-/// bytes: **2 GiB** (`2 * 1024 * 1024 * 1024`).
-///
-/// This is a product tradeoff between two failure modes: too low, and a
-/// legitimate `cargo fetch`/`npm install`/`docker pull`-style dependency
-/// resolve (which can pull single artifacts in the hundreds-of-MB range —
-/// large ML/CUDA wheels, `node_modules` tarballs, monorepo shallow clones)
-/// gets blocked and reported as if it were malicious; too high, and the cap
-/// stops meaning anything. 2 GiB is generous enough to pass those ordinary
-/// package-manager workloads (which sit one to two orders of magnitude
-/// below it) while still bounding a single request far short of what a
-/// deliberate bulk-exfiltration attempt would need to move — this is a
-/// **per-request** ceiling (`NetworkPolicy::max_egress_bytes` is checked
-/// against one request's `estimated_bytes` by `ironclaw_network`'s policy
-/// enforcer), not a cumulative session budget, so it does not by itself
-/// bound how much data a long-running sandboxed session moves in total
-/// across many requests.
-///
-/// That per-request model holds today only because the sole consumer of
-/// this constant is `PolicyNetworkHttpEgress`, a host-mediated HTTP client
-/// that sees plaintext method/URL/headers/body and computes
-/// `estimated_bytes` for a request before sending it
-/// (`estimate_http_request_bytes`,
-/// `crates/substrates/ironclaw_network/src/egress.rs`). It is **not established** that
-/// the same model transfers to the CONNECT/forward proxy this list feeds
-/// (see the module doc above): a CONNECT proxy tunnels opaque TLS bytes
-/// after the handshake and never sees plaintext, so it cannot compute "one
-/// request's size" the way `estimate_http_request_bytes` does — streamed
-/// per-connection byte metering is the natural fit for that transport, not
-/// discrete pre-flight request sizing. Whether `max_egress_bytes` should
-/// mean "per request" or "cumulative per connection" once the proxy exists
-/// is an open design question for that proxy-wiring PR to resolve, not
-/// something this constant already answers. [`SANDBOX_MAX_EGRESS_BYTES_ENV`]
-/// lets an operator tighten (or loosen) this for their own risk tolerance
-/// and workload shape in the meantime.
-///
-/// Mirrors `MCP_NETWORK_EGRESS_LIMIT`'s shape
-/// (`crates/extensions/ironclaw_extension_host/src/mcp.rs`, `activation_transaction.rs`)
-/// — a named constant feeding `NetworkPolicy::max_egress_bytes` — but not
-/// its value: that one is sized for MCP tool-call JSON responses (2 MiB) and
-/// is not a template here; the sandboxed shell's legitimate payloads are
-/// orders of magnitude larger.
-// TODO(security): this value is sized and validated against
-// `PolicyNetworkHttpEgress`'s per-request `estimated_bytes` check
-// (`crates/substrates/ironclaw_network/src/egress.rs`). The CONNECT-proxy wiring PR
-// (see module doc above) must explicitly decide streaming vs. cumulative
-// byte metering for that transport before assuming `max_egress_bytes`
-// carries the same "per request" meaning there — a proxy that reuses this
-// constant without that decision is not enforcing what this doc comment
-// describes.
-pub const DEFAULT_SANDBOX_MAX_EGRESS_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const RETIRED_SANDBOX_MAX_EGRESS_BYTES_ENV: &str = "IRONCLAW_SANDBOX_MAX_EGRESS_BYTES";
 
 /// Default egress allowlist for the sandboxed shell profile — the package
 /// registries and source hosts ordinary `pip`/`npm`/`git`/`curl` workflows
@@ -109,11 +30,19 @@ pub const DEFAULT_SANDBOX_ALLOWED_DOMAINS: &[&str] = &[
     "files.pythonhosted.org",
     // Go
     "proxy.golang.org",
-    // GitHub (source + release archives)
+    "sum.golang.org",
+    // GitHub (source + release archives). Content hosts are enumerated
+    // exactly: the managed-egress proxy cannot represent `*.` wildcards
+    // with the canonical one-label semantics, so wildcard patterns fail
+    // managed-egress profile construction.
     "github.com",
     "raw.githubusercontent.com",
     "api.github.com",
     "codeload.github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "github-releases.githubusercontent.com",
+    "media.githubusercontent.com",
 ];
 
 /// Reads [`SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV`] and returns the operator's
@@ -171,19 +100,6 @@ fn parse_host_patterns(domains: &[&str]) -> Result<Vec<NetworkTargetPattern>, Ne
         .collect()
 }
 
-/// Reads [`SANDBOX_MAX_EGRESS_BYTES_ENV`] and returns the operator's
-/// configured per-request egress cap, or [`DEFAULT_SANDBOX_MAX_EGRESS_BYTES`]
-/// when unset. `Err` when the override is set but not a positive `u64` —
-/// same fail-loud posture as [`sandbox_extra_allowed_domains`]: a malformed
-/// override must refuse to start, not silently fall back to the default
-/// while the operator believes their tighter value took effect.
-pub fn sandbox_max_egress_bytes() -> Result<u64, NetworkPolicyError> {
-    let Some(raw) = env_or_override(SANDBOX_MAX_EGRESS_BYTES_ENV) else {
-        return Ok(DEFAULT_SANDBOX_MAX_EGRESS_BYTES);
-    };
-    ironclaw_network::parse_egress_limit(&raw)
-}
-
 /// [`sandbox_allowed_domains`], expressed as [`NetworkPolicy`] `allowed_targets`
 /// — ready to carry on the sandboxed profile's `builtin.shell` grant so
 /// `validate_network_policy_metadata` (which rejects an empty allowlist)
@@ -197,10 +113,19 @@ pub fn sandbox_max_egress_bytes() -> Result<u64, NetworkPolicyError> {
 /// whatever validated". A silently narrowed sandbox allowlist is invisible
 /// until someone audits traffic; a boot failure is loud and immediate.
 pub fn sandbox_network_policy() -> Result<NetworkPolicy, NetworkPolicyError> {
+    if let Some(raw) = env_or_override(RETIRED_SANDBOX_MAX_EGRESS_BYTES_ENV) {
+        return Err(NetworkPolicyError::InvalidEgressLimit {
+            raw,
+            reason: "opaque TLS tunnels cannot enforce host-mediated HTTP request estimates"
+                .to_string(),
+        });
+    }
     Ok(NetworkPolicy {
         allowed_targets: sandbox_allowed_domains()?,
         deny_private_ip_ranges: true,
-        max_egress_bytes: Some(sandbox_max_egress_bytes()?),
+        // CONNECT carries opaque TLS. Do not advertise the host-mediated HTTP
+        // request-estimate ceiling as a wire-byte limit the proxy cannot enforce.
+        max_egress_bytes: None,
     })
 }
 
@@ -218,8 +143,12 @@ mod tests {
             "pypi.org",
             "files.pythonhosted.org",
             "proxy.golang.org",
+            "sum.golang.org",
             "github.com",
             "raw.githubusercontent.com",
+            "objects.githubusercontent.com",
+            "release-assets.githubusercontent.com",
+            "media.githubusercontent.com",
         ] {
             assert!(
                 DEFAULT_SANDBOX_ALLOWED_DOMAINS.contains(&expected),
@@ -230,15 +159,11 @@ mod tests {
 
     #[test]
     fn sandbox_network_policy_is_non_empty_and_denies_private_ips() {
-        // Guarded and reset like the env-mutating tests below: `sandbox_
-        // network_policy` now reads the shared runtime-env overlay through
-        // `sandbox_extra_allowed_domains`/`sandbox_max_egress_bytes`, so this
-        // test must not race a sibling test's mid-flight override of either
-        // env var (e.g. the deliberately-invalid `*` set by
-        // `sandbox_network_policy_propagates_the_wildcard_rejection`).
+        // This test holds the environment lock because sibling allowlist tests
+        // mutate the same process-global override.
         let _guard = lock_env();
         remove_runtime_env(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV);
-        remove_runtime_env(SANDBOX_MAX_EGRESS_BYTES_ENV);
+        remove_runtime_env(RETIRED_SANDBOX_MAX_EGRESS_BYTES_ENV);
 
         let policy = sandbox_network_policy().unwrap();
         assert!(
@@ -252,50 +177,18 @@ mod tests {
                 .iter()
                 .any(|target| target.host_pattern == "github.com")
         );
-    }
-
-    // The sandboxed shell is the one profile whose entire purpose is running
-    // untrusted code; an absent egress cap there means a single request can
-    // exfiltrate an unbounded amount of data through the (otherwise
-    // allowlisted) proxy. `max_egress_bytes: None` is the repo-wide default
-    // everywhere else, but not here.
-    #[test]
-    fn sandbox_network_policy_sets_a_concrete_egress_ceiling() {
-        let _guard = lock_env();
-        remove_runtime_env(SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV);
-        remove_runtime_env(SANDBOX_MAX_EGRESS_BYTES_ENV);
-
-        let policy = sandbox_network_policy().unwrap();
-
-        assert_eq!(
-            policy.max_egress_bytes,
-            Some(DEFAULT_SANDBOX_MAX_EGRESS_BYTES)
-        );
+        assert_eq!(policy.max_egress_bytes, None);
     }
 
     #[test]
-    fn sandbox_max_egress_bytes_env_override_is_honored() {
+    fn sandbox_network_policy_rejects_unenforceable_byte_ceiling_override() {
         let _guard = lock_env();
-        set_runtime_env(SANDBOX_MAX_EGRESS_BYTES_ENV, "1048576");
+        set_runtime_env(RETIRED_SANDBOX_MAX_EGRESS_BYTES_ENV, "1048576");
 
-        let result = sandbox_max_egress_bytes();
+        let result = sandbox_network_policy();
 
-        remove_runtime_env(SANDBOX_MAX_EGRESS_BYTES_ENV);
-
-        assert_eq!(result.unwrap(), 1_048_576);
-    }
-
-    #[test]
-    fn sandbox_max_egress_bytes_env_rejects_zero_and_non_numeric() {
-        let _guard = lock_env();
-
-        set_runtime_env(SANDBOX_MAX_EGRESS_BYTES_ENV, "0");
-        assert!(sandbox_max_egress_bytes().is_err());
-
-        set_runtime_env(SANDBOX_MAX_EGRESS_BYTES_ENV, "not-a-number");
-        assert!(sandbox_max_egress_bytes().is_err());
-
-        remove_runtime_env(SANDBOX_MAX_EGRESS_BYTES_ENV);
+        remove_runtime_env(RETIRED_SANDBOX_MAX_EGRESS_BYTES_ENV);
+        assert!(result.is_err());
     }
 
     // Defaults must fail the same way operator-supplied extras do when an

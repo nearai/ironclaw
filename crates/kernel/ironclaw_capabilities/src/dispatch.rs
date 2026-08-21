@@ -18,12 +18,9 @@ use ironclaw_host_api::{
     authorized::Authorized,
     dispatch::{
         CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
-        CapabilityDisplayOutputPreview, DispatchError, DispatchFailureDetail,
+        CapabilityDisplayOutputPreview, DispatchError, DispatchFailureKind,
         RuntimeDispatchErrorKind,
     },
-    runtime::DispatchErrorLane,
-};
-use ironclaw_host_api::{
     ids::{CapabilityId, ExtensionId, InvocationId},
     invocation::{Actor, InvocationOrigin},
     lane::RuntimeLane,
@@ -418,30 +415,16 @@ fn dispatch_resource_error(
     let cause = error.to_string();
     // System has no runtime backend to attribute a resource-reservation
     // failure to, so it classifies as MissingRuntimeBackend here rather than
-    // joining FirstParty's lane (unlike the other three RuntimeKind ->
-    // DispatchError sites, which route System into FirstParty uniformly).
+    // as a generic provider rejection.
     if runtime == RuntimeKind::System {
         return DispatchError::MissingRuntimeBackend { runtime };
     }
-    match runtime.dispatch_error_lane() {
-        DispatchErrorLane::Wasm => DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Resource,
-            model_visible_cause: Some(cause),
-        },
-        DispatchErrorLane::Script => DispatchError::Script {
-            kind: RuntimeDispatchErrorKind::Resource,
-            model_visible_cause: Some(cause),
-        },
-        DispatchErrorLane::Mcp => DispatchError::Mcp {
-            kind: RuntimeDispatchErrorKind::Resource,
-            model_visible_cause: Some(cause),
-        },
-        DispatchErrorLane::FirstParty => DispatchError::FirstParty {
-            kind: RuntimeDispatchErrorKind::Resource,
-            safe_summary: None,
-            detail: Some(DispatchFailureDetail::Diagnostic { text: cause }),
-        },
-    }
+    DispatchError::provider_rejected(
+        Some(runtime),
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+        Some(cause),
+        None,
+    )
 }
 
 #[async_trait]

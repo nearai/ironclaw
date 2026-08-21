@@ -664,6 +664,7 @@ mod openai_compat_mount_tests {
                     let response = self
                         .coordinator
                         .submit_turn(SubmitTurnRequest {
+                            subagent_activation_provenance: None,
                             scope,
                             actor: caller.actor(),
                             accepted_message_ref: accepted_message_ref.clone(),

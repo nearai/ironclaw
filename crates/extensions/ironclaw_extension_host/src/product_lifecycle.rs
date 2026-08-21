@@ -64,6 +64,7 @@ pub trait ExtensionCredentialCleanup: Send + Sync {
     ) -> Result<SecretCleanupReport, ProductSurfaceError>;
 }
 
+use crate::extension_credential_requirements::activation_requirement_applies;
 use crate::{
     ActiveExtensionCapability, AvailableExtensionCatalog, AvailableExtensionPackage,
     ExtensionInstallPlan, imported_extension_package, materialize_available_extension,
@@ -76,8 +77,8 @@ use crate::{
 use crate::{ExtensionRemovalCleanupContext, ExtensionRemovalCleanupRegistry};
 use crate::{
     channel_connect_strategy, channel_connection_requirement,
-    manifest_runtime_credential_auth_requirements, package_declares_inbound_product_adapter,
-    package_runtime_credential_auth_requirements,
+    manifest_runtime_credential_auth_requirements, package_activation_credential_auth_requirements,
+    package_declares_inbound_product_adapter, package_runtime_credential_auth_requirements,
 };
 
 use crate::ActiveExtensionPublisher;
@@ -821,7 +822,7 @@ impl ExtensionLifecycleManager {
         ensure_caller_may_operate(&installation, caller)?;
         let package = self.lifecycle_package(&extension_id).await?;
         let device_link_channel_setup = self.device_link_channel_setup(&extension_id);
-        let mut requirements = package_runtime_credential_auth_requirements(&package);
+        let mut requirements = package_activation_credential_auth_requirements(&package);
         if let Some(setup) = device_link_channel_setup.as_ref() {
             requirements
                 .retain(|requirement| !is_device_link_channel_requirement(setup, requirement));
@@ -830,6 +831,7 @@ impl ExtensionLifecycleManager {
                 .missing_requirement(&extension_id, caller)
                 .await
                 .map_err(map_account_setup_error)?
+            && activation_requirement_applies(&package, &requirement)
         {
             requirements.push(requirement);
         }

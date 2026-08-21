@@ -1,5 +1,6 @@
 // @ts-nocheck
 import React from "react";
+import "./device-link-translations";
 import { Button } from "../design-system/button";
 import { LinkPayloadPanel } from "./link-payload-panel";
 import { useT } from "../lib/i18n";
@@ -339,6 +340,12 @@ export function DeviceLinkPanel({
   if (!frame) {
     return (
       <div data-testid="device-link-panel">
+        <p
+          data-testid="device-link-personal-disclosure"
+          className="mb-3 text-xs leading-5 text-iron-300"
+        >
+          {t("deviceLink.personalDisclosure", { name })}
+        </p>
         {error
           ? (
               <div className="space-y-2">
@@ -361,6 +368,12 @@ export function DeviceLinkPanel({
 
   return (
     <div data-testid="device-link-panel" data-device-link-step={frame.step} data-device-link-mode={mode}>
+      <p
+        data-testid="device-link-personal-disclosure"
+        className="mb-3 text-xs leading-5 text-iron-300"
+      >
+        {t("deviceLink.personalDisclosure", { name })}
+      </p>
       <p data-testid="device-link-instructions" className="mb-3 text-xs leading-5 text-iron-300">
         {frame.instructions}
       </p>
