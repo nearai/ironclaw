@@ -522,10 +522,19 @@ impl NearAiChatProvider {
             response.headers().get("retry-after"),
         );
         if !status.is_success() {
-            let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
-                provider: "nearai_chat".to_string(),
-                reason: format!("Failed to read response body: {}", e),
-            })?;
+            let response_text = tokio::time::timeout_at(progress_deadline, response.text())
+                .await
+                .map_err(|_| LlmError::RequestFailed {
+                    provider: "nearai_chat".to_string(),
+                    reason: format!(
+                        "stream was idle for {} seconds while reading error response body",
+                        self.stream_idle_timeout.as_secs()
+                    ),
+                })?
+                .map_err(|e| LlmError::RequestFailed {
+                    provider: "nearai_chat".to_string(),
+                    reason: format!("Failed to read response body: {}", e),
+                })?;
             let status_code = status.as_u16();
             if status_code == 401 && !self.uses_api_key() {
                 let lower = response_text.to_lowercase();
@@ -634,8 +643,8 @@ impl NearAiChatProvider {
                 if let Some(reasoning_delta) = choice
                     .delta
                     .reasoning_content
-                    .or(choice.delta.reasoning)
                     .filter(|s| !s.is_empty())
+                    .or(choice.delta.reasoning.filter(|s| !s.is_empty()))
                 {
                     semantic_progress = true;
                     parsed.reasoning.push_str(&reasoning_delta);
@@ -2285,28 +2294,31 @@ data: [DONE]
                 )
                 .await
                 .expect("write first event");
-            sleep(Duration::from_millis(600)).await;
+            socket.flush().await.expect("flush first event");
+            sleep(Duration::from_millis(1_600)).await;
             socket
                 .write_all(
                     b"data: {\"choices\":[{\"delta\":{\"content\":\" two\"},\"finish_reason\":null}]}\n\n",
                 )
                 .await
                 .expect("write second event");
-            sleep(Duration::from_millis(600)).await;
+            socket.flush().await.expect("flush second event");
+            sleep(Duration::from_millis(1_600)).await;
             socket
                 .write_all(
                     b"data: {\"choices\":[{\"delta\":{\"content\":\" three\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
                 )
                 .await
                 .expect("write terminal events");
+            socket.flush().await.expect("flush terminal events");
         });
 
         let provider =
-            NearAiChatProvider::new_with_timeout(test_nearai_config(&base_url), test_session(), 1)
+            NearAiChatProvider::new_with_timeout(test_nearai_config(&base_url), test_session(), 3)
                 .expect("provider");
-        let (delta_tx, _delta_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel();
         let response = timeout(
-            Duration::from_secs(3),
+            Duration::from_secs(8),
             provider.complete_streaming(
                 CompletionRequest::new(vec![ChatMessage::user("count")]),
                 Arc::new(RecordingCompletionStreamSink { sender: delta_tx }),
@@ -2318,41 +2330,154 @@ data: [DONE]
 
         server_task.await.expect("server task");
         assert_eq!(response.content, "one two three");
+        let observed_deltas: Vec<String> =
+            std::iter::from_fn(|| delta_rx.try_recv().ok()).collect();
+        assert_eq!(
+            observed_deltas,
+            vec!["one", " two", " three"],
+            "semantic deltas must arrive in SSE order"
+        );
     }
 
-    async fn assert_streaming_times_out_before_late_content(
-        steps: Vec<(std::time::Duration, &'static [u8])>,
-        expected_deltas: &[&str],
-    ) {
+    #[tokio::test]
+    async fn complete_streaming_times_out_while_reading_non_success_body() {
         use tokio::io::AsyncWriteExt;
         use tokio::net::TcpListener;
-        use tokio::time::{Duration, sleep, timeout};
+        use tokio::sync::oneshot;
+        use tokio::time::{Duration, timeout};
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (release_tx, release_rx) = oneshot::channel();
         let server_task = tokio::spawn(async move {
             let (mut socket, _) = accept_chat_request(&listener).await;
-            for (delay, bytes) in steps {
-                sleep(delay).await;
-                if socket.write_all(bytes).await.is_err() {
-                    return;
-                }
-            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\ncontent-type: text/plain\r\ncontent-length: 64\r\nconnection: keep-alive\r\n\r\nupstream unavailable",
+                )
+                .await
+                .expect("write error response headers");
+            socket.flush().await.expect("flush error response");
+            let _ = release_rx.await;
         });
 
         let provider =
-            NearAiChatProvider::new_with_timeout(test_nearai_config(&base_url), test_session(), 1)
+            NearAiChatProvider::new_with_timeout(test_nearai_config(&base_url), test_session(), 2)
                 .expect("provider");
-        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (delta_tx, _delta_rx) = tokio::sync::mpsc::unbounded_channel();
         let result = timeout(
-            Duration::from_secs(2),
+            Duration::from_secs(5),
             provider.complete_streaming(
                 CompletionRequest::new(vec![ChatMessage::user("wait")]),
                 Arc::new(RecordingCompletionStreamSink { sender: delta_tx }),
             ),
         )
         .await
-        .expect("provider must enforce its own first-content timeout");
+        .expect("provider should enforce the streaming deadline for error bodies");
+
+        let _ = release_tx.send(());
+        server_task.await.expect("server task");
+
+        match result {
+            Err(LlmError::RequestFailed { provider, reason }) => {
+                assert_eq!(provider, "nearai_chat");
+                assert!(
+                    reason.contains("error response body"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected error-body timeout, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_uses_nonempty_reasoning_fallback() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server_task = tokio::spawn(async move {
+            let (mut socket, _) = accept_chat_request(&listener).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"reasoning_content\":\"\",\"reasoning\":\"fallback reasoning\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                )
+                .await
+                .expect("write reasoning response");
+        });
+
+        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+            .expect("provider");
+        let (delta_tx, _delta_rx) = tokio::sync::mpsc::unbounded_channel();
+        let response = provider
+            .complete_streaming(
+                CompletionRequest::new(vec![ChatMessage::user("answer")]),
+                Arc::new(RecordingCompletionStreamSink { sender: delta_tx }),
+            )
+            .await
+            .expect("streaming completion");
+
+        server_task.await.expect("server task");
+        assert_eq!(response.reasoning.as_deref(), Some("fallback reasoning"));
+        assert_eq!(response.content, "fallback reasoning");
+    }
+
+    async fn assert_streaming_times_out_before_late_content(
+        idle_timeout_secs: u64,
+        outer_timeout_secs: u64,
+        events_before_late_content: usize,
+        steps: Vec<(std::time::Duration, &'static [u8])>,
+        expected_deltas: &[&str],
+    ) {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+        use tokio::sync::oneshot;
+        use tokio::time::{Duration, sleep, timeout};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (prefix_sent_tx, prefix_sent_rx) = oneshot::channel();
+        let mut prefix_sent_tx = Some(prefix_sent_tx);
+        let server_task = tokio::spawn(async move {
+            let (mut socket, _) = accept_chat_request(&listener).await;
+            for (index, (delay, bytes)) in steps.into_iter().enumerate() {
+                sleep(delay).await;
+                if socket.write_all(bytes).await.is_err() {
+                    return;
+                }
+                socket.flush().await.expect("flush SSE event");
+                if index + 1 == events_before_late_content
+                    && let Some(prefix_sent_tx) = prefix_sent_tx.take()
+                {
+                    let _ = prefix_sent_tx.send(());
+                }
+            }
+        });
+
+        let provider = NearAiChatProvider::new_with_timeout(
+            test_nearai_config(&base_url),
+            test_session(),
+            idle_timeout_secs,
+        )
+        .expect("provider");
+        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel();
+        let completion_task = tokio::spawn(async move {
+            provider
+                .complete_streaming(
+                    CompletionRequest::new(vec![ChatMessage::user("wait")]),
+                    Arc::new(RecordingCompletionStreamSink { sender: delta_tx }),
+                )
+                .await
+        });
+        timeout(Duration::from_secs(idle_timeout_secs), prefix_sent_rx)
+            .await
+            .expect("SSE event prefix should be sent before the deadline")
+            .expect("server should signal the SSE event prefix");
+        let result = timeout(Duration::from_secs(outer_timeout_secs), completion_task)
+            .await
+            .expect("provider must enforce its own first-content timeout")
+            .expect("streaming completion task should not panic");
 
         server_task.await.expect("server task");
         let observed_deltas: Vec<String> =
@@ -2372,16 +2497,19 @@ data: [DONE]
         use tokio::time::Duration;
 
         assert_streaming_times_out_before_late_content(
+            3,
+            8,
+            4,
             vec![
                 (
                     Duration::ZERO,
                     b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
                 ),
-                (Duration::from_millis(400), b"data:\n\n"),
-                (Duration::from_millis(400), b"data:\n\n"),
-                (Duration::from_millis(400), b"data:\n\n"),
+                (Duration::from_millis(650), b"data:\n\n"),
+                (Duration::from_millis(650), b"data:\n\n"),
+                (Duration::from_millis(650), b"data:\n\n"),
                 (
-                    Duration::ZERO,
+                    Duration::from_millis(1_800),
                     b"data: {\"choices\":[{\"delta\":{\"content\":\"late\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
                 ),
             ],
@@ -2395,13 +2523,16 @@ data: [DONE]
         use tokio::time::Duration;
 
         assert_streaming_times_out_before_late_content(
+            3,
+            8,
+            1,
             vec![
                 (
-                    Duration::from_millis(600),
+                    Duration::from_millis(1_000),
                     b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
                 ),
                 (
-                    Duration::from_millis(600),
+                    Duration::from_millis(2_800),
                     b"data: {\"choices\":[{\"delta\":{\"content\":\"late\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
                 ),
             ],
@@ -2415,18 +2546,21 @@ data: [DONE]
         use tokio::time::Duration;
 
         assert_streaming_times_out_before_late_content(
+            3,
+            8,
+            3,
             vec![
                 (
                     Duration::ZERO,
                     b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
                 ),
                 (
-                    Duration::from_millis(400),
+                    Duration::from_millis(1_000),
                     b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n",
                 ),
-                (Duration::from_millis(400), b"data:\n\n"),
+                (Duration::from_millis(1_000), b"data:\n\n"),
                 (
-                    Duration::from_millis(400),
+                    Duration::from_millis(1_800),
                     b"data: {\"choices\":[{\"delta\":{\"content\":\"late\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
                 ),
             ],
@@ -2457,16 +2591,17 @@ data: [DONE]
                 b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"query\\\":\\\"near ai\\\"}\"}}]},\"finish_reason\":null}]}\n\n".as_slice(),
                 b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n".as_slice(),
             ] {
-                sleep(Duration::from_millis(600)).await;
+                sleep(Duration::from_millis(1_250)).await;
                 socket.write_all(event).await.expect("write model progress");
+                socket.flush().await.expect("flush model progress");
             }
         });
 
         let provider =
-            NearAiChatProvider::new_with_timeout(test_nearai_config(&base_url), test_session(), 1)
+            NearAiChatProvider::new_with_timeout(test_nearai_config(&base_url), test_session(), 3)
                 .expect("provider");
         let response = timeout(
-            Duration::from_secs(4),
+            Duration::from_secs(10),
             complete_search_tool_streaming(provider),
         )
         .await

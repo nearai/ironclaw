@@ -26,11 +26,14 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::AgentTurnSpawnTreeRuntimePort;
 
-// Bounds the complete finalization operation while leaving room for the
-// default four 60-second transport attempts and their exponential backoffs.
-// The process supervisor heartbeats active execution independently; lease
-// fences below still reject a stale executor before durable publication.
-const FINALIZATION_DEADLINE_MS: u64 = 300_000;
+// Bounds the complete structured-finalization operation at 500 seconds: enough
+// for four default attempts at 60 seconds to first semantic progress plus a
+// 60-second semantic-idle window each, with 8.75 seconds of maximum jittered
+// backoff. Active semantic progress has no per-attempt total cap; this outer
+// deadline remains authoritative for a finite headless run. The process
+// supervisor heartbeat and durable lease fences still apply: a stale executor
+// is rejected before durable publication.
+const FINALIZATION_DEADLINE_MS: u64 = 500_000;
 
 #[async_trait]
 pub(crate) trait StructuredFinalizationPort: Send + Sync {

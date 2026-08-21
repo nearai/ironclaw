@@ -40,14 +40,17 @@ use super::{
 
 #[test]
 fn finalization_deadline_covers_default_transport_retry_budget() {
-    // The default NearAI transport permits four attempts at 60 seconds each.
-    // Maximum jittered backoffs are 1.25s, 2.5s, and 5s. Retry-After and
+    // The default NearAI transport permits four attempts, each with a 60 s
+    // headers/first-progress deadline and a 60 s semantic-idle window.
+    // Maximum jittered backoffs are 1.25 s, 2.5 s, and 5 s. Retry-After and
     // non-default provider configuration remain bounded by the outer deadline.
     const DEFAULT_ATTEMPT_COUNT: u64 = 4;
-    const DEFAULT_ATTEMPT_TIMEOUT_MS: u64 = 60_000;
+    const DEFAULT_ATTEMPT_TTFT_MS: u64 = 60_000;
+    const DEFAULT_ATTEMPT_SEMANTIC_IDLE_MS: u64 = 60_000;
     const MAXIMUM_DEFAULT_BACKOFF_MS: u64 = 1_250 + 2_500 + 5_000;
-    let default_retry_budget_ms =
-        DEFAULT_ATTEMPT_COUNT * DEFAULT_ATTEMPT_TIMEOUT_MS + MAXIMUM_DEFAULT_BACKOFF_MS;
+    let default_retry_budget_ms = DEFAULT_ATTEMPT_COUNT
+        * (DEFAULT_ATTEMPT_TTFT_MS + DEFAULT_ATTEMPT_SEMANTIC_IDLE_MS)
+        + MAXIMUM_DEFAULT_BACKOFF_MS;
 
     assert!(FINALIZATION_DEADLINE_MS > default_retry_budget_ms);
 }

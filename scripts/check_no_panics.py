@@ -457,16 +457,21 @@ def has_cfg_test_module_declaration(
     )
     path_declaration = re.compile(
         rf"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*"
-        rf"#\s*\[\s*path\s*=\s*[\"']{re.escape(posix_path.name)}[\"']\s*\]\s*"
+        r"#\s*\[\s*path\s*=\s*[\"']([^\"']+)[\"']\s*\]\s*"
         r"(?:pub(?:\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*;"
     )
+    target = (repository_root / pathlib.Path(*posix_path.parts)).resolve()
     for candidate in candidates:
         try:
             source = candidate.read_text(encoding="utf-8")
         except (FileNotFoundError, OSError, UnicodeError):
             continue
-        if declaration.search(source) or path_declaration.search(source):
+        if declaration.search(source):
             return True
+        for path_match in path_declaration.finditer(source):
+            declared = (candidate.parent / pathlib.Path(path_match.group(1))).resolve()
+            if declared == target:
+                return True
     return False
 
 
@@ -1221,6 +1226,14 @@ class CheckNoPanicsTests(unittest.TestCase):
         self.assertTrue(
             is_test_only_path(
                 "crates/kernel/ironclaw_processes/src/journal_store/state_tests.rs"
+            )
+        )
+        # Nested path attributes are also test-only when the source module
+        # spells the path relative to the crate's `src/` directory. This is
+        # the layout used by `system_inference.rs`.
+        self.assertTrue(
+            is_test_only_path(
+                "crates/loop/ironclaw_loop_host/src/system_inference/tests.rs"
             )
         )
         self.assertFalse(is_test_only_path("src/channels/web/mod.rs"))

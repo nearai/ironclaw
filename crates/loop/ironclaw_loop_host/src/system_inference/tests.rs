@@ -76,6 +76,7 @@ impl HostManagedModelGateway for RecordingGateway {
 
 struct SlowGateway {
     delay: std::time::Duration,
+    progress_requests: AtomicUsize,
 }
 
 #[async_trait]
@@ -84,6 +85,16 @@ impl HostManagedModelGateway for SlowGateway {
         &self,
         _request: HostManagedModelRequest,
     ) -> Result<crate::HostManagedModelResponse, crate::HostManagedModelError> {
+        tokio::time::sleep(self.delay).await;
+        Ok(crate::HostManagedModelResponse::assistant_reply("too late"))
+    }
+
+    async fn stream_model_with_progress(
+        &self,
+        _request: HostManagedModelRequest,
+        _sink: Arc<dyn crate::HostManagedModelStreamSink>,
+    ) -> Result<crate::HostManagedModelResponse, crate::HostManagedModelError> {
+        self.progress_requests.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(self.delay).await;
         Ok(crate::HostManagedModelResponse::assistant_reply("too late"))
     }
@@ -173,6 +184,7 @@ struct RecordingBudgetAccountant {
     post_outcomes: Mutex<Vec<ModelWorkOutcome>>,
     release_calls: AtomicUsize,
     fail_post: bool,
+    panic_post: bool,
 }
 
 #[async_trait]
@@ -200,6 +212,9 @@ impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
             request.kind,
             ironclaw_loop_contracts::ModelWorkKind::SystemInference { .. }
         ));
+        if self.panic_post {
+            panic!("post_model_work panic");
+        }
         if self.fail_post {
             return Err(LoopModelGatewayError::new(
                 AgentLoopHostErrorKind::BudgetAccountingFailed,
@@ -577,6 +592,36 @@ async fn guarded_system_inference_releases_reservation_when_post_accounting_fail
 }
 
 #[tokio::test]
+async fn guarded_system_inference_maps_post_accounting_panic_and_releases_reservation() {
+    let context = test_run_context("system-inference-post-panic").await;
+    let gateway = Arc::new(RecordingGateway::new(
+        crate::HostManagedModelResponse::assistant_reply("summary"),
+    ));
+    let direct: Arc<dyn SystemInferencePort> = Arc::new(
+        ModelGatewayBackedSystemInferencePort::new(gateway, context.clone()),
+    );
+    let accountant = Arc::new(RecordingBudgetAccountant {
+        panic_post: true,
+        ..Default::default()
+    });
+    let port = GuardedSystemInferencePort::new(
+        direct,
+        context,
+        accountant.clone(),
+        Arc::new(NoOpPolicyGuard),
+    );
+
+    let error = port
+        .call_system_inference(system_request("transcript"))
+        .await
+        .expect_err("post-accounting panic should become a safe inference failure");
+
+    assert!(matches!(error, SystemInferenceError::Failed { .. }));
+    assert!(accountant.post_outcomes.lock().expect("lock").is_empty());
+    assert_eq!(accountant.release_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn rejects_gateway_capability_calls() {
     let context = test_run_context("system-inference-capability-calls").await;
     let gateway = Arc::new(RecordingGateway::new(
@@ -639,6 +684,7 @@ async fn timeout_returns_timeout_error() {
     let port = ModelGatewayBackedSystemInferencePort::new(
         Arc::new(SlowGateway {
             delay: std::time::Duration::from_millis(25),
+            progress_requests: AtomicUsize::new(0),
         }),
         context,
     );
@@ -663,6 +709,28 @@ async fn timeout_returns_timeout_error() {
         .expect_err("slow gateway should hit system inference timeout");
 
     assert_eq!(error, SystemInferenceError::Timeout);
+}
+
+#[tokio::test]
+async fn structured_finalization_timeout_uses_progress_transport() {
+    let context = test_run_context("system-inference-structured-timeout").await;
+    let gateway = Arc::new(SlowGateway {
+        delay: std::time::Duration::from_millis(25),
+        progress_requests: AtomicUsize::new(0),
+    });
+    let port = ModelGatewayBackedSystemInferencePort::new(gateway.clone(), context);
+    let mut request = system_request("transcript");
+    request.identity.task_kind = SystemTaskKind::StructuredOutputFinalization;
+    request.deadline_ms = 1;
+    request.output_contract = Some(OutputContract::JsonObject);
+
+    let error = port
+        .call_system_inference(request)
+        .await
+        .expect_err("structured finalization should hit its deadline");
+
+    assert_eq!(error, SystemInferenceError::Timeout);
+    assert_eq!(gateway.progress_requests.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

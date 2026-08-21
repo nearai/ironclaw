@@ -135,34 +135,44 @@ impl SystemInferencePort for GuardedSystemInferencePort {
         let result = AssertUnwindSafe(self.inner.call_system_inference(request))
             .catch_unwind()
             .await
-            .map_err(|panic| {
-                let (panic_payload_kind, panic_payload_length) =
-                    if let Some(message) = panic.downcast_ref::<&str>() {
-                        ("static-string", message.len())
-                    } else if let Some(message) = panic.downcast_ref::<String>() {
-                        ("owned-string", message.len())
-                    } else {
-                        ("non-string", 0)
-                    };
-                tracing::debug!(
-                    panic_payload_kind,
-                    panic_payload_length,
-                    "system inference worker failed before post-model accounting completed"
-                );
-                SystemInferenceError::Failed {
-                    safe_summary: safe("system inference task failed"),
-                }
-            })?;
+            .map_err(|panic| map_system_inference_panic(panic, "model inference"))?;
         let outcome = ModelWorkOutcome::from_system_inference_result(&result);
-        if let Err(error) = self
-            .accountant
-            .post_model_work(&self.run_context, &work_request, outcome)
-            .await
-        {
+        let post_model_work = AssertUnwindSafe(self.accountant.post_model_work(
+            &self.run_context,
+            &work_request,
+            outcome,
+        ))
+        .catch_unwind()
+        .await
+        .map_err(|panic| map_system_inference_panic(panic, "post-model accounting"))?;
+        if let Err(error) = post_model_work {
             return Err(map_gateway_error(error));
         }
         release_guard.disarm();
         result
+    }
+}
+
+fn map_system_inference_panic(
+    panic: Box<dyn std::any::Any + Send>,
+    phase: &'static str,
+) -> SystemInferenceError {
+    let (panic_payload_kind, panic_payload_length) =
+        if let Some(message) = panic.downcast_ref::<&str>() {
+            ("static-string", message.len())
+        } else if let Some(message) = panic.downcast_ref::<String>() {
+            ("owned-string", message.len())
+        } else {
+            ("non-string", 0)
+        };
+    tracing::debug!(
+        panic_payload_kind,
+        panic_payload_length,
+        phase,
+        "system inference worker panicked"
+    );
+    SystemInferenceError::Failed {
+        safe_summary: safe("system inference task failed"),
     }
 }
 
