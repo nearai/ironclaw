@@ -19,7 +19,7 @@ use ironclaw_host_api::turn::{TurnActor, TurnGateRef};
 use ironclaw_loop_contracts::{AgentLoopHostError, LoopRunContext};
 #[cfg(test)]
 use ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID;
-use ironclaw_loop_host::{AwaitEdgeSettler, ResolveOutcome};
+use ironclaw_loop_host::{AwaitEdgeSettler, HostInputEnqueuePort, ResolveOutcome};
 #[cfg(test)]
 use ironclaw_threads::ThreadHistoryRequest;
 use ironclaw_threads::{
@@ -55,6 +55,15 @@ pub struct AwaitEdgeResolver<S: SessionThreadService + ?Sized> {
     // below) — an extra `Arc` around each `OnceLock` was redundant
     // allocation/indirection on top of that outer `Arc`.
     result_writer: OnceLock<Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>>,
+    /// Deferred-bind for the background-mode delivery tail's attend step
+    /// (`deliver_background`, Task 5/2b) — same ordering constraint as
+    /// `result_writer` above. `None` (never bound) is a legitimate runtime
+    /// shape, not a missing-wiring bug: it means this runtime has no live
+    /// input queue at all, and the delivery tail treats that exactly like a
+    /// refused enqueue (park the edge in `ResultAppended`) rather than an
+    /// error — unlike `result_writer`, whose accessor fails closed when
+    /// unbound.
+    input_enqueue: OnceLock<Arc<dyn HostInputEnqueuePort>>,
     coordinator: OnceLock<Arc<dyn TurnCoordinator>>,
     thread_service: Arc<S>,
 }
@@ -76,6 +85,7 @@ where
             store,
             agent_turn_runtime: RwLock::new(agent_turn_runtime),
             result_writer: result_writer_cell,
+            input_enqueue: OnceLock::new(),
             coordinator: OnceLock::new(),
             thread_service,
         }
@@ -95,6 +105,7 @@ where
             store,
             agent_turn_runtime: RwLock::new(agent_turn_runtime),
             result_writer: OnceLock::new(),
+            input_enqueue: OnceLock::new(),
             coordinator: OnceLock::new(),
             thread_service,
         }
@@ -151,6 +162,17 @@ where
             .get()
             .ok_or_else(|| TurnError::Unavailable {
                 reason: "await-edge resolver result writer is not bound".to_string(),
+            })
+    }
+
+    pub fn bind_input_enqueue(
+        &self,
+        input_enqueue: Arc<dyn HostInputEnqueuePort>,
+    ) -> Result<(), TurnError> {
+        self.input_enqueue
+            .set(input_enqueue)
+            .map_err(|_| TurnError::InvalidRequest {
+                reason: "await-edge resolver input enqueue port already bound".to_string(),
             })
     }
 
@@ -1870,6 +1892,10 @@ where
         result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
     ) -> Result<(), TurnError> {
         AwaitEdgeResolver::bind_result_writer(self, result_writer)
+    }
+
+    fn bind_input_enqueue(&self, port: Arc<dyn HostInputEnqueuePort>) -> Result<(), TurnError> {
+        AwaitEdgeResolver::bind_input_enqueue(self, port)
     }
 
     fn as_turn_committed_event_observer(

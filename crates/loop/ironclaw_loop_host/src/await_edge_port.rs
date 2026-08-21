@@ -145,6 +145,21 @@ pub trait AwaitEdgeSettler: Send + Sync {
         result_writer: Arc<dyn crate::LoopCapabilityResultWriter>,
     ) -> Result<(), TurnError>;
 
+    /// Bind the host input-enqueue port late, mirroring `bind_result_writer`'s
+    /// deferred-binding pattern — composition builds the input queue after
+    /// this resolver is already erased into `Arc<dyn AwaitEdgeSettler>` (its
+    /// own generic backend type parameter is no longer nameable at that
+    /// point) (Task 5, 2b). The background-mode delivery tail uses this port
+    /// to enqueue a settled child's result as steering input for a live
+    /// parent run. A runtime that never binds one (no live-queue reader
+    /// wired at all) is a legitimate deployment shape, not a bug: the
+    /// delivery tail treats an unbound port exactly like a refused enqueue —
+    /// it parks the edge in `ResultAppended` rather than erroring.
+    fn bind_input_enqueue(
+        &self,
+        port: Arc<dyn crate::HostInputEnqueuePort>,
+    ) -> Result<(), TurnError>;
+
     /// Adapter to the turn projection observer seam
     /// (the process journal observer needs a `TurnCommittedEventObserver`, not
     /// this trait) — implemented as
