@@ -315,6 +315,26 @@ function findHandler(node, bodyMarker, seen = new Set()) {
 }
 
 
+function capturedValuesAfter(node, marker, seen = new Set()) {
+  if (!node || typeof node !== "object" || seen.has(node)) return [];
+  seen.add(node);
+
+  const matches = [];
+  if (Array.isArray(node.strings) && Array.isArray(node.values)) {
+    node.strings.forEach((part, index) => {
+      if (part.includes(marker) && index < node.values.length) {
+        matches.push(node.values[index]);
+      }
+    });
+  }
+
+  const children = Array.isArray(node) ? node : Object.values(node);
+  for (const child of children) {
+    matches.push(...capturedValuesAfter(child, marker, seen));
+  }
+  return matches;
+}
+
 function renderedContainsComponent(rendered, component) {
   if (!rendered || typeof rendered !== "object") {
     return rendered === component;
@@ -963,6 +983,16 @@ test("ConfigureModal explains independent bot and personal onboarding before con
     renderedContainsComponent(view.rendered, view.PairingWebCodePanel),
     false,
     "opening Configure must not mint a workspace-bot pairing code",
+  );
+  assert.deepEqual(
+    capturedValuesAfter(view.rendered, "checked="),
+    [false, false],
+    "both connection options must start unchecked",
+  );
+  assert.deepEqual(
+    capturedValuesAfter(view.rendered, "disabled="),
+    [true],
+    "Continue must stay disabled until the user chooses",
   );
 });
 

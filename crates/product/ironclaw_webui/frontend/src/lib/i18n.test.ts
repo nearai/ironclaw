@@ -171,6 +171,8 @@ test("non-English locale packs localize exposed workflow copy", () => {
         key === "extensions.addCustomMcp" ||
         key === "extensions.emptyToolsTitle" ||
         key === "extensions.emptyToolsDesc" ||
+        key.startsWith("extensions.connectionChoice.") ||
+        key.startsWith("deviceLink.") ||
         key.startsWith("extensions.customMcp")),
   );
 
