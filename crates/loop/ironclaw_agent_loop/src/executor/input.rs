@@ -249,27 +249,3 @@ fn user_facing_input_matches_drain_mode(input: &LoopInput, mode: UserFacingInput
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use ironclaw_host_api::turn::{LoopMessageRef, TurnRunId};
-
-    use super::{LoopInput, UserFacingInputDrainMode, user_facing_input_matches_drain_mode};
-
-    #[test]
-    fn subagent_settled_drains_in_both_user_facing_modes() {
-        let input = LoopInput::SubagentSettled {
-            child_run_id: TurnRunId::new(),
-            message_ref: LoopMessageRef::new("msg:child-result-1").expect("valid message ref"),
-        };
-        for mode in [
-            UserFacingInputDrainMode::Steering,
-            UserFacingInputDrainMode::FollowUp,
-        ] {
-            assert!(
-                user_facing_input_matches_drain_mode(&input, mode),
-                "settled results must drain in {mode:?}"
-            );
-        }
-    }
-}

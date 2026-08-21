@@ -398,6 +398,67 @@ fn consume_drainable_inputs_returns_planner_contract_error_when_acks_missing() {
     ));
 }
 
+/// A settled subagent result must be consumed by the real drain call site — in
+/// BOTH user-facing modes — before the drain stops at a barrier input. Placing
+/// a `GateResolved` right behind it is the case a predicate-only test cannot
+/// see: it proves the settled input was consumed (cursor advanced by exactly
+/// one, one ack token returned) rather than merely classified as drainable.
+#[test]
+fn consume_drainable_inputs_drains_subagent_settled_ahead_of_a_barrier_in_both_modes() {
+    for mode in [
+        UserFacingInputDrainMode::Steering,
+        UserFacingInputDrainMode::FollowUp,
+    ] {
+        let host = MockHost::new(Vec::new());
+        let run_context = host.run_context();
+        let mut state = LoopExecutionState::initial_for_run(run_context);
+        let before_cursor = state.input_cursor.clone();
+        let batch = LoopInputBatch {
+            inputs: vec![
+                LoopInput::SubagentSettled {
+                    child_run_id: TurnRunId::new(),
+                    message_ref: message_ref("msg:child-result-1"),
+                },
+                LoopInput::GateResolved {
+                    gate_ref: LoopGateRef::new("gate:blocks-the-drain").expect("valid gate ref"),
+                },
+            ],
+            input_acks: vec![
+                input_ack(
+                    run_context,
+                    "input-cursor:after-settled",
+                    "input-ack:settled",
+                ),
+                input_ack(run_context, "input-cursor:after-gate", "input-ack:gate"),
+            ],
+            next_cursor: before_cursor.clone(),
+        };
+
+        let (drained, ack_tokens, cancelled_reason_kind) =
+            consume_drainable_inputs(&batch, mode, &mut state).expect("consume inputs");
+
+        assert!(drained, "settled results must drain in {mode:?}");
+        assert!(
+            cancelled_reason_kind.is_none(),
+            "no cancellation in {mode:?}"
+        );
+        assert_eq!(
+            ack_tokens,
+            vec![LoopInputAckToken::new("input-ack:settled").expect("valid ack token")],
+            "only the settled input is consumed in {mode:?}; the gate is a barrier"
+        );
+        assert_eq!(
+            state.input_cursor,
+            input_cursor(run_context, "input-cursor:after-settled"),
+            "the cursor must advance past the settled input in {mode:?}"
+        );
+        assert_ne!(
+            state.input_cursor, before_cursor,
+            "the cursor must not stay put in {mode:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn assistant_reply_stage_returns_reply_summary() {
     let host = MockHost::new(Vec::new());
