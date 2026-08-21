@@ -34,10 +34,17 @@ else
 fi
 export IRONCLAW_REBORN_HOME
 
+if [ -n "${IRONCLAW_REBORN_WORKSPACE_ROOT:-}" ]; then
+  IRONCLAW_REBORN_WORKSPACE_ROOT="${IRONCLAW_REBORN_WORKSPACE_ROOT%/}"
+else
+  IRONCLAW_REBORN_WORKSPACE_ROOT="$IRONCLAW_REBORN_HOME/workspace"
+fi
+export IRONCLAW_REBORN_WORKSPACE_ROOT
+
 ssh_public_key="${IRONCLAW_REBORN_SSH_PUBLIC_KEY:-}"
 if [ "$(id -u)" = "0" ]; then
-  mkdir -p "$IRONCLAW_REBORN_HOME" /workspace
-  chown ironclaw:ironclaw "$IRONCLAW_REBORN_HOME" /workspace
+  mkdir -p "$IRONCLAW_REBORN_HOME" "$IRONCLAW_REBORN_WORKSPACE_ROOT" /workspace
+  chown ironclaw:ironclaw "$IRONCLAW_REBORN_HOME" "$IRONCLAW_REBORN_WORKSPACE_ROOT" /workspace
   if [ -n "$ssh_public_key" ]; then
     ironclaw-reborn-start-sshd
   fi
@@ -253,9 +260,23 @@ then
           exit 1
           ;;
       esac
+      case "$IRONCLAW_REBORN_WORKSPACE_ROOT" in
+        "$railway_volume_mount"|"$railway_volume_mount"/*) ;;
+        *)
+          echo "Railway deployment using profile=$effective_profile requires IRONCLAW_REBORN_WORKSPACE_ROOT=$IRONCLAW_REBORN_WORKSPACE_ROOT to be under RAILWAY_VOLUME_MOUNT_PATH=$railway_volume_mount." >&2
+          echo "Unset IRONCLAW_REBORN_WORKSPACE_ROOT to use $IRONCLAW_REBORN_HOME/workspace, or set IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY=true only for disposable tests." >&2
+          exit 1
+          ;;
+      esac
       ;;
   esac
 fi
+
+case "$effective_profile" in
+  local-dev|local-dev-yolo|hosted-single-tenant|hosted-single-tenant-volume|hosted-single-tenant-volume-sandboxed|hosted-single-tenant-volume-sandboxed-railway)
+    mkdir -p "$IRONCLAW_REBORN_WORKSPACE_ROOT"
+    ;;
+esac
 
 # Serve-host resolution: an explicit IRONCLAW_REBORN_SERVE_HOST always wins.
 # Otherwise, on Railway (and any platform that sets the RAILWAY_* markers) the
