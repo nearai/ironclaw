@@ -1287,13 +1287,8 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "github",
     ),
     ("crates/ironclaw_assistant/src/workflow.rs", "slack"),
-    ("crates/ironclaw_host_api/src/dispatch.rs", "slack"),
     (
         "crates/ironclaw_host_runtime/src/first_party_tools/schemas.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_host_runtime/src/services/wasm_execution.rs",
         "slack",
     ),
     ("crates/ironclaw_loop_host/src/tool_disclosure.rs", "google"),
@@ -1694,7 +1689,13 @@ const ALLOWLIST: &[(&str, &str)] = &[
 // `loop_driver_host.rs`/"slack" carve-out was retired when the channel-context
 // forwarding it described was reworked, so its now-stale allowlist entry was
 // deleted — the ratchet only ever shrinks.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 112;
+// 112 -> 110 (retire lane-named DispatchError variants, PR 4 stage 1): the
+// `ironclaw_host_api/src/dispatch.rs`/"slack" and
+// `ironclaw_host_runtime/src/services/wasm_execution.rs`/"slack" carve-outs
+// named doc-comment examples on the retired `DispatchError::Wasm` variant;
+// deleting the variant deleted the examples, so the now-stale allowlist
+// entries were deleted too.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 110;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///

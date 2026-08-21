@@ -27,8 +27,8 @@ pub use ironclaw_host_api::{
     authorized::Authorized,
     dispatch::{
         CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
-        CapabilityDisplayOutputPreview, DispatchError, DispatchFailureDetail,
-        RuntimeDispatchErrorKind,
+        CapabilityDisplayOutputPreview, DispatchError, DispatchFailureDetail, DispatchFailureKind,
+        ProviderDiagnostic, RuntimeDispatchErrorKind, UntrustedProviderMessage,
     },
 };
 pub use obligations::{

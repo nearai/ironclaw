@@ -63,10 +63,14 @@ impl AuthRetryStreamSink {
 #[async_trait]
 impl CompletionStreamSink for AuthRetryStreamSink {
     async fn text_delta(&self, delta: String) {
-        if !delta.is_empty() {
+        if !delta.is_empty() && self.inner.text_is_visible() {
             self.emitted_text.store(true, Ordering::Relaxed);
         }
         self.inner.text_delta(delta).await;
+    }
+
+    fn text_is_visible(&self) -> bool {
+        self.inner.text_is_visible()
     }
 
     fn supports_text_replacement(&self) -> bool {
@@ -458,6 +462,17 @@ mod tests {
         }
     }
 
+    struct DiscardingSink;
+
+    #[async_trait]
+    impl CompletionStreamSink for DiscardingSink {
+        async fn text_delta(&self, _delta: String) {}
+
+        fn text_is_visible(&self) -> bool {
+            false
+        }
+    }
+
     async fn make_streaming_auth_provider(
         emit_before_auth_failure: bool,
     ) -> (
@@ -513,6 +528,20 @@ mod tests {
         assert_eq!(sink.deltas.lock().unwrap().as_slice(), ["partial"]);
         assert_eq!(inner.text_calls.load(Ordering::Relaxed), 1);
         assert_eq!(inner.token_updates.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn text_stream_retries_auth_failure_after_discarded_delta() {
+        let (provider, inner, _dir) = make_streaming_auth_provider(true).await;
+
+        let response = provider
+            .complete_streaming(CompletionRequest::new(Vec::new()), Arc::new(DiscardingSink))
+            .await
+            .expect("discarded partial text must not suppress auth retry");
+
+        assert_eq!(response.content, "replacement");
+        assert_eq!(inner.text_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(inner.token_updates.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]

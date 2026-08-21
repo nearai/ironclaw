@@ -37,7 +37,9 @@ use ironclaw_host_api::{
         CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
     },
     decision::{Decision, DenyReason, Obligations},
-    dispatch::{CapabilityDispatchResult, DispatchError, RuntimeDispatchErrorKind},
+    dispatch::{
+        CapabilityDispatchResult, DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind,
+    },
     host_port::HostPortCatalog,
     ids::{
         ApprovalRequestId, CapabilityGrantId, CapabilityId, ExtensionId, InvocationId, PackageId,
@@ -139,9 +141,11 @@ async fn default_runtime_returns_completed_outcome_for_authorized_dispatch() {
 async fn default_runtime_persists_failed_invocation_when_dispatch_fails() {
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(TestDispatcher::responding(|_, _| {
-        Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Backend,
-            model_visible_cause: None,
+        Err(DispatchError::Rejected {
+            runtime: Some(RuntimeKind::Wasm),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            diagnostic: None,
+            detail: None,
         })
     }));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);

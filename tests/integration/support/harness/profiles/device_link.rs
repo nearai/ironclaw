@@ -82,9 +82,10 @@ use ironclaw_extension_contracts::device_link::{
 use ironclaw_extension_contracts::tool_adapter::{
     ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
 };
-use ironclaw_host_api::dispatch::RuntimeDispatchErrorKind;
+use ironclaw_host_api::dispatch::{DispatchFailureDetail, RuntimeDispatchErrorKind};
 use ironclaw_host_api::ids::{CapabilityId, ExtensionId};
 use ironclaw_host_api::messaging::StandardMessagingOp;
+use ironclaw_host_api::safe_summary::SafeSummary;
 use serde_json::{Value, json};
 
 use super::super::options::ToolsProfile;
@@ -516,12 +517,16 @@ impl ToolAdapter for LinkedAccountFixtureToolAdapter {
 }
 
 fn undeclared(capability_id: &str) -> ToolError {
-    ToolError::Failed {
+    ToolError::Rejected {
         kind: RuntimeDispatchErrorKind::UndeclaredCapability,
-        safe_summary: Some(format!(
-            "the linked-account fixture does not implement the capability {capability_id}"
-        )),
-        model_visible_cause: None,
+        diagnostic: None,
+        detail: Some(DispatchFailureDetail::HostSummary {
+            summary: SafeSummary::new(format!(
+                "the linked-account fixture does not implement the capability {capability_id}"
+            ))
+            .unwrap(),
+            detail: None,
+        }),
     }
 }
 

@@ -78,17 +78,21 @@ impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for EchoLane {
             None => self
                 .governor
                 .reserve(request.scope, request.estimate)
-                .map_err(|_| DispatchError::Wasm {
-                    kind: RuntimeDispatchErrorKind::Resource,
-                    model_visible_cause: None,
+                .map_err(|_| DispatchError::Rejected {
+                    runtime: Some(RuntimeKind::Wasm),
+                    kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+                    diagnostic: None,
+                    detail: None,
                 })?,
         };
         let receipt = self
             .governor
             .reconcile(reservation.id, usage.clone())
-            .map_err(|_| DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Resource,
-                model_visible_cause: None,
+            .map_err(|_| DispatchError::Rejected {
+                runtime: Some(RuntimeKind::Wasm),
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+                diagnostic: None,
+                detail: None,
             })?;
         Ok(RuntimeAdapterResult {
             output,

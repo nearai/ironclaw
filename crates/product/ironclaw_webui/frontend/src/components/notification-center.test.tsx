@@ -574,6 +574,6 @@ test("Escape from a control inside the dialog still dismisses it", async () => {
   assert.equal(
     document.querySelector("[data-testid='notification-panel']"),
     null,
-    "the handler is on the dialog, so Escape works wherever focus sits inside it",
+    "the document-level handler dismisses the dialog wherever focus sits inside it",
   );
 });

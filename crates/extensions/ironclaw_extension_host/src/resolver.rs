@@ -27,10 +27,12 @@ use ironclaw_extension_contracts::tool_adapter::{
     ToolCall, ToolCallResources, ToolError, ToolPorts,
 };
 use ironclaw_host_api::{
-    dispatch::{DispatchError, DispatchFailureDetail, RuntimeDispatchErrorKind},
+    dispatch::{DispatchError, DispatchFailureDetail, DispatchFailureKind, ProviderDiagnostic},
     ids::{CapabilityId, ExtensionId},
+    messaging::StandardMessagingErrorCode,
     resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
-    runtime::{DispatchErrorLane, RuntimeKind},
+    runtime::RuntimeKind,
+    safe_summary::SafeSummary,
 };
 
 use crate::active::ResolvedToolBinding;
@@ -142,91 +144,131 @@ fn dispatch_error_for_tool_error(
             requirement,
         },
         ToolError::Rejected {
-            runtime,
             kind,
             diagnostic,
             detail,
-        } => DispatchError::Rejected {
-            runtime,
-            kind,
-            diagnostic,
-            detail,
-        },
-        ToolError::Failed {
-            kind,
-            safe_summary,
-            model_visible_cause,
-        } => dispatch_error_for_kind(runtime, kind, safe_summary, model_visible_cause),
+            ..
+        } => {
+            let messaging_code = standard_messaging_code(diagnostic.as_deref());
+            DispatchError::Rejected {
+                // Runtime provenance belongs to the trusted resolved binding,
+                // not to the extension-supplied error payload.
+                runtime: Some(runtime),
+                kind: DispatchFailureKind::Runtime(kind),
+                diagnostic,
+                detail: dispatch_detail_for_tool_error(messaging_code, detail),
+            }
+        }
     }
 }
 
-fn dispatch_error_for_kind(
-    runtime: RuntimeKind,
-    kind: RuntimeDispatchErrorKind,
-    safe_summary: Option<String>,
-    model_visible_cause: Option<String>,
-) -> DispatchError {
-    match runtime.dispatch_error_lane() {
-        // The lane variants carry the cause on `model_visible_cause` (#5965):
-        // raw-or-better cause text, scrubbed downstream at the model-visible
-        // Diagnostic seam. When an adapter supplied only a fixed host-authored
-        // summary, that text is trivially cause-safe, so it rides the same
-        // channel rather than being dropped.
-        DispatchErrorLane::Wasm => DispatchError::Wasm {
-            kind,
-            model_visible_cause: model_visible_cause.or(safe_summary),
-        },
-        DispatchErrorLane::Mcp => DispatchError::Mcp {
-            kind,
-            model_visible_cause: model_visible_cause.or(safe_summary),
-        },
-        DispatchErrorLane::Script => DispatchError::Script {
-            kind,
-            model_visible_cause: model_visible_cause.or(safe_summary),
-        },
-        // FirstParty/System carry the raw cause on the Diagnostic detail
-        // channel (untrusted-provenance text, scrubbed downstream) rather than
-        // dropping it — the lane arms' `model_visible_cause` equivalent for the
-        // detail-shaped variant. A fixed host-authored summary, if that is all
-        // the adapter gave, still travels on `safe_summary`.
-        DispatchErrorLane::FirstParty => DispatchError::FirstParty {
-            kind,
-            safe_summary,
-            detail: model_visible_cause.map(|text| DispatchFailureDetail::Diagnostic { text }),
-        },
+/// Resolve the only trusted text an extension may select — a closed standard
+/// messaging code — after the adapter boundary. Raw host-summary variants are
+/// intentionally discarded here because an extension cannot attest to host
+/// authorship. Other detail variants retain their existing untrusted/typed
+/// semantics and continue through the downstream scrubbers.
+fn dispatch_detail_for_tool_error(
+    messaging_code: Option<StandardMessagingErrorCode>,
+    detail: Option<DispatchFailureDetail>,
+) -> Option<DispatchFailureDetail> {
+    messaging_code
+        .map(trusted_standard_messaging_summary)
+        .or_else(|| extension_detail_without_host_summary(detail))
+}
+
+/// Recognize only an exact member of the closed standard-messaging code set.
+/// Provider text never undergoes substring or keyword interpretation here.
+fn standard_messaging_code(
+    diagnostic: Option<&ProviderDiagnostic>,
+) -> Option<StandardMessagingErrorCode> {
+    let code = diagnostic?.code.as_ref()?.as_str();
+    StandardMessagingErrorCode::ALL
+        .iter()
+        .copied()
+        .find(|candidate| candidate.as_str() == code)
+}
+
+fn trusted_standard_messaging_summary(code: StandardMessagingErrorCode) -> DispatchFailureDetail {
+    let summary = match SafeSummary::new(format!("messaging operation failed: {}", code.as_str())) {
+        Ok(summary) => summary,
+        Err(_) => SafeSummary::placeholder(),
+    };
+    DispatchFailureDetail::HostSummary {
+        summary,
+        detail: None,
+    }
+}
+
+fn extension_detail_without_host_summary(
+    detail: Option<DispatchFailureDetail>,
+) -> Option<DispatchFailureDetail> {
+    match detail {
+        Some(DispatchFailureDetail::HostSummary { .. })
+        | Some(DispatchFailureDetail::HostRemediation { .. }) => None,
+        other => other,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_host_api::{
+        dispatch::RuntimeDispatchErrorKind, messaging::StandardMessagingErrorCode,
+    };
 
     fn cause_of(error: &DispatchError) -> Option<&str> {
         match error {
-            DispatchError::Wasm {
-                model_visible_cause,
+            DispatchError::Rejected {
+                diagnostic: Some(diagnostic),
                 ..
-            }
-            | DispatchError::Mcp {
-                model_visible_cause,
-                ..
-            }
-            | DispatchError::Script {
-                model_visible_cause,
-                ..
-            } => model_visible_cause.as_deref(),
-            DispatchError::FirstParty {
-                detail: Some(DispatchFailureDetail::Diagnostic { text }),
-                ..
-            } => Some(text.as_str()),
+            } => diagnostic.message.as_ref().map(|message| message.as_str()),
             _ => None,
         }
     }
 
-    /// The generic extension lanes must carry a failing adapter's
-    /// `model_visible_cause` across the tool ABI onto the dispatch error —
-    /// including the FirstParty/System arm, which routes it to the Diagnostic
-    /// detail channel rather than dropping it (#5965 on the extension path).
+    #[test]
+    fn standard_messaging_code_becomes_a_host_summary_at_the_resolver_boundary() {
+        let cap = CapabilityId::new("telegram.send_message").unwrap();
+        let dispatch = dispatch_error_for_tool_error(
+            &cap,
+            RuntimeKind::FirstParty,
+            ToolError::Rejected {
+                kind: RuntimeDispatchErrorKind::OperationFailed,
+                diagnostic: Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
+                    code: Some(ironclaw_host_api::dispatch::ProviderErrorCode::new(
+                        StandardMessagingErrorCode::RateLimited.as_str(),
+                    )),
+                    message: None,
+                    retry_after: None,
+                })),
+                detail: None,
+            },
+        );
+        let DispatchError::Rejected { detail, .. } = dispatch else {
+            panic!("expected Rejected dispatch error");
+        };
+        assert!(matches!(
+            detail,
+            Some(ironclaw_host_api::dispatch::DispatchFailureDetail::HostSummary {
+                summary,
+                detail: None,
+            }) if summary.as_str().contains(StandardMessagingErrorCode::RateLimited.as_str())
+        ));
+    }
+
+    #[test]
+    fn extension_host_remediation_is_not_trusted_at_the_resolver_boundary() {
+        let detail = DispatchFailureDetail::HostRemediation {
+            text: ironclaw_host_api::host_remediation::HostRemediation::new("connect the account")
+                .unwrap(),
+        };
+
+        assert!(extension_detail_without_host_summary(Some(detail)).is_none());
+    }
+
+    /// The generic extension lanes must carry a provider diagnostic across the
+    /// tool ABI onto the dispatch error — including the FirstParty/System arm,
+    /// which routes it to the diagnostic channel rather than dropping it.
     #[test]
     fn tool_error_cause_survives_every_lane() {
         let cap = CapabilityId::new("acme.cap").unwrap();
@@ -237,10 +279,16 @@ mod tests {
             RuntimeKind::FirstParty,
             RuntimeKind::System,
         ] {
-            let error = ToolError::Failed {
+            let error = ToolError::Rejected {
                 kind: RuntimeDispatchErrorKind::Backend,
-                safe_summary: None,
-                model_visible_cause: Some("channel_not_found".to_string()),
+                diagnostic: Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
+                    code: None,
+                    message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                        "channel_not_found",
+                    )),
+                    retry_after: None,
+                })),
+                detail: None,
             };
             let dispatch = dispatch_error_for_tool_error(&cap, runtime, error);
             assert_eq!(
@@ -251,19 +299,98 @@ mod tests {
         }
     }
 
-    /// When the adapter supplied only a fixed host-authored `safe_summary`
-    /// (no raw cause), the lane arms still surface it on the cause channel so
-    /// the failure keeps an actionable label instead of collapsing to the
-    /// kind's generic sentence.
+    /// An adapter cannot attest to host authorship, so a summary supplied in
+    /// the tool error is discarded when no closed standard code is present.
     #[test]
-    fn lane_summary_rides_the_cause_channel_when_no_raw_cause() {
+    fn lane_summary_is_dropped_when_no_closed_code_is_present() {
         let cap = CapabilityId::new("acme.cap").unwrap();
-        let error = ToolError::Failed {
+        let error = ToolError::Rejected {
             kind: RuntimeDispatchErrorKind::Backend,
-            safe_summary: Some("vendor unavailable".to_string()),
-            model_visible_cause: None,
+            diagnostic: None,
+            detail: Some(
+                ironclaw_host_api::dispatch::DispatchFailureDetail::HostSummary {
+                    summary: ironclaw_host_api::safe_summary::SafeSummary::new(
+                        "vendor unavailable",
+                    )
+                    .unwrap(),
+                    detail: None,
+                },
+            ),
         };
         let dispatch = dispatch_error_for_tool_error(&cap, RuntimeKind::Wasm, error);
-        assert_eq!(cause_of(&dispatch), Some("vendor unavailable"));
+        let DispatchError::Rejected {
+            diagnostic, detail, ..
+        } = dispatch
+        else {
+            panic!("expected Rejected dispatch error");
+        };
+        assert!(diagnostic.is_none());
+        assert!(detail.is_none());
+    }
+
+    #[test]
+    fn rejected_tool_error_drops_extension_summary_but_keeps_vendor_cause() {
+        let cap = CapabilityId::new("acme.cap").unwrap();
+        let dispatch = dispatch_error_for_tool_error(
+            &cap,
+            RuntimeKind::FirstParty,
+            ToolError::Rejected {
+                kind: RuntimeDispatchErrorKind::Backend,
+                diagnostic: Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
+                    code: None,
+                    message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                        "vendor backend returned 503",
+                    )),
+                    retry_after: None,
+                })),
+                detail: Some(
+                    ironclaw_host_api::dispatch::DispatchFailureDetail::HostSummary {
+                        summary: ironclaw_host_api::safe_summary::SafeSummary::new(
+                            "the tool's backend failed",
+                        )
+                        .unwrap(),
+                        detail: None,
+                    },
+                ),
+            },
+        );
+
+        let DispatchError::Rejected {
+            runtime,
+            diagnostic,
+            detail,
+            ..
+        } = dispatch
+        else {
+            panic!("expected Rejected dispatch error");
+        };
+        assert_eq!(runtime, Some(RuntimeKind::FirstParty));
+        assert_eq!(
+            diagnostic
+                .as_ref()
+                .and_then(|diagnostic| diagnostic.message.as_ref())
+                .map(|message| message.as_str()),
+            Some("vendor backend returned 503")
+        );
+        assert!(detail.is_none());
+    }
+
+    #[test]
+    fn rejected_tool_error_runtime_comes_from_the_outer_binding() {
+        let cap = CapabilityId::new("acme.cap").unwrap();
+        let dispatch = dispatch_error_for_tool_error(
+            &cap,
+            RuntimeKind::FirstParty,
+            ToolError::Rejected {
+                kind: RuntimeDispatchErrorKind::Backend,
+                diagnostic: None,
+                detail: None,
+            },
+        );
+
+        let DispatchError::Rejected { runtime, .. } = dispatch else {
+            panic!("expected Rejected dispatch error");
+        };
+        assert_eq!(runtime, Some(RuntimeKind::FirstParty));
     }
 }

@@ -660,7 +660,6 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
         DispatchError::AuthRequired {
             capability,
             requirement,
-            ..
         } => {
             assert_eq!(capability.as_str(), "acme.ping");
             assert_eq!(requirement.required_secrets.len(), 1);
@@ -687,11 +686,10 @@ async fn snapshot_resolver_preserves_typed_provider_rejection() {
     };
     use ironclaw_host_api::{
         dispatch::{
-            DispatchError, DispatchFailureKind, ProviderDiagnostic, ProviderErrorCode,
-            RuntimeDispatchErrorKind, UntrustedProviderMessage,
+            DispatchError, ProviderDiagnostic, ProviderErrorCode, RuntimeDispatchErrorKind,
+            UntrustedProviderMessage,
         },
         ids::CapabilityId,
-        runtime::RuntimeKind,
     };
 
     struct RejectingAdapter;
@@ -704,8 +702,7 @@ async fn snapshot_resolver_preserves_typed_provider_rejection() {
             _ports: &ToolPorts<'_>,
         ) -> Result<ToolResult, ToolError> {
             Err(ToolError::Rejected {
-                runtime: Some(RuntimeKind::Mcp),
-                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client),
+                kind: RuntimeDispatchErrorKind::Client,
                 diagnostic: Some(Box::new(ProviderDiagnostic {
                     code: Some(ProviderErrorCode::new("mcp_tool_rejected")),
                     message: Some(UntrustedProviderMessage::new("Bad credentials")),

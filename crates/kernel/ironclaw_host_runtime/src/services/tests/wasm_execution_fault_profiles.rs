@@ -18,9 +18,9 @@
 //! ```text
 //! profile status                          provider_fault_proxy.py
 //!   -> "github_api_error_status_{status}"  request.rs:45
-//!   -> guest kind tag                      github wasm-src lib.rs:55
-//!   -> WasmGuestErrorKind                  wasm_guest_error_kind
-//!   -> DispatchError                       wasm_guest_dispatch_error
+//!   -> guest kind tag                      github wasm-src lib.rs:55 (typed near:agent@0.4.1 `guest-failure`)
+//!   -> WitErrorKind                        guest-computed, carried on `WitGuestFailure::kind`
+//!   -> DispatchError                       typed_wasm_guest_dispatch_error
 //!   -> FailureKind                         From<DispatchFailureKind>
 //!   -> FailureFate                         FailureKind::fate
 //! ```
@@ -35,7 +35,7 @@ use ironclaw_host_api::{
     result_meta::{FailureFate, FailureKind},
 };
 
-use super::wasm_guest_dispatch_error;
+use super::{WitErrorKind, WitGuestFailure, typed_wasm_guest_dispatch_error};
 
 /// The e2e fault-profile catalogue, as source text.
 const FAULT_PROFILE_CATALOGUE: &str =
@@ -180,28 +180,29 @@ fn catalogue_profiles() -> Vec<(String, Option<u16>)> {
     profiles
 }
 
-/// The kind tag the GitHub guest emits for an HTTP status.
+/// The `WitErrorKind` the GitHub guest computes for an HTTP status.
 ///
 /// Mirrors `guest_error_kind` in the extension's wasm source, which is a
 /// separate crate compiled to wasm and so cannot be linked into a host test.
 /// The status side is not guesswork: `request.rs:45` builds the code as
 /// `github_api_error_status_{status}` for every non-2xx.
-fn guest_kind_for_status(status: u16) -> &'static str {
+fn guest_kind_for_status(status: u16) -> WitErrorKind {
     match status {
-        401 => "auth_required",
-        403 | 429 => "client",
-        _ => "operation_failed",
+        401 => WitErrorKind::AuthRequired,
+        403 | 429 => WitErrorKind::Client,
+        _ => WitErrorKind::OperationFailed,
     }
 }
 
-/// The wire payload the GitHub guest emits for a failed request
-/// (`{"code": ..., "kind": ...}`, github wasm-src lib.rs:47-52).
-fn guest_error_payload(status: u16) -> String {
-    serde_json::json!({
-        "code": format!("github_api_error_status_{status}"),
-        "kind": guest_kind_for_status(status),
-    })
-    .to_string()
+/// The typed `guest-failure` the GitHub guest emits for a failed request
+/// (near:agent@0.4.1 `guest-failure`, github wasm-src lib.rs:30-33: `code` is
+/// the plain error string, `kind` is computed guest-side).
+fn guest_failure(status: u16) -> WitGuestFailure {
+    WitGuestFailure {
+        kind: guest_kind_for_status(status),
+        code: Some(format!("github_api_error_status_{status}")),
+        message: None,
+    }
 }
 
 /// The catalogue status for a profile, or a failure naming the profile.
@@ -228,8 +229,8 @@ fn status_fault_profiles_classify_to_their_declared_fate() {
 
     for case in STATUS_PROFILE_FATES {
         let status = catalogue_status(case.profile);
-        let payload = guest_error_payload(status);
-        let dispatch = wasm_guest_dispatch_error(&payload, &capability);
+        let failure = guest_failure(status);
+        let dispatch = typed_wasm_guest_dispatch_error(failure, &capability);
         let failure_kind: FailureKind = dispatch.failure_kind().into();
 
         assert_eq!(
@@ -258,20 +259,19 @@ fn status_fault_profiles_classify_to_their_declared_fate() {
 #[test]
 fn a_401_parks_for_reauth_and_is_never_reported_as_a_tool_failure() {
     let capability = CapabilityId::new("github.list_issues").expect("a legal capability id");
-    let payload = serde_json::json!({
-        "code": format!(
+    let failure = WitGuestFailure {
+        kind: WitErrorKind::AuthRequired,
+        code: Some(format!(
             "github_api_error_status_{}",
             catalogue_status("expired_credential")
-        ),
-        "kind": "auth_required",
-        "message": "Bad credentials",
-    })
-    .to_string();
+        )),
+        message: Some("Bad credentials".to_string()),
+    };
 
     // The variant matters, not just the fate: a re-auth gate needs the
     // capability and credential requirements carried through, which only
     // `DispatchError::AuthRequired` does.
-    let dispatch = wasm_guest_dispatch_error(&payload, &capability);
+    let dispatch = typed_wasm_guest_dispatch_error(failure, &capability);
     let DispatchError::AuthRequired { requirement, .. } = &dispatch else {
         panic!("an expired credential must produce an auth gate, got {dispatch:?}");
     };
@@ -289,18 +289,18 @@ fn a_401_parks_for_reauth_and_is_never_reported_as_a_tool_failure() {
     );
     assert!(!format!("{dispatch:?}").contains("Bad credentials"));
 
-    let code_only_payload = serde_json::json!({
-        "code": "github_api_error_status_401",
-        "kind": "auth_required",
-    })
-    .to_string();
-    let code_only_dispatch = wasm_guest_dispatch_error(&code_only_payload, &capability);
+    let code_only_failure = WitGuestFailure {
+        kind: WitErrorKind::AuthRequired,
+        code: Some("github_api_error_status_401".to_string()),
+        message: None,
+    };
+    let code_only_dispatch = typed_wasm_guest_dispatch_error(code_only_failure, &capability);
     let DispatchError::AuthRequired { requirement, .. } = code_only_dispatch else {
         panic!("a code-only auth rejection must retain its diagnostic");
     };
     let code_only_cause = requirement
         .model_visible_cause
-        .expect("a code-only auth rejection must retain its diagnostic");
+        .expect("code-only auth rejection retains its diagnostic");
     assert_eq!(
         code_only_cause.code.as_ref().map(|code| code.as_str()),
         Some("github_api_error_status_401")

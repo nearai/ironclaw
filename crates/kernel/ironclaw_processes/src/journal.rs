@@ -712,8 +712,56 @@ pub struct ProcessTreeReservation {
 pub enum ProcessDependencyState {
     Open,
     Settled,
+    /// The settled dependency's result is durably recorded on the dependent.
+    ResultAppended,
+    /// The dependent has been made attentive to the recorded result.
+    AttentionScheduled,
+    /// Attention was withheld on purpose; the dependent must be made attentive
+    /// later. Not a failure, and not closed.
+    AttentionDeferred,
     Consumed,
     Abandoned,
+}
+
+impl ProcessDependencyState {
+    /// The states a dependency may hold immediately before entering `self` —
+    /// the dependent-notification lifecycle expressed as a relation instead of
+    /// as an expectation each caller has to assert correctly.
+    ///
+    /// Total over the enum on purpose: a new variant cannot compile without
+    /// naming its predecessors, and both closing doors (the state-column CAS
+    /// and consume/abandon) read this one relation rather than each carrying
+    /// its own list.
+    pub fn legal_predecessors(self) -> &'static [Self] {
+        match self {
+            // An edge is born here; nothing precedes it.
+            Self::Open => &[],
+            Self::Settled => &[Self::Open],
+            Self::ResultAppended => &[Self::Settled],
+            // Two predecessors: making a deferred dependent attentive *is*
+            // scheduling attention, so a parked edge has a forward path.
+            Self::AttentionScheduled => &[Self::ResultAppended, Self::AttentionDeferred],
+            Self::AttentionDeferred => &[Self::ResultAppended],
+            // `ResultAppended` has no attention recorded yet and
+            // `AttentionDeferred` is parked for a later sweep; closing either
+            // would strand the dependent with an undelivered result.
+            Self::Consumed => &[Self::Settled, Self::AttentionScheduled],
+            // Giving up is legal from anywhere still in flight.
+            Self::Abandoned => &[
+                Self::Open,
+                Self::Settled,
+                Self::ResultAppended,
+                Self::AttentionScheduled,
+                Self::AttentionDeferred,
+            ],
+        }
+    }
+
+    /// Whether the edge has reached a terminal state and its descendant
+    /// reservation has already been released.
+    pub fn is_closed(self) -> bool {
+        matches!(self, Self::Consumed | Self::Abandoned)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -741,6 +789,10 @@ pub struct ProcessDependencyRecord {
     pub settled_at: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumed_at: Option<Timestamp>,
+    /// When the state column last moved under a delivery transition.
+    /// Absent on rows written before delivery substates existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transitioned_at: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
 }
@@ -773,6 +825,24 @@ pub struct CloseProcessDependencyRequest {
     pub dependency_process_id: ProcessId,
     pub scope: ResourceScope,
     pub closed_at: Timestamp,
+}
+
+/// A compare-and-swap over one dependency's state column: the write lands only
+/// if the stored state is a legal predecessor of `next`
+/// (`ProcessDependencyState::legal_predecessors`). A caller does not assert
+/// which state it is advancing from — the relation derives it, so a step
+/// cannot be skipped by naming the wrong one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransitionProcessDependencyRequest {
+    pub dependent_process_id: ProcessId,
+    pub dependency_process_id: ProcessId,
+    pub scope: ResourceScope,
+    pub next: ProcessDependencyState,
+    /// Merged into the record's metadata object when present; `None` leaves the
+    /// recorded payload untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+    pub transitioned_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1035,6 +1105,22 @@ pub trait ProcessDependencyPort: Send + Sync {
     async fn abandon_process_dependency(
         &self,
         request: CloseProcessDependencyRequest,
+    ) -> Result<Option<ProcessDependencyRecord>, Self::Error>;
+
+    /// Advances a dependency's state column only if it still holds the
+    /// requested `expected` state, so a delivery step that crashed part-way can
+    /// be replayed without double-applying the next one. Replaying a
+    /// transition that already landed is idempotent; an unknown edge yields
+    /// `Ok(None)`; any other stored state is an error.
+    ///
+    /// This operation writes the state column only. Closing an edge also
+    /// releases its descendant reservation and the two are one journal
+    /// command, so `Consumed` and `Abandoned` are refused here: they are
+    /// reachable only through `consume_process_dependency` /
+    /// `abandon_process_dependency`.
+    async fn transition_process_dependency(
+        &self,
+        request: TransitionProcessDependencyRequest,
     ) -> Result<Option<ProcessDependencyRecord>, Self::Error>;
 
     async fn query_process_dependencies(

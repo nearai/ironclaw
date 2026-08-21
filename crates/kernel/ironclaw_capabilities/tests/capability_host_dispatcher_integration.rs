@@ -16,7 +16,7 @@ use ironclaw_host_api::{
     Timestamp,
     action::NetworkPolicy,
     capability::{CapabilitySet, EffectKind, GrantConstraints},
-    dispatch::{DispatchError, RuntimeDispatchErrorKind},
+    dispatch::{DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind},
     ids::{ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, UserId},
     mount::MountView,
     resource::{ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage},
@@ -407,18 +407,22 @@ impl BoundCapabilityAdapter for RecordingRuntimeAdapter {
             None => self
                 .governor
                 .reserve(request.scope, request.estimate)
-                .map_err(|_| DispatchError::Wasm {
-                    kind: RuntimeDispatchErrorKind::Resource,
-                    model_visible_cause: None,
+                .map_err(|_| DispatchError::Rejected {
+                    runtime: Some(RuntimeKind::Wasm),
+                    kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+                    diagnostic: None,
+                    detail: None,
                 })?,
         };
         let output_bytes = usage.output_bytes;
         let receipt = self
             .governor
             .reconcile(reservation.id, usage.clone())
-            .map_err(|_| DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Resource,
-                model_visible_cause: None,
+            .map_err(|_| DispatchError::Rejected {
+                runtime: Some(RuntimeKind::Wasm),
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+                diagnostic: None,
+                detail: None,
             })?;
         Ok(RuntimeAdapterResult {
             output,

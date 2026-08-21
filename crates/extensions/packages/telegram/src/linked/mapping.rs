@@ -31,11 +31,15 @@ use ironclaw_extension_contracts::tool_adapter::ToolError;
 use ironclaw_host_api::{
     capability::RuntimeCredentialAccountSetup,
     decision::RuntimeCredentialAuthRequirement,
-    dispatch::{DispatchAuthRequirement, RuntimeDispatchErrorKind},
+    dispatch::{
+        DispatchAuthRequirement, ProviderDiagnostic, ProviderErrorCode, RuntimeDispatchErrorKind,
+        UntrustedProviderMessage,
+    },
     ids::{ExtensionId, SecretHandle, VendorId},
     messaging::StandardMessagingErrorCode,
 };
 use serde_json::{Value, json};
+use std::time::Duration;
 
 use super::{MAX_MESSAGE_TEXT_BYTES, MAX_RESULT_BYTES};
 
@@ -67,26 +71,41 @@ const CURSOR_TAG: &str = "p1";
 // Failure construction
 // ---------------------------------------------------------------------------
 
-/// A canonical messaging failure. `safe_summary` carries only the fixed
-/// canonical code string (never vendor payload); `model_visible_cause` carries
-/// the one piece of vendor detail worth surfacing — today, a flood wait's
-/// retry-after — as prose, because no structured retry-after slot is plumbed
-/// through tool dispatch (§6.6).
+/// A canonical messaging rejection. The closed code crosses the adapter
+/// boundary as a typed value; the extension host turns it into the trusted
+/// public summary. `ProviderDiagnostic` carries only vendor detail and is
+/// scrubbed by the host before model visibility.
 pub(crate) fn failed(code: StandardMessagingErrorCode) -> ToolError {
-    ToolError::Failed {
+    ToolError::Rejected {
         kind: RuntimeDispatchErrorKind::OperationFailed,
-        safe_summary: Some(format!("telegram rejected the request: {}", code.as_str())),
-        model_visible_cause: None,
+        diagnostic: Some(Box::new(ProviderDiagnostic {
+            code: Some(ProviderErrorCode::new(code.as_str())),
+            message: None,
+            retry_after: None,
+        })),
+        detail: None,
     }
 }
 
-/// Same, plus a model-visible cause. The cause is vendor-derived and is NOT
+/// Same, plus a provider diagnostic. The cause is vendor-derived and is NOT
 /// display-safe; downstream scrubbing owns that.
 pub(crate) fn failed_because(code: StandardMessagingErrorCode, cause: String) -> ToolError {
-    ToolError::Failed {
+    failed_with_diagnostic(code, cause, None)
+}
+
+fn failed_with_diagnostic(
+    code: StandardMessagingErrorCode,
+    cause: String,
+    retry_after: Option<Duration>,
+) -> ToolError {
+    ToolError::Rejected {
         kind: RuntimeDispatchErrorKind::OperationFailed,
-        safe_summary: Some(format!("telegram rejected the request: {}", code.as_str())),
-        model_visible_cause: Some(cause),
+        diagnostic: Some(Box::new(ProviderDiagnostic {
+            code: Some(ProviderErrorCode::new(code.as_str())),
+            message: Some(UntrustedProviderMessage::new(cause)),
+            retry_after,
+        })),
+        detail: None,
     }
 }
 
@@ -95,28 +114,27 @@ pub(crate) fn failed_because(code: StandardMessagingErrorCode, cause: String) ->
 /// run and offers the connect affordance, which is a thing the user can fix,
 /// whereas a messaging code would tell the model to rephrase its arguments.
 pub(crate) fn auth_required() -> ToolError {
+    let (Ok(required_secret), Ok(provider), Ok(requester_extension)) = (
+        SecretHandle::new(TELEGRAM_LINKED_SESSION_HANDLE),
+        VendorId::new(TELEGRAM_VENDOR_ID),
+        ExtensionId::new(TELEGRAM_EXTENSION_ID),
+    ) else {
+        return ToolError::Rejected {
+            kind: RuntimeDispatchErrorKind::Manifest,
+            diagnostic: None,
+            detail: None,
+        };
+    };
+
     ToolError::AuthRequired {
         requirement: Box::new(DispatchAuthRequirement {
-            required_secrets: SecretHandle::new(TELEGRAM_LINKED_SESSION_HANDLE)
-                .map(|handle| vec![handle])
-                .unwrap_or_default(),
-            credential_requirements: match (
-                VendorId::new(TELEGRAM_VENDOR_ID),
-                ExtensionId::new(TELEGRAM_EXTENSION_ID),
-            ) {
-                (Ok(provider), Ok(requester_extension)) => {
-                    vec![RuntimeCredentialAuthRequirement {
-                        provider,
-                        setup: RuntimeCredentialAccountSetup::DeviceLink,
-                        requester_extension,
-                        provider_scopes: Vec::new(),
-                    }]
-                }
-                // Both ids are compile-time literals that satisfy their
-                // validators; an empty requirement list still parks the run on the
-                // generic re-auth gate, so this arm degrades rather than panics.
-                _ => Vec::new(),
-            },
+            required_secrets: vec![required_secret],
+            credential_requirements: vec![RuntimeCredentialAuthRequirement {
+                provider,
+                setup: RuntimeCredentialAccountSetup::DeviceLink,
+                requester_extension,
+                provider_scopes: Vec::new(),
+            }],
             model_visible_cause: None,
         }),
     }
@@ -668,14 +686,10 @@ pub(crate) fn map_vendor_error(family: OpFamily, error: &InvocationError) -> Too
     match rpc.name.as_str() {
         "FLOOD_WAIT" | "FLOOD_PREMIUM_WAIT" | "SLOWMODE_WAIT" | "FLOOD_TEST_PHONE_WAIT" => {
             match rpc.value {
-                // Prose is the only carrier available: `safe_summary` is fixed
-                // host-authored text and may not interpolate a vendor value,
-                // and nothing plumbs a tool-dispatch retry-after into the
-                // structured `ToolRecoveryObservation` slot today. Do not read
-                // this as a machine-readable back-off.
-                Some(seconds) => failed_because(
+                Some(seconds) => failed_with_diagnostic(
                     RateLimited,
                     format!("telegram asked us to wait {seconds} seconds before retrying"),
+                    Some(Duration::from_secs(u64::from(seconds))),
                 ),
                 None => failed(RateLimited),
             }

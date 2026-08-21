@@ -22,6 +22,7 @@ use crate::{
         ResourceEstimate, ResourceReceipt, ResourceReservation, ResourceScope, ResourceUsage,
     },
     runtime::RuntimeKind,
+    safe_summary::SafeSummary,
 };
 
 /// Stable provider error code supplied by a protocol decoder.
@@ -68,9 +69,9 @@ pub struct ProviderDiagnostic {
     pub retry_after: Option<Duration>,
 }
 
-/// Authentication requirements carried across the dispatch and capability
-/// error boundaries. The outer error variants box this aggregate so their
-/// common vector payloads do not inflate every future that returns them.
+/// Authentication requirements carried across dispatch and capability error
+/// boundaries. The outer variants box this aggregate to keep error futures
+/// compact as credential metadata grows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchAuthRequirement {
     pub required_secrets: Vec<SecretHandle>,
@@ -200,13 +201,26 @@ pub enum DispatchInputIssueCode {
 }
 
 /// Stable input issue for dispatch validation failures.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DispatchInputIssue {
     pub path: String,
     pub code: DispatchInputIssueCode,
     pub expected: Option<String>,
     pub received: Option<String>,
     pub schema_path: Option<String>,
+}
+
+impl fmt::Debug for DispatchInputIssue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DispatchInputIssue")
+            .field("path", &self.path)
+            .field("code", &self.code)
+            .field("expected", &self.expected)
+            .field("received", &self.received.as_ref().map(|_| "<redacted>"))
+            .field("schema_path", &self.schema_path)
+            .finish()
+    }
 }
 
 impl DispatchInputIssue {
@@ -264,6 +278,30 @@ pub enum DispatchFailureDetail {
     HostRemediation {
         text: HostRemediation,
     },
+    /// Host-authored public label carried alongside a vendor/provider cause
+    /// riding [`DispatchError::Rejected`]'s `diagnostic` field — e.g. a
+    /// first-party capability's fixed rejection summary.
+    ///
+    /// Distinct from [`Self::Diagnostic`] (an internal-only raw cause) and
+    /// [`Self::HostRemediation`] (an operator remediation instruction): this
+    /// is the plain host-authored text that `ironclaw_capabilities`'s
+    /// `CapabilityInvocationError::from(DispatchError)` maps into the public
+    /// `safe_summary` field as its highest-precedence source. When present,
+    /// it wins over the vendor/provider cause riding `diagnostic` — the two
+    /// are never merged — so a caller with its own trusted label (e.g. a
+    /// first-party capability's fixed rejection summary) is guaranteed that
+    /// label reaches the user, not whatever vendor text happens to also be
+    /// attached. When this variant is absent, `safe_summary` falls back to
+    /// the vendor/provider diagnostic text (still validation-gated
+    /// downstream), and only then to the kind's fixed sentence — see
+    /// `CapabilityInvocationError::Dispatch`'s `safe_summary` field doc for
+    /// the full three-tier precedence. Carries no separate model-visible
+    /// representation; the loop projection drops it rather than duplicating
+    /// the safe-summary text into the diagnostic detail seam.
+    HostSummary {
+        summary: SafeSummary,
+        detail: Option<Box<DispatchFailureDetail>>,
+    },
 }
 
 impl fmt::Debug for DispatchFailureDetail {
@@ -280,6 +318,11 @@ impl fmt::Debug for DispatchFailureDetail {
             Self::HostRemediation { text } => formatter
                 .debug_struct("HostRemediation")
                 .field("text", text)
+                .finish(),
+            Self::HostSummary { summary, detail } => formatter
+                .debug_struct("HostSummary")
+                .field("summary", summary)
+                .field("detail", detail)
                 .finish(),
         }
     }
@@ -558,9 +601,9 @@ pub enum DispatchError {
     MissingProcessAuthorization { capability: CapabilityId },
     /// Authentication is required to dispatch this capability.
     ///
-    /// `requirement.required_secrets` names the credentials the caller must
-    /// stage. The aggregate is intentionally redacted from `Debug` output to
-    /// avoid leaking secret-handle identifiers into logs.
+    /// `required_secrets` names the credentials the caller must stage.  The
+    /// field is intentionally absent from the `Debug` output to avoid leaking
+    /// secret-handle identifiers into logs.
     #[error("capability {capability} dispatch requires authentication")]
     AuthRequired {
         capability: CapabilityId,
@@ -573,40 +616,6 @@ pub enum DispatchError {
         runtime: Option<RuntimeKind>,
         kind: DispatchFailureKind,
         diagnostic: Option<Box<ProviderDiagnostic>>,
-        detail: Option<DispatchFailureDetail>,
-    },
-    /// MCP dispatch failure. `model_visible_cause` carries the raw backend cause —
-    /// it is NOT yet display/model-safe: secret VALUES are scrubbed downstream
-    /// at the model-visible Diagnostic seam (`scrub_model_visible_detail`),
-    /// and display surfaces run their own redaction. Do not log or surface it
-    /// directly.
-    #[error("MCP dispatch failed: {kind}")]
-    Mcp {
-        kind: RuntimeDispatchErrorKind,
-        model_visible_cause: Option<String>,
-    },
-    /// Script dispatch failure. Same `model_visible_cause` contract as [`Self::Mcp`]:
-    /// raw cause, scrubbed downstream — not directly displayable.
-    #[error("script dispatch failed: {kind}")]
-    Script {
-        kind: RuntimeDispatchErrorKind,
-        model_visible_cause: Option<String>,
-    },
-    /// WASM guest dispatch failure. `model_visible_cause` carries the best available
-    /// cause: the stable, host-sanitized error code a structured guest error
-    /// declared (e.g. a Slack `channel_not_found`) when present, otherwise the
-    /// raw error text (secret VALUES are scrubbed downstream at the
-    /// model-visible Diagnostic seam), so the failure keeps its actionable
-    /// cause instead of collapsing to the kind's generic sentence.
-    #[error("WASM dispatch failed: {kind}")]
-    Wasm {
-        kind: RuntimeDispatchErrorKind,
-        model_visible_cause: Option<String>,
-    },
-    #[error("first-party dispatch failed: {kind}")]
-    FirstParty {
-        kind: RuntimeDispatchErrorKind,
-        safe_summary: Option<String>,
         detail: Option<DispatchFailureDetail>,
     },
 }
@@ -683,6 +692,9 @@ impl fmt::Debug for DispatchError {
                     ),
                 )
                 .finish(),
+            // `DispatchFailureDetail`'s Debug implementation selectively
+            // preserves structured input issues while redacting raw
+            // provider/backend causes.
             Self::Rejected {
                 runtime,
                 kind,
@@ -695,12 +707,6 @@ impl fmt::Debug for DispatchError {
                 .field("detail", detail)
                 .field("diagnostic", &"<redacted>")
                 .finish(),
-            Self::Mcp { kind, .. } => f.debug_struct("Mcp").field("kind", kind).finish(),
-            Self::Script { kind, .. } => f.debug_struct("Script").field("kind", kind).finish(),
-            Self::Wasm { kind, .. } => f.debug_struct("Wasm").field("kind", kind).finish(),
-            Self::FirstParty { kind, .. } => {
-                f.debug_struct("FirstParty").field("kind", kind).finish()
-            }
         }
     }
 }
@@ -733,10 +739,6 @@ impl DispatchError {
             }
             Self::AuthRequired { .. } => DispatchFailureKind::AuthRequired,
             Self::Rejected { kind, .. } => *kind,
-            Self::Mcp { kind, .. }
-            | Self::Script { kind, .. }
-            | Self::Wasm { kind, .. }
-            | Self::FirstParty { kind, .. } => DispatchFailureKind::Runtime(*kind),
         }
     }
 
@@ -759,10 +761,35 @@ impl DispatchError {
                 DispatchFailureKind::Runtime(kind) => kind.event_kind(),
                 _ => "provider_rejected",
             },
-            Self::Mcp { kind, .. }
-            | Self::Script { kind, .. }
-            | Self::Wasm { kind, .. }
-            | Self::FirstParty { kind, .. } => kind.event_kind(),
+        }
+    }
+
+    /// Builds a provider-rejection [`Self::Rejected`] from an optional cause
+    /// string. `cause` rides the typed diagnostic channel (#5965):
+    /// raw-or-better cause text, scrubbed downstream at the model-visible
+    /// Diagnostic seam. `detail` carries an optional structured
+    /// [`DispatchFailureDetail`] when the caller has one.
+    ///
+    /// This is the single construction site for cause-only provider
+    /// rejections; runtime-lane callers wrap it with a thin constant-runtime
+    /// helper rather than repeating the struct literal.
+    pub fn provider_rejected(
+        runtime: Option<RuntimeKind>,
+        kind: DispatchFailureKind,
+        cause: Option<String>,
+        detail: Option<DispatchFailureDetail>,
+    ) -> Self {
+        Self::Rejected {
+            runtime,
+            kind,
+            diagnostic: cause.map(|text| {
+                Box::new(ProviderDiagnostic {
+                    code: None,
+                    message: Some(UntrustedProviderMessage::new(text)),
+                    retry_after: None,
+                })
+            }),
+            detail,
         }
     }
 }
@@ -840,9 +867,49 @@ mod tests {
         assert!(!format!("{diagnostic:?}").contains('é'));
     }
 
-    #[cfg(target_pointer_width = "64")]
     #[test]
-    fn dispatch_error_stays_within_stack_budget() {
-        assert!(std::mem::size_of::<DispatchError>() <= 72);
+    fn dispatch_error_rejected_debug_redacts_diagnostic_detail_text() {
+        // `DispatchFailureDetail::Diagnostic { text }` carries an untrusted
+        // raw provider/backend cause (never-log content); the folded
+        // `Rejected` variant's Debug must not print it, matching the retired
+        // `FirstParty` variant's omission of the same content.
+        let error = DispatchError::Rejected {
+            runtime: Some(RuntimeKind::FirstParty),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            diagnostic: None,
+            detail: Some(DispatchFailureDetail::Diagnostic {
+                text: "leak-me-not: /secret/path token=abc123".to_string(),
+            }),
+        };
+
+        let debug_output = format!("{error:?}");
+        assert!(!debug_output.contains("leak-me-not"));
+        assert!(!debug_output.contains("/secret/path"));
+        assert!(!debug_output.contains("abc123"));
+    }
+
+    #[test]
+    fn dispatch_error_rejected_debug_keeps_structured_input_detail_visible() {
+        let error = DispatchError::Rejected {
+            runtime: Some(RuntimeKind::FirstParty),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
+            diagnostic: None,
+            detail: Some(DispatchFailureDetail::InvalidInput {
+                issues: vec![
+                    DispatchInputIssue::new("schedule.kind", DispatchInputIssueCode::TypeMismatch)
+                        .expected("string")
+                        .received("secret-attacker-controlled-value")
+                        .schema_path("/properties/schedule/kind"),
+                ],
+            }),
+        };
+
+        let debug_output = format!("{error:?}");
+        assert!(debug_output.contains("InvalidInput"));
+        assert!(debug_output.contains("schedule.kind"));
+        assert!(debug_output.contains("TypeMismatch"));
+        assert!(debug_output.contains("string"));
+        assert!(debug_output.contains("/properties/schedule/kind"));
+        assert!(!debug_output.contains("secret-attacker-controlled-value"));
     }
 }

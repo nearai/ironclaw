@@ -3878,7 +3878,14 @@ async fn triggered_empty_notification_set_delivers_nothing() {
 #[tokio::test]
 async fn triggered_notification_preference_read_failure_is_not_reported_as_no_configuration() {
     let harness = build_triggered_harness_with_preferences(
-        vec![scripted_state(TurnStatus::Completed, None)],
+        vec![
+            scripted_state(
+                TurnStatus::BlockedApproval,
+                Some("gate:approval-00000000000000000000000000000011"),
+            ),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Completed, None),
+        ],
         None,
         vec![DM_TARGET],
         vec![DM_TARGET],
@@ -3897,6 +3904,16 @@ async fn triggered_notification_preference_read_failure_is_not_reported_as_no_co
         "a storage outage must stay distinguishable from an intentionally empty channel set"
     );
     assert!(harness.adapter.texts().is_empty(), "nothing was resolved");
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::ApprovalRequired
+    );
+    assert!(
+        inbox.notifications[0].resolved_at.is_some(),
+        "the WebUI gate must still settle after an external preference lookup outage"
+    );
 }
 
 /// Regression: the notifier reads the ACTIVE codec set at every fire.

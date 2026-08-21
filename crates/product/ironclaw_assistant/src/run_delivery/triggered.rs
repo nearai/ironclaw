@@ -507,13 +507,13 @@ struct PreSubmitFailureDeliveryContext<'a> {
 /// After the actionable gate/auth prompt for a blocked run has been
 /// delivered, the run typically *stays* blocked until the user acts — the
 /// common case, not a failure. If the re-wait hits the `max_wait` backstop,
-/// the run is parked awaiting the user: that is a successful,
-/// terminal-for-delivery outcome (`Delivered`) — never record `Failed` for
-/// it. The backstop is the failure signal ONLY for runs that never reached
-/// an actionable state at all, distinguished by `delivered_blocked_marker`.
-/// For those runs the backstop now delivers a terminal timeout notice and
-/// records the delivery outcome; `Failed` is reserved for notice delivery
-/// failure.
+/// the run is parked awaiting the user and observation is complete. The
+/// recorded outcome still describes the external-channel side: `Delivered`
+/// when a channel received the prompt, `NoDefaultConfigured` for an intentional
+/// WebUI-only setup, and `Failed` when channel lookup itself was unavailable.
+/// The backstop is a run-wait failure only when no actionable state was ever
+/// reached, distinguished by `delivered_blocked_marker`; that path publishes a
+/// terminal timeout notice before recording its delivery outcome.
 async fn notify_background_run(
     services: &RunDeliveryServices,
     settings: &RunDeliverySettings,
@@ -640,9 +640,11 @@ async fn notify_background_run(
                 tracing::debug!(
                     target: TRACE_TARGET,
                     %run_id,
-                    "background run parked awaiting user after notifying; recording Delivered"
+                    "background run parked awaiting user after notifying; settling delivery outcome"
                 );
-                let outcome = if web_inbox_only {
+                let outcome = if lookup_failed_without_targets {
+                    TriggeredRunDeliveryOutcomeKind::Failed
+                } else if web_inbox_only {
                     TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
                 } else {
                     TriggeredRunDeliveryOutcomeKind::Delivered
@@ -843,7 +845,7 @@ async fn notify_background_run(
             record_triggered_run_outcome(delivery_store, run_id, outcome).await;
             return outcome;
         }
-        if web_inbox_only {
+        if targets.is_empty() {
             if let Some(marker) = blocked_actionable_marker(&state) {
                 // The Inbox is itself a destination. Keep observing a WebUI-only
                 // gate so the stable item can be resolved when that gate is
@@ -851,12 +853,11 @@ async fn notify_background_run(
                 delivered_blocked_marker = Some(marker);
                 continue;
             }
-            let outcome = TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured;
-            record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-            return outcome;
-        }
-        if lookup_failed_without_targets {
-            let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
+            let outcome = if lookup_failed_without_targets {
+                TriggeredRunDeliveryOutcomeKind::Failed
+            } else {
+                TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+            };
             record_triggered_run_outcome(delivery_store, run_id, outcome).await;
             return outcome;
         }

@@ -4,14 +4,62 @@
 //! credential injection and rate limiting. The WASM tool never sees
 //! the actual OAuth token.
 
+use crate::exports::near::agent::tool::{ErrorKind, GuestFailure};
 use crate::near::agent::host;
 use crate::types::*;
 
 const SLIDES_API_BASE: &str = "https://slides.googleapis.com/v1/presentations";
 const GOOGLE_API_AUTH_REQUIRED_ERROR: &str = "google_api_error_status_401";
 
+/// Bound a free-text message to a sane length before it rides in a
+/// `guest-failure`; the host re-bounds and scrubs downstream, but the guest
+/// should never hand over an unbounded string in the first place.
+pub(crate) fn bounded_message(message: &str) -> String {
+    const MAX_MESSAGE_CHARS: usize = 512;
+    message.chars().take(MAX_MESSAGE_CHARS).collect()
+}
+
+// ponytail: duplicated across isolated WASM guest packages; consolidate only
+// when guests share a supported contracts crate.
+fn transport_failure(failure: &host::HttpFailure) -> GuestFailure {
+    let kind = match failure.kind {
+        host::HttpErrorKind::AuthRequired => ErrorKind::AuthRequired,
+        host::HttpErrorKind::Input => ErrorKind::Input,
+        host::HttpErrorKind::OutputTooLarge => ErrorKind::OutputTooLarge,
+        host::HttpErrorKind::Executor => ErrorKind::Executor,
+        host::HttpErrorKind::NetworkDenied => ErrorKind::NetworkDenied,
+        host::HttpErrorKind::Client => ErrorKind::Client,
+        host::HttpErrorKind::OperationFailed => ErrorKind::OperationFailed,
+    };
+    GuestFailure {
+        kind,
+        code: failure.code.clone().or_else(|| Some("google_api_transport_error".into())),
+        message: failure.message.as_deref().map(bounded_message),
+    }
+}
+
+/// A guest-side JSON encode/decode of an already-well-formed payload failed
+/// — a tool-side processing failure, not anything the caller did wrong.
+pub(crate) fn serialization_failure(error: &serde_json::Error) -> GuestFailure {
+    GuestFailure {
+        kind: ErrorKind::Executor,
+        code: Some("serialization_failed".to_string()),
+        message: Some(bounded_message(&error.to_string())),
+    }
+}
+
+/// Build an `input`-kind guest failure for a caller-supplied argument that
+/// fails local validation before any egress.
+fn input_failure(code: &'static str, message: impl Into<String>) -> GuestFailure {
+    GuestFailure {
+        kind: ErrorKind::Input,
+        code: Some(code.to_string()),
+        message: Some(bounded_message(&message.into())),
+    }
+}
+
 /// Make a Google Slides API call.
-fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, String> {
+fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, GuestFailure> {
     let url = if path.is_empty() {
         SLIDES_API_BASE.to_string()
     } else {
@@ -31,43 +79,58 @@ fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, Stri
         &format!("Google Slides API: {} {}", method, url),
     );
 
-    let response = host::http_request(method, &url, headers, body_bytes.as_deref(), None)?;
+    let response = host::http_request(method, &url, headers, body_bytes.as_deref(), None)
+        .map_err(|e| transport_failure(&e))?;
 
     if response.status < 200 || response.status >= 300 {
-        return Err(api_status_error("Google Slides", response.status, &response.body));
+        return Err(api_status_error(
+            "Google Slides",
+            response.status,
+            &response.body,
+        ));
     }
 
     if response.body.is_empty() {
         return Ok(String::new());
     }
 
-    String::from_utf8(response.body).map_err(|e| format!("Invalid UTF-8 in response: {}", e))
+    String::from_utf8(response.body).map_err(|e| GuestFailure {
+        kind: ErrorKind::Executor,
+        code: Some("invalid_utf8_response".to_string()),
+        message: Some(bounded_message(&e.to_string())),
+    })
 }
 
-fn api_status_error(service: &str, status: u16, body: &[u8]) -> String {
+fn api_status_error(service: &str, status: u16, body: &[u8]) -> GuestFailure {
     if status == 401 {
-        return serde_json::json!({
-            "code": GOOGLE_API_AUTH_REQUIRED_ERROR,
-            "kind": "auth_required",
-        })
-        .to_string();
+        return GuestFailure {
+            kind: ErrorKind::AuthRequired,
+            code: Some(GOOGLE_API_AUTH_REQUIRED_ERROR.to_string()),
+            message: None,
+        };
     }
     let body_text = String::from_utf8_lossy(body);
-    format!("{service} API returned status {status}: {body_text}")
+    GuestFailure {
+        kind: ErrorKind::Client,
+        code: Some(format!("api_status_{status}")),
+        message: Some(bounded_message(&format!(
+            "{service} API returned status {status}: {body_text}"
+        ))),
+    }
 }
 
 /// Send a batchUpdate to the presentation.
 fn batch_update_raw(
     presentation_id: &str,
     requests: Vec<serde_json::Value>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, GuestFailure> {
     let path = format!("{}:batchUpdate", url_encode(presentation_id));
 
     let body = serde_json::json!({ "requests": requests });
-    let body_str = serde_json::to_string(&body).map_err(|e| e.to_string())?;
+    let body_str = serde_json::to_string(&body).map_err(|e| serialization_failure(&e))?;
 
     let response = api_call("POST", &path, Some(&body_str))?;
-    serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))
+    serde_json::from_str(&response).map_err(|e| serialization_failure(&e))
 }
 
 /// Extract text content from a shape's textElements array.
@@ -119,13 +182,13 @@ fn parse_element(el: &serde_json::Value) -> ElementInfo {
 }
 
 /// Create a new presentation.
-pub fn create_presentation(title: &str) -> Result<CreatePresentationResult, String> {
+pub fn create_presentation(title: &str) -> Result<CreatePresentationResult, GuestFailure> {
     let body = serde_json::json!({ "title": title });
-    let body_str = serde_json::to_string(&body).map_err(|e| e.to_string())?;
+    let body_str = serde_json::to_string(&body).map_err(|e| serialization_failure(&e))?;
 
     let response = api_call("POST", "", Some(&body_str))?;
     let parsed: serde_json::Value =
-        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
+        serde_json::from_str(&response).map_err(|e| serialization_failure(&e))?;
 
     Ok(CreatePresentationResult {
         presentation_id: parsed["presentationId"].as_str().unwrap_or("").to_string(),
@@ -134,12 +197,12 @@ pub fn create_presentation(title: &str) -> Result<CreatePresentationResult, Stri
 }
 
 /// Get presentation metadata and slides.
-pub fn get_presentation(presentation_id: &str) -> Result<PresentationMetadata, String> {
+pub fn get_presentation(presentation_id: &str) -> Result<PresentationMetadata, GuestFailure> {
     let path = url_encode(presentation_id);
 
     let response = api_call("GET", &path, None)?;
     let parsed: serde_json::Value =
-        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
+        serde_json::from_str(&response).map_err(|e| serialization_failure(&e))?;
 
     let slides: Vec<SlideInfo> = parsed["slides"]
         .as_array()
@@ -179,7 +242,7 @@ pub fn get_presentation(presentation_id: &str) -> Result<PresentationMetadata, S
 pub fn get_thumbnail(
     presentation_id: &str,
     slide_object_id: &str,
-) -> Result<ThumbnailResult, String> {
+) -> Result<ThumbnailResult, GuestFailure> {
     let path = format!(
         "{}/pages/{}/thumbnail",
         url_encode(presentation_id),
@@ -188,7 +251,7 @@ pub fn get_thumbnail(
 
     let response = api_call("GET", &path, None)?;
     let parsed: serde_json::Value =
-        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
+        serde_json::from_str(&response).map_err(|e| serialization_failure(&e))?;
 
     Ok(ThumbnailResult {
         content_url: parsed["contentUrl"].as_str().unwrap_or("").to_string(),
@@ -202,7 +265,7 @@ pub fn create_slide(
     presentation_id: &str,
     insertion_index: Option<i64>,
     layout: &str,
-) -> Result<UpdateResult, String> {
+) -> Result<UpdateResult, GuestFailure> {
     let mut request = serde_json::json!({
         "createSlide": {
             "slideLayoutReference": {
@@ -228,7 +291,7 @@ pub fn create_slide(
 }
 
 /// Delete a slide or page element.
-pub fn delete_object(presentation_id: &str, object_id: &str) -> Result<UpdateResult, String> {
+pub fn delete_object(presentation_id: &str, object_id: &str) -> Result<UpdateResult, GuestFailure> {
     let request = serde_json::json!({
         "deleteObject": { "objectId": object_id }
     });
@@ -247,7 +310,7 @@ pub fn insert_text(
     object_id: &str,
     text: &str,
     insertion_index: i64,
-) -> Result<UpdateResult, String> {
+) -> Result<UpdateResult, GuestFailure> {
     let request = serde_json::json!({
         "insertText": {
             "objectId": object_id,
@@ -270,7 +333,7 @@ pub fn delete_text(
     object_id: &str,
     start_index: i64,
     end_index: Option<i64>,
-) -> Result<UpdateResult, String> {
+) -> Result<UpdateResult, GuestFailure> {
     let text_range = if let Some(end) = end_index {
         serde_json::json!({
             "type": "FIXED_RANGE",
@@ -305,7 +368,7 @@ pub fn replace_all_text(
     find: &str,
     replace: &str,
     match_case: bool,
-) -> Result<ReplaceResult, String> {
+) -> Result<ReplaceResult, GuestFailure> {
     let request = serde_json::json!({
         "replaceAllText": {
             "containsText": {
@@ -342,7 +405,7 @@ pub fn create_shape(
     y: f64,
     width: f64,
     height: f64,
-) -> Result<UpdateResult, String> {
+) -> Result<UpdateResult, GuestFailure> {
     let request = serde_json::json!({
         "createShape": {
             "shapeType": shape_type,
@@ -386,7 +449,7 @@ pub fn insert_image(
     y: f64,
     width: f64,
     height: f64,
-) -> Result<UpdateResult, String> {
+) -> Result<UpdateResult, GuestFailure> {
     let request = serde_json::json!({
         "createImage": {
             "url": image_url,
@@ -456,7 +519,7 @@ pub struct FormatTextOptions<'a> {
 }
 
 /// Format text in a shape.
-pub fn format_text(opts: FormatTextOptions<'_>) -> Result<UpdateResult, String> {
+pub fn format_text(opts: FormatTextOptions<'_>) -> Result<UpdateResult, GuestFailure> {
     let mut style = serde_json::json!({});
     let mut fields = Vec::new();
 
@@ -488,7 +551,10 @@ pub fn format_text(opts: FormatTextOptions<'_>) -> Result<UpdateResult, String> 
     }
 
     if fields.is_empty() {
-        return Err("No formatting options specified".to_string());
+        return Err(input_failure(
+            "no_formatting_options",
+            "No formatting options specified",
+        ));
     }
 
     let text_range = match (opts.start_index, opts.end_index) {
@@ -528,7 +594,7 @@ pub fn format_paragraph(
     alignment: &str,
     start_index: Option<i64>,
     end_index: Option<i64>,
-) -> Result<UpdateResult, String> {
+) -> Result<UpdateResult, GuestFailure> {
     let text_range = match (start_index, end_index) {
         (Some(start), Some(end)) => serde_json::json!({
             "type": "FIXED_RANGE",
@@ -565,7 +631,7 @@ pub fn replace_shapes_with_image(
     find: &str,
     image_url: &str,
     match_case: bool,
-) -> Result<ReplaceResult, String> {
+) -> Result<ReplaceResult, GuestFailure> {
     let request = serde_json::json!({
         "replaceAllShapesWithImage": {
             "containsText": {
@@ -593,7 +659,7 @@ pub fn replace_shapes_with_image(
 pub fn batch_update(
     presentation_id: &str,
     requests: Vec<serde_json::Value>,
-) -> Result<BatchUpdateResult, String> {
+) -> Result<BatchUpdateResult, GuestFailure> {
     let parsed = batch_update_raw(presentation_id, requests)?;
 
     let replies = parsed["replies"]
@@ -609,4 +675,54 @@ pub fn batch_update(
 
 fn url_encode(s: &str) -> String {
     urlencoding::encode(s).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_status_error_401_maps_to_auth_required() {
+        let err = api_status_error("Google Slides", 401, b"{\"error\":\"invalid_token\"}");
+
+        assert_eq!(err.kind, ErrorKind::AuthRequired);
+        assert_eq!(
+            err.code.as_deref(),
+            Some(GOOGLE_API_AUTH_REQUIRED_ERROR)
+        );
+    }
+
+    #[test]
+    fn api_status_error_non_401_maps_to_client() {
+        let err = api_status_error("Google Slides", 429, b"rate limited");
+
+        assert_eq!(err.kind, ErrorKind::Client);
+        assert_eq!(err.code.as_deref(), Some("api_status_429"));
+        assert!(
+            err.message
+                .as_deref()
+                .is_some_and(|message| message.contains("rate limited")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn format_text_rejects_no_formatting_options() {
+        let err = format_text(FormatTextOptions {
+            presentation_id: "presentation-1",
+            object_id: "object-1",
+            start_index: None,
+            end_index: None,
+            bold: None,
+            italic: None,
+            underline: None,
+            font_size: None,
+            font_family: None,
+            foreground_color: None,
+        })
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Input);
+        assert_eq!(err.code.as_deref(), Some("no_formatting_options"));
+    }
 }

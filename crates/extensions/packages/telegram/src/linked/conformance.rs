@@ -36,7 +36,7 @@ use std::panic::{self, AssertUnwindSafe};
 
 use ironclaw_extension_contracts::tool_adapter::ToolError;
 use ironclaw_host_api::{
-    dispatch::{DispatchFailureKind, RuntimeDispatchErrorKind},
+    dispatch::RuntimeDispatchErrorKind,
     messaging::{StandardMessagingErrorCode, StandardMessagingOp},
     test_support::messaging_conformance::{
         assert_canonical_input_accepted, assert_canonical_output, message_ref_from_output,
@@ -71,23 +71,20 @@ fn conversation() -> ConversationRef {
 
 fn failure_kind(error: &ToolError) -> Option<RuntimeDispatchErrorKind> {
     match error {
-        ToolError::Failed { kind, .. } => Some(*kind),
-        // Rejected's kind is a superset (DispatchFailureKind); only its
-        // Runtime(..) variant carries a RuntimeDispatchErrorKind to unwrap.
-        ToolError::Rejected { kind, .. } => match kind {
-            DispatchFailureKind::Runtime(runtime_kind) => Some(*runtime_kind),
-            _ => None,
-        },
+        ToolError::Rejected { kind, .. } => Some(*kind),
         ToolError::AuthRequired { .. } => None,
     }
 }
 
 fn failure_summary(error: &ToolError) -> String {
     match error {
-        ToolError::Failed { safe_summary, .. } => {
-            safe_summary.clone().unwrap_or_else(|| "<none>".to_string())
-        }
-        ToolError::Rejected { kind, .. } => kind.human_summary().to_string(),
+        ToolError::Rejected {
+            kind, diagnostic, ..
+        } => diagnostic
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.code.as_ref())
+            .map(|code| code.as_str().to_string())
+            .unwrap_or_else(|| kind.human_summary().to_string()),
         ToolError::AuthRequired { .. } => "auth_required".to_string(),
     }
 }
@@ -286,15 +283,13 @@ fn an_unknown_write_outcome_is_a_vendor_error_never_an_unverified_send() {
         // difference: "the send failed" invites a re-send that double-messages
         // a human, and "the message was sent" suppresses a re-send that may be
         // the only delivery.
-        let ToolError::Failed {
-            model_visible_cause,
-            ..
-        } = &mapped
-        else {
-            panic!("an unknown write outcome is a failure");
+        let ToolError::Rejected { diagnostic, .. } = &mapped else {
+            panic!("an unknown write outcome is a rejection");
         };
-        let cause = model_visible_cause
-            .clone()
+        let cause = diagnostic
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.message.as_ref())
+            .map(|message| message.as_str())
             .expect("an unknown outcome must say so");
         assert!(cause.contains("before the outcome was known"), "{cause}");
 
@@ -303,7 +298,7 @@ fn an_unknown_write_outcome_is_a_vendor_error_never_an_unverified_send() {
         // `send_result` builds when the vendor RETURNED a message. An error
         // path never reaches that builder, so the marker cannot appear here —
         // which is what keeps "unknown" from being reported as "delivered".
-        assert!(matches!(mapped, ToolError::Failed { .. }));
+        assert!(matches!(mapped, ToolError::Rejected { .. }));
     }
 
     // The contrast that makes the rule visible: the *same* op family, given a
