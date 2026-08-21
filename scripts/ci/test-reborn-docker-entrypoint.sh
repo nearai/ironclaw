@@ -146,6 +146,14 @@ expect_present() {
   fi
 }
 
+assert_eq() {
+  local name="$1" expected="$2" actual="$3" what="$4"
+  if [ "$actual" != "$expected" ]; then
+    echo "FAIL[${name}]: ${what}: expected '${expected}', got '${actual}'" >&2
+    failures=$((failures + 1))
+  fi
+}
+
 LEGACY_DISABLED='[slack]
 enabled = false
 signing_secret_env = "SLACK_SIGNING_SECRET"
@@ -167,14 +175,63 @@ out="$(run_entrypoint plain "$LEGACY_DISABLED")"
 expect_absent plain 'signing_secret_env' "$out"
 expect_absent plain 'bot_token_env' "$out"
 expect_present plain 'enabled = false' "$out"
-if [ "$(cat "${WORK}/plain/workspace-root")" != "${WORK}/plain/workspace" ]; then
-  echo "FAIL[plain]: workspace root did not default beneath IRONCLAW_REBORN_HOME" >&2
+assert_eq plain "${WORK}/plain/workspace" "$(cat "${WORK}/plain/workspace-root")" \
+  'workspace root did not default beneath IRONCLAW_REBORN_HOME'
+
+out="$(run_entrypoint custom_workspace "$LEGACY_DISABLED" "IRONCLAW_REBORN_WORKSPACE_ROOT=${WORK}/durable-workspace")"
+assert_eq custom_workspace "${WORK}/durable-workspace" \
+  "$(cat "${WORK}/custom_workspace/workspace-root")" \
+  'explicit durable workspace root was not preserved'
+
+# A trailing slash is normalized away so the Railway containment comparison and
+# the Rust-side root agree on one spelling.
+out="$(run_entrypoint trailing_slash "$LEGACY_DISABLED" "IRONCLAW_REBORN_WORKSPACE_ROOT=${WORK}/durable-workspace/")"
+assert_eq trailing_slash "${WORK}/durable-workspace" \
+  "$(cat "${WORK}/trailing_slash/workspace-root")" \
+  'trailing slash was not stripped from the workspace root'
+
+# The Railway containment guard compares resolved paths, not spelling. A
+# workspace root that is a symlink *under* the mount but points outside it
+# passes a lexical prefix test while the runtime writes to the ephemeral
+# target — a deployment that boots and silently loses project files.
+railway_mount="${WORK}/railway-mount"
+railway_home="${railway_mount}/ironclaw-reborn"
+mkdir -p "$railway_home" "${WORK}/railway-ephemeral" "${railway_mount}/real-workspace"
+printf '%s' "$LEGACY_DISABLED" > "${railway_home}/config.toml"
+ln -sfn "${WORK}/railway-ephemeral" "${railway_mount}/escaping-workspace"
+
+run_railway_entrypoint() {
+  (
+    export PATH="${WORK}/bin:${PATH}"
+    export IRONCLAW_REBORN_HOME="$railway_home"
+    export IRONCLAW_REBORN_DEFAULT_CONFIG=/opt/ironclaw/reborn/config.toml
+    export IRONCLAW_STUB_ARGV_PATH="${railway_home}/argv"
+    export IRONCLAW_STUB_WORKSPACE_PATH="${railway_home}/workspace-root"
+    export RAILWAY_ENVIRONMENT=production
+    export RAILWAY_VOLUME_MOUNT_PATH="$railway_mount"
+    export IRONCLAW_REBORN_WORKSPACE_ROOT="$1"
+    unset IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY
+    sh "$ENTRYPOINT" >/dev/null 2>"${railway_home}/railway.err"
+  )
+}
+
+rm -f "${railway_home}/argv"
+if run_railway_entrypoint "${railway_mount}/escaping-workspace"; then
+  echo "FAIL[railway_escape]: a workspace root resolving outside the volume was accepted" >&2
+  failures=$((failures + 1))
+elif ! grep -q 'IRONCLAW_REBORN_WORKSPACE_ROOT' "${railway_home}/railway.err"; then
+  echo "FAIL[railway_escape]: expected a workspace-root containment diagnostic" >&2
+  cat "${railway_home}/railway.err" >&2
   failures=$((failures + 1))
 fi
 
-out="$(run_entrypoint custom_workspace "$LEGACY_DISABLED" "IRONCLAW_REBORN_WORKSPACE_ROOT=${WORK}/durable-workspace")"
-if [ "$(cat "${WORK}/custom_workspace/workspace-root")" != "${WORK}/durable-workspace" ]; then
-  echo "FAIL[custom_workspace]: explicit durable workspace root was not preserved" >&2
+# Positive control: a real directory under the mount still boots. This also
+# pins that both sides are canonicalized — on a host where the mount path
+# itself traverses a symlink, resolving only one side would reject every root.
+rm -f "${railway_home}/argv"
+if ! run_railway_entrypoint "${railway_mount}/real-workspace"; then
+  echo "FAIL[railway_contained]: a workspace root under the volume was rejected" >&2
+  cat "${railway_home}/railway.err" >&2
   failures=$((failures + 1))
 fi
 
@@ -215,7 +272,7 @@ if ! grep -q '^ironclaw .*docker/reborn/entrypoint.sh' "$gosu_record"; then
   echo "FAIL[ssh_root]: entrypoint did not re-exec through gosu: $(cat "$gosu_record")" >&2
   failures=$((failures + 1))
 fi
-if [ "$(cat "$chown_record")" != "ironclaw:ironclaw ${WORK}/ssh_root ${WORK}/ssh_root/workspace /workspace" ]; then
+if [ "$(cat "$chown_record")" != "ironclaw:ironclaw ${WORK}/ssh_root /workspace" ]; then
   echo "FAIL[ssh_root]: root pass did not hand runtime paths to ironclaw: $(cat "$chown_record")" >&2
   failures=$((failures + 1))
 fi
