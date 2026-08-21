@@ -101,6 +101,11 @@ pub fn build_spawn_subagent_parameters_schema(
                 "type": "string",
                 "maxLength": DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
                 "description": "Optional context appended to the child subagent prompt. Runtime enforces a UTF-8 byte budget; maxLength is a provider-facing character-count hint."
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["blocking", "background"],
+                "default": "blocking"
             }
         }
     })
@@ -178,9 +183,10 @@ impl From<SubagentKindId> for String {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SpawnSubagentMode {
+    #[default]
     Blocking,
     Background,
 }
@@ -192,6 +198,8 @@ pub struct SpawnSubagentArgs {
     pub task: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<String>,
+    #[serde(default)]
+    pub mode: SpawnSubagentMode,
 }
 
 #[derive(Debug, Deserialize)]
@@ -203,28 +211,24 @@ struct SpawnSubagentWireArgs {
     #[serde(default)]
     handoff: Option<String>,
     #[serde(default)]
-    mode: Option<SpawnSubagentWireMode>,
+    mode: Option<SpawnSubagentMode>,
     #[serde(default)]
     run_in_background: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum SpawnSubagentWireMode {
-    Blocking,
-    Background,
 }
 
 impl TryFrom<SpawnSubagentWireArgs> for SpawnSubagentArgs {
     type Error = AgentLoopHostError;
 
     fn try_from(value: SpawnSubagentWireArgs) -> Result<Self, Self::Error> {
-        if value.run_in_background {
-            return Err(background_subagents_disabled());
-        }
-        if value.mode == Some(SpawnSubagentWireMode::Background) {
-            return Err(background_subagents_disabled());
-        }
+        let mode = match (value.mode, value.run_in_background) {
+            (Some(mode), false) => mode,
+            (None, true) => SpawnSubagentMode::Background,
+            (None, false) => SpawnSubagentMode::Blocking,
+            (Some(SpawnSubagentMode::Background), true) => SpawnSubagentMode::Background,
+            (Some(SpawnSubagentMode::Blocking), true) => {
+                return Err(spawn_mode_conflicts_with_run_in_background());
+            }
+        };
         if value.task.len() > DEFAULT_SUBAGENT_GOAL_MAX_BYTES {
             return Err(spawn_goal_field_too_large("task", value.task.len()));
         }
@@ -237,6 +241,7 @@ impl TryFrom<SpawnSubagentWireArgs> for SpawnSubagentArgs {
             subagent_kind: value.subagent_kind,
             task: value.task,
             handoff: value.handoff,
+            mode,
         })
     }
 }
@@ -1478,13 +1483,14 @@ fn spawn_rejected(reason: &'static str) -> Resolution {
 ///
 /// The spawn-args codec decodes MODEL-SUPPLIED JSON, so an
 /// `InvalidInvocation` failure (malformed JSON, schema-violating wire args,
-/// model-correctable rejections like requesting the disabled background mode)
-/// is the model's own mistake: surface it on the `spawn_rejected` `Denied`
-/// channel with the codec's sanitized summary so the model can correct the
-/// call. Propagating it as `Err(AgentLoopHostError)` instead lets the
-/// executor map it to a run-ending `HostUnavailable`, killing the run on
-/// malformed model output. Genuine host faults (input-store outages and every
-/// other error kind) still propagate as errors.
+/// model-correctable rejections like a contradictory `mode`/
+/// `run_in_background` pair) is the model's own mistake: surface it on the
+/// `spawn_rejected` `Denied` channel with the codec's sanitized summary so
+/// the model can correct the call. Propagating it as `Err(AgentLoopHostError)`
+/// instead lets the executor map it to a run-ending `HostUnavailable`,
+/// killing the run on malformed model output. Genuine host faults
+/// (input-store outages and every other error kind) still propagate as
+/// errors.
 fn spawn_input_decode_outcome(error: AgentLoopHostError) -> Result<Resolution, AgentLoopHostError> {
     if error.kind != AgentLoopHostErrorKind::InvalidInvocation {
         return Err(error);
@@ -1497,10 +1503,10 @@ fn spawn_input_decode_outcome(error: AgentLoopHostError) -> Result<Resolution, A
     .resolution)
 }
 
-fn background_subagents_disabled() -> AgentLoopHostError {
+fn spawn_mode_conflicts_with_run_in_background() -> AgentLoopHostError {
     AgentLoopHostError::new(
         AgentLoopHostErrorKind::InvalidInvocation,
-        "background subagents are disabled pending durable completion delivery design (#4147)",
+        "mode: blocking conflicts with run_in_background: true",
     )
 }
 

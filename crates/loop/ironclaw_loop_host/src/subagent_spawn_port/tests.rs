@@ -1121,6 +1121,7 @@ fn default_spawn_args() -> SpawnSubagentArgs {
         subagent_kind: SubagentKindId::new("general").unwrap(),
         task: "task".to_string(),
         handoff: None,
+        mode: SpawnSubagentMode::Blocking,
     }
 }
 
@@ -1472,7 +1473,14 @@ async fn spawn_tool_definition_is_present_in_structured_tools() {
             .contains("UTF-8 byte budget")
     );
     assert!(definition.parameters["properties"].get("handoff").is_some());
-    assert!(definition.parameters["properties"].get("mode").is_none());
+    assert_eq!(
+        definition.parameters["properties"]["mode"],
+        json!({
+            "type": "string",
+            "enum": ["blocking", "background"],
+            "default": "blocking"
+        })
+    );
     assert!(
         definition.parameters["properties"]
             .get("run_in_background")
@@ -1543,8 +1551,8 @@ async fn spawn_provider_tool_call_validation_accepts_valid_spawn_args() {
 }
 
 #[tokio::test]
-async fn spawn_provider_tool_call_validation_rejects_invalid_spawn_args() {
-    let context = test_run_context("spawn-validate-invalid").await;
+async fn spawn_provider_tool_call_validation_accepts_background_mode() {
+    let context = test_run_context("spawn-validate-background").await;
     let port = spawn_test_port_with_inner(
         context,
         Arc::new(AuthPassPort),
@@ -1557,15 +1565,35 @@ async fn spawn_provider_tool_call_validation_rejects_invalid_spawn_args() {
         "mode": "background"
     });
 
+    port.validate_provider_tool_call(&call)
+        .expect("background spawn provider call is accepted");
+}
+
+#[tokio::test]
+async fn spawn_provider_tool_call_validation_rejects_conflicting_mode_and_run_in_background() {
+    let context = test_run_context("spawn-validate-mode-conflict").await;
+    let port = spawn_test_port_with_inner(
+        context,
+        Arc::new(AuthPassPort),
+        Arc::new(RegisteringSpawnInputCodec),
+    );
+    let mut call = spawn_provider_tool_call();
+    call.arguments = json!({
+        "flavor_id": "general",
+        "task": "background task",
+        "mode": "blocking",
+        "run_in_background": true
+    });
+
     let error = port
         .validate_provider_tool_call(&call)
-        .expect_err("background spawn provider call rejects");
+        .expect_err("contradictory mode/run_in_background rejects");
 
     assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
     assert!(
         error
             .safe_summary
-            .contains("background subagents are disabled")
+            .contains("mode: blocking conflicts with run_in_background: true")
     );
 }
 
@@ -1916,6 +1944,7 @@ fn spawn_args_hold_blocking_runtime_request() {
         subagent_kind: SubagentKindId::new("general").unwrap(),
         task: "task".to_string(),
         handoff: None,
+        mode: SpawnSubagentMode::Blocking,
     };
     assert_eq!(args.subagent_kind.as_str(), "general");
     assert_eq!(args.task, "task");
@@ -2075,6 +2104,7 @@ async fn invoke_spawn_submits_child_run_through_spawn_tree_port() {
                 subagent_kind: SubagentKindId::new("general").unwrap(),
                 task: "inspect the logs".to_string(),
                 handoff: Some("return concise notes".to_string()),
+                mode: SpawnSubagentMode::Blocking,
             },
         }),
         result_writer: Arc::new(NoopResultWriter),
@@ -2709,7 +2739,7 @@ async fn invoke_spawn_rejects_subagent_parent_without_resolved_parent_flavor() {
 }
 
 #[tokio::test]
-async fn json_spawn_input_codec_rejects_legacy_background_flag() {
+async fn json_spawn_input_codec_accepts_legacy_background_flag_as_mode_alias() {
     let codec = JsonSpawnSubagentInputCodec::new(Arc::new(StaticInputResolver {
         value: Ok(json!({
             "flavor_id": "general",
@@ -2719,18 +2749,15 @@ async fn json_spawn_input_codec_rejects_legacy_background_flag() {
     }));
     let context = test_run_context("spawn-codec").await;
 
-    let error = codec.decode(&context, &input_ref()).await.unwrap_err();
+    let args = codec.decode(&context, &input_ref()).await.unwrap();
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
-    assert!(
-        error
-            .safe_summary
-            .contains("background subagents are disabled")
-    );
+    assert_eq!(args.subagent_kind.as_str(), "general");
+    assert_eq!(args.task, "investigate");
+    assert_eq!(args.mode, SpawnSubagentMode::Background);
 }
 
 #[tokio::test]
-async fn json_spawn_input_codec_rejects_legacy_background_flag_even_with_blocking_mode() {
+async fn json_spawn_input_codec_rejects_conflicting_mode_and_run_in_background() {
     let codec = JsonSpawnSubagentInputCodec::new(Arc::new(StaticInputResolver {
         value: Ok(json!({
             "flavor_id": "general",
@@ -2747,12 +2774,12 @@ async fn json_spawn_input_codec_rejects_legacy_background_flag_even_with_blockin
     assert!(
         error
             .safe_summary
-            .contains("background subagents are disabled")
+            .contains("mode: blocking conflicts with run_in_background: true")
     );
 }
 
 #[tokio::test]
-async fn json_spawn_input_codec_rejects_background_mode() {
+async fn json_spawn_input_codec_accepts_background_mode() {
     let codec = JsonSpawnSubagentInputCodec::new(Arc::new(StaticInputResolver {
         value: Ok(json!({
             "flavor_id": "general",
@@ -2762,14 +2789,11 @@ async fn json_spawn_input_codec_rejects_background_mode() {
     }));
     let context = test_run_context("spawn-codec-background").await;
 
-    let error = codec.decode(&context, &input_ref()).await.unwrap_err();
+    let args = codec.decode(&context, &input_ref()).await.unwrap();
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
-    assert!(
-        error
-            .safe_summary
-            .contains("background subagents are disabled")
-    );
+    assert_eq!(args.subagent_kind.as_str(), "general");
+    assert_eq!(args.task, "investigate");
+    assert_eq!(args.mode, SpawnSubagentMode::Background);
 }
 
 #[tokio::test]
@@ -2786,6 +2810,7 @@ async fn json_spawn_input_codec_defaults_to_blocking_when_mode_is_absent() {
 
     assert_eq!(args.subagent_kind.as_str(), "general");
     assert_eq!(args.task, "investigate");
+    assert_eq!(args.mode, SpawnSubagentMode::Blocking);
 }
 
 #[tokio::test]
@@ -2833,11 +2858,12 @@ async fn json_spawn_input_codec_accepts_legacy_blocking_inputs() {
 }
 
 /// Regression: malformed MODEL-SUPPLIED spawn input (JSON that fails the
-/// spawn-args decode, or model-correctable wire-args rejections such as
-/// requesting the disabled background mode) must surface as a model-visible
-/// `Denied` resolution — the `spawn_rejected` channel — so the model can
-/// correct the call. It must NOT propagate as `Err(AgentLoopHostError)`,
-/// which the executor maps to a run-ending `HostUnavailable`.
+/// spawn-args decode, or model-correctable wire-args rejections such as a
+/// contradictory `mode`/`run_in_background` pair) must surface as a
+/// model-visible `Denied` resolution — the `spawn_rejected` channel — so the
+/// model can correct the call. It must NOT propagate as
+/// `Err(AgentLoopHostError)`, which the executor maps to a run-ending
+/// `HostUnavailable`.
 #[tokio::test]
 async fn invoke_spawn_denies_malformed_model_input_without_side_effects() {
     for (label, input_value, expected_summary_fragment) in [
@@ -2847,13 +2873,14 @@ async fn invoke_spawn_denies_malformed_model_input_without_side_effects() {
             "invalid spawn_subagent input",
         ),
         (
-            "background-disabled",
+            "mode-run-in-background-conflict",
             json!({
                 "flavor_id": "general",
                 "task": "background task",
-                "mode": "background"
+                "mode": "blocking",
+                "run_in_background": true
             }),
-            "background subagents are disabled",
+            "mode: blocking conflicts with run_in_background: true",
         ),
     ] {
         let context = test_run_context_with_agent_actor(&format!("spawn-denied-{label}")).await;
@@ -3119,6 +3146,7 @@ async fn invoke_batch_coalesces_blocking_spawns_under_single_gate() {
                 subagent_kind: SubagentKindId::new("general").unwrap(),
                 task: "shared task".to_string(),
                 handoff: None,
+                mode: SpawnSubagentMode::Blocking,
             },
         }),
         result_writer: Arc::new(NoopResultWriter),
@@ -3210,6 +3238,7 @@ async fn invoke_batch_mixed_spawn_and_non_spawn_capabilities() {
                 subagent_kind: SubagentKindId::new("general").unwrap(),
                 task: "shared task".to_string(),
                 handoff: None,
+                mode: SpawnSubagentMode::Blocking,
             },
         }),
         result_writer: Arc::new(NoopResultWriter),
@@ -3334,6 +3363,7 @@ async fn invoke_batch_skips_shared_gate_for_single_blocking_spawn() {
                 subagent_kind: SubagentKindId::new("general").unwrap(),
                 task: "task".to_string(),
                 handoff: None,
+                mode: SpawnSubagentMode::Blocking,
             },
         }),
         result_writer: Arc::new(NoopResultWriter),
@@ -3563,6 +3593,21 @@ fn spawn_subagent_description_contains_planner_nudge() {
         SPAWN_SUBAGENT_DESCRIPTION.contains("planner"),
         "SPAWN_SUBAGENT_DESCRIPTION must mention 'planner' to nudge parents toward planning"
     );
+}
+
+#[test]
+fn build_spawn_subagent_parameters_schema_declares_mode_property() {
+    let schema = build_spawn_subagent_parameters_schema(&[]);
+
+    assert_eq!(
+        schema["properties"]["mode"],
+        json!({
+            "type": "string",
+            "enum": ["blocking", "background"],
+            "default": "blocking"
+        })
+    );
+    assert_eq!(schema["required"], json!(["subagent_type", "task"]));
 }
 
 // ── Gap 1: empty catalog schema satisfiability ───────────────────────────────
