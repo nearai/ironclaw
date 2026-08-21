@@ -458,9 +458,14 @@ PR_STATIC_CONTROL_PATHS = {
     #     exercise a change to it. Surfaced 2026-08-05 (#7259) when the docs
     #     path sweep touched its docstring.
     "scripts/check-type-duplicates.py",
-    #   * Its self-test is run locally the same way (`python3
-    #     scripts/test-check-type-duplicates.py`); like its subject, no
-    #     workflow invokes it.
+    #   * Its self-test, `python3 scripts/test-check-type-duplicates.py`, runs
+    #     under Code Style's "Static-check self-tests" step
+    #     (`.github/workflows/code_style.yml`) — the same lane that runs
+    #     `scripts/ci/test-check-guidance.py` and the other `scripts/ci/`
+    #     self-tests covered by the `PR_STATIC_CONTROL_PREFIXES` rule below.
+    #     Static control here means "no Tests (Reborn) lane reads it", not "no
+    #     workflow runs it": Code Style owns this self-test, not a Reborn
+    #     Rust test lane, so it stays classified as static control.
     "scripts/test-check-type-duplicates.py",
     #   * `render-architecture-video.sh` is a local one-command Remotion
     #     render for docs/internal/architecture-video; never invoked by a

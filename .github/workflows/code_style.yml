@@ -209,6 +209,7 @@ jobs:
           python3 scripts/ci/test_ws12_workflow_contracts.py
           python3 scripts/ci/test-check-target-tree.py
           python3 scripts/ci/test-check-guidance.py
+          python3 scripts/test-check-type-duplicates.py
           python3 scripts/ci/test_check_h2_advisory_exception.py
           python3 scripts/ci/test_cut_ironclaw_release.py
           scripts/ci/test-hermetic-test-process.sh

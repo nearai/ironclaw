@@ -19,7 +19,9 @@ patching the module (the same real-tree-vs-fixture split
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import os
 import pathlib
 import sys
@@ -94,7 +96,14 @@ class CollectTests(unittest.TestCase):
         """The field-shape match (not name matching) is the tool's whole
         point: a family crate and an extension-package crate defining
         differently-named structs with the same (field, type) set must be
-        reported as a candidate pair."""
+        reported as a candidate pair.
+
+        This drives the production `main()` candidate-selection and report
+        path (the itertools.combinations/Jaccard loop and its printed
+        output), not a local reimplementation of Jaccard over `collect()`'s
+        return value — a regression in `main()`'s own pairing or reporting
+        logic would not be caught by re-deriving the score independently.
+        """
         self.write(
             "crates/domains/ironclaw_alpha/src/types.rs",
             "pub struct Widget {\n"
@@ -118,6 +127,18 @@ class CollectTests(unittest.TestCase):
         union = len(i1 | i2)
         jaccard = len(i1 & i2) / union if union else 0
         self.assertEqual(jaccard, 1.0)
+
+        argv = sys.argv
+        sys.argv = ["check-type-duplicates.py", "--min-items", "3"]
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                DUP.main()
+        finally:
+            sys.argv = argv
+        report = out.getvalue()
+        self.assertIn("struct alpha::Widget  <->  acme::Gadget", report)
+        self.assertIn("1 candidate pair(s) from 2 types", report)
 
     def test_below_min_items_is_not_collected(self) -> None:
         self.write(
