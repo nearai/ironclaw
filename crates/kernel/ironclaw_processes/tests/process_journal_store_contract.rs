@@ -3290,7 +3290,7 @@ async fn dependency_transition_from_a_wrong_expected_state_is_rejected() {
             dependency_process_id: dependency,
             scope: scope(),
             expected: ProcessDependencyState::AttentionScheduled,
-            next: ProcessDependencyState::Consumed,
+            next: ProcessDependencyState::AttentionDeferred,
             metadata: None,
             transitioned_at: Utc::now(),
         })
@@ -3305,6 +3305,125 @@ async fn dependency_transition_from_a_wrong_expected_state_is_rejected() {
         ProcessDependencyState::Settled,
         "a rejected transition must leave the stored state untouched"
     );
+}
+
+/// Consume/abandon and the reservation release are one journal command
+/// (`crates/kernel/ironclaw_processes/AGENTS.md`). The state-column CAS does
+/// not touch the reservation ledger, so letting it write a terminal state
+/// would be exactly the compensating dual write that invariant forbids: the
+/// edge would read closed while its descendant slot leaked forever.
+#[tokio::test]
+async fn dependency_transition_refuses_to_write_a_terminal_state() {
+    for (target, door) in [
+        (
+            ProcessDependencyState::Consumed,
+            "consume_process_dependency",
+        ),
+        (
+            ProcessDependencyState::Abandoned,
+            "abandon_process_dependency",
+        ),
+    ] {
+        let store = new_store();
+        let (dependent, dependency) = open_settled_dependency(&store).await;
+
+        let error = store
+            .transition_process_dependency(TransitionProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: dependency,
+                scope: scope(),
+                expected: ProcessDependencyState::Settled,
+                next: target,
+                metadata: None,
+                transitioned_at: Utc::now(),
+            })
+            .await
+            .expect_err("a transition must not close the edge");
+        assert!(
+            format!("{error}").contains(door),
+            "the refusal must name the door that also releases the reservation: {error}"
+        );
+        assert_eq!(
+            stored_dependency(&store, dependent, dependency).await.state,
+            ProcessDependencyState::Settled,
+            "{target:?} must not reach the state column through a transition"
+        );
+    }
+}
+
+/// Consuming closes the edge and releases its descendant reservation, so it is
+/// allowed only where delivery is durably far enough along: the result is
+/// appended *and* attention is scheduled. `ResultAppended` has no attention
+/// recorded yet, and `AttentionDeferred` is deliberately parked for a later
+/// sweep — closing either would strand the dependent.
+#[tokio::test]
+async fn consume_closes_a_delivered_edge_only_once_attention_is_scheduled() {
+    for state in [
+        ProcessDependencyState::Settled,
+        ProcessDependencyState::AttentionScheduled,
+    ] {
+        let store = new_store();
+        let (dependent, dependency) = open_settled_dependency(&store).await;
+        force_state(&store, dependent, dependency, state).await;
+
+        let consumed = store
+            .consume_process_dependency(CloseProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: dependency,
+                scope: scope(),
+                closed_at: Utc::now(),
+            })
+            .await
+            .expect("consume succeeds")
+            .expect("dependency exists");
+        assert_eq!(
+            consumed.state,
+            ProcessDependencyState::Consumed,
+            "{state:?} must be closeable, or the delivery chain has a state with no exit"
+        );
+    }
+
+    for state in [
+        ProcessDependencyState::ResultAppended,
+        ProcessDependencyState::AttentionDeferred,
+    ] {
+        let store = new_store();
+        let (dependent, dependency) = open_settled_dependency(&store).await;
+        force_state(&store, dependent, dependency, state).await;
+
+        let error = store
+            .consume_process_dependency(CloseProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: dependency,
+                scope: scope(),
+                closed_at: Utc::now(),
+            })
+            .await
+            .expect_err("consume must be refused");
+        assert!(
+            format!("{error}").contains("attention"),
+            "the refusal must name what closing actually requires: {error}"
+        );
+        assert_eq!(
+            stored_dependency(&store, dependent, dependency).await.state,
+            state,
+            "a refused consume must leave the edge where it was"
+        );
+        let unclosed = store
+            .query_process_dependencies(ProcessDependencyQuery {
+                scope: scope(),
+                dependent_process_id: Some(dependent),
+                group_ref: None,
+                include_closed: false,
+            })
+            .await
+            .expect("query succeeds");
+        assert_eq!(
+            unclosed.len(),
+            1,
+            "{state:?} stays visible to the sweep that will finish delivery"
+        );
+    }
 }
 
 /// The payload is merged into an object, so a scalar has no keys to merge and

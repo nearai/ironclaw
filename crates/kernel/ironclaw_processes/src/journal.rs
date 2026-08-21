@@ -1070,9 +1070,11 @@ pub trait ProcessDependencyPort: Send + Sync {
     /// transition that already landed is idempotent; an unknown edge yields
     /// `Ok(None)`; any other stored state is an error.
     ///
-    /// Closure stays with `consume_process_dependency` /
-    /// `abandon_process_dependency`, which also release the descendant
-    /// reservation this operation does not touch.
+    /// This operation writes the state column only. Closing an edge also
+    /// releases its descendant reservation and the two are one journal
+    /// command, so `Consumed` and `Abandoned` are refused here: they are
+    /// reachable only through `consume_process_dependency` /
+    /// `abandon_process_dependency`.
     async fn transition_process_dependency(
         &self,
         request: TransitionProcessDependencyRequest,

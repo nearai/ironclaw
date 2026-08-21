@@ -1162,6 +1162,21 @@ impl ProcessJournalMaterializedState {
         &mut self,
         request: crate::TransitionProcessDependencyRequest,
     ) -> Result<StoredCommandOutcome, ProcessJournalStoreError> {
+        // Closing an edge and releasing its descendant reservation are one
+        // journal command (crate AGENTS.md). This CAS writes the state column
+        // only, so letting it reach a terminal state would be a compensating
+        // dual write that leaks the reservation.
+        let terminal_door = match request.next {
+            crate::ProcessDependencyState::Consumed => Some("consume_process_dependency"),
+            crate::ProcessDependencyState::Abandoned => Some("abandon_process_dependency"),
+            _ => None,
+        };
+        if let Some(door) = terminal_door {
+            return Err(ProcessJournalStoreError::InvalidRequest(format!(
+                "process dependency transition cannot close an edge: use {door}, which releases \
+                 the descendant reservation in the same journal command"
+            )));
+        }
         // Validated before any mutation: a rejected command must leave the
         // materialized state exactly as it found it.
         let merged_metadata = match request.metadata {
@@ -1225,9 +1240,20 @@ impl ProcessJournalMaterializedState {
         ) {
             return Ok(StoredCommandOutcome::Dependency(Some(existing.clone())));
         }
-        if !abandon && existing.state != crate::ProcessDependencyState::Settled {
+        // `ResultAppended` has no attention recorded yet and `AttentionDeferred`
+        // is parked for a later sweep; closing either would strand the
+        // dependent with an undelivered result.
+        if !abandon
+            && !matches!(
+                existing.state,
+                crate::ProcessDependencyState::Settled
+                    | crate::ProcessDependencyState::AttentionScheduled
+            )
+        {
             return Err(ProcessJournalStoreError::InvalidRequest(
-                "only a settled process dependency can be consumed".to_string(),
+                "a process dependency can only be consumed while settled or with its attention \
+                 scheduled"
+                    .to_string(),
             ));
         }
         let root_process_id = existing.root_process_id;
