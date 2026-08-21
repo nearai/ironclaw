@@ -54,6 +54,33 @@ impl AwaitEdgeStore {
         let mut edge = match serde_json::from_value::<AwaitEdge>(record.metadata.clone()) {
             Ok(edge) => edge,
             Err(_) => {
+                // The blob every production edge is actually born with:
+                // `AwaitedChildSetRecord` (subagent_spawn_port.rs), which the
+                // delivery-chain CAS writes then merge `appended_message_ref`
+                // and `attention_outcome` into as sibling top-level keys —
+                // never replacing this shape, only widening it (§ merge, not
+                // substitute). `from_value::<AwaitEdge>` above always misses
+                // it (this record has none of `AwaitEdge`'s required fields),
+                // so this is the only branch production ever actually takes;
+                // it must recover those two merged keys, not default them away.
+                let appended_message_ref = record
+                    .metadata
+                    .get("appended_message_ref")
+                    .cloned()
+                    .map(serde_json::from_value::<LoopMessageRef>)
+                    .transpose()
+                    .map_err(|error| AwaitEdgeStoreError::Backend {
+                        reason: format!("appended_message_ref deserialize failed: {error}"),
+                    })?;
+                let attention_outcome = record
+                    .metadata
+                    .get("attention_outcome")
+                    .cloned()
+                    .map(serde_json::from_value::<AttentionOutcome>)
+                    .transpose()
+                    .map_err(|error| AwaitEdgeStoreError::Backend {
+                        reason: format!("attention_outcome deserialize failed: {error}"),
+                    })?;
                 let submitted: ironclaw_loop_host::AwaitedChildSetRecord =
                     serde_json::from_value(record.metadata).map_err(|error| {
                         AwaitEdgeStoreError::Backend {
@@ -79,8 +106,8 @@ impl AwaitEdgeStore {
                     terminal_byte_len: None,
                     terminal_reason: None,
                     reservation_release: ReservationReleaseState::Unclaimed,
-                    appended_message_ref: None,
-                    attention_outcome: None,
+                    appended_message_ref,
+                    attention_outcome,
                     created_at: record.created_at,
                     settled_at: None,
                 }
@@ -203,7 +230,7 @@ impl AwaitEdgeStore {
         child_run_id: TurnRunId,
         outcome: AttentionOutcome,
     ) -> Result<Option<AwaitEdge>, AwaitEdgeStoreError> {
-        let outcome =
+        let outcome_value =
             serde_json::to_value(outcome).map_err(|error| AwaitEdgeStoreError::Backend {
                 reason: format!("attention outcome serialize failed: {error}"),
             })?;
@@ -219,7 +246,7 @@ impl AwaitEdgeStore {
             child_run_id,
             expected,
             ProcessDependencyState::AttentionScheduled,
-            Some(serde_json::json!({"attention_outcome": outcome})),
+            Some(serde_json::json!({"attention_outcome": outcome_value})),
         )
         .await
     }
@@ -519,6 +546,31 @@ mod tests {
         )
     }
 
+    /// The blob every production edge is actually opened with
+    /// (`subagent_spawn_port.rs`'s `AwaitedChildSetRecord`) — never the
+    /// `AwaitEdge` shape itself. Shared by every fixture that opens a
+    /// dependency through the real port, so the tests exercise the shape
+    /// production writes instead of one only `serde_json::to_value(&edge)`
+    /// happens to round-trip through.
+    fn awaited_child_set_record(
+        child_run_id: TurnRunId,
+        edge: &AwaitEdge,
+    ) -> AwaitedChildSetRecord {
+        AwaitedChildSetRecord {
+            gate_ref: edge.gate_ref.clone(),
+            parent_run_context: edge.parent_run_context.clone(),
+            tree_root_run_id: edge.tree_root_run_id,
+            child_scope: edge.child_scope.clone(),
+            child_run_id,
+            child_thread_id: edge.child_thread_id.clone(),
+            subagent_kind: edge.subagent_kind.clone(),
+            spawn_capability_id: edge.spawn_capability_id.clone(),
+            spawn_provider_call_id: edge.spawn_provider_call_id.clone(),
+            result_ref: edge.result_ref.clone(),
+            mode: edge.mode,
+        }
+    }
+
     fn record(
         parent_run_id: TurnRunId,
         child_run_id: TurnRunId,
@@ -633,19 +685,7 @@ mod tests {
     #[test]
     fn legacy_edge_metadata_fallback_and_malformed_metadata_fail_closed() {
         let (parent_run_id, child_run_id, edge) = edge_fixture();
-        let submitted = AwaitedChildSetRecord {
-            gate_ref: edge.gate_ref.clone(),
-            parent_run_context: edge.parent_run_context.clone(),
-            tree_root_run_id: edge.tree_root_run_id,
-            child_scope: edge.child_scope.clone(),
-            child_run_id,
-            child_thread_id: edge.child_thread_id.clone(),
-            subagent_kind: edge.subagent_kind.clone(),
-            spawn_capability_id: edge.spawn_capability_id.clone(),
-            spawn_provider_call_id: edge.spawn_provider_call_id.clone(),
-            result_ref: edge.result_ref.clone(),
-            mode: edge.mode,
-        };
+        let submitted = awaited_child_set_record(child_run_id, &edge);
         let mut legacy = record(
             parent_run_id,
             child_run_id,
@@ -718,7 +758,8 @@ mod tests {
                 scope: scope.to_resource_scope(),
                 group_ref: Some(edge.gate_ref.as_str().to_string()),
                 created_at: edge.created_at,
-                metadata: serde_json::to_value(&edge).expect("serialize edge"),
+                metadata: serde_json::to_value(awaited_child_set_record(child_run_id, &edge))
+                    .expect("serialize submitted record"),
             })
             .await
             .expect("open dependency");

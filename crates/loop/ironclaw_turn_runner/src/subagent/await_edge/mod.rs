@@ -10,7 +10,9 @@ use ironclaw_host_api::turn::{LoopMessageRef, LoopResultRef, TurnGateRef, TurnRu
 use ironclaw_loop_host::{SpawnSubagentMode, SubagentKindId};
 use serde::{Deserialize, Serialize};
 
-/// CAS state machine (§2): `Open -> Settled -> Drained`, `Open -> Abandoned`.
+/// CAS state machine (§2): `Open -> Settled -> Drained`; abandon reaches any
+/// non-terminal state, not just `Open` — the kernel's close-dependency guard
+/// only gates the `consume` door.
 /// A background child's result also walks the delivery chain in between:
 /// `Settled -> ResultAppended -> AttentionScheduled`, with
 /// `ResultAppended -> AttentionDeferredStreakCap -> AttentionScheduled` when a
@@ -37,7 +39,8 @@ pub enum AwaitEdgeState {
     /// consecutive-interruption cap. In flight, not closed: the edge stays
     /// claimable, and the next permitted or human-initiated run start drains it
     /// forward into `AttentionScheduled` (§4.1/§4.2). It is deliberately not
-    /// closeable from here — closing would strand the undelivered result.
+    /// consumable from here — consuming would strand the undelivered result;
+    /// abandoning it is still allowed.
     AttentionDeferredStreakCap,
     Drained,
     Abandoned,
