@@ -1,5 +1,23 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# -E (errtrace): without it, the ERR trap below is NOT inherited into shell
+# functions (run_cargo_ci, select_test_runner) — a failure inside them would
+# abort the script via -e but silently skip the REPRO trap. Verified live:
+# without -E, a failing `cargo fetch`/`cargo clippy` called through a helper
+# function exits the script with no REPRO line at all.
+set -Eeuo pipefail
+
+report_repro() {
+    local status=$?
+    trap - ERR
+    echo "REPRO: ${BASH_COMMAND}" >&2
+    if [[ "${BASH_COMMAND}" == run_cargo_ci* ]]; then
+        echo "       (run_cargo_ci wraps this with quality_gate.sh's own scrubbed env:" >&2
+        echo "        NEARAI_*/IRONCLAW_LLM_*/LLM_BACKEND unset, IRONCLAW_DISABLE_OS_KEYCHAIN=1," >&2
+        echo "        CARGO_INCREMENTAL=0, CARGO_PROFILE_TEST_DEBUG=0, RUST_MIN_STACK=67108864)" >&2
+    fi
+    exit "${status}"
+}
+trap report_repro ERR
 
 echo "==> fmt check"
 cargo fmt --all -- --check

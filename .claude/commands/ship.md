@@ -1,6 +1,6 @@
 ---
 description: Run the full Rust quality gate (fmt, clippy, tests) before shipping changes
-allowed-tools: Bash(cargo fmt:*), Bash(cargo clippy:*), Bash(cargo test:*)
+allowed-tools: Bash(cargo fmt:*), Bash(cargo clippy:*), Bash(cargo test:*), Bash(bash scripts/preflight-gates.sh:*)
 ---
 
 Run the IronClaw shipping checklist. This is the mandatory quality gate before any change is considered done.

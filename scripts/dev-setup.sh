@@ -46,19 +46,17 @@ cargo check
 echo "[5/6] Running tests (no external DB required)..."
 cargo test
 
-# 6. Install git hooks
+# 6. Install git hooks — one story, worktree-safe. core.hooksPath makes git
+# read hooks from the tracked .githooks/ directory in EVERY checkout of this
+# repository (worktrees included: a relative core.hooksPath resolves against
+# each worktree's own top-level directory), which the old absolute-path
+# git-path-hooks symlinks never did — they pointed every worktree at
+# whichever checkout last ran this script.
 echo "[6/6] Installing git hooks..."
-HOOKS_DIR=$(git rev-parse --git-path hooks 2>/dev/null) || true
-if [ -n "$HOOKS_DIR" ]; then
-    mkdir -p "$HOOKS_DIR"
-    SCRIPTS_ABS="$(cd "$(dirname "$0")" && pwd)"
-    ln -sf "$SCRIPTS_ABS/commit-msg-regression.sh" "$HOOKS_DIR/commit-msg"
-    echo "  commit-msg hook installed (regression test enforcement)"
-    ln -sf "$SCRIPTS_ABS/pre-commit-safety.sh" "$HOOKS_DIR/pre-commit"
-    echo "  pre-commit hook installed (UTF-8, case-sensitivity, /tmp, redaction, composition-mass ratchet)"
-    REPO_ROOT="$(git rev-parse --show-toplevel)"
-    ln -sf "$REPO_ROOT/.githooks/pre-push" "$HOOKS_DIR/pre-push"
-    echo "  pre-push hook installed (merge check + CI-parity quality gate + Reborn coverage ratchet + WebUI provider replay + optional delta lint)"
+if git rev-parse --git-dir >/dev/null 2>&1; then
+    git config core.hooksPath .githooks
+    echo "  core.hooksPath -> .githooks (commit-msg, pre-commit incl. safety checks, tiered pre-push)"
+    echo "  pre-push default: bash scripts/preflight-gates.sh + changed-package clippy (~5-6 min warm); full gauntlet: IRONCLAW_PREPUSH_FULL=1"
 else
     echo "  Skipped: not a git repository"
 fi

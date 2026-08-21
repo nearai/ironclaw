@@ -876,6 +876,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "scripts/dev_metrics.py",
             "scripts/pre-commit-safety.sh",
             "scripts/test-mutation-audit.sh",
+            "scripts/dev-setup.sh",
         ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])

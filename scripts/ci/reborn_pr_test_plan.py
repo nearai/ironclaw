@@ -486,6 +486,14 @@ PR_STATIC_CONTROL_PATHS = {
     #     the 2026-08 gate audit (docs/internal/gate-audit-2026-08.md §4.3);
     #     referenced by no workflow, so no lane can be selected for it.
     "scripts/preflight-gates.sh",
+    #   * `dev-setup.sh` is the local fresh-checkout bootstrap script (rustup
+    #     target/tool install, cargo check/test, git hooks). No Tests (Reborn)
+    #     lane invokes it; CI's own steps install toolchain bits directly.
+    #     Decided here (2026-08, canonical-preflight track WS3) after this
+    #     class's `unmapped test or CI path` fail-closed arm caught the gap on
+    #     this track's own hooks commit — the same reasoning `preflight-gates.sh`
+    #     already carries a few lines above.
+    "scripts/dev-setup.sh",
     #   * `check-boundaries.sh` was DELETED by the same audit (measured broken
     #     on a clean tree, run by nothing). The entry stays so the deletion
     #     diff — and any revert — classifies instead of tripping the

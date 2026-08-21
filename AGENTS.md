@@ -13,6 +13,10 @@ cargo fmt                                                       # format
 cargo clippy --all --benches --tests --examples --all-features -- -D warnings  # lint (zero warnings; CI denies warnings — an unflagged run exits 0 with them)
 cargo test                                                      # unit + integration suites (Postgres legs self-provision testcontainers; skipped without Docker)
 RUST_LOG=ironclaw=debug cargo run -p ironclaw -- serve          # run the serve binary (add tower_http=debug for HTTP logging)
+bash scripts/preflight-gates.sh                # pre-push predictor: every deterministic CI gate, one round-trip (~5-7 min warm; also the default pre-push hook tier)
+bash scripts/preflight-gates.sh --queue-shape  # the clippy shapes + full test plan the merge queue runs and PR CI skips (~6 min warm CI; cold local runs far longer)
+# A red CI job prints its own "REPRO: <exact local command>" line in its own
+# log / job summary on failure — read the failing job's output, no lookup tool.
 ```
 
 The workspace-root `integration` feature is empty with zero consumers — a bare root `cargo test --features integration` adds nothing. Backend-heavy gated suites are crate-level (e.g. `cargo test -p ironclaw_hooks --features integration,test-support`). E2E suite: `tests/e2e/AGENTS.md`.

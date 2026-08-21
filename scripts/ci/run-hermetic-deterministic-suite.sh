@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# -E (errtrace): almost every stage in this script runs through a helper
+# function (prepare_rust_dependencies, run_crate_tests, ...); without -E the
+# ERR trap below is NOT inherited into those functions, so a failure inside
+# one would abort the script via -e but never print REPRO. Verified live.
+set -Eeuo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 hermetic="${repo_root}/scripts/ci/run-hermetic-test-process.sh"
@@ -7,6 +11,20 @@ stage="${1:-all}"
 if [[ "$#" -gt 0 ]]; then
   shift
 fi
+# Captured now, not read via "$@" inside the trap: by the time an ERR trap
+# fires from deep inside a helper function (prepare_rust_dependencies, ...),
+# "$@" resolves to THAT function's own (empty) positional parameters, not the
+# script's — verified live (a failure inside prepare_command_dependencies
+# printed "REPRO: ... rust-e2e ''" instead of the real stage args).
+stage_args=("$@")
+
+print_repro_on_error() {
+    local status=$?
+    trap - ERR
+    echo "REPRO: bash scripts/ci/run-hermetic-deterministic-suite.sh ${stage} $(printf '%q ' "${stage_args[@]}")" >&2
+    exit "${status}"
+}
+trap print_repro_on_error ERR
 
 frontend_corepack_home=""
 postgres_image_prepared=0

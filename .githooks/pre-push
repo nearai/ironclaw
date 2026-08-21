@@ -57,7 +57,43 @@ run_ci_env() {
 
 check_merge_to_base_clean "${1:-origin}"
 
-# Default: baseline quality gate
+if [ "${IRONCLAW_PREPUSH_FULL:-0}" != "1" ]; then
+    # Default tier (gate-audit 2026-08 §4.3 inversion): the ~5-minute
+    # deterministic-gate gauntlet plus the ~60s changed-package clippy shape
+    # (the largest measured queue-red class — research.md). The full
+    # CI-parity gauntlet (workspace clippy + tests + coverage ratchet + WebUI
+    # provider replay) still exists, unchanged, behind IRONCLAW_PREPUSH_FULL=1.
+    echo "==> pre-push default tier: preflight gates (IRONCLAW_PREPUSH_FULL=1 for the full gauntlet)"
+    bash "$REPO_ROOT/scripts/preflight-gates.sh"
+
+    if [ "${IRONCLAW_PREPUSH_CHANGED_CLIPPY:-1}" = "1" ]; then
+        echo "==> pre-push default tier: changed-package clippy (the PR-lane shape; skip with IRONCLAW_PREPUSH_CHANGED_CLIPPY=0)"
+        remote_name="${1:-origin}"
+        base_branch="${IRONCLAW_PREPUSH_BASE_BRANCH:-main}"
+        merge_base_for_clippy="$(git merge-base HEAD "refs/remotes/${remote_name}/${base_branch}")"
+        changed_file_list="$(mktemp)"
+        git diff --name-only "${merge_base_for_clippy}...HEAD" >"${changed_file_list}"
+        changed_packages=()
+        while IFS= read -r pkg; do
+            [ -n "$pkg" ] && changed_packages+=("$pkg")
+        done < <(python3 "$SCRIPT_DIR/changed_workspace_packages.py" \
+            --changed-files "${changed_file_list}" | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)))')
+        rm -f "${changed_file_list}"
+        if [ "${#changed_packages[@]}" -gt 0 ]; then
+            package_args=()
+            for pkg in "${changed_packages[@]}"; do
+                package_args+=(-p "${pkg}")
+            done
+            cargo clippy "${package_args[@]}" -- -D warnings
+        else
+            echo "    (no changed workspace packages; nothing to lint)"
+        fi
+    fi
+    exit 0
+fi
+
+# ---- Full gauntlet (IRONCLAW_PREPUSH_FULL=1): everything below is today's
+# ---- behavior, moved — not weakened — except the Emulate-absent case.
 "$SCRIPT_DIR/quality_gate.sh"
 
 # Fast static checks (no compile) — catch deterministic breakers that a
@@ -66,6 +102,7 @@ check_merge_to_base_clean "${1:-origin}"
 #     (the #5603 Docker outage class).
 #   - newly-added raw std::env::set_var/remove_var is guarded (the #6015
 #     coverage-flake / Rust 1.82 UB class).
+echo "==> static checks (#6018): #5603 Docker COPY coverage class + #6015 hermetic-env class"
 echo "==> static: include_str! paths + Docker COPY coverage"
 "$SCRIPT_DIR/check-include-str-paths.sh"
 echo "==> static: hermetic env mutation"
@@ -80,25 +117,22 @@ if [ "${IRONCLAW_PREPUSH_REBORN_WEBUI_E2E:-1}" = "1" ]; then
     emulate_cli="${IRONCLAW_EMULATE_CLI:-$REPO_ROOT/.emulate/packages/emulate/dist/index.js}"
     if [ ! -f "$emulate_cli" ]; then
         cat >&2 <<EOF
-ERROR: Emulate CLI not found for the pre-push WebUI provider replay.
-
-Set IRONCLAW_EMULATE_CLI to the built Emulate CLI, or install it at:
-  $REPO_ROOT/.emulate/packages/emulate/dist/index.js
-
-This hook runs the same provider replay lane that gates CI because it catches
-tool-inventory regressions that Rust unit tests and clippy do not.
+WARN: Emulate CLI not found — skipping the pre-push WebUI provider replay.
+      Set IRONCLAW_EMULATE_CLI or install it at:
+        $REPO_ROOT/.emulate/packages/emulate/dist/index.js
+      CI still runs this lane; a tool-inventory regression will land there.
 EOF
-        exit 1
+    else
+        echo "==> reborn WebUI provider replay (CI parity; skip with IRONCLAW_PREPUSH_REBORN_WEBUI_E2E=0)"
+        IRONCLAW_EMULATE_CLI="$emulate_cli" run_ci_env pytest \
+            tests/e2e/scenarios/test_provider_capability_inventory.py \
+            tests/e2e/scenarios/test_journey_coverage.py \
+            tests/e2e/scenarios/test_emulate_reborn_provider_contracts.py \
+            tests/e2e/scenarios/test_reborn_qa_trace_replay.py \
+            tests/e2e/scenarios/test_reborn_qa_trace_full_path.py \
+            -v \
+            --timeout=120
     fi
-    echo "==> reborn WebUI provider replay (CI parity; skip with IRONCLAW_PREPUSH_REBORN_WEBUI_E2E=0)"
-    IRONCLAW_EMULATE_CLI="$emulate_cli" run_ci_env pytest \
-        tests/e2e/scenarios/test_provider_capability_inventory.py \
-        tests/e2e/scenarios/test_journey_coverage.py \
-        tests/e2e/scenarios/test_emulate_reborn_provider_contracts.py \
-        tests/e2e/scenarios/test_reborn_qa_trace_replay.py \
-        tests/e2e/scenarios/test_reborn_qa_trace_full_path.py \
-        -v \
-        --timeout=120
 fi
 
 # Optional strict delta lint (env-gated)

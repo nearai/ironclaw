@@ -31,6 +31,12 @@ if $NEEDS_CHECK; then
     fi
 fi
 
+# Safety checks (UTF-8 slicing, /tmp paths, redaction, unwrap in production,
+# composition-mass ratchet, …). One install story: with core.hooksPath this
+# hook is THE pre-commit, so it must carry what dev-setup.sh used to symlink
+# in separately.
+bash "$(git rev-parse --show-toplevel)/scripts/pre-commit-safety.sh"
+
 # Reborn WebUI i18n parity (crates/ironclaw_webui/frontend/src/i18n/*.ts) is
 # enforced by the frontend's own tooling (`pnpm lint`/`pnpm test` in the
 # `webui-v2-js-lint` CI job), not by this shell hook — the v1 gateway's
