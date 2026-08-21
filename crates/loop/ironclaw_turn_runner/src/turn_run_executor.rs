@@ -19,7 +19,7 @@ use ironclaw_loop_contracts::{
 use ironclaw_loop_host::AwaitEdgeSettler;
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_processes::ProcessTransitionPort;
-use ironclaw_turns::{TurnError, TurnStatus, runner::ClaimedTurnRun};
+use ironclaw_turns::{ActivationProvenance, TurnError, TurnStatus, runner::ClaimedTurnRun};
 use tracing::{debug, error, warn};
 
 /// The loop-facing routing-ref prefix an auth gate carries
@@ -213,6 +213,29 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
         _process_transitions: Arc<dyn ProcessTransitionPort<Error = TurnError>>,
     ) -> Result<(), TurnRunExecutorError> {
         let started_at = live_latency_started_at();
+        // Run-start sweep (§4.2), before the driver runs: heal any background
+        // await-edges left mid-delivery on this thread. `human_initiated`
+        // mirrors the streak-cap admission rule (`activation_streak.rs`) —
+        // absent or `Human` provenance is a permitted start; `System` (a
+        // background wake) or `ParentAgent` is not, so a streak-capped edge
+        // stays parked. A sweep failure must not fail the run start — it is
+        // logged and the driver still runs, matching the sweep's own
+        // per-edge non-fatal contract.
+        let human_initiated = !matches!(
+            claimed.subagent_activation_provenance,
+            Some(ActivationProvenance::System | ActivationProvenance::ParentAgent)
+        );
+        if let Err(error) = self
+            .await_edge_settler
+            .sweep_thread_on_run_start(&claimed.state.scope, human_initiated)
+            .await
+        {
+            debug!(
+                run_id = %claimed.state.run_id,
+                error = %error,
+                "background await-edge run-start sweep failed; continuing without it"
+            );
+        }
         match self.invoke_driver(&claimed).await {
             Ok(DriverInvocationSuccess {
                 exit,
