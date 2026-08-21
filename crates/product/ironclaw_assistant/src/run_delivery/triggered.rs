@@ -502,18 +502,20 @@ struct PreSubmitFailureDeliveryContext<'a> {
 
 /// Inner watcher coroutine for a single background run.
 ///
-/// ## Invariant: a parked-awaiting-user run is terminal-for-delivery
+/// ## Invariant: delivery settlement does not end Inbox observation
 ///
 /// After the actionable gate/auth prompt for a blocked run has been
 /// delivered, the run typically *stays* blocked until the user acts — the
 /// common case, not a failure. If the re-wait hits the `max_wait` backstop,
-/// the run is parked awaiting the user and observation is complete. The
-/// recorded outcome still describes the external-channel side: `Delivered`
+/// the run is parked awaiting the user and external delivery is complete. The
+/// recorded outcome describes only that external-channel side: `Delivered`
 /// when a channel received the prompt, `NoDefaultConfigured` for an intentional
 /// WebUI-only setup, and `Failed` when channel lookup itself was unavailable.
-/// The backstop is a run-wait failure only when no actionable state was ever
-/// reached, distinguished by `delivered_blocked_marker`; that path publishes a
-/// terminal timeout notice before recording its delivery outcome.
+/// A lightweight observer continues independently until the durable Inbox gate
+/// can be resolved, without retaining a bounded delivery permit or retrying
+/// external fan-out. The backstop is a run-wait failure only when no actionable
+/// state was ever reached, distinguished by `delivered_blocked_marker`; that
+/// path publishes a terminal timeout notice before recording its outcome.
 async fn notify_background_run(
     services: &RunDeliveryServices,
     settings: &RunDeliverySettings,
@@ -650,6 +652,16 @@ async fn notify_background_run(
                     TriggeredRunDeliveryOutcomeKind::Delivered
                 };
                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+                if let Some(marker) = delivered_blocked_marker.clone() {
+                    spawn_inbox_gate_observer(
+                        services,
+                        *settings,
+                        scope.clone(),
+                        creator_user_id.clone(),
+                        run_id,
+                        marker,
+                    );
+                }
                 return outcome;
             }
             Err(RunDeliveryError::RunWaitTimedOut { .. }) => {
@@ -936,6 +948,18 @@ async fn notify_background_run(
                 TriggeredRunDeliveryOutcomeKind::Failed
             };
             record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+            if plan.keeps_run_parked
+                && let Some(marker) = next_blocked_marker
+            {
+                spawn_inbox_gate_observer(
+                    services,
+                    *settings,
+                    scope.clone(),
+                    creator_user_id.clone(),
+                    run_id,
+                    marker,
+                );
+            }
             return outcome;
         }
 
@@ -957,6 +981,98 @@ async fn notify_background_run(
         let outcome = TriggeredRunDeliveryOutcomeKind::Delivered;
         record_triggered_run_outcome(delivery_store, run_id, outcome).await;
         return outcome;
+    }
+}
+
+/// Continue only the durable Inbox half of a parked gate's lifecycle after
+/// external delivery has settled. This detached observer deliberately owns no
+/// delivery semaphore permit and never retries channel fan-out.
+fn spawn_inbox_gate_observer(
+    services: &RunDeliveryServices,
+    settings: RunDeliverySettings,
+    scope: TurnScope,
+    creator_user_id: UserId,
+    run_id: TurnRunId,
+    marker: BlockedActionableMarker,
+) {
+    if services.notification_inbox.is_none() {
+        return;
+    }
+    let services = services.clone();
+    tokio::spawn(async move {
+        observe_inbox_gate_lifecycle(
+            &services,
+            &settings,
+            &scope,
+            &creator_user_id,
+            run_id,
+            marker,
+        )
+        .await;
+    });
+}
+
+async fn observe_inbox_gate_lifecycle(
+    services: &RunDeliveryServices,
+    settings: &RunDeliverySettings,
+    scope: &TurnScope,
+    creator_user_id: &UserId,
+    run_id: TurnRunId,
+    mut marker: BlockedActionableMarker,
+) {
+    loop {
+        let state = match wait_for_actionable_state(
+            services.turn_coordinator.as_ref(),
+            scope,
+            run_id,
+            settings,
+            Some(&marker),
+        )
+        .await
+        {
+            Ok(state) => state,
+            Err(RunDeliveryError::RunWaitTimedOut { .. }) => {
+                tokio::time::sleep(settings.poll_interval.max(Duration::from_millis(1))).await;
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: TRACE_TARGET,
+                    %run_id,
+                    %error,
+                    "durable Inbox gate observation failed"
+                );
+                return;
+            }
+        };
+
+        if let Some(kind) = super::blocked_status_notification_kind(marker.status) {
+            services
+                .resolve_inbox_notification(
+                    creator_user_id,
+                    scope,
+                    run_id,
+                    kind,
+                    marker.gate_ref.as_deref(),
+                )
+                .await;
+        }
+
+        let Some(next_marker) = blocked_actionable_marker(&state) else {
+            return;
+        };
+        if let Some(kind) = super::blocked_status_notification_kind(next_marker.status) {
+            services
+                .publish_inbox_notification(
+                    creator_user_id,
+                    scope,
+                    run_id,
+                    kind,
+                    next_marker.gate_ref.as_deref(),
+                )
+                .await;
+        }
+        marker = next_marker;
     }
 }
 

@@ -836,6 +836,21 @@ async fn inbox_records(
         .expect("notification inbox")
 }
 
+async fn wait_for_inbox_resolution(inbox: &dyn NotificationInboxStorePort) {
+    for _ in 0..500 {
+        let page = inbox_records(inbox).await;
+        if page
+            .notifications
+            .iter()
+            .any(|notification| notification.resolved_at.is_some())
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    panic!("no Inbox notification resolved before the test deadline");
+}
+
 fn envelope_for_conversation(
     payload: ProductInboundPayload,
     event_id: &str,
@@ -3385,6 +3400,59 @@ async fn triggered_second_gate_announces_instead_of_deduping_against_the_first()
     }
 }
 
+#[tokio::test]
+async fn triggered_failed_gate_fanout_still_resolves_the_inbox_after_resume() {
+    const GATE: &str = "gate:approval-00000000000000000000000000000023";
+    let harness = build_triggered_harness(
+        vec![
+            scripted_state(TurnStatus::BlockedApproval, Some(GATE)),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Completed, None),
+        ],
+        None,
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    harness
+        .adapter
+        .reports
+        .lock()
+        .expect("reports lock")
+        .push_back(DeliveryReport {
+            prune_registrations: Vec::new(),
+            parts: vec![PartDeliveryOutcome::Permanent {
+                reason: "scripted failure".to_string(),
+            }],
+        });
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Failed
+    );
+    wait_for_inbox_resolution(harness.notification_inbox.as_ref()).await;
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::ApprovalRequired
+    );
+    assert!(
+        inbox.notifications[0].resolved_at.is_some(),
+        "external fan-out failure must not strand the durable Inbox gate"
+    );
+    assert_eq!(
+        harness.adapter.texts().len(),
+        1,
+        "Inbox-only observation must not retry external delivery"
+    );
+}
+
 /// Spec §7: an OAuth `authorization_url` may only land in a personal DM.
 /// Non-DM notification channels get a redacted "needs re-auth, open the app"
 /// notice instead, and the run is NO LONGER cancelled — it parks so the user
@@ -3772,6 +3840,48 @@ async fn triggered_timeout_notice_delivery_failure_records_failed() {
         texts[0].contains("taking longer than expected"),
         "timeout notice text present: {}",
         texts[0]
+    );
+}
+
+#[tokio::test]
+async fn triggered_gate_resolves_inbox_after_delivery_wait_timeout() {
+    const GATE: &str = "gate:approval-00000000000000000000000000000024";
+    let harness = build_triggered_harness_with_turns(
+        Arc::new(ScriptedTurnCoordinator::with_late_terminal(
+            scripted_state(TurnStatus::BlockedApproval, Some(GATE)),
+            scripted_state(TurnStatus::Completed, None),
+            30,
+        )),
+        None,
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Delivered
+    );
+    wait_for_inbox_resolution(harness.notification_inbox.as_ref()).await;
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::ApprovalRequired
+    );
+    assert!(
+        inbox.notifications[0].resolved_at.is_some(),
+        "the Inbox gate must resolve when the run finishes after max_wait"
+    );
+    assert_eq!(
+        harness.adapter.texts().len(),
+        1,
+        "post-timeout Inbox observation must not send a terminal channel notice"
     );
 }
 
