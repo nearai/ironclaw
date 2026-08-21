@@ -39,11 +39,17 @@ use super::{
 };
 
 #[test]
-fn finalization_deadline_stays_below_the_process_lease() {
-    let lease_ms = u64::try_from(ironclaw_processes::DEFAULT_PROCESS_LEASE_DURATION.as_millis())
-        .expect("default process lease fits in u64 milliseconds");
+fn finalization_deadline_covers_default_transport_retry_budget() {
+    // The default NearAI transport permits four attempts at 60 seconds each.
+    // Maximum jittered backoffs are 1.25s, 2.5s, and 5s. Retry-After and
+    // non-default provider configuration remain bounded by the outer deadline.
+    const DEFAULT_ATTEMPT_COUNT: u64 = 4;
+    const DEFAULT_ATTEMPT_TIMEOUT_MS: u64 = 60_000;
+    const MAXIMUM_DEFAULT_BACKOFF_MS: u64 = 1_250 + 2_500 + 5_000;
+    let default_retry_budget_ms =
+        DEFAULT_ATTEMPT_COUNT * DEFAULT_ATTEMPT_TIMEOUT_MS + MAXIMUM_DEFAULT_BACKOFF_MS;
 
-    assert!(FINALIZATION_DEADLINE_MS < lease_ms);
+    assert!(FINALIZATION_DEADLINE_MS > default_retry_budget_ms);
 }
 
 #[test]

@@ -1,4 +1,3 @@
-
 use super::*;
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
 use ironclaw_host_api::output::OutputContract;
@@ -10,11 +9,15 @@ use ironclaw_loop_contracts::{
     SystemInferenceTaskId, SystemPromptSource, SystemTaskKind,
 };
 use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
-use std::sync::Mutex;
+use std::sync::{
+    Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 use tokio::sync::Notify;
 
 struct RecordingGateway {
     request: Mutex<Option<HostManagedModelRequest>>,
+    progress_requests: AtomicUsize,
     response: Result<crate::HostManagedModelResponse, crate::HostManagedModelError>,
 }
 
@@ -28,6 +31,7 @@ impl RecordingGateway {
     ) -> Self {
         Self {
             request: Mutex::new(None),
+            progress_requests: AtomicUsize::new(0),
             response,
         }
     }
@@ -43,6 +47,10 @@ impl RecordingGateway {
     fn request_was_recorded(&self) -> bool {
         self.request.lock().expect("lock").is_some()
     }
+
+    fn progress_requests(&self) -> usize {
+        self.progress_requests.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait]
@@ -51,6 +59,16 @@ impl HostManagedModelGateway for RecordingGateway {
         &self,
         request: HostManagedModelRequest,
     ) -> Result<crate::HostManagedModelResponse, crate::HostManagedModelError> {
+        *self.request.lock().expect("lock") = Some(request);
+        self.response.clone()
+    }
+
+    async fn stream_model_with_progress(
+        &self,
+        request: HostManagedModelRequest,
+        _sink: Arc<dyn crate::HostManagedModelStreamSink>,
+    ) -> Result<crate::HostManagedModelResponse, crate::HostManagedModelError> {
+        self.progress_requests.fetch_add(1, Ordering::SeqCst);
         *self.request.lock().expect("lock") = Some(request);
         self.response.clone()
     }
@@ -79,24 +97,22 @@ impl HostManagedModelGateway for PanicGateway {
         &self,
         _request: HostManagedModelRequest,
     ) -> Result<crate::HostManagedModelResponse, crate::HostManagedModelError> {
-        panic!("oversized inference input must fail before gateway dispatch")
+        panic!("test gateway panic")
     }
 }
 
-struct DelayedInferencePort {
+struct PendingInferencePort {
     started: Arc<Notify>,
-    delay: std::time::Duration,
 }
 
 #[async_trait]
-impl SystemInferencePort for DelayedInferencePort {
+impl SystemInferencePort for PendingInferencePort {
     async fn call_system_inference(
         &self,
         _request: SystemInferenceRequest,
     ) -> Result<SystemInferenceResponse, SystemInferenceError> {
         self.started.notify_one();
-        tokio::time::sleep(self.delay).await;
-        Err(SystemInferenceError::Timeout)
+        std::future::pending().await
     }
 }
 
@@ -155,6 +171,8 @@ impl LoopModelBudgetAccountant for RejectingBudgetAccountant {
 struct RecordingBudgetAccountant {
     pre_called: Mutex<bool>,
     post_outcomes: Mutex<Vec<ModelWorkOutcome>>,
+    release_calls: AtomicUsize,
+    fail_post: bool,
 }
 
 #[async_trait]
@@ -182,8 +200,19 @@ impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
             request.kind,
             ironclaw_loop_contracts::ModelWorkKind::SystemInference { .. }
         ));
+        if self.fail_post {
+            return Err(LoopModelGatewayError::new(
+                AgentLoopHostErrorKind::BudgetAccountingFailed,
+                "system inference post-accounting failed",
+            )
+            .expect("safe summary is valid"));
+        }
         self.post_outcomes.lock().expect("lock").push(outcome);
         Ok(())
+    }
+
+    fn release_in_flight(&self, _context: &LoopRunContext) {
+        self.release_calls.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -234,6 +263,7 @@ async fn dispatches_direct_gateway_request_without_prompt_materialization() {
         .expect("system inference succeeds");
 
     assert_eq!(response.output_text, "summary");
+    assert_eq!(gateway.progress_requests(), 0);
     let request = gateway.request();
     assert_eq!(
         request.model_profile_id,
@@ -330,6 +360,7 @@ async fn structured_finalization_uses_native_schema_without_tools() {
 
     assert_eq!(response.output_text, r#"{"items":[]}"#);
     assert_eq!(response.usage, Some(usage));
+    assert_eq!(gateway.progress_requests(), 1);
     let request = gateway.request();
     assert_eq!(request.tool_choice, None);
     assert_eq!(request.messages.len(), 5);
@@ -455,15 +486,15 @@ async fn guarded_system_inference_records_budget_around_gateway_dispatch() {
     let outcomes = accountant.post_outcomes.lock().expect("lock");
     assert_eq!(outcomes.len(), 1);
     assert!(matches!(outcomes[0], ModelWorkOutcome::Success(_)));
+    assert_eq!(accountant.release_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
 async fn guarded_system_inference_reconciles_when_outer_future_is_cancelled() {
     let context = test_run_context("system-inference-outer-cancel").await;
     let started = Arc::new(Notify::new());
-    let direct: Arc<dyn SystemInferencePort> = Arc::new(DelayedInferencePort {
+    let direct: Arc<dyn SystemInferencePort> = Arc::new(PendingInferencePort {
         started: Arc::clone(&started),
-        delay: std::time::Duration::from_millis(25),
     });
     let accountant = Arc::new(RecordingBudgetAccountant::default());
     let port = Arc::new(GuardedSystemInferencePort::new(
@@ -483,20 +514,66 @@ async fn guarded_system_inference_reconciles_when_outer_future_is_cancelled() {
     started.notified().await;
     task.abort();
 
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            if !accountant.post_outcomes.lock().expect("lock").is_empty() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("worker should reconcile after outer future cancellation");
+    let task_error = task.await.expect_err("outer task should be cancelled");
+    assert!(task_error.is_cancelled());
 
     let outcomes = accountant.post_outcomes.lock().expect("lock");
-    assert_eq!(outcomes.len(), 1);
-    assert!(matches!(outcomes[0], ModelWorkOutcome::Failure(_)));
+    assert!(outcomes.is_empty());
+    assert_eq!(accountant.release_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn guarded_system_inference_maps_panic_and_releases_reservation() {
+    let context = test_run_context("system-inference-panic").await;
+    let direct: Arc<dyn SystemInferencePort> = Arc::new(
+        ModelGatewayBackedSystemInferencePort::new(Arc::new(PanicGateway), context.clone()),
+    );
+    let accountant = Arc::new(RecordingBudgetAccountant::default());
+    let port = GuardedSystemInferencePort::new(
+        direct,
+        context,
+        accountant.clone(),
+        Arc::new(NoOpPolicyGuard),
+    );
+
+    let error = port
+        .call_system_inference(system_request("transcript"))
+        .await
+        .expect_err("gateway panic should become a safe inference failure");
+
+    assert!(matches!(error, SystemInferenceError::Failed { .. }));
+    assert!(accountant.post_outcomes.lock().expect("lock").is_empty());
+    assert_eq!(accountant.release_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn guarded_system_inference_releases_reservation_when_post_accounting_fails() {
+    let context = test_run_context("system-inference-post-failure").await;
+    let gateway = Arc::new(RecordingGateway::new(
+        crate::HostManagedModelResponse::assistant_reply("summary"),
+    ));
+    let direct: Arc<dyn SystemInferencePort> = Arc::new(
+        ModelGatewayBackedSystemInferencePort::new(gateway, context.clone()),
+    );
+    let accountant = Arc::new(RecordingBudgetAccountant {
+        fail_post: true,
+        ..Default::default()
+    });
+    let port = GuardedSystemInferencePort::new(
+        direct,
+        context,
+        accountant.clone(),
+        Arc::new(NoOpPolicyGuard),
+    );
+
+    let error = port
+        .call_system_inference(system_request("transcript"))
+        .await
+        .expect_err("post-accounting failure should fail inference");
+
+    assert!(matches!(error, SystemInferenceError::Failed { .. }));
+    assert!(accountant.post_outcomes.lock().expect("lock").is_empty());
+    assert_eq!(accountant.release_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

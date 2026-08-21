@@ -26,10 +26,11 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::AgentTurnSpawnTreeRuntimePort;
 
-// Keep a stuck provider call inside the default process lease. Otherwise a
-// successor can legitimately reclaim the run and repeat the final inference
-// before the predecessor reaches its post-inference ownership fence.
-const FINALIZATION_DEADLINE_MS: u64 = 75_000;
+// Bounds the complete finalization operation while leaving room for the
+// default four 60-second transport attempts and their exponential backoffs.
+// The process supervisor heartbeats active execution independently; lease
+// fences below still reject a stale executor before durable publication.
+const FINALIZATION_DEADLINE_MS: u64 = 300_000;
 
 #[async_trait]
 pub(crate) trait StructuredFinalizationPort: Send + Sync {

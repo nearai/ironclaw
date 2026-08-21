@@ -983,6 +983,13 @@ pub trait LlmProvider: Send + Sync {
 pub trait CompletionStreamSink: Send + Sync {
     async fn text_delta(&self, delta: String);
 
+    /// Whether emitted text is visible outside the provider chain. Decorators
+    /// use this to avoid suppressing safe retries or failover when a caller is
+    /// consuming a stream only for transport progress.
+    fn text_is_visible(&self) -> bool {
+        true
+    }
+
     /// Whether this sink can atomically replace text emitted by a failed
     /// streaming attempt when the replacement attempt produces its first
     /// delta. The default is deliberately false: retrying after visible text

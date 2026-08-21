@@ -1340,7 +1340,7 @@ impl ProviderStreamSink {
 #[async_trait]
 impl CompletionStreamSink for ProviderStreamSink {
     async fn text_delta(&self, delta: String) {
-        if delta.is_empty() {
+        if delta.is_empty() || !self.inner.accepts_safe_text_updates() {
             return;
         }
         let safe_text = {
@@ -1357,15 +1357,24 @@ impl CompletionStreamSink for ProviderStreamSink {
         self.inner.safe_text_update(safe_text).await;
     }
 
+    fn text_is_visible(&self) -> bool {
+        self.inner.accepts_safe_text_updates()
+    }
+
     fn supports_text_replacement(&self) -> bool {
         true
     }
 
     async fn replace_on_next_text_delta(&self) {
-        self.replace_on_next_delta.store(true, Ordering::SeqCst);
+        if self.inner.accepts_safe_text_updates() {
+            self.replace_on_next_delta.store(true, Ordering::SeqCst);
+        }
     }
 
     async fn finish_text_replacement(&self) {
+        if !self.inner.accepts_safe_text_updates() {
+            return;
+        }
         if !self.replace_on_next_delta.swap(false, Ordering::SeqCst) {
             return;
         }
@@ -2877,6 +2886,36 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(safe_text);
         }
+    }
+
+    struct DiscardingSafeTextSink;
+
+    #[async_trait]
+    impl HostManagedModelStreamSink for DiscardingSafeTextSink {
+        fn accepts_safe_text_updates(&self) -> bool {
+            false
+        }
+
+        async fn safe_text_update(&self, _safe_text: String) {
+            panic!("discarding sink must not receive safe text updates");
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_stream_sink_does_not_accumulate_discarded_updates() {
+        let sink = ProviderStreamSink::new(Arc::new(DiscardingSafeTextSink));
+
+        sink.text_delta("partial".to_string()).await;
+        sink.replace_on_next_text_delta().await;
+        sink.finish_text_replacement().await;
+
+        assert!(
+            sink.accumulated_text
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        );
+        assert!(!sink.replace_on_next_delta.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

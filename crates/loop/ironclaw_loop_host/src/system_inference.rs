@@ -1,7 +1,9 @@
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use futures::FutureExt;
 use ironclaw_loop_contracts::{
     AgentLoopHostErrorKind, LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelPolicyGuard,
     LoopRunContext, LoopSafeSummary, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput,
@@ -11,7 +13,7 @@ use ironclaw_loop_contracts::{
 
 use crate::{
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
-    HostManagedModelMessageRole, HostManagedModelRequest,
+    HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelStreamSink,
     token_estimator::estimate_tokens_from_chars,
 };
 use ironclaw_host_api::output::OutputContract;
@@ -62,6 +64,47 @@ impl GuardedSystemInferencePort {
     }
 }
 
+/// Releases a successful pre-model-work reservation if the caller cancels
+/// before post-model accounting completes.
+struct SystemInferenceReservationReleaseGuard<'a> {
+    accountant: &'a dyn LoopModelBudgetAccountant,
+    context: &'a LoopRunContext,
+    armed: bool,
+}
+
+impl<'a> SystemInferenceReservationReleaseGuard<'a> {
+    fn new(accountant: &'a dyn LoopModelBudgetAccountant, context: &'a LoopRunContext) -> Self {
+        Self {
+            accountant,
+            context,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SystemInferenceReservationReleaseGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.accountant.release_in_flight(self.context);
+        }
+    }
+}
+
+struct DiscardSystemInferenceProgress;
+
+#[async_trait]
+impl HostManagedModelStreamSink for DiscardSystemInferenceProgress {
+    fn accepts_safe_text_updates(&self) -> bool {
+        false
+    }
+
+    async fn safe_text_update(&self, _safe_text: String) {}
+}
+
 #[async_trait]
 impl SystemInferencePort for GuardedSystemInferencePort {
     async fn call_system_inference(
@@ -85,31 +128,41 @@ impl SystemInferencePort for GuardedSystemInferencePort {
             return Err(map_gateway_error(error));
         }
 
-        let inner = Arc::clone(&self.inner);
-        let accountant = Arc::clone(&self.accountant);
-        let run_context = self.run_context.clone();
-        let worker_request = work_request.clone();
-        tokio::spawn(async move {
-            let result = inner.call_system_inference(request).await;
-            let outcome = ModelWorkOutcome::from_system_inference_result(&result);
-            if let Err(error) = accountant
-                .post_model_work(&run_context, &worker_request, outcome)
-                .await
-            {
-                return Err(map_gateway_error(error));
-            }
-            result
-        })
-        .await
-        .map_err(|error| {
-            tracing::debug!(
-                error = %error,
-                "system inference worker failed before post-model accounting completed"
-            );
-            SystemInferenceError::Failed {
-                safe_summary: safe("system inference task failed"),
-            }
-        })?
+        let mut release_guard = SystemInferenceReservationReleaseGuard::new(
+            self.accountant.as_ref(),
+            &self.run_context,
+        );
+        let result = AssertUnwindSafe(self.inner.call_system_inference(request))
+            .catch_unwind()
+            .await
+            .map_err(|panic| {
+                let (panic_payload_kind, panic_payload_length) =
+                    if let Some(message) = panic.downcast_ref::<&str>() {
+                        ("static-string", message.len())
+                    } else if let Some(message) = panic.downcast_ref::<String>() {
+                        ("owned-string", message.len())
+                    } else {
+                        ("non-string", 0)
+                    };
+                tracing::debug!(
+                    panic_payload_kind,
+                    panic_payload_length,
+                    "system inference worker failed before post-model accounting completed"
+                );
+                SystemInferenceError::Failed {
+                    safe_summary: safe("system inference task failed"),
+                }
+            })?;
+        let outcome = ModelWorkOutcome::from_system_inference_result(&result);
+        if let Err(error) = self
+            .accountant
+            .post_model_work(&self.run_context, &work_request, outcome)
+            .await
+        {
+            return Err(map_gateway_error(error));
+        }
+        release_guard.disarm();
+        result
     }
 }
 
@@ -135,6 +188,10 @@ where
         }
 
         let started = Instant::now();
+        let use_streaming_transport = matches!(
+            request.identity.task_kind,
+            ironclaw_loop_contracts::SystemTaskKind::StructuredOutputFinalization
+        );
         let response_format = match (request.identity.task_kind, request.output_contract.as_ref()) {
             (
                 ironclaw_loop_contracts::SystemTaskKind::StructuredOutputFinalization,
@@ -232,9 +289,16 @@ where
         };
         let requested_fallback_index = model_request.fallback_index;
 
+        let model_call = if use_streaming_transport {
+            self.gateway
+                .stream_model_with_progress(model_request, Arc::new(DiscardSystemInferenceProgress))
+                .boxed()
+        } else {
+            self.gateway.stream_model(model_request).boxed()
+        };
         let response = tokio::time::timeout(
             std::time::Duration::from_millis(request.deadline_ms),
-            self.gateway.stream_model(model_request),
+            model_call,
         )
         .await
         .map_err(|_| SystemInferenceError::Timeout)?

@@ -2350,6 +2350,13 @@ pub trait HostManagedModelGateway: Send + Sync {
 
 #[async_trait::async_trait]
 pub trait HostManagedModelStreamSink: Send + Sync {
+    /// Whether streamed text should be accumulated, sanitized, and delivered.
+    /// Sinks that only select provider streaming may opt out while retaining
+    /// the retry wrapper's safe replacement semantics.
+    fn accepts_safe_text_updates(&self) -> bool {
+        true
+    }
+
     async fn safe_text_update(&self, safe_text: String);
 }
 
