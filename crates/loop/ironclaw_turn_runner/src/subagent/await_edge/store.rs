@@ -769,6 +769,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_delivery_chain_refuses_to_skip_the_append() {
+        let (store, journal) = new_store();
+        let (scope, parent, child) = settled_background_edge(&store, &journal).await;
+
+        // Attention before the result is durably appended would make the parent
+        // attentive to nothing. The expected-state CAS refuses it, and the
+        // store propagates that refusal with the kernel's cause intact.
+        let error = store
+            .record_attention(&scope, parent, child, AttentionOutcome::Activated)
+            .await
+            .expect_err("attention before the append must be refused");
+        let AwaitEdgeStoreError::Backend { reason } = &error;
+        assert!(
+            reason.contains("expected state") && reason.contains("Settled"),
+            "refusal must carry the kernel's cause, got: {reason}"
+        );
+
+        assert_eq!(
+            store
+                .peek(&scope, parent, child)
+                .await
+                .expect("peek edge")
+                .expect("edge exists")
+                .state,
+            AwaitEdgeState::Settled,
+            "a refused transition must leave the edge exactly where it was"
+        );
+    }
+
+    #[tokio::test]
     async fn recording_an_append_twice_keeps_the_first_ref() {
         let (store, journal) = new_store();
         let (scope, parent, child) = settled_background_edge(&store, &journal).await;
