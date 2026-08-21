@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { Decorator } from "@storybook/react-vite";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
+import { renderToStaticMarkup } from "react-dom/server";
 import { test, vi } from "vitest";
 
 import { withStubbedFetch } from "./storybook-decorators";
@@ -111,6 +112,65 @@ test("passthrough is opt-in, and only reaches the network for unmatched routes",
       await window.fetch("https://host/elsewhere");
     });
     assert.equal(realFetch.mock.calls.length, 1);
+  } finally {
+    await act(async () => root.unmount());
+    window.fetch = originalFetch;
+    container.remove();
+  }
+});
+
+test("the render phase never installs the stub — only a committed mount does", () => {
+  const realFetch = vi.fn(async () => new Response("REAL BACKEND"));
+  const originalFetch = window.fetch;
+  window.fetch = realFetch as unknown as typeof window.fetch;
+
+  const Alpha = storyComponent(
+    withStubbedFetch([{ match: "/alpha", json: { from: "alpha" } }]),
+    () => <span>alpha</span>,
+  );
+
+  // `renderToStaticMarkup` runs the render phase and stops, which is what an
+  // abandoned render (interrupted, suspended, or thrown out) does. Such a
+  // render schedules no cleanup, so a render-phase install would strand a stub
+  // on `window.fetch` with nothing left to ever remove it.
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    renderToStaticMarkup(<Alpha />);
+    assert.equal(window.fetch, realFetch, "an uncommitted render must not touch window.fetch");
+  } finally {
+    consoleError.mockRestore();
+    window.fetch = originalFetch;
+  }
+});
+
+test("a Request input is matched on its own method, not treated as GET", async () => {
+  const realFetch = vi.fn(async () => new Response("REAL BACKEND"));
+  const originalFetch = window.fetch;
+  window.fetch = realFetch as unknown as typeof window.fetch;
+
+  const Minting = storyComponent(
+    withStubbedFetch([
+      { match: "/pairing", json: { from: "status" } },
+      { match: "/pairing", method: "POST", json: { from: "mint" } },
+    ]),
+    () => <span>minting</span>,
+  );
+
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+
+  try {
+    await act(async () => root.render(<Minting />));
+
+    // The method rides on the Request, not on `init` — reading only `init`
+    // would fall through to the GET route and serve the wrong body.
+    const posted = await window.fetch(new Request("https://host/pairing", { method: "POST" }));
+    assert.deepEqual(await posted.json(), { from: "mint" });
+
+    const got = await window.fetch(new Request("https://host/pairing"));
+    assert.deepEqual(await got.json(), { from: "status" });
+    assert.equal(realFetch.mock.calls.length, 0);
   } finally {
     await act(async () => root.unmount());
     window.fetch = originalFetch;
