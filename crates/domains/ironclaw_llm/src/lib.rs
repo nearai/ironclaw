@@ -683,7 +683,7 @@ fn create_deepseek_from_registry(
     Ok(Arc::new(
         RigAdapter::new(model, &config.model)
             .with_provider_id(config.provider_id.clone())
-            // rig-core 0.33's DeepSeek request serializer silently omits
+            // rig-core 0.36's DeepSeek request serializer silently omits
             // `output_schema`; reject structured-output requests at the
             // provider boundary instead of claiming the contract was sent.
             .with_structured_output_support(false)
@@ -779,7 +779,7 @@ fn create_openrouter_from_registry(
     Ok(Arc::new(
         RigAdapter::new(model, &config.model)
             .with_provider_id(config.provider_id.clone())
-            // rig-core 0.33's OpenRouter request serializer silently omits
+            // rig-core 0.36's OpenRouter request serializer silently omits
             // `output_schema`; reject structured-output requests at the
             // provider boundary instead of claiming the contract was sent.
             .with_structured_output_support(false)
@@ -2060,10 +2060,9 @@ mod tests {
             .expect("registry provider construction succeeds");
 
         let response = provider
-            .complete_with_tools(ToolCompletionRequest::new(
-                vec![ChatMessage::user("Inspect the tools")],
-                Vec::new(),
-            ))
+            .complete(CompletionRequest::new(vec![ChatMessage::user(
+                "Inspect the tools",
+            )]))
             .await
             .expect("reasoning-only response must not be classified as empty");
         server.await.expect("loopback server task");
@@ -2072,8 +2071,7 @@ mod tests {
             response.reasoning.as_deref(),
             Some("I should inspect the available tools first.")
         );
-        assert!(response.content.is_none());
-        assert!(response.tool_calls.is_empty());
+        assert!(response.content.is_empty());
     }
 
     #[test]

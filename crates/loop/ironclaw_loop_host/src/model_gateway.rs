@@ -1938,7 +1938,8 @@ async fn tool_response_to_host(
     match response.finish_reason {
         FinishReason::Stop => {
             let content = clean_response(&response.content.unwrap_or_default());
-            if content.trim().is_empty() {
+            let reasoning = response.reasoning.filter(|value| !value.trim().is_empty());
+            if content.trim().is_empty() && reasoning.is_none() {
                 return Err(HostManagedModelError::safe(
                     HostManagedModelErrorKind::InvalidOutput,
                     InvalidOutputReason::EmptyAssistantResponse.safe_summary(),
@@ -1948,16 +1949,15 @@ async fn tool_response_to_host(
                 content_bytes = content.len(),
                 "reborn model gateway classified tool-capable provider response as assistant reply"
             );
-            Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
-                content,
-                response.reasoning,
+            Ok(
+                HostManagedModelResponse::assistant_reply_with_reasoning(content, reasoning)
+                    .with_usage(LoopModelUsage {
+                        input_tokens: response.input_tokens,
+                        output_tokens: response.output_tokens,
+                        cache_read_input_tokens: response.cache_read_input_tokens,
+                        cache_creation_input_tokens: response.cache_creation_input_tokens,
+                    }),
             )
-            .with_usage(LoopModelUsage {
-                input_tokens: response.input_tokens,
-                output_tokens: response.output_tokens,
-                cache_read_input_tokens: response.cache_read_input_tokens,
-                cache_creation_input_tokens: response.cache_creation_input_tokens,
-            }))
         }
         FinishReason::Length => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::OutputTruncated,
