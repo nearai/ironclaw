@@ -13,18 +13,22 @@ use std::sync::{Arc, OnceLock, RwLock};
 #[cfg(test)]
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_host_api::ids::UserId;
-use ironclaw_host_api::turn::{IdempotencyKey, TurnRunId, TurnScope, TurnStatus};
+use ironclaw_host_api::turn::{IdempotencyKey, LoopMessageRef, TurnRunId, TurnScope, TurnStatus};
 #[cfg(test)]
 use ironclaw_host_api::turn::{TurnActor, TurnGateRef};
-use ironclaw_loop_contracts::{AgentLoopHostError, LoopRunContext};
+use ironclaw_loop_contracts::{AgentLoopHostError, LoopInput, LoopRunContext};
 #[cfg(test)]
 use ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID;
-use ironclaw_loop_host::{AwaitEdgeSettler, HostInputEnqueuePort, ResolveOutcome};
+use ironclaw_loop_host::{
+    AwaitEdgeSettler, EnqueueQueuedMessageRequest, HostInputEnqueuePort, HostInputQueueError,
+    ResolveOutcome, SpawnSubagentMode,
+};
 #[cfg(test)]
 use ironclaw_threads::ThreadHistoryRequest;
 use ironclaw_threads::{
-    LatestThreadMessageRequest, MessageKind, MessageStatus, SessionThreadService, ThreadScope,
-    ToolResultSafeSummary, UpdateToolResultReferenceRequest,
+    AcceptSubagentResultRequest, FramedSubagentText, LatestThreadMessageRequest, MessageKind,
+    MessageStatus, SessionThreadService, ThreadMessageId, ThreadScope, ToolResultSafeSummary,
+    UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::{
     AgentTurnSpawnTreeRuntimePort, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
@@ -563,6 +567,149 @@ where
         Ok(())
     }
 
+    /// Background-mode delivery tail (Task 5, 2b): append the settled
+    /// child's framed result to the parent's transcript, then — for a live,
+    /// non-terminal parent run only — enqueue it as steering input. Never
+    /// resumes a blocked parent; that is `resume_parent`'s job, exclusive to
+    /// the blocking-mode `drain_settled_group` path. A background parent
+    /// that has no live run right now, or whose enqueue itself refuses,
+    /// stays parked in `ResultAppended` rather than erroring — Task 6 (2c)
+    /// adds the parked-parent activation path that later drains it.
+    async fn deliver_background(
+        &self,
+        edge: &AwaitEdge,
+        parent_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+    ) -> Result<ResolveOutcome, TurnError> {
+        let owner_user_id = edge
+            .parent_run_context
+            .actor
+            .clone()
+            .map(|actor| actor.user_id);
+
+        // Step 1: append (idempotent). A re-peeked edge that already carries
+        // `appended_message_ref` means a prior attempt already landed the
+        // parent-thread row (e.g. a crash between acceptance and
+        // `record_result_appended`, or a benign re-drive) — reuse it instead
+        // of accepting a second row.
+        let message_ref = match edge.appended_message_ref.clone() {
+            Some(existing) => existing,
+            None => {
+                let status = edge
+                    .terminal_kind
+                    .map(EdgeTerminalKind::to_status)
+                    .unwrap_or(TurnStatus::Completed);
+                let output = self
+                    .child_terminal_output(
+                        edge,
+                        owner_user_id.clone(),
+                        status,
+                        edge.terminal_reason.clone(),
+                    )
+                    .await?;
+                let raw_text = output
+                    .final_text
+                    .clone()
+                    .or_else(|| output.failure_summary.clone())
+                    .unwrap_or_else(|| {
+                        format!("Subagent finished with status {}", status_label(status))
+                    });
+                let framed = FramedSubagentText::frame(raw_text);
+                let parent_scope = background_parent_thread_scope(edge, owner_user_id.clone())?;
+                let accepted = self
+                    .thread_service
+                    .accept_subagent_result(AcceptSubagentResultRequest {
+                        scope: parent_scope,
+                        thread_id: edge.parent_thread_id.clone(),
+                        source_binding_id: format!("subagent-result:{parent_run_id}"),
+                        external_event_id: child_run_id.to_string(),
+                        content: framed,
+                    })
+                    .await
+                    .map_err(|error| TurnError::Unavailable {
+                        reason: format!("subagent background result acceptance failed: {error}"),
+                    })?;
+                let message_ref = LoopMessageRef::new(format!("msg:{}", accepted.message_id))
+                    .map_err(|reason| TurnError::InvalidRequest { reason })?;
+                self.store
+                    .record_result_appended(
+                        &edge.child_scope,
+                        parent_run_id,
+                        child_run_id,
+                        message_ref.clone(),
+                    )
+                    .await
+                    .map_err(store_error)?;
+                message_ref
+            }
+        };
+
+        // Step 2: attend.
+        let live_record = self
+            .agent_turn_runtime()?
+            .recent_runs_for_thread(&edge.parent_run_context.scope, 1)
+            .await?
+            .into_iter()
+            .next()
+            .filter(|record| !record.status.is_terminal());
+        let Some(record) = live_record else {
+            // Task 6 (2c): parked-parent activation lands here.
+            return Ok(ResolveOutcome::Drained);
+        };
+        let Some(enqueue_port) = self.input_enqueue.get() else {
+            // Task 6 (2c): parked-parent activation lands here.
+            return Ok(ResolveOutcome::Drained);
+        };
+        let message_id = parse_appended_message_id(&message_ref)?;
+        let parent_scope = background_parent_thread_scope(edge, owner_user_id)?;
+        let enqueue_result = enqueue_port
+            .enqueue_queued_message(EnqueueQueuedMessageRequest {
+                run_id: record.run_id,
+                turn_id: record.turn_id,
+                scope: parent_scope,
+                thread_id: edge.parent_thread_id.clone(),
+                message_id,
+                input: LoopInput::SubagentSettled {
+                    child_run_id,
+                    message_ref: message_ref.clone(),
+                },
+            })
+            .await;
+        match enqueue_result {
+            Ok(_) => {}
+            Err(
+                HostInputQueueError::RunClosed
+                | HostInputQueueError::CapacityExhausted
+                | HostInputQueueError::Disabled,
+            ) => {
+                // Task 6 (2c): parked-parent activation lands here.
+                return Ok(ResolveOutcome::Drained);
+            }
+            Err(error) => {
+                return Err(TurnError::Unavailable {
+                    reason: format!("subagent background result enqueue failed: {error}"),
+                });
+            }
+        }
+        self.store
+            .record_attention(
+                &edge.child_scope,
+                parent_run_id,
+                child_run_id,
+                super::AttentionOutcome::Queued,
+            )
+            .await
+            .map_err(store_error)?;
+
+        // Step 3: close only from `AttentionScheduled`.
+        self.store
+            .close(&edge.child_scope, parent_run_id, child_run_id)
+            .await
+            .map_err(store_error)?;
+
+        Ok(ResolveOutcome::Drained)
+    }
+
     /// Drives one child terminal event through settle -> (group-ready?) ->
     /// write-result -> resume -> consume.
     pub async fn handle_child_terminal(
@@ -668,6 +815,25 @@ where
                 )
                 .await
                 .map_err(store_error)?;
+        }
+
+        if edge.mode == SpawnSubagentMode::Background {
+            // Re-peek: the settle write above (or an earlier settle, on a
+            // replay where `edge.state` was already past `Open`) may have
+            // moved the edge past the snapshot captured before this branch —
+            // `deliver_background` needs the settled `terminal_kind`/
+            // `terminal_reason`, not the pre-settle values.
+            let Some(settled_edge) = self
+                .store
+                .peek(child_scope, parent_run_id, child_run_id)
+                .await
+                .map_err(store_error)?
+            else {
+                return Ok(ResolveOutcome::AlreadyClosed);
+            };
+            return self
+                .deliver_background(&settled_edge, parent_run_id, child_run_id)
+                .await;
         }
 
         self.drain_settled_group(child_scope, parent_run_id, child_run_id)
@@ -789,6 +955,54 @@ fn store_error(error: super::AwaitEdgeStoreError) -> TurnError {
     TurnError::Unavailable {
         reason: error.to_string(),
     }
+}
+
+/// The parent `ThreadScope` for background-mode delivery (Task 5, 2b),
+/// sourced from `edge.parent_run_context.scope` — the same shape
+/// `update_parent_result_reference` builds (tenant/agent/project +
+/// caller-supplied owner, no mission), but off the parent's own scope
+/// instead of the child's. The blocking-mode path derives its `ThreadScope`
+/// from `edge.child_scope` because it only ever needs the same
+/// tenant/agent/project axes the child shares; background delivery writes
+/// and reads the parent's own thread, so it anchors to the parent's own
+/// scope directly rather than assuming the two coincide.
+fn background_parent_thread_scope(
+    edge: &AwaitEdge,
+    owner_user_id: Option<UserId>,
+) -> Result<ThreadScope, TurnError> {
+    let scope = &edge.parent_run_context.scope;
+    let Some(agent_id) = scope.agent_id.clone() else {
+        return Err(TurnError::InvalidRequest {
+            reason: "parent run context scope missing agent id for subagent result delivery"
+                .to_string(),
+        });
+    };
+    Ok(ThreadScope {
+        tenant_id: scope.tenant_id.clone(),
+        agent_id,
+        project_id: scope.project_id.clone(),
+        owner_user_id,
+        mission_id: None,
+    })
+}
+
+/// Recover the transcript `ThreadMessageId` a `LoopMessageRef` points at —
+/// the same `msg:{id}` convention `structured_finalization.rs` and
+/// `loop_exit_applier.rs` already parse.
+fn parse_appended_message_id(message_ref: &LoopMessageRef) -> Result<ThreadMessageId, TurnError> {
+    let raw =
+        message_ref
+            .as_str()
+            .strip_prefix("msg:")
+            .ok_or_else(|| TurnError::InvalidRequest {
+                reason: "subagent result message ref is not a transcript message reference"
+                    .to_string(),
+            })?;
+    ThreadMessageId::parse(raw).map_err(|error| TurnError::InvalidRequest {
+        reason: format!(
+            "subagent result message ref is not a valid transcript message id: {error}"
+        ),
+    })
 }
 
 /// §5.2's benign already-closed set for a resume attempt pinned to
@@ -1858,6 +2072,938 @@ mod tests {
             summaries.iter().any(|summary| summary.contains("failed")),
             "failed child keeps its own terminal status: {summaries:?}"
         );
+    }
+
+    // ─── Task 5 (2b): `deliver_background` — append + live-run enqueue tail ──
+
+    #[derive(Debug, Clone, Copy)]
+    enum EnqueueRefusal {
+        RunClosed,
+        CapacityExhausted,
+    }
+
+    struct RecordingEnqueue {
+        requests: std::sync::Mutex<Vec<EnqueueQueuedMessageRequest>>,
+        refusal: Option<EnqueueRefusal>,
+    }
+
+    impl RecordingEnqueue {
+        fn accepting() -> Self {
+            Self {
+                requests: std::sync::Mutex::new(Vec::new()),
+                refusal: None,
+            }
+        }
+
+        fn refusing(refusal: EnqueueRefusal) -> Self {
+            Self {
+                requests: std::sync::Mutex::new(Vec::new()),
+                refusal: Some(refusal),
+            }
+        }
+
+        fn requests(&self) -> Vec<EnqueueQueuedMessageRequest> {
+            self.requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HostInputEnqueuePort for RecordingEnqueue {
+        async fn enqueue_queued_message(
+            &self,
+            request: EnqueueQueuedMessageRequest,
+        ) -> Result<ironclaw_loop_host::HostInputEnvelope, HostInputQueueError> {
+            let input = request.input.clone();
+            self.requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request);
+            match self.refusal {
+                None => Ok(ironclaw_loop_host::HostInputEnvelope {
+                    input,
+                    cursor: ironclaw_loop_contracts::LoopInputCursorToken::origin(),
+                    ack_token: ironclaw_loop_contracts::LoopInputAckToken::new("input-ack:1")
+                        .expect("ack token"),
+                }),
+                Some(EnqueueRefusal::RunClosed) => Err(HostInputQueueError::RunClosed),
+                Some(EnqueueRefusal::CapacityExhausted) => {
+                    Err(HostInputQueueError::CapacityExhausted)
+                }
+            }
+        }
+    }
+
+    /// Fails one scripted `transition_process_dependency` call per armed
+    /// target state, and/or one scripted `consume_process_dependency` call —
+    /// simulating a crash between a durable side effect (thread acceptance,
+    /// a successful enqueue) and the store CAS that would have recorded it.
+    /// Every other call passes straight through to `inner`.
+    struct ScriptedDependencyFailures {
+        inner: Arc<
+            dyn ironclaw_processes::ProcessDependencyPort<
+                    Error = ironclaw_processes::ProcessJournalStoreError,
+                >,
+        >,
+        fail_transition_once: std::sync::Mutex<Vec<ironclaw_processes::ProcessDependencyState>>,
+        fail_consume_once: std::sync::atomic::AtomicBool,
+    }
+
+    impl ScriptedDependencyFailures {
+        fn new(
+            inner: Arc<
+                dyn ironclaw_processes::ProcessDependencyPort<
+                        Error = ironclaw_processes::ProcessJournalStoreError,
+                    >,
+            >,
+        ) -> Self {
+            Self {
+                inner,
+                fail_transition_once: std::sync::Mutex::new(Vec::new()),
+                fail_consume_once: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn fail_transition_once_for(
+            self,
+            state: ironclaw_processes::ProcessDependencyState,
+        ) -> Self {
+            self.fail_transition_once
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(state);
+            self
+        }
+
+        fn fail_consume_once(self) -> Self {
+            self.fail_consume_once
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ironclaw_processes::ProcessDependencyPort for ScriptedDependencyFailures {
+        type Error = ironclaw_processes::ProcessJournalStoreError;
+
+        async fn open_process_dependency(
+            &self,
+            request: ironclaw_processes::OpenProcessDependencyRequest,
+        ) -> Result<ironclaw_processes::ProcessDependencyRecord, Self::Error> {
+            self.inner.open_process_dependency(request).await
+        }
+
+        async fn settle_process_dependency(
+            &self,
+            request: ironclaw_processes::SettleProcessDependencyRequest,
+        ) -> Result<Option<ironclaw_processes::ProcessDependencyRecord>, Self::Error> {
+            self.inner.settle_process_dependency(request).await
+        }
+
+        async fn consume_process_dependency(
+            &self,
+            request: ironclaw_processes::CloseProcessDependencyRequest,
+        ) -> Result<Option<ironclaw_processes::ProcessDependencyRecord>, Self::Error> {
+            if self
+                .fail_consume_once
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(
+                    ironclaw_processes::ProcessJournalStoreError::InvalidRequest(
+                        "scripted consume failure".to_string(),
+                    ),
+                );
+            }
+            self.inner.consume_process_dependency(request).await
+        }
+
+        async fn abandon_process_dependency(
+            &self,
+            request: ironclaw_processes::CloseProcessDependencyRequest,
+        ) -> Result<Option<ironclaw_processes::ProcessDependencyRecord>, Self::Error> {
+            self.inner.abandon_process_dependency(request).await
+        }
+
+        async fn transition_process_dependency(
+            &self,
+            request: ironclaw_processes::TransitionProcessDependencyRequest,
+        ) -> Result<Option<ironclaw_processes::ProcessDependencyRecord>, Self::Error> {
+            let should_fail = {
+                let mut armed = self
+                    .fail_transition_once
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Some(index) = armed.iter().position(|state| *state == request.next) {
+                    armed.remove(index);
+                    true
+                } else {
+                    false
+                }
+            };
+            if should_fail {
+                return Err(
+                    ironclaw_processes::ProcessJournalStoreError::InvalidRequest(format!(
+                        "scripted transition failure for {:?}",
+                        request.next
+                    )),
+                );
+            }
+            self.inner.transition_process_dependency(request).await
+        }
+
+        async fn query_process_dependencies(
+            &self,
+            request: ironclaw_processes::ProcessDependencyQuery,
+        ) -> Result<Vec<ironclaw_processes::ProcessDependencyRecord>, Self::Error> {
+            self.inner.query_process_dependencies(request).await
+        }
+
+        async fn unresolved_process_dependencies(
+            &self,
+        ) -> Result<Vec<ironclaw_processes::ProcessDependencyRecord>, Self::Error> {
+            self.inner.unresolved_process_dependencies().await
+        }
+    }
+
+    /// Stub `AgentTurnSpawnTreeRuntimePort`: `get_run_record` always answers
+    /// with the fixture's child record (`handle_child_terminal_inner`'s
+    /// lookup), and `recent_runs_for_thread` answers with a configured
+    /// live-parent window (`deliver_background`'s attend step) — no process
+    /// journal involved, unlike the child/parent turn records themselves,
+    /// which the fixture submits through the real journal so the await-edge
+    /// machinery has something real to settle/append/attend/close.
+    struct StubBackgroundRuntime {
+        child_record: TurnRunRecord,
+        recent_runs: Vec<TurnRunRecord>,
+    }
+
+    #[async_trait::async_trait]
+    impl ironclaw_turns::AgentTurnRuntimePort for StubBackgroundRuntime {
+        async fn submit_turn(
+            &self,
+            _request: ironclaw_turns::SubmitTurnRequest,
+            _admission_policy: &dyn ironclaw_turns::TurnAdmissionPolicy,
+            _run_profile_resolver: &dyn ironclaw_loop_contracts::RunProfileResolver,
+        ) -> Result<ironclaw_turns::SubmitTurnResponse, TurnError> {
+            unreachable!("background delivery tests do not submit turns")
+        }
+
+        async fn resume_turn(
+            &self,
+            _request: ResumeTurnRequest,
+        ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
+            unreachable!("background delivery tests do not resume turns")
+        }
+
+        async fn retry_turn(
+            &self,
+            request: ironclaw_turns::RetryTurnRequest,
+        ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+            Err(TurnError::RunNotRetryable {
+                run_id: request.run_id,
+            })
+        }
+
+        async fn request_cancel(
+            &self,
+            _request: ironclaw_turns::CancelRunRequest,
+        ) -> Result<ironclaw_turns::CancelRunResponse, TurnError> {
+            unreachable!("background delivery tests do not cancel")
+        }
+
+        async fn get_run_state(
+            &self,
+            _request: GetRunStateRequest,
+        ) -> Result<ironclaw_turns::TurnRunState, TurnError> {
+            unreachable!("background delivery tests do not get run state")
+        }
+
+        async fn recent_runs_for_thread(
+            &self,
+            _scope: &TurnScope,
+            _limit: u32,
+        ) -> Result<Vec<TurnRunRecord>, TurnError> {
+            Ok(self.recent_runs.clone())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentTurnSpawnTreeRuntimePort for StubBackgroundRuntime {
+        async fn submit_child_turn(
+            &self,
+            _request: ironclaw_turns::SubmitChildRunRequest,
+            _admission_policy: &dyn ironclaw_turns::TurnAdmissionPolicy,
+            _run_profile_resolver: &dyn ironclaw_loop_contracts::RunProfileResolver,
+        ) -> Result<ironclaw_turns::SubmitTurnResponse, TurnError> {
+            unreachable!("background delivery tests do not submit child turns")
+        }
+
+        async fn children_of(
+            &self,
+            _scope: &TurnScope,
+            _run_id: TurnRunId,
+        ) -> Result<Vec<TurnRunRecord>, TurnError> {
+            Ok(Vec::new())
+        }
+
+        async fn get_run_record(
+            &self,
+            _scope: &TurnScope,
+            _run_id: TurnRunId,
+        ) -> Result<Option<TurnRunRecord>, TurnError> {
+            Ok(Some(self.child_record.clone()))
+        }
+
+        async fn reserve_tree_descendants(
+            &self,
+            scope: &TurnScope,
+            root_run_id: TurnRunId,
+            delta: u32,
+            _cap: u32,
+        ) -> Result<ironclaw_turns::SpawnTreeReservation, TurnError> {
+            Ok(ironclaw_turns::SpawnTreeReservation {
+                scope: scope.clone(),
+                root_run_id,
+                descendant_count: u64::from(delta),
+                released_children: std::collections::BTreeSet::new(),
+            })
+        }
+
+        async fn release_tree_descendants(
+            &self,
+            _scope: &TurnScope,
+            _root_run_id: TurnRunId,
+            _delta: u32,
+            _idempotency_key: TurnRunId,
+        ) -> Result<(), TurnError> {
+            Ok(())
+        }
+
+        async fn prune_released_child(
+            &self,
+            _scope: &TurnScope,
+            _root_run_id: TurnRunId,
+            _child_run_id: TurnRunId,
+        ) -> Result<(), TurnError> {
+            Ok(())
+        }
+    }
+
+    struct BgFixture {
+        resolver: Arc<AwaitEdgeResolver<ironclaw_threads::InMemorySessionThreadService>>,
+        edge_store: Arc<AwaitEdgeStore>,
+        thread_service: Arc<ironclaw_threads::InMemorySessionThreadService>,
+        tenant_id: ironclaw_host_api::ids::TenantId,
+        agent_id: ironclaw_host_api::ids::AgentId,
+        owner_user_id: UserId,
+        parent_thread_id: ironclaw_host_api::ids::ThreadId,
+        child_scope: TurnScope,
+        parent_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+        event: TurnLifecycleEvent,
+    }
+
+    /// Builds one background-mode await-edge (`Open`, real process journal)
+    /// plus a resolver wired to it: `dependencies` is the (optionally
+    /// scripted) `ProcessDependencyPort` the edge store's CAS writes go
+    /// through, and `live_run` configures the stub runtime's
+    /// `recent_runs_for_thread` answer for the parent's thread — `Some` for a
+    /// live, non-terminal parent run, `None` for no live run at all.
+    async fn bg_fixture(
+        process_store: Arc<
+            ironclaw_processes::ProcessJournalStore<ironclaw_filesystem::InMemoryBackend>,
+        >,
+        dependencies: Arc<
+            dyn ironclaw_processes::ProcessDependencyPort<
+                    Error = ironclaw_processes::ProcessJournalStoreError,
+                >,
+        >,
+        enqueue: Arc<RecordingEnqueue>,
+        live_run: Option<(TurnRunId, ironclaw_host_api::turn::TurnId)>,
+    ) -> BgFixture {
+        use ironclaw_host_api::ids::{AgentId, ProcessId, TenantId, ThreadId};
+        use ironclaw_processes::{
+            ProcessDependencySubmission, ProcessKind, ProcessOperationId, ProcessSubmissionPort,
+            SubmitProcessRequest,
+        };
+        use ironclaw_threads::{
+            AppendFinalizedAssistantMessageRequest, EnsureThreadRequest, MessageContent,
+        };
+
+        let tenant_id = TenantId::new("bg-tenant").expect("tenant");
+        let agent_id = AgentId::new("bg-agent").expect("agent");
+        let owner_user_id = UserId::new("bg-owner").expect("owner");
+        let parent_thread_id = ThreadId::new("bg-parent-thread").expect("parent thread");
+        let child_thread_id = ThreadId::new("bg-child-thread").expect("child thread");
+
+        let parent_scope = TurnScope::new_with_owner(
+            tenant_id.clone(),
+            Some(agent_id.clone()),
+            None,
+            parent_thread_id.clone(),
+            Some(owner_user_id.clone()),
+        );
+        let child_scope = TurnScope::new_with_owner(
+            tenant_id.clone(),
+            Some(agent_id.clone()),
+            None,
+            child_thread_id.clone(),
+            Some(owner_user_id.clone()),
+        );
+        let parent_run_id = TurnRunId::new();
+        let child_run_id = TurnRunId::new();
+        let parent_process_id = ProcessId::from_uuid(parent_run_id.as_uuid());
+
+        process_store
+            .submit_process(SubmitProcessRequest {
+                process_id: parent_process_id,
+                process_kind: ProcessKind::AgentTurn,
+                scope: parent_scope.to_resource_scope(),
+                exclusive_within_scope: false,
+                operation_id: None,
+                owner_user_id: Some(owner_user_id.clone()),
+                concurrency_class: None,
+                parent_process_id: None,
+                root_process_id: None,
+                spawn_tree_descendant_cap: None,
+                dependency: None,
+                checkpoint_ref: None,
+                input: None,
+                created_at: chrono::Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .expect("submit parent process");
+
+        let thread_service = Arc::new(ironclaw_threads::InMemorySessionThreadService::default());
+        let thread_scope = ThreadScope {
+            tenant_id: tenant_id.clone(),
+            agent_id: agent_id.clone(),
+            project_id: None,
+            owner_user_id: Some(owner_user_id.clone()),
+            mission_id: None,
+        };
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope.clone(),
+                thread_id: Some(parent_thread_id.clone()),
+                created_by_actor_id: owner_user_id.to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("ensure parent thread");
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope.clone(),
+                thread_id: Some(child_thread_id.clone()),
+                created_by_actor_id: owner_user_id.to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("ensure child thread");
+        thread_service
+            .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+                scope: thread_scope.clone(),
+                thread_id: child_thread_id.clone(),
+                turn_run_id: child_run_id.to_string(),
+                content: MessageContent::text("child background output"),
+            })
+            .await
+            .expect("append child final output");
+
+        let mut parent_context = ironclaw_agent_loop::test_support::test_run_context("bg-parent");
+        parent_context.scope = parent_scope.clone();
+        parent_context.thread_id = parent_thread_id.clone();
+        parent_context.run_id = parent_run_id;
+        parent_context.actor = Some(TurnActor::new(owner_user_id.clone()));
+
+        let gate_ref =
+            TurnGateRef::new(format!("gate:subagent-bg-{child_run_id}")).expect("gate ref");
+        let result_ref =
+            ironclaw_host_api::turn::LoopResultRef::new("result:bg-subagent").expect("result ref");
+        let submitted = ironclaw_loop_host::AwaitedChildSetRecord {
+            gate_ref: gate_ref.clone(),
+            parent_run_context: parent_context.clone(),
+            tree_root_run_id: parent_run_id,
+            child_scope: child_scope.clone(),
+            child_run_id,
+            child_thread_id: child_thread_id.clone(),
+            subagent_kind: ironclaw_loop_host::SubagentKindId::new("general").expect("kind"),
+            spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+                .expect("capability"),
+            spawn_provider_call_id: Some("spawn-call-bg".to_string()),
+            result_ref: result_ref.clone(),
+            mode: SpawnSubagentMode::Background,
+        };
+        process_store
+            .submit_process(SubmitProcessRequest {
+                process_id: ProcessId::from_uuid(child_run_id.as_uuid()),
+                process_kind: ProcessKind::AgentTurn,
+                scope: child_scope.to_resource_scope(),
+                exclusive_within_scope: false,
+                operation_id: Some(ProcessOperationId::from_trusted("bg-child".to_string())),
+                owner_user_id: Some(owner_user_id.clone()),
+                concurrency_class: None,
+                parent_process_id: Some(parent_process_id),
+                root_process_id: Some(parent_process_id),
+                spawn_tree_descendant_cap: Some(2),
+                dependency: Some(ProcessDependencySubmission {
+                    dependent_process_id: parent_process_id,
+                    root_process_id: parent_process_id,
+                    group_ref: Some(gate_ref.as_str().to_string()),
+                    metadata: serde_json::to_value(submitted).expect("edge metadata"),
+                }),
+                checkpoint_ref: None,
+                input: None,
+                created_at: chrono::Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .expect("submit child process");
+
+        let edge_store = Arc::new(AwaitEdgeStore::new(dependencies));
+
+        let child_record = TurnRunRecord {
+            subagent_activation_provenance: None,
+            run_id: child_run_id,
+            turn_id: ironclaw_host_api::turn::TurnId::new(),
+            scope: child_scope.clone(),
+            accepted_message_ref: ironclaw_host_api::turn::AcceptedMessageRef::new("msg:bg-child")
+                .expect("accepted message ref"),
+            status: TurnStatus::Completed,
+            profile: ironclaw_turns::TurnRunProfile::from_resolved(
+                parent_context.resolved_run_profile.clone(),
+            ),
+            output_contract: Default::default(),
+            resolved_model_route: None,
+            model_usage: None,
+            execution_outcome: None,
+            checkpoint_id: None,
+            gate_ref: None,
+            blocked_activity_id: None,
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor: ironclaw_host_api::turn::EventCursor(1),
+            runner_id: None,
+            lease_token: None,
+            lease_expires_at: None,
+            last_heartbeat_at: None,
+            claim_count: 0,
+            received_at: chrono::Utc::now(),
+            parent_run_id: Some(parent_run_id),
+            subagent_depth: 1,
+            spawn_tree_root_run_id: Some(parent_run_id),
+            product_context: None,
+            resume_disposition: None,
+        };
+
+        let recent_runs = match live_run {
+            Some((live_run_id, live_turn_id)) => vec![TurnRunRecord {
+                subagent_activation_provenance: None,
+                run_id: live_run_id,
+                turn_id: live_turn_id,
+                scope: parent_scope.clone(),
+                accepted_message_ref: ironclaw_host_api::turn::AcceptedMessageRef::new(
+                    "msg:bg-live",
+                )
+                .expect("accepted message ref"),
+                status: TurnStatus::Running,
+                profile: ironclaw_turns::TurnRunProfile::from_resolved(
+                    parent_context.resolved_run_profile.clone(),
+                ),
+                output_contract: Default::default(),
+                resolved_model_route: None,
+                model_usage: None,
+                execution_outcome: None,
+                checkpoint_id: None,
+                gate_ref: None,
+                blocked_activity_id: None,
+                credential_requirements: Vec::new(),
+                failure: None,
+                event_cursor: ironclaw_host_api::turn::EventCursor(1),
+                runner_id: None,
+                lease_token: None,
+                lease_expires_at: None,
+                last_heartbeat_at: None,
+                claim_count: 0,
+                received_at: chrono::Utc::now(),
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
+                product_context: None,
+                resume_disposition: None,
+            }],
+            None => Vec::new(),
+        };
+        let runtime = Arc::new(StubBackgroundRuntime {
+            child_record,
+            recent_runs,
+        }) as Arc<dyn AgentTurnSpawnTreeRuntimePort>;
+
+        let result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter> =
+            Arc::new(RecordingUpdateWriter::default());
+
+        let resolver = Arc::new(AwaitEdgeResolver::new_unbound(
+            Arc::clone(&edge_store),
+            runtime,
+            result_writer,
+            Arc::clone(&thread_service),
+        ));
+        resolver
+            .bind_input_enqueue(Arc::clone(&enqueue) as Arc<dyn HostInputEnqueuePort>)
+            .expect("bind input enqueue");
+
+        let event = TurnLifecycleEvent {
+            cursor: ironclaw_host_api::turn::EventCursor(2),
+            scope: child_scope.clone(),
+            occurred_at: Some(chrono::Utc::now()),
+            owner_user_id: Some(owner_user_id.clone()),
+            run_id: child_run_id,
+            status: TurnStatus::Completed,
+            kind: ironclaw_turns::TurnEventKind::Completed,
+            blocked_gate: None,
+            sanitized_reason: None,
+            retryable: None,
+            detail: None,
+        };
+
+        BgFixture {
+            resolver,
+            edge_store,
+            thread_service,
+            tenant_id,
+            agent_id,
+            owner_user_id,
+            parent_thread_id,
+            child_scope,
+            parent_run_id,
+            child_run_id,
+            event,
+        }
+    }
+
+    async fn single_system_message(fixture: &BgFixture) -> ironclaw_threads::ThreadMessageRecord {
+        let history = fixture
+            .thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: ThreadScope {
+                    tenant_id: fixture.tenant_id.clone(),
+                    agent_id: fixture.agent_id.clone(),
+                    project_id: None,
+                    owner_user_id: Some(fixture.owner_user_id.clone()),
+                    mission_id: None,
+                },
+                thread_id: fixture.parent_thread_id.clone(),
+            })
+            .await
+            .expect("read parent thread");
+        let mut system_messages: Vec<_> = history
+            .messages
+            .into_iter()
+            .filter(|message| message.kind == MessageKind::System)
+            .collect();
+        assert_eq!(
+            system_messages.len(),
+            1,
+            "exactly one background-result row must land on the parent thread"
+        );
+        system_messages.remove(0)
+    }
+
+    async fn assert_accept_subagent_result_replays(
+        fixture: &BgFixture,
+        expected_message_id: ThreadMessageId,
+    ) {
+        let replay = fixture
+            .thread_service
+            .accept_subagent_result(AcceptSubagentResultRequest {
+                scope: ThreadScope {
+                    tenant_id: fixture.tenant_id.clone(),
+                    agent_id: fixture.agent_id.clone(),
+                    project_id: None,
+                    owner_user_id: Some(fixture.owner_user_id.clone()),
+                    mission_id: None,
+                },
+                thread_id: fixture.parent_thread_id.clone(),
+                source_binding_id: format!("subagent-result:{}", fixture.parent_run_id),
+                external_event_id: fixture.child_run_id.to_string(),
+                content: FramedSubagentText::frame(
+                    "replay probe — content is irrelevant, identity is what dedupes",
+                ),
+            })
+            .await
+            .expect("replay accept_subagent_result");
+        assert!(
+            replay.idempotent_replay,
+            "a second acceptance on the same (scope, source_binding_id, external_event_id) \
+             must replay the existing row, proving the identity the resolver used"
+        );
+        assert_eq!(replay.message_id, expected_message_id);
+    }
+
+    #[tokio::test]
+    async fn background_delivery_appends_and_enqueues_for_live_parent() {
+        let process_store = Arc::new(ironclaw_processes::ProcessJournalStore::new(
+            recon_scoped_fs(),
+        ));
+        let dependencies = Arc::clone(&process_store)
+            as Arc<
+                dyn ironclaw_processes::ProcessDependencyPort<
+                        Error = ironclaw_processes::ProcessJournalStoreError,
+                    >,
+            >;
+        let enqueue = Arc::new(RecordingEnqueue::accepting());
+        let live_run_id = TurnRunId::new();
+        let live_turn_id = ironclaw_host_api::turn::TurnId::new();
+        let fixture = bg_fixture(
+            process_store,
+            dependencies,
+            Arc::clone(&enqueue),
+            Some((live_run_id, live_turn_id)),
+        )
+        .await;
+
+        let outcome = fixture
+            .resolver
+            .handle_child_terminal(&fixture.event)
+            .await
+            .expect("background delivery to a live parent succeeds");
+        assert_eq!(outcome, ResolveOutcome::Drained);
+
+        assert!(
+            fixture
+                .edge_store
+                .peek(
+                    &fixture.child_scope,
+                    fixture.parent_run_id,
+                    fixture.child_run_id
+                )
+                .await
+                .expect("peek edge")
+                .is_none(),
+            "a delivered-and-attended edge must be closed"
+        );
+
+        let row = single_system_message(&fixture).await;
+        assert_eq!(row.status, MessageStatus::Finalized);
+        let content = row.content.as_deref().expect("row has content");
+        let expected_framed = FramedSubagentText::frame("child background output");
+        assert_eq!(content, expected_framed.as_str());
+
+        assert_accept_subagent_result_replays(&fixture, row.message_id).await;
+
+        let requests = enqueue.requests();
+        assert_eq!(
+            requests.len(),
+            1,
+            "no resume_turn path: exactly one enqueue, no coordinator bound"
+        );
+        let request = &requests[0];
+        assert_eq!(request.run_id, live_run_id);
+        assert_eq!(request.turn_id, live_turn_id);
+        assert_eq!(request.message_id, row.message_id);
+        let expected_ref =
+            LoopMessageRef::new(format!("msg:{}", row.message_id)).expect("message ref");
+        assert_eq!(
+            request.input,
+            LoopInput::SubagentSettled {
+                child_run_id: fixture.child_run_id,
+                message_ref: expected_ref,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn background_delivery_replays_idempotently_after_crash_before_result_appended() {
+        let process_store = Arc::new(ironclaw_processes::ProcessJournalStore::new(
+            recon_scoped_fs(),
+        ));
+        let dependencies = Arc::new(
+            ScriptedDependencyFailures::new(Arc::clone(&process_store)
+                as Arc<
+                    dyn ironclaw_processes::ProcessDependencyPort<
+                            Error = ironclaw_processes::ProcessJournalStoreError,
+                        >,
+                >)
+            .fail_transition_once_for(ironclaw_processes::ProcessDependencyState::ResultAppended),
+        )
+            as Arc<
+                dyn ironclaw_processes::ProcessDependencyPort<
+                        Error = ironclaw_processes::ProcessJournalStoreError,
+                    >,
+            >;
+        let enqueue = Arc::new(RecordingEnqueue::accepting());
+        let live_run_id = TurnRunId::new();
+        let live_turn_id = ironclaw_host_api::turn::TurnId::new();
+        let fixture = bg_fixture(
+            process_store,
+            dependencies,
+            Arc::clone(&enqueue),
+            Some((live_run_id, live_turn_id)),
+        )
+        .await;
+
+        let first = fixture.resolver.handle_child_terminal(&fixture.event).await;
+        assert!(
+            first.is_err(),
+            "a crash between acceptance and record_result_appended must surface as an error"
+        );
+
+        let second = fixture
+            .resolver
+            .handle_child_terminal(&fixture.event)
+            .await
+            .expect("re-drive recovers once the store CAS is no longer scripted to fail");
+        assert_eq!(second, ResolveOutcome::Drained);
+
+        let row = single_system_message(&fixture).await;
+        assert_accept_subagent_result_replays(&fixture, row.message_id).await;
+
+        let requests = enqueue.requests();
+        assert_eq!(
+            requests.len(),
+            1,
+            "the append never reached attend on the failed first pass, so only the re-drive enqueues"
+        );
+        let expected_ref =
+            LoopMessageRef::new(format!("msg:{}", row.message_id)).expect("message ref");
+        assert_eq!(
+            requests[0].input,
+            LoopInput::SubagentSettled {
+                child_run_id: fixture.child_run_id,
+                message_ref: expected_ref,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn background_delivery_replays_safely_after_crash_before_record_attention() {
+        let process_store = Arc::new(ironclaw_processes::ProcessJournalStore::new(
+            recon_scoped_fs(),
+        ));
+        let dependencies = Arc::new(
+            ScriptedDependencyFailures::new(Arc::clone(&process_store)
+                as Arc<
+                    dyn ironclaw_processes::ProcessDependencyPort<
+                            Error = ironclaw_processes::ProcessJournalStoreError,
+                        >,
+                >)
+            .fail_transition_once_for(
+                ironclaw_processes::ProcessDependencyState::AttentionScheduled,
+            )
+            .fail_consume_once(),
+        )
+            as Arc<
+                dyn ironclaw_processes::ProcessDependencyPort<
+                        Error = ironclaw_processes::ProcessJournalStoreError,
+                    >,
+            >;
+        let enqueue = Arc::new(RecordingEnqueue::accepting());
+        let live_run_id = TurnRunId::new();
+        let live_turn_id = ironclaw_host_api::turn::TurnId::new();
+        let fixture = bg_fixture(
+            process_store,
+            dependencies,
+            Arc::clone(&enqueue),
+            Some((live_run_id, live_turn_id)),
+        )
+        .await;
+
+        let first = fixture.resolver.handle_child_terminal(&fixture.event).await;
+        assert!(
+            first.is_err(),
+            "a crash between the enqueue and record_attention must surface as an error"
+        );
+
+        let second = fixture.resolver.handle_child_terminal(&fixture.event).await;
+        assert!(
+            second.is_err(),
+            "the scripted close/consume failure keeps the edge observable at AttentionScheduled \
+             instead of letting this same re-drive also close it"
+        );
+
+        let edge = fixture
+            .edge_store
+            .peek(
+                &fixture.child_scope,
+                fixture.parent_run_id,
+                fixture.child_run_id,
+            )
+            .await
+            .expect("peek edge")
+            .expect("edge is not yet closed");
+        assert_eq!(edge.state, AwaitEdgeState::AttentionScheduled);
+        assert_eq!(
+            edge.attention_outcome,
+            Some(crate::subagent::await_edge::AttentionOutcome::Queued)
+        );
+
+        assert_eq!(
+            enqueue.requests().len(),
+            2,
+            "the queue double saw a second enqueue attempt, but the durable queue's identity \
+             dedupe makes replaying it safe"
+        );
+
+        single_system_message(&fixture).await;
+    }
+
+    async fn assert_background_delivery_parks_on_enqueue_refusal(refusal: EnqueueRefusal) {
+        let process_store = Arc::new(ironclaw_processes::ProcessJournalStore::new(
+            recon_scoped_fs(),
+        ));
+        let dependencies = Arc::clone(&process_store)
+            as Arc<
+                dyn ironclaw_processes::ProcessDependencyPort<
+                        Error = ironclaw_processes::ProcessJournalStoreError,
+                    >,
+            >;
+        let enqueue = Arc::new(RecordingEnqueue::refusing(refusal));
+        let live_run_id = TurnRunId::new();
+        let live_turn_id = ironclaw_host_api::turn::TurnId::new();
+        let fixture = bg_fixture(
+            process_store,
+            dependencies,
+            Arc::clone(&enqueue),
+            Some((live_run_id, live_turn_id)),
+        )
+        .await;
+
+        let outcome = fixture
+            .resolver
+            .handle_child_terminal(&fixture.event)
+            .await
+            .expect("a refused enqueue leaves the edge parked, not an error, in this slice");
+        assert_eq!(outcome, ResolveOutcome::Drained);
+
+        let edge = fixture
+            .edge_store
+            .peek(
+                &fixture.child_scope,
+                fixture.parent_run_id,
+                fixture.child_run_id,
+            )
+            .await
+            .expect("peek edge")
+            .expect("edge stays parked, not closed");
+        assert_eq!(edge.state, AwaitEdgeState::ResultAppended);
+        assert!(edge.attention_outcome.is_none());
+        assert_eq!(enqueue.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn background_delivery_parks_edge_on_run_closed_enqueue_refusal() {
+        assert_background_delivery_parks_on_enqueue_refusal(EnqueueRefusal::RunClosed).await;
+    }
+
+    #[tokio::test]
+    async fn background_delivery_parks_edge_on_capacity_exhausted_enqueue_refusal() {
+        assert_background_delivery_parks_on_enqueue_refusal(EnqueueRefusal::CapacityExhausted)
+            .await;
     }
 }
 
