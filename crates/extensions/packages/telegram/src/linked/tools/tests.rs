@@ -243,7 +243,7 @@ fn every_bound_content_returning_op_is_covered_by_the_framing_check() {
 #[test]
 fn an_unroutable_capability_reports_an_undeclared_capability() {
     let error = undeclared_capability("telegram.get_thread_replies");
-    let ToolError::Failed { kind, .. } = error else {
+    let ToolError::Rejected { kind, .. } = error else {
         panic!("an unknown capability is not an auth problem");
     };
     assert_eq!(

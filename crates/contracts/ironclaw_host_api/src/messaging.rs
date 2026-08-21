@@ -584,9 +584,9 @@ impl StandardMessagingErrorCode {
         Self::VendorError,
     ];
 
-    /// The `messaging.*`-namespaced wire code carried on the structured WASM
-    /// guest error channel (`{code, kind}`) or a first-party `ToolError::Failed`
-    /// safe summary.
+    /// The `messaging.*`-namespaced wire code carried by the structured WASM
+    /// guest failure or a first-party `ToolError::Rejected` provider
+    /// diagnostic. The host recognizes only exact members of [`Self::ALL`].
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::UnknownConversation => "messaging.unknown_conversation",

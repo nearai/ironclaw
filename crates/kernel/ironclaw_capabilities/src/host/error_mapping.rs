@@ -8,7 +8,7 @@
 use ironclaw_authorization::CapabilityLeaseStorePort;
 use ironclaw_host_api::{
     decision::{DenyReason, Obligation},
-    dispatch::DispatchError,
+    dispatch::{DispatchAuthRequirement, DispatchError},
     ids::{CapabilityGrantId, CapabilityId, InvocationId},
     resource::ResourceScope,
 };
@@ -210,9 +210,11 @@ pub(super) fn prepare_obligation_error_to_invocation(
             credential_requirements,
         } => CapabilityInvocationError::AuthorizationRequiresAuth {
             capability: capability_id.clone(),
-            required_secrets: Vec::new(),
-            credential_requirements,
-            model_visible_cause: None,
+            requirement: Box::new(DispatchAuthRequirement {
+                required_secrets: Vec::new(),
+                credential_requirements,
+                model_visible_cause: None,
+            }),
         },
         CapabilityObligationError::Failed { kind } => CapabilityInvocationError::ObligationFailed {
             capability: capability_id.clone(),
@@ -273,17 +275,22 @@ pub(super) fn enrich_dispatch_error_credential_requirements(
     error: DispatchError,
     obligations: &[Obligation],
 ) -> DispatchError {
-    // Matched by value in one pass: the guard borrows the two vectors, so a
+    // Matched by value in one pass: the guard borrows the requirement, so a
     // non-enriching outcome falls through to `other` with `error` un-moved.
     // Enriching rebuilds the variant from the parts it already owns, which is
     // what lets this be total — there is no "matched above" branch to assert.
     match error {
         DispatchError::AuthRequired {
             capability,
-            required_secrets,
-            credential_requirements,
-            model_visible_cause,
-        } if required_secrets.is_empty() && credential_requirements.is_empty() => {
+            requirement,
+        } if requirement.required_secrets.is_empty()
+            && requirement.credential_requirements.is_empty() =>
+        {
+            let DispatchAuthRequirement {
+                required_secrets,
+                credential_requirements,
+                model_visible_cause,
+            } = *requirement;
             let derived: Vec<_> = obligations
                 .iter()
                 .filter_map(Obligation::credential_auth_requirement)
@@ -291,9 +298,11 @@ pub(super) fn enrich_dispatch_error_credential_requirements(
             match derived.as_slice() {
                 [requirement] => DispatchError::AuthRequired {
                     capability,
-                    required_secrets,
-                    credential_requirements: vec![requirement.clone()],
-                    model_visible_cause,
+                    requirement: Box::new(DispatchAuthRequirement {
+                        required_secrets,
+                        credential_requirements: vec![requirement.clone()],
+                        model_visible_cause,
+                    }),
                 },
                 // Zero declared credential obligations: the capability makes
                 // no credential claim at all, so there is nothing to attribute
@@ -306,16 +315,18 @@ pub(super) fn enrich_dispatch_error_credential_requirements(
                 // ambiguous attribution (see the `_` arm below).
                 [] => DispatchError::AuthRequired {
                     capability,
-                    required_secrets,
-                    credential_requirements,
-                    model_visible_cause,
+                    requirement: Box::new(DispatchAuthRequirement {
+                        required_secrets,
+                        credential_requirements,
+                        model_visible_cause,
+                    }),
                 },
                 _ => DispatchError::Rejected {
                     runtime: None,
                     kind: ironclaw_host_api::dispatch::DispatchFailureKind::Runtime(
                         ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::SecretDenied,
                     ),
-                    diagnostic: model_visible_cause.map(|diagnostic| *diagnostic),
+                    diagnostic: model_visible_cause.map(Box::new),
                     detail: Some(
                         ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic {
                             text: format!(

@@ -714,6 +714,8 @@ impl HostRuntime for DefaultHostRuntime {
         // replacing the former host_runtime pre-authorization + `context.trust`
         // stamp.
         let registry = self.registry.snapshot();
+        let scope = context.resource_scope.clone();
+        let invocation_id = context.invocation_id;
         let host = self.capability_host(&registry);
         match host
             .resume_spawn_json(
@@ -734,30 +736,18 @@ impl HostRuntime for DefaultHostRuntime {
                     error_kind = failure_kind_from(&error).as_str(),
                     "capability spawn resume failed"
                 );
-                // Mirror resume_capability: AuthorizationRequiresAuth must return
-                // AuthRequired, not Failed. Without this arm a spawned capability
-                // that needs re-auth after an approval resume silently fails.
-                match error {
-                    CapabilityInvocationError::AuthorizationRequiresAuth {
-                        capability,
-                        required_secrets,
-                        credential_requirements,
-                        model_visible_cause,
-                    } => Ok(auth_required_outcome(
-                        capability,
-                        required_secrets,
-                        credential_requirements,
-                        model_visible_cause,
-                    )),
-                    other => {
-                        let is_standard_write =
-                            capability_is_standard_write(&registry, &capability_id);
-                        Ok(RuntimeCapabilityOutcome::Failed(
-                            failure_from(other, capability_id)
-                                .with_is_standard_write(is_standard_write),
-                        ))
-                    }
-                }
+                process_capability_response(
+                    self,
+                    CapabilityResponseContext {
+                        registry: &registry,
+                        capability_id,
+                        scope: &scope,
+                        invocation_id,
+                        mode: InlineInvocationMode::ApprovalResume,
+                    },
+                    Err(error),
+                )
+                .await
             }
         }
     }
@@ -1382,7 +1372,7 @@ pub(super) fn auth_required_outcome(
             required_secrets,
             credential_requirements,
         )
-        .with_provider_diagnostic(model_visible_cause.map(|diagnostic| *diagnostic)),
+        .with_provider_diagnostic(model_visible_cause),
     )
 }
 

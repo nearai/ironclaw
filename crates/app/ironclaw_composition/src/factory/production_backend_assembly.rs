@@ -605,10 +605,13 @@ pub(super) async fn build_backend_production(
                     >,
             >),
     );
+    let trigger_manual_fire_runner =
+        Arc::new(crate::automation::trigger_poller::LateBoundTriggerManualFireRunner::default());
     let mut first_party_registry = production_first_party_registry_with_trigger_create_hook(
         Arc::clone(&trigger_repository),
         Arc::clone(&trigger_create_hook) as Arc<dyn TriggerCreateHook>,
         trigger_active_run_lookup,
+        trigger_manual_fire_runner.clone(),
         process_backend,
     )?;
     if let (Some(package), Some(handler)) = (
@@ -1445,6 +1448,7 @@ pub(super) async fn build_backend_production(
         processes,
         thread_service,
         trigger_repository: Arc::clone(&trigger_repository),
+        trigger_manual_fire_runner,
         trigger_create_hook,
         resource_governor: production_resource_governor,
         budget_gate_store,

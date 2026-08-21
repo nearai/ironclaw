@@ -373,6 +373,8 @@ where
             terminal_byte_len: None,
             terminal_reason: None,
             reservation_release: super::ReservationReleaseState::Unclaimed,
+            appended_message_ref: None,
+            attention_outcome: None,
             created_at: chrono::Utc::now(),
             settled_at: None,
         }))

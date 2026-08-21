@@ -51,9 +51,9 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Extension lifecycle | 14 | 6 | ✓ | ✓ |
 | Channels (Slack/Telegram/webhook) | 5 | 3 | ✓ | ✓ |
 | Triggers / automations / routines | 11 | 2 | ✓ | ✓ |
-| Memory & workspace | 10 | 2 | — | ✓ |
+| Memory & workspace | 11 | 2 | — | ✓ |
 | Skills | 1 | 1 | — | ✓ |
-| Multi-user / scope isolation | 5 | 3 | 9 | ✓ |
+| Multi-user / scope isolation | 5 | 4 | 9 | ✓ |
 | Tools & tool dispatch | — | 11 | ✓ | ✓ |
 | Turn lifecycle (cancel/steer/retry/restart) | — | 8 | ✓ | ✓ |
 | WebUI surfaces & APIs | 2 | 2 | — | ✓ (largest) |
@@ -62,7 +62,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **61** group scenarios · **61** flat integration bins (54 in
+Totals: **61** group scenarios · **62** flat integration bins (55 in
 `tests/integration/`, 7 in `tests/integration/auth/`) · **39** top-level Rust bins ·
 **102** Python scenario files (**870** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
@@ -183,7 +183,7 @@ ones speak MTProto over a raw socket with no injectable seam.
 
 ---
 
-## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (61)
+## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (62)
 
 One thread, whole real turn. Grouped by what the user experiences.
 
@@ -218,7 +218,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | An HTTP tool call reaches the real egress boundary and the result reaches the model | `tool_call.rs`, `http_matcher.rs` |
 | Saved, transcript-shaped JSON can be queried through scoped storage with plain or `$`-rooted paths; bounded collection operations can select the last item and aggregate numeric rows; invalid JSON produces model-visible correction guidance | `tool_call.rs` |
 | Shell commands dispatch through the real path without spawning an OS process | `process_port.rs` |
-| A sandbox-profile shell turn executes as an unprivileged user in a real Docker worker and keeps its workspace across calls | `reborn_sandbox_shell_turn.rs` |
+| A sandbox-profile shell turn executes as an unprivileged user in one reusable per-user Docker container, preserving workspace and container-local state across shell calls and sharing that container across the user's threads | `reborn_sandbox_shell_turn.rs` |
 | MCP tools work over a real loopback HTTP MCP server | `mcp.rs` |
 | User-registered and bundled hosted MCP servers register, authenticate, project active, restore, and invoke | `hosted_mcp_registration.rs` |
 | Web search/fetch runs the real Exa MCP handshake | `web_access.rs` |
@@ -256,6 +256,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | An outbound reply is delivered through the real inbound→outbound pipeline | `extension_delivery.rs` |
 | A Telegram reply quotes the message it answers; a DM arriving mid-run gets an immediate busy notice quoting that DM, and the late reply still quotes its own prompt (#6643/#6644) | `extension_delivery.rs::linked_telegram_actor_turns_attribute_to_the_linking_user_and_unlink_revokes_admission` (anchored delivery evidence) |
 | Tenant-admin configuration and per-user install/remove stay separate state machines | `extension_user_lifecycle_isolation.rs` |
+| A notification inbox belongs to one recipient: knowing another user's notification id grants no read and no mutation | `notification_inbox_user_isolation.rs` |
 | The model sees Telegram's channel and linked tools without the retired proof-code setup recipe | `channel_connection_projection.rs` |
 | An ordinary Telegram user sees device-link setup without deployment secrets, and the retired bot proof-code pairing route stays unavailable | `webui_v2_product_api.rs::telegram_setup_hides_admin_configuration_and_excludes_legacy_pairing` |
 | Delivery preferences / connected channels render into the model prompt | `comm_context.rs` |
@@ -285,7 +286,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | A canonical 10-tool-call agent turn's database write volume is measured and reported (for tracking, not gated) on both libSQL and Postgres, and custom-actor group threads are rejected from canonical durable milestones | `db_write_canonical.rs` |
 | A downloaded run artifact carries per-iteration model-call timing evidence for a completed run, and still carries durable per-message timestamps (with an explicit `run_not_resident` reason) when the process-local timing buffer was evicted or the process restarted | `run_artifact_timings.rs` |
 
-One of the 61 registered bins, `delivery_user_journeys.rs`, holds the explicit
+One of the 62 registered bins, `delivery_user_journeys.rs`, holds the explicit
 channel-delivery journeys (two-lane model):
 
 | A user can… | Scenario |
@@ -342,7 +343,8 @@ unreachable from another: `reborn_agent_scope_isolation_parity.rs`,
 `reborn_trace_core_builtin_tools_parity.rs`, `reborn_trace_file_tools_parity.rs`,
 `reborn_trace_coding_read_tools_parity.rs`, `reborn_trace_error_path_parity.rs`,
 `reborn_trace_wasm_github_fixture_parity.rs`,
-`reborn_trace_first_party_tool_coverage.rs` (10),
+`reborn_trace_first_party_tool_coverage.rs` (10; including the product-triggered
+manual-run and scheduled-run denial evidence),
 `reborn_recorded_trace_parity.rs`, `reborn_minimal_dispatch_parity.rs`,
 `reborn_response_order_parity.rs`, `reborn_tool_param_coercion_parity.rs`,
 `reborn_approval_traces_parity.rs`, `reborn_turn_state_lock_free_submit_parity.rs`.
@@ -354,7 +356,7 @@ enums), `trace_format.rs`, `trace_llm_tests.rs`,
 
 ---
 
-## 6. Python E2E scenarios — `tests/e2e/scenarios/` (103 files, 1,144 tests)
+## 6. Python E2E scenarios — `tests/e2e/scenarios/` (102 files, 797 top-level tests)
 
 This is an exhaustive inventory, not a claim that every retained scenario is
 currently executable. Current Reborn coverage starts `ironclaw serve` through the
@@ -437,7 +439,7 @@ entries.
 ### 6.6 Automations, routines & projects
 | The user can… | Evidence |
 |---|---|
-| Create an automation through chat; rename, pause, resume, reload, and delete it through the UI with persisted API state; filter automations, retry failed runs, and dismiss error toasts | `test_reborn_webui_v2_smoke.py::test_reborn_v2_automation_lifecycle_persists_from_ui`, other automation tests in that file, `test_reborn_webui_v2_automation_trace_outbound_api.py` (4) |
+| Create an automation through chat; run it now, rename, pause, resume, reload, and delete it through the UI with persisted API state; disable run-now while a request is pending, a fire or run is active, a duplicate click is in flight, or the scheduler is off; keep the list visible while filtering; dismiss and clear safe mutation-error toasts; and open a failed run or its scoped logs | `test_reborn_webui_v2_smoke.py::test_reborn_v2_automation_lifecycle_persists_from_ui`, `…::test_reborn_v2_automation_run_now_respects_active_fire_and_scheduler`, `…::test_reborn_v2_automation_filter_keeps_list_visible_while_loading`, `…::test_reborn_v2_automation_action_error_toast_is_safe_dismissible_and_cleared_on_retry`, `…::test_reborn_v2_automation_failed_run_actions_are_clickable`, `test_reborn_webui_v2_automation_trace_outbound_api.py` (4) |
 | Create event-triggered routines, have them fire on match, respect cooldown, pause/resume | `test_routine_event_batch.py` (8) |
 | Run a full-job routine end-to-end with tools, trigger it manually, see failures in the UI | `test_routine_full_job.py` (3) |
 | Have routines run with injected OAuth credentials | `test_routine_oauth_credential_injection.py` (3) |
@@ -446,7 +448,7 @@ entries.
 | Use the Missions tab instead of the removed Routines tab and activity strip | `test_v2_activity_shell.py` (2; pending legacy migration #6369) |
 | See routines created in one surface from another (owner scope) | `test_owner_scope.py` (3) |
 | Browse projects, create one, open a scoped chat, list and download workspace files | `test_reborn_webui_v2_legacy_projects.py` (6), `test_project_detail.py` (3), `test_reborn_v2_file_download.py` (4) |
-| Get notified about automation activity and open the thread from the notification | `test_reborn_webui_v2_notifications.py` (4) |
+| Read generic server-backed notifications, mark one or all as read, wait for a matching final reply before acknowledging completion, and open the source thread | `test_reborn_webui_v2_notifications.py` (6) |
 
 ### 6.7 Settings, skills & admin
 | The user can… | Evidence |

@@ -32,12 +32,14 @@ use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    dispatch::{CapabilityDispatcher, DispatchError, RuntimeDispatchErrorKind},
+    dispatch::{
+        CapabilityDispatcher, DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind,
+    },
     http::RuntimeHttpEgress,
     ids::{CapabilityId, ResourceReservationId, SecretHandle},
     lane::RuntimeLane,
     resource::{ResourceScope, ResourceUsage},
-    runtime::{DispatchErrorLane, RuntimeKind},
+    runtime::RuntimeKind,
     runtime_policy::{
         DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode,
         ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -63,8 +65,8 @@ use ironclaw_turns::{
 use ironclaw_wasm::{
     DenyWasmHostHttp, EmptyWasmRuntimeCredentials, PreparedWitTool, WasmError,
     WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder,
-    WasmStagedRuntimeCredentials, WitToolExecution, WitToolHost, WitToolRequest, WitToolRuntime,
-    WitToolRuntimeConfig,
+    WasmStagedRuntimeCredentials, WitErrorKind, WitGuestFailure, WitToolExecution, WitToolHost,
+    WitToolOutcome, WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
 };
 use secrecy::ExposeSecret;
 

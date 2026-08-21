@@ -316,6 +316,10 @@ fn trigger_enums_serialize_as_snake_case() {
         json!("schedule")
     );
     assert_eq!(
+        to_value(TriggerSourceKind::Manual).unwrap(),
+        json!("manual")
+    );
+    assert_eq!(
         to_value(TriggerState::Scheduled).unwrap(),
         json!("scheduled")
     );
@@ -352,6 +356,38 @@ fn fire_identity_is_stable_domain_separated_and_tenant_scoped() {
 }
 
 #[test]
+fn scheduled_fire_identity_digest_is_frozen_and_manual_is_domain_separated() {
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let slot = Utc.with_ymd_and_hms(2026, 5, 30, 8, 0, 0).unwrap();
+    let scheduled = TriggerFireIdentity::new(tenant("tenant-a"), trigger_id, slot);
+    let manual = TriggerFireIdentity::for_source(
+        TriggerSourceKind::Manual,
+        tenant("tenant-a"),
+        trigger_id,
+        slot,
+    );
+
+    assert_eq!(
+        scheduled.route_thread_id.as_str(),
+        "f916bc384a37375fe079690406308ee526a206427c71e30dc7af3cc58ce8148e"
+    );
+    assert_eq!(
+        scheduled.external_event_id.as_str(),
+        "5a07cf9e557e855450d664fb433cd857d86298f056d51fb42cd83fec2bd818a8"
+    );
+    assert_eq!(
+        manual.route_thread_id.as_str(),
+        "ecabccb0989df3fe5e9b5d304b69bf1367c2f144bd46419d0e916924c6071593"
+    );
+    assert_eq!(
+        manual.external_event_id.as_str(),
+        "7fd2f0302e58feb5f7fdd27cfc11958bc5020836b4c9dc88b3d9d719114fd363"
+    );
+    assert_ne!(manual.route_thread_id, scheduled.route_thread_id);
+    assert_ne!(manual.external_event_id, scheduled.external_event_id);
+}
+
+#[test]
 fn fire_identity_length_prefixing_avoids_component_boundary_collisions() {
     let slot = Utc.with_ymd_and_hms(2026, 5, 30, 8, 0, 0).unwrap();
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
@@ -378,13 +414,23 @@ async fn schedule_provider_emits_due_fire_only() {
 
     assert!(
         provider
-            .evaluate(&record, ts(1_704_067_199))
+            .evaluate(
+                &record,
+                record.next_run_at,
+                TriggerSourceKind::Schedule,
+                ts(1_704_067_199),
+            )
             .await
             .expect("not due")
             .is_none()
     );
     let fire = provider
-        .evaluate(&record, ts(1_704_067_200))
+        .evaluate(
+            &record,
+            record.next_run_at,
+            TriggerSourceKind::Schedule,
+            ts(1_704_067_200),
+        )
         .await
         .expect("due")
         .expect("fire");
@@ -472,7 +518,12 @@ async fn prompt_materializer_port_receives_fire_and_returns_materialized_prompt(
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
     let record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_200));
     let fire = ScheduleTriggerSourceProvider
-        .evaluate(&record, ts(1_704_067_200))
+        .evaluate(
+            &record,
+            record.next_run_at,
+            TriggerSourceKind::Schedule,
+            ts(1_704_067_200),
+        )
         .await
         .expect("due")
         .expect("fire");
@@ -500,7 +551,12 @@ async fn schedule_provider_uses_state_as_fire_gate() {
 
     assert!(
         provider
-            .evaluate(&record, ts(1_704_067_200))
+            .evaluate(
+                &record,
+                record.next_run_at,
+                TriggerSourceKind::Schedule,
+                ts(1_704_067_200),
+            )
             .await
             .expect("scheduled state remains due")
             .is_some()
@@ -509,7 +565,12 @@ async fn schedule_provider_uses_state_as_fire_gate() {
     record.state = TriggerState::Paused;
     assert!(
         provider
-            .evaluate(&record, ts(1_704_067_200))
+            .evaluate(
+                &record,
+                record.next_run_at,
+                TriggerSourceKind::Schedule,
+                ts(1_704_067_200),
+            )
             .await
             .expect("paused state is not due")
             .is_none()
@@ -518,7 +579,12 @@ async fn schedule_provider_uses_state_as_fire_gate() {
     record.state = TriggerState::Completed;
     assert!(
         provider
-            .evaluate(&record, ts(1_704_067_200))
+            .evaluate(
+                &record,
+                record.next_run_at,
+                TriggerSourceKind::Schedule,
+                ts(1_704_067_200),
+            )
             .await
             .expect("completed state is not due")
             .is_none()
@@ -535,7 +601,12 @@ async fn schedule_provider_rejects_invalid_record() {
     record.prompt.clear();
 
     let error = ScheduleTriggerSourceProvider
-        .evaluate(&record, ts(1_704_067_200))
+        .evaluate(
+            &record,
+            record.next_run_at,
+            TriggerSourceKind::Schedule,
+            ts(1_704_067_200),
+        )
         .await
         .expect_err("invalid record rejected");
     assert!(
@@ -799,6 +870,7 @@ async fn in_memory_repository_running_history_does_not_overwrite_terminal_histor
         &tenant_id,
         trigger_id,
         fire_slot,
+        TriggerSourceKind::Schedule,
         Some(run_id),
         TriggerRunHistoryStatus::Ok,
         completed_at,

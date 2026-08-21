@@ -34,6 +34,14 @@ where
                     .drain_settled_group(scope, parent_run_id, child_run_id)
                     .await
             }
+            // ponytail: the background delivery substates are recovery-inert.
+            // Nothing writes them yet (this slice lands the surface only), and
+            // the sweep that resumes a half-delivered background result — a
+            // re-append, or making a streak-capped parent attentive — lands
+            // with the producer that first writes them.
+            super::AwaitEdgeState::ResultAppended
+            | super::AwaitEdgeState::AttentionScheduled
+            | super::AwaitEdgeState::AttentionDeferredStreakCap => continue,
             super::AwaitEdgeState::Drained | super::AwaitEdgeState::Abandoned => continue,
         };
         match outcome {

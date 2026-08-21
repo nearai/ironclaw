@@ -18,6 +18,7 @@ async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 futures-util = "0.3"
+fs2 = "0.4"
 ironclaw_extension_contracts = { path = "../../contracts/ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_common = { path = "../../contracts/ironclaw_common" }
 ironclaw_host_api = { path = "../../contracts/ironclaw_host_api", version = "0.1.0" }

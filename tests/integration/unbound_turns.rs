@@ -247,6 +247,11 @@ async fn structured_unbound_run_completes_by_recording_a_validated_result() -> H
     assert!(run.state.output_contract.is_json_schema());
 
     assert_eq!(run.scripted_llm.captured_requests().len(), 2);
+    assert_eq!(
+        run.scripted_llm.streaming_calls(),
+        1,
+        "the structured finalizer must use the streaming transport"
+    );
     let requests = run.scripted_llm.captured_requests();
     assert!(
         requests[0].iter().any(|message| {

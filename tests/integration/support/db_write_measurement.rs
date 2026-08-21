@@ -112,11 +112,11 @@ impl CanonicalDbWriteMeasurementReport {
 #[derive(Debug, thiserror::Error)]
 pub enum DbWriteMeasurementError {
     #[error("database probe begin failed: {0}")]
-    Begin(#[source] Box<DbProbeError>),
+    Begin(#[source] DbProbeError),
     #[error("database probe begin failed: {primary}; cleanup also failed: {cleanup}")]
     BeginAndCleanup {
         #[source]
-        primary: Box<DbProbeError>,
+        primary: DbProbeError,
         cleanup: Box<DbProbeError>,
     },
     #[error("measured workload failed: {0}")]
@@ -128,15 +128,15 @@ pub enum DbWriteMeasurementError {
         cleanup: Box<DbProbeError>,
     },
     #[error("database probe capture failed: {0}")]
-    Capture(#[source] Box<DbProbeError>),
+    Capture(#[source] DbProbeError),
     #[error("database probe capture failed: {primary}; cleanup also failed: {cleanup}")]
     CaptureAndCleanup {
         #[source]
-        primary: Box<DbProbeError>,
+        primary: DbProbeError,
         cleanup: Box<DbProbeError>,
     },
     #[error("database probe cleanup failed: {0}")]
-    Cleanup(#[source] Box<DbProbeError>),
+    Cleanup(#[source] DbProbeError),
 }
 
 impl DbWriteMeasurementError {
@@ -144,7 +144,7 @@ impl DbWriteMeasurementError {
         match self {
             Self::BeginAndCleanup { cleanup, .. }
             | Self::WorkloadAndCleanup { cleanup, .. }
-            | Self::CaptureAndCleanup { cleanup, .. } => Some(cleanup),
+            | Self::CaptureAndCleanup { cleanup, .. } => Some(cleanup.as_ref()),
             Self::Cleanup(error) => Some(error),
             Self::Begin(_) | Self::Workload(_) | Self::Capture(_) => None,
         }
@@ -164,9 +164,9 @@ where
         Ok(before) => before,
         Err(primary) => {
             return match finish(config).await {
-                Ok(()) => Err(DbWriteMeasurementError::Begin(Box::new(primary))),
+                Ok(()) => Err(DbWriteMeasurementError::Begin(primary)),
                 Err(cleanup) => Err(DbWriteMeasurementError::BeginAndCleanup {
-                    primary: Box::new(primary),
+                    primary,
                     cleanup: Box::new(cleanup),
                 }),
             };
@@ -191,9 +191,9 @@ where
         Ok(after) => after,
         Err(primary) => {
             return match finish(config).await {
-                Ok(()) => Err(DbWriteMeasurementError::Capture(Box::new(primary))),
+                Ok(()) => Err(DbWriteMeasurementError::Capture(primary)),
                 Err(cleanup) => Err(DbWriteMeasurementError::CaptureAndCleanup {
-                    primary: Box::new(primary),
+                    primary,
                     cleanup: Box::new(cleanup),
                 }),
             };
@@ -201,7 +201,7 @@ where
     };
     finish(config)
         .await
-        .map_err(|error| DbWriteMeasurementError::Cleanup(Box::new(error)))?;
+        .map_err(DbWriteMeasurementError::Cleanup)?;
 
     let backend = match config.target() {
         DbProbeTarget::LibSql { .. } => MeasuredStorageBackend::Libsql,

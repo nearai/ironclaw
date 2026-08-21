@@ -1,11 +1,6 @@
 //! Shared length-prefixed identity-key encoding plus SHA-256 digest used by
-//! both [`super::scope_key::RebornSandboxScopeKey`] and
-//! [`super::user_key::RebornSandboxUserKey`]. Each type selects its own
-//! distinct fields and its own container-name/workspace namespace prefixes —
-//! only the framing (length-prefix every key/value so no combination of
-//! field values can collide after concatenation) and the digest step are
-//! identical, so that logic lives in exactly one place rather than two
-//! independently-maintained copies that could silently diverge.
+//! the scope and user key types. Each type selects its own fields and namespace
+//! prefix. Only the collision-safe framing and digest step are shared here.
 
 use sha2::{Digest, Sha256};
 

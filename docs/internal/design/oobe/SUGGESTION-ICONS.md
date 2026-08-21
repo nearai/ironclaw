@@ -55,7 +55,7 @@ but the frontend also maps unknown, missing, and legacy persisted values to
            "generic"]
 },
 "sources": {
-  "type": "array", "minItems": 1, "maxItems": 5, "uniqueItems": true,
+  "type": "array", "minItems": 1, "maxItems": 5,
   "items": { "type": "string", "minLength": 1, "maxLength": 128 }
 }
 ```

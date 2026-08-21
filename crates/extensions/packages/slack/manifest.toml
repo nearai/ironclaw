@@ -12,16 +12,16 @@ module = "wasm/slack_user_tool.wasm"
 [admin_configuration]
 group_id = "extension.slack"
 display_name = "Slack deployment configuration"
-description = "Deployment credentials and routing configuration for the Slack channel."
+description = "Deployment credentials for the Slack workspace bot, from your app at api.slack.com/apps. Slack delivers events by webhook, so the instance must be reachable over public HTTPS — a local installation needs a tunnel (such as ngrok or Cloudflare Tunnel) in front of it. Each person connects their own Slack account separately, from the Extensions page."
 fields = [
-  { handle = "slack_bot_token", label = "Bot token", secret = true, required = true },
-  { handle = "slack_signing_secret", label = "Signing secret", secret = true, required = true },
-  { handle = "slack_team_id", label = "Workspace (team) ID", secret = false, required = true },
-  { handle = "slack_api_app_id", label = "App ID", secret = false, required = true },
-  { handle = "slack_installation_id", label = "Installation ID", secret = false, required = true },
-  { handle = "slack_bot_user_id", label = "Bot user ID", secret = false, required = true },
-  { handle = "slack_oauth_client_id", label = "OAuth client ID", secret = false, required = true },
-  { handle = "slack_oauth_client_secret", label = "OAuth client secret", secret = true, required = true },
+  { handle = "slack_bot_token", label = "Bot token", secret = true, required = true, description = "The Bot User OAuth Token (xoxb-…) under OAuth & Permissions, available once the app is installed to your workspace." },
+  { handle = "slack_signing_secret", label = "Signing secret", secret = true, required = true, description = "From Basic Information → App Credentials. Used to verify that incoming requests really came from Slack." },
+  { handle = "slack_team_id", label = "Workspace (team) ID", secret = false, required = true, description = "Your workspace id (T…) — also the team_id in every Events API payload." },
+  { handle = "slack_api_app_id", label = "App ID", secret = false, required = true, description = "From Basic Information → App ID (A…) — also the api_app_id in Events API payloads." },
+  { handle = "slack_installation_id", label = "Installation ID", secret = false, required = true, description = "A stable label you choose for this app/workspace installation, e.g. slack-acme." },
+  { handle = "slack_bot_user_id", label = "Bot user ID", secret = false, required = true, description = "The bot's member id (U…), shown under App Home or returned by auth.test with the bot token." },
+  { handle = "slack_oauth_client_id", label = "OAuth client ID", secret = false, required = true, description = "From Basic Information → App Credentials. Used for personal (per-user) Slack authorization." },
+  { handle = "slack_oauth_client_secret", label = "OAuth client secret", secret = true, required = true, description = "From Basic Information → App Credentials, next to the client ID." },
 ]
 # Retired handles (run-acts-as-invoker): `slack_shared_subject_user_id`,
 # `slack_subject_routes`, and the interim `slack_allowed_channels` allowlist

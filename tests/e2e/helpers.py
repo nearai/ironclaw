@@ -357,6 +357,10 @@ SEL_V2 = {
     "notification_panel": "[data-testid='notification-panel']",
     "notification_row": "[data-testid='notification-row']",
     "notification_unread_dot": "[data-testid='notification-unread-dot']",
+    "notification_mark_all_read": "[data-testid='notification-mark-all-read']",
+    "notification_load_more": "[data-testid='notification-load-more']",
+    "notification_error_banner": "[data-testid='notification-error-banner']",
+    "notification_page_limit": "[data-testid='notification-page-limit']",
     "toast": "[data-testid='toast']",
     "toast_dismiss": "[data-testid='toast-dismiss']",
     "toast_viewport": "[data-rht-toaster]",
@@ -481,6 +485,9 @@ SEL_V2 = {
     ),
     "automation_action_for": (
         "[data-testid='automation-action-button'][data-automation-id='{id}']"
+    ),
+    "automation_run_now_for": (
+        "[data-testid='automation-run-now-button'][data-automation-id='{id}']"
     ),
     "automation_delete_for": (
         "[data-testid='automation-delete-button'][data-automation-id='{id}']"

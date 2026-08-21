@@ -139,8 +139,6 @@ struct InvokedCapabilityBatch {
 }
 
 struct InvokedCapabilityBatchError {
-    // Boxed: `AgentLoopHostError` is ≥128 bytes (Rust 1.98 `result_large_err`)
-    // and this struct rides every batch `Result`.
     error: Box<ironclaw_loop_contracts::AgentLoopHostError>,
     launched_count: usize,
 }
