@@ -15,8 +15,7 @@
 
 use ironclaw_extension_contracts::tool_adapter::ToolError;
 use ironclaw_host_api::{
-    dispatch::{DispatchFailureKind, RuntimeDispatchErrorKind},
-    messaging::StandardMessagingErrorCode,
+    dispatch::RuntimeDispatchErrorKind, messaging::StandardMessagingErrorCode,
 };
 use serde_json::Value;
 
@@ -143,7 +142,7 @@ where
 
 fn missing_field(_field: &str) -> ToolError {
     ToolError::Rejected {
-        kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Unknown),
+        kind: RuntimeDispatchErrorKind::Unknown,
         diagnostic: None,
         detail: None,
     }

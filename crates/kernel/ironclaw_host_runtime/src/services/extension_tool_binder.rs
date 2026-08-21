@@ -147,7 +147,7 @@ where
     ) -> Result<ToolResult, ToolError> {
         let Some(descriptor) = self.descriptors.get(&call.capability_id) else {
             return Err(ToolError::Rejected {
-                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability),
+                kind: RuntimeDispatchErrorKind::UndeclaredCapability,
                 diagnostic: None,
                 detail: None,
             });
@@ -203,7 +203,7 @@ pub(super) fn tool_error_from_dispatch(error: DispatchError) -> ToolError {
             detail,
             ..
         } => ToolError::Rejected {
-            kind,
+            kind: tool_runtime_error_kind(kind),
             diagnostic,
             detail,
         },
@@ -214,7 +214,7 @@ pub(super) fn tool_error_from_dispatch(error: DispatchError) -> ToolError {
                 Err(_) => SafeSummary::placeholder(),
             };
             ToolError::Rejected {
-                kind: other.failure_kind(),
+                kind: tool_runtime_error_kind(other.failure_kind()),
                 diagnostic: None,
                 detail: Some(DispatchFailureDetail::HostSummary {
                     summary,
@@ -222,6 +222,21 @@ pub(super) fn tool_error_from_dispatch(error: DispatchError) -> ToolError {
                 }),
             }
         }
+    }
+}
+
+fn tool_runtime_error_kind(kind: DispatchFailureKind) -> RuntimeDispatchErrorKind {
+    match kind {
+        DispatchFailureKind::Runtime(kind) => kind,
+        DispatchFailureKind::UnknownCapability => RuntimeDispatchErrorKind::UndeclaredCapability,
+        DispatchFailureKind::UnknownProvider => RuntimeDispatchErrorKind::Manifest,
+        DispatchFailureKind::RuntimeMismatch => RuntimeDispatchErrorKind::ExtensionRuntimeMismatch,
+        DispatchFailureKind::MissingRuntimeBackend | DispatchFailureKind::UnsupportedRuntime => {
+            RuntimeDispatchErrorKind::UnsupportedRunner
+        }
+        // Auth gates use `DispatchError::AuthRequired`; this category inside
+        // `Rejected` is malformed and retains no control-plane authority.
+        DispatchFailureKind::AuthRequired => RuntimeDispatchErrorKind::Unknown,
     }
 }
 

@@ -22,7 +22,7 @@ use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
     dispatch::{
         CapabilityDisplayOutputPreview, DispatchAuthRequirement, DispatchFailureDetail,
-        DispatchFailureKind, ProviderDiagnostic,
+        ProviderDiagnostic, RuntimeDispatchErrorKind,
     },
     ids::{CapabilityId, SecretHandle},
     mount::MountView,
@@ -79,7 +79,7 @@ pub enum ToolError {
     },
     #[error("tool provider rejected invocation ({kind})")]
     Rejected {
-        kind: DispatchFailureKind,
+        kind: RuntimeDispatchErrorKind,
         /// Provider-authored metadata remains typed so its `Debug` output is
         /// redacted until the host's model-diagnostic scrub/fence seam.
         diagnostic: Option<Box<ProviderDiagnostic>>,
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn tool_error_display_stays_redacted() {
         let error = ToolError::Rejected {
-            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            kind: RuntimeDispatchErrorKind::Backend,
             diagnostic: Some(Box::new(ProviderDiagnostic {
                 code: None,
                 message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn tool_error_debug_never_exposes_untrusted_failure_text() {
         let rejected = ToolError::Rejected {
-            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            kind: RuntimeDispatchErrorKind::Backend,
             diagnostic: Some(Box::new(ProviderDiagnostic {
                 code: None,
                 message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
@@ -389,7 +389,10 @@ mod tests {
         assert_ne!(left, right);
     }
 
-    fn rejected(kind: DispatchFailureKind, diagnostic: Option<ProviderDiagnostic>) -> ToolError {
+    fn rejected(
+        kind: RuntimeDispatchErrorKind,
+        diagnostic: Option<ProviderDiagnostic>,
+    ) -> ToolError {
         ToolError::Rejected {
             kind,
             diagnostic: diagnostic.map(Box::new),
@@ -399,8 +402,8 @@ mod tests {
 
     #[test]
     fn rejected_equality_compares_kind_and_diagnostic() {
-        let denied = DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied);
-        let network_denied = DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied);
+        let denied = RuntimeDispatchErrorKind::PolicyDenied;
+        let network_denied = RuntimeDispatchErrorKind::NetworkDenied;
 
         assert_eq!(
             rejected(denied, None),
@@ -436,7 +439,7 @@ mod tests {
             }),
         };
         let rejected = ToolError::Rejected {
-            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            kind: RuntimeDispatchErrorKind::Backend,
             diagnostic: None,
             detail: None,
         };

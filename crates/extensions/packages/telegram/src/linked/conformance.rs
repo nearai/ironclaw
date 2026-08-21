@@ -36,7 +36,7 @@ use std::panic::{self, AssertUnwindSafe};
 
 use ironclaw_extension_contracts::tool_adapter::ToolError;
 use ironclaw_host_api::{
-    dispatch::{DispatchFailureKind, RuntimeDispatchErrorKind},
+    dispatch::RuntimeDispatchErrorKind,
     messaging::{StandardMessagingErrorCode, StandardMessagingOp},
     test_support::messaging_conformance::{
         assert_canonical_input_accepted, assert_canonical_output, message_ref_from_output,
@@ -71,12 +71,7 @@ fn conversation() -> ConversationRef {
 
 fn failure_kind(error: &ToolError) -> Option<RuntimeDispatchErrorKind> {
     match error {
-        // Rejected's kind is a superset (DispatchFailureKind); only its
-        // Runtime(..) variant carries a RuntimeDispatchErrorKind to unwrap.
-        ToolError::Rejected { kind, .. } => match kind {
-            DispatchFailureKind::Runtime(runtime_kind) => Some(*runtime_kind),
-            _ => None,
-        },
+        ToolError::Rejected { kind, .. } => Some(*kind),
         ToolError::AuthRequired { .. } => None,
     }
 }

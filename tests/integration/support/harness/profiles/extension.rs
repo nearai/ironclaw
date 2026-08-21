@@ -11,7 +11,7 @@ use ironclaw_extension_contracts::tool_adapter::{
 };
 use ironclaw_host_api::{
     action::NetworkMethod,
-    dispatch::{DispatchFailureDetail, DispatchFailureKind, RuntimeDispatchErrorKind},
+    dispatch::{DispatchFailureDetail, RuntimeDispatchErrorKind},
     ids::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId},
     messaging::StandardMessagingErrorCode,
     mount::{MountPermissions, MountView},
@@ -1330,7 +1330,7 @@ impl ToolAdapter for AcmeFixtureToolAdapter {
             }
 
             _ => Err(ToolError::Rejected {
-                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability),
+                kind: RuntimeDispatchErrorKind::UndeclaredCapability,
                 diagnostic: None,
                 detail: None,
             }),
@@ -1412,7 +1412,7 @@ fn tool_result(output: serde_json::Value) -> ToolResult {
 
 fn acme_tool_error(kind: RuntimeDispatchErrorKind, host_summary: String) -> ToolError {
     ToolError::Rejected {
-        kind: DispatchFailureKind::Runtime(kind),
+        kind,
         diagnostic: None,
         detail: Some(DispatchFailureDetail::HostSummary {
             summary: SafeSummary::new(host_summary).unwrap(),

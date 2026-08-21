@@ -186,6 +186,32 @@ fn the_surviving_failure_vocabulary_stays_closed() {
     );
 }
 
+#[test]
+fn extension_tool_errors_cannot_mint_control_plane_failure_kinds() {
+    let root = workspace_root();
+    let tool_adapter = crate_path(
+        &root,
+        "crates/ironclaw_extension_contracts/src/tool_adapter.rs",
+    );
+    let raw = std::fs::read_to_string(&tool_adapter)
+        .unwrap_or_else(|error| panic!("read {}: {error}", tool_adapter.display()));
+    let contents = strip_comments_and_strings(&raw);
+    let rejected = contents
+        .split("Rejected {")
+        .nth(1)
+        .and_then(|tail| tail.split('}').next())
+        .expect("ToolError::Rejected variant");
+
+    assert!(
+        rejected.contains("kind: RuntimeDispatchErrorKind"),
+        "extension adapters may report runtime failures only; trusted dispatch owns control-plane kinds"
+    );
+    assert!(
+        !rejected.contains("DispatchFailureKind"),
+        "ToolError::Rejected must not accept the host's control-plane failure taxonomy"
+    );
+}
+
 /// The comment contract is a promise this gate makes to every file it scans,
 /// so it gets its own coverage rather than being trusted. A guardrail whose
 /// exemption rule is untested is a guardrail that silently changes meaning.

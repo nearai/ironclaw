@@ -14,7 +14,7 @@ use ironclaw_extension_contracts::tool_adapter::{
 };
 use ironclaw_host_api::{
     capability::CapabilityDescriptor,
-    dispatch::{CapabilityDispatchRequest, DispatchError},
+    dispatch::{CapabilityDispatchRequest, DispatchError, DispatchFailureKind},
     ids::{CapabilityId, ExtensionId},
     resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
     runtime::RuntimeKind,
@@ -184,7 +184,7 @@ fn tool_error_to_dispatch_error(
             // Runtime provenance belongs to the trusted registry binding, not
             // to the extension-supplied error payload.
             runtime: Some(runtime),
-            kind,
+            kind: DispatchFailureKind::Runtime(kind),
             diagnostic,
             detail,
         },
@@ -387,7 +387,7 @@ mod tests {
             _ports: &ToolPorts<'_>,
         ) -> Result<ToolResult, ToolError> {
             Err(ToolError::Rejected {
-                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied),
+                kind: RuntimeDispatchErrorKind::PolicyDenied,
                 diagnostic: Some(Box::new(ProviderDiagnostic {
                     code: Some(ProviderErrorCode::new("channel_not_found")),
                     message: Some(UntrustedProviderMessage::new("no such channel")),
@@ -482,7 +482,7 @@ mod tests {
                 _ports: &ToolPorts<'_>,
             ) -> Result<ToolResult, ToolError> {
                 Err(ToolError::Rejected {
-                    kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+                    kind: RuntimeDispatchErrorKind::Backend,
                     diagnostic: Some(Box::new(ProviderDiagnostic {
                         code: None,
                         message: Some(UntrustedProviderMessage::new("vendor backend returned 503")),
@@ -544,7 +544,7 @@ mod tests {
                 _ports: &ToolPorts<'_>,
             ) -> Result<ToolResult, ToolError> {
                 Err(ToolError::Rejected {
-                    kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest),
+                    kind: RuntimeDispatchErrorKind::Guest,
                     diagnostic: Some(Box::new(ProviderDiagnostic {
                         code: None,
                         message: Some(UntrustedProviderMessage::new("guest trapped")),

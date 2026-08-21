@@ -29,14 +29,26 @@ use crate::wasm_sandbox_core::SandboxLimits;
 /// `code`/`message` fields — the only free-text carriers on that path.
 static GUEST_ERROR_LEAK_DETECTOR: LazyLock<LeakDetector> = LazyLock::new(LeakDetector::new);
 
+/// Maximum retained bytes for either free-text field in a guest failure.
+/// This is enforced at the sandbox exit before host allocation and scanning
+/// can be amplified by concurrently failing guests.
+const MAX_GUEST_ERROR_BYTES: usize = 4096;
+
 /// Redact secret-shaped values from a guest-authored string before it becomes
 /// guest-visible (`WitToolExecution::outcome`). Downstream seams (the
 /// model-visible diagnostic seam in `ironclaw_loop_host`) still apply their
 /// own scrubbing and injection fencing; this is the earlier, sandbox-exit
-/// boundary and only redacts secret values in place — it never blocks or
-/// truncates the string, so the descriptive cause survives.
+/// boundary. It redacts secret values and bounds retained text without ever
+/// splitting a UTF-8 code point.
 fn scrub_guest_error(error: String) -> String {
-    let (scrubbed, _redacted) = GUEST_ERROR_LEAK_DETECTOR.redact_all_secrets(&error);
+    let (mut scrubbed, _redacted) = GUEST_ERROR_LEAK_DETECTOR.redact_all_secrets(&error);
+    if scrubbed.len() > MAX_GUEST_ERROR_BYTES {
+        let mut end = MAX_GUEST_ERROR_BYTES;
+        while !scrubbed.is_char_boundary(end) {
+            end -= 1;
+        }
+        scrubbed.truncate(end);
+    }
     scrubbed
 }
 
@@ -332,6 +344,16 @@ mod tests {
         let scrubbed = scrub_guest_error(guest_error.clone());
 
         assert_eq!(scrubbed, guest_error);
+    }
+
+    #[test]
+    fn scrub_guest_error_bounds_text_at_a_utf8_boundary() {
+        let guest_error = format!("{}é", "a".repeat(4095));
+
+        let scrubbed = scrub_guest_error(guest_error);
+
+        assert!(scrubbed.len() <= 4096, "{} bytes", scrubbed.len());
+        assert_eq!(scrubbed, "a".repeat(4095));
     }
 
     /// Integration-ish: pins the exact seam `WitToolRuntime::execute` uses —

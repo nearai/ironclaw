@@ -27,7 +27,7 @@ use ironclaw_extension_contracts::tool_adapter::{
     ToolCall, ToolCallResources, ToolError, ToolPorts,
 };
 use ironclaw_host_api::{
-    dispatch::{DispatchError, DispatchFailureDetail, ProviderDiagnostic},
+    dispatch::{DispatchError, DispatchFailureDetail, DispatchFailureKind, ProviderDiagnostic},
     ids::{CapabilityId, ExtensionId},
     messaging::StandardMessagingErrorCode,
     resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
@@ -154,7 +154,7 @@ fn dispatch_error_for_tool_error(
                 // Runtime provenance belongs to the trusted resolved binding,
                 // not to the extension-supplied error payload.
                 runtime: Some(runtime),
-                kind,
+                kind: DispatchFailureKind::Runtime(kind),
                 diagnostic,
                 detail: dispatch_detail_for_tool_error(messaging_code, detail),
             }
@@ -213,7 +213,7 @@ fn extension_detail_without_host_summary(
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        dispatch::{DispatchFailureKind, RuntimeDispatchErrorKind},
+        dispatch::RuntimeDispatchErrorKind,
         messaging::StandardMessagingErrorCode,
     };
 
@@ -234,7 +234,7 @@ mod tests {
             &cap,
             RuntimeKind::FirstParty,
             ToolError::Rejected {
-                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+                kind: RuntimeDispatchErrorKind::OperationFailed,
                 diagnostic: Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
                     code: Some(ironclaw_host_api::dispatch::ProviderErrorCode::new(
                         StandardMessagingErrorCode::RateLimited.as_str(),
@@ -281,7 +281,7 @@ mod tests {
             RuntimeKind::System,
         ] {
             let error = ToolError::Rejected {
-                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+                kind: RuntimeDispatchErrorKind::Backend,
                 diagnostic: Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
                     code: None,
                     message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
@@ -306,7 +306,7 @@ mod tests {
     fn lane_summary_is_dropped_when_no_closed_code_is_present() {
         let cap = CapabilityId::new("acme.cap").unwrap();
         let error = ToolError::Rejected {
-            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            kind: RuntimeDispatchErrorKind::Backend,
             diagnostic: None,
             detail: Some(
                 ironclaw_host_api::dispatch::DispatchFailureDetail::HostSummary {
@@ -336,7 +336,7 @@ mod tests {
             &cap,
             RuntimeKind::FirstParty,
             ToolError::Rejected {
-                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+                kind: RuntimeDispatchErrorKind::Backend,
                 diagnostic: Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
                     code: None,
                     message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
@@ -383,7 +383,7 @@ mod tests {
             &cap,
             RuntimeKind::FirstParty,
             ToolError::Rejected {
-                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+                kind: RuntimeDispatchErrorKind::Backend,
                 diagnostic: None,
                 detail: None,
             },

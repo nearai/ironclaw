@@ -82,9 +82,7 @@ use ironclaw_extension_contracts::device_link::{
 use ironclaw_extension_contracts::tool_adapter::{
     ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
 };
-use ironclaw_host_api::dispatch::{
-    DispatchFailureDetail, DispatchFailureKind, RuntimeDispatchErrorKind,
-};
+use ironclaw_host_api::dispatch::{DispatchFailureDetail, RuntimeDispatchErrorKind};
 use ironclaw_host_api::ids::{CapabilityId, ExtensionId};
 use ironclaw_host_api::messaging::StandardMessagingOp;
 use ironclaw_host_api::safe_summary::SafeSummary;
@@ -520,7 +518,7 @@ impl ToolAdapter for LinkedAccountFixtureToolAdapter {
 
 fn undeclared(capability_id: &str) -> ToolError {
     ToolError::Rejected {
-        kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability),
+        kind: RuntimeDispatchErrorKind::UndeclaredCapability,
         diagnostic: None,
         detail: Some(DispatchFailureDetail::HostSummary {
             summary: SafeSummary::new(format!(

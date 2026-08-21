@@ -59,9 +59,9 @@ permitted to hold one.
   capabilities composition explicitly wires, nothing by omission.
 - **Fresh store per call**, aggregate memory accounting across multi-memory
   components, fuel/epoch/table/instance ceilings (via the shared limiter).
-- **Guest diagnostic safety:** guest-authored execution errors are scrubbed at
-  the sandbox-exit boundary, and each buffered guest log record is bounded to
-  4 KiB on a UTF-8 boundary. The host-runtime diagnostic seam applies the
+- **Guest diagnostic safety:** each guest-authored failure code and message is
+  scrubbed and bounded to 4 KiB at the sandbox-exit boundary without splitting
+  UTF-8, and each buffered guest log record has the same bound. The host-runtime diagnostic seam applies the
   canonical `MODEL_DIAGNOSTIC_MAX_BYTES` bound again before tracing; typed
   provider messages are narrowed further before they enter dispatch metadata.
   Structured JSON envelopes retain their parseable kind/code/message shape.

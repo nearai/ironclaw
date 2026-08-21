@@ -337,7 +337,7 @@ fn an_unknown_write_outcome_is_a_vendor_error_and_never_sent_unverified() {
 }
 
 #[test]
-fn a_flood_wait_carries_its_retry_after_as_bounded_diagnostic_prose() {
+fn a_flood_wait_carries_typed_retry_after_and_bounded_diagnostic_prose() {
     let mapped = map_vendor_error(OpFamily::Write, &rpc("FLOOD_WAIT", Some(31)));
     let ToolError::Rejected {
         detail, diagnostic, ..
@@ -361,5 +361,9 @@ fn a_flood_wait_carries_its_retry_after_as_bounded_diagnostic_prose() {
             .as_ref()
             .and_then(|diagnostic| diagnostic.message.as_ref())
             .is_some_and(|message| message.as_str().contains("31"))
+    );
+    assert_eq!(
+        diagnostic.and_then(|diagnostic| diagnostic.retry_after),
+        Some(std::time::Duration::from_secs(31))
     );
 }

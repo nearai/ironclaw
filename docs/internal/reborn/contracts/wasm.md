@@ -38,7 +38,8 @@ a typed `wit-result`-shaped `variant response`:
 
 `code` and `message` are free-text carriers: the host scrubs both for
 secret-shaped values at the sandbox-exit chokepoint before either is visible
-outside the guest. The WASM lane bounds each buffered guest log record to 4 KiB;
+outside the guest. Each scrubbed failure field and each buffered guest log
+record is UTF-8-safely bounded to 4 KiB at that boundary;
 `ironclaw_host_runtime` redacts and applies the canonical
 `MODEL_DIAGNOSTIC_MAX_BYTES` bound before tracing, then narrows typed provider
 messages to 2 KiB before they enter dispatch metadata and are re-validated at

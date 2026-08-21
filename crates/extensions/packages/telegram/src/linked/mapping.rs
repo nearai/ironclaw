@@ -32,13 +32,14 @@ use ironclaw_host_api::{
     capability::RuntimeCredentialAccountSetup,
     decision::RuntimeCredentialAuthRequirement,
     dispatch::{
-        DispatchAuthRequirement, DispatchFailureKind, ProviderDiagnostic, ProviderErrorCode,
-        RuntimeDispatchErrorKind, UntrustedProviderMessage,
+        DispatchAuthRequirement, ProviderDiagnostic, ProviderErrorCode, RuntimeDispatchErrorKind,
+        UntrustedProviderMessage,
     },
     ids::{ExtensionId, SecretHandle, VendorId},
     messaging::StandardMessagingErrorCode,
 };
 use serde_json::{Value, json};
+use std::time::Duration;
 
 use super::{MAX_MESSAGE_TEXT_BYTES, MAX_RESULT_BYTES};
 
@@ -76,7 +77,7 @@ const CURSOR_TAG: &str = "p1";
 /// scrubbed by the host before model visibility.
 pub(crate) fn failed(code: StandardMessagingErrorCode) -> ToolError {
     ToolError::Rejected {
-        kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+        kind: RuntimeDispatchErrorKind::OperationFailed,
         diagnostic: Some(Box::new(ProviderDiagnostic {
             code: Some(ProviderErrorCode::new(code.as_str())),
             message: None,
@@ -89,12 +90,20 @@ pub(crate) fn failed(code: StandardMessagingErrorCode) -> ToolError {
 /// Same, plus a provider diagnostic. The cause is vendor-derived and is NOT
 /// display-safe; downstream scrubbing owns that.
 pub(crate) fn failed_because(code: StandardMessagingErrorCode, cause: String) -> ToolError {
+    failed_with_diagnostic(code, cause, None)
+}
+
+fn failed_with_diagnostic(
+    code: StandardMessagingErrorCode,
+    cause: String,
+    retry_after: Option<Duration>,
+) -> ToolError {
     ToolError::Rejected {
-        kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+        kind: RuntimeDispatchErrorKind::OperationFailed,
         diagnostic: Some(Box::new(ProviderDiagnostic {
             code: Some(ProviderErrorCode::new(code.as_str())),
             message: Some(UntrustedProviderMessage::new(cause)),
-            retry_after: None,
+            retry_after,
         })),
         detail: None,
     }
@@ -111,7 +120,7 @@ pub(crate) fn auth_required() -> ToolError {
         ExtensionId::new(TELEGRAM_EXTENSION_ID),
     ) else {
         return ToolError::Rejected {
-            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Manifest),
+            kind: RuntimeDispatchErrorKind::Manifest,
             diagnostic: None,
             detail: None,
         };
@@ -677,11 +686,10 @@ pub(crate) fn map_vendor_error(family: OpFamily, error: &InvocationError) -> Too
     match rpc.name.as_str() {
         "FLOOD_WAIT" | "FLOOD_PREMIUM_WAIT" | "SLOWMODE_WAIT" | "FLOOD_TEST_PHONE_WAIT" => {
             match rpc.value {
-                // Keep the vendor's wait in the bounded diagnostic prose;
-                // retry scheduling remains outside this adapter contract.
-                Some(seconds) => failed_because(
+                Some(seconds) => failed_with_diagnostic(
                     RateLimited,
                     format!("telegram asked us to wait {seconds} seconds before retrying"),
+                    Some(Duration::from_secs(u64::from(seconds))),
                 ),
                 None => failed(RateLimited),
             }

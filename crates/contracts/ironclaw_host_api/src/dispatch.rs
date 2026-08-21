@@ -201,13 +201,26 @@ pub enum DispatchInputIssueCode {
 }
 
 /// Stable input issue for dispatch validation failures.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DispatchInputIssue {
     pub path: String,
     pub code: DispatchInputIssueCode,
     pub expected: Option<String>,
     pub received: Option<String>,
     pub schema_path: Option<String>,
+}
+
+impl fmt::Debug for DispatchInputIssue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DispatchInputIssue")
+            .field("path", &self.path)
+            .field("code", &self.code)
+            .field("expected", &self.expected)
+            .field("received", &self.received.as_ref().map(|_| "<redacted>"))
+            .field("schema_path", &self.schema_path)
+            .finish()
+    }
 }
 
 impl DispatchInputIssue {
@@ -882,15 +895,21 @@ mod tests {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
             diagnostic: None,
             detail: Some(DispatchFailureDetail::InvalidInput {
-                issues: vec![DispatchInputIssue::new(
-                    "schedule.kind",
-                    DispatchInputIssueCode::MissingRequired,
-                )],
+                issues: vec![
+                    DispatchInputIssue::new("schedule.kind", DispatchInputIssueCode::TypeMismatch)
+                        .expected("string")
+                        .received("secret-attacker-controlled-value")
+                        .schema_path("/properties/schedule/kind"),
+                ],
             }),
         };
 
         let debug_output = format!("{error:?}");
         assert!(debug_output.contains("InvalidInput"));
         assert!(debug_output.contains("schedule.kind"));
+        assert!(debug_output.contains("TypeMismatch"));
+        assert!(debug_output.contains("string"));
+        assert!(debug_output.contains("/properties/schedule/kind"));
+        assert!(!debug_output.contains("secret-attacker-controlled-value"));
     }
 }

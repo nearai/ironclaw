@@ -702,7 +702,7 @@ async fn snapshot_resolver_preserves_typed_provider_rejection() {
             _ports: &ToolPorts<'_>,
         ) -> Result<ToolResult, ToolError> {
             Err(ToolError::Rejected {
-                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client),
+                kind: RuntimeDispatchErrorKind::Client,
                 diagnostic: Some(Box::new(ProviderDiagnostic {
                     code: Some(ProviderErrorCode::new("mcp_tool_rejected")),
                     message: Some(UntrustedProviderMessage::new("Bad credentials")),

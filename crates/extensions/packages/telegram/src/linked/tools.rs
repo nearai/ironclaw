@@ -22,7 +22,7 @@ use ironclaw_extension_contracts::tool_adapter::{
     ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
 };
 use ironclaw_host_api::{
-    dispatch::{DispatchFailureKind, RuntimeDispatchErrorKind},
+    dispatch::RuntimeDispatchErrorKind,
     messaging::{StandardMessagingErrorCode, StandardMessagingOp},
 };
 use serde_json::Value;
@@ -166,7 +166,7 @@ async fn run(
 
 fn undeclared_capability(_id: &str) -> ToolError {
     ToolError::Rejected {
-        kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability),
+        kind: RuntimeDispatchErrorKind::UndeclaredCapability,
         diagnostic: None,
         detail: None,
     }

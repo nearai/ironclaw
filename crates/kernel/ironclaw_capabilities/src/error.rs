@@ -678,7 +678,12 @@ mod tests {
             Some(vendor_cause.to_string()),
             Some(DispatchFailureDetail::HostSummary {
                 summary: SafeSummary::new(host_summary).unwrap(),
-                detail: None,
+                detail: Some(Box::new(DispatchFailureDetail::InvalidInput {
+                    issues: vec![DispatchInputIssue::new(
+                        "schedule.kind",
+                        DispatchInputIssueCode::TypeMismatch,
+                    )],
+                })),
             }),
         );
         let err = CapabilityInvocationError::from(error);
@@ -687,6 +692,7 @@ mod tests {
             CapabilityInvocationError::Dispatch {
                 safe_summary,
                 provider_diagnostic,
+                detail,
                 ..
             } => {
                 assert_eq!(safe_summary.as_deref(), Some(host_summary));
@@ -695,6 +701,11 @@ mod tests {
                     provider_diagnostic_model_cause(&diagnostic).as_deref(),
                     Some(format!("provider message: {vendor_cause}").as_str())
                 );
+                assert!(matches!(
+                    detail,
+                    Some(DispatchFailureDetail::InvalidInput { issues })
+                        if issues.len() == 1 && issues[0].path == "schedule.kind"
+                ));
             }
             other => panic!("expected Dispatch variant, got {other:?}"),
         }

@@ -947,6 +947,83 @@ async fn host_runtime_services_routes_google_slides_wasm_get_presentation_with_s
 }
 
 #[tokio::test]
+async fn host_runtime_services_maps_google_docs_sheets_and_slides_wasm_401_to_auth_required() {
+    let cases = [
+        (
+            "google-docs",
+            "google-docs.get_document",
+            "docs.googleapis.com",
+            "https://www.googleapis.com/auth/documents.readonly",
+            json!({"document_id": "doc-1"}),
+        ),
+        (
+            "google-sheets",
+            "google-sheets.get_spreadsheet",
+            "sheets.googleapis.com",
+            "https://www.googleapis.com/auth/spreadsheets.readonly",
+            json!({"spreadsheet_id": "sheet-1"}),
+        ),
+        (
+            "google-slides",
+            "google-slides.get_presentation",
+            "slides.googleapis.com",
+            "https://www.googleapis.com/auth/presentations.readonly",
+            json!({"presentation_id": "slides-1"}),
+        ),
+    ];
+
+    for (package_id, capability, host, required_scope, input) in cases {
+        let capability_id = CapabilityId::new(capability).unwrap();
+        let scope = sample_scope(InvocationId::new());
+        let network = RecordingNetworkHttpEgress::with_status_body(
+            401,
+            br#"{"error":{"status":"UNAUTHENTICATED","message":"Invalid Credentials"}}"#.to_vec(),
+        );
+        let secret_store = Arc::new(SecretStore::ephemeral());
+        let account_access_secret = SecretHandle::new("google_artifact_401_access").unwrap();
+        let required_scopes = vec![required_scope.to_string()];
+        let services = google_wasm_services_for_test!(
+            package_id,
+            google_policy(host),
+            network.clone(),
+            Arc::clone(&secret_store),
+            account_access_secret.clone(),
+            required_scopes.clone(),
+        );
+        secret_store
+            .put(
+                scope.clone(),
+                account_access_secret,
+                SecretMaterial::from("ya29.expired_fixture_token"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let outcome = services
+            .host_runtime_for_local_testing()
+            .invoke_capability(wasm_runtime_request_for_scope(
+                capability_id.clone(),
+                scope,
+                input,
+            ))
+            .await
+            .unwrap();
+
+        let RuntimeCapabilityOutcome::AuthRequired(gate) = outcome else {
+            panic!("{package_id}: expected auth-required outcome, got {outcome:?}");
+        };
+        assert_eq!(gate.capability_id, capability_id);
+        assert_eq!(gate.credential_requirements.len(), 1);
+        assert_eq!(
+            gate.credential_requirements[0].provider,
+            VendorId::new("google").unwrap()
+        );
+        assert_eq!(network.requests().len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn host_runtime_services_maps_github_wasm_input_errors_to_invalid_input() {
     let capability_id = CapabilityId::new("github.search_issues").unwrap();
     let scope = sample_scope(InvocationId::new());

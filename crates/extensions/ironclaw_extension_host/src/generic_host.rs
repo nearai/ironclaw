@@ -41,10 +41,7 @@ use ironclaw_extension_registry::{
     ExtensionPackage, ResolvedExtensionManifest,
 };
 use ironclaw_host_api::path::VirtualPath;
-use ironclaw_host_api::{
-    dispatch::{DispatchFailureKind, RuntimeDispatchErrorKind},
-    ids::ExtensionId,
-};
+use ironclaw_host_api::{dispatch::RuntimeDispatchErrorKind, ids::ExtensionId};
 use ironclaw_host_runtime::{ExtensionLaneToolBinder, ExtensionToolBindError};
 use ironclaw_resources::ResourceGovernor;
 
@@ -669,7 +666,7 @@ impl ToolAdapter for SettlingToolAdapter {
                 // host log before it is redacted from the adapter result.
                 tracing::warn!(%error, "native extension tool resource reservation failed");
                 ToolError::Rejected {
-                    kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+                    kind: RuntimeDispatchErrorKind::Resource,
                     diagnostic: None,
                     detail: None,
                 }
