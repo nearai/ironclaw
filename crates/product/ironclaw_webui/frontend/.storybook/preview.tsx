@@ -23,8 +23,18 @@ const withTheme: Decorator = (Story, context) => {
   document.documentElement.dataset.theme = theme;
   try {
     window.localStorage.setItem(THEME_STORAGE_KEY, theme);
-  } catch {
-    // Storybook runs in a sandboxed iframe; ignore storage failures.
+  } catch (storageError) {
+    // Non-fatal by design: the `data-theme` write above is what app.css keys
+    // its token sets off, so the story is already themed correctly whether or
+    // not this succeeds. The write only keeps `useInterfaceTheme` in sync for a
+    // story that mounts it, and it can fail legitimately (a sandboxed iframe,
+    // or a browser blocking storage in a third-party frame). Report the cause
+    // rather than discarding it, so a real storage fault is diagnosable instead
+    // of silently looking like a successful persist.
+    console.warn(
+      `[storybook] theme "${theme}" applied but not persisted to localStorage`,
+      storageError,
+    );
   }
   return (
     <div className="min-h-[100dvh] bg-[var(--v2-canvas)] p-6 text-[var(--v2-text)]">

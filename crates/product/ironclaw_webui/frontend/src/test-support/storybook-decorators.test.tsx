@@ -64,12 +64,13 @@ test("a story swap hands the fetch stub over without exposing the real fetch", a
     assert.deepEqual(seen, ['{"from":"alpha"}', '{"from":"beta"}']);
     assert.equal(realFetch.mock.calls.length, 0, "no story request reached the real fetch");
 
-    // A request Beta does not match still falls through to the real fetch —
-    // the stub is scoped, not a blanket network block.
-    await act(async () => {
-      await window.fetch("https://host/unmatched");
-    });
-    assert.equal(realFetch.mock.calls.length, 1);
+    // A route Beta does not declare is a loud failure, not a quiet trip to the
+    // network: an unmatched request must never become live backend access.
+    await assert.rejects(
+      () => window.fetch("https://host/unmatched"),
+      /unmatched GET https:\/\/host\/unmatched/,
+    );
+    assert.equal(realFetch.mock.calls.length, 0);
 
     // Unmounting the last owner puts the real fetch back: a request the stub
     // WOULD have matched now reaches the backend. (`window.fetch` is restored
@@ -77,8 +78,41 @@ test("a story swap hands the fetch stub over without exposing the real fetch", a
     // than object identity.)
     await act(async () => root.unmount());
     await window.fetch("https://host/beta");
-    assert.equal(realFetch.mock.calls.length, 2, "the last stub restores the real fetch");
+    assert.equal(realFetch.mock.calls.length, 1, "the last stub restores the real fetch");
   } finally {
+    window.fetch = originalFetch;
+    container.remove();
+  }
+});
+
+test("passthrough is opt-in, and only reaches the network for unmatched routes", async () => {
+  const realFetch = vi.fn(async () => new Response("REAL BACKEND"));
+  const originalFetch = window.fetch;
+  window.fetch = realFetch as unknown as typeof window.fetch;
+
+  const seen: string[] = [];
+  const Open = storyComponent(
+    withStubbedFetch([{ match: "/stubbed", json: { from: "stub" } }], { passthrough: true }),
+    () => <Probe url="https://host/stubbed" seen={seen} />,
+  );
+
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+
+  try {
+    await act(async () => root.render(<Open />));
+    // A declared route still wins over the network...
+    assert.deepEqual(seen, ['{"from":"stub"}']);
+    assert.equal(realFetch.mock.calls.length, 0);
+
+    // ...and only what the routes do not cover falls through.
+    await act(async () => {
+      await window.fetch("https://host/elsewhere");
+    });
+    assert.equal(realFetch.mock.calls.length, 1);
+  } finally {
+    await act(async () => root.unmount());
     window.fetch = originalFetch;
     container.remove();
   }

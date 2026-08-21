@@ -72,7 +72,12 @@ type StubbedFetch = typeof window.fetch & {
  * seed) receive deterministic responses instead of hitting a real backend — a
  * shared/deployed Storybook must never perform a real side effect (e.g. minting
  * a live pairing code). Matched routes return a JSON `Response`; anything
- * unmatched passes through to the real `fetch`.
+ * unmatched REJECTS by default, naming the URL — a story that forgets a route
+ * fails loudly instead of quietly acquiring live network access. Pass
+ * `{ passthrough: true }` for the rare story that genuinely needs the real
+ * `fetch`; making that opt-in is what keeps "shared Storybook never reaches a
+ * backend" a property of the harness rather than a convention each new story
+ * has to remember.
  *
  * Each decorator instance OWNS its stub. Switching stories renders the incoming
  * decorator before React runs the outgoing one's cleanup, so a shared
@@ -84,7 +89,10 @@ type StubbedFetch = typeof window.fetch & {
  * handoff hermetic in both directions. The real `fetch` is carried forward via
  * `__original` so stubs never chain-wrap each other.
  */
-export function withStubbedFetch(routes: FetchStubRoute[]): Decorator {
+export function withStubbedFetch(
+  routes: FetchStubRoute[],
+  options: { passthrough?: boolean } = {},
+): Decorator {
   return function StubbedFetchDecorator(Story) {
     // Read through a ref so the installed stub always serves this render's
     // routes, even if the same instance is re-rendered with new ones.
@@ -108,7 +116,14 @@ export function withStubbedFetch(routes: FetchStubRoute[]): Decorator {
         const route = routesRef.current.find(
           (r) => (r.method ?? "GET").toUpperCase() === method && url.includes(r.match),
         );
-        if (!route) return original(input, init);
+        if (!route) {
+          if (options.passthrough) return original(input, init);
+          throw new Error(
+            `withStubbedFetch: unmatched ${method} ${url}. Stories must not reach a real ` +
+              "backend — add a route for it, or pass { passthrough: true } if this story " +
+              "genuinely needs the network.",
+          );
+        }
         const value = typeof route.json === "function" ? (route.json as () => unknown)() : route.json;
         const hasBody = value !== undefined;
         return new Response(hasBody ? JSON.stringify(value) : null, {
