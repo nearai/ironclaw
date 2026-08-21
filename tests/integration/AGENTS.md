@@ -12,9 +12,11 @@ product workflow, turn coordinator, scheduler, the agent loop, the real
 stack: a scripted model at the vendor-SDK seam. A test reaches no network, no
 real process, no real channel, and needs no setup.
 
-See `tests/support/reborn_parity_qa/AGENTS.md` ("Tier") for how this compares
-to `RebornBinaryE2EHarness`, which fakes one seam higher (the gateway, not the
-vendor SDK) — this tier mocks lower so the real decorator chain runs.
+This is a distinct tier from `RebornBinaryE2EHarness` (which swaps the whole
+`HostManagedModelGateway` with `RebornTraceReplayModelGateway` at the *gateway*
+seam, skipping `ironclaw_llm`). This tier mocks one layer lower so the
+decorator chain runs for real; see that harness's own guidance ("Tier") for
+the full tier comparison.
 
 ## How it works
 
