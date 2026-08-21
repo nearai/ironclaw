@@ -223,10 +223,6 @@ pub struct WebUiV2Features {
     /// `IRONCLAW_REBORN_PROJECTS`, while the surface is still being
     /// finished.
     pub reborn_projects: bool,
-    /// OOBE first-run suggestion surface (the first-run suggestion cards).
-    /// Hidden unless the deployment sets `IRONCLAW_OOBE_SUGGESTIONS`; gated so
-    /// real users never see fabricated suggestions until it ships.
-    pub oobe_suggestions: bool,
     /// Whether the browser must hide raw workspace fallback and only show the
     /// caller-scoped workspace projection. Hosted deployments enable this to
     /// avoid showing artifacts from a shared `/workspace` root; local
@@ -272,7 +268,6 @@ pub async fn get_session(
         capabilities,
         features: WebUiV2Features {
             reborn_projects: state.reborn_projects_enabled(),
-            oobe_suggestions: state.oobe_suggestions_enabled(),
             workspace_requires_scoped_projection,
             regression_artifact_export: state.regression_artifact_export_enabled(),
             admin_thread_scrape: state.admin_thread_scrape_enabled(),

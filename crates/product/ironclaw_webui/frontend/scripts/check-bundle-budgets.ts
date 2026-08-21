@@ -92,12 +92,12 @@ const LOGIN_GZIP_BUDGET = 180_000;
 //    locale packs stay lazy per-locale imports and cost nothing here.
 // Measured /chat closure on the merged tree is 220.4 KB gzip; 222.0 KB
 // retains about 1.6 KB of explicit headroom.
-// The OOBE first-run suggestion surface (behind an off-by-default
-// `oobe_suggestions` session flag) — its cards, the `useSuggestions` data hook,
+// The always-on OOBE first-run suggestion surface — its cards, the
+// `useSuggestions` data hook,
 // the suggestions API client, and the brand-icon SVGs — is lazy-loaded from
 // `empty-state.tsx` (`React.lazy` + `Suspense`), so it lands in its own chunk
-// and costs the eager /chat closure nothing. Only the flag-read gate and the
-// lazy-import decision stay eager (already accounted for above).
+// and costs the eager /chat closure nothing. Only the lazy-import decision
+// stays eager (already accounted for above).
 // The OOBE drawer's section close/restore interaction then added a small eager
 // increment in `empty-state.tsx`: the drawer-visibility gate (open/dismissed/
 // gone) plus the `chat.oobe.showSuggestions` / `hideSuggestions` keys in the

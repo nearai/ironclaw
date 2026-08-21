@@ -162,16 +162,6 @@ fn reborn_projects_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Deployment gate for the OOBE first-run suggestion surface. Read once here
-/// (host-owned config — per the composition crate guardrails, env reads live
-/// in composition and feed builders, not in route handlers) and delivered via
-/// `/session` `features.oobe_suggestions`; off by default.
-fn oobe_suggestions_enabled() -> bool {
-    std::env::var("IRONCLAW_OOBE_SUGGESTIONS")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false)
-}
-
 /// Deployment gate for QA-only scrubbed regression artifact exports.
 /// Read once at composition and default off so production users never receive
 /// the browser affordance or mounted HTTP routes without an operator opt-in.
@@ -654,7 +644,6 @@ pub fn webui_v2_app_with_lifecycle(
     };
     let v2_state = WebUiV2State::new(product_surface, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
         .with_reborn_projects_enabled(reborn_projects_enabled())
-        .with_oobe_suggestions_enabled(oobe_suggestions_enabled())
         .with_session_channel_extension_id(config.session_channel_extension_id.clone())
         .with_workspace_requires_scoped_projection(config.workspace_requires_scoped_projection)
         .with_regression_artifact_export_enabled(regression_artifact_export_enabled)

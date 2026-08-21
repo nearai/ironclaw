@@ -23,7 +23,6 @@ function emptyStateSourceForTest() {
 }
 
 function renderEmptyState({
-  oobeSuggestionsEnabled = true,
   drawerState = "open",
   ...props
 } = {}) {
@@ -43,20 +42,14 @@ function renderEmptyState({
     ...components,
     globalThis: {},
     useT: () => (key) => key,
-    // EmptyState reads the `oobe_suggestions` flag itself (eagerly, before
-    // deciding whether to mount the lazy surface at all) — see
-    // empty-state.tsx and suggested-task-surface.test.ts, which used to stub
-    // this same hook before that gating moved here.
-    useOobeSuggestionsEnabled: () => oobeSuggestionsEnabled,
     // EmptyState wraps SuggestedTaskSurface in React.lazy()/React.Suspense
     // (see empty-state.tsx) so it loads as its own chunk instead of padding
     // every /chat page load. The vm harness never actually resolves a lazy
     // import, so stub React.lazy to hand back the exact same stub function
     // component identity that findComponent()/componentProps() below key
     // off of — this keeps the harness observing the real prop plumbing
-    // between EmptyState and the surface, lazy-loaded or not. Mounting is
-    // still conditional on the flag: with it off, EmptyState never renders
-    // the Suspense/lazy subtree, so the surface is never reached.
+    // between EmptyState and the surface, lazy-loaded or not. The harness still
+    // observes the actual always-on Suspense/lazy subtree.
     React: {
       lazy: () => lazyComponents[lazyIndex++] ?? components.SuggestedTaskSurface,
       Suspense: ({ children }) => children,
@@ -95,28 +88,12 @@ test("EmptyState forwards a non-empty commands list to its composer so the menu 
   assert.deepEqual(props.commands, commands);
 });
 
-test("EmptyState mounts the OOBE suggestion surface when the oobe_suggestions flag is on", () => {
-  const { tree, components } = renderEmptyState({ oobeSuggestionsEnabled: true });
+test("EmptyState always mounts the OOBE suggestion surface without a session feature flag", () => {
+  const { tree, components } = renderEmptyState();
 
-  // EmptyState now owns the feature-flag gate itself (hoisted from the lazy
-  // surface so the flag check stays eager while the surface's own weight
-  // stays lazy) — with the flag on, the surface must be mounted and reachable.
   assert.ok(
     findComponent(tree, components.SuggestedTaskSurface),
-    "the suggestion surface must be mounted in the landing view when the flag is on",
-  );
-});
-
-test("EmptyState never mounts the OOBE suggestion surface when the oobe_suggestions flag is off", () => {
-  const { tree, components } = renderEmptyState({ oobeSuggestionsEnabled: false });
-
-  // With the flag off, EmptyState must not even attempt to mount the lazy
-  // Suspense/surface subtree — the landing is unchanged for real users, and
-  // the lazy chunk is never requested.
-  assert.equal(
-    findComponent(tree, components.SuggestedTaskSurface),
-    null,
-    "the suggestion surface must not be reachable when the flag is off",
+    "the always-on suggestion surface must be mounted in the landing view",
   );
 });
 
