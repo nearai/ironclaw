@@ -1,13 +1,13 @@
 import { registerPack } from "../lib/i18n";
 
-// Consent copy for the lazy Telegram setup surfaces. Keep it out of `en.ts`:
-// the fallback English pack loads eagerly on every route, including /chat.
+// Consent copy for the lazy connection and device-link setup surfaces.
+// The fallback English pack loads eagerly on every route, including /chat.
 // Non-English copy remains in each locale pack and parity is enforced by
 // `src/lib/i18n.test.ts`.
 registerPack("en", {
   "extensions.connectionChoice.title": "How do you want to connect {name}?",
   "extensions.connectionChoice.workspaceBot": "Connect a workspace bot",
-  "extensions.connectionChoice.workspaceBotDisclosure": "Connect your Telegram identity to the workspace bot. The bot can receive your messages and reply as the bot. This does not link your personal account or enable personal-account tools.",
+  "extensions.connectionChoice.workspaceBotDisclosure": "Connect this identity to the workspace bot. The bot can receive your messages and reply as the bot. This does not link your personal account or enable personal-account tools.",
   "extensions.connectionChoice.personalAccount": "Link my personal account",
   "deviceLink.personalDisclosure": "Link your personal {name} account as a third-party device. When you ask IronClaw, it can read your {name} chats and send messages that recipients see as coming from you. Revoke access at any time in {name} Settings → Devices.",
   "deviceLink.title": "Link your {name} account",
