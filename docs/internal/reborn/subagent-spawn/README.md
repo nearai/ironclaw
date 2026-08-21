@@ -2,7 +2,7 @@
 
 **Status:** Canonical — the one current document for subagent architecture,
 design decisions, and roadmap.
-**Last verified against code:** 2026-08-21, workspace @ `e4225c442`.
+**Last verified against code:** 2026-08-21, workspace @ `dba5f41e9`.
 **Replaces (deleted 2026-08-20, recoverable from git history):**
 `phase-1-contracts.md`, `phase-2-mechanisms.md`, `phase-3-integration.md`,
 `thread-harness-design.md`, `pr2-pr6-shape.md`,
