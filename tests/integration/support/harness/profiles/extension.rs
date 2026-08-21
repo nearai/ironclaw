@@ -11,7 +11,9 @@ use ironclaw_extension_contracts::tool_adapter::{
 };
 use ironclaw_host_api::{
     action::NetworkMethod,
-    dispatch::{DispatchFailureDetail, RuntimeDispatchErrorKind},
+    dispatch::{
+        DispatchFailureDetail, ProviderDiagnostic, ProviderErrorCode, RuntimeDispatchErrorKind,
+    },
     ids::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId},
     messaging::StandardMessagingErrorCode,
     mount::{MountPermissions, MountView},
@@ -1489,18 +1491,20 @@ fn acme_error_to_standard_code(vendor_code: &str) -> StandardMessagingErrorCode 
     }
 }
 
-/// Builds the adapter error for a non-2xx vendor response: maps the vendor
-/// code and puts the standard code string in the host summary — the same
-/// error path `send_note` surfaces through today (`ToolError::Rejected`'s
-/// `HostSummary` detail), which is the channel the standard messaging error
-/// taxonomy is documented to ride
-/// (`ironclaw_host_api::messaging::StandardMessagingErrorCode`).
+/// Builds the adapter error for a non-2xx vendor response. The extension sends
+/// only the closed standard-messaging code; the trusted extension host
+/// recognizes that exact code and mints the public summary.
 fn acme_vendor_error(vendor_code: &str) -> ToolError {
     let code = acme_error_to_standard_code(vendor_code);
-    acme_tool_error(
-        RuntimeDispatchErrorKind::OperationFailed,
-        format!("acme vendor rejected the request: {}", code.as_str()),
-    )
+    ToolError::Rejected {
+        kind: RuntimeDispatchErrorKind::OperationFailed,
+        diagnostic: Some(Box::new(ProviderDiagnostic {
+            code: Some(ProviderErrorCode::new(code.as_str())),
+            message: None,
+            retry_after: None,
+        })),
+        detail: None,
+    }
 }
 
 /// One canonical `message` object (spec appendix) from one vendor-shaped
@@ -2511,16 +2515,20 @@ pub(crate) mod standard_op_contract_tests {
             let error = invoke_acme("send_message", input, &vendor)
                 .await
                 .expect_err("a non-2xx vendor response must surface as an error");
-            let ToolError::Rejected { detail, .. } = error else {
+            let ToolError::Rejected {
+                diagnostic, detail, ..
+            } = error
+            else {
                 panic!("expected ToolError::Rejected for vendor code {vendor_code}");
             };
-            let Some(DispatchFailureDetail::HostSummary { summary, .. }) = detail else {
-                panic!("acme vendor errors carry a host summary");
-            };
-            assert!(
-                summary.as_str().contains(expected.as_str()),
-                "vendor code {vendor_code}: expected {summary:?} to contain {}",
-                expected.as_str()
+            assert!(detail.is_none(), "extensions must not mint host summaries");
+            assert_eq!(
+                diagnostic
+                    .as_ref()
+                    .and_then(|diagnostic| diagnostic.code.as_ref())
+                    .map(ProviderErrorCode::as_str),
+                Some(expected.as_str()),
+                "vendor code {vendor_code}"
             );
         }
     }
