@@ -757,19 +757,27 @@ path — today the codec still rejects background mode), the resolver half of
 Task 6 (`deliver_background`, `bind_input_enqueue`, composition wiring), and
 Tasks 7–9 (healing sweeps, integration scenarios, prompt/doc closeout).
 
-**Two items found during 2a and deliberately left for 2b** (open, not
-fixed — track them in whichever task lands the resolver tail):
-- `record_attention`'s predecessor selector
-  (`crates/loop/ironclaw_turn_runner/src/subagent/await_edge/store.rs`) uses
-  a `_ =>` wildcard over the peeked edge's `AwaitEdgeState` to pick the
-  expected kernel state for its CAS. Fail-closed today, but a future state
-  that should be a legal predecessor gets admitted silently through the
-  wildcard arm instead of failing to compile.
+**One item found during 2a and deliberately left for 2b** (open, not
+fixed — track it in whichever task lands the resolver tail):
 - `AwaitEdgeStore::close` returns `Ok(())` for an edge still in
   `ResultAppended` (same file) — a silent success that leaves the
   descendant reservation held. This is correct while nothing produces
   `ResultAppended` outside tests; once 2b's resolver tail exists it should
   become a typed error instead of a quiet no-op.
+
+The predecessor-selector wildcard previously listed here was retired rather
+than deferred: `record_attention`'s `peek`-then-CAS existed only to
+reconstruct an `expected` state the kernel now derives itself from
+`ProcessDependencyState::legal_predecessors`, so both the peek and its
+wildcard arm were deleted (PR #7788, correcting the entry this list carried).
+
+A separate charter item, recorded here so 2b's sweeps do not inherit it
+silently: `query_indexed_collection` drains every page and
+`dependencies_for_scope` is unbounded, with `group_ref` and closed-state
+filtered in memory. That predates this work, but it already violates the
+`crates/kernel/ironclaw_processes/AGENTS.md` rule that normal request and
+startup paths use bounded, partition-leading keyset queries only — so §4.2's
+`limit`/continuation work is a charter fix, not an optimisation.
 
 ### Global constraints
 
