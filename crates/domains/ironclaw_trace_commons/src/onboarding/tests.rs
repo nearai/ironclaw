@@ -217,7 +217,7 @@ async fn successful_onboard_writes_policy_and_promotes_key() {
     // Verify parsed path is /v1/trace-upload-claim and host matches invite.
     let issuer_parsed = reqwest::Url::parse(expected_issuer_url.as_str()).unwrap();
     assert_eq!(issuer_parsed.path(), "/v1/trace-upload-claim");
-    assert_eq!(issuer_parsed.host_str().unwrap(), format!("127.0.0.1"));
+    assert_eq!(issuer_parsed.host_str().unwrap(), "127.0.0.1");
     assert_eq!(
         policy.ingestion_endpoint.as_deref(),
         Some("https://ingest.example.com")
