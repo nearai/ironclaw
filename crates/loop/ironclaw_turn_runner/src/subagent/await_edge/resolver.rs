@@ -31,8 +31,9 @@ use ironclaw_threads::{
     UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::{
+    AcceptedMessageRef, ActivateThreadRequest, ActivationProvenance, AdmissionRejectionReason,
     AgentTurnSpawnTreeRuntimePort, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
-    TurnCoordinator, TurnError, TurnLifecycleEvent, TurnRunRecord,
+    RunProfileRequest, TurnCoordinator, TurnError, TurnLifecycleEvent, TurnRunRecord,
 };
 
 use super::{AwaitEdge, AwaitEdgeState, EdgeTerminalKind, store::AwaitEdgeStore};
@@ -567,14 +568,18 @@ where
         Ok(())
     }
 
-    /// Background-mode delivery tail (Task 5, 2b): append the settled
-    /// child's framed result to the parent's transcript, then — for a live,
-    /// non-terminal parent run only — enqueue it as steering input. Never
-    /// resumes a blocked parent; that is `resume_parent`'s job, exclusive to
-    /// the blocking-mode `drain_settled_group` path. A background parent
-    /// that has no live run right now, or whose enqueue itself refuses,
-    /// stays parked in `ResultAppended` rather than erroring — Task 6 (2c)
-    /// adds the parked-parent activation path that later drains it.
+    /// Background-mode delivery tail (Task 5, 2b; Task 6, 2c): append the
+    /// settled child's framed result to the parent's transcript, then either
+    /// enqueue it as steering input for a live, non-terminal parent run, or —
+    /// when there is no live run, or the live-run enqueue itself refuses —
+    /// activate the parked parent (`activate_parked_parent`) with system
+    /// provenance. Never resumes a blocked parent; that is `resume_parent`'s
+    /// job, exclusive to the blocking-mode `drain_settled_group` path.
+    ///
+    /// Re-drive entry: a peeked edge already at `AttentionScheduled` closes
+    /// without repeating append/attend/activate; one already
+    /// `AttentionDeferredStreakCap` returns untouched — sweeps own its retry,
+    /// not the reactive settle path.
     async fn deliver_background(
         &self,
         edge: &AwaitEdge,
@@ -644,7 +649,23 @@ where
             }
         };
 
-        // Step 2: attend.
+        // Step 2: attend. A re-drive that finds the edge already past the
+        // append/attend fork (`AttentionScheduled`, or parked at
+        // `AttentionDeferredStreakCap`) must not repeat it.
+        match edge.state {
+            AwaitEdgeState::AttentionScheduled => {
+                self.store
+                    .close(&edge.child_scope, parent_run_id, child_run_id)
+                    .await
+                    .map_err(store_error)?;
+                return Ok(ResolveOutcome::Drained);
+            }
+            AwaitEdgeState::AttentionDeferredStreakCap => {
+                return Ok(ResolveOutcome::Drained);
+            }
+            _ => {}
+        }
+        let message_id = parse_appended_message_id(&message_ref)?;
         let live_record = self
             .agent_turn_runtime()?
             .recent_runs_for_thread(&edge.parent_run_context.scope, 1)
@@ -653,14 +674,15 @@ where
             .next()
             .filter(|record| !record.status.is_terminal());
         let Some(record) = live_record else {
-            // Task 6 (2c): parked-parent activation lands here.
-            return Ok(ResolveOutcome::Drained);
+            return self
+                .activate_parked_parent(edge, parent_run_id, child_run_id, message_id)
+                .await;
         };
         let Some(enqueue_port) = self.input_enqueue.get() else {
-            // Task 6 (2c): parked-parent activation lands here.
-            return Ok(ResolveOutcome::Drained);
+            return self
+                .activate_parked_parent(edge, parent_run_id, child_run_id, message_id)
+                .await;
         };
-        let message_id = parse_appended_message_id(&message_ref)?;
         let parent_scope = background_parent_thread_scope(edge, owner_user_id)?;
         let enqueue_result = enqueue_port
             .enqueue_queued_message(EnqueueQueuedMessageRequest {
@@ -682,8 +704,9 @@ where
                 | HostInputQueueError::CapacityExhausted
                 | HostInputQueueError::Disabled,
             ) => {
-                // Task 6 (2c): parked-parent activation lands here.
-                return Ok(ResolveOutcome::Drained);
+                return self
+                    .activate_parked_parent(edge, parent_run_id, child_run_id, message_id)
+                    .await;
             }
             Err(error) => {
                 return Err(TurnError::Unavailable {
@@ -708,6 +731,94 @@ where
             .map_err(store_error)?;
 
         Ok(ResolveOutcome::Drained)
+    }
+
+    /// Parked-parent activation (Task 6, 2c): reached from `deliver_background`
+    /// step 2 when there is no live parent run, or the live-run enqueue itself
+    /// refuses (`RunClosed`/`CapacityExhausted`/`Disabled`) — the parent must
+    /// be woken, not steered. Wakes it through `TurnCoordinator::activate` with
+    /// `ActivationProvenance::System` so the derived streak caps see (and, once
+    /// spent, refuse) this wake exactly as they would a human-initiated one.
+    /// Never calls `resume_turn`/`resume_parent`: that path is exclusive to the
+    /// blocking-mode dependent-run gate, which a background parent never parks
+    /// on.
+    async fn activate_parked_parent(
+        &self,
+        edge: &AwaitEdge,
+        parent_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+        message_id: ThreadMessageId,
+    ) -> Result<ResolveOutcome, TurnError> {
+        let actor =
+            edge.parent_run_context
+                .actor
+                .clone()
+                .ok_or_else(|| TurnError::InvalidRequest {
+                    reason: "subagent parent run context missing actor for activation".to_string(),
+                })?;
+        let coordinator = self
+            .coordinator
+            .get()
+            .ok_or_else(|| TurnError::Unavailable {
+                reason: "await-edge resolver coordinator is not bound".to_string(),
+            })?;
+        let accepted_message_ref = AcceptedMessageRef::new(format!("msg:{message_id}"))
+            .map_err(|reason| TurnError::InvalidRequest { reason })?;
+        let idempotency_key =
+            IdempotencyKey::new(format!("subagent-activate:{parent_run_id}:{child_run_id}"))
+                .map_err(|reason| TurnError::InvalidRequest { reason })?;
+        let requested_run_profile = RunProfileRequest::new(
+            edge.parent_run_context
+                .resolved_run_profile
+                .profile_id
+                .as_str(),
+        )
+        .map_err(|reason| TurnError::InvalidRequest { reason })?;
+
+        let activation = coordinator
+            .activate(ActivateThreadRequest {
+                scope: edge.parent_run_context.scope.clone(),
+                actor,
+                accepted_message_ref,
+                provenance: ActivationProvenance::System,
+                idempotency_key,
+                received_at: chrono::Utc::now(),
+                requested_run_profile: Some(requested_run_profile),
+            })
+            .await;
+
+        match activation {
+            Ok(_) => {
+                self.store
+                    .record_attention(
+                        &edge.child_scope,
+                        parent_run_id,
+                        child_run_id,
+                        super::AttentionOutcome::Activated,
+                    )
+                    .await
+                    .map_err(store_error)?;
+                self.store
+                    .close(&edge.child_scope, parent_run_id, child_run_id)
+                    .await
+                    .map_err(store_error)?;
+                Ok(ResolveOutcome::Drained)
+            }
+            Err(TurnError::AdmissionRejected(rejection))
+                if rejection.reason == AdmissionRejectionReason::SystemWakeStreak =>
+            {
+                self.store
+                    .defer_streak_capped(&edge.child_scope, parent_run_id, child_run_id)
+                    .await
+                    .map_err(store_error)?;
+                Ok(ResolveOutcome::Drained)
+            }
+            // `ThreadBusy` (the parent raced back to live) and any other
+            // refusal this tail doesn't recognize as a streak cap leave the
+            // edge parked in `ResultAppended` — the next drive re-attends;
+            // sweeps own the retry, this tail does not hard-fail on it.
+            Err(_) => Ok(ResolveOutcome::Drained),
+        }
     }
 
     /// Drives one child terminal event through settle -> (group-ready?) ->
@@ -1549,6 +1660,13 @@ mod tests {
     #[derive(Default)]
     struct RecordingResumeCoordinator {
         resumes: std::sync::Mutex<Vec<ResumeTurnRequest>>,
+        // Task 6 (2c): the recorded `ActivateThreadRequest`s this double saw,
+        // and the scripted response `activate()` replays for every call —
+        // every background-delivery activation test scripts exactly one
+        // outcome, so a single slot (not a per-call queue) is enough.
+        activations: std::sync::Mutex<Vec<ActivateThreadRequest>>,
+        activation_result:
+            std::sync::Mutex<Option<Result<ironclaw_turns::SubmitTurnResponse, TurnError>>>,
     }
 
     impl RecordingResumeCoordinator {
@@ -1557,6 +1675,24 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone()
+        }
+
+        fn activations(&self) -> Vec<ActivateThreadRequest> {
+            self.activations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+
+        fn with_activation_result(
+            self,
+            result: Result<ironclaw_turns::SubmitTurnResponse, TurnError>,
+        ) -> Self {
+            *self
+                .activation_result
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
+            self
         }
     }
 
@@ -1621,6 +1757,21 @@ mod tests {
             Err(TurnError::InvalidRequest {
                 reason: "submit is not used by await-edge drain test".to_string(),
             })
+        }
+
+        async fn activate(
+            &self,
+            request: ActivateThreadRequest,
+        ) -> Result<ironclaw_turns::SubmitTurnResponse, TurnError> {
+            self.activations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request);
+            self.activation_result
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+                .expect("activation result must be scripted before activate() is called")
         }
 
         async fn resume_turn(
@@ -2408,9 +2559,16 @@ mod tests {
     /// Builds one background-mode await-edge (`Open`, real process journal)
     /// plus a resolver wired to it: `dependencies` is the (optionally
     /// scripted) `ProcessDependencyPort` the edge store's CAS writes go
-    /// through, and `live_run` configures the stub runtime's
+    /// through, `live_run` configures the stub runtime's
     /// `recent_runs_for_thread` answer for the parent's thread — `Some` for a
-    /// live, non-terminal parent run, `None` for no live run at all.
+    /// live, non-terminal parent run, `None` for no live run at all — and
+    /// `coordinator` is bound the same way production always binds one
+    /// (`ironclaw_turn_runner::runtime.rs`), so the Task 6 (2c) parked-parent
+    /// activation branch has a real callee regardless of which fixture uses
+    /// it. `profile_id`, when set, overrides the parent's resolved run
+    /// profile id (default is `RunProfileId::default_profile()`) so
+    /// activation-shape tests can assert the id an activation request
+    /// carries is the parent's own, not a hardcoded default.
     async fn bg_fixture(
         process_store: Arc<
             ironclaw_processes::ProcessJournalStore<ironclaw_filesystem::InMemoryBackend>,
@@ -2422,6 +2580,8 @@ mod tests {
         >,
         enqueue: Arc<RecordingEnqueue>,
         live_run: Option<(TurnRunId, ironclaw_host_api::turn::TurnId)>,
+        coordinator: Arc<dyn TurnCoordinator>,
+        profile_id: Option<ironclaw_host_api::turn::RunProfileId>,
     ) -> BgFixture {
         use ironclaw_host_api::ids::{AgentId, ProcessId, TenantId, ThreadId};
         use ironclaw_processes::{
@@ -2520,6 +2680,9 @@ mod tests {
         parent_context.thread_id = parent_thread_id.clone();
         parent_context.run_id = parent_run_id;
         parent_context.actor = Some(TurnActor::new(owner_user_id.clone()));
+        if let Some(profile_id) = profile_id {
+            parent_context.resolved_run_profile.profile_id = profile_id;
+        }
 
         let gate_ref =
             TurnGateRef::new(format!("gate:subagent-bg-{child_run_id}")).expect("gate ref");
@@ -2656,6 +2819,9 @@ mod tests {
         resolver
             .bind_input_enqueue(Arc::clone(&enqueue) as Arc<dyn HostInputEnqueuePort>)
             .expect("bind input enqueue");
+        resolver
+            .bind_coordinator(coordinator)
+            .expect("bind coordinator");
 
         let event = TurnLifecycleEvent {
             cursor: ironclaw_host_api::turn::EventCursor(2),
@@ -2764,6 +2930,8 @@ mod tests {
             dependencies,
             Arc::clone(&enqueue),
             Some((live_run_id, live_turn_id)),
+            Arc::new(RecordingResumeCoordinator::default()) as Arc<dyn TurnCoordinator>,
+            None,
         )
         .await;
 
@@ -2800,7 +2968,7 @@ mod tests {
         assert_eq!(
             requests.len(),
             1,
-            "no resume_turn path: exactly one enqueue, no coordinator bound"
+            "no resume_turn path in background mode: exactly one enqueue"
         );
         let request = &requests[0];
         assert_eq!(request.run_id, live_run_id);
@@ -2844,6 +3012,8 @@ mod tests {
             dependencies,
             Arc::clone(&enqueue),
             Some((live_run_id, live_turn_id)),
+            Arc::new(RecordingResumeCoordinator::default()) as Arc<dyn TurnCoordinator>,
+            None,
         )
         .await;
 
@@ -2910,6 +3080,8 @@ mod tests {
             dependencies,
             Arc::clone(&enqueue),
             Some((live_run_id, live_turn_id)),
+            Arc::new(RecordingResumeCoordinator::default()) as Arc<dyn TurnCoordinator>,
+            None,
         )
         .await;
 
@@ -2965,11 +3137,27 @@ mod tests {
         let enqueue = Arc::new(RecordingEnqueue::refusing(refusal));
         let live_run_id = TurnRunId::new();
         let live_turn_id = ironclaw_host_api::turn::TurnId::new();
+        // The enqueue refusal (Task 5) now falls through into the Task 6
+        // parked-parent activation branch; script the coordinator with
+        // `ThreadBusy` so this test still exercises (and asserts) the
+        // "stays parked, not closed" outcome the refusal itself is about,
+        // rather than actually activating the parent.
+        let coordinator = Arc::new(
+            RecordingResumeCoordinator::default().with_activation_result(Err(
+                TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+                    active_run_id: live_run_id,
+                    status: TurnStatus::Running,
+                    event_cursor: ironclaw_host_api::turn::EventCursor(1),
+                }),
+            )),
+        );
         let fixture = bg_fixture(
             process_store,
             dependencies,
             Arc::clone(&enqueue),
             Some((live_run_id, live_turn_id)),
+            Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+            None,
         )
         .await;
 
@@ -2993,6 +3181,11 @@ mod tests {
         assert_eq!(edge.state, AwaitEdgeState::ResultAppended);
         assert!(edge.attention_outcome.is_none());
         assert_eq!(enqueue.requests().len(), 1);
+        assert_eq!(
+            coordinator.activations().len(),
+            1,
+            "the refused enqueue must still attempt activation once"
+        );
     }
 
     #[tokio::test]
@@ -3004,6 +3197,375 @@ mod tests {
     async fn background_delivery_parks_edge_on_capacity_exhausted_enqueue_refusal() {
         assert_background_delivery_parks_on_enqueue_refusal(EnqueueRefusal::CapacityExhausted)
             .await;
+    }
+
+    // ─── Task 6 (2c): parked-parent activation + streak-cap deferral ──────
+
+    fn activation_accepted(
+        run_id: TurnRunId,
+    ) -> Result<ironclaw_turns::SubmitTurnResponse, TurnError> {
+        Ok(ironclaw_turns::SubmitTurnResponse::Accepted {
+            turn_id: ironclaw_host_api::turn::TurnId::new(),
+            run_id,
+            status: TurnStatus::Queued,
+            resolved_run_profile_id: ironclaw_host_api::turn::RunProfileId::default_profile(),
+            resolved_run_profile_version: ironclaw_host_api::turn::RunProfileVersion::new(1),
+            event_cursor: ironclaw_host_api::turn::EventCursor(1),
+            accepted_message_ref: AcceptedMessageRef::new("accepted-activation-probe")
+                .expect("accepted message ref"),
+        })
+    }
+
+    #[tokio::test]
+    async fn background_delivery_activates_parked_parent_with_system_provenance_and_preserves_profile()
+     {
+        let process_store = Arc::new(ironclaw_processes::ProcessJournalStore::new(
+            recon_scoped_fs(),
+        ));
+        let dependencies = Arc::clone(&process_store)
+            as Arc<
+                dyn ironclaw_processes::ProcessDependencyPort<
+                        Error = ironclaw_processes::ProcessJournalStoreError,
+                    >,
+            >;
+        let enqueue = Arc::new(RecordingEnqueue::accepting());
+        let coordinator = Arc::new(
+            RecordingResumeCoordinator::default()
+                .with_activation_result(activation_accepted(TurnRunId::new())),
+        );
+        let fixture = bg_fixture(
+            process_store,
+            dependencies,
+            Arc::clone(&enqueue),
+            None,
+            Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+            Some(ironclaw_host_api::turn::RunProfileId::long_running_mission()),
+        )
+        .await;
+
+        let outcome = fixture
+            .resolver
+            .handle_child_terminal(&fixture.event)
+            .await
+            .expect("parked-parent activation succeeds");
+        assert_eq!(outcome, ResolveOutcome::Drained);
+
+        assert!(
+            fixture
+                .edge_store
+                .peek(
+                    &fixture.child_scope,
+                    fixture.parent_run_id,
+                    fixture.child_run_id
+                )
+                .await
+                .expect("peek edge")
+                .is_none(),
+            "an activated edge must be closed"
+        );
+
+        let row = single_system_message(&fixture).await;
+        assert_accept_subagent_result_replays(&fixture, row.message_id).await;
+        assert!(
+            enqueue.requests().is_empty(),
+            "no live parent: the parked branch must never enqueue"
+        );
+
+        let activations = coordinator.activations();
+        assert_eq!(activations.len(), 1, "exactly one activate() call");
+        let request = &activations[0];
+        assert_eq!(request.provenance, ActivationProvenance::System);
+        assert_eq!(
+            request.accepted_message_ref,
+            AcceptedMessageRef::new(format!("msg:{}", row.message_id)).expect("accepted ref")
+        );
+        assert_eq!(
+            request.idempotency_key,
+            IdempotencyKey::new(format!(
+                "subagent-activate:{}:{}",
+                fixture.parent_run_id, fixture.child_run_id
+            ))
+            .expect("idempotency key")
+        );
+        assert_eq!(
+            request.requested_run_profile,
+            Some(RunProfileRequest::new("long_running_mission").expect("run profile request"))
+        );
+        let expected_scope = TurnScope::new_with_owner(
+            fixture.tenant_id.clone(),
+            Some(fixture.agent_id.clone()),
+            None,
+            fixture.parent_thread_id.clone(),
+            Some(fixture.owner_user_id.clone()),
+        );
+        assert_eq!(request.scope, expected_scope);
+        assert_eq!(request.actor, TurnActor::new(fixture.owner_user_id.clone()));
+    }
+
+    #[tokio::test]
+    async fn background_delivery_defers_streak_capped_parent_and_excludes_it_from_redrive() {
+        let process_store = Arc::new(ironclaw_processes::ProcessJournalStore::new(
+            recon_scoped_fs(),
+        ));
+        let dependencies = Arc::clone(&process_store)
+            as Arc<
+                dyn ironclaw_processes::ProcessDependencyPort<
+                        Error = ironclaw_processes::ProcessJournalStoreError,
+                    >,
+            >;
+        let enqueue = Arc::new(RecordingEnqueue::accepting());
+        let coordinator = Arc::new(
+            RecordingResumeCoordinator::default().with_activation_result(Err(
+                TurnError::AdmissionRejected(ironclaw_turns::AdmissionRejection::new(
+                    AdmissionRejectionReason::SystemWakeStreak,
+                )),
+            )),
+        );
+        let fixture = bg_fixture(
+            process_store,
+            dependencies,
+            Arc::clone(&enqueue),
+            None,
+            Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+            None,
+        )
+        .await;
+
+        let outcome = fixture
+            .resolver
+            .handle_child_terminal(&fixture.event)
+            .await
+            .expect("a streak-capped activation refusal is not a hard error");
+        assert_eq!(outcome, ResolveOutcome::Drained);
+
+        let edge = fixture
+            .edge_store
+            .peek(
+                &fixture.child_scope,
+                fixture.parent_run_id,
+                fixture.child_run_id,
+            )
+            .await
+            .expect("peek edge")
+            .expect("a streak-deferred edge stays unclosed");
+        assert_eq!(edge.state, AwaitEdgeState::AttentionDeferredStreakCap);
+
+        assert!(
+            fixture
+                .edge_store
+                .list_unclosed_for_scope(&fixture.child_scope)
+                .await
+                .expect("list unclosed")
+                .into_iter()
+                .any(|(parent, child, _)| parent == fixture.parent_run_id
+                    && child == fixture.child_run_id),
+            "a streak-deferred edge must still be returned by list_unclosed_for_scope"
+        );
+
+        // Re-drive: the edge is no longer `Settled`, so `deliver_background`
+        // must skip it rather than attempt a second activation.
+        let redrive = fixture
+            .resolver
+            .handle_child_terminal(&fixture.event)
+            .await
+            .expect("re-driving a deferred edge is a no-op, not an error");
+        assert_eq!(redrive, ResolveOutcome::Drained);
+        assert_eq!(
+            coordinator.activations().len(),
+            1,
+            "autonomous retry must not call activate() again on a streak-capped edge"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_delivery_leaves_parked_edge_on_thread_busy_activation_refusal() {
+        let process_store = Arc::new(ironclaw_processes::ProcessJournalStore::new(
+            recon_scoped_fs(),
+        ));
+        let dependencies = Arc::clone(&process_store)
+            as Arc<
+                dyn ironclaw_processes::ProcessDependencyPort<
+                        Error = ironclaw_processes::ProcessJournalStoreError,
+                    >,
+            >;
+        let enqueue = Arc::new(RecordingEnqueue::accepting());
+        let raced_run_id = TurnRunId::new();
+        let coordinator = Arc::new(
+            RecordingResumeCoordinator::default().with_activation_result(Err(
+                TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+                    active_run_id: raced_run_id,
+                    status: TurnStatus::Running,
+                    event_cursor: ironclaw_host_api::turn::EventCursor(1),
+                }),
+            )),
+        );
+        let fixture = bg_fixture(
+            process_store,
+            dependencies,
+            Arc::clone(&enqueue),
+            None,
+            Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+            None,
+        )
+        .await;
+
+        let outcome = fixture
+            .resolver
+            .handle_child_terminal(&fixture.event)
+            .await
+            .expect("a ThreadBusy activation refusal is not a hard error");
+        assert_eq!(outcome, ResolveOutcome::Drained);
+
+        let edge = fixture
+            .edge_store
+            .peek(
+                &fixture.child_scope,
+                fixture.parent_run_id,
+                fixture.child_run_id,
+            )
+            .await
+            .expect("peek edge")
+            .expect("edge stays parked, not closed");
+        assert_eq!(edge.state, AwaitEdgeState::ResultAppended);
+        assert!(edge.attention_outcome.is_none());
+        assert_eq!(coordinator.activations().len(), 1);
+        assert!(enqueue.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn background_delivery_leaves_parked_edge_on_transient_activation_error() {
+        let process_store = Arc::new(ironclaw_processes::ProcessJournalStore::new(
+            recon_scoped_fs(),
+        ));
+        let dependencies = Arc::clone(&process_store)
+            as Arc<
+                dyn ironclaw_processes::ProcessDependencyPort<
+                        Error = ironclaw_processes::ProcessJournalStoreError,
+                    >,
+            >;
+        let enqueue = Arc::new(RecordingEnqueue::accepting());
+        let coordinator = Arc::new(
+            RecordingResumeCoordinator::default().with_activation_result(Err(
+                TurnError::Unavailable {
+                    reason: "activation transiently unavailable".to_string(),
+                },
+            )),
+        );
+        let fixture = bg_fixture(
+            process_store,
+            dependencies,
+            Arc::clone(&enqueue),
+            None,
+            Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+            None,
+        )
+        .await;
+
+        let outcome = fixture
+            .resolver
+            .handle_child_terminal(&fixture.event)
+            .await
+            .expect("a transient activation error is not a hard error");
+        assert_eq!(outcome, ResolveOutcome::Drained);
+
+        let edge = fixture
+            .edge_store
+            .peek(
+                &fixture.child_scope,
+                fixture.parent_run_id,
+                fixture.child_run_id,
+            )
+            .await
+            .expect("peek edge")
+            .expect("edge stays parked, not closed");
+        assert_eq!(edge.state, AwaitEdgeState::ResultAppended);
+        assert!(edge.attention_outcome.is_none());
+        assert_eq!(coordinator.activations().len(), 1);
+        assert!(enqueue.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn background_delivery_closes_without_second_activate_after_crash_before_close() {
+        let process_store = Arc::new(ironclaw_processes::ProcessJournalStore::new(
+            recon_scoped_fs(),
+        ));
+        let dependencies = Arc::new(
+            ScriptedDependencyFailures::new(Arc::clone(&process_store)
+                as Arc<
+                    dyn ironclaw_processes::ProcessDependencyPort<
+                            Error = ironclaw_processes::ProcessJournalStoreError,
+                        >,
+                >)
+            .fail_consume_once(),
+        )
+            as Arc<
+                dyn ironclaw_processes::ProcessDependencyPort<
+                        Error = ironclaw_processes::ProcessJournalStoreError,
+                    >,
+            >;
+        let enqueue = Arc::new(RecordingEnqueue::accepting());
+        let coordinator = Arc::new(
+            RecordingResumeCoordinator::default()
+                .with_activation_result(activation_accepted(TurnRunId::new())),
+        );
+        let fixture = bg_fixture(
+            process_store,
+            dependencies,
+            Arc::clone(&enqueue),
+            None,
+            Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+            None,
+        )
+        .await;
+
+        let first = fixture.resolver.handle_child_terminal(&fixture.event).await;
+        assert!(
+            first.is_err(),
+            "a crash between record_attention(Activated) and close must surface as an error"
+        );
+
+        let edge = fixture
+            .edge_store
+            .peek(
+                &fixture.child_scope,
+                fixture.parent_run_id,
+                fixture.child_run_id,
+            )
+            .await
+            .expect("peek edge")
+            .expect("edge is not yet closed");
+        assert_eq!(edge.state, AwaitEdgeState::AttentionScheduled);
+        assert_eq!(
+            edge.attention_outcome,
+            Some(crate::subagent::await_edge::AttentionOutcome::Activated)
+        );
+
+        let second = fixture
+            .resolver
+            .handle_child_terminal(&fixture.event)
+            .await
+            .expect("re-drive recovers once the scripted close failure is spent");
+        assert_eq!(second, ResolveOutcome::Drained);
+
+        assert!(
+            fixture
+                .edge_store
+                .peek(
+                    &fixture.child_scope,
+                    fixture.parent_run_id,
+                    fixture.child_run_id
+                )
+                .await
+                .expect("peek edge")
+                .is_none(),
+            "the re-drive must close the edge"
+        );
+
+        assert_eq!(
+            coordinator.activations().len(),
+            1,
+            "the re-drive must not call activate() a second time"
+        );
     }
 }
 
