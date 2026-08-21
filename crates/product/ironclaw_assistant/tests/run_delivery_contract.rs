@@ -132,6 +132,7 @@ struct ScriptedTurnCoordinator {
     clamp_at_last: bool,
     calls: Mutex<usize>,
     cancel_calls: Mutex<Vec<TurnRunId>>,
+    state_override: Mutex<Option<ScriptedRunState>>,
     /// Optional late transition: from call `flip.0` on, `flip.1` is returned
     /// instead of the scripted sequence — used to race a terminal state in
     /// after the wait backstop has already fired. One tuple keeps the flip
@@ -147,6 +148,7 @@ impl ScriptedTurnCoordinator {
             clamp_at_last: true,
             calls: Mutex::new(0),
             cancel_calls: Mutex::new(Vec::new()),
+            state_override: Mutex::new(None),
             flip: None,
         }
     }
@@ -163,12 +165,21 @@ impl ScriptedTurnCoordinator {
             clamp_at_last: true,
             calls: Mutex::new(0),
             cancel_calls: Mutex::new(Vec::new()),
+            state_override: Mutex::new(None),
             flip: Some((flip_after, terminal)),
         }
     }
 
     fn cancel_call_count(&self) -> usize {
         self.cancel_calls.lock().expect("cancel calls").len()
+    }
+
+    fn set_state(&self, state: ScriptedRunState) {
+        *self.state_override.lock().expect("state override") = Some(state);
+    }
+
+    fn call_count(&self) -> usize {
+        *self.calls.lock().expect("calls")
     }
 }
 
@@ -206,16 +217,19 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
         let mut calls = self.calls.lock().expect("calls");
         let call = *calls;
         *calls += 1;
-        let scripted = match self.flip {
-            Some((flip_after, ref terminal)) if call >= flip_after => terminal.clone(),
-            _ => {
-                let idx = if self.clamp_at_last {
-                    call.min(self.states.len() - 1)
-                } else {
-                    call % self.states.len()
-                };
-                self.states[idx].clone()
-            }
+        let scripted = match self.state_override.lock().expect("state override").clone() {
+            Some(state) => state,
+            None => match self.flip {
+                Some((flip_after, ref terminal)) if call >= flip_after => terminal.clone(),
+                _ => {
+                    let idx = if self.clamp_at_last {
+                        call.min(self.states.len() - 1)
+                    } else {
+                        call % self.states.len()
+                    };
+                    self.states[idx].clone()
+                }
+            },
         };
         Ok(TurnRunState {
             scope: request.scope.clone(),
@@ -836,19 +850,33 @@ async fn inbox_records(
         .expect("notification inbox")
 }
 
-async fn wait_for_inbox_resolution(inbox: &dyn NotificationInboxStorePort) {
+async fn wait_for_inbox_resolution(
+    inbox: &dyn NotificationInboxStorePort,
+    expected_kind: NotificationKind,
+    expected_lifecycle_ref: &str,
+) {
     for _ in 0..500 {
         let page = inbox_records(inbox).await;
         if page
             .notifications
             .iter()
-            .any(|notification| notification.resolved_at.is_some())
+            .find(|notification| {
+                notification.kind == expected_kind
+                    && notification
+                        .source
+                        .lifecycle_ref
+                        .as_ref()
+                        .is_some_and(|reference| reference.as_str() == expected_lifecycle_ref)
+            })
+            .is_some_and(|notification| notification.resolved_at.is_some())
         {
             return;
         }
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
-    panic!("no Inbox notification resolved before the test deadline");
+    panic!(
+        "Inbox notification {expected_kind:?}/{expected_lifecycle_ref} did not resolve before the test deadline"
+    );
 }
 
 fn envelope_for_conversation(
@@ -3435,7 +3463,12 @@ async fn triggered_failed_gate_fanout_still_resolves_the_inbox_after_resume() {
         wait_for_outcome(&harness.delivery_store, run_id).await,
         TriggeredRunDeliveryOutcomeKind::Failed
     );
-    wait_for_inbox_resolution(harness.notification_inbox.as_ref()).await;
+    wait_for_inbox_resolution(
+        harness.notification_inbox.as_ref(),
+        NotificationKind::ApprovalRequired,
+        GATE,
+    )
+    .await;
     let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
     assert_eq!(inbox.notifications.len(), 1);
     assert_eq!(
@@ -3846,15 +3879,11 @@ async fn triggered_timeout_notice_delivery_failure_records_failed() {
 #[tokio::test]
 async fn triggered_gate_resolves_inbox_after_delivery_wait_timeout() {
     const GATE: &str = "gate:approval-00000000000000000000000000000024";
-    let harness = build_triggered_harness_with_turns(
-        Arc::new(ScriptedTurnCoordinator::with_late_terminal(
-            scripted_state(TurnStatus::BlockedApproval, Some(GATE)),
-            scripted_state(TurnStatus::Completed, None),
-            30,
-        )),
-        None,
-        vec![DM_TARGET],
-    );
+    let turns = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+        TurnStatus::BlockedApproval,
+        Some(GATE),
+    )]));
+    let harness = build_triggered_harness_with_turns(Arc::clone(&turns), None, vec![DM_TARGET]);
     seed_notification_targets(&harness.store, &[DM_TARGET]).await;
     let run_id = TurnRunId::new();
 
@@ -3867,7 +3896,13 @@ async fn triggered_gate_resolves_inbox_after_delivery_wait_timeout() {
         wait_for_outcome(&harness.delivery_store, run_id).await,
         TriggeredRunDeliveryOutcomeKind::Delivered
     );
-    wait_for_inbox_resolution(harness.notification_inbox.as_ref()).await;
+    turns.set_state(scripted_state(TurnStatus::Completed, None));
+    wait_for_inbox_resolution(
+        harness.notification_inbox.as_ref(),
+        NotificationKind::ApprovalRequired,
+        GATE,
+    )
+    .await;
     let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
     assert_eq!(inbox.notifications.len(), 1);
     assert_eq!(
@@ -3882,6 +3917,36 @@ async fn triggered_gate_resolves_inbox_after_delivery_wait_timeout() {
         harness.adapter.texts().len(),
         1,
         "post-timeout Inbox observation must not send a terminal channel notice"
+    );
+}
+
+#[tokio::test]
+async fn triggered_abandoned_gate_inbox_observer_stops_after_total_deadline() {
+    const GATE: &str = "gate:approval-00000000000000000000000000000025";
+    let turns = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+        TurnStatus::BlockedApproval,
+        Some(GATE),
+    )]));
+    let harness = build_triggered_harness_with_turns(Arc::clone(&turns), None, vec![DM_TARGET]);
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Delivered
+    );
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let calls_after_deadline = turns.call_count();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        turns.call_count(),
+        calls_after_deadline,
+        "an abandoned gate must not retain a polling task after the observation deadline"
     );
 }
 

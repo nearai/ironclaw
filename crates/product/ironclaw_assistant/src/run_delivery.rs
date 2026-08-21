@@ -59,6 +59,7 @@ use ironclaw_product_contracts::binding::ProductBindingResolver;
 use ironclaw_product_contracts::binding::ResolvedBinding;
 
 mod gate_routes;
+mod inbox_gate_observer;
 pub mod notifications;
 mod observer;
 pub(crate) mod prompts;
