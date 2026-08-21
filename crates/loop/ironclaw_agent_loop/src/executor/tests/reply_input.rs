@@ -424,6 +424,28 @@ async fn input_stage_drains_subagent_settled_ahead_of_a_barrier_in_both_modes() 
             vec![LoopCheckpointKind::BeforeModel],
             "the advanced cursor is checkpointed in {mode:?}"
         );
+        let staged_before_model = host
+            .staged_payloads()
+            .into_iter()
+            .find(|request| request.kind == LoopCheckpointKind::BeforeModel)
+            .unwrap_or_else(|| panic!("no BeforeModel checkpoint payload staged in {mode:?}"));
+        let staged_state = LoopExecutionState::from_checkpoint_payload(
+            &staged_before_model.payload,
+            CheckpointKind::BeforeModel,
+        )
+        .expect("checkpoint payload");
+        // `checkpoint_kinds()` proves only the checkpoint's kind, and the
+        // final `state.input_cursor` above proves only the in-memory cursor —
+        // neither proves what cursor value was actually persisted. Decode the
+        // staged payload bytes (what the host would durably journal) and
+        // assert the cursor inside it directly, so a regression that
+        // checkpoints a stale cursor and only later advances the in-memory
+        // one cannot pass silently.
+        assert_eq!(
+            staged_state.input_cursor,
+            input_cursor(&run_context, "input-cursor:after-settled"),
+            "the persisted checkpoint cursor must be the advanced cursor in {mode:?}"
+        );
         assert_eq!(
             host.events(),
             vec![
