@@ -910,14 +910,25 @@ impl SubagentSpawnCapabilityPort {
         let child_thread_id =
             ThreadId::new(format!("subagent-{}", child_run_id.as_uuid().simple()))
                 .map_err(invalid_static_ref)?;
-        let mode = SpawnSubagentMode::Blocking;
+        let mode = args.mode;
         // The gate ref is also returned as a `LoopGateRef`; keep the opaque
         // suffix colon-free so it satisfies the model-visible loop ref
         // contract (`gate:<ascii-id>` with only alnum/underscore/dash/dot).
-        let gate_ref = if let Some(gate_ref) = gate_override {
-            gate_ref
-        } else {
-            TurnGateRef::new(format!("gate:subagent-{child_run_id}")).map_err(invalid_static_ref)?
+        // An explicit `gate_override` (e.g. a batch's shared gate) always
+        // wins, blocking or background alike; only an un-overridden spawn
+        // mints a mode-specific ref here.
+        let gate_ref = match gate_override {
+            Some(gate_ref) => gate_ref,
+            None => match mode {
+                SpawnSubagentMode::Blocking => {
+                    TurnGateRef::new(format!("gate:subagent-{child_run_id}"))
+                        .map_err(invalid_static_ref)?
+                }
+                SpawnSubagentMode::Background => {
+                    TurnGateRef::new(format!("gate:subagent-bg-{child_run_id}"))
+                        .map_err(invalid_static_ref)?
+                }
+            },
         };
         let payload = spawn_result_payload(
             child_run_id,
@@ -1092,7 +1103,12 @@ impl SubagentSpawnCapabilityPort {
                     root_process_id: ironclaw_host_api::ids::ProcessId::from_uuid(
                         tree_root.as_uuid(),
                     ),
-                    group_ref: Some(gate_ref.as_str().to_string()),
+                    group_ref: match mode {
+                        SpawnSubagentMode::Blocking => Some(gate_ref.as_str().to_string()),
+                        SpawnSubagentMode::Background => {
+                            Some(format!("bg:{}", self.run_context.thread_id))
+                        }
+                    },
                     metadata: dependency_metadata,
                 }),
                 process_input: Some(process_input),
@@ -1103,15 +1119,29 @@ impl SubagentSpawnCapabilityPort {
         compensation.submitted_child_run = Some((child_turn_scope.clone(), actor.clone(), run_id));
         compensation.edge_written = Some((child_turn_scope.clone(), child_run_id));
 
-        let loop_gate_ref = LoopGateRef::new(gate_ref.as_str()).map_err(invalid_static_ref)?;
-        Ok(resolution::await_dependent_run(
-            loop_gate_ref,
-            result_ref,
-            safe_summary("subagent spawned; waiting for completion"),
-            write_result.byte_len,
-            write_result.model_observation,
-        )
-        .resolution)
+        match mode {
+            SpawnSubagentMode::Blocking => {
+                let loop_gate_ref =
+                    LoopGateRef::new(gate_ref.as_str()).map_err(invalid_static_ref)?;
+                Ok(resolution::await_dependent_run(
+                    loop_gate_ref,
+                    result_ref,
+                    safe_summary("subagent spawned; waiting for completion"),
+                    write_result.byte_len,
+                    write_result.model_observation,
+                )
+                .resolution)
+            }
+            SpawnSubagentMode::Background => Ok(resolution::spawned_child_run(
+                child_run_id,
+                result_ref,
+                safe_summary(
+                    "subagent spawned in background; result will arrive as a tagged input",
+                ),
+                write_result.byte_len,
+                write_result.model_observation,
+            )),
+        }
     }
 
     async fn rollback_batch_compensation(&self, compensations: &mut Vec<SpawnCompensationState>) {

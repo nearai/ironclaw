@@ -85,6 +85,24 @@ struct RecordingResultWriter {
     delete_calls: std::sync::atomic::AtomicUsize,
 }
 
+/// Captures the JSON payload passed to `write_capability_result` so a test
+/// can assert on the receipt shape (`status`, `output_available`, `mode`)
+/// without going through a real result store.
+#[derive(Default)]
+struct CapturingResultWriter {
+    last_output: std::sync::Mutex<Option<serde_json::Value>>,
+}
+
+impl CapturingResultWriter {
+    fn last_output(&self) -> serde_json::Value {
+        self.last_output
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("write_capability_result was called")
+    }
+}
+
 /// Wraps [`InMemoryAwaitEdgeWriter`] but always rejects the lazy-recovery
 /// admission check — drives `finish_spawn`'s `check_scope_recovered` reject
 /// branch (external review finding: this must surface as a retryable
@@ -597,6 +615,20 @@ impl LoopCapabilityResultWriter for RecordingResultWriter {
         self.delete_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityResultWriter for CapturingResultWriter {
+    async fn write_capability_result(
+        &self,
+        write: CapabilityResultWrite<'_>,
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+        *self.last_output.lock().unwrap() = Some(write.output.clone());
+        Ok(CapabilityWriteResult::without_output_digest(
+            LoopResultRef::new("result:spawn").unwrap(),
+            0,
+        ))
     }
 }
 
@@ -2174,6 +2206,94 @@ async fn invoke_spawn_submits_child_run_through_spawn_tree_port() {
         Some("test-provider-call")
     );
     assert_eq!(awaited[0].mode, SpawnSubagentMode::Blocking);
+}
+
+// Task 2 (§9 Task 4): a background spawn returns an immediate `Resolution::Done`
+// receipt carrying the child's run id -- it must NOT suspend the parent on a
+// gate the way a blocking spawn does (that suspension path stays pinned by
+// `invoke_spawn_submits_child_run_through_spawn_tree_port` and the other
+// `Suspended(DependentRun)` assertions above). The background dependency edge
+// is still opened (so recovery/steering can find it later), but keyed under a
+// `bg:{parent_thread_id}` journal `group_ref` and a
+// `gate:subagent-bg-{child_run_id}` edge `gate_ref`, distinct from the
+// blocking `gate:subagent-{child_run_id}` form. Mutation: revert `mode` to a
+// hardcoded `SpawnSubagentMode::Blocking` -> RED (suspends instead of
+// returning `Done`).
+#[tokio::test]
+async fn invoke_spawn_background_returns_immediate_receipt_without_gate() {
+    let context = test_run_context_with_agent_actor("spawn-background-receipt").await;
+    let turn_store = Arc::new(StaticAgentTurnRuntime::new(Some(turn_record(&context, 0))));
+    let child_runs = Arc::new(RecordingChildRuns::default());
+    let gate_store = Arc::new(InMemoryAwaitEdgeWriter);
+    let result_writer = Arc::new(CapturingResultWriter::default());
+    let deps = Arc::new(SubagentSpawnDeps {
+        coordinator: Arc::new(StaticCoordinator),
+        child_runs: child_runs.clone(),
+        agent_turn_runtime: turn_store,
+        thread_service: Arc::new(InMemorySessionThreadService::default()),
+        await_edge_writer: gate_store.clone(),
+        definition_resolver: Arc::new(StaticDefinitionResolver {
+            resolved: Some(subagent_definition(false)),
+            parent: None,
+        }),
+        spawn_input_codec: Arc::new(StaticSpawnInputCodec {
+            args: SpawnSubagentArgs {
+                subagent_kind: SubagentKindId::new("general").unwrap(),
+                task: "inspect the logs in the background".to_string(),
+                handoff: None,
+                mode: SpawnSubagentMode::Background,
+            },
+        }),
+        result_writer: result_writer.clone(),
+    });
+    let port = SubagentSpawnCapabilityPort::new(
+        Arc::new(AuthPassPort),
+        context.clone(),
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits::default(),
+        deps,
+        Vec::new(),
+    );
+    authorize_spawn_input(&port);
+
+    let outcome = invoke_spawn(&port).await;
+
+    let Resolution::Done(done) = outcome else {
+        panic!("expected an immediate Done receipt for a background spawn, got {outcome:?}");
+    };
+    let child_run = done
+        .verdict
+        .child_run()
+        .expect("background spawn verdict carries ToolVerdict::ChildSpawned { child_run }");
+
+    let requests = child_runs.requests();
+    assert_eq!(requests.len(), 1);
+    let awaited = submitted_dependencies(&child_runs);
+    assert_eq!(awaited.len(), 1);
+    assert_eq!(awaited[0].mode, SpawnSubagentMode::Background);
+    assert_eq!(
+        child_run,
+        ironclaw_host_api::ids::RunId::from_uuid(awaited[0].child_run_id.as_uuid()),
+        "the receipt's child_run must match the spawned child's run id"
+    );
+
+    let payload = result_writer.last_output();
+    assert_eq!(payload["status"], serde_json::json!("spawned"));
+    assert_eq!(payload["output_available"], serde_json::json!(false));
+    assert_eq!(payload["mode"], serde_json::json!("background"));
+
+    assert_eq!(
+        awaited[0].gate_ref.as_str(),
+        format!("gate:subagent-bg-{}", awaited[0].child_run_id)
+    );
+
+    let group_ref = requests[0]
+        .process_dependency
+        .as_ref()
+        .expect("background spawn still opens a process dependency")
+        .group_ref
+        .clone();
+    assert_eq!(group_ref, Some(format!("bg:{}", context.thread_id)));
 }
 
 // A multi-user parent's explicit thread owner must carry onto
