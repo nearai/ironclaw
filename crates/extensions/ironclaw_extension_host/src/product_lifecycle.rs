@@ -3116,7 +3116,7 @@ async fn search_installation_phase(
         has_last_error,
     );
     if phase == InstallationState::Active
-        && !package_runtime_credential_auth_requirements(&extension.package).is_empty()
+        && !package_activation_credential_auth_requirements(&extension.package).is_empty()
         && !search_credentials_configured(extension, credential_gate).await?
     {
         return Ok(InstallationState::Installed);
