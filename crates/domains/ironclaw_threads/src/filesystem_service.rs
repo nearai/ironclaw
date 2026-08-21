@@ -40,6 +40,7 @@ mod transcript_migration;
 
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -140,6 +141,35 @@ enum IdempotencyState<T> {
     /// Boxed: the record dwarfs every `Accepted` payload, and this state is
     /// the rare crash-recovery branch.
     Pending(Box<InboundIdempotencyRecord>),
+}
+
+/// Where a fallback append lands and what identity claim guards it — the
+/// non-row half of [`FilesystemSessionThreadService::write_new_message_claiming_identity_first`].
+struct FallbackAppend<'a> {
+    scope: &'a ThreadScope,
+    thread_id: &'a ThreadId,
+    /// The durable claim to take before the row, absent for doors that append
+    /// without an acceptance identity.
+    claim: Option<(&'a ScopedPath, &'a Entry)>,
+    /// The caller already adopted a pending claim before this attempt, so the
+    /// identity must not be claimed a second time.
+    already_resuming: bool,
+    /// Names this door in write validation and in claim-conflict diagnostics.
+    write_label: &'static str,
+}
+
+/// Outcome of the non-transactional two-phase append.
+enum FallbackMessageWrite<T> {
+    /// The row was written at `sequence`. `resumed_claim` is the durable claim
+    /// this attempt adopted, when a concurrent writer had already taken the
+    /// identity and left its row unwritten.
+    Written {
+        sequence: u64,
+        resumed_claim: Option<Box<InboundIdempotencyRecord>>,
+    },
+    /// An existing claim already answers this request; return it unchanged
+    /// rather than appending anything.
+    AlreadyAccepted(T),
 }
 
 /// On-disk thread state record. The transcript boundary's
@@ -730,6 +760,98 @@ where
             "filesystem CAS retries exhausted accepting inbound message at {}",
             thread_path.as_str()
         )))
+    }
+
+    /// The two-phase claim-then-row protocol every acceptance door falls back
+    /// to when the backend has no transactions, so the crash window between
+    /// the two writes is closed in exactly one place.
+    ///
+    /// The identity claim is written BEFORE the transcript row. A process that
+    /// dies in between leaves the claim as a durable recovery intent, and the
+    /// retry adopts its `message_id` instead of appending the payload a second
+    /// time. `classify` is the calling door's reading of an existing claim —
+    /// it decides whether a record hit is an answer to return or an intent to
+    /// resume — because that judgement, and the reply it produces, is the only
+    /// part of the protocol that differs between doors.
+    async fn write_new_message_claiming_identity_first<T, Fut>(
+        &self,
+        append: FallbackAppend<'_>,
+        message: &mut ThreadMessageRecord,
+        classify: impl Fn(InboundIdempotencyRecord) -> Fut,
+    ) -> Result<FallbackMessageWrite<T>, SessionThreadError>
+    where
+        Fut: Future<Output = Result<IdempotencyState<T>, SessionThreadError>> + Send,
+    {
+        let FallbackAppend {
+            scope,
+            thread_id,
+            claim,
+            already_resuming,
+            write_label,
+        } = append;
+        let mut resumed_claim = None;
+        if !already_resuming && let Some((path, entry)) = claim {
+            match self
+                .filesystem
+                .put(
+                    &scope.to_resource_scope(),
+                    path,
+                    entry.clone(),
+                    CasExpectation::Absent,
+                )
+                .await
+            {
+                Ok(_) => {}
+                // Someone else already holds the identity. Their claim is
+                // either an answer we must return unchanged, or an intent we
+                // adopt so the payload lands on the message id they reserved.
+                Err(FilesystemError::VersionMismatch { .. }) => {
+                    let record = self
+                        .idempotency_record_from_path(scope, path)
+                        .await?
+                        .ok_or_else(|| {
+                            SessionThreadError::Backend(format!(
+                                "concurrent {write_label} idempotency claim disappeared"
+                            ))
+                        })?;
+                    match classify(record).await? {
+                        IdempotencyState::Accepted(accepted) => {
+                            return Ok(FallbackMessageWrite::AlreadyAccepted(accepted));
+                        }
+                        IdempotencyState::Pending(record) => {
+                            message.message_id = record.message_id;
+                            resumed_claim = Some(record);
+                        }
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let resuming = already_resuming || resumed_claim.is_some();
+
+        let sequence = self.reserve_sequence(scope, thread_id).await?;
+        message.sequence = sequence;
+        if let Err(error) = self
+            .write_new_message(scope, thread_id, message, write_label)
+            .await
+        {
+            // A concurrent resumer of the same claim may have landed the row
+            // first; that row is the answer, not an error. Anything else — no
+            // claim, no row yet, or a claim that no longer classifies as an
+            // answer — surfaces the original write failure.
+            if resuming
+                && let Some((path, _)) = claim
+                && let Ok(Some(record)) = self.idempotency_record_from_path(scope, path).await
+                && let Ok(IdempotencyState::Accepted(accepted)) = classify(record).await
+            {
+                return Ok(FallbackMessageWrite::AlreadyAccepted(accepted));
+            }
+            return Err(error);
+        }
+        Ok(FallbackMessageWrite::Written {
+            sequence,
+            resumed_claim,
+        })
     }
 
     async fn list_thread_messages(
@@ -1932,76 +2054,42 @@ where
                 return Ok(accepted);
             }
             TransactionalMessageWrite::Unsupported => {
-                // Claim the idempotency key before the transcript write. If a
-                // later operation fails, the record is a durable recovery
-                // intent carrying the original routing metadata and a
-                // content-free request fingerprint. A matching retry resumes
-                // with the same message id and model rather than duplicating
-                // the message or resolving current policy again.
-                if !resuming_pending_idempotency && let Some((path, entry)) = &idempotency_write {
-                    match self
-                        .filesystem
-                        .put(
-                            &scope.to_resource_scope(),
-                            path,
-                            entry.clone(),
-                            CasExpectation::Absent,
-                        )
-                        .await
-                    {
-                        Ok(_) => {}
-                        Err(FilesystemError::VersionMismatch { .. }) => {
-                            let record = self
-                                .idempotency_record_from_path(&scope, path)
-                                .await?
-                                .ok_or_else(|| {
-                                    SessionThreadError::Backend(
-                                        "concurrent inbound idempotency claim disappeared"
-                                            .to_string(),
-                                    )
-                                })?;
-                            match self
-                                .classify_inbound_idempotency_record(
-                                    &scope,
-                                    &thread_id,
-                                    &actor_id,
-                                    &request_fingerprint,
-                                    record,
-                                )
-                                .await?
-                            {
-                                IdempotencyState::Accepted(accepted) => {
-                                    return Ok(accepted);
-                                }
-                                IdempotencyState::Pending(record) => {
-                                    message.message_id = record.message_id;
-                                    replay_metadata = record.replay_metadata;
-                                    resuming_pending_idempotency = true;
-                                }
-                            }
-                        }
-                        Err(error) => return Err(error.into()),
-                    }
-                }
-                let sequence = self.reserve_sequence(&scope, &thread_id).await?;
-                message.sequence = sequence;
-                if let Err(error) = self
-                    .write_new_message(&scope, &thread_id, &message, "message")
-                    .await
-                {
-                    if resuming_pending_idempotency
-                        && let Some(path) = &idempotency_path
-                        && let Ok(Some(accepted)) = self
-                            .accepted_message_from_idempotency_path(
-                                &scope, &thread_id, &actor_id, path,
+                match self
+                    .write_new_message_claiming_identity_first(
+                        FallbackAppend {
+                            scope: &scope,
+                            thread_id: &thread_id,
+                            claim: idempotency_write
+                                .as_ref()
+                                .map(|(path, entry)| (path, entry)),
+                            already_resuming: resuming_pending_idempotency,
+                            write_label: "message",
+                        },
+                        &mut message,
+                        |record| {
+                            self.classify_inbound_idempotency_record(
+                                &scope,
+                                &thread_id,
+                                &actor_id,
+                                &request_fingerprint,
+                                record,
                             )
-                            .await
-                    {
-                        return Ok(accepted);
+                        },
+                    )
+                    .await?
+                {
+                    FallbackMessageWrite::AlreadyAccepted(accepted) => return Ok(accepted),
+                    FallbackMessageWrite::Written {
+                        sequence,
+                        resumed_claim,
+                    } => {
+                        if let Some(record) = resumed_claim {
+                            replay_metadata = record.replay_metadata;
+                            resuming_pending_idempotency = true;
+                        }
+                        sequence
                     }
-                    return Err(error);
                 }
-                sequence
             }
         };
         if sequence == 1 {
@@ -2049,14 +2137,6 @@ where
         })
     }
 
-    // ponytail: the claim-then-write crash protocol below is a second copy of
-    // the one in `accept_inbound_message_with_replay_metadata` — the shared
-    // part is the *dedupe index* (one flat SHA-256 record for both doors), not
-    // the control flow. Ceiling: a fix to the two-phase recovery in one door
-    // does not reach the other. Upgrade path: when a third acceptance door
-    // arrives (rule of three), lift the transactional-then-fallback protocol
-    // into one private helper parameterized by row shape and by the classifier
-    // that turns a record hit into that door's reply.
     async fn accept_subagent_result(
         &self,
         request: AcceptSubagentResultRequest,
@@ -2183,72 +2263,38 @@ where
                 };
             }
             TransactionalMessageWrite::Unsupported => {
-                // Claim the identity BEFORE the row. If the process dies here
-                // the record is a durable recovery intent carrying the content-
-                // free fingerprint, so a retry resumes the same message id
-                // rather than appending the child's result a second time.
-                if !resuming_pending_idempotency {
-                    match self
-                        .filesystem
-                        .put(
-                            &scope.to_resource_scope(),
-                            &idempotency_path,
-                            claim_entry.clone(),
-                            CasExpectation::Absent,
-                        )
-                        .await
-                    {
-                        Ok(_) => {}
-                        Err(FilesystemError::VersionMismatch { .. }) => {
-                            let record = self
-                                .idempotency_record_from_path(&scope, &idempotency_path)
-                                .await?
-                                .ok_or_else(|| {
-                                    SessionThreadError::Backend(
-                                        "concurrent subagent-result claim disappeared".to_string(),
-                                    )
-                                })?;
-                            match self
-                                .classify_subagent_idempotency_record(
-                                    &scope,
-                                    &thread_id,
-                                    &request_fingerprint,
-                                    record,
-                                )
-                                .await?
-                            {
-                                IdempotencyState::Accepted(accepted) => return Ok(accepted),
-                                IdempotencyState::Pending(record) => {
-                                    message.message_id = record.message_id;
-                                    resuming_pending_idempotency = true;
-                                }
-                            }
-                        }
-                        Err(error) => return Err(error.into()),
-                    }
-                }
-                let sequence = self.reserve_sequence(&scope, &thread_id).await?;
-                message.sequence = sequence;
-                if let Err(error) = self
-                    .write_new_message(&scope, &thread_id, &message, "subagent result")
-                    .await
+                match self
+                    .write_new_message_claiming_identity_first(
+                        FallbackAppend {
+                            scope: &scope,
+                            thread_id: &thread_id,
+                            claim: Some((&idempotency_path, &claim_entry)),
+                            already_resuming: resuming_pending_idempotency,
+                            write_label: "subagent result",
+                        },
+                        &mut message,
+                        |record| {
+                            self.classify_subagent_idempotency_record(
+                                &scope,
+                                &thread_id,
+                                &request_fingerprint,
+                                record,
+                            )
+                        },
+                    )
+                    .await?
                 {
-                    // A concurrent resumer of the same claim may have landed
-                    // the row first; that row is the answer, not an error.
-                    if resuming_pending_idempotency
-                        && let Ok(Some((existing, _))) = self
-                            .read_message_versioned(&scope, &thread_id, message.message_id)
-                            .await
-                    {
-                        return Ok(AcceptedSubagentResult {
-                            message_id: message.message_id,
-                            sequence: existing.sequence,
-                            idempotent_replay: true,
-                        });
+                    FallbackMessageWrite::AlreadyAccepted(accepted) => return Ok(accepted),
+                    FallbackMessageWrite::Written {
+                        sequence,
+                        resumed_claim,
+                    } => {
+                        if resumed_claim.is_some() {
+                            resuming_pending_idempotency = true;
+                        }
+                        sequence
                     }
-                    return Err(error);
                 }
-                sequence
             }
         };
         self.invalidate_one_shot_context_window(&scope, &thread_id);
