@@ -197,7 +197,7 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// resolved binding. Measured with `bash scripts/ci/check-composition-budget.sh`;
 /// this record moves with `scripts/ci/composition-budget.toml`'s
 /// `loc_ceiling`/`loc_observed` to the same figure in this commit.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_316;
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_479;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

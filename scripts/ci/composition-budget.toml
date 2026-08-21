@@ -257,7 +257,15 @@ observed_date = "2026-08-08"
 # mirrored `COMPOSITION_ABSOLUTE_SRC_LOC` in
 # crates/app/ironclaw_architecture_tests/tests/reborn_restructure_baselines.rs
 # moves to the same figure in this commit.
-loc_ceiling = 42316
+# ✎ Re-measured 42316 -> 42479 on 2026-08-21: the main merge into the #7770
+# phase-1 branch combined main's own composition growth (durable notification
+# inbox #7697, subagent background-delivery slice #7788) with this branch's
+# curation wiring. The two ceilings merged textually without a git conflict
+# while the SUM exceeded both — the gate caught exactly the case it exists
+# for. No new composition code in this commit; measured with
+# `bash scripts/ci/check-composition-budget.sh`; the mirrored
+# COMPOSITION_ABSOLUTE_SRC_LOC moves to the same figure in this commit.
+loc_ceiling = 42479
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -268,8 +276,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 42316
-loc_observed_date = "2026-08-20"
+loc_observed = 42479
+loc_observed_date = "2026-08-21"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the
