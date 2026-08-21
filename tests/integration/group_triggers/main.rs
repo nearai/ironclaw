@@ -23,6 +23,7 @@ mod reborn_support;
 #[path = "../../support/mod.rs"]
 mod support;
 
+mod scenario_automation_authoring_preflight;
 mod scenario_scheduled_final_output;
 mod scenario_trigger_create_has_no_delivery_target_field;
 mod scenario_trigger_persists_after_reopen;
@@ -118,6 +119,28 @@ fn scheduled_final_output_group() {
         "scheduled_final_output_group",
         scheduled_final_output_group_inner,
     );
+}
+
+/// #7742: bounded authoring is independent from trigger lifecycle and fire
+/// validation, so it owns a fresh repository and target catalog.
+#[test]
+fn automation_authoring_preflight_group() {
+    run_async_test_with_stack(
+        "automation_authoring_preflight_group",
+        automation_authoring_preflight_group_inner,
+    );
+}
+
+async fn automation_authoring_preflight_group_inner() {
+    let g = RebornIntegrationGroup::automation_authoring()
+        .await
+        .expect("automation authoring group builds");
+    let mut report = ScenarioReport::new();
+    report.record(
+        "automation_authoring_preflight",
+        scenario_automation_authoring_preflight::run(&g).await,
+    );
+    report.assert_all_passed();
 }
 
 async fn scheduled_final_output_group_inner() {

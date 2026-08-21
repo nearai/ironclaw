@@ -1,0 +1,19 @@
+{
+  "model_name": "synthetic-automation-preflight-missing-status-input",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Every five minutes, check our status endpoint and alert me if it is down. Do not run it now."
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "needs_input: What exact status endpoint URL should the routine check?",
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    }
+  ]
+}

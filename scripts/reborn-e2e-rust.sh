@@ -112,6 +112,15 @@ run_architecture_runtime() {
   # bounded collection selection and numeric aggregation through the real turn.
   run_test_exact ironclaw_integration_tests reborn_integration_tool_call \
     json_runs_bounded_collection_operations
+  # Pins docs/internal/reborn/contracts/triggers.md: automation authoring
+  # reaches ready/needs_setup/needs_input after bounded persistence-critical
+  # discovery, without executing or probing the future task.
+  run_test_exact ironclaw_integration_tests reborn_group_triggers \
+    automation_authoring_preflight_group
+  run_test_exact ironclaw_integration_tests reborn_qa_recorded_behavior \
+    contract_automation_authoring_preflight_covers_four_failure_classes
+  run_test_exact ironclaw_integration_tests reborn_qa_recorded_behavior \
+    replay_automation_preflight_outcomes
   run_test ironclaw_host_runtime reborn_e2e_gate
   run_test ironclaw_host_runtime reborn_invoke_vertical_slice
   run_test ironclaw_host_runtime runtime_http_egress_contract

@@ -1,0 +1,58 @@
+{
+  "model_name": "synthetic-automation-preflight-slack-ready",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Every day at 9 UTC, check deployment status and post the summary in Slack #x-releases. Do not run it now."
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_preflight_slack_targets",
+            "name": "builtin__outbound_delivery_targets_list",
+            "arguments": {"channel": "slack"}
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_preflight_slack_create",
+            "name": "builtin__trigger_create",
+            "arguments": {
+              "name": "deployment-status-x-releases",
+              "execution_contract": {
+                "version": 1,
+                "goal": "Check deployment status, compose a concise summary, then deliver it with builtin__outbound_deliver to slack:channel:x-releases.",
+                "success_criteria": ["Report the current deployment status and deliver the summary"],
+                "output_instructions": "Return a concise status summary.",
+                "no_result_text": "No deployment status was available.",
+                "policy": {"result_delivery": "deliver"}
+              },
+              "schedule": {"kind": "cron", "expression": "0 9 * * *", "timezone": "UTC"}
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "ready: Created the daily deployment-status routine for Slack #x-releases.",
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    }
+  ]
+}

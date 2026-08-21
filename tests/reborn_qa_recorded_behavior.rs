@@ -164,6 +164,29 @@ const ROUTINE_MULTI_CHANNEL_DELIVERY: QaPhrase = QaPhrase {
     phrase: "Every morning at 9 in UTC, send me the workspace status to Slack and Telegram. Do not run it now.",
 };
 
+// #7742 benchmark-regression traces are deliberately synthetic: the
+// production-composed group test supplies the authoritative target inventory
+// and auth failure, while these fixtures pin model tool ordering, terminal
+// wording, replay persistence, and the absence of exploratory calls without
+// requiring live credentials. They follow the existing synthetic delivery
+// fixture convention below.
+const AUTOMATION_PREFLIGHT_SLACK_READY: QaPhrase = QaPhrase {
+    fixture: "automation_preflight_slack_ready",
+    phrase: "Every day at 9 UTC, check deployment status and post the summary in Slack #x-releases. Do not run it now.",
+};
+const AUTOMATION_PREFLIGHT_MISSING_STATUS_INPUT: QaPhrase = QaPhrase {
+    fixture: "automation_preflight_missing_status_input",
+    phrase: "Every five minutes, check our status endpoint and alert me if it is down. Do not run it now.",
+};
+const AUTOMATION_PREFLIGHT_MISSING_TELEGRAM_SETUP: QaPhrase = QaPhrase {
+    fixture: "automation_preflight_missing_telegram_setup",
+    phrase: "Every morning, send my routine summary to Telegram. Do not run it now.",
+};
+const AUTOMATION_PREFLIGHT_CUSTOM_TOOL_MISSING_TELEGRAM_SETUP: QaPhrase = QaPhrase {
+    fixture: "automation_preflight_custom_tool_missing_telegram_setup",
+    phrase: "Every hour, use the installed custom MCP status tool and send the result to Telegram. Do not run it now.",
+};
+
 const SLACK_CHANNEL_MEMBERSHIP_FIXTURE: &str = "slack_channel_membership";
 const SLACK_RECENT_MESSAGE_FIXTURE: &str = "slack_recent_message";
 const SLACK_MENTION_ENCODING_FIXTURE: &str = "slack_mention_encoding";
@@ -509,6 +532,68 @@ fn assert_structured_trigger_create(trace: &LlmTrace) {
             panic!("execution_contract must pass contract validation ({error}): {arguments}")
         });
     }
+}
+
+fn assert_automation_preflight_fixture(case: &QaPhrase, outcome: &str, expected_tools: &[&str]) {
+    let trace = load_qa_trace(case.fixture);
+    let calls = recorded_tool_calls(&trace);
+    let names = calls
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names, expected_tools,
+        "{} must stay within bounded authoring tools",
+        case.fixture
+    );
+    let reply = final_text_reply(&trace).expect("authoring fixture must end with visible text");
+    assert!(
+        reply.to_ascii_lowercase().contains(outcome),
+        "{} must render {outcome}; reply: {reply:?}",
+        case.fixture
+    );
+    if outcome != "ready" {
+        assert!(
+            calls
+                .iter()
+                .all(|(name, _)| name != "builtin.trigger_create"),
+            "blocked authoring must not persist a trigger: {calls:?}"
+        );
+    }
+}
+
+#[test]
+fn contract_automation_authoring_preflight_covers_four_failure_classes() {
+    assert_automation_preflight_fixture(
+        &AUTOMATION_PREFLIGHT_SLACK_READY,
+        "ready",
+        &[
+            "builtin.outbound_delivery_targets_list",
+            "builtin.trigger_create",
+        ],
+    );
+    let ready = load_qa_trace(AUTOMATION_PREFLIGHT_SLACK_READY.fixture);
+    assert_structured_trigger_create(&ready);
+    assert_tool_called_with(
+        &ready,
+        "builtin.trigger_create",
+        &["slack:channel:x-releases"],
+    );
+    assert_automation_preflight_fixture(
+        &AUTOMATION_PREFLIGHT_MISSING_STATUS_INPUT,
+        "needs_input",
+        &[],
+    );
+    assert_automation_preflight_fixture(
+        &AUTOMATION_PREFLIGHT_MISSING_TELEGRAM_SETUP,
+        "needs_setup",
+        &["builtin.outbound_delivery_targets_list"],
+    );
+    assert_automation_preflight_fixture(
+        &AUTOMATION_PREFLIGHT_CUSTOM_TOOL_MISSING_TELEGRAM_SETUP,
+        "needs_setup",
+        &["builtin.outbound_delivery_targets_list"],
+    );
 }
 
 #[tokio::test]
@@ -1176,6 +1261,52 @@ async fn replay_routine_phrase(case: &QaPhrase, cron_fragment: &str) {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
+async fn replay_automation_preflight(
+    case: &QaPhrase,
+    outcome: &str,
+    expected_trigger_count: usize,
+) {
+    let mut trace = load_qa_trace(case.fixture);
+    let http_exchanges = trace.http_exchanges.clone();
+    strip_expected_tool_results(&mut trace);
+    let gateway =
+        RebornTraceReplayModelGateway::from_trace(trace).expect("replay gateway from fixture");
+    let root = tempfile::tempdir().expect("tempdir");
+    let runtime = build_qa_trace_runtime_with_http_exchanges(
+        &root,
+        Arc::new(gateway.clone()),
+        http_exchanges,
+    )
+    .await;
+
+    let reply = send_qa_phrase(&runtime, case.phrase).await;
+    assert!(
+        reply.is_successful_final_reply()
+            && reply
+                .text
+                .as_deref()
+                .is_some_and(|text| text.to_ascii_lowercase().contains(outcome)),
+        "replayed {} must finalize {outcome}; status {:?}, text {:?}",
+        case.fixture,
+        reply.status,
+        reply.text
+    );
+    gateway.assert_exhausted();
+
+    let records = runtime
+        .trigger_repository()
+        .list_triggers(TenantId::new(qa_trace_tenant_id()).expect("tenant id"))
+        .await
+        .expect("list triggers after authoring replay");
+    assert_eq!(
+        records.len(),
+        expected_trigger_count,
+        "replayed {} persisted the wrong number of triggers: {records:#?}",
+        case.fixture
+    );
+    runtime.shutdown().await.expect("runtime shutdown");
+}
+
 fn append_fired_routine_reply(trace: &mut LlmTrace) {
     trace.turns.push(TraceTurn {
         user_input: "qa trigger fire".to_string(),
@@ -1431,6 +1562,45 @@ async fn replay_routine_bare_send_me_webui_creates_real_trigger() {
 #[tokio::test]
 async fn replay_routine_multi_channel_delivery_creates_real_trigger() {
     replay_routine_phrase(&ROUTINE_MULTI_CHANNEL_DELIVERY, "0 9 * * *").await;
+}
+
+#[test]
+fn replay_automation_preflight_outcomes() {
+    let handle = std::thread::Builder::new()
+        .name("replay_automation_preflight_outcomes".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("automation preflight replay runtime")
+                .block_on(async {
+                    replay_automation_preflight(&AUTOMATION_PREFLIGHT_SLACK_READY, "ready", 1)
+                        .await;
+                    replay_automation_preflight(
+                        &AUTOMATION_PREFLIGHT_MISSING_STATUS_INPUT,
+                        "needs_input",
+                        0,
+                    )
+                    .await;
+                    replay_automation_preflight(
+                        &AUTOMATION_PREFLIGHT_MISSING_TELEGRAM_SETUP,
+                        "needs_setup",
+                        0,
+                    )
+                    .await;
+                    replay_automation_preflight(
+                        &AUTOMATION_PREFLIGHT_CUSTOM_TOOL_MISSING_TELEGRAM_SETUP,
+                        "needs_setup",
+                        0,
+                    )
+                    .await;
+                });
+        })
+        .expect("spawn automation preflight replay thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[tokio::test]

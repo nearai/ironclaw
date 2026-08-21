@@ -131,6 +131,38 @@ fn trigger_create_description_teaches_contract_owned_delivery_with_no_stored_tar
 }
 
 #[test]
+fn trigger_create_description_bounds_authoring_preflight() {
+    let description = TRIGGER_CREATE_DESCRIPTION.to_ascii_lowercase();
+    for outcome in ["ready", "needs_setup", "needs_input"] {
+        assert!(
+            description.contains(outcome),
+            "trigger_create must define the {outcome} authoring outcome: {TRIGGER_CREATE_DESCRIPTION}"
+        );
+    }
+    for required_guidance in [
+        "persistence-critical",
+        "create immediately",
+        "do not execute",
+        "do not guess",
+        "do not use shell as a fallback",
+        "do not inspect environment secrets",
+        "do not call raw vendor apis",
+        "future fire",
+        "dynamically",
+    ] {
+        assert!(
+            description.contains(required_guidance),
+            "trigger_create must teach {required_guidance:?}: {TRIGGER_CREATE_DESCRIPTION}"
+        );
+    }
+    assert!(
+        description.contains("one concise question")
+            && description.contains("one actionable setup instruction"),
+        "blocked authoring must always produce a concise visible outcome: {TRIGGER_CREATE_DESCRIPTION}"
+    );
+}
+
+#[test]
 fn trigger_resume_description_requires_explicit_lifecycle_intent() {
     let manifest = manifests()
         .expect("trigger manifests")

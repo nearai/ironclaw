@@ -70,6 +70,9 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
+    # Safe upstream pin while the arrayref 0.3.9 registry release is yanked and
+    # the 0.3.10 replacement contains a hostile build dependency.
+    "https://github.com/droundy/arrayref.git",
     # Monty (Pydantic's embedded Python interpreter) — not yet on crates.io.
     # Pulls in ruff_* crates from samuelcolvin/ruff at a pinned revision.
     "https://github.com/pydantic/monty.git",

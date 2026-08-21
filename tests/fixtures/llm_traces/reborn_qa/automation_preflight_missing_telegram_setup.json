@@ -1,0 +1,33 @@
+{
+  "model_name": "synthetic-automation-preflight-missing-telegram-setup",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Every morning, send my routine summary to Telegram. Do not run it now."
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_preflight_telegram_targets",
+            "name": "builtin__outbound_delivery_targets_list",
+            "arguments": {"channel": "telegram"}
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "needs_setup: Connect Telegram and expose a delivery destination, then ask me to create this routine again.",
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    }
+  ]
+}

@@ -19,6 +19,12 @@ exclude = [
 [workspace.package]
 rust-version = "1.96"
 
+[patch.crates-io]
+# arrayref 0.3.9 was yanked on 2026-08-20, and the replacement 0.3.10 adds a
+# hostile build dependency that downloads and executes an unauthenticated
+# payload. Pin the audited upstream 0.3.9 source until crates.io is remediated.
+arrayref = { git = "https://github.com/droundy/arrayref.git", rev = "f8d0299d863922db6c409d08098941e833b70d69" }
+
 [workspace.dependencies]
 # WASM sandbox for untrusted tool execution.
 # Floor 47.0.3: minimum current major patch containing the fixes for the

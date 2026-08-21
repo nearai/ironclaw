@@ -431,6 +431,18 @@ fn seed_static_outbound_delivery_targets(runtime: &RebornRuntime) {
         .expect("seed QA Slack delivery target");
     runtime
         .register_static_outbound_delivery_target_for_test(
+            "qa-trace-slack-x-releases",
+            RebornOutboundDeliveryTargetId::new("slack:channel:x-releases")
+                .expect("QA Slack channel target id"),
+            "slack",
+            "Slack #x-releases",
+            Some("QA trace Slack release channel"),
+            ReplyTargetBindingRef::new("reply:qa-trace:slack-x-releases")
+                .expect("QA Slack channel reply binding"),
+        )
+        .expect("seed QA Slack channel delivery target");
+    runtime
+        .register_static_outbound_delivery_target_for_test(
             "qa-trace-email",
             RebornOutboundDeliveryTargetId::new("email:qa-trace-inbox")
                 .expect("QA email target id"),

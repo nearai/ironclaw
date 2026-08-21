@@ -6,10 +6,12 @@ use ironclaw_host_api::{
     mount::{MountPermissions, MountView},
 };
 use ironclaw_host_runtime::{
-    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+    HTTP_CAPABILITY_ID, SHELL_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID,
+    TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
+    TRIGGER_RESUME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
 };
 
+use super::super::super::outbound_preferences::FakeOutboundPreferencesService;
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{HarnessResult, HostRuntimeCapabilityHarness, workspace_mounts};
 
@@ -37,6 +39,34 @@ pub(crate) fn trigger_management_tools_profile() -> HarnessResult<ToolsProfile> 
 
 pub(crate) async fn trigger_management_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
     trigger_management_tools_profile()?.build().await
+}
+
+/// Trigger creation plus the side-effect-free outbound target catalog and
+/// representative forbidden exploration tools. The automation-authoring
+/// scenarios prove only target discovery and trigger persistence dispatch;
+/// HTTP and shell are intentionally offered so their non-invocation is a real
+/// caller-path assertion rather than an absent-tool tautology.
+pub(crate) fn automation_authoring_tools_profile() -> HarnessResult<ToolsProfile> {
+    let mut profile = trigger_management_tools_profile()?;
+    profile.capability_ids.extend([
+        CapabilityId::new(
+            ironclaw_composition::test_support::OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
+        )?,
+        CapabilityId::new(ironclaw_host_runtime::OUTBOUND_DELIVER_CAPABILITY_ID)?,
+        CapabilityId::new(HTTP_CAPABILITY_ID)?,
+        CapabilityId::new(SHELL_CAPABILITY_ID)?,
+    ]);
+    profile.effect_kinds.extend([
+        EffectKind::Network,
+        EffectKind::SpawnProcess,
+        EffectKind::ReadFilesystem,
+        EffectKind::WriteFilesystem,
+    ]);
+    profile.options = profile.options.with_outbound_target_tools(
+        FakeOutboundPreferencesService::with_automation_authoring_targets(),
+        true,
+    );
+    Ok(profile)
 }
 
 /// Trigger verbs PLUS `builtin.write_file` on ONE runtime (#5886 hold

@@ -239,6 +239,12 @@ impl RebornIntegrationGroup {
         Self::builder().triggers().await
     }
 
+    /// Production-composed automation authoring with trigger persistence,
+    /// outbound destination discovery, and inert exploration boundaries.
+    pub async fn automation_authoring() -> HarnessResult<Self> {
+        Self::builder().automation_authoring().await
+    }
+
     /// Trigger verbs plus `builtin.write_file` on one runtime (#5886
     /// blocked-trigger visibility). Auto-approve is ON so the verbs dispatch
     /// gate-free; a scenario gates the write via
@@ -855,6 +861,20 @@ impl RebornIntegrationGroupBuilder {
             super::super::harness::profiles::trigger::trigger_management_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
+    }
+
+    /// Build the production-composed automation-authoring profile. Align the
+    /// runtime user with the product binding because target discovery is
+    /// caller-scoped and trigger persistence must use that same identity.
+    pub async fn automation_authoring(self) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        let host_runtime = build_group_capability_with_base(
+            super::super::harness::profiles::trigger::automation_authoring_tools_profile()?,
+            &base,
+        )
+        .await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.into_group(base, capability).await
     }
 
     /// Build a triggers-plus-gated-write group. See

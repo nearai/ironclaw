@@ -592,6 +592,43 @@ The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove
   fleet — a malformed or self-referential routine prompt could otherwise
   cause a fire to re-invoke `trigger_create` and spawn more triggers.
 
+### Bounded authoring preflight
+
+Automation authoring decides only whether the persistence contract is complete;
+it does not execute, semantically judge, or exhaustively validate future work.
+It reaches exactly one visible outcome:
+
+- `ready`: schedule, execution contract, and persistence-critical values are
+  complete, so the caller invokes `trigger_create` immediately.
+- `needs_setup`: a required creation-time integration or explicit delivery
+  destination is unavailable. No trigger is persisted, and the final reply
+  gives one actionable setup instruction.
+- `needs_input`: an essential value such as an endpoint URL or recipient cannot
+  be derived safely. No trigger is persisted, and the final reply asks one
+  concise question.
+
+Creation-time discovery is side-effect-free and limited to values that must be
+frozen for safe persistence. An explicitly named external destination is
+resolved through `outbound_delivery_targets_list`; an absent or unauthorized
+target is `needs_setup`. The author must not guess URLs, recipients, opaque ids,
+or credentials; inspect environment secrets; use shell or raw vendor APIs as a
+fallback; query business data; or call ordinary future-work capabilities merely
+to prove they might work. Once a named destination resolves, unrelated
+integration readiness cannot delay creation.
+
+Scheduled fires continue to discover ordinary capabilities dynamically. The
+authoring protocol does not require capability ids, versions, allowlists, or a
+successful trial run. Run-once verification, standing grants, and semantic
+evaluation are separate contracts.
+
+This contract is pinned through the production-composed caller path by
+`tests/integration/group_triggers/scenario_automation_authoring_preflight.rs`
+(`cargo test -p ironclaw_integration_tests --test reborn_group_triggers
+automation_authoring_preflight_group -- --exact`) and through the model-visible
+descriptor by `trigger_create_description_bounds_authoring_preflight`
+(`cargo test -p ironclaw_host_runtime --lib
+trigger_create_description_bounds_authoring_preflight`).
+
 Exact wiring of the capability registry and handler dependencies may land in later implementation PRs, but the capability names and semantics are frozen here.
 
 Capability follow-ups before launch:

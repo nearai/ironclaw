@@ -165,7 +165,7 @@ ones speak MTProto over a raw socket with no injectable seam.
 | Have a revoked link park the run on a connect prompt instead of failing silently, then re-link and have the parked call run for real | `scenario_revoked_session_reauth.rs` |
 | Link their account through the real multi-step handshake — scan, wait, type the account password — have the resulting credential automatically connect their bot-channel identity and become immediately usable by the assistant, then remove Telegram and have the provider device, identity binding, and connection all disappear | `scenario_handshake_mints_and_serves.rs` (drives the production `DeviceLinkFlowDriver`: start → poll → submit → completed, asserts the minted account's §4.5 ownership pin and durable custody, proves a linked tool call resolves to that account, then removes the extension through the production lifecycle and observes the scripted provider revoke) |
 
-### 3.8 Triggers & automations — `group_triggers/` (11)
+### 3.8 Triggers & automations — `group_triggers/` (12)
 
 | The user can… | Evidence |
 |---|---|
@@ -177,6 +177,7 @@ ones speak MTProto over a raw socket with no injectable seam.
 | Trust that a scheduled run can't create/remove/pause its own automations | `scenario_trigger_self_create_denied.rs` |
 | Have a scheduled run that repeatedly asks the absent user a question fail truthfully after two bounded nudges while retaining every rejected reply | `scenario_scheduled_final_output.rs` |
 | Create an automation whose create input carries no delivery-routing field at all | `scenario_trigger_create_has_no_delivery_target_field.rs` |
+| Author a routine to one bounded outcome (`ready`, `needs_setup`, or `needs_input`) without probing future work, guessing missing values, or persisting a blocked routine | `scenario_automation_authoring_preflight.rs` |
 | See and rename their automations in the WebUI, backed by the real trigger store | `scenario_webui_automations_list.rs`, `scenario_webui_automations_rename.rs` |
 
 ---
@@ -316,6 +317,7 @@ channel-delivery journeys (two-lane model):
 | any of the above, replayed from committed real-LLM traces | `reborn_qa_recorded_behavior.rs` (29) |
 | "send me XYZ every morning" from the web app and gets a routine whose fires stay in the run thread (no delivery step — the source-surface default, live-recorded) | `reborn_qa_recorded_behavior.rs::contract_routine_bare_send_me_from_web_app_pins_no_delivery_step` (+ replay) |
 | "send me XYZ to Slack and Telegram" and gets a routine whose prompt pins one delivery step per channel (live-recorded) | `reborn_qa_recorded_behavior.rs::contract_routine_multi_channel_delivery_pins_both_targets_in_prompt` (+ replay) |
+| Author an automation to `ready`, `needs_setup`, or `needs_input` without probing future work; the named Slack path creates one routine while blocked paths create none | `reborn_qa_recorded_behavior.rs::contract_automation_authoring_preflight_covers_four_failure_classes`, `…::replay_automation_preflight_outcomes` |
 | a broad smoke set of whole turns on a full runtime | `reborn_qa_smoke_scenarios_e2e.rs` (10) |
 
 **Binary-level behavior**

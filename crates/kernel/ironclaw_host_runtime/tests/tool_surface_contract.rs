@@ -859,6 +859,12 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
             .contains("a fire that makes no delivery call delivers nothing externally"),
         "trigger_create description should state the no-call/no-delivery rule"
     );
+    for outcome in ["ready", "needs_setup", "needs_input"] {
+        assert!(
+            trigger_create.descriptor.description.contains(outcome),
+            "trigger_create description should expose the {outcome} authoring outcome"
+        );
+    }
     let trigger_properties = trigger_create
         .descriptor
         .parameters_schema
@@ -901,6 +907,19 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
         trigger_goal_description.contains("builtin__outbound_delivery_targets_list")
             && trigger_goal_description.contains("selected now"),
         "trigger_create goal schema should require the destination be picked at creation time"
+    );
+    assert!(
+        trigger_goal_description.contains("discovered dynamically")
+            && trigger_goal_description.contains("without testing them during authoring"),
+        "trigger_create goal schema should defer ordinary capability discovery to future fires"
+    );
+    let trigger_policy_properties =
+        trigger_properties["execution_contract"]["properties"]["policy"]["properties"]
+            .as_object()
+            .expect("trigger policy properties");
+    assert!(
+        !trigger_policy_properties.contains_key("allowed_capability_ids"),
+        "model-authored triggers must not advertise future capability allowlists"
     );
     assert!(
         !trigger_goal_description.contains("delivery_target_id"),

@@ -7,7 +7,10 @@
 
 #![allow(dead_code)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 use async_trait::async_trait;
 use ironclaw_assistant::{
@@ -37,6 +40,7 @@ struct FakeOutboundState {
 pub(crate) struct FakeOutboundPreferencesService {
     targets: Vec<RebornOutboundDeliveryTargetOption>,
     state: Mutex<FakeOutboundState>,
+    list_requires_setup: AtomicBool,
 }
 
 impl FakeOutboundPreferencesService {
@@ -50,7 +54,26 @@ impl FakeOutboundPreferencesService {
                 target_option("slack:channel:beta", "Slack Channel Beta"),
             ],
             state: Mutex::new(FakeOutboundState::default()),
+            list_requires_setup: AtomicBool::new(false),
         })
+    }
+
+    /// Seed the explicit named-channel inventory used by automation-authoring
+    /// preflight coverage. Telegram is intentionally absent so filtering for
+    /// it returns an honest empty inventory through the production list path.
+    pub(crate) fn with_automation_authoring_targets() -> Arc<Self> {
+        Arc::new(Self {
+            targets: vec![target_option(
+                "slack:channel:x-releases",
+                "Slack Channel #x-releases",
+            )],
+            state: Mutex::new(FakeOutboundState::default()),
+            list_requires_setup: AtomicBool::new(false),
+        })
+    }
+
+    pub(crate) fn set_list_requires_setup(&self, required: bool) {
+        self.list_requires_setup.store(required, Ordering::SeqCst);
     }
 
     /// The stored notification-channel set after the most recent
@@ -84,6 +107,9 @@ impl OutboundPreferencesProductService for FakeOutboundPreferencesService {
         &self,
         _caller: ProductSurfaceCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError> {
+        if self.list_requires_setup.load(Ordering::SeqCst) {
+            return Err(target_list_requires_setup());
+        }
         Ok(RebornOutboundDeliveryTargetListResponse {
             targets: self.targets.clone(),
             next_cursor: None,
@@ -197,6 +223,17 @@ fn target_not_found() -> ProductSurfaceError {
         code: ProductSurfaceErrorCode::NotFound,
         kind: ProductSurfaceErrorKind::NotFound,
         status_code: 404,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
+}
+
+fn target_list_requires_setup() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Unauthenticated,
+        kind: ProductSurfaceErrorKind::BlockedAuthentication,
+        status_code: 401,
         retryable: false,
         field: None,
         validation_code: None,
