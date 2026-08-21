@@ -6,6 +6,7 @@ import { Button } from "../../../design-system/button";
 import { ConfirmDialog } from "../../../design-system/confirm-dialog";
 import { Icon } from "../../../design-system/icons";
 import { SelectMenu } from "../../../design-system/select-menu";
+import { Skeleton } from "../../../design-system/skeleton";
 import { useAdminUsers } from "../hooks/useAdminUsers";
 import {
   formatRelativeTime,
@@ -291,11 +292,11 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
   if (query.isLoading) {
     return (
       <Panel className="p-5 sm:p-6">
-        <div className="v2-skeleton mb-4 h-3 w-24 rounded" />
+        <Skeleton className="mb-4 h-3 w-24 rounded" />
         {[1, 2, 3].map((i) => (
           <div key={i} className="flex items-center justify-between border-t border-iron-700 py-3.5 first:border-0">
-            <div className="v2-skeleton h-4 w-32 rounded" />
-            <div className="v2-skeleton h-6 w-20 rounded-full" />
+            <Skeleton className="h-4 w-32 rounded" />
+            <Skeleton className="h-6 w-20 rounded-full" />
           </div>
         ))}
       </Panel>

@@ -95,6 +95,7 @@ function renderToolsModule({
     Card: "Card",
     Icon: "Icon",
     SelectMenu: "SelectMenu",
+    Skeleton: "Skeleton",
     Switch,
     html,
     matchesSearch: (query, values) =>

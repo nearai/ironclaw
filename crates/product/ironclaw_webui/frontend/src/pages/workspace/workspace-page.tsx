@@ -2,6 +2,7 @@ import { useNavigate, useOutletContext, useParams } from "react-router";
 import { Button } from "../../design-system/button";
 import { StatusPill } from "../../design-system/primitives";
 import React from "react";
+import { PageScroll, PageStack } from "../../layout/page-shell";
 import { useT } from "../../lib/i18n";
 import { FeedbackBanner } from "../projects/components/feedback-banner";
 import { WorkspaceDirectory } from "./components/workspace-directory";
@@ -42,9 +43,8 @@ export function WorkspacePage() {
   );
 
   return (
-    <div className="flex h-full flex-col overflow-y-auto">
-      <div className="v2-page-entrance flex-1 p-4 sm:p-6">
-        <div className="flex h-full min-h-0 flex-col space-y-5">
+    <PageScroll>
+      <PageStack className="flex h-full min-h-0 flex-col">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="flex items-center gap-2">
@@ -115,8 +115,7 @@ export function WorkspacePage() {
                   />
                 )}
           </div>
-        </div>
-      </div>
-    </div>
+      </PageStack>
+    </PageScroll>
   );
 }

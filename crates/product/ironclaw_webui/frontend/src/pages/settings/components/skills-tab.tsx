@@ -1,6 +1,7 @@
 // @ts-nocheck
 import React from "react";
 import { Card } from "../../../design-system/card";
+import { Skeleton } from "../../../design-system/skeleton";
 import { Button } from "../../../design-system/button";
 import { ConfirmDialog } from "../../../design-system/confirm-dialog";
 import { useT } from "../../../lib/i18n";
@@ -107,14 +108,14 @@ export function SkillsTab({ searchQuery = "" }) {
   if (query.isLoading) {
     body = (
       <Card padding="md">
-          <div className="mb-4 h-3 w-24 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
+          <Skeleton className="mb-4 h-3 w-24 rounded" />
           {[1, 2, 3].map((i) => (
             <div key={i} className="flex items-center justify-between border-t border-[var(--v2-panel-border)] py-4 first:border-0">
               <div>
-                <div className="h-4 w-32 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
-                <div className="mt-1 h-3 w-48 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
+                <Skeleton className="h-4 w-32 rounded" />
+                <Skeleton className="mt-1 h-3 w-48 rounded" />
               </div>
-              <div className="h-6 w-20 animate-pulse rounded-full bg-[var(--v2-surface-muted)]" />
+              <Skeleton className="h-6 w-20 rounded-full" />
             </div>
           ))}
         </Card>

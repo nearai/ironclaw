@@ -1,6 +1,7 @@
 import { Icon } from "../../../design-system/icons";
 import { Badge } from "../../../design-system/badge";
 import { Card } from "../../../design-system/card";
+import { Skeleton } from "../../../design-system/skeleton";
 import { SelectMenu } from "../../../design-system/select-menu";
 import { Switch } from "../../../design-system/switch";
 import { useT } from "../../../lib/i18n";
@@ -172,15 +173,15 @@ export function ToolsTab({
           isLoading={isLoading}
         />
         <Card padding="md">
-          <div className="mb-4 h-3 w-28 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
+          <Skeleton className="mb-4 h-3 w-28 rounded" />
           {[1, 2, 3, 4, 5].map(
             (i) => (
               <div
                 key={i}
                 className="flex items-center justify-between border-t border-[var(--v2-panel-border)] py-3.5 first:border-0"
               >
-                <div className="h-4 w-36 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
-                <div className="h-8 w-28 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
+                <Skeleton className="h-4 w-36 rounded" />
+                <Skeleton className="h-8 w-28 rounded" />
               </div>
             )
           )}

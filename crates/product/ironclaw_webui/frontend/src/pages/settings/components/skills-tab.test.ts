@@ -60,6 +60,7 @@ function createHarness() {
       },
     },
     SettingsSearchEmpty() {},
+    Skeleton() {},
     SkillCard,
     SkillInstallPanel() {},
     matchesSearch: () => true,
