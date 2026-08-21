@@ -707,6 +707,33 @@ mod tests {
         );
         malformed.metadata = serde_json::json!({"unexpected": true});
         assert!(AwaitEdgeStore::edge_from_record(malformed).is_err());
+
+        // A blob that still parses as `AwaitedChildSetRecord` but carries junk
+        // under one of the two keys the delivery chain merges in. Recovering
+        // these is the whole point of the fallback branch, so a junk value must
+        // refuse — never silently default the key away — and must name the key
+        // it choked on.
+        for key in ["appended_message_ref", "attention_outcome"] {
+            let mut poisoned = record(
+                parent_run_id,
+                child_run_id,
+                &edge,
+                ProcessDependencyState::ResultAppended,
+                ProcessLifecycleStatus::Completed,
+            );
+            let mut blob = serde_json::to_value(awaited_child_set_record(child_run_id, &edge))
+                .expect("serialize submitted record");
+            blob[key] = serde_json::json!({"not": "a valid value"});
+            poisoned.metadata = blob;
+
+            let AwaitEdgeStoreError::Backend { reason } =
+                AwaitEdgeStore::edge_from_record(poisoned)
+                    .expect_err("a malformed merged delivery key must fail closed");
+            assert!(
+                reason.contains(key),
+                "the refusal must name the offending key, got: {reason}"
+            );
+        }
     }
 
     /// The projection store together with the journal it projects over. A
