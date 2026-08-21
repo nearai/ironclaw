@@ -213,8 +213,7 @@ fn extension_detail_without_host_summary(
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        dispatch::RuntimeDispatchErrorKind,
-        messaging::StandardMessagingErrorCode,
+        dispatch::RuntimeDispatchErrorKind, messaging::StandardMessagingErrorCode,
     };
 
     fn cause_of(error: &DispatchError) -> Option<&str> {
