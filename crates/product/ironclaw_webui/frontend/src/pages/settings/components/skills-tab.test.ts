@@ -42,6 +42,7 @@ function createHarness() {
     Button() {},
     Card() {},
     ConfirmDialog,
+    InlineNotice() {},
     React: {
       useCallback: (fn) => fn,
       useState: (initial) => {

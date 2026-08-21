@@ -3,6 +3,7 @@ import { Navigate, useOutletContext, useParams } from "react-router";
 import React from "react";
 import { useT } from "../../lib/i18n";
 import { RouteLoadBoundary } from "../../app/route-load-boundary";
+import { InlineNotice } from "../../design-system/inline-notice";
 import { RestartBanner } from "./components/restart-banner";
 import { SettingsToolbar } from "./components/settings-toolbar";
 import { useSettings } from "./hooks/useSettings";
@@ -110,11 +111,9 @@ export function SettingsPage() {
 
             {saveError &&
             (
-              <div
-                className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-              >
+              <InlineNotice tone="danger" role="alert">
                 {t("error.saveFailed", { message: saveError.message })}
-              </div>
+              </InlineNotice>
             )}
 
             <SettingsToolbar

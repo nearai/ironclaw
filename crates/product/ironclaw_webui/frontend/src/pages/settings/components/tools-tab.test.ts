@@ -90,10 +90,12 @@ function renderToolsModule({
     return value;
   };
   const Switch = "Switch";
+  const InlineNotice = "InlineNotice";
   const context = {
     Badge: "Badge",
     Card: "Card",
     Icon: "Icon",
+    InlineNotice,
     SelectMenu: "SelectMenu",
     Switch,
     html,
@@ -115,7 +117,7 @@ function renderToolsModule({
     context,
     import.meta.url
   );
-  return { exports, saved, Switch };
+  return { exports, InlineNotice, saved, Switch };
 }
 
 test("Tools tab renders global auto-approve control and saves the operator key", () => {
@@ -367,7 +369,7 @@ test("Tools tab search does not index locked tools as disabled unless disabled",
 });
 
 test("Tools tab surfaces permission save failures", () => {
-  const { exports } = renderToolsModule({
+  const { exports, InlineNotice } = renderToolsModule({
     translations: {
       "error.saveFailed": "Save failed: {message}",
     },
@@ -375,9 +377,11 @@ test("Tools tab surfaces permission save failures", () => {
   });
 
   const rendered = exports.ToolsTab({});
+  const notice = findComponentNode(rendered, InlineNotice);
+  const props = componentProps(notice, InlineNotice);
 
-  assert.match(collectTemplateText(rendered), /role="alert"/);
-  assert.match(collectTemplateText(rendered), /var\(--v2-danger-text\)/);
-  assert.doesNotMatch(collectTemplateText(rendered), /text-red-|bg-red-|border-red-/);
+  assert.ok(notice, "expected permission errors to use InlineNotice");
+  assert.equal(props.tone, "danger");
+  assert.equal(props.role, "alert");
   assert.ok(collectScalars(rendered).includes("Save failed: permission denied"));
 });

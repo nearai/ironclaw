@@ -4,6 +4,7 @@ import { useT } from "../../../lib/i18n";
 import { Panel, StatusPill } from "../../../design-system/primitives";
 import { Button } from "../../../design-system/button";
 import { ConfirmDialog } from "../../../design-system/confirm-dialog";
+import { InlineNotice } from "../../../design-system/inline-notice";
 import { SelectMenu } from "../../../design-system/select-menu";
 import { useAdminUserDetail, useAdminUsers } from "../hooks/useAdminUsers";
 import { UserSecretsPanel } from "./user-secrets-panel";
@@ -90,9 +91,9 @@ export function UserDetailView({ onBack, userQuery, adminState, threadScrapingEn
 
   if (userQuery.error) {
     return (
-      <Panel className="p-5 sm:p-6">
-        <p className="text-sm text-red-200">{t("error.loadFailed", { what: t("admin.users.user"), message: userQuery.error.message })}</p>
-      </Panel>
+      <InlineNotice tone="danger" role="alert">
+        {t("error.loadFailed", { what: t("admin.users.user"), message: userQuery.error.message })}
+      </InlineNotice>
     );
   }
 
@@ -195,9 +196,9 @@ export function UserDetailView({ onBack, userQuery, adminState, threadScrapingEn
       </Panel>
 
       {statusError && (
-        <p className="text-sm text-red-200" role="alert" data-testid="admin-user-detail-status-error">
+        <InlineNotice tone="danger" role="alert" data-testid="admin-user-detail-status-error">
           {adminUserActionErrorMessage(statusError, t)}
-        </p>
+        </InlineNotice>
       )}
 
       <div className="grid gap-5 lg:grid-cols-2">
