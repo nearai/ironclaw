@@ -1,5 +1,9 @@
 // arch-exempt: large_file, pre-existing size; #6263 only migrated 2 test-double lines to in_memory_agent_turn_runtime(), plan #6263
-//! Per-child/per-settle-group settle path (§2, §5.2, §5.5, §8.1) — the
+//! `§`-references in this module's doc comments cite
+//! `docs/internal/reborn/subagent-spawn/README.md`, the canonical subagent
+//! design/roadmap document.
+//!
+//! Per-child/per-settle-group settle path (§2.3, §2.6) — the
 //! direct successor to `SubagentCompletionObserver` (deleted with this
 //! module). Owner-recovery/reconstruction/framing helpers below are ported
 //! near-verbatim from `completion_observer.rs` — that logic is
@@ -974,7 +978,7 @@ where
     /// between the read and the check below. Benign: every downstream
     /// effect here is idempotent (gate resume, per-member CAS overwrite,
     /// `mark_released`'s re-read-adopt) and groups are bounded (≤16
-    /// descendants, §5.1), so a racing settle just loses this round's driver
+    /// descendants, §2.6), so a racing settle just loses this round's driver
     /// election and drives the next one instead.
     pub(super) async fn drain_settled_group(
         &self,
@@ -1017,7 +1021,7 @@ where
         // never the driving member's, so a mixed-status batch (one sibling
         // failed, another completed) doesn't stamp the same status onto
         // every parent result (external review finding on this PR).
-        // (Batched into one snapshot/CAS write is §8's rule for the
+        // (Batched into one snapshot/CAS write is §4.3's rule for the
         // background-mode multi-edge drain case, P2.4 — not required here;
         // blocking-mode groups are tiny, ≤4 spawns/turn, so a per-member loop
         // is the simpler, correct choice for PR1.)
@@ -1185,7 +1189,7 @@ fn parse_appended_message_id(message_ref: &LoopMessageRef) -> Result<ThreadMessa
     })
 }
 
-/// §5.2's benign already-closed set for a resume attempt pinned to
+/// §2.3's benign already-closed set for a resume attempt pinned to
 /// `ResumeTurnPrecondition::BlockedDependentRunGate`: exactly
 /// `from ∈ {Queued, Running, Completed}` — a second resume attempt
 /// (double-settle, or recovery re-driving an already-resumed parent)
