@@ -30,11 +30,11 @@ const FRAME_DELIMITER: &str = "|||";
 /// Child-agent text that has been framed as untrusted.
 ///
 /// The only constructor is [`Self::frame`]; there is deliberately no
-/// `From<String>`, no public field, and no `Deserialize`, because every one of
-/// those would be a way to reintroduce raw child text at the acceptance
-/// boundary.
+/// `From<String>`, no public field, no `Deserialize`, and no
+/// `#[serde(transparent)]`, because every one of those would be a way to
+/// reintroduce raw child text at the acceptance boundary. `Serialize` alone
+/// is derived because `subagent_acceptance_fingerprint` hashes the request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(transparent)]
 pub struct FramedSubagentText(String);
 
 impl FramedSubagentText {
@@ -45,6 +45,18 @@ impl FramedSubagentText {
     /// cannot escape its own delimiters and continue as if it were host text.
     /// Nothing is truncated: this is the durable transcript row, and LLM data
     /// is never dropped at this boundary.
+    ///
+    /// Neutralization is one-way, and deliberately so: the value here is a
+    /// *derived* copy written into the **parent's** transcript. The child's
+    /// own thread already holds its verbatim output as a finalized assistant
+    /// row — that row is the source `child_terminal_output`
+    /// (`ironclaw_turn_runner::subagent::await_edge::resolver`) reads to build
+    /// this one, and nothing on the settle path deletes or redacts it. So the
+    /// "LLM data is never deleted" invariant (root `AGENTS.md`) is satisfied
+    /// at the original, and this projection is free to be lossy. Do not make
+    /// it reversible: an escape the child can predict is a second way to
+    /// reason about the frame from inside it, bought for retention that is
+    /// already guaranteed elsewhere.
     pub fn frame(raw_child_text: impl Into<String>) -> Self {
         let body = neutralize_untrusted_body(raw_child_text.into());
         Self(format!(
