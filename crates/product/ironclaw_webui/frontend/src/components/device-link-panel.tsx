@@ -1,5 +1,6 @@
 // @ts-nocheck
 import React from "react";
+import "./device-link-translations";
 import { Button } from "../design-system/button";
 import { LinkPayloadPanel } from "./link-payload-panel";
 import { useT } from "../lib/i18n";
