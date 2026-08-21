@@ -359,15 +359,17 @@ impl AwaitEdgeStore {
             AwaitEdgeState::Settled | AwaitEdgeState::AttentionScheduled => {
                 self.consume(scope, parent_run_id, child_run_id).await
             }
-            // Still in flight. `ResultAppended` has no attention recorded yet
-            // and a streak-capped edge is parked for a later sweep; the kernel
-            // refuses to consume either, because closing would strand the
-            // parent with an undelivered result.
-            AwaitEdgeState::Open
-            | AwaitEdgeState::ResultAppended
-            | AwaitEdgeState::AttentionDeferredStreakCap
-            | AwaitEdgeState::Drained
-            | AwaitEdgeState::Abandoned => Ok(()),
+            // `ResultAppended` has no attention recorded yet and a
+            // streak-capped edge is parked for a later sweep; the result is
+            // durably appended but the parent hasn't been made attentive to
+            // it, so closing here would strand the result and hold the
+            // descendant reservation. Refuse instead of silently no-opping.
+            AwaitEdgeState::ResultAppended | AwaitEdgeState::AttentionDeferredStreakCap => {
+                Err(AwaitEdgeStoreError::UndeliveredResult { state: edge.state })
+            }
+            // Benign re-observation: still open, or already closed by a
+            // previous call.
+            AwaitEdgeState::Open | AwaitEdgeState::Drained | AwaitEdgeState::Abandoned => Ok(()),
         }
     }
 }

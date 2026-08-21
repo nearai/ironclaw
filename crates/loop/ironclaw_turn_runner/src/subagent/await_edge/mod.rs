@@ -179,6 +179,8 @@ pub struct AwaitEdge {
 pub enum AwaitEdgeStoreError {
     #[error("await-edge store backend failed: {reason}")]
     Backend { reason: String },
+    #[error("await edge close refused: undelivered result still on the edge (state: {state:?})")]
+    UndeliveredResult { state: AwaitEdgeState },
 }
 
 pub(crate) fn map_await_edge_error(
