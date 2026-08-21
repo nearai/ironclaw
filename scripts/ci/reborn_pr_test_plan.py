@@ -458,6 +458,10 @@ PR_STATIC_CONTROL_PATHS = {
     #     exercise a change to it. Surfaced 2026-08-05 (#7259) when the docs
     #     path sweep touched its docstring.
     "scripts/check-type-duplicates.py",
+    #   * Its self-test is run locally the same way (`python3
+    #     scripts/test-check-type-duplicates.py`); like its subject, no
+    #     workflow invokes it.
+    "scripts/test-check-type-duplicates.py",
     #   * `render-architecture-video.sh` is a local one-command Remotion
     #     render for docs/internal/architecture-video; never invoked by a
     #     workflow (the `architecture-video` Claude skill that used to

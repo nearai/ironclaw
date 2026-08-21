@@ -871,6 +871,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "LICENSE-APACHE",
             "LICENSE-MIT",
             "scripts/check_no_panics.py",
+            "scripts/check-type-duplicates.py",
+            "scripts/test-check-type-duplicates.py",
             "scripts/dev_metrics.py",
             "scripts/pre-commit-safety.sh",
             "scripts/test-mutation-audit.sh",
