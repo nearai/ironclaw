@@ -168,8 +168,11 @@ still live under the local filesystem root. The image default is
 `/data/ironclaw-reborn`; without a Railway volume, that path is ephemeral. The
 hosted single-tenant volume profile stores runtime/control-plane state under
 that Reborn home on the mounted volume and does not require
-`IRONCLAW_REBORN_POSTGRES_URL`. The container workdir is `/workspace` so the
-workspace root stays separate from Reborn's state and skill roots.
+`IRONCLAW_REBORN_POSTGRES_URL`. The Docker entrypoint defaults
+`IRONCLAW_REBORN_WORKSPACE_ROOT` to `$IRONCLAW_REBORN_HOME/workspace`, so project
+files and landed attachments stay on the same durable mount. If you override
+the workspace root, point it at durable storage too — on Railway the entrypoint
+fails closed when it resolves outside `RAILWAY_VOLUME_MOUNT_PATH`.
 
 The image includes `sqlite3` and `psql` for terminal inspection from Railway
 shells. Use `sqlite3` for mounted-volume libSQL/SQLite state and `psql` for

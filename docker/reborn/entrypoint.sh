@@ -34,6 +34,13 @@ else
 fi
 export IRONCLAW_REBORN_HOME
 
+if [ -n "${IRONCLAW_REBORN_WORKSPACE_ROOT:-}" ]; then
+  IRONCLAW_REBORN_WORKSPACE_ROOT="${IRONCLAW_REBORN_WORKSPACE_ROOT%/}"
+else
+  IRONCLAW_REBORN_WORKSPACE_ROOT="$IRONCLAW_REBORN_HOME/workspace"
+fi
+export IRONCLAW_REBORN_WORKSPACE_ROOT
+
 ssh_public_key="${IRONCLAW_REBORN_SSH_PUBLIC_KEY:-}"
 if [ "$(id -u)" = "0" ]; then
   mkdir -p "$IRONCLAW_REBORN_HOME" /workspace
@@ -253,9 +260,35 @@ then
           exit 1
           ;;
       esac
+      # Compare canonicalized paths, not their original spelling. A symlink
+      # beneath the mount whose target is outside it, or a `..` segment such as
+      # `/volume/../ephemeral`, passes a purely lexical prefix test while the
+      # runtime resolves the real (ephemeral) target — booting a deployment
+      # whose project files silently do not persist, which is the exact failure
+      # this guard exists to prevent. `readlink -f` resolves symlinks and
+      # relative segments without requiring the path to exist yet, and falls
+      # back to the original spelling if it is unavailable.
+      canonical_workspace_root="$(readlink -f "$IRONCLAW_REBORN_WORKSPACE_ROOT" 2>/dev/null \
+        || printf '%s' "$IRONCLAW_REBORN_WORKSPACE_ROOT")"
+      canonical_volume_mount="$(readlink -f "$railway_volume_mount" 2>/dev/null \
+        || printf '%s' "$railway_volume_mount")"
+      case "$canonical_workspace_root" in
+        "$canonical_volume_mount"|"$canonical_volume_mount"/*) ;;
+        *)
+          echo "Railway deployment using profile=$effective_profile requires IRONCLAW_REBORN_WORKSPACE_ROOT=$IRONCLAW_REBORN_WORKSPACE_ROOT (resolved: $canonical_workspace_root) to be under RAILWAY_VOLUME_MOUNT_PATH=$railway_volume_mount (resolved: $canonical_volume_mount)." >&2
+          echo "Unset IRONCLAW_REBORN_WORKSPACE_ROOT to use $IRONCLAW_REBORN_HOME/workspace, or set IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY=true only for disposable tests." >&2
+          exit 1
+          ;;
+      esac
       ;;
   esac
 fi
+
+case "$effective_profile" in
+  local-dev|local-dev-yolo|hosted-single-tenant|hosted-single-tenant-volume|hosted-single-tenant-volume-sandboxed|hosted-single-tenant-volume-sandboxed-railway)
+    mkdir -p "$IRONCLAW_REBORN_WORKSPACE_ROOT"
+    ;;
+esac
 
 # Serve-host resolution: an explicit IRONCLAW_REBORN_SERVE_HOST always wins.
 # Otherwise, on Railway (and any platform that sets the RAILWAY_* markers) the
