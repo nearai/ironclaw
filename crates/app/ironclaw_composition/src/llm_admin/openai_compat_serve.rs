@@ -297,6 +297,8 @@ impl ironclaw_openai_compat::OpenAiCompatPreparedTurnPort for OpenAiCompatPrepar
                 messages: request.messages,
                 tools: Vec::new(),
                 output: request.output,
+                // Unchanged behavior: OpenAI-compat keeps the profile's own ceilings.
+                limits: Default::default(),
                 requested_model: request.requested_model,
                 idempotency_key,
             })

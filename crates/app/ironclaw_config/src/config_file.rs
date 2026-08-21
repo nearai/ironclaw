@@ -143,6 +143,29 @@ pub struct MemorySection {
     /// third-party binding needs it.
     #[serde(default)]
     pub mem0_base_url: Option<String>,
+    /// How many completed user turns pass between periodic memory-curation
+    /// passes — the background "dreaming" chore that re-reads the standing
+    /// memory document and tidies it (issue #7276).
+    ///
+    /// Opt-in and absent by default: `None` means the curation hook is NEVER
+    /// REGISTERED, so an existing deployment behaves exactly as it did before
+    /// this field existed. Disabled is expressed by omitting the key, never by
+    /// a sentinel value — `0` is rejected here rather than quietly meaning
+    /// "after every turn" or "off".
+    ///
+    /// Choosing a value: `10` is a reasonable starting point — it matches the
+    /// interval the Hermes agent uses for its own memory-review fork. This is
+    /// a RATE, not a deadline: too frequent burns tokens re-reading a document
+    /// that has not changed, too rare lets redundancy accumulate past the point
+    /// where a single pass can fix it. Counted per user, and only completed
+    /// conversation turns count.
+    ///
+    /// Requires a memory binding whose provider can replace the standing
+    /// document — today the host-bundled native provider. Setting this against
+    /// another binding fails startup rather than running passes that cannot
+    /// write.
+    #[serde(default)]
+    pub curation_interval_turns: Option<u32>,
 }
 
 /// One admin override authorizing a production memory binding, scoped to
@@ -1206,6 +1229,19 @@ impl RebornConfigFile {
             // opaquely, at transport construction during startup.
             if let Some(base_url) = memory.mem0_base_url.as_deref() {
                 check_non_empty_trimmed(Cow::Borrowed("memory.mem0_base_url"), base_url)?;
+            }
+            // Curation is disabled by OMITTING the key. A written `0` would
+            // otherwise be clamped to "a pass after every turn" downstream while
+            // reading as "off" to whoever wrote it — so it is rejected here,
+            // where the operator can still see why.
+            if memory.curation_interval_turns == Some(0) {
+                return Err(RebornConfigFileError::InvalidField {
+                    path: path_str(),
+                    field: "memory.curation_interval_turns".to_string(),
+                    reason: "must be at least 1; omit the key entirely to disable \
+                             memory curation"
+                        .to_string(),
+                });
             }
         }
         Ok(())
@@ -2569,6 +2605,46 @@ mem0_base_url = "https://mem0.example.com"
             cfg.memory.and_then(|m| m.mem0_base_url).as_deref(),
             Some("https://mem0.example.com")
         );
+    }
+
+    /// Memory curation (#7276) is opt-in: an existing operator file that
+    /// predates the key must keep parsing AND must keep meaning "no curation".
+    /// A sentinel `0` is rejected rather than silently becoming "every turn".
+    #[test]
+    fn memory_curation_interval_is_absent_by_default_and_never_zero() {
+        // The `[memory]` section as every existing deployment already writes it:
+        // the new key is absent, and absent means the hook is never registered.
+        let existing = r#"
+[memory]
+provider = "ironclaw.memory"
+"#;
+        let cfg = RebornConfigFile::parse_text(existing, &attributed())
+            .expect("a config file predating the curation key still parses");
+        assert_eq!(
+            cfg.memory.and_then(|m| m.curation_interval_turns),
+            None,
+            "absent must stay absent — disabled is expressed by not wiring the hook"
+        );
+
+        let enabled = r#"
+[memory]
+curation_interval_turns = 10
+"#;
+        let cfg = RebornConfigFile::parse_text(enabled, &attributed())
+            .expect("an explicit interval parses");
+        assert_eq!(cfg.memory.and_then(|m| m.curation_interval_turns), Some(10));
+
+        let zero = r#"
+[memory]
+curation_interval_turns = 0
+"#;
+        let err = RebornConfigFile::parse_text(zero, &attributed())
+            .expect_err("zero is a sentinel, not an interval");
+        assert!(matches!(
+            err,
+            RebornConfigFileError::InvalidField { ref field, .. }
+                if field == "memory.curation_interval_turns"
+        ));
     }
 
     #[test]

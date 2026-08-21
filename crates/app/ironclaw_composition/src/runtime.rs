@@ -3094,6 +3094,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // below — live-traffic admission, the cutover gate, substrate selection —
     // reads a field on this value instead of re-matching the profile.
     let deployment = services_input.deployment().clone();
+    // Read before `build_runtime_substrate` consumes the input (§ the runtime
+    // policy capture below, same reason).
+    let memory_curation_interval_turns = services_input.memory_curation_interval_turns();
     if let Some(reason) = deployment.traffic().live_traffic_refusal(profile) {
         return Err(RebornRuntimeError::InvalidArgument { reason });
     }
@@ -3751,6 +3754,48 @@ pub(crate) async fn build_runtime_with_resource_governor(
             None,
         )
     });
+    // Periodic memory curation (#7276) fans out from the same resolution, and
+    // is opt-in on top of it: an operator must have asked for an interval, and
+    // the bound provider must be able to REPLACE the standing document a pass
+    // rewrites. A provider that cannot is a startup error, not a degraded mode
+    // — passes would be spawned forever and fail their write with nothing
+    // surfacing it (`curation_interval_for_binding` carries the reasoning).
+    // Disabled means no interval, the hook is never registered, and nothing
+    // here is built — never a sentinel interval.
+    let memory_curation_interval_turns =
+        crate::memory_provider_factory::curation_interval_for_binding(
+            memory_curation_interval_turns,
+            local_runtime
+                .map(|local_runtime| local_runtime.memory_service_resolver.resolved_binding())
+                .as_ref(),
+        )
+        .map_err(|reason| RebornRuntimeError::MalformedConfig { reason })?;
+    // Which hook, at which phase, under which trust class is decided by the
+    // crate that owns curation, so this is one call into it.
+    let memory_curation_hook_wiring = memory_curation_interval_turns
+        .filter(|_| resolved_memory_provider.is_some())
+        .map(|interval_turns| {
+            Box::new(
+                move |deps: ironclaw_turn_runner::runtime::AfterTurnHookDeps| {
+                    let submitter = Arc::new(ironclaw_assistant::UnboundTurnService::new(
+                        deps.thread_service,
+                        deps.coordinator,
+                        deps.thread_scope.agent_id,
+                        deps.thread_scope.project_id,
+                    ));
+                    // Fail closed: an operator who configured an interval and a
+                    // provider asked for curation. If the hook cannot install,
+                    // swallowing it would leave a deployment that believes
+                    // memory is being tidied while nothing ever runs — a
+                    // difference nothing surfaces later. The build carries this
+                    // out as a startup error instead.
+                    ironclaw_assistant::memory_curation::after_turn_curation_dispatcher_factory(
+                        submitter,
+                        interval_turns,
+                    )
+                },
+            ) as ironclaw_turn_runner::runtime::AfterTurnHookWiring
+        });
     let memory_lifecycle = local_runtime
         .map(|local_runtime| local_runtime.memory_lifecycle.clone())
         .unwrap_or_default();
@@ -4006,6 +4051,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         hook_security_audit_sink: Some(Arc::new(ironclaw_event_log::TracingSecurityAuditSink)),
         turn_event_sink: Some(turn_event_sink),
         hook_dispatcher_builder_factory,
+        after_turn_hook_wiring: memory_curation_hook_wiring,
         communication_context_provider,
         // For the production composition path, use the pre-minted wiring from
         // `build_production_shaped` so the `HostRuntimeServices` notifier (used by

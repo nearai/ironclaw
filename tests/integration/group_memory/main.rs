@@ -19,6 +19,8 @@ mod support;
 mod scenario_always_on_memory_recall_libsql;
 mod scenario_disabled_binding_offers_no_memory_tools;
 mod scenario_lifecycle_gates_host_memory_calls;
+mod scenario_memory_curation_below_threshold_never_fires;
+mod scenario_memory_curation_rewrites_standing_document;
 mod scenario_memory_retrieval_failure_is_visible;
 mod scenario_memory_search_finds_seeded;
 mod scenario_memory_tree_reflects_structure;
@@ -116,6 +118,24 @@ async fn memory_group_e2e() {
     report.record(
         "memory_retrieval_failure_is_visible",
         scenario_memory_retrieval_failure_is_visible::run().await,
+    );
+
+    // Scenario 10 (#7276/#7770): after every Nth completed turn the agent
+    // tidies the standing memory document on its own, through the `after_turn`
+    // hook point and an unbound run on the shared scheduler. Owns its group —
+    // curation is a construction input, and every other group must stay
+    // un-wired.
+    report.record(
+        "memory_curation_rewrites_standing_document",
+        scenario_memory_curation_rewrites_standing_document::run().await,
+    );
+
+    // Scenario 11 (#7276/#7770): the negative half — below the interval, no
+    // pass is submitted at all. Separate group for the same reason, and a
+    // different interval from scenario 10.
+    report.record(
+        "memory_curation_below_threshold_never_fires",
+        scenario_memory_curation_below_threshold_never_fires::run().await,
     );
 
     report.assert_all_passed();

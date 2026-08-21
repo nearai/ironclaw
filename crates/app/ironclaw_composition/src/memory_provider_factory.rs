@@ -19,6 +19,7 @@
 //! by the upstream [`MemoryBindingPolicy`]; this factory never relaxes that —
 //! it only constructs a provider for a binding the policy already permitted.
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use ironclaw_extension_contracts::memory::{MemoryDescriptor, MemoryLifecycleHook};
@@ -503,6 +504,44 @@ pub fn memory_lifecycle_consumers(
     }
 }
 
+/// The interval curation may actually run at for the resolved memory binding,
+/// or an operator-facing reason it cannot.
+///
+/// `Ok(None)` = no interval configured, so curation stays unwired. `Ok(Some)` =
+/// wire it. `Err` = an operator asked for curation the bound provider cannot
+/// perform; the runtime build fails rather than spawning passes that always
+/// fail their write, silently.
+///
+/// A curation pass REPLACES the standing memory document — it rewrites the
+/// whole thing under a version expectation. Nothing in the manifest declares
+/// that capability: `[memory].lifecycle` names the four host-initiated
+/// read/record hooks and says nothing about write shape, so there is no
+/// declared surface to gate on. Until one exists — the honest seam, and the
+/// right home for it is the pluggable-memory work (#7664) — the gate is the
+/// binding itself: only the host-bundled native provider is known to serve
+/// replacement writes, and a bound third party may reject them.
+pub(crate) fn curation_interval_for_binding(
+    interval_turns: Option<NonZeroU32>,
+    binding: Option<&MemoryProviderBinding>,
+) -> Result<Option<NonZeroU32>, String> {
+    let Some(interval_turns) = interval_turns else {
+        return Ok(None);
+    };
+    let unsupported = |provider: String| {
+        Err(format!(
+            "[memory].curation_interval_turns is set, but the bound memory provider ({provider})              cannot perform the standing-document replacement a curation pass requires — every              pass would fail its write. Bind the host-bundled native memory provider, or remove              [memory].curation_interval_turns to disable curation."
+        ))
+    };
+    match binding {
+        Some(MemoryProviderBinding::Native) => Ok(Some(interval_turns)),
+        Some(MemoryProviderBinding::ThirdParty { extension_id }) => {
+            unsupported(extension_id.as_str().to_string())
+        }
+        Some(MemoryProviderBinding::Disabled) => unsupported("memory is disabled".to_string()),
+        None => unsupported("no memory provider is assembled".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -634,6 +673,65 @@ mod tests {
         assert!(full.memory_context_service.is_some());
         assert!(full.after_turn_memory_writer.is_some());
         assert!(full.user_profile_source.is_some());
+    }
+
+    fn interval(value: u32) -> NonZeroU32 {
+        NonZeroU32::new(value).expect("test interval is non-zero")
+    }
+
+    /// The gate that keeps a deployment from being told memory is being tidied
+    /// while every pass fails its write: curation is wired only for a binding
+    /// whose provider can REPLACE the standing document.
+    #[test]
+    fn curation_is_wired_only_for_the_native_binding() {
+        assert_eq!(
+            curation_interval_for_binding(Some(interval(10)), Some(&MemoryProviderBinding::Native)),
+            Ok(Some(interval(10))),
+            "the host-bundled native provider performs the replacement write"
+        );
+        assert_eq!(
+            curation_interval_for_binding(None, Some(&MemoryProviderBinding::Native)),
+            Ok(None),
+            "no interval configured is not an error; curation simply stays unwired"
+        );
+    }
+
+    /// Fail closed, loudly. An operator who configured curation against a
+    /// provider that cannot serve it gets a startup error naming the provider
+    /// and how to proceed — not a quiet deployment spawning passes that always
+    /// fail.
+    #[test]
+    fn configured_curation_on_an_incapable_binding_fails_the_build() {
+        let third_party = MemoryProviderBinding::ThirdParty {
+            extension_id: ExtensionId::new("some-provider").expect("valid extension id"),
+        };
+        for (label, binding) in [
+            ("third party", Some(&third_party)),
+            ("disabled", Some(&MemoryProviderBinding::Disabled)),
+            ("no memory runtime", None),
+        ] {
+            let error = curation_interval_for_binding(Some(interval(10)), binding)
+                .expect_err(&format!("{label} must not silently accept curation"));
+            assert!(
+                error.contains("curation_interval_turns"),
+                "{label}: the message must name the setting to change: {error}"
+            );
+        }
+        let named = curation_interval_for_binding(Some(interval(10)), Some(&third_party))
+            .expect_err("a third-party binding is rejected");
+        assert!(
+            named.contains("some-provider"),
+            "the message must name the bound provider: {named}"
+        );
+        // No interval configured against the same bindings is silence, not an
+        // error: nobody asked for curation.
+        for binding in [
+            Some(&third_party),
+            Some(&MemoryProviderBinding::Disabled),
+            None,
+        ] {
+            assert_eq!(curation_interval_for_binding(None, binding), Ok(None));
+        }
     }
 
     /// Binding-shape regression for the resolved provider: `Disabled` and an

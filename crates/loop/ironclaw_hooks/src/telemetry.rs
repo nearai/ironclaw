@@ -67,6 +67,7 @@ pub fn point_label(point: HookPointSpec) -> &'static str {
         HookPointSpec::AfterModel => "after_model",
         HookPointSpec::AfterCapability => "after_capability",
         HookPointSpec::AfterCheckpoint => "after_checkpoint",
+        HookPointSpec::AfterTurn => "after_turn",
         HookPointSpec::EventTriggered => "event_triggered",
     }
 }
@@ -126,6 +127,7 @@ mod tests {
             point_label(HookPointSpec::EventTriggered),
             "event_triggered"
         );
+        assert_eq!(point_label(HookPointSpec::AfterTurn), "after_turn");
         assert_eq!(failure_category_label(FailureCategory::Timeout), "timeout");
         assert_eq!(
             failure_disposition_label(FailureDisposition::FailClosed),
