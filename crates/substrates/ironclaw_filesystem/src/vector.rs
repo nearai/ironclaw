@@ -15,9 +15,9 @@ pub(crate) fn decode_embedding_blob(bytes: &[u8]) -> Option<Vec<f32>> {
         return None;
     }
     // `as_chunks` over `chunks_exact` (clippy `chunks_exact_to_as_chunks`,
-    // new in Rust 1.98): the const chunk size gives `[u8; 4]` arrays directly,
-    // so the per-element indexing disappears. The remainder is empty by the
-    // multiple-of-size check above.
+    // enforced by CI's floating stable toolchain): the const chunk size gives
+    // `[u8; 4]` arrays directly, so the per-element indexing disappears. The
+    // remainder is empty by the multiple-of-size check above.
     Some(
         bytes
             .as_chunks::<{ std::mem::size_of::<f32>() }>()

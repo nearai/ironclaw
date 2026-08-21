@@ -251,6 +251,49 @@ impl AgentLoopDriver for ImmediateCompletedDriver {
     }
 }
 
+/// Returns a fixed [`LoopExit`] so a test can drive the executor to a chosen
+/// terminal state (completed / failed / cancelled) at the `after_turn` seam.
+struct ScriptedExitDriver {
+    descriptor: AgentLoopDriverDescriptor,
+    exit: LoopExit,
+}
+
+#[async_trait]
+impl AgentLoopDriver for ScriptedExitDriver {
+    fn descriptor(&self) -> AgentLoopDriverDescriptor {
+        self.descriptor.clone()
+    }
+
+    async fn run(
+        &self,
+        _request: AgentLoopDriverRunRequest,
+        _host: &(dyn AgentLoopDriverHost + Send + Sync),
+    ) -> Result<LoopExit, AgentLoopDriverError> {
+        Ok(self.exit.clone())
+    }
+
+    async fn resume(
+        &self,
+        _request: AgentLoopDriverResumeRequest,
+        _host: &(dyn AgentLoopDriverHost + Send + Sync),
+    ) -> Result<LoopExit, AgentLoopDriverError> {
+        Ok(self.exit.clone())
+    }
+}
+
+fn failed_exit() -> LoopExit {
+    LoopExit::failed(
+        ironclaw_loop_contracts::LoopFailureKind::ModelError,
+        LoopExitId::new("exit:executor-after-turn-failed").expect("valid test exit id"),
+    )
+}
+
+fn cancelled_exit() -> LoopExit {
+    LoopExit::cancelled_for_observed_interrupt(
+        LoopExitId::new("exit:executor-after-turn-cancelled").expect("valid test exit id"),
+    )
+}
+
 fn completed_exit() -> LoopExit {
     LoopExit::Completed(LoopCompleted {
         completion_kind: LoopCompletionKind::ResultOnly,
@@ -579,6 +622,7 @@ fn after_turn_executor(
     context: &LoopRunContext,
     claimed: &ClaimedTurnRun,
     dispatchers: ironclaw_turn_runner::loop_driver_host::HookDispatcherFactory,
+    exit: LoopExit,
 ) -> (
     RebornTurnRunExecutor,
     Arc<dyn ironclaw_processes::ProcessTransitionPort<Error = ironclaw_turns::TurnError>>,
@@ -587,7 +631,7 @@ fn after_turn_executor(
     let mut registry = DriverRegistry::new();
     registry
         .register_driver(
-            Arc::new(ImmediateCompletedDriver { descriptor }),
+            Arc::new(ScriptedExitDriver { descriptor, exit }),
             DriverRequirements::all_optional(),
             DriverKind::Reference,
         )
@@ -627,9 +671,23 @@ async fn observed_after_turn_contexts(
     context: &LoopRunContext,
     claimed: ClaimedTurnRun,
 ) -> Vec<ironclaw_hooks::points::AfterTurnHookContext> {
+    observed_after_turn_contexts_for_exit(context, claimed, completed_exit()).await
+}
+
+/// [`observed_after_turn_contexts`] for a run whose driver returns `exit`, so a
+/// test can pin what the hook sees for each terminal disposition.
+async fn observed_after_turn_contexts_for_exit(
+    context: &LoopRunContext,
+    claimed: ClaimedTurnRun,
+    exit: LoopExit,
+) -> Vec<ironclaw_hooks::points::AfterTurnHookContext> {
     let hook = Arc::new(RecordingAfterTurnHook::default());
-    let (executor, transitions) =
-        after_turn_executor(context, &claimed, after_turn_dispatchers(Arc::clone(&hook)));
+    let (executor, transitions) = after_turn_executor(
+        context,
+        &claimed,
+        after_turn_dispatchers(Arc::clone(&hook)),
+        exit,
+    );
 
     executor
         .execute_claimed_run(claimed, transitions)
@@ -754,7 +812,8 @@ async fn a_panicking_hook_is_retried_on_the_next_run() {
         })
     };
 
-    let (executor, transitions) = after_turn_executor(&context, &claimed, dispatchers);
+    let (executor, transitions) =
+        after_turn_executor(&context, &claimed, dispatchers, completed_exit());
 
     for _ in 0..2 {
         executor
@@ -772,5 +831,201 @@ async fn a_panicking_hook_is_retried_on_the_next_run() {
         *hook.observed.lock().expect("observed lock"),
         1,
         "the first dispatch panicked; the second one ran to completion"
+    );
+}
+
+/// A conversation turn that ended in FAILURE is still a finished turn: the
+/// point fires, and it reports the failure honestly so a lifecycle hook can
+/// tell a successful turn from a broken one. Without this, a hook that only
+/// ever saw completed runs would silently treat every failure as "no turn
+/// happened".
+#[tokio::test]
+async fn a_failed_conversation_run_reaches_the_after_turn_hook_as_incomplete() {
+    let context = ironclaw_agent_loop::test_support::test_run_context("executor-after-turn-failed");
+    let user_id = UserId::new("user-after-turn").expect("valid user id");
+    let claimed = claimed_run_as(
+        &context,
+        Some(TurnActor::new(user_id.clone())),
+        RunProfileId::interactive_default(),
+    );
+
+    let observed = observed_after_turn_contexts_for_exit(&context, claimed, failed_exit()).await;
+
+    assert_eq!(observed.len(), 1, "the point fires exactly once per run");
+    assert_eq!(observed[0].user_id, user_id);
+    assert!(
+        !observed[0].completed,
+        "a run that reached Failed must not be reported to hooks as a success"
+    );
+}
+
+/// Same contract for a CANCELLED turn: the turn is over, so the point fires,
+/// and `completed` stays false.
+#[tokio::test]
+async fn a_cancelled_conversation_run_reaches_the_after_turn_hook_as_incomplete() {
+    let context =
+        ironclaw_agent_loop::test_support::test_run_context("executor-after-turn-cancelled");
+    let user_id = UserId::new("user-after-turn").expect("valid user id");
+    let claimed = claimed_run_as(
+        &context,
+        Some(TurnActor::new(user_id.clone())),
+        RunProfileId::interactive_default(),
+    );
+
+    let observed = observed_after_turn_contexts_for_exit(&context, claimed, cancelled_exit()).await;
+
+    assert_eq!(observed.len(), 1, "the point fires exactly once per run");
+    assert_eq!(observed[0].user_id, user_id);
+    assert!(
+        !observed[0].completed,
+        "a run that reached Cancelled must not be reported to hooks as a success"
+    );
+}
+
+/// One wedged hook must not take the dispatch down with it. The dispatcher
+/// bounds each hook individually (`AFTER_TURN_HOOK_TIMEOUT`) and the executor's
+/// outer backstop is deliberately much larger, so the inner bound is the one
+/// that fires: the hung hook is classified as a Timeout failure, the hooks
+/// ordered after it still run, and the already-terminal run is unaffected.
+///
+/// The failure mode this pins is the timeout RACE: if the outer backstop were
+/// sized at or below the per-hook bound, the whole dispatch would be cancelled
+/// mid-classification and the survivor would never be reached.
+///
+/// The per-hook budget is shortened to milliseconds for this test
+/// (`with_after_turn_timeout`) so the wedged hook is classified promptly
+/// instead of costing the suite the production 5-second budget. The executor's
+/// outer backstop is untouched, which is exactly the asymmetry under test.
+#[tokio::test]
+async fn a_hung_hook_is_timed_out_and_the_next_hook_still_runs() {
+    /// Shortened per-hook budget: long enough that a hook doing real work
+    /// would finish, short enough that the wedged one is classified promptly.
+    /// Orders of magnitude below the executor's 30s outer backstop, which is
+    /// the asymmetry that lets the dispatcher classify rather than be
+    /// cancelled mid-flight.
+    const HUNG_HOOK_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
+
+    /// Never returns. Ordered ahead of the survivor by phase.
+    struct HungHook;
+
+    #[async_trait]
+    impl ironclaw_hooks::sink::PrivilegedAfterTurnHook for HungHook {
+        async fn on_turn(&self, _ctx: &ironclaw_hooks::points::AfterTurnHookContext) {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// Counts its invocations so the test can prove it was reached.
+    #[derive(Default)]
+    struct SurvivorHook {
+        invocations: std::sync::Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl ironclaw_hooks::sink::PrivilegedAfterTurnHook for SurvivorHook {
+        async fn on_turn(&self, _ctx: &ironclaw_hooks::points::AfterTurnHookContext) {
+            *self.invocations.lock().expect("invocations lock") += 1;
+        }
+    }
+
+    let context = ironclaw_agent_loop::test_support::test_run_context("executor-after-turn-hang");
+    let claimed = claimed_run_as(
+        &context,
+        Some(TurnActor::new(
+            UserId::new("user-after-turn").expect("valid user id"),
+        )),
+        RunProfileId::interactive_default(),
+    );
+
+    let survivor = Arc::new(SurvivorHook::default());
+    // Hook failures are only observable from outside the dispatcher through the
+    // milestone sink, so the test reads the Timeout classification from there.
+    let milestones = Arc::new(ironclaw_loop_contracts::InMemoryHookMilestoneSink::default());
+    let survivor_id = ironclaw_hooks::identity::HookId::for_builtin(
+        "ironclaw_turn_runner::tests::survivor_after_turn_hook",
+        ironclaw_hooks::identity::HookVersion::ONE,
+    );
+    let hung_id = ironclaw_hooks::identity::HookId::for_builtin(
+        "ironclaw_turn_runner::tests::hung_after_turn_hook",
+        ironclaw_hooks::identity::HookVersion::ONE,
+    );
+
+    let dispatchers: ironclaw_turn_runner::loop_driver_host::HookDispatcherFactory = {
+        let survivor = Arc::clone(&survivor);
+        let milestones = Arc::clone(&milestones);
+        Arc::new(move || {
+            struct Forwarding(Arc<SurvivorHook>);
+            #[async_trait]
+            impl ironclaw_hooks::sink::PrivilegedAfterTurnHook for Forwarding {
+                async fn on_turn(&self, ctx: &ironclaw_hooks::points::AfterTurnHookContext) {
+                    self.0.on_turn(ctx).await;
+                }
+            }
+            ironclaw_hooks::dispatch::HookDispatcherBuilder::new(
+                ironclaw_hooks::registry::HookRegistry::new(),
+            )
+            .with_milestone_sink(Arc::clone(&milestones) as Arc<_>)
+            .with_after_turn_timeout(HUNG_HOOK_BUDGET)
+            // Phase orders the two: Policy runs before Telemetry, so the hung
+            // hook is guaranteed to be the one the survivor follows.
+            .install_builtin_after_turn(
+                hung_id,
+                ironclaw_hooks::ordering::HookPhase::Policy,
+                Box::new(HungHook),
+            )
+            .expect("the hung hook installs")
+            .install_builtin_after_turn(
+                survivor_id,
+                ironclaw_hooks::ordering::HookPhase::Telemetry,
+                Box::new(Forwarding(Arc::clone(&survivor))),
+            )
+            .expect("the survivor hook installs")
+            .build_arc()
+        })
+    };
+
+    let (executor, transitions) =
+        after_turn_executor(&context, &claimed, dispatchers, completed_exit());
+
+    executor
+        .execute_claimed_run(claimed, transitions)
+        .await
+        .expect("a wedged lifecycle hook must not fail the already-terminal run");
+
+    assert_eq!(
+        *survivor.invocations.lock().expect("invocations lock"),
+        1,
+        "the hook ordered after the timed-out one must still run"
+    );
+
+    let timed_out: Vec<_> = milestones
+        .kinds()
+        .into_iter()
+        .filter_map(|kind| {
+            if let ironclaw_loop_contracts::LoopHostMilestoneKind::HookFailed {
+                hook_id,
+                category,
+                ..
+            } = kind
+            {
+                Some((hook_id, category))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        timed_out.len(),
+        1,
+        "exactly the hung hook is recorded as a failure, got {timed_out:?}"
+    );
+    assert_eq!(
+        timed_out[0].0,
+        ironclaw_hooks::telemetry::hook_id_string(hung_id),
+        "the recorded failure is the hung hook, not the survivor"
+    );
+    assert_eq!(
+        timed_out[0].1, "timeout",
+        "the hung hook is classified as a timeout, not swallowed"
     );
 }

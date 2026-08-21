@@ -9,10 +9,15 @@
 //! Asserted at the model seam rather than by looking for an absent thread: the
 //! pass's scope is registered with a script, so any submitted pass calls that
 //! model. Zero captured requests is then direct evidence that nothing was
-//! submitted — but on its own it would also be what mere latency looks like,
-//! so the scenario does not stop there: one more turn crosses the interval and
-//! the SAME script is watched until it is used. An "empty" reading that was
-//! really slowness could not turn into a real pass one turn later.
+//! submitted — but on its own it would also be what mere latency looks like: a
+//! pass already queued and not yet started reads as zero too, and would fire
+//! later with nothing here to notice.
+//!
+//! So the scenario does not stop at the empty reading. One more turn crosses
+//! the interval, and the SAME script is then watched until EXACTLY ONE pass —
+//! three scripted model calls, no more — has run. That count is what makes the
+//! earlier zero real: a pass left pending from the below-threshold turns would
+//! run too, and two passes cannot produce one pass's worth of model calls.
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -97,27 +102,49 @@ pub async fn run() -> HarnessResult<()> {
     );
 
     // The corroborating half: one more turn crosses the interval, and the very
-    // same script is now used. Whatever made the reading above empty, it was
-    // not the machinery being slow or unwired.
+    // same script is now used — exactly once. Whatever made the reading above
+    // empty, it was neither the machinery being slow or unwired (a pass does
+    // run) nor a pass sitting queued from the earlier turns (only ONE runs).
     conversation.submit_turn("And that is all.").await?;
-    wait_for_pass_to_start(&curation_llm).await
+    wait_for_exactly_one_pass(&curation_llm).await
 }
 
-/// Poll until the pass has made its first model call. Polling the model rather
-/// than a run handle is deliberate: the pass is submitted from a background
-/// path this test never touches, so its model calls are the only synchronous
-/// evidence available to wait on.
-async fn wait_for_pass_to_start(curation_llm: &Arc<TraceLlm>) -> HarnessResult<()> {
+/// Number of scripted model calls ONE curation pass makes: the rewrite, an
+/// ordinary work-phase candidate, and the host-owned finalizer that records the
+/// structured report.
+const MODEL_CALLS_PER_PASS: usize = 3;
+
+/// Poll until one whole pass has run, then hold still and require that it was
+/// the ONLY one. Polling the model rather than a run handle is deliberate: the
+/// pass is submitted from a background path this test never touches, so its
+/// model calls are the only synchronous evidence available to wait on.
+///
+/// The settle window is what turns "one pass has finished" into "exactly one
+/// pass exists": a second pass — the one a below-threshold turn would have
+/// wrongly queued — is already in flight by the time the first finishes, so it
+/// shows up as extra calls within it.
+async fn wait_for_exactly_one_pass(curation_llm: &Arc<TraceLlm>) -> HarnessResult<()> {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while curation_llm.captured_requests().is_empty() {
+    while curation_llm.captured_requests().len() < MODEL_CALLS_PER_PASS {
         if std::time::Instant::now() > deadline {
             return Err(format!(
                 "the {CURATION_INTERVAL}rd turn must trigger a pass, but the pass's model \
-                 was never called"
+                 was called only {} of {MODEL_CALLS_PER_PASS} times",
+                curation_llm.captured_requests().len()
             )
             .into());
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let captured = curation_llm.captured_requests().len();
+    if captured != MODEL_CALLS_PER_PASS {
+        return Err(format!(
+            "exactly one curation pass may run across {CURATION_INTERVAL} turns, but the \
+             pass model was called {captured} times ({MODEL_CALLS_PER_PASS} per pass) — a \
+             below-threshold turn queued a pass that the earlier empty reading missed"
+        )
+        .into());
     }
     Ok(())
 }

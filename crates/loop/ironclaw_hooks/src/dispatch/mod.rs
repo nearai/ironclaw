@@ -239,6 +239,10 @@ pub struct HookDispatcher {
     event_triggered: HashMap<HookId, EventTriggeredHookImpl>,
     after_turn: HashMap<HookId, AfterTurnHookImpl>,
     timeout: Duration,
+    /// Per-hook budget for [`HookPointSpec::AfterTurn`], separate from
+    /// [`Self::timeout`] because lifecycle hooks run off the hot path and do
+    /// durable work. Defaults to [`AFTER_TURN_HOOK_TIMEOUT`].
+    after_turn_timeout: Duration,
     max_before_capability_hooks_per_dispatch: usize,
     milestone_sink: Option<Arc<dyn HookMilestoneSink>>,
     /// Best-effort recording sink for security-boundary decisions made by
@@ -267,6 +271,7 @@ impl HookDispatcher {
             event_triggered: HashMap::new(),
             after_turn: HashMap::new(),
             timeout: DEFAULT_HOOK_TIMEOUT,
+            after_turn_timeout: AFTER_TURN_HOOK_TIMEOUT,
             max_before_capability_hooks_per_dispatch:
                 DEFAULT_MAX_BEFORE_CAPABILITY_HOOKS_PER_DISPATCH,
             milestone_sink: None,
@@ -276,6 +281,11 @@ impl HookDispatcher {
 
     pub(crate) fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    pub(crate) fn with_after_turn_timeout(mut self, timeout: Duration) -> Self {
+        self.after_turn_timeout = timeout;
         self
     }
 
@@ -1935,7 +1945,7 @@ impl HookDispatcher {
             }
         };
 
-        match tokio::time::timeout(AFTER_TURN_HOOK_TIMEOUT, run).await {
+        match tokio::time::timeout(self.after_turn_timeout, run).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(())) => Err(self.classify_failure(
                 binding,
@@ -2236,6 +2246,21 @@ impl HookDispatcherBuilder {
     /// [`DEFAULT_HOOK_TIMEOUT`] when not set.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.dispatcher = self.dispatcher.with_timeout(timeout);
+        self
+    }
+
+    /// Override the per-hook wall-clock timeout for the `after_turn` point.
+    /// Defaults to [`AFTER_TURN_HOOK_TIMEOUT`] when not set — deliberately
+    /// separate from [`Self::with_timeout`], since a lifecycle hook's budget
+    /// has nothing to do with a hot-path gate's.
+    ///
+    /// A caller that shortens this must keep any OUTER bound it also applies
+    /// strictly larger than this value times the number of hooks it installs;
+    /// an outer cancel landing with the inner one takes the dispatch away
+    /// mid-classification, so an overrunning hook is neither recorded nor
+    /// poisoned.
+    pub fn with_after_turn_timeout(mut self, timeout: Duration) -> Self {
+        self.dispatcher = self.dispatcher.with_after_turn_timeout(timeout);
         self
     }
 

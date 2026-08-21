@@ -64,8 +64,10 @@ impl RebornIntegrationGroupBuilder {
     /// group's `after_turn` point, firing a pass every `interval_turns`
     /// completed turns. Mirrors production's opt-in shape exactly — production
     /// wires this only when `[memory].curation_interval_turns` is set AND a
-    /// memory provider resolved, so a group that does not call this leaves the
-    /// point un-wired and is behavior-identical to today.
+    /// memory provider resolved, and `into_group` applies the same two-part
+    /// gate over `bound_memory`. A group that does not call this — or calls it
+    /// without binding a memory provider — leaves the point un-wired and is
+    /// behavior-identical to today.
     pub fn with_memory_curation_interval(mut self, interval_turns: std::num::NonZeroU32) -> Self {
         self.memory_curation_interval_turns = Some(interval_turns);
         self

@@ -1293,6 +1293,15 @@ impl RebornIntegrationGroupBuilder {
                 }),
                 None => Arc::clone(&user_profile_source),
             };
+        // E-MEMORY / #7276: production (`runtime.rs`) gates the curation wiring
+        // on BOTH an operator-configured interval and a RESOLVED memory
+        // provider — a pass rewrites a standing memory document, so with no
+        // provider bound there is nothing for it to curate. `bound_memory` is
+        // this harness's analog of that resolution, so the gate is mirrored
+        // here rather than left to the interval alone.
+        let memory_curation_interval_turns = self
+            .memory_curation_interval_turns
+            .filter(|_| self.bound_memory.is_some());
         let reply_attachment_intent_port = capability.reply_attachment_intent_port();
         // Production parity: ONE store, connected to the loop's diagnostic
         // sinks and readable by product services — see runtime.rs:3455 and
@@ -1402,9 +1411,10 @@ impl RebornIntegrationGroupBuilder {
             // E-MEMORY / #7276: the same assembly production performs — the
             // curation hook over an `UnboundTurnService` built from this
             // runtime's own thread service and coordinator. `None` unless
-            // `with_memory_curation_interval()` was called, so every other
-            // group is behavior-identical.
-            after_turn_hook_wiring: self.memory_curation_interval_turns.map(|interval_turns| {
+            // `with_memory_curation_interval()` was called AND a memory
+            // provider is bound (see the gate above), so every other group is
+            // behavior-identical.
+            after_turn_hook_wiring: memory_curation_interval_turns.map(|interval_turns| {
                 Box::new(
                     move |deps: ironclaw_turn_runner::runtime::AfterTurnHookDeps| {
                         let submitter = Arc::new(ironclaw_assistant::UnboundTurnService::new(

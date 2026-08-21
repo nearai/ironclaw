@@ -127,8 +127,8 @@ enum DriverInvocationError {
         reason: String,
     },
     HostFinalizationFailed {
-        // Boxed: `AgentLoopHostError` is the enum's ≥128-byte outlier (Rust
-        // 1.98 `result_large_err`); the `DriverError` variant stays unboxed
+        // Boxed: `AgentLoopHostError` is the enum's ≥128-byte outlier (clippy
+        // `result_large_err`); the `DriverError` variant stays unboxed
         // because five match sites destructure its payload by pattern.
         error: Box<AgentLoopHostError>,
         cumulative_usage: Option<LoopModelUsage>,
