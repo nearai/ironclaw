@@ -4,15 +4,17 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use ironclaw_host_api::ids::ProcessId;
-use ironclaw_host_api::turn::{TurnRunId, TurnScope};
+use ironclaw_host_api::turn::{LoopMessageRef, TurnRunId, TurnScope};
 use ironclaw_processes::{
     CloseProcessDependencyRequest, ProcessDependencyPort, ProcessDependencyQuery,
     ProcessDependencyRecord, ProcessDependencyState, ProcessJournalStoreError,
     ProcessLifecycleStatus, ProcessTerminalEvidence, SettleProcessDependencyRequest,
+    TransitionProcessDependencyRequest,
 };
 
 use super::{
-    AwaitEdge, AwaitEdgeState, AwaitEdgeStoreError, EdgeTerminalKind, ReservationReleaseState,
+    AttentionOutcome, AwaitEdge, AwaitEdgeState, AwaitEdgeStoreError, EdgeTerminalKind,
+    ReservationReleaseState,
 };
 
 pub struct AwaitEdgeStore {
@@ -77,6 +79,8 @@ impl AwaitEdgeStore {
                     terminal_byte_len: None,
                     terminal_reason: None,
                     reservation_release: ReservationReleaseState::Unclaimed,
+                    appended_message_ref: None,
+                    attention_outcome: None,
                     created_at: record.created_at,
                     settled_at: None,
                 }
@@ -84,15 +88,12 @@ impl AwaitEdgeStore {
         };
         edge.state = match record.state {
             ProcessDependencyState::Open => AwaitEdgeState::Open,
-            // ponytail: the kernel's three delivery substates all project onto
-            // `Settled` — settled and not yet drained is true of every one of
-            // them, but the projection cannot yet tell them apart. Nothing
-            // writes those states in this slice; the slice that starts walking
-            // the delivery chain gives `AwaitEdgeState` the matching arms.
-            ProcessDependencyState::Settled
-            | ProcessDependencyState::ResultAppended
-            | ProcessDependencyState::AttentionScheduled
-            | ProcessDependencyState::AttentionDeferred => AwaitEdgeState::Settled,
+            ProcessDependencyState::Settled => AwaitEdgeState::Settled,
+            ProcessDependencyState::ResultAppended => AwaitEdgeState::ResultAppended,
+            ProcessDependencyState::AttentionScheduled => AwaitEdgeState::AttentionScheduled,
+            // The kernel keeps this name domain-neutral; the loop tier is where
+            // "which cap deferred it" is knowable, so the spelling differs.
+            ProcessDependencyState::AttentionDeferred => AwaitEdgeState::AttentionDeferredStreakCap,
             ProcessDependencyState::Consumed => AwaitEdgeState::Drained,
             ProcessDependencyState::Abandoned => AwaitEdgeState::Abandoned,
         };
@@ -151,6 +152,99 @@ impl AwaitEdgeStore {
                     sanitized_reason: terminal_reason,
                 },
                 settled_at: Utc::now(),
+            })
+            .await
+            .map_err(map_process_error)?
+            .map(Self::edge_from_record)
+            .transpose()
+    }
+
+    /// `Settled -> ResultAppended`, recording the parent-thread message the
+    /// child's result landed as. Replaying an append that already landed
+    /// returns the ref already recorded rather than writing a second one.
+    pub async fn record_result_appended(
+        &self,
+        scope: &TurnScope,
+        parent_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+        message_ref: LoopMessageRef,
+    ) -> Result<Option<AwaitEdge>, AwaitEdgeStoreError> {
+        self.transition(
+            scope,
+            parent_run_id,
+            child_run_id,
+            ProcessDependencyState::Settled,
+            ProcessDependencyState::ResultAppended,
+            Some(serde_json::json!({"appended_message_ref": message_ref.as_str()})),
+        )
+        .await
+    }
+
+    /// `ResultAppended -> AttentionScheduled`, recording how the parent was
+    /// made attentive.
+    pub async fn record_attention(
+        &self,
+        scope: &TurnScope,
+        parent_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+        outcome: AttentionOutcome,
+    ) -> Result<Option<AwaitEdge>, AwaitEdgeStoreError> {
+        let outcome =
+            serde_json::to_value(outcome).map_err(|error| AwaitEdgeStoreError::Backend {
+                reason: format!("attention outcome serialize failed: {error}"),
+            })?;
+        self.transition(
+            scope,
+            parent_run_id,
+            child_run_id,
+            ProcessDependencyState::ResultAppended,
+            ProcessDependencyState::AttentionScheduled,
+            Some(serde_json::json!({"attention_outcome": outcome})),
+        )
+        .await
+    }
+
+    /// `ResultAppended -> AttentionDeferred`: the result is durably appended
+    /// but the parent hit its consecutive-interruption cap, so attention is
+    /// parked. The edge stays unclosed and claimable.
+    pub async fn defer_streak_capped(
+        &self,
+        scope: &TurnScope,
+        parent_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+    ) -> Result<Option<AwaitEdge>, AwaitEdgeStoreError> {
+        self.transition(
+            scope,
+            parent_run_id,
+            child_run_id,
+            ProcessDependencyState::ResultAppended,
+            ProcessDependencyState::AttentionDeferred,
+            None,
+        )
+        .await
+    }
+
+    /// One expected-state CAS over the kernel's state column. `metadata` is
+    /// merged into the stored blob — which *is* the serialized edge — never
+    /// substituted for it.
+    async fn transition(
+        &self,
+        scope: &TurnScope,
+        parent_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+        expected: ProcessDependencyState,
+        next: ProcessDependencyState,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<Option<AwaitEdge>, AwaitEdgeStoreError> {
+        self.dependencies
+            .transition_process_dependency(TransitionProcessDependencyRequest {
+                dependent_process_id: Self::process_id(parent_run_id),
+                dependency_process_id: Self::process_id(child_run_id),
+                scope: scope.to_resource_scope(),
+                expected,
+                next,
+                metadata,
+                transitioned_at: Utc::now(),
             })
             .await
             .map_err(map_process_error)?
@@ -243,8 +337,20 @@ impl AwaitEdgeStore {
             return Ok(());
         };
         match edge.state {
-            AwaitEdgeState::Settled => self.consume(scope, parent_run_id, child_run_id).await,
-            AwaitEdgeState::Open | AwaitEdgeState::Drained | AwaitEdgeState::Abandoned => Ok(()),
+            // The two states the kernel will consume — closing releases the
+            // descendant reservation in the same journal command.
+            AwaitEdgeState::Settled | AwaitEdgeState::AttentionScheduled => {
+                self.consume(scope, parent_run_id, child_run_id).await
+            }
+            // Still in flight. `ResultAppended` has no attention recorded yet
+            // and a streak-capped edge is parked for a later sweep; the kernel
+            // refuses to consume either, because closing would strand the
+            // parent with an undelivered result.
+            AwaitEdgeState::Open
+            | AwaitEdgeState::ResultAppended
+            | AwaitEdgeState::AttentionDeferredStreakCap
+            | AwaitEdgeState::Drained
+            | AwaitEdgeState::Abandoned => Ok(()),
         }
     }
 }
@@ -319,10 +425,17 @@ fn map_process_error(error: ironclaw_processes::ProcessJournalStoreError) -> Awa
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::ids::{AgentId, CapabilityId, ProcessId, TenantId, ThreadId, UserId};
-    use ironclaw_host_api::turn::{LoopResultRef, TurnActor, TurnGateRef, TurnRunId, TurnScope};
+    use ironclaw_host_api::turn::{
+        LoopMessageRef, LoopResultRef, TurnActor, TurnGateRef, TurnRunId, TurnScope,
+    };
     use ironclaw_loop_host::{AwaitedChildSetRecord, SpawnSubagentMode, SubagentKindId};
-    use ironclaw_processes::{ProcessDependencyRecord, ProcessDependencyState};
+    use ironclaw_processes::{
+        OpenProcessDependencyRequest, ProcessDependencyRecord, ProcessDependencyState,
+        ProcessJournalStore, ProcessKind, ProcessSubmissionPort, SubmitProcessRequest,
+        in_memory_backed_process_store,
+    };
 
     use super::*;
 
@@ -378,6 +491,8 @@ mod tests {
                 terminal_byte_len: None,
                 terminal_reason: None,
                 reservation_release: ReservationReleaseState::Unclaimed,
+                appended_message_ref: None,
+                attention_outcome: None,
                 created_at: Utc::now(),
                 settled_at: None,
             },
@@ -429,25 +544,25 @@ mod tests {
                 ProcessLifecycleStatus::Failed,
                 Some(EdgeTerminalKind::Failed),
             ),
-            // The three kernel delivery substates all project onto `Settled`
-            // today, and none of them may look released.
+            // Each kernel delivery substate has its own loop-tier arm, and none
+            // of them may look released: they are all still in flight.
             (
                 ProcessDependencyState::ResultAppended,
-                AwaitEdgeState::Settled,
+                AwaitEdgeState::ResultAppended,
                 ReservationReleaseState::Unclaimed,
                 ProcessLifecycleStatus::Completed,
                 Some(EdgeTerminalKind::Completed),
             ),
             (
                 ProcessDependencyState::AttentionScheduled,
-                AwaitEdgeState::Settled,
+                AwaitEdgeState::AttentionScheduled,
                 ReservationReleaseState::Unclaimed,
                 ProcessLifecycleStatus::Completed,
                 Some(EdgeTerminalKind::Completed),
             ),
             (
                 ProcessDependencyState::AttentionDeferred,
-                AwaitEdgeState::Settled,
+                AwaitEdgeState::AttentionDeferredStreakCap,
                 ReservationReleaseState::Unclaimed,
                 ProcessLifecycleStatus::Completed,
                 Some(EdgeTerminalKind::Completed),
@@ -532,5 +647,191 @@ mod tests {
         );
         malformed.metadata = serde_json::json!({"unexpected": true});
         assert!(AwaitEdgeStore::edge_from_record(malformed).is_err());
+    }
+
+    /// The projection store together with the journal it projects over. A
+    /// fixture seeds the kernel side through the real port; nothing here
+    /// writes stored dependency state through a back door.
+    fn new_store() -> (AwaitEdgeStore, Arc<ProcessJournalStore<InMemoryBackend>>) {
+        let journal = Arc::new(in_memory_backed_process_store());
+        let dependencies = Arc::clone(&journal)
+            as Arc<dyn ProcessDependencyPort<Error = ProcessJournalStoreError>>;
+        (AwaitEdgeStore::new(dependencies), journal)
+    }
+
+    /// Opens one background-mode await edge in the journal and settles it
+    /// through `AwaitEdgeStore::settle`, leaving it exactly where the delivery
+    /// chain starts.
+    async fn settled_background_edge(
+        store: &AwaitEdgeStore,
+        journal: &ProcessJournalStore<InMemoryBackend>,
+    ) -> (TurnScope, TurnRunId, TurnRunId) {
+        let (parent_run_id, child_run_id, mut edge) = edge_fixture();
+        edge.mode = SpawnSubagentMode::Background;
+        let scope = edge.child_scope.clone();
+        let parent_process_id = ProcessId::from_uuid(parent_run_id.as_uuid());
+        journal
+            .submit_process(SubmitProcessRequest {
+                process_id: parent_process_id,
+                process_kind: ProcessKind::AgentTurn,
+                scope: edge.parent_run_context.scope.to_resource_scope(),
+                exclusive_within_scope: false,
+                operation_id: None,
+                owner_user_id: None,
+                concurrency_class: None,
+                parent_process_id: None,
+                root_process_id: None,
+                spawn_tree_descendant_cap: None,
+                dependency: None,
+                checkpoint_ref: None,
+                input: None,
+                created_at: Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .expect("submit parent process");
+        journal
+            .open_process_dependency(OpenProcessDependencyRequest {
+                dependent_process_id: parent_process_id,
+                dependency_process_id: ProcessId::from_uuid(child_run_id.as_uuid()),
+                root_process_id: parent_process_id,
+                scope: scope.to_resource_scope(),
+                group_ref: Some(edge.gate_ref.as_str().to_string()),
+                created_at: edge.created_at,
+                metadata: serde_json::to_value(&edge).expect("serialize edge"),
+            })
+            .await
+            .expect("open dependency");
+        let settled = store
+            .settle(
+                &scope,
+                parent_run_id,
+                child_run_id,
+                EdgeTerminalKind::Completed,
+                Some(17),
+                None,
+            )
+            .await
+            .expect("settle edge")
+            .expect("edge exists");
+        assert_eq!(settled.state, AwaitEdgeState::Settled);
+        (scope, parent_run_id, child_run_id)
+    }
+
+    #[tokio::test]
+    async fn edge_walks_the_full_background_delivery_lifecycle() {
+        let (store, journal) = new_store();
+        let (scope, parent, child) = settled_background_edge(&store, &journal).await;
+
+        let appended = store
+            .record_result_appended(
+                &scope,
+                parent,
+                child,
+                LoopMessageRef::new("msg:child-1").expect("valid ref"),
+            )
+            .await
+            .expect("append recorded")
+            .expect("edge exists");
+        assert_eq!(appended.state, AwaitEdgeState::ResultAppended);
+        assert_eq!(
+            appended.appended_message_ref.as_ref().map(|r| r.as_str()),
+            Some("msg:child-1")
+        );
+        assert_eq!(
+            appended.reservation_release,
+            ReservationReleaseState::Unclaimed,
+            "an in-flight delivery step must not look like a released reservation"
+        );
+
+        let attended = store
+            .record_attention(&scope, parent, child, AttentionOutcome::Queued)
+            .await
+            .expect("attention recorded")
+            .expect("edge exists");
+        assert_eq!(attended.state, AwaitEdgeState::AttentionScheduled);
+        assert_eq!(attended.attention_outcome, Some(AttentionOutcome::Queued));
+        assert_eq!(
+            attended.appended_message_ref.as_ref().map(|r| r.as_str()),
+            Some("msg:child-1"),
+            "a later delivery step must merge into the edge, never replace it"
+        );
+
+        // The whole walk is durable, not an in-memory artifact of the caller.
+        let reread = store
+            .peek(&scope, parent, child)
+            .await
+            .expect("peek edge")
+            .expect("edge exists");
+        assert_eq!(reread.state, AwaitEdgeState::AttentionScheduled);
+        assert_eq!(reread.attention_outcome, Some(AttentionOutcome::Queued));
+        assert_eq!(reread.terminal_kind, Some(EdgeTerminalKind::Completed));
+    }
+
+    #[tokio::test]
+    async fn recording_an_append_twice_keeps_the_first_ref() {
+        let (store, journal) = new_store();
+        let (scope, parent, child) = settled_background_edge(&store, &journal).await;
+        let first = LoopMessageRef::new("msg:first").expect("valid ref");
+        let second = LoopMessageRef::new("msg:second").expect("valid ref");
+
+        store
+            .record_result_appended(&scope, parent, child, first)
+            .await
+            .expect("first append")
+            .expect("edge exists");
+        let replay = store
+            .record_result_appended(&scope, parent, child, second)
+            .await
+            .expect("replay")
+            .expect("edge exists");
+
+        assert_eq!(
+            replay.appended_message_ref.as_ref().map(|r| r.as_str()),
+            Some("msg:first"),
+            "replay must return the ref already durably recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn streak_capped_edges_stay_unclosed() {
+        let (store, journal) = new_store();
+        let (scope, parent, child) = settled_background_edge(&store, &journal).await;
+        store
+            .record_result_appended(
+                &scope,
+                parent,
+                child,
+                LoopMessageRef::new("msg:child-1").expect("valid ref"),
+            )
+            .await
+            .expect("append")
+            .expect("edge exists");
+
+        let deferred = store
+            .defer_streak_capped(&scope, parent, child)
+            .await
+            .expect("deferral recorded")
+            .expect("edge exists");
+        assert_eq!(deferred.state, AwaitEdgeState::AttentionDeferredStreakCap);
+
+        let unclosed = store.list_unclosed_for_scope(&scope).await.expect("query");
+        assert_eq!(unclosed.len(), 1, "a deferred edge must remain claimable");
+
+        // `close` must leave a parked edge alone: the kernel refuses to consume
+        // one, because closing it would strand the undelivered result.
+        store
+            .close(&scope, parent, child)
+            .await
+            .expect("close is a no-op on a parked edge");
+        assert_eq!(
+            store
+                .peek(&scope, parent, child)
+                .await
+                .expect("peek edge")
+                .expect("edge exists")
+                .state,
+            AwaitEdgeState::AttentionDeferredStreakCap
+        );
     }
 }
