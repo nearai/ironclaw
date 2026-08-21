@@ -71,10 +71,19 @@ const MEMORY_CURATION_KICKOFF: &str =
 /// Name of the structured report contract.
 const MEMORY_CURATION_OUTPUT_NAME: &str = "memory_curation_report_v1";
 
-/// Iteration ceiling for one pass: read, decide, write, report, plus room for
-/// one retry. A pass that cannot finish in this many steps is not converging,
-/// and letting it spin costs tokens for a chore nobody requested.
-const MEMORY_CURATION_MAX_ITERATIONS: u32 = 6;
+/// Iteration ceiling for one pass: read, decide, write, report, plus headroom
+/// for real-model sloppiness. A pass that cannot finish in this many steps is
+/// not converging, and letting it spin costs tokens for a chore nobody
+/// requested.
+///
+/// 10, not the tidy 6 the design assumed: the 2026-08-21 live test
+/// (DeepSeek-V4-Flash, isolated home) showed a real model spends extra calls —
+/// it made three writes where the prompt asks for one, fumbled a read with a
+/// malformed tool call, then hit the 6-call limit BEFORE emitting its
+/// structured report, terminating the run Failed with the work done. The
+/// ceiling still hard-stops an unconverged pass; it just leaves room for the
+/// report after ordinary imperfection.
+const MEMORY_CURATION_MAX_ITERATIONS: u32 = 10;
 
 /// Capability-call ceiling: read, maybe a search or two, one write, and the
 /// result tool, plus headroom. A pass calling far more than this is thrashing.
