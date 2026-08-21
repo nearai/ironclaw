@@ -1,16 +1,25 @@
 # Unified channel model — target architecture
 
-**Status:** Shipped. Originally a target design (approved direction,
-2026-08-10); the channel-adapter contract described here is built (as the
-split `ChannelIngress`/`ChannelReply`/`ChannelDelivery` traits, see
+**Status:** Shipped, with one accepted deviation from the original plan.
+Originally a target design (approved direction, 2026-08-10); the
+channel-adapter contract described here is built (as the split
+`ChannelIngress`/`ChannelReply`/`ChannelDelivery` traits, see
 `crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs`) and
 this document is still cited as the design rationale from
-`delivery_coordinator.rs` and `inbound_turn.rs`.
+`delivery_coordinator.rs` and `inbound_turn.rs`. The old shape this design
+replaced (channel-specific routes, two inbound cores, bespoke `/web-push/*`
+enrollment) is gone — there is no production `/web-push/*` route. **The one
+place the shipped code diverges from §3 below:** the web-app channel
+(`crates/extensions/packages/web-app/src/channel.rs`) implements only
+`ChannelDelivery`. Its authenticated-session inbound and its streaming reply
+are host-owned, not adapter-implemented — a deliberate exception (the
+adapter may never mint the session's trust, and the reply sink is the
+existing SSE/projection path), not leftover migration debt. See the note at
+the end of §3.
 **Audience:** Any agent touching channel inbound, outbound/reply, notifications,
 notification enrollment/setup, or the web-app/web-push surface. **Read this
-first** — the code is mid-migration toward it and the old shape (channel-specific
-routes, two inbound cores, bespoke `/web-push/*` enrollment) is a known smell
-being *removed*, not a pattern to copy.
+first** — the old shape (channel-specific routes, two inbound cores, bespoke
+`/web-push/*` enrollment) is a known smell and must not be reintroduced.
 
 Owning families: `crates/extensions/` (adapters + host), `crates/contracts/ironclaw_extension_contracts`
 (the `ChannelAdapter` + descriptor vocabulary), `crates/product/` (the shared
@@ -99,6 +108,18 @@ adapter. The host runs verification, credential injection, binding, idempotency,
 turn submission, notification routing, and notification-setup dispatch
 generically — the adapter only ever sees already-verified inbound, already-
 authorized egress, and its own opaque setup payload.
+
+**Accepted exception: the authenticated-session channel implements only
+responsibilities 3 and 4.** The web-app channel's `[channel.ingress]` uses the
+`authenticated_session` recipe and `[channel.reply] transport = "stream"`
+(manifest, `crates/extensions/packages/web-app/manifest.toml`); for that
+combination, responsibilities 1 and 2 above have no adapter code —
+`WebAppChannelAdapter` implements only `ChannelDelivery`. Trust for a session
+caller is the host transport's own authentication, which an adapter must never
+mint from a payload (§9), and the reply is the existing durable
+SSE/projection stream, which an adapter is never called to re-implement. Any
+future `authenticated_session` + `stream` channel gets the same two
+absences; a webhook or batched-reply channel still implements all four.
 
 ## 4. Entrypoints are declared, thin, generic
 
@@ -300,6 +321,12 @@ Slack/Telegram manifests gain `reply_mode = "batched"`; their `max_message_chars
 becomes the declared split bound; `notifications_require_setup = false`.
 
 ## 12. Migration from today (concrete deltas)
+
+Historical record of the steps taken to ship §0–§11 — kept for the same
+reason a changelog is kept, not as an open TODO list. Step 10 (deleting
+`/web-push/{subscribe,unsubscribe,status}`) is done — no such route exists
+in production. Re-verify any individual step against the named files before
+treating it as still open; do not read this section as a live plan.
 
 Inbound unification:
 1. Generalize the inbound entry DTO (`ChannelInboundSurfaceRequest` /

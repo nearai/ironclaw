@@ -26,11 +26,38 @@ cannot write the row in one plain-English sentence, the test is probably asserti
 internal rather than a behavior — see `.claude/rules/testing.md`.
 
 The counts in each section header are checked-in facts, not estimates. Update
-them in the same commit; re-derive any of them with
-`find tests/integration/group_<name> -maxdepth 1 -name 'scenario_*.rs' | wc -l`
-(groups), `ls tests/integration/*.rs tests/integration/auth/*.rs | wc -l` (flat
-bins), `ls tests/*.rs | wc -l` (top-level bins), or
-`ls tests/e2e/scenarios/test_*.py | wc -l` (E2E files).
+them in the same commit; re-derive any of them with:
+
+- Groups (the count of `group_*/` directories): `find tests/integration -maxdepth
+  1 -type d -name 'group_*' | wc -l`. Scenarios inside one named group (e.g.
+  `group_approvals`): `find tests/integration/group_approvals -maxdepth 1 -name
+  'scenario_*.rs' | wc -l`.
+- Flat integration bins: `ls tests/integration/*.rs tests/integration/auth/*.rs
+  | wc -l`.
+- Top-level Rust bins: `ls tests/*.rs | wc -l`.
+- E2E files: `ls tests/e2e/scenarios/test_*.py | wc -l`.
+- E2E test *functions* (the §2 "870" figure — every `test_*` function or
+  method, top-level or in a class, across all 102 files; this is an exhaustive
+  syntactic count, not filtered by active/legacy status):
+  ```
+  python3 -c "
+  import ast, glob
+  n = 0
+  for f in glob.glob('tests/e2e/scenarios/test_*.py'):
+      for node in ast.walk(ast.parse(open(f).read())):
+          if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith('test_'):
+              n += 1
+  print(n)
+  "
+  ```
+- E2E collected pytest items (the §6 "797 top-level tests" figure — pytest's
+  own collection count, which differs from the syntactic function count above
+  when a function is parametrized, skipped at collection, or a class groups
+  several `test_*` methods under one node): `cd tests/e2e && python3 -m pytest
+  scenarios --collect-only -q | tail -1` (requires the E2E dependencies from
+  `tests/e2e/pyproject.toml`, e.g. via `uv run` or the project's E2E venv).
+  Neither figure filters by whether a scenario is currently
+  Reborn-executable — see the §6 preamble.
 
 ---
 

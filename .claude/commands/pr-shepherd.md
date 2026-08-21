@@ -100,7 +100,7 @@ Read EVERY changed file in full (not just diff hunks). For PRs touching >20 file
 - No `.unwrap()` or `.expect()` in production code
 - Prefer `crate::` for cross-module imports (`super::` OK in tests/intra-module)
 - Error types use `thiserror`
-- If persistence touched, verify dual-backend parity the way `ironclaw_hooks` does it (`.claude/skills/ironclaw-reborn-testing/SKILL.md` — `src/postgres_backend/` + `src/libsql_backend/`, proved by its `parity_matrix.rs`); most crates don't branch on backend at all (`.claude/rules/database.md`), so first confirm this crate is one that does
+- If persistence touched, verify dual-backend parity the way `ironclaw_hooks` does it (`.claude/skills/ironclaw-reborn-testing/SKILL.md` — `src/postgres_backend/` + `src/libsql_backend/`, proved by its `parity_matrix.rs`); first confirm this crate is one of the ones that branch on backend at all (`.claude/rules/database.md`) with `for d in $(find crates -type d -name postgres_backend); do p=$(dirname "$d"); [ -d "$p/libsql_backend" ] && echo "$p"; done` — only `ironclaw_hooks` matches today
 - New model-callable tools implement `ToolAdapter` (`crates/contracts/ironclaw_extension_contracts/src/tool_adapter.rs`) via an extension manifest, wired per `.claude/skills/reborn-extension-surfaces/SKILL.md`
 - External tool output passes through safety layer
 - Tool parameters redacted before logging/SSE

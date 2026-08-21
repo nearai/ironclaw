@@ -288,7 +288,7 @@ after your fixes**.
    changes, `test` if the PR is mostly added coverage, `docs` if mostly guidance, `fix` if you
    corrected a real bug a finding exposed). End the message with a `Co-Authored-By:` trailer naming
    the model actually running this session (not a hardcoded one — it goes stale the moment a
-   different model runs the loop), e.g. `Co-Authored-By: <running model's own identity> <noreply@anthropic.com>`.
+   different model runs the loop), e.g. `Co-Authored-By: <running model's own identity> <its provider's noreply address>`.
    (The commit-msg hook requires a regression test with every `fix` — write it test-first, §Testing
    Discipline in CLAUDE.md.)
 3. **Push and open the PR** with `gh pr create --base main`. PR body states: the **crate**, the

@@ -90,7 +90,7 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
 
 ## Files
 
-- `scope_gateway.rs` — `ScopeRegistryGateway`, a `HostManagedModelGateway` dispatcher that routes model calls to per-thread scripted gateways by `TurnScope` (looked up in a `Mutex<HashMap>`). Sits at the `HostManagedModelGateway` seam but routes to REAL `LlmProviderModelGateway` instances over the `ironclaw_llm` chain — the single-fake-at-the-vendor-SDK-seam invariant (CLAUDE.md lines 5–8, 28) is preserved. Its own `stream_model` is a `ConfigurationError` sentinel (never reached when routing succeeds); `resolve_for_scope` does the actual lookup.
+- `scope_gateway.rs` — `ScopeRegistryGateway`, a `HostManagedModelGateway` dispatcher that routes model calls to per-thread scripted gateways by `TurnScope` (looked up in a `Mutex<HashMap>`). Sits at the `HostManagedModelGateway` seam but routes to REAL `LlmProviderModelGateway` instances over the `ironclaw_llm` chain — the single-fake-at-the-vendor-SDK-seam invariant (this file's opening paragraph, "the only thing faked is the bottom of the stack: a scripted model at the vendor-SDK seam") is preserved. Its own `stream_model` is a `ConfigurationError` sentinel (never reached when routing succeeds); `resolve_for_scope` does the actual lookup.
 - `scripted_provider.rs` — `scripted_trace_llm(..)`, the `TraceLlm` raw-provider seam.
 - `reply.rs` — `RebornScriptedReply` (the one-line-per-turn façade).
 - `builder.rs` — `RebornIntegrationHarness` + builder, hermetic env, core assertions

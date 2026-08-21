@@ -155,7 +155,7 @@ extension host reaches whose signature this crate may legally name.
 pinned by
 `reborn_extension_host_port_inversion.rs::INVERTED_PORT_IMPLEMENTORS`, each
 *with its implementing crate* (WS2.4 split the extension-management product
-face out of the host, so four of the twelve are implemented by the manager
+face out of the host, so three of the twelve are implemented by the manager
 rather than the host):
 
 | Port | Implemented by |

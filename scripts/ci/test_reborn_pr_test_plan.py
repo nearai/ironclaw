@@ -1087,7 +1087,25 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertNotEqual(paired["crate_buckets"], [], path)
 
     def test_repo_wide_test_guidance_selects_no_rust_lane(self) -> None:
-        for path in ("tests/AGENTS.md", "tests/integration/AGENTS.md"):
+        """Every path in IGNORED_GUIDANCE_PATHS, including the `CLAUDE.md`
+        alias symlinks the AGENTS.md/CLAUDE.md rename (#7797) introduced and
+        the parity-QA support pair, must select nothing on its own.
+
+        Regression: `tests/CLAUDE.md` used to be a real file; the rename
+        converted it (and its siblings) to `CLAUDE.md -> AGENTS.md` symlinks.
+        `git diff --name-only` still reports the path as changed on that
+        conversion, and only the new `AGENTS.md` half was ever added to
+        `IGNORED_GUIDANCE_PATHS` — so the alias half fell through to the
+        unmapped-path fail-closed arm and aborted the whole `Tests (Reborn)`
+        roll-up (`unmapped test or CI path: tests/CLAUDE.md`)."""
+        for path in (
+            "tests/AGENTS.md",
+            "tests/CLAUDE.md",
+            "tests/integration/AGENTS.md",
+            "tests/integration/CLAUDE.md",
+            "tests/support/reborn_parity_qa/AGENTS.md",
+            "tests/support/reborn_parity_qa/CLAUDE.md",
+        ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])
                 self.assertEqual(plan["mode"], "none")

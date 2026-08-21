@@ -419,10 +419,39 @@ If you need to test against a manually started ironclaw, you can skip conftest b
 
 1. Create `scenarios/test_my_feature.py` <!-- check-guidance: path-ok --> (a new file — pick a name for the feature under test).
 2. All async functions are automatically recognized as tests — `asyncio_mode = "auto"` is set globally in `pyproject.toml`. Do **not** add `@pytest.mark.asyncio`; it is redundant and raises a warning.
-3. Use the `page` fixture for browser tests (function-scoped, fresh context each test). Use `ironclaw_server` directly for pure HTTP tests.
-4. Import selectors from `helpers.SEL` and `helpers.AUTH_TOKEN` — do not hardcode selectors or tokens inline.
+3. For a browser test against the live Reborn surface, use `reborn_v2_page` (or `reborn_v2_server` + `reborn_v2_browser` directly) — **not** the legacy `page` fixture; see the file-top note. Use `ironclaw_server` directly for pure HTTP tests against the legacy binary, or `reborn_v2_server` for HTTP tests against the Reborn surface.
+4. Import selectors from `helpers.SEL_V2` and the token from `helpers.REBORN_V2_AUTH_TOKEN` for Reborn v2 scenarios — do not hardcode selectors or tokens inline.
 5. Use `httpx.AsyncClient` for REST calls; `aiohttp` for SSE streaming.
-6. Keep new fixtures session-scoped where possible; server startup is expensive. Function-scoped fixtures (like `page`) are fine for browser state that must be clean per test.
+6. Keep new fixtures session-scoped where possible; server startup is expensive. Function-scoped fixtures (like `reborn_v2_page`) are fine for browser state that must be clean per test.
+
+For a Reborn v2 browser test (the pattern `test_reborn_webui_v2_smoke.py` uses):
+```python
+from helpers import SEL_V2
+
+async def test_my_ui_feature(reborn_v2_page):
+    # reborn_v2_page is already navigated and authenticated
+    chat_input = reborn_v2_page.locator(SEL_V2["chat_composer"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+    # ... interact with the page ...
+```
+
+For a Reborn v2 HTTP test:
+```python
+import httpx
+from helpers import REBORN_V2_AUTH_TOKEN
+
+async def test_my_endpoint(reborn_v2_server):
+    headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+    async with httpx.AsyncClient() as client:
+        r = await client.get(f"{reborn_v2_server}/api/health", headers=headers)
+        assert r.status_code == 200
+```
+
+### Legacy recipe (non-functional pending #6369 — do not copy for new work)
+
+The `page` / `SEL` / `AUTH_TOKEN` / `ironclaw_server`-against-the-legacy-binary
+shape below predates the Reborn v2 migration and is kept only because a
+number of `test_v2_*` scenarios still depend on it (see the file-top note):
 
 ```python
 import httpx
@@ -435,7 +464,6 @@ async def test_my_endpoint(ironclaw_server):
         assert r.status_code == 200
 ```
 
-For browser tests:
 ```python
 from helpers import SEL
 

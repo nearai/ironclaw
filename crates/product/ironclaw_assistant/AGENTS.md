@@ -300,7 +300,8 @@ by the sealed validated reply-target binding.
 
 ## `reborn_services` module-charter map
 
-`src/reborn_services.rs` is the largest file in this crate (`wc -l` to
+`src/reborn_services.rs` is the largest file in this crate
+(`wc -l crates/product/ironclaw_assistant/src/reborn_services.rs` to
 re-derive the current count) —
 and carries a live `// arch-exempt: large_file` waiver naming plan #5985. This
 map is **not** that split and does not discharge that waiver: PROPOSAL §6.4.15

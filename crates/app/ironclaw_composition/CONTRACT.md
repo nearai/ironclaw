@@ -323,15 +323,19 @@ and the auth/product-auth mounts below), not in this prose.
   preflight.
 - **Body limit** — descriptor-driven per-route via
   `webui_body_limit::enforce_body_limit`. Caps come from
-  `ironclaw_webui::webui_v2_routes()`: `create_thread` 16 KiB,
-  `send_message` 14 MiB, `cancel_run` / `resolve_gate` 4 KiB,
-  `get_timeline` / `stream_events` `NoBody`. The outer
-  `RequestBodyLimitLayer` at `config.max_body_bytes` (14 MiB default)
-  is kept as defense in depth for paths that don't match any v2
-  descriptor.
+  `ironclaw_webui::webui_v2_routes()` — `descriptors.rs` is the sole
+  authoritative source; the figures below are a snapshot, re-derive with
+  `rg -n 'body_limit_kib' crates/product/ironclaw_webui/src/webui_v2/descriptors.rs`
+  before trusting them: `create_thread` 16 KiB, `send_message` 14 MiB,
+  `cancel_run` / `resolve_gate` 4 KiB, `get_timeline` / `stream_events`
+  `NoBody`. The outer `RequestBodyLimitLayer` at `config.max_body_bytes`
+  (14 MiB default) is kept as defense in depth for paths that don't match
+  any v2 descriptor.
 - **Rate limit** — descriptor-driven; the v2 crate declares mutation
-  60/60, read 120/60, stream 30/60 per `(tenant, user)`. Reading and
-  enforcing happens in `webui_rate_limit::build_rate_limit_state`.
+  60/60, read 120/60, stream 30/60 per `(tenant, user)` — snapshot,
+  `webui_rate_limit.rs` and `descriptors.rs` are authoritative; re-derive
+  with `rg -n 'rate_limit_per_caller' crates/product/ironclaw_webui/src/webui_v2/descriptors.rs`.
+  Reading and enforcing happens in `webui_rate_limit::build_rate_limit_state`.
 - **Static security headers** — `nosniff`, `DENY`, CSP applied via
   outer `SetResponseHeaderLayer`s; default CSP is
   `default-src 'self'; object-src 'none'; frame-ancestors 'none';

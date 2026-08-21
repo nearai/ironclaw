@@ -356,7 +356,7 @@ Set the channels where IronClaw notifies this user about background runs (approv
 
 - [ ] **Step 1:** Failing frontend test: checkbox multi-select renders options, toggles, posts `{target_ids: [...]}`, renders empty-state helper.
 - [ ] **Step 2:** Implement panel/hook/api/routes/i18n/assets pins.
-- [ ] **Step 3:** `pnpm lint && pnpm test` in the frontend; `cargo test -p ironclaw_webui`; extend the Playwright served-API scenario (auth required + shape) and add its `tests/e2e/reborn_coverage_tests.txt` row per `tests/e2e/AGENTS.md`.
+- [ ] **Step 3:** `pnpm lint && pnpm test` in the frontend; `cargo test -p ironclaw_webui`; extend the Playwright served-API scenario (auth required + shape), update the matching `tests/AGENTS.md` coverage-map row, and add its `tests/e2e/reborn_coverage_tests.txt` row per `tests/e2e/AGENTS.md`.
 - [ ] **Step 4: Commit** `feat(webui): notification channels multi-select`
 
 ### Task 11: Delete the route_current stack + web_app pseudo-target + old set tool

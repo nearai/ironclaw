@@ -83,16 +83,18 @@ Two things to get right before touching this path:
   must never mint `TrustedInboundTurnRequest` or call trusted trigger
   submitter factories — only trigger-worker-owned minting and private
   conversation-owned trusted construction may. Verify with
-  `rg -n "TrustedInboundTurnRequest|ConversationTrustedTriggerSubmitter" crates/domains/ironclaw_conversations crates/app/ironclaw_composition/src/automation`;
-  the boundary is enforced by
+  `rg -n "TrustedInboundTurnRequest|ConversationTrustedTriggerSubmitter" crates/` (today
+  the only hits are the allowed owner, `crates/domains/ironclaw_conversations`, plus the
+  architecture test itself — any hit outside that crate is a prohibited caller); the
+  boundary is enforced by
   `untrusted_ingress_paths_cannot_submit_host_trusted_inbound` in
   `crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`.
 - **Settlement, fire identity, and run-history ordering are specified, not
   improvised.** `crates/domains/ironclaw_triggers/AGENTS.md` and
   `docs/internal/reborn/contracts/triggers.md` are the source of truth — read
-  both before changing schedule, claim, settlement, or history behavior; the
-  most recent run-now feature landed with six follow-up fixes for exactly
-  this class of invariant, so treat first-pass changes here as review-heavy.
+  both before changing schedule, claim, settlement, or history behavior;
+  this class of invariant has a history of needing multiple follow-up fixes
+  to get right, so treat first-pass changes here as review-heavy.
 
 ## Boundary rules
 

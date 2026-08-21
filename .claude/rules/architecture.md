@@ -24,8 +24,9 @@ clippy's default is 7 args. Reaching it means the function has more
 inputs than a reader can hold in their head. Allowing it once is a
 trade — allowing it dozens of times across dozens of files is a refactor
 someone declined to do. Re-measure with
-`rg -c '#\[allow\(clippy::too_many_arguments\)\]' crates/` before quoting
-a number.
+`rg -o '#\[allow\(clippy::too_many_arguments\)\]' crates/ | wc -l` for the
+total occurrence count, or `rg -l '#\[allow\(clippy::too_many_arguments\)\]' crates/ | wc -l`
+for the file count, before quoting a number.
 
 **Required pattern** when introducing the allow:
 

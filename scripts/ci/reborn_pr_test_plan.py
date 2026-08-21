@@ -154,7 +154,15 @@ IGNORED_PREFIXES = (
 )
 IGNORED_GUIDANCE_PATHS = {
     "tests/AGENTS.md",
+    "tests/CLAUDE.md",
     "tests/integration/AGENTS.md",
+    "tests/integration/CLAUDE.md",
+    # `check-guidance.py`'s alias rule also requires this pair (`crates/` or
+    # `TESTS_PREFIX`); without an explicit entry here it falls into the
+    # `tests/support/reborn_parity_qa/` arm below and over-selects the root
+    # partition for a pure guidance edit.
+    "tests/support/reborn_parity_qa/AGENTS.md",
+    "tests/support/reborn_parity_qa/CLAUDE.md",
 }
 # Repo-root prose/example files with no build or test surface. Root `*.md` is
 # already handled inline below; this covers the non-`.md` siblings.

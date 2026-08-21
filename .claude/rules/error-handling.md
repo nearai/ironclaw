@@ -16,8 +16,11 @@ Existing rules forbid `.unwrap()` / `.expect()` in production. The footguns belo
   continuing — poisons downstream state with a half-initialized value.
 - `.map_err(|_| OtherError)` — discards the cause. A sanitized
   `ProductSurfaceError` may hide details from the client, but the server-side
-  chain must retain/log the source. Use a cause-preserving constructor such as
-  `ProductSurfaceError::internal_from`, or log the bound source before mapping.
+  chain must retain/log the source. `ProductSurfaceError::internal_from` is not
+  cause-preserving in the chained-`Error::source()` sense — it logs the source via
+  `tracing::error!` and returns a sanitized error with no source field — so use it
+  (or log the bound source before mapping) to satisfy the "log the source"
+  requirement, not to satisfy a requirement for true cause propagation.
 
 **Required pattern — fail loud by default:**
 

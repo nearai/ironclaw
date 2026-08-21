@@ -45,7 +45,11 @@ anchors, by category:
   await-edge machinery: store = journal-edge projection, resolver = loop-tier
   responsibility (PROPOSAL §12.13 D-S; see `README.md`).
 - `production_readiness.rs` — **no production caller**; a pure reporting slice
-  awaiting either a startup gate or deletion (CHECKLIST WS4/WS8).
+  awaiting either a startup gate or deletion — tracked by
+  `docs/internal/reborn/target-architecture/CHECKLIST.md`'s WS4 row (line
+  ~310, "delete `production_readiness` (no production caller) or wire it")
+  and its WS8 "Modules" row (line ~515, deletion cascade into
+  `driver_registry.rs` measured), not yet closed.
 
 Also present but not detailed above (`ls src/` has the current set):
 `after_turn_memory.rs`, `failure_categories.rs`, `failure_summary.rs`,
