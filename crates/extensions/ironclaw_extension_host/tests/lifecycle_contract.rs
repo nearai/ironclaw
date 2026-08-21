@@ -686,8 +686,8 @@ async fn snapshot_resolver_preserves_typed_provider_rejection() {
     };
     use ironclaw_host_api::{
         dispatch::{
-            DispatchError, DispatchFailureKind, ProviderDiagnostic, ProviderErrorCode,
-            RuntimeDispatchErrorKind, UntrustedProviderMessage,
+            DispatchError, ProviderDiagnostic, ProviderErrorCode, RuntimeDispatchErrorKind,
+            UntrustedProviderMessage,
         },
         ids::CapabilityId,
     };
