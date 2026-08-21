@@ -463,9 +463,16 @@ PR_STATIC_CONTROL_PATHS = {
     #     (`.github/workflows/code_style.yml`) — the same lane that runs
     #     `scripts/ci/test-check-guidance.py` and the other `scripts/ci/`
     #     self-tests covered by the `PR_STATIC_CONTROL_PREFIXES` rule below.
-    #     Static control here means "no Tests (Reborn) lane reads it", not "no
-    #     workflow runs it": Code Style owns this self-test, not a Reborn
-    #     Rust test lane, so it stays classified as static control.
+    #     Neither this file nor `scripts/check-type-duplicates.py` sits under
+    #     `scripts/ci/`, so unlike its sibling neither tripped the workflow's
+    #     `has_code` path filter on its own — a PR touching only this file had
+    #     `fast-checks` (and thus the self-test step) skipped entirely (review
+    #     on #7797). `has_code`'s scope list now names both scripts
+    #     explicitly, pinned by the `has_code` filter's `in_scope` probes in
+    #     `scripts/ci/ws12_workflow_contracts.py`. Static control here means
+    #     "no Tests (Reborn) lane reads it", not "no workflow runs it": Code
+    #     Style owns this self-test, not a Reborn Rust test lane, so it stays
+    #     classified as static control.
     "scripts/test-check-type-duplicates.py",
     #   * `render-architecture-video.sh` is a local one-command Remotion
     #     render for docs/internal/architecture-video; never invoked by a

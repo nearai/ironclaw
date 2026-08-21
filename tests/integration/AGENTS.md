@@ -15,8 +15,9 @@ real process, no real channel, and needs no setup.
 This is a distinct tier from `RebornBinaryE2EHarness` (which swaps the whole
 `HostManagedModelGateway` with `RebornTraceReplayModelGateway` at the *gateway*
 seam, skipping `ironclaw_llm`). This tier mocks one layer lower so the
-decorator chain runs for real; see that harness's own guidance ("Tier") for
-the full tier comparison.
+decorator chain runs for real. Locate that harness and its own tier
+comparison with `rg -n "struct RebornBinaryE2EHarness" tests/ --type rust` —
+the file it points to carries the full comparison in its sibling guidance.
 
 ## How it works
 
