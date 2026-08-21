@@ -1,0 +1,51 @@
+{
+  "source_commit": "08819b279cf02ae2545e69dad7111ab48d91d35e",
+  "cases": [
+    {
+      "id": "zero_is_valid",
+      "input": "artifact://0",
+      "artifact_id": 0
+    },
+    {
+      "id": "missing_id",
+      "input": "artifact://",
+      "error": "artifact:// URL requires a numeric ID: artifact://0"
+    },
+    {
+      "id": "non_numeric_id",
+      "input": "artifact://notes",
+      "error": "artifact:// ID must be numeric, got: notes"
+    },
+    {
+      "id": "no_session",
+      "input": "artifact://0",
+      "error": "No session - artifacts unavailable"
+    },
+    {
+      "id": "no_artifacts_directory",
+      "input": "artifact://0",
+      "error": "No artifacts directory found"
+    },
+    {
+      "id": "not_found",
+      "input": "artifact://7",
+      "error": "Artifact 7 not found. Available: 0, 2"
+    },
+    {
+      "id": "resolved_directory",
+      "input": "artifact://3",
+      "error": "Artifact 3 resolved to a directory, not a file"
+    },
+    {
+      "id": "oversized_unsliced_hosted_deviation",
+      "input": "artifact://4",
+      "bytes": 8388609,
+      "error": "Artifact 4 is 8388609 bytes; full internal resolution is blocked. Use read selectors such as artifact://4:1-3000 or artifact://4:raw:1-3000",
+      "deviation": "The hosted implementation omits the upstream backing host path."
+    }
+  ],
+  "allocation": {
+    "first_id": 0,
+    "scope": "parent_and_subagent_tree_share_one_namespace"
+  }
+}

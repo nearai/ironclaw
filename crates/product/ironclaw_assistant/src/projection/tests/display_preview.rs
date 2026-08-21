@@ -74,13 +74,13 @@ async fn product_event_stream_enriches_activity_with_display_preview_from_store(
     let thread_id = ThreadId::new("webui-preview-thread").unwrap();
     let invocation_id = InvocationId::new();
     let run_id = TurnRunId::new();
-    let capability = CapabilityId::new("builtin.read_file").unwrap();
+    let capability = CapabilityId::new("builtin.read").unwrap();
     let input_ref = preview_input_ref("webui-preview-input");
     let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
     display_previews.record_input(
         &run_id.to_string(),
         &input_ref,
-        "read_file",
+        "read",
         &serde_json::json!({
             "path": "src/main.rs",
             "token": "sk-secret",
@@ -132,7 +132,7 @@ async fn product_event_stream_enriches_activity_with_display_preview_from_store(
                     if preview.invocation_id == invocation_id
                         && preview.thread_id.as_ref() == Some(&thread_id)
                         && preview.capability_id == capability
-                        && preview.title == "read_file"
+                        && preview.title == "read"
                         && preview.subtitle.as_deref() == Some("src/main.rs")
                         && preview.input_summary.as_deref().is_some_and(|summary| summary.contains("path: src/main.rs"))
                         && preview.output_preview.as_deref() == Some("fn main() {}")
@@ -163,7 +163,7 @@ async fn capability_display_preview_error_does_not_drop_activity_payload() {
         EventProjectionCursor::for_scope(projection_scope, ironclaw_event_log::EventCursor::new(1));
     let invocation_id = InvocationId::new();
     let run_id = TurnRunId::new();
-    let capability = CapabilityId::new("builtin.write_file").unwrap();
+    let capability = CapabilityId::new("builtin.write").unwrap();
 
     let item = runtime_payloads_for_item(
         &scope,
@@ -212,13 +212,13 @@ async fn capability_display_preview_error_does_not_drop_activity_payload() {
 #[tokio::test]
 async fn capability_display_preview_store_redacts_unsafe_paths_and_secrets() {
     let run_id = TurnRunId::new();
-    let capability = CapabilityId::new("builtin.read_file").unwrap();
+    let capability = CapabilityId::new("builtin.read").unwrap();
     let input_ref = preview_input_ref("redacted-preview-input");
     let store = CapabilityDisplayPreviewStore::default();
     store.record_input(
         &run_id.to_string(),
         &input_ref,
-        "read_file",
+        "read",
         &serde_json::json!({
             "path": "/Users/alice/secret.rs",
             "api_key": "sk-secret"
@@ -368,58 +368,7 @@ async fn capability_display_preview_store_redacts_file_url_inputs() {
 }
 
 #[tokio::test]
-async fn capability_display_preview_store_summarizes_file_inputs_without_contents() {
-    let write_preview = completed_preview_for_input(
-        "builtin.write_file",
-        "builtin.write_file",
-        serde_json::json!({
-            "path": "/workspace/src/main.rs",
-            "content": "fn main() {}"
-        }),
-    )
-    .await;
-    let write_summary = write_preview.input_summary.as_deref().unwrap();
-    assert!(write_summary.contains("path: src/main.rs"));
-    assert!(write_summary.contains("content_bytes: 12"));
-    assert!(!write_summary.contains("fn main"));
-
-    let patch_preview = completed_preview_for_input(
-        "builtin.apply_patch",
-        "builtin.apply_patch",
-        serde_json::json!({
-            "path": "src/lib.rs",
-            "old_string": "let token = \"sk-secret\";",
-            "new_string": "let token = load_token();",
-            "replace_all": true
-        }),
-    )
-    .await;
-    let patch_summary = patch_preview.input_summary.as_deref().unwrap();
-    assert!(patch_summary.contains("path: src/lib.rs"));
-    assert!(patch_summary.contains("old_bytes: 24"));
-    assert!(patch_summary.contains("new_bytes: 25"));
-    assert!(patch_summary.contains("replace_all: true"));
-    assert!(!patch_summary.contains("sk-secret"));
-    assert!(!patch_summary.contains("load_token"));
-}
-
-#[tokio::test]
 async fn capability_display_preview_store_summarizes_read_limits_and_memory_tree_root() {
-    let read_preview = completed_preview_for_input(
-        "builtin.read_file",
-        "builtin.read_file",
-        serde_json::json!({
-            "path": "/workspace/src/main.rs",
-            "offset": 128,
-            "max_bytes": 4096
-        }),
-    )
-    .await;
-    let read_summary = read_preview.input_summary.as_deref().unwrap();
-    assert!(read_summary.contains("path: src/main.rs"));
-    assert!(read_summary.contains("offset: 128"));
-    assert!(read_summary.contains("limit: 4096"));
-
     let memory_tree_preview = completed_preview_for_input(
         "ironclaw.memory.tree",
         "ironclaw.memory.tree",
@@ -431,6 +380,101 @@ async fn capability_display_preview_store_summarizes_read_limits_and_memory_tree
     let memory_tree_summary = memory_tree_preview.input_summary.as_deref().unwrap();
     assert!(memory_tree_summary.contains("path: /"));
     assert!(memory_tree_summary.contains("limit: 12"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_summarizes_coding_read_write_edit_safely() {
+    // pinned coding read → the path; non-path args are never summarized.
+    let read = completed_preview_for_input(
+        "read",
+        "builtin.read",
+        serde_json::json!({"path": "/workspace/src/main.rs", "api_key": "sk-secret"}),
+    )
+    .await;
+    let read_summary = read.input_summary.as_deref().unwrap();
+    assert!(read_summary.contains("path: src/main.rs"));
+    assert!(!read_summary.contains("sk-secret"));
+
+    // pinned coding write → path + content byte count; the content itself never appears.
+    let write = completed_preview_for_input(
+        "write",
+        "builtin.write",
+        serde_json::json!({
+            "path": "/workspace/notes.md",
+            "content": "token: sk-secret\nbody"
+        }),
+    )
+    .await;
+    let write_summary = write.input_summary.as_deref().unwrap();
+    assert!(write_summary.contains("path: notes.md"));
+    assert!(write_summary.contains("content_bytes: 21"));
+    assert!(!write_summary.contains("token:"));
+    assert!(!write_summary.contains("body"));
+    assert!(!write_summary.contains("sk-secret"));
+
+    // pinned coding edit → only the hashline grammar byte count; the grammar (paths,
+    // snapshot tags, verbatim replacement rows) is never embedded.
+    let edit = completed_preview_for_input(
+        "edit",
+        "builtin.edit",
+        serde_json::json!({"input": "[notes.md#A1B2]\nPUT 1.=1:\n+secret line\n"}),
+    )
+    .await;
+    let edit_summary = edit.input_summary.as_deref().unwrap();
+    assert!(edit_summary.contains("input_bytes: 39"));
+    assert!(!edit_summary.contains("notes.md"));
+    assert!(!edit_summary.contains("#A1B2"));
+    assert!(!edit_summary.contains("secret line"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_extracts_coding_output_envelope_as_text() {
+    let run_id = TurnRunId::new();
+    let capability = CapabilityId::new("builtin.read").unwrap();
+    let input_ref = preview_input_ref("coding-output-preview-input");
+    let store = CapabilityDisplayPreviewStore::default();
+    store.record_input(
+        &run_id.to_string(),
+        &input_ref,
+        "read",
+        &serde_json::json!({"path": "src/main.rs"}),
+    );
+    store.record_result(CapabilityDisplayPreviewResult {
+        run_id: &run_id.to_string(),
+        input_ref: &input_ref,
+        invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+        capability_id: &capability,
+        result_ref: "result:coding-output",
+        output: &serde_json::json!({"output": "[main.rs#1A2B]\n1:fn main() {}"}),
+        output_bytes: 32,
+    });
+    let preview = store
+        .preview(&CapabilityActivityProjection {
+            invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+            run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
+            capability_id: capability,
+            thread_id: Some(ThreadId::new("webui-coding-output-preview-thread").unwrap()),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: Some(32),
+            error_kind: None,
+            error_detail: None,
+            first_cursor: ironclaw_event_log::EventCursor::new(1),
+            last_cursor: ironclaw_event_log::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    // The pinned coding `{"output": "..."}` envelope renders as its extracted text, not
+    // as a generic JSON dump.
+    assert_eq!(preview.output_kind.as_deref(), Some("text"));
+    let output_preview = preview.output_preview.as_deref().unwrap();
+    assert!(output_preview.contains("[main.rs#1A2B]"));
+    assert!(output_preview.contains("1:fn main() {}"));
+    assert!(!output_preview.starts_with('{'));
 }
 
 #[tokio::test]
@@ -566,30 +610,12 @@ async fn capability_display_preview_store_uses_primary_arg_subtitle_for_non_path
 
     // Path-based tools keep the workspace-relative path subtitle.
     let read = completed_preview_for_input(
-        "read_file",
-        "builtin.read_file",
+        "read",
+        "builtin.read",
         serde_json::json!({"path": "/workspace/src/main.rs"}),
     )
     .await;
     assert_eq!(read.subtitle.as_deref(), Some("src/main.rs"));
-}
-
-#[tokio::test]
-async fn capability_display_preview_store_summarizes_list_dir_inputs() {
-    let preview = completed_preview_for_input(
-        "builtin.list_dir",
-        "builtin.list_dir",
-        serde_json::json!({
-            "path": "/workspace/src",
-            "recursive": true,
-            "max_depth": 3
-        }),
-    )
-    .await;
-    let input_summary = preview.input_summary.as_deref().unwrap();
-    assert!(input_summary.contains("path: src"));
-    assert!(input_summary.contains("recursive: true"));
-    assert!(input_summary.contains("max_depth: 3"));
 }
 
 #[tokio::test]
@@ -599,35 +625,25 @@ async fn capability_display_preview_store_summarizes_grep_and_glob_inputs() {
         "builtin.grep",
         serde_json::json!({
             "pattern": "Authorization: Bearer sk-secret",
-            "path": "/workspace/src",
-            "glob": "*.rs",
-            "output_mode": "content",
-            "head_limit": 20
+            "path": "/workspace/src"
         }),
     )
     .await;
     let grep_summary = grep_preview.input_summary.as_deref().unwrap();
     assert!(grep_summary.contains("pattern: Authorization: [redacted]"));
     assert!(grep_summary.contains("path: src"));
-    assert!(grep_summary.contains("glob: *.rs"));
-    assert!(grep_summary.contains("output_mode: content"));
-    assert!(grep_summary.contains("head_limit: 20"));
     assert!(!grep_summary.contains("sk-secret"));
 
     let glob_preview = completed_preview_for_input(
         "builtin.glob",
         "builtin.glob",
         serde_json::json!({
-            "pattern": "**/*.rs",
-            "path": "/workspace/crates",
-            "max_results": 100
+            "path": "/workspace/crates/*.rs"
         }),
     )
     .await;
     let glob_summary = glob_preview.input_summary.as_deref().unwrap();
-    assert!(glob_summary.contains("pattern: **/*.rs"));
-    assert!(glob_summary.contains("path: crates"));
-    assert!(glob_summary.contains("max_results: 100"));
+    assert!(glob_summary.contains("path: crates/*.rs"));
 }
 
 #[tokio::test]
@@ -641,13 +657,13 @@ async fn capability_display_preview_store_admits_workspace_and_project_scoped_pa
         ("relative/path.rs", Some("relative/path.rs")),
     ] {
         let run_id = TurnRunId::new();
-        let capability = CapabilityId::new("builtin.write_file").unwrap();
+        let capability = CapabilityId::new("builtin.write").unwrap();
         let input_ref = preview_input_ref(&format!("subtitle-path-input-{input_path}"));
         let store = CapabilityDisplayPreviewStore::default();
         store.record_input(
             &run_id.to_string(),
             &input_ref,
-            "write_file",
+            "write",
             &serde_json::json!({ "path": input_path }),
         );
         store.record_result(CapabilityDisplayPreviewResult {
@@ -1229,7 +1245,7 @@ async fn capability_display_preview_store_preserves_long_line_counts() {
 #[tokio::test]
 async fn capability_display_preview_store_marks_truncated_side_channel_summary() {
     let run_id = TurnRunId::new();
-    let capability = CapabilityId::new("builtin.write_file").unwrap();
+    let capability = CapabilityId::new("builtin.write").unwrap();
     let input_ref = preview_input_ref("long-summary-preview-input");
     let invocation_id = InvocationId::new();
     let store = CapabilityDisplayPreviewStore::default();
@@ -1245,8 +1261,8 @@ async fn capability_display_preview_store_marks_truncated_side_channel_summary()
         },
         Some(&CapabilityDisplayOutputPreview {
             output_summary: Some("x".repeat(CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES + 1)),
-            output_preview: "--- a/workspace/main.rs\n+++ b/workspace/main.rs\n".to_string(),
-            output_kind: "unified_diff".to_string(),
+            output_preview: "[main.rs#1A2B]\n1:fn main() {}\n".to_string(),
+            output_kind: "text".to_string(),
             subtitle: Some("/workspace/main.rs".to_string()),
             truncated: false,
         }),
@@ -1273,7 +1289,7 @@ async fn capability_display_preview_store_marks_truncated_side_channel_summary()
         .unwrap()
         .unwrap();
 
-    assert_eq!(preview.output_kind.as_deref(), Some("unified_diff"));
+    assert_eq!(preview.output_kind.as_deref(), Some("text"));
     assert_eq!(preview.subtitle.as_deref(), Some("/workspace/main.rs"));
     assert!(preview.truncated);
 }

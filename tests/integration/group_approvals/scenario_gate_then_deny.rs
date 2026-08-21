@@ -1,4 +1,4 @@
-//! Scenario: a gated `builtin.write_file` raises a real `BlockedApproval` gate;
+//! Scenario: a gated `builtin.write` raises a real `BlockedApproval` gate;
 //! denying it resumes the run so the model sees a non-retryable authorization
 //! failure (not a hang) and finalizes a reply.
 //!
@@ -17,7 +17,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .thread("conv-deny")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 json!({"path": "/workspace/denied.txt", "content": "should not persist"}),
             ),
             RebornScriptedReply::text("understood, the write was not authorized"),

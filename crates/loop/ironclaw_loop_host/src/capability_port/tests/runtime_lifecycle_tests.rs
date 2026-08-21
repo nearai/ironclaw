@@ -146,6 +146,9 @@ async fn runtime_completed_display_preview_is_forwarded_to_result_writer() {
             )],
             vec![Ok(RuntimeCapabilityOutcome::Completed(Box::new(
                 RuntimeCapabilityCompleted {
+                    completed_artifact: None,
+                    canonical_output_digest: None,
+                    receipt: None,
                     capability_id: capability_id.clone(),
                     output: serde_json::json!({"ok": true}),
                     display_preview: Some(CapabilityDisplayOutputPreview {
@@ -156,6 +159,7 @@ async fn runtime_completed_display_preview_is_forwarded_to_result_writer() {
                         truncated: false,
                     }),
                     usage: ResourceUsage::default(),
+                    canonical_item_count: None,
                 },
             )))],
         )),
@@ -311,10 +315,14 @@ async fn runtime_capability_batch_continues_after_runtime_failure_outcome() {
                 }),
                 Ok(RuntimeCapabilityOutcome::Completed(Box::new(
                     RuntimeCapabilityCompleted {
+                        completed_artifact: None,
+                        canonical_output_digest: None,
+                        receipt: None,
                         capability_id: capability_id.clone(),
                         output: serde_json::json!({"ok": true}),
                         display_preview: None,
                         usage: ResourceUsage::default(),
+                        canonical_item_count: None,
                     },
                 ))),
             ],
@@ -468,10 +476,14 @@ async fn runtime_capability_mismatched_outcome_does_not_emit_terminal_milestone(
             )],
             vec![Ok(RuntimeCapabilityOutcome::Completed(Box::new(
                 RuntimeCapabilityCompleted {
+                    completed_artifact: None,
+                    canonical_output_digest: None,
+                    receipt: None,
                     capability_id: other_capability_id,
                     output: serde_json::json!({"ok": true}),
                     display_preview: None,
                     usage: ResourceUsage::default(),
+                    canonical_item_count: None,
                 },
             )))],
         )),
@@ -638,10 +650,14 @@ async fn auth_resume_uses_replay_input_without_resolving_stale_input_ref() {
         )
         .with_auth_resume_outcomes(vec![Ok(RuntimeCapabilityOutcome::Completed(
             Box::new(RuntimeCapabilityCompleted {
+                completed_artifact: None,
+                canonical_output_digest: None,
+                receipt: None,
                 capability_id: capability_id.clone(),
                 output: serde_json::json!({"auth_resumed": true}),
                 display_preview: None,
                 usage: ResourceUsage::default(),
+                canonical_item_count: None,
             }),
         ))]),
     );
@@ -1594,10 +1610,14 @@ impl HostRuntime for ApprovalResumeRecordingRuntime {
         }
         Ok(RuntimeCapabilityOutcome::Completed(Box::new(
             RuntimeCapabilityCompleted {
+                completed_artifact: None,
+                canonical_output_digest: None,
+                receipt: None,
                 capability_id: request.2,
                 output: serde_json::json!({"resumed": true}),
                 display_preview: None,
                 usage: ResourceUsage::default(),
+                canonical_item_count: None,
             },
         )))
     }
@@ -1612,10 +1632,14 @@ impl HostRuntime for ApprovalResumeRecordingRuntime {
             .push(request.clone());
         Ok(RuntimeCapabilityOutcome::Completed(Box::new(
             RuntimeCapabilityCompleted {
+                completed_artifact: None,
+                canonical_output_digest: None,
+                receipt: None,
                 capability_id: request.1,
                 output: serde_json::json!({"auth_resumed": true}),
                 display_preview: None,
                 usage: ResourceUsage::default(),
+                canonical_item_count: None,
             },
         )))
     }

@@ -552,6 +552,7 @@ pub struct UpdateToolResultReferenceRequest {
     /// callers whose durable edge predates provider-call identity.
     pub provider_call_id: Option<String>,
     pub safe_summary: ToolResultSafeSummary,
+    pub model_observation: Option<serde_json::Value>,
 }
 
 /// Durable, opaque capability output associated with one transcript result reference.
@@ -566,52 +567,32 @@ pub struct PutToolResultRecordRequest {
     pub content: Vec<u8>,
 }
 
-/// Maximum byte window returned by one durable tool-result read, and the
-/// inline first-look preview size (`standalone.rs`'s
-/// The standalone result-preview limit mirrors this so a model paging past
-/// `next_offset` sees no gap or overlap). PR #5902 (fixing #5838's
-/// context-compaction crash) originally set this to 2,048 bytes -- a 49x cut
-/// from the pre-fix 100,000-byte inline cap that left most tool results
-/// requiring dozens of manual `result_read` calls to recover, which tanked
-/// agent benchmark performance. Raised to 24KB: still per-call bounded (the
-/// property #5838 actually needed -- unbounded *accumulation* of large
-/// results in the compacted transcript, not single-call size, caused the
-/// crash) and far below the pre-fix 100,000-byte constant, while making most
-/// tool outputs recoverable in 1-2 calls instead of ~49.
-/// `tool_result_reference.rs`'s `MAX_MODEL_OBSERVATION_BYTES` is derived from
-/// this value; raising it here raises that ceiling too.
-/// Compile-time ceiling on a single `result_read` request: 24 KiB.
+/// Maximum byte window used by the private historical tool-result adapter.
 ///
-/// Do NOT raise this to widen the env override. `tool_result_reference.rs` derives
-/// `MAX_MODEL_OBSERVATION_BYTES` from it (`* 2`), so raising it changes preview truncation for
-/// every caller. The override is bounded by [`TOOL_RESULT_READ_ENV_CEILING_BYTES`] instead, which
-/// nothing derives from.
+/// New model-visible results use immutable artifacts and pinned coding `read`; this
+/// bound remains only to prevent unbounded reads while projecting legacy
+/// result records into that artifact store.
+///
+/// The model-observation envelope in `tool_result_reference.rs` is derived
+/// from this value, so historical replay remains bounded.
 pub const TOOL_RESULT_RECORD_READ_MAX_BYTES: usize = 24 * 1024;
-
-/// Highest value `IRONCLAW_TOOL_RESULT_READ_MAX_BYTES` may request: 64 KiB. Separate from
-/// [`TOOL_RESULT_RECORD_READ_MAX_BYTES`] so the observation envelope stays put.
+/// Highest value `IRONCLAW_TOOL_RESULT_READ_MAX_BYTES` may request.
 pub(crate) const TOOL_RESULT_READ_ENV_CEILING_BYTES: usize = 64 * 1024;
 
-/// Effective per-request cap: 24 KiB by default.
-///
-/// A larger default was tried and reverted -- the trace motivating it was real but the change
-/// shipped alongside two others, so nothing isolates its effect. Raise with
-/// `IRONCLAW_TOOL_RESULT_READ_MAX_BYTES` (bytes), clamped to
-/// `[4, TOOL_RESULT_READ_ENV_CEILING_BYTES]`.
+/// Default per-request read cap.
 pub(crate) const TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES: usize = 24 * 1024;
 
-/// Env var controlling [`effective_tool_result_read_max_bytes`].
+/// Environment variable controlling [`effective_tool_result_read_max_bytes`].
 pub(crate) const TOOL_RESULT_READ_MAX_BYTES_ENV: &str = "IRONCLAW_TOOL_RESULT_READ_MAX_BYTES";
 
-/// Resolve the effective per-request `result_read` cap.
+/// Resolve the effective per-request cap for legacy result records.
 ///
-/// Unparseable or out-of-range values fall back to the default rather than
-/// failing the run — a malformed tuning knob must not take down an agent.
+/// Invalid values fall back to the default; valid values are clamped to the
+/// supported range.
 pub fn effective_tool_result_read_max_bytes() -> usize {
     match std::env::var(TOOL_RESULT_READ_MAX_BYTES_ENV) {
         Ok(raw) => match raw.trim().parse::<usize>() {
-            // floor mirrors `tool_result_records::TOOL_RESULT_RECORD_READ_MIN_BYTES`
-            Ok(v) => v.clamp(4, TOOL_RESULT_READ_ENV_CEILING_BYTES),
+            Ok(value) => value.clamp(4, TOOL_RESULT_READ_ENV_CEILING_BYTES),
             Err(_) => TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES,
         },
         Err(_) => TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES,
@@ -1125,46 +1106,5 @@ mod tests {
         assert_eq!(record.created_at, None);
         assert_eq!(record.updated_at, None);
         assert_eq!(record.content.as_deref(), Some("legacy row"));
-    }
-}
-
-#[cfg(test)]
-mod tool_result_read_cap_tests {
-    use super::*;
-
-    /// 64 KiB, up from the historical 24 KiB, and never above the ceiling the
-    /// observation envelope is derived from.
-    #[test]
-    fn default_is_24k_and_within_the_ceiling() {
-        // Behavior-preserving: 24 KiB is the historical default. The raise to 64 KiB was
-        // never isolated from the other switches it shipped with, so it is available
-        // only via the env override, not as a default.
-        assert_eq!(TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES, 24 * 1024);
-        const { assert!(TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES <= TOOL_RESULT_RECORD_READ_MAX_BYTES) };
-    }
-
-    /// The ceiling bounds only what the ENV OVERRIDE may reach; it is not the default.
-    /// The model-observation envelope is derived from it
-    /// (`* 2`, asserted at compile time in tool_result_reference.rs), so 64 KiB here
-    /// means a 128 KiB envelope. An env override can never exceed the ceiling, so
-    /// the envelope always fits whatever a read returns.
-    #[test]
-    fn contract_ceiling_stays_24k_so_the_observation_envelope_does_not_move() {
-        // `tool_result_reference.rs` derives MAX_MODEL_OBSERVATION_BYTES from this (* 2).
-        // Raising it changes preview truncation for every caller -- see the three
-        // preview/result_read tests that broke when it was briefly 64 KiB.
-        assert_eq!(TOOL_RESULT_RECORD_READ_MAX_BYTES, 24 * 1024);
-        // The override may go higher; nothing is derived from this bound.
-        assert_eq!(TOOL_RESULT_READ_ENV_CEILING_BYTES, 64 * 1024);
-        const { assert!(TOOL_RESULT_READ_ENV_CEILING_BYTES >= TOOL_RESULT_RECORD_READ_MAX_BYTES) };
-    }
-
-    /// A malformed knob must degrade to the default, never fail the run.
-    #[test]
-    fn env_var_name_is_stable() {
-        assert_eq!(
-            TOOL_RESULT_READ_MAX_BYTES_ENV,
-            "IRONCLAW_TOOL_RESULT_READ_MAX_BYTES"
-        );
     }
 }

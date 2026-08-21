@@ -1,0 +1,32 @@
+{
+  "type": "object",
+  "properties": {
+    "command": {
+      "type": "string",
+      "description": "command to execute"
+    },
+    "env": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "extra env vars"
+    },
+    "timeout": {
+      "type": "number",
+      "description": "timeout in seconds; 0 disables the command deadline; nonzero values are clamped to 1-3600"
+    },
+    "cwd": {
+      "type": "string",
+      "description": "working directory"
+    },
+    "pty": {
+      "type": "boolean",
+      "description": "run in pty mode"
+    }
+  },
+  "required": [
+    "command"
+  ],
+  "additionalProperties": false
+}

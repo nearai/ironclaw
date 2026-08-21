@@ -22,7 +22,6 @@ use ironclaw_loop_host::{
     wrap_external_tools, wrap_surface_disclosure,
 };
 use ironclaw_product_contracts::project_service::ProjectService;
-use ironclaw_threads::SessionThreadService;
 use ironclaw_trust::TrustDecision;
 use ironclaw_turns::ExternalToolCatalog;
 use tokio::sync::Mutex as AsyncMutex;
@@ -33,7 +32,6 @@ use crate::runtime::capability_host::outbound_delivery::outbound_delivery_capabi
 use ironclaw_approvals::ApprovalSettingsProvider;
 use ironclaw_assistant::project_create_capability;
 use ironclaw_extension_host::capability_surface::ExtensionCapabilitySurfaceSource;
-use ironclaw_loop_host::result_read_capability;
 use ironclaw_loop_host::skill_activation_capability;
 use ironclaw_loop_host::wrap_synthetic_capabilities;
 
@@ -58,7 +56,6 @@ pub(crate) struct RefreshingCapabilityPortConfig {
     pub(super) milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     pub(super) skill_activation_source: Option<Arc<ComposedSelectableSkillContextSource>>,
     pub(super) project_service: Arc<dyn ProjectService>,
-    pub(super) thread_service: Arc<dyn SessionThreadService>,
     pub(super) trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     pub(super) outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     pub(super) outbound_preference_write_requires_approval: bool,
@@ -120,7 +117,6 @@ pub(crate) async fn create_refreshing_capability_port(
         milestone_sink: config.milestone_sink,
         skill_activation_source: config.skill_activation_source,
         project_service: config.project_service,
-        thread_service: config.thread_service,
         trajectory_observer: config.trajectory_observer,
         outbound_preferences_service: config.outbound_preferences_service,
         outbound_preference_write_requires_approval: config
@@ -162,7 +158,6 @@ struct RefreshingCapabilityPort {
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     skill_activation_source: Option<Arc<ComposedSelectableSkillContextSource>>,
     project_service: Arc<dyn ProjectService>,
-    thread_service: Arc<dyn SessionThreadService>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     outbound_preference_write_requires_approval: bool,
@@ -327,10 +322,6 @@ impl RefreshingCapabilityPort {
         };
         synthetic_capabilities.push(project_create_capability(
             Arc::clone(&self.project_service),
-            self.fallback_user_id.clone(),
-        )?);
-        synthetic_capabilities.push(result_read_capability(
-            Arc::clone(&self.thread_service),
             self.fallback_user_id.clone(),
         )?);
         if let Some(outbound_preferences_service) = &self.outbound_preferences_service {
@@ -539,7 +530,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
         milestone_sink,
         skill_activation_source,
         project_service,
-        thread_service,
+        thread_service: _,
         trajectory_observer,
         outbound_preferences_service,
         outbound_preference_write_requires_approval,
@@ -597,7 +588,6 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
         milestone_sink,
         skill_activation_source,
         project_service,
-        thread_service,
         trajectory_observer,
         outbound_preferences_service,
         outbound_preference_write_requires_approval,

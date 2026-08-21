@@ -183,7 +183,7 @@ Scripts:
 
 | `--api-scripted-tool` | Tool sequence |
 | --- | --- |
-| `write_file_roundtrip` | `builtin.write_file` then `builtin.read_file` of a unique workspace path. |
+| `write_roundtrip` | `builtin.write` then `builtin.read` of a unique workspace path. |
 | `memory_roundtrip` | `ironclaw.memory.write` (replace) then a read-back checkpoint of `stress/shared.md`. |
 | `memory_grow` | Write a quarter, append three quarters, then checkpoint — growing-append slope. |
 | `memory_mixed` | Write half, checkpoint, append half, checkpoint — mixed read/write. |
@@ -203,7 +203,7 @@ concurrent writers on distinct threads of the first user so they contend on
 the same per-user memory document without per-thread turn serialization.
 
 Scripted mode requires `--mock-llm-bind` (the sidecar serves the tool calls)
-and `--api-wait-for-assistant`. Gated tools (`builtin.write_file`, memory
+and `--api-wait-for-assistant`. Gated tools (`builtin.write`, memory
 writes) are exercised through the per-user Tools auto-approve setting, which
 the driver enables during user setup through the same settings API a real
 user would use.

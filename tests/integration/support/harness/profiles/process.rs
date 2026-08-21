@@ -3,7 +3,7 @@
 
 use ironclaw_host_api::{capability::EffectKind, ids::CapabilityId, mount::MountView};
 use ironclaw_host_runtime::{
-    ECHO_CAPABILITY_ID, SHELL_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
+    CODING_BASH_CAPABILITY_ID, ECHO_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
 };
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
@@ -13,7 +13,7 @@ pub(crate) fn process_tools_profile() -> HarnessResult<ToolsProfile> {
     Ok(ToolsProfile {
         capability_ids: vec![
             CapabilityId::new(ECHO_CAPABILITY_ID)?,
-            CapabilityId::new(SHELL_CAPABILITY_ID)?,
+            CapabilityId::new(CODING_BASH_CAPABILITY_ID)?,
             CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID)?,
         ],
         effect_kinds: vec![

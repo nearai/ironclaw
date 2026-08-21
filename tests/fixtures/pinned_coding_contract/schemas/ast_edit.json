@@ -1,0 +1,42 @@
+{
+  "type": "object",
+  "properties": {
+    "ops": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "pat": {
+            "type": "string",
+            "description": "ast pattern"
+          },
+          "out": {
+            "type": "string",
+            "description": "replacement template"
+          }
+        },
+        "required": [
+          "pat",
+          "out"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "description": "rewrite ops"
+    },
+    "paths": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "description": "file, directory, glob, or internal URL to rewrite"
+      },
+      "minItems": 1,
+      "description": "files, directories, globs, or internal URLs to rewrite"
+    }
+  },
+  "required": [
+    "ops",
+    "paths"
+  ],
+  "additionalProperties": false
+}

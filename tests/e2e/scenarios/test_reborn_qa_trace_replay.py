@@ -203,6 +203,91 @@ def test_exact_trace_result_binding_unwraps_complete_preview_and_pointer_escapes
     assert resolve_trace_result_bindings(marker, observed) == "escaped-hit"
 
 
+def test_exact_trace_result_binding_unwraps_inline_result_content():
+    inline = json.dumps({"file": {"id": "fresh-file-id"}})
+    marker = {
+        "$trace_result": {
+            "tool_call_id": "call_upload",
+            "pointer": "/file/id",
+        }
+    }
+    observed = [
+        {
+            "tool_call_id": "call_upload",
+            "content": {
+                "schema_version": 1,
+                "status": "success",
+                "trust": "provider",
+                "detail": {
+                    "kind": "inline_result",
+                    "content": inline,
+                    "byte_len": len(inline),
+                },
+            },
+        }
+    ]
+
+    assert resolve_trace_result_bindings(marker, observed) == "fresh-file-id"
+
+
+def test_exact_trace_result_binding_rejects_malformed_inline_result():
+    marker = {
+        "$trace_result": {
+            "tool_call_id": "call_upload",
+            "pointer": "/file/id",
+        }
+    }
+    observed = [
+        {
+            "tool_call_id": "call_upload",
+            "content": {
+                "schema_version": 1,
+                "status": "success",
+                "trust": "provider",
+                "detail": {
+                    "kind": "inline_result",
+                    "content": '{"file": {"id": "trunc',
+                    "byte_len": 26,
+                },
+            },
+        }
+    ]
+
+    with pytest.raises(ValueError, match="has no JSON Pointer"):
+        resolve_trace_result_bindings(marker, observed)
+
+
+@pytest.mark.parametrize("byte_len", [None, True, 1])
+def test_exact_trace_result_binding_rejects_invalid_inline_result_length(byte_len):
+    inline = json.dumps({"file": {"id": "fresh-file-id"}})
+    marker = {
+        "$trace_result": {
+            "tool_call_id": "call_upload",
+            "pointer": "/file/id",
+        }
+    }
+    detail = {
+        "kind": "inline_result",
+        "content": inline,
+    }
+    if byte_len is not None:
+        detail["byte_len"] = byte_len
+    observed = [
+        {
+            "tool_call_id": "call_upload",
+            "content": {
+                "schema_version": 1,
+                "status": "success",
+                "trust": "provider",
+                "detail": detail,
+            },
+        }
+    ]
+
+    with pytest.raises(ValueError, match="has no JSON Pointer"):
+        resolve_trace_result_bindings(marker, observed)
+
+
 def test_trace_aliasing_rejects_indistinguishable_parallel_calls():
     state = {
         "pending_tool_calls": [

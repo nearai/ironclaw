@@ -330,6 +330,8 @@ impl CapabilityDispatcher for RecordingDispatcher {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request.clone());
         Ok(CapabilityDispatchResult {
+            completed_artifact: None,
+            canonical_output_digest: None,
             capability_id: request.invocation.capability.clone(),
             provider: extension_id(),
             runtime: RuntimeKind::Wasm,
@@ -343,6 +345,7 @@ impl CapabilityDispatcher for RecordingDispatcher {
                 estimate: request.invocation.estimate,
                 actual: Some(ResourceUsage::default()),
             },
+            canonical_item_count: None,
         })
     }
 }
@@ -367,6 +370,8 @@ pub fn dispatch_result_with_output(
     output: serde_json::Value,
 ) -> CapabilityDispatchResult {
     CapabilityDispatchResult {
+        completed_artifact: None,
+        canonical_output_digest: None,
         capability_id: request.invocation.capability.clone(),
         provider: extension_id(),
         runtime: RuntimeKind::Wasm,
@@ -380,6 +385,7 @@ pub fn dispatch_result_with_output(
             estimate: request.invocation.estimate.clone(),
             actual: Some(ResourceUsage::default()),
         },
+        canonical_item_count: None,
     }
 }
 

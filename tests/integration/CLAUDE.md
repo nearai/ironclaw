@@ -265,10 +265,11 @@ Requests that match no scripted response fall back to the recording egress defau
 
 ### Shell / process
 
-When `.with_builtin_http_tools()` is active, `builtin.shell` turns are dispatched
-through the inert `RecordingProcessPort` by default. It records every
-`CommandExecutionRequest.command` string and returns exit 0 / empty output without
-spawning any OS process.
+When `.with_builtin_http_tools()` is active, model-visible `builtin.bash` turns
+are dispatched through the inert `RecordingProcessPort` by default. It records
+every `CommandExecutionRequest.command` string and returns exit 0 / empty output
+without spawning any OS process. The legacy `builtin.shell` capability remains
+host-internal and is not advertised to models.
 
 - `assert_shell_command_recorded(substr)` — the recorded command string contains `substr`.
 - `assert_shell_ran_through_inert_port()` — at least one shell command was recorded by the inert port (proves no real OS process ran).
@@ -280,7 +281,7 @@ Implies `.with_builtin_http_tools()`.
 
 **`.with_sandbox_shell_tools()`** — dedicated runtime-integration opt-in. It
 builds the explicit local-Docker sandbox profile through production composition
-and dispatches `builtin.shell` into the hardened Python worker. Only
+and dispatches `builtin.bash` into the hardened Python worker. Only
 `reborn_sandbox_shell_turn.rs` selects it; the Docker availability gate remains
 owned by that test.
 
@@ -388,9 +389,9 @@ the default backend build.
 ### Approvals (group tests only)
 
 `RebornIntegrationGroup::live_approvals()` constructs a group with real file-tool
-approval stores (`write_file`/`read_file` at `PermissionMode::Ask`). Auto-approve
-is disabled for the group scope at construction so gated tool calls raise real
-`BlockedApproval` gates.
+approval stores (`builtin.write`/`builtin.read` at `PermissionMode::Ask`).
+Auto-approve is disabled for the group scope at construction so gated tool calls
+raise real `BlockedApproval` gates.
 
 On a harness built from a `live_approvals` group:
 
@@ -518,7 +519,10 @@ use super::reborn_support::reply::RebornScriptedReply;
 
 pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let h = g.thread("conv-gate-resolve")
-        .script([RebornScriptedReply::tool_call("builtin.write_file", serde_json::json!({}))])
+        .script([RebornScriptedReply::tool_call(
+            "builtin.write",
+            serde_json::json!({"path": "/tmp/approval.txt", "content": "approved"}),
+        )])
         .build().await?;
     let (run_id, gate_ref) = h.submit_turn_until_blocked("write something").await?;
     h.approve_gate(run_id, &gate_ref).await?;
@@ -531,7 +535,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 
 | Constructor | Capability | Auto-approve |
 |---|---|---|
-| `RebornIntegrationGroup::live_approvals()` | file tools (write_file/read_file @ Ask) | disabled |
+| `RebornIntegrationGroup::live_approvals()` | file tools (builtin.write/builtin.read @ Ask) | disabled |
 | `RebornIntegrationGroup::builtin_tools()` | core built-in (http/echo/time/json/shell) | enabled |
 | `RebornIntegrationGroup::extension_lifecycle()` | extension_search/install/remove | enabled |
 | `RebornIntegrationGroup::triggers()` | trigger_create/list/pause/resume/remove | enabled |
@@ -540,7 +544,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 | `RebornIntegrationGroup::live_auth_and_approval()` | file tools @ Ask + unseeded `github.get_repo` (raises BlockedApproval AND BlockedAuth on one runtime; C-JOURNEY) | disabled |
 | `RebornIntegrationGroup::builder().storage(LibSql).live_approvals()` | same + LibSql storage | disabled |
 | `RebornIntegrationGroup::multiuser_memory_tools()` | core built-in (memory/http/shell/…) with per-actor run-owner-scoped capability dispatch (C-MULTIUSER) | enabled |
-| `RebornIntegrationGroup::multiuser_approvals()` | file tools (write_file/read_file @ Ask) with per-actor capability scoping (C-MULTIUSER) | enabled per owner (default; toggle per-owner in test) |
+| `RebornIntegrationGroup::multiuser_approvals()` | file tools (builtin.write/builtin.read @ Ask) with per-actor capability scoping (C-MULTIUSER) | enabled per owner (default; toggle per-owner in test) |
 | `RebornIntegrationGroup::outbound_target_tools()` | `outbound_delivery_targets_list`/`notification_channels_set` over an injected `FakeOutboundPreferencesService` (C-SYNTH) | enabled |
 
 ### Auth-gate resolution (C-JOURNEY)

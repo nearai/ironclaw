@@ -3,6 +3,7 @@
 // validates the persisted form) depend on `host_api` but not on each other, so
 // a home below both is the only one where the vocabulary can have a single
 // definition instead of a hand-maintained copy per crate.
+use ironclaw_host_api::artifact::ArtifactRef;
 use ironclaw_host_api::{
     dispatch::DispatchInputIssueCode,
     host_remediation::HostRemediation,
@@ -124,6 +125,15 @@ pub enum ToolObservationDetail {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
+    /// Complete canonical JSON result carried inline when it fits the model
+    /// observation bound. The durable artifact remains the full-output source;
+    /// this arm deliberately carries no model-visible recovery reference.
+    InlineResult {
+        content: String,
+        byte_len: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item_count: Option<u64>,
+    },
     ResultReference {
         result_ref: String,
         byte_len: u64,
@@ -137,6 +147,15 @@ pub enum ToolObservationDetail {
         /// Attached only when a continuation offset exists, including when an
         /// unsafe truncated preview is suppressed, so the model cannot misread
         /// a byte-sliced array as the complete result.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item_count: Option<u64>,
+    },
+    ArtifactReference {
+        artifact_ref: String,
+        total_bytes: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<String>,
+        /// Element count when the full result is a top-level JSON array.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         item_count: Option<u64>,
     },
@@ -159,6 +178,23 @@ impl ToolObservationDetail {
             Self::GenericFailure { detail, .. } => {
                 if let Some(detail) = detail {
                     validate_model_observation_detail(detail)?;
+                }
+                Ok(())
+            }
+            Self::InlineResult {
+                content, byte_len, ..
+            } => {
+                validate_non_empty_text(content, "model observation inline result")?;
+                validate_text_len(
+                    content,
+                    "model observation inline result",
+                    ironclaw_host_api::artifact::ARTIFACT_INLINE_PREVIEW_MAX_BYTES,
+                )?;
+                if u64::try_from(content.len()).ok() != Some(*byte_len) {
+                    return Err(
+                        "model observation inline result byte length does not match content"
+                            .to_string(),
+                    );
                 }
                 Ok(())
             }
@@ -185,6 +221,20 @@ impl ToolObservationDetail {
                     return Err("model observation item_count requires next_offset".to_string());
                 }
                 Ok(())
+            }
+            Self::ArtifactReference { artifact_ref, .. } => {
+                validate_non_empty_text(artifact_ref, "model observation artifact ref")?;
+                validate_text_len(
+                    artifact_ref,
+                    "model observation artifact ref",
+                    MODEL_OBSERVATION_TEXT_MAX_BYTES,
+                )?;
+                artifact_ref
+                    .parse::<ArtifactRef>()
+                    .map(|_| ())
+                    .map_err(|_| {
+                        "model observation artifact ref must be an artifact URI".to_string()
+                    })
             }
         }
     }
@@ -522,6 +572,123 @@ mod tests {
         missing_offset
             .validate()
             .expect_err("item_count without next_offset must be rejected");
+    }
+
+    #[test]
+    fn artifact_reference_round_trips_without_continuation_offset() {
+        let observation = ModelVisibleToolObservation {
+            schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+            status: ToolObservationStatus::Success,
+
+            summary: "Tool completed; full output: artifact://7".to_string(),
+            detail: ToolObservationDetail::ArtifactReference {
+                artifact_ref: "artifact://7".to_string(),
+                total_bytes: 4096,
+                preview: Some("{\"items\":[".to_string()),
+                item_count: Some(600),
+            },
+            artifacts: vec![ModelVisibleArtifact {
+                artifact_ref: "artifact://7".to_string(),
+                summary: "Stored tool output".to_string(),
+            }],
+            recovery: None,
+            trust: ObservationTrust::UntrustedToolOutput,
+        };
+
+        observation
+            .validate()
+            .expect("artifact observation validates");
+        let encoded = serde_json::to_value(&observation).expect("serialize observation");
+        assert_eq!(encoded["detail"]["kind"], "artifact_reference");
+        assert_eq!(encoded["detail"]["artifact_ref"], "artifact://7");
+        assert_eq!(encoded["detail"]["total_bytes"], 4096);
+        assert!(encoded["detail"].get("next_offset").is_none());
+        let decoded: ModelVisibleToolObservation =
+            serde_json::from_value(encoded).expect("deserialize observation");
+        assert_eq!(decoded, observation);
+    }
+    #[test]
+    fn inline_result_round_trips_and_rejects_incorrect_length() {
+        let content = r#"{"ok":true}"#.to_string();
+        let observation = ModelVisibleToolObservation {
+            schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+            status: ToolObservationStatus::Success,
+            summary: "Tool completed inline.".to_string(),
+            detail: ToolObservationDetail::InlineResult {
+                byte_len: content.len() as u64,
+                content: content.clone(),
+                item_count: None,
+            },
+            artifacts: Vec::new(),
+            recovery: None,
+            trust: ObservationTrust::UntrustedToolOutput,
+        };
+        observation.validate().expect("inline result validates");
+        let encoded = serde_json::to_value(&observation).expect("serialize observation");
+        assert_eq!(encoded["detail"]["kind"], "inline_result");
+        assert_eq!(encoded["detail"]["content"], content);
+        let decoded: ModelVisibleToolObservation =
+            serde_json::from_value(encoded).expect("deserialize observation");
+        assert_eq!(decoded, observation);
+
+        let mut wrong_length = observation;
+        let ToolObservationDetail::InlineResult { byte_len, .. } = &mut wrong_length.detail else {
+            panic!("inline detail");
+        };
+        *byte_len += 1;
+        wrong_length
+            .validate()
+            .expect_err("mismatched inline byte length must fail");
+    }
+
+    #[test]
+    fn inline_result_rejects_content_over_shared_bound() {
+        let content =
+            "x".repeat(ironclaw_host_api::artifact::ARTIFACT_INLINE_PREVIEW_MAX_BYTES + 1);
+        let observation = ModelVisibleToolObservation {
+            schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+            status: ToolObservationStatus::Success,
+            summary: "Tool completed inline.".to_string(),
+            detail: ToolObservationDetail::InlineResult {
+                byte_len: content.len() as u64,
+                content,
+                item_count: None,
+            },
+            artifacts: Vec::new(),
+            recovery: None,
+            trust: ObservationTrust::UntrustedToolOutput,
+        };
+        observation
+            .validate()
+            .expect_err("oversized inline result must fail");
+    }
+
+    #[test]
+    fn artifact_reference_rejects_malformed_uris() {
+        for malformed in [
+            "result:7",
+            "artifact://",
+            "artifact://abc",
+            "artifact://7/extra",
+        ] {
+            let observation = ModelVisibleToolObservation {
+                schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+                status: ToolObservationStatus::Success,
+                summary: "Tool completed.".to_string(),
+                detail: ToolObservationDetail::ArtifactReference {
+                    artifact_ref: malformed.to_string(),
+                    total_bytes: 1,
+                    preview: None,
+                    item_count: None,
+                },
+                artifacts: Vec::new(),
+                recovery: None,
+                trust: ObservationTrust::UntrustedToolOutput,
+            };
+            observation
+                .validate()
+                .expect_err("malformed artifact URI must be rejected");
+        }
     }
 
     #[test]

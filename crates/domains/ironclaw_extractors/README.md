@@ -36,10 +36,12 @@ one).
 ## Depends on / consumed by
 
 - **Normal deps (measured):** `ironclaw_common` — nothing else internal.
-- **Consumed by (3, and there are no others):** `ironclaw_attachments`
-  (inbound landing), `ironclaw_extension_support` (the `read_file` coding
-  tool), `ironclaw_host_runtime` (capability download output). All call
-  through the full path — no crate writes `use ironclaw_extractors::…`.
+- **Consumed by (2, and there are no others):** `ironclaw_attachments`
+  (inbound landing), `ironclaw_host_runtime` (capability download output). All
+  call through the full path — no crate writes `use ironclaw_extractors::…`.
+  (The third consumer, `ironclaw_extension_support`'s `read_file` coding tool,
+  was retired in the coding-tool cutover; the `read` tool that replaced it
+  does not use this crate.)
 
 ## Invariants
 
@@ -47,8 +49,9 @@ one).
   `every_extraction_failure_display_is_content_free` (in `src/lib.rs`) drives
   both boundary functions across every private extractor; a new variant whose
   `#[error(…)]` interpolates a field fails it. The call-site regression test
-  for the historical leak lives in `ironclaw_extension_support`
-  (`coding/file.rs::tests::read_file_extraction_failure_summary_carries_no_parser_detail`).
+  for the historical leak was removed with the retired `read_file` coding tool
+  in the coding-tool cutover (its `read` replacement does not use this crate),
+  so this test is the guard.
 - **Bomb caps fail closed:** every ZIP-based format goes through
   `bounded_read_zip_entry` — per-entry (50 MB) and cumulative (100 MB)
   decompressed bounds, actual-bytes-read tracking because headers can lie.

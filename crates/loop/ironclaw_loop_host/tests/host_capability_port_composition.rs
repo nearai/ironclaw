@@ -348,10 +348,14 @@ impl HostRuntime for SingleToolHostRuntime {
             .push(request.clone());
         Ok(RuntimeCapabilityOutcome::Completed(Box::new(
             RuntimeCapabilityCompleted {
+                completed_artifact: None,
+                canonical_output_digest: None,
+                receipt: None,
                 capability_id: request.1,
                 output: serde_json::json!({"ok": true}),
                 display_preview: None,
                 usage: ResourceUsage::default(),
+                canonical_item_count: None,
             },
         )))
     }
@@ -390,6 +394,7 @@ impl HostRuntime for SingleToolHostRuntime {
                     resource_profile: None,
                     origin_gate_matrix: None,
                     standard_op: None,
+                    provider_tool_name: None,
                 },
                 description_trust: CapabilityDescriptionTrust::VerifiedCatalog,
                 access: VisibleCapabilityAccess::Available,

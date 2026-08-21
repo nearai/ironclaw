@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "glob, file, or directory to search — a single path or a semicolon-delimited list (\"src/**/*.ts; test/**/*.ts\"). Omitted -> searches the workspace root (\".\")"
+    },
+    "hidden": {
+      "type": "boolean",
+      "description": "include hidden files"
+    },
+    "gitignore": {
+      "type": "boolean",
+      "description": "respect gitignore"
+    },
+    "limit": {
+      "type": "number",
+      "description": "max results"
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,12 +1,28 @@
 // arch-exempt: large_file, caller-tier coding-tool suite shares one runtime/mount fixture set, plan #4539
-use std::{path::Path, sync::Arc, time::Duration};
+//
+// Host-runtime integration coverage for the pinned coding tools (`read`,
+// `write`, `edit`, `glob`, `grep`). Engine-level behavior (hashline output
+// formats, selector grammar, stale-anchor rejection, glob/grep budgets) is
+// covered by the engine suites in `ironclaw_extension_support` and the
+// pinned contract snapshot under `tests/reborn_coding_engines.rs`; this
+// file pins the HOST boundaries: mount authorization denials, workspace-root
+// resolution, relative-path round trips, read-before-edit snapshot seeding
+// through the public read path, post-edit-check wiring, and the failure-kind
+// mapping of engine errors onto the runtime surface.
+use std::{
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extension_registry::ExtensionRegistry;
 use ironclaw_filesystem::{
-    DirEntry, DiskFilesystem, Fault, FaultInjecting, FaultKind, FileStat, FileType,
-    FilesystemError, FilesystemOperation, RootFilesystem,
+    DiskFilesystem, Fault, FaultInjecting, FilesystemOperation, RootFilesystem,
 };
 use ironclaw_host_api::process::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
@@ -18,1187 +34,35 @@ use ironclaw_host_api::runtime_policy::{
 };
 use ironclaw_host_api::{
     action::NetworkPolicy,
+    artifact::{
+        AccountedArtifactPersister, ArtifactDigest, ArtifactId, ArtifactNamespaceId, ArtifactRef,
+        ArtifactWriteError, ArtifactWriteMetadata, CompletedArtifact,
+    },
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
-    ids::{CapabilityGrantId, CapabilityId, ExtensionId, InvocationId, PackageId, RunId, UserId},
+    dispatch::DispatchFailureDetail,
+    ids::{CapabilityGrantId, CapabilityId, ExtensionId, PackageId, RunId, UserId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{HostPath, MountAlias, VirtualPath},
-    resource::ResourceEstimate,
+    resource::{ResourceEstimate, ResourceReceipt},
     runtime::{RuntimeKind, TrustClass},
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    APPLY_PATCH_CAPABILITY_ID, CapabilitySurfaceVersion, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID,
-    HostRuntime, HostRuntimeServices, LIST_DIR_CAPABILITY_ID, PostEditCheckConfig,
-    READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome, RuntimeProcessPort, UserSandboxProcessPort,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
+    CODING_EDIT_CAPABILITY_ID, CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID,
+    CapabilitySurfaceVersion, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HostRuntime,
+    HostRuntimeServices, PostEditCheckConfig, RuntimeCapabilityOutcome, RuntimeProcessPort,
+    UserSandboxProcessPort, builtin_first_party_handlers, builtin_first_party_package,
 };
-use ironclaw_loop_contracts::LoopSafeSummary;
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_triggers::InMemoryTriggerRepository;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use serde_json::{Value, json};
 
 #[tokio::test]
-async fn builtin_coding_grep_reports_oversized_explicit_file_as_partial_result() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(
-        temp.path().join("huge.txt"),
-        vec![b'x'; max_read_size() + 1],
-    )
-    .unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
-    let runtime = runtime_with_filesystem(filesystem);
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-
-    let grepped = invoke_with_context(
-        &runtime,
-        GREP_CAPABILITY_ID,
-        json!({"path": "/workspace/huge.txt", "pattern": "needle"}),
-        context,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(grepped["files"], json!([]));
-    assert_eq!(grepped["count"], json!(0));
-    assert_eq!(grepped["truncated"], json!(true));
-    assert_eq!(grepped["limit_reason"], json!("file_size_bytes"));
-    assert_eq!(grepped["file_bytes"], json!(max_read_size() + 1));
-    assert_eq!(grepped["max_file_bytes"], json!(max_read_size()));
-}
-
-#[tokio::test]
-async fn builtin_coding_grep_skips_oversized_files_like_resilient_v1_search() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("ok.rs"), "needle\n").unwrap();
-    std::fs::write(
-        temp.path().join("huge.txt"),
-        vec![b'x'; max_read_size() + 1],
-    )
-    .unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
-    let runtime = runtime_with_filesystem(filesystem);
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-
-    let grepped = invoke_with_context(
-        &runtime,
-        GREP_CAPABILITY_ID,
-        json!({"path": "/workspace", "pattern": "needle"}),
-        context,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(grepped["files"], json!(["ok.rs"]));
-    assert_eq!(grepped["truncated"], json!(false));
-}
-
-#[tokio::test]
-async fn builtin_coding_grep_reports_scan_budget_truncation_for_all_output_modes() {
-    let temp = tempfile::tempdir().unwrap();
-    for index in 0..50 {
-        std::fs::write(temp.path().join(format!("file-{index:02}.rs")), "needle\n").unwrap();
-    }
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
-    let runtime = runtime_with_filesystem(StatLenOverrideFilesystem {
-        inner: filesystem,
-        suffix: ".rs",
-        len: max_read_size() as u64,
-    });
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-
-    let files = invoke_with_context(
-        &runtime,
-        GREP_CAPABILITY_ID,
-        json!({"path": "/workspace", "pattern": "needle"}),
-        context.clone(),
-    )
-    .await
-    .unwrap();
-    assert_aggregate_scan_limit(&files);
-    assert_eq!(files["count"], json!(6));
-    assert_eq!(files["files"].as_array().unwrap().len(), 6);
-
-    let counts = invoke_with_context(
-        &runtime,
-        GREP_CAPABILITY_ID,
-        json!({"path": "/workspace", "pattern": "needle", "output_mode": "count"}),
-        context.clone(),
-    )
-    .await
-    .unwrap();
-    assert_aggregate_scan_limit(&counts);
-    assert_eq!(counts["total"], json!(6));
-    assert_eq!(counts["counts"].as_array().unwrap().len(), 6);
-
-    let content = invoke_with_context(
-        &runtime,
-        GREP_CAPABILITY_ID,
-        json!({"path": "/workspace", "pattern": "needle", "output_mode": "content"}),
-        context,
-    )
-    .await
-    .unwrap();
-    assert_aggregate_scan_limit(&content);
-    assert!(content["content"].as_str().unwrap().contains("needle"));
-}
-
-#[tokio::test]
-async fn builtin_coding_list_and_grep_skip_entries_when_stat_fails() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("ok.rs"), "needle\n").unwrap();
-    std::fs::write(temp.path().join("skip.rs"), "needle\n").unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
-    let runtime = runtime_with_filesystem(
-        FaultInjecting::new(filesystem).with_fault(
-            Fault::on(FilesystemOperation::Stat)
-                .path("/skip.rs")
-                .backend("injected stat failure"),
-        ),
-    );
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-
-    let listed = invoke_with_context(
-        &runtime,
-        LIST_DIR_CAPABILITY_ID,
-        json!({"path": "/workspace"}),
-        context.clone(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(listed["entries"], json!(["ok.rs (7B)"]));
-
-    let grepped = invoke_with_context(
-        &runtime,
-        GREP_CAPABILITY_ID,
-        json!({"path": "/workspace", "pattern": "needle"}),
-        context,
-    )
-    .await
-    .unwrap();
-    assert_eq!(grepped["files"], json!(["ok.rs"]));
-    assert_eq!(grepped["incomplete"], json!(true));
-    assert_eq!(grepped["skipped_file_count"], json!(1));
-    assert_eq!(
-        grepped["skipped_files"],
-        json!([{"file": "skip.rs", "operation": "stat"}])
-    );
-}
-
-#[tokio::test]
-async fn builtin_coding_grep_bounds_skipped_file_diagnostics() {
-    let temp = tempfile::tempdir().unwrap();
-    for index in 0..25 {
-        std::fs::write(temp.path().join(format!("file-{index:02}.rs")), "needle\n").unwrap();
-    }
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
-    let runtime = runtime_with_filesystem(
-        FaultInjecting::new(filesystem).with_fault(
-            Fault::on(FilesystemOperation::Stat)
-                .path("/file-")
-                .backend("injected host path /private/secret and backend details"),
-        ),
-    );
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-
-    let grepped = invoke_with_context(
-        &runtime,
-        GREP_CAPABILITY_ID,
-        json!({"path": "/workspace", "pattern": "needle"}),
-        context,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(grepped["incomplete"], json!(true));
-    assert_eq!(grepped["skipped_file_count"], json!(25));
-    assert_eq!(grepped["skipped_files"].as_array().unwrap().len(), 20);
-    assert!(
-        !grepped.to_string().contains("private")
-            && !grepped.to_string().contains("backend details"),
-        "grep output must not expose injected host paths or backend reasons: {grepped}"
-    );
-}
-
-#[tokio::test]
-async fn builtin_coding_grep_skips_entries_when_read_fails_during_directory_search() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("ok.rs"), "needle\n").unwrap();
-    std::fs::write(temp.path().join("skip.rs"), "needle\n").unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
-    let runtime = runtime_with_filesystem(
-        FaultInjecting::new(filesystem).with_fault(
-            Fault::on(FilesystemOperation::ReadFile)
-                .path("/skip.rs")
-                .backend("injected read failure"),
-        ),
-    );
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-
-    let grepped = invoke_with_context(
-        &runtime,
-        GREP_CAPABILITY_ID,
-        json!({"path": "/workspace", "pattern": "needle"}),
-        context,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(grepped["files"], json!(["ok.rs"]));
-    assert_eq!(grepped["incomplete"], json!(true));
-    assert_eq!(grepped["skipped_file_count"], json!(1));
-    assert_eq!(
-        grepped["skipped_files"],
-        json!([{"file": "skip.rs", "operation": "read_file"}])
-    );
-}
-
-#[tokio::test]
-async fn builtin_coding_grep_failure_reports_missing_root_path() {
-    let temp = tempfile::tempdir().unwrap();
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
-    let runtime = runtime_with_filesystem(filesystem);
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-
-    let failure = invoke_failure_with_context(
-        &runtime,
-        GREP_CAPABILITY_ID,
-        json!({"path": "/workspace/missing.py", "pattern": "needle"}),
-        context,
-    )
-    .await;
-
-    assert_eq!(failure.kind, FailureKind::OperationFailed);
-    assert_eq!(
-        failure.message.as_deref(),
-        Some("grep failed for path workspace missing.py: file not found")
-    );
-}
-
-#[tokio::test]
-async fn builtin_coding_grep_failure_reports_file_disappeared_before_read() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("gone.rs"), "needle\n").unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
-    let runtime = runtime_with_filesystem(
-        FaultInjecting::new(filesystem).with_fault(
-            Fault::on(FilesystemOperation::ReadFile)
-                .path("/gone.rs")
-                .returning(FaultKind::NotFound),
-        ),
-    );
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-
-    let failure = invoke_failure_with_context(
-        &runtime,
-        GREP_CAPABILITY_ID,
-        json!({"path": "/workspace/gone.rs", "pattern": "needle"}),
-        context,
-    )
-    .await;
-
-    assert_eq!(failure.kind, FailureKind::OperationFailed);
-    assert_eq!(
-        failure.message.as_deref(),
-        Some("grep failed for path workspace gone.rs: file not found")
-    );
-}
-
-#[tokio::test]
-async fn builtin_coding_grep_fails_on_explicit_file_read_error() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("fail.rs"), "needle\n").unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
-    let runtime = runtime_with_filesystem(
-        FaultInjecting::new(filesystem).with_fault(
-            Fault::on(FilesystemOperation::ReadFile)
-                .path("/fail.rs")
-                .backend("injected read failure"),
-        ),
-    );
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-
-    let failure = invoke_failure_with_context(
-        &runtime,
-        GREP_CAPABILITY_ID,
-        json!({"path": "/workspace/fail.rs", "pattern": "needle"}),
-        context,
-    )
-    .await;
-
-    assert_eq!(failure.kind, FailureKind::Backend);
-    assert_eq!(
-        failure.message.as_deref(),
-        Some("grep failed for path workspace fail.rs: filesystem backend error")
-    );
-}
-
-#[tokio::test]
-async fn builtin_coding_grep_treats_backend_infrastructure_as_backend_failure() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("fail.rs"), "needle\n").unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
-    let runtime = runtime_with_filesystem(ReadInfrastructureFailureFilesystem {
-        inner: filesystem,
-        fail_suffix: "/fail.rs",
-    });
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-
-    let error = invoke_with_context(
-        &runtime,
-        GREP_CAPABILITY_ID,
-        json!({"path": "/workspace/fail.rs", "pattern": "needle"}),
-        context,
-    )
-    .await
-    .unwrap_err();
-
-    assert_eq!(error, FailureKind::Backend);
-}
-
-#[tokio::test]
-async fn builtin_coding_list_fails_when_visited_entry_budget_is_exceeded() {
-    let temp = tempfile::tempdir().unwrap();
-    let (_filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
-    let runtime = runtime_with_filesystem(ManySkippedEntriesFilesystem);
-
-    let error = invoke_with_context(
-        &runtime,
-        LIST_DIR_CAPABILITY_ID,
-        json!({"path": "/workspace"}),
-        execution_context_with_mounts(coding_capability_ids(), mounts),
-    )
-    .await
-    .unwrap_err();
-
-    assert_eq!(error, FailureKind::Resource);
-}
-
-#[tokio::test]
-async fn builtin_write_file_returns_unified_diff_display_preview() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("main.rs"), "fn main() {\n    old();\n}\n").unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
-    let runtime = runtime_with_filesystem(filesystem);
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-    seed_read_state(&runtime, "/workspace/main.rs", context.clone()).await;
-
-    let completed = invoke_completed_with_context(
-        &runtime,
-        WRITE_FILE_CAPABILITY_ID,
-        json!({
-            "path": "/workspace/main.rs",
-            "content": "fn main() {\n    new();\n}\n"
-        }),
-        context,
-    )
-    .await;
-
-    let preview = completed
-        .display_preview
-        .expect("write_file should attach display preview");
-    assert_eq!(preview.output_kind, "unified_diff");
-    assert_eq!(preview.subtitle.as_deref(), Some("/workspace/main.rs"));
-    assert!(preview.output_preview.contains("--- a/workspace/main.rs"));
-    assert!(preview.output_preview.contains("-    old();"));
-    assert!(preview.output_preview.contains("+    new();"));
-}
-
-#[tokio::test]
-async fn builtin_write_file_does_not_read_existing_content_for_write_only_mount() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("main.rs"), "secret-old-content\n").unwrap();
-
-    let permissions = MountPermissions {
-        read: false,
-        write: true,
-        delete: false,
-        list: false,
-        execute: false,
-    };
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), permissions);
-    let runtime = runtime_with_filesystem(filesystem);
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-
-    let completed = invoke_completed_with_context(
-        &runtime,
-        WRITE_FILE_CAPABILITY_ID,
-        json!({
-            "path": "/workspace/main.rs",
-            "content": "replacement\n"
-        }),
-        context,
-    )
-    .await;
-
-    assert!(
-        completed.display_preview.is_none(),
-        "write-only authority must not expose old file contents through a diff preview"
-    );
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("main.rs")).unwrap(),
-        "replacement\n"
-    );
-}
-
-#[tokio::test]
-async fn builtin_write_file_new_file_returns_additions_only_diff_preview() {
-    let temp = tempfile::tempdir().unwrap();
-    // No pre-existing file — write_file creates it from scratch.
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
-    let runtime = runtime_with_filesystem(filesystem);
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-
-    let completed = invoke_completed_with_context(
-        &runtime,
-        WRITE_FILE_CAPABILITY_ID,
-        json!({
-            "path": "/workspace/new.rs",
-            "content": "fn hello() {}\n"
-        }),
-        context,
-    )
-    .await;
-
-    let preview = completed
-        .display_preview
-        .expect("write_file on new file should attach display preview");
-    assert_eq!(preview.output_kind, "unified_diff");
-    // Additions-only: summary must contain /-0
-    let summary = preview.output_summary.as_deref().unwrap_or("");
-    assert!(
-        summary.contains("/-0"),
-        "expected /-0 in summary for new-file write, got: {summary}"
-    );
-    // No deletion lines in the preview (only additions from the new file).
-    let deletion_lines: Vec<_> = preview
-        .output_preview
-        .lines()
-        .filter(|l| l.starts_with('-') && !l.starts_with("---"))
-        .collect();
-    assert!(
-        deletion_lines.is_empty(),
-        "unexpected deletion lines in new-file diff: {deletion_lines:?}"
-    );
-    assert!(
-        preview.output_preview.contains("+fn hello() {}"),
-        "expected addition line"
-    );
-}
-
-#[tokio::test]
-async fn builtin_write_file_maps_filesystem_provider_write_failure_to_backend() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("main.rs"), "old\n").unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
-    let runtime = runtime_with_filesystem(WriteFailureFilesystem {
-        inner: filesystem,
-        fail_suffix: "/main.rs",
-    });
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-    seed_read_state(&runtime, "/workspace/main.rs", context.clone()).await;
-
-    let error = invoke_with_context(
-        &runtime,
-        WRITE_FILE_CAPABILITY_ID,
-        json!({"path": "/workspace/main.rs", "content": "new\n"}),
-        context,
-    )
-    .await
-    .unwrap_err();
-
-    assert_eq!(error, FailureKind::Backend);
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("main.rs")).unwrap(),
-        "old\n"
-    );
-}
-
-#[tokio::test]
-async fn builtin_apply_patch_returns_unified_diff_display_preview() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("main.rs"), "fn main() {\n    old();\n}\n").unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
-    let runtime = runtime_with_filesystem(filesystem);
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-
-    invoke_with_context(
-        &runtime,
-        READ_FILE_CAPABILITY_ID,
-        json!({"path": "/workspace/main.rs"}),
-        context.clone(),
-    )
-    .await
-    .unwrap();
-
-    let completed = invoke_completed_with_context(
-        &runtime,
-        APPLY_PATCH_CAPABILITY_ID,
-        json!({
-            "path": "/workspace/main.rs",
-            "old_string": "old();",
-            "new_string": "new();"
-        }),
-        context,
-    )
-    .await;
-
-    let preview = completed
-        .display_preview
-        .expect("apply_patch should attach display preview");
-    assert_eq!(preview.output_kind, "unified_diff");
-    assert_eq!(
-        preview.output_summary.as_deref(),
-        Some("Edited 1 file: +1/-1")
-    );
-    assert!(preview.output_preview.contains("-    old();"));
-    assert!(preview.output_preview.contains("+    new();"));
-}
-
-#[tokio::test]
-async fn builtin_apply_patch_maps_filesystem_provider_write_failure_to_backend() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("main.rs"), "old\n").unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
-    let runtime = runtime_with_filesystem(WriteFailureFilesystem {
-        inner: filesystem,
-        fail_suffix: "/main.rs",
-    });
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-    seed_read_state(&runtime, "/workspace/main.rs", context.clone()).await;
-
-    let error = invoke_with_context(
-        &runtime,
-        APPLY_PATCH_CAPABILITY_ID,
-        json!({"path": "/workspace/main.rs", "old_string": "old", "new_string": "new"}),
-        context,
-    )
-    .await
-    .unwrap_err();
-
-    assert_eq!(error, FailureKind::Backend);
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("main.rs")).unwrap(),
-        "old\n"
-    );
-}
-
-#[tokio::test]
-async fn builtin_apply_patch_failure_reports_path_and_match_count() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("main.rs"), "fn main() {\n    old();\n}\n").unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
-    let runtime = runtime_with_filesystem(filesystem);
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-
-    invoke_with_context(
-        &runtime,
-        READ_FILE_CAPABILITY_ID,
-        json!({"path": "/workspace/main.rs"}),
-        context.clone(),
-    )
-    .await
-    .unwrap();
-
-    let failure = invoke_failure_with_context(
-        &runtime,
-        APPLY_PATCH_CAPABILITY_ID,
-        json!({
-            "path": "/workspace/main.rs",
-            "old_string": "missing();",
-            "new_string": "new();"
-        }),
-        context,
-    )
-    .await;
-
-    assert_eq!(failure.kind, FailureKind::OperationFailed);
-    assert_eq!(
-        failure.message.as_deref(),
-        Some("apply_patch failed for path workspace main.rs: old_string matched 0 times")
-    );
-}
-
-#[tokio::test]
-async fn builtin_apply_patch_accepts_multi_edit_with_fuzzy_unicode_matching() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(
-        temp.path().join("main.txt"),
-        "hello\u{00A0}world\nrange: 1\u{2013}5\n\u{FF21}\u{FF22}\u{FF23}123\n",
-    )
-    .unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
-    let runtime = runtime_with_filesystem(filesystem);
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-    seed_read_state(&runtime, "/workspace/main.txt", context.clone()).await;
-
-    let patched = invoke_with_context(
-        &runtime,
-        APPLY_PATCH_CAPABILITY_ID,
-        json!({
-            "path": "/workspace/main.txt",
-            "edits": [
-                { "old_string": "hello world\n", "new_string": "hello universe\n" },
-                { "old_string": "range: 1-5\nABC123\n", "new_string": "range: 10-50\nASCII\n" }
-            ]
-        }),
-        context,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(patched["success"], json!(true));
-    assert_eq!(patched["replacements"], json!(2));
-    assert_eq!(patched["match_method"], json!("FuzzyNormalization"));
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("main.txt")).unwrap(),
-        "hello universe\nrange: 10-50\nASCII\n"
-    );
-}
-
-#[tokio::test]
-async fn builtin_apply_patch_fuzzy_match_preserves_unrelated_original_content() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(
-        temp.path().join("main.txt"),
-        "target\u{00A0}text\nuntouched\u{00A0}text   \n",
-    )
-    .unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
-    let runtime = runtime_with_filesystem(filesystem);
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-    seed_read_state(&runtime, "/workspace/main.txt", context.clone()).await;
-
-    let patched = invoke_with_context(
-        &runtime,
-        APPLY_PATCH_CAPABILITY_ID,
-        json!({
-            "path": "/workspace/main.txt",
-            "old_string": "target text",
-            "new_string": "changed text"
-        }),
-        context,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(patched["success"], json!(true));
-    assert_eq!(patched["match_method"], json!("FuzzyNormalization"));
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("main.txt")).unwrap(),
-        "changed text\nuntouched\u{00A0}text   \n"
-    );
-}
-
-#[tokio::test]
-async fn builtin_apply_patch_ignores_null_edits_placeholder_for_single_edit() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("null.txt"), "old\n").unwrap();
-    std::fs::write(temp.path().join("string-null.txt"), "old\n").unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
-    let runtime = runtime_with_filesystem(filesystem);
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-
-    for (file_name, edits) in [
-        ("null.txt", Value::Null),
-        ("string-null.txt", Value::String("null".to_string())),
-    ] {
-        seed_read_state(
-            &runtime,
-            &format!("/workspace/{file_name}"),
-            context.clone(),
-        )
-        .await;
-        let patched = invoke_with_context(
-            &runtime,
-            APPLY_PATCH_CAPABILITY_ID,
-            json!({
-                "path": format!("/workspace/{file_name}"),
-                "old_string": "old",
-                "new_string": "new",
-                "edits": edits
-            }),
-            context.clone(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(patched["success"], json!(true));
-        assert_eq!(
-            std::fs::read_to_string(temp.path().join(file_name)).unwrap(),
-            "new\n"
-        );
-    }
-}
-
-#[tokio::test]
-async fn builtin_apply_patch_ignores_top_level_null_placeholders_for_multi_edit() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("main.txt"), "old\n").unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
-    let runtime = runtime_with_filesystem(filesystem);
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-    seed_read_state(&runtime, "/workspace/main.txt", context.clone()).await;
-
-    let patched = invoke_with_context(
-        &runtime,
-        APPLY_PATCH_CAPABILITY_ID,
-        json!({
-            "path": "/workspace/main.txt",
-            "old_string": "null",
-            "new_string": Value::Null,
-            "edits": [
-                {"old_string": "old", "new_string": "new"}
-            ]
-        }),
-        context,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(patched["success"], json!(true));
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("main.txt")).unwrap(),
-        "new\n"
-    );
-}
-
-#[tokio::test]
-async fn builtin_apply_patch_rejects_active_null_string_placeholders() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("old-null.txt"), "null\n").unwrap();
-    std::fs::write(temp.path().join("new-null.txt"), "old\n").unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
-    let runtime = runtime_with_filesystem(filesystem);
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-
-    for (file_name, old_string, new_string, expected_content) in [
-        ("old-null.txt", "null", "new", "null\n"),
-        ("new-null.txt", "old", "null", "old\n"),
-    ] {
-        let failure = invoke_failure_with_context(
-            &runtime,
-            APPLY_PATCH_CAPABILITY_ID,
-            json!({
-                "path": format!("/workspace/{file_name}"),
-                "old_string": old_string,
-                "new_string": new_string
-            }),
-            context.clone(),
-        )
-        .await;
-
-        assert_eq!(failure.kind, FailureKind::InputEncode);
-        assert_eq!(
-            std::fs::read_to_string(temp.path().join(file_name)).unwrap(),
-            expected_content
-        );
-    }
-}
-
-#[tokio::test]
-async fn builtin_apply_patch_replace_all_replaces_fuzzy_matches_when_exact_text_is_absent() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(
-        temp.path().join("main.txt"),
-        "hello\u{00A0}world\nhello\u{2003}world\n",
-    )
-    .unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
-    let runtime = runtime_with_filesystem(filesystem);
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-    seed_read_state(&runtime, "/workspace/main.txt", context.clone()).await;
-
-    let patched = invoke_with_context(
-        &runtime,
-        APPLY_PATCH_CAPABILITY_ID,
-        json!({
-            "path": "/workspace/main.txt",
-            "old_string": "hello world",
-            "new_string": "hello universe",
-            "replace_all": true
-        }),
-        context,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(patched["success"], json!(true));
-    assert_eq!(patched["replacements"], json!(2));
-    assert_eq!(patched["match_method"], json!("FuzzyNormalization"));
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("main.txt")).unwrap(),
-        "hello universe\nhello universe\n"
-    );
-}
-
-#[tokio::test]
-async fn builtin_apply_patch_replace_all_replaces_mixed_exact_and_fuzzy_matches() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(
-        temp.path().join("main.txt"),
-        "hello world\nhello\u{00A0}world\n",
-    )
-    .unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
-    let runtime = runtime_with_filesystem(filesystem);
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-    seed_read_state(&runtime, "/workspace/main.txt", context.clone()).await;
-
-    let patched = invoke_with_context(
-        &runtime,
-        APPLY_PATCH_CAPABILITY_ID,
-        json!({
-            "path": "/workspace/main.txt",
-            "old_string": "hello world",
-            "new_string": "hello universe",
-            "replace_all": true
-        }),
-        context,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(patched["success"], json!(true));
-    assert_eq!(patched["replacements"], json!(2));
-    assert_eq!(patched["match_method"], json!("FuzzyNormalization"));
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("main.txt")).unwrap(),
-        "hello universe\nhello universe\n"
-    );
-}
-
-#[tokio::test]
-async fn builtin_apply_patch_rejects_duplicate_after_fuzzy_normalization() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(
-        temp.path().join("main.txt"),
-        "hello world\nhello\u{00A0}world\n",
-    )
-    .unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
-    let runtime = runtime_with_filesystem(filesystem);
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-    seed_read_state(&runtime, "/workspace/main.txt", context.clone()).await;
-
-    let failure = invoke_failure_with_context(
-        &runtime,
-        APPLY_PATCH_CAPABILITY_ID,
-        json!({
-            "path": "/workspace/main.txt",
-            "old_string": "hello world",
-            "new_string": "hello universe"
-        }),
-        context,
-    )
-    .await;
-
-    assert_eq!(failure.kind, FailureKind::OperationFailed);
-    assert_eq!(
-        failure.message.as_deref(),
-        Some(
-            "apply_patch failed for path workspace main.txt: old_string matched 2 times; set replace_all=true or provide a unique old_string"
-        )
-    );
-}
-
-#[tokio::test]
-async fn builtin_coding_read_state_is_scoped_to_the_run() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("main.txt"), "original content\n").unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
-    let runtime = runtime_with_filesystem(filesystem);
-    let mut run_a = execution_context_with_mounts(coding_capability_ids(), mounts.clone());
-    run_a.run_id = Some(RunId::new());
-    // Same tenant/user/agent/project identity, but a different loop run and a
-    // different tool call: a run that never read the file itself.
-    let mut run_b = execution_context_with_mounts(coding_capability_ids(), mounts);
-    run_b.run_id = Some(RunId::new());
-
-    // Run A reads the file in full.
-    let read = invoke_with_context(
-        &runtime,
-        READ_FILE_CAPABILITY_ID,
-        json!({"path": "/workspace/main.txt"}),
-        run_a.clone(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(read["truncated"], json!(false));
-
-    // Run B never read the file; run A's read (with a still-matching
-    // fingerprint) must not authorize run B's edits.
-    let failure = invoke_failure_with_context(
-        &runtime,
-        WRITE_FILE_CAPABILITY_ID,
-        json!({"path": "/workspace/main.txt", "content": "cross-run overwrite"}),
-        run_b.clone(),
-    )
-    .await;
-    assert_eq!(failure.kind, FailureKind::OperationFailed);
-    let message = failure.message.as_deref().unwrap_or_default();
-    assert!(
-        message.contains("read it in full with read_file"),
-        "cross-run write rejection must carry the read-before-edit guidance, got: {message}"
-    );
-    let failure = invoke_failure_with_context(
-        &runtime,
-        APPLY_PATCH_CAPABILITY_ID,
-        json!({
-            "path": "/workspace/main.txt",
-            "old_string": "original",
-            "new_string": "patched"
-        }),
-        run_b,
-    )
-    .await;
-    assert_eq!(failure.kind, FailureKind::OperationFailed);
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("main.txt")).unwrap(),
-        "original content\n",
-        "cross-run edits must be rejected before touching the file"
-    );
-
-    // Within the SAME run, the read from an earlier tool call still unlocks a
-    // later tool call's edit: run scoping must not degrade to per-invocation
-    // scoping, which would break the read -> edit flow entirely.
-    let mut run_a_later_call = run_a;
-    let later_invocation = InvocationId::new();
-    run_a_later_call.invocation_id = later_invocation;
-    run_a_later_call.resource_scope.invocation_id = later_invocation;
-    let written = invoke_with_context(
-        &runtime,
-        WRITE_FILE_CAPABILITY_ID,
-        json!({"path": "/workspace/main.txt", "content": "same-run informed overwrite\n"}),
-        run_a_later_call,
-    )
-    .await
-    .unwrap();
-    assert_eq!(written["success"], json!(true));
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("main.txt")).unwrap(),
-        "same-run informed overwrite\n"
-    );
-}
-
-#[tokio::test]
-async fn builtin_write_file_rejects_edit_when_default_read_was_truncated_by_lines() {
-    let temp = tempfile::tempdir().unwrap();
-    let original: String = (0..2_100).map(|index| format!("line {index}\n")).collect();
-    std::fs::write(temp.path().join("long.txt"), &original).unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
-    let runtime = runtime_with_filesystem(filesystem);
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-
-    // A default read of a >2,000-line file returns a truncated window.
-    let read = invoke_with_context(
-        &runtime,
-        READ_FILE_CAPABILITY_ID,
-        json!({"path": "/workspace/long.txt"}),
-        context.clone(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(read["truncated"], json!(true));
-    assert_eq!(read["truncated_by"], json!("lines"));
-
-    // The truncated read must not unlock a whole-file overwrite.
-    let failure = invoke_failure_with_context(
-        &runtime,
-        WRITE_FILE_CAPABILITY_ID,
-        json!({"path": "/workspace/long.txt", "content": "blind overwrite"}),
-        context.clone(),
-    )
-    .await;
-    assert_eq!(failure.kind, FailureKind::OperationFailed);
-    let message = failure.message.as_deref().unwrap_or_default();
-    assert!(
-        message.contains("read it in full with read_file"),
-        "rejection must tell the model to read the file in full, got: {message}"
-    );
-    assert!(
-        message.contains("truncated"),
-        "rejection must explain that a truncated read does not count, got: {message}"
-    );
-
-    // An explicit offset/limit read (even one wide enough to cover the whole
-    // file) still does not unlock edits.
-    let ranged = invoke_with_context(
-        &runtime,
-        READ_FILE_CAPABILITY_ID,
-        json!({"path": "/workspace/long.txt", "offset": 1, "limit": 2_100}),
-        context.clone(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(ranged["truncated"], json!(false));
-    let failure = invoke_failure_with_context(
-        &runtime,
-        WRITE_FILE_CAPABILITY_ID,
-        json!({"path": "/workspace/long.txt", "content": "blind overwrite"}),
-        context,
-    )
-    .await;
-    assert_eq!(failure.kind, FailureKind::OperationFailed);
-
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("long.txt")).unwrap(),
-        original,
-        "rejected writes must not touch the file"
-    );
-}
-
-#[tokio::test]
-async fn builtin_apply_patch_rejects_edit_when_default_read_was_truncated_by_bytes() {
-    let temp = tempfile::tempdir().unwrap();
-    // Fewer lines than the 2,000-line cap, but wide enough that the rendered
-    // body exceeds the 64 KiB byte budget: byte truncation, not line truncation.
-    let wide_line = "x".repeat(120);
-    let original: String = std::iter::once("seed-marker line\n".to_string())
-        .chain((0..900).map(|_| format!("{wide_line}\n")))
-        .collect();
-    std::fs::write(temp.path().join("wide.txt"), &original).unwrap();
-
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
-    let runtime = runtime_with_filesystem(filesystem);
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-
-    let read = invoke_with_context(
-        &runtime,
-        READ_FILE_CAPABILITY_ID,
-        json!({"path": "/workspace/wide.txt"}),
-        context.clone(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(read["truncated"], json!(true));
-    assert_eq!(read["truncated_by"], json!("bytes"));
-
-    // Even a patch anchored in the visible part of the window is rejected:
-    // the guard requires the model to have seen the complete file.
-    let failure = invoke_failure_with_context(
-        &runtime,
-        APPLY_PATCH_CAPABILITY_ID,
-        json!({
-            "path": "/workspace/wide.txt",
-            "old_string": "seed-marker line",
-            "new_string": "patched line"
-        }),
-        context,
-    )
-    .await;
-    assert_eq!(failure.kind, FailureKind::OperationFailed);
-    let message = failure.message.as_deref().unwrap_or_default();
-    assert!(
-        message.contains("read it in full with read_file"),
-        "rejection must tell the model to read the file in full, got: {message}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(temp.path().join("wide.txt")).unwrap(),
-        original,
-        "rejected patches must not touch the file"
-    );
-}
-
-#[tokio::test]
-async fn builtin_read_file_failure_reports_missing_path() {
-    let temp = tempfile::tempdir().unwrap();
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
-    let runtime = runtime_with_filesystem(filesystem);
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-
-    let failure = invoke_failure_with_context(
-        &runtime,
-        READ_FILE_CAPABILITY_ID,
-        json!({"path": "/workspace/missing.py"}),
-        context,
-    )
-    .await;
-
-    assert_eq!(failure.kind, FailureKind::OperationFailed);
-    assert_eq!(
-        failure.message.as_deref(),
-        Some("read_file failed for path workspace missing.py: file not found")
-    );
-}
-
-#[tokio::test]
-async fn builtin_read_file_out_of_scope_rejection_reaches_the_model_through_the_summary() {
-    // Loop-boundary pin for the "model-visible tool-failure reasons" feature:
-    // an out-of-scope absolute path (copied verbatim from a task description)
-    // must produce a failure whose message BOTH survives the strict loop
-    // safe-summary validator (FilesystemDenied surfaces as a Denied loop
-    // outcome, whose only model-visible channel is the summary) AND names the
-    // path and the available scoped roots so the model can correct course.
-    let temp = tempfile::tempdir().unwrap();
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
-    let runtime = runtime_with_filesystem(filesystem);
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-
-    let failure = invoke_failure_with_context(
-        &runtime,
-        READ_FILE_CAPABILITY_ID,
-        json!({"path": "/testbed/replacer.go"}),
-        context,
-    )
-    .await;
-
-    // FilesystemDenied is carried 1:1 through the runtime boundary.
-    assert_eq!(failure.kind, FailureKind::FilesystemDenied);
-    let message = failure
-        .message
-        .as_deref()
-        .expect("failure carries a reason");
-    assert!(
-        LoopSafeSummary::new(message.to_string()).is_ok(),
-        "the reason must survive the strict loop safe-summary validator \
-         instead of degrading to the generic category sentence: {message}"
-    );
-    assert!(
-        message.contains("testbed replacer.go"),
-        "the reason must name the offending path: {message}"
-    );
-    assert!(
-        message.contains("workspace"),
-        "the reason must name an available scoped root: {message}"
-    );
-    assert_eq!(
-        failure.detail, None,
-        "a validator-safe reason travels on the message; no diagnostic fallback needed"
-    );
-}
-
-#[tokio::test]
-async fn builtin_write_file_to_read_only_mount_reports_an_actionable_denial() {
+async fn coding_write_to_read_only_mount_reports_an_actionable_denial() {
     // A write through a read-only scoped mount must fail as a filesystem
-    // denial AND tell the model which path hit the permission wall, through a
-    // summary that survives the strict loop validator (the Denied loop
-    // outcome has no diagnostic detail channel).
+    // denial AND tell the model which path hit the permission wall (the
+    // exact pinned resolution text rides the untrusted diagnostic channel).
     let temp = tempfile::tempdir().unwrap();
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
     let runtime = runtime_with_filesystem(filesystem);
@@ -1206,7 +70,7 @@ async fn builtin_write_file_to_read_only_mount_reports_an_actionable_denial() {
 
     let failure = invoke_failure_with_context(
         &runtime,
-        WRITE_FILE_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
         json!({"path": "/workspace/notes.txt", "content": "hello"}),
         context,
     )
@@ -1214,21 +78,19 @@ async fn builtin_write_file_to_read_only_mount_reports_an_actionable_denial() {
 
     // FilesystemDenied is carried 1:1 through the runtime boundary.
     assert_eq!(failure.kind, FailureKind::FilesystemDenied);
-    let message = failure
-        .message
-        .as_deref()
-        .expect("failure carries a reason");
+    let Some(DispatchFailureDetail::Diagnostic { text }) = failure.detail.as_ref() else {
+        panic!(
+            "expected a diagnostic carrying the coding denial, got {:?}",
+            failure.detail
+        );
+    };
     assert!(
-        LoopSafeSummary::new(message.to_string()).is_ok(),
-        "the reason must survive the strict loop safe-summary validator: {message}"
+        text.contains("workspace/notes.txt"),
+        "the reason must name the denied path: {text}"
     );
     assert!(
-        message.contains("workspace notes.txt"),
-        "the reason must name the denied path: {message}"
-    );
-    assert!(
-        message.contains("does not permit"),
-        "the reason must say the mount refused the operation: {message}"
+        text.contains("does not permit"),
+        "the reason must say the mount refused the operation: {text}"
     );
     assert!(
         !temp.path().join("notes.txt").exists(),
@@ -1236,86 +98,142 @@ async fn builtin_write_file_to_read_only_mount_reports_an_actionable_denial() {
     );
 }
 
+/// Agent-scoped dispatch without a caller-stamped artifact namespace must not
+/// fail closed: the host runtime derives an invocation-anchored namespace (the
+/// same `ArtifactNamespaceId::from_root_run` derivation the WebUI product
+/// adapter uses), so the kernel's agent-scoped artifact-persistence guard
+/// passes and the completed result carries the durable artifact. Regression
+/// for the cutover guard that failed every agent-scoped direct `HostRuntime`
+/// invoke with `ResourceError::Storage` surfaced as "the tool ran out of
+/// resources" (`standalone_extension_activate_accepts_manual_token_from_webui_gate_scope`
+/// and the admin-configuration/trigger-create harnesses).
 #[tokio::test]
-async fn builtin_read_file_extracts_supported_document_text() {
+async fn agent_scoped_dispatch_without_stamped_namespace_derives_one_and_persists() {
     let temp = tempfile::tempdir().unwrap();
-    std::fs::write(
-        temp.path().join("hello.pdf"),
-        include_bytes!("../../../../tests/fixtures/hello.pdf"),
-    )
-    .unwrap();
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
     let runtime = runtime_with_filesystem(filesystem);
-    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+    let mut context = execution_context_with_mounts([CODING_WRITE_CAPABILITY_ID], mounts);
+    assert!(
+        context.agent_id.is_some(),
+        "fixture must be agent-scoped to exercise the agent-scoped guard"
+    );
+    context.artifact_namespace = None;
+    assert!(
+        context.run_id.is_some(),
+        "fixture context carries a run identity like the production loop"
+    );
 
-    let output = invoke_with_context(
+    let completed = invoke_completed_with_context(
         &runtime,
-        READ_FILE_CAPABILITY_ID,
-        json!({"path": "/workspace/hello.pdf", "limit": 5}),
+        CODING_WRITE_CAPABILITY_ID,
+        json!({"path": "/workspace/notes.txt", "content": "hello"}),
         context,
     )
-    .await
-    .unwrap();
+    .await;
 
-    assert_eq!(output["path"], json!("/workspace/hello.pdf"));
-    assert_eq!(output["truncated_by_default"], json!(false));
+    let artifact = completed
+        .completed_artifact
+        .expect("agent-scoped dispatch must persist canonical output as a durable artifact");
     assert!(
-        output["content"]
-            .as_str()
-            .expect("read_file content")
-            .contains("Hello")
+        artifact.byte_len > 0,
+        "the persisted artifact must account the written output bytes"
+    );
+    assert!(
+        completed.canonical_output_digest.is_some(),
+        "the completed result must carry the canonical output digest"
     );
 }
 
 #[tokio::test]
-async fn builtin_read_file_prefers_text_for_pdf_named_git_lfs_pointer() {
+async fn coding_read_out_of_scope_rejection_carries_the_path_and_available_roots() {
+    // Loop-boundary pin: an out-of-scope absolute path (copied verbatim from
+    // a task description) must produce a FilesystemDenied failure whose
+    // diagnostic names the path and the available scoped roots so the model
+    // can correct course.
     let temp = tempfile::tempdir().unwrap();
-    std::fs::write(
-        temp.path().join("GPT4.pdf"),
-        "version https://git-lfs.github.com/spec/v1\n\
-oid sha256:dee926384a7c107a9b51273a99fca2aecb3ed6c27ba7ace0fba67a147a63d2aa\n\
-size 7370286\n",
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        CODING_READ_CAPABILITY_ID,
+        json!({"path": "/testbed/replacer.go"}),
+        context,
     )
-    .unwrap();
+    .await;
+
+    assert_eq!(failure.kind, FailureKind::FilesystemDenied);
+    let Some(DispatchFailureDetail::Diagnostic { text }) = failure.detail.as_ref() else {
+        panic!(
+            "expected a diagnostic carrying the coding resolution error, got {:?}",
+            failure.detail
+        );
+    };
+    assert!(
+        text.contains("/testbed/replacer.go"),
+        "the reason must name the offending path: {text}"
+    );
+    assert!(
+        text.contains("available scoped root"),
+        "the reason must point at the scoped-root resolution: {text}"
+    );
+}
+
+#[tokio::test]
+async fn coding_read_failure_reports_missing_path() {
+    let temp = tempfile::tempdir().unwrap();
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
     let runtime = runtime_with_filesystem(filesystem);
     let context = execution_context_with_mounts(coding_capability_ids(), mounts);
 
-    let output = invoke_with_context(
+    let failure = invoke_failure_with_context(
         &runtime,
-        READ_FILE_CAPABILITY_ID,
-        json!({"path": "/workspace/GPT4.pdf"}),
+        CODING_READ_CAPABILITY_ID,
+        json!({"path": "/workspace/missing.py"}),
         context,
     )
-    .await
-    .unwrap();
+    .await;
 
-    let content = output["content"].as_str().expect("read_file content");
-    assert!(content.contains("version https://git-lfs.github.com/spec/v1"));
-    assert!(content.contains("size 7370286"));
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    let Some(DispatchFailureDetail::Diagnostic { text }) = failure.detail.as_ref() else {
+        panic!(
+            "expected a diagnostic carrying the coding not-found text, got {:?}",
+            failure.detail
+        );
+    };
+    assert_eq!(text, "Path '/workspace/missing.py' not found");
 }
 
 #[tokio::test]
-async fn builtin_coding_glob_reports_visited_entry_budget_as_truncated_result() {
+async fn coding_write_maps_filesystem_provider_write_failure_to_operation_failed() {
     let temp = tempfile::tempdir().unwrap();
-    let (_filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
-    let runtime = runtime_with_filesystem(ManySkippedEntriesFilesystem);
+    std::fs::write(temp.path().join("main.rs"), "old\n").unwrap();
 
-    let output = invoke_with_context(
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(
+        FaultInjecting::new(filesystem).with_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("/main.rs")
+                .backend("injected write failure"),
+        ),
+    );
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let error = invoke_with_context(
         &runtime,
-        GLOB_CAPABILITY_ID,
-        json!({"path": "/workspace", "pattern": "*.txt"}),
-        execution_context_with_mounts(coding_capability_ids(), mounts),
+        CODING_WRITE_CAPABILITY_ID,
+        json!({"path": "/workspace/main.rs", "content": "new\n"}),
+        context,
     )
     .await
-    .unwrap();
+    .unwrap_err();
 
-    assert_eq!(output["truncated"], json!(true));
-    assert_eq!(output["limit_reason"], json!("visited_entries"));
-    assert_eq!(output["visited_entries"], json!(50_000));
-    assert_eq!(output["max_visited_entries"], json!(50_000));
-    assert_eq!(output["count"], json!(0));
-    assert_eq!(output["files"], json!([]));
+    assert_eq!(error, FailureKind::OperationFailed);
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("main.rs")).unwrap(),
+        "old\n"
+    );
 }
 
 #[tokio::test]
@@ -1340,16 +258,16 @@ async fn builtin_edit_tools_append_new_post_edit_check_findings_only() {
         ),
     );
     let context = execution_context_with_mounts(coding_capability_ids(), mounts);
-    seed_read_state(&runtime, "/workspace/main.rs", context.clone()).await;
+    let header = seed_read_tag(&runtime, "/workspace/main.rs", context.clone()).await;
     assert!(
         check_port.requests().is_empty(),
-        "read_file must not trigger the post-edit check"
+        "read must not trigger the post-edit check"
     );
 
     let first_completed = invoke_completed_with_context(
         &runtime,
-        APPLY_PATCH_CAPABILITY_ID,
-        json!({"path": "/workspace/main.rs", "old_string": "alpha", "new_string": "gamma"}),
+        CODING_EDIT_CAPABILITY_ID,
+        json!({"input": format!("{header}\nPUT 1:\n+gamma beta\n")}),
         context.clone(),
     )
     .await;
@@ -1360,7 +278,12 @@ async fn builtin_edit_tools_append_new_post_edit_check_findings_only() {
     );
     let first = first_completed.output;
 
-    assert_eq!(first["success"], json!(true), "edit itself must succeed");
+    assert!(
+        first["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("gamma beta")),
+        "edit itself must succeed and render the new content: {first}"
+    );
     assert_eq!(first["post_edit_check"]["exit_code"], json!(1));
     let new_output = first["post_edit_check"]["new_output"]
         .as_str()
@@ -1382,10 +305,20 @@ async fn builtin_edit_tools_append_new_post_edit_check_findings_only() {
          resolves it exactly like a shell workdir"
     );
 
+    // A chained edit on the same file anchors on the tag of a CURRENT read:
+    // the first edit changed the file hash, so refresh the header through the
+    // public read path (the canonical read -> edit chain the engine contract
+    // and the passing trace suites exercise) instead of reusing the stale
+    // read header or the first edit's echoed output header.
+    let refreshed_header = seed_read_tag(&runtime, "/workspace/main.rs", context.clone()).await;
+    assert_ne!(
+        refreshed_header, header,
+        "the first edit must refresh the file hash: {refreshed_header}"
+    );
     let second = invoke_with_context(
         &runtime,
-        APPLY_PATCH_CAPABILITY_ID,
-        json!({"path": "/workspace/main.rs", "old_string": "beta", "new_string": "delta"}),
+        CODING_EDIT_CAPABILITY_ID,
+        json!({"input": format!("{refreshed_header}\nPUT 1:\n+gamma delta\n")}),
         context,
     )
     .await
@@ -1412,14 +345,19 @@ async fn builtin_edit_tools_skip_post_edit_check_when_unconfigured() {
 
     let written = invoke_with_context(
         &runtime,
-        WRITE_FILE_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
         json!({"path": "/workspace/new.rs", "content": "fn hello() {}\n"}),
         context,
     )
     .await
     .unwrap();
 
-    assert_eq!(written["success"], json!(true));
+    assert!(
+        written["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("Successfully wrote")),
+        "write must succeed: {written}"
+    );
     assert!(
         written.get("post_edit_check").is_none(),
         "unconfigured runtime must not emit a post_edit_check field"
@@ -1447,14 +385,19 @@ async fn builtin_edit_tools_report_post_edit_check_timeout_without_failing_the_e
 
     let written = invoke_with_context(
         &runtime,
-        WRITE_FILE_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
         json!({"path": "/workspace/new.rs", "content": "fn hello() {}\n"}),
         context,
     )
     .await
     .unwrap();
 
-    assert_eq!(written["success"], json!(true), "edit must not fail");
+    assert!(
+        written["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("Successfully wrote")),
+        "edit must not fail: {written}"
+    );
     assert_eq!(written["post_edit_check"], json!({"timed_out": true}));
     assert_eq!(
         std::fs::read_to_string(temp.path().join("new.rs")).unwrap(),
@@ -1478,7 +421,7 @@ async fn builtin_edit_tools_omit_new_output_when_check_passes_clean() {
 
     let written = invoke_with_context(
         &runtime,
-        WRITE_FILE_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
         json!({"path": "/workspace/new.rs", "content": "fn hello() {}\n"}),
         context,
     )
@@ -1490,12 +433,12 @@ async fn builtin_edit_tools_omit_new_output_when_check_passes_clean() {
 
 #[tokio::test]
 async fn builtin_edit_tools_disable_post_edit_check_when_process_backend_is_none() {
-    // Regression (PR #5979 review): write_file/apply_patch declare only
-    // filesystem effects, so their plan never requires a process — but a
-    // configured post-edit check used to spawn through the default process
-    // port anyway, bypassing ProcessBackendKind::None entirely. Under a
-    // no-process policy the advisory check must be withheld: the edit
-    // succeeds, no process port is touched, and nothing is accounted.
+    // Regression (PR #5979 review): write/edit declare only filesystem
+    // effects, so their plan never requires a process — but a configured
+    // post-edit check used to spawn through the default process port anyway,
+    // bypassing ProcessBackendKind::None entirely. Under a no-process policy
+    // the advisory check must be withheld: the edit succeeds, no process port
+    // is touched, and nothing is accounted.
     let temp = tempfile::tempdir().unwrap();
 
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
@@ -1511,16 +454,18 @@ async fn builtin_edit_tools_disable_post_edit_check_when_process_backend_is_none
 
     let completed = invoke_completed_with_context(
         &runtime,
-        WRITE_FILE_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
         json!({"path": "/workspace/new.rs", "content": "fn hello() {}\n"}),
         context,
     )
     .await;
 
-    assert_eq!(
-        completed.output["success"],
-        json!(true),
-        "edit must succeed"
+    assert!(
+        completed.output["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("Successfully wrote")),
+        "edit must succeed: {}",
+        completed.output
     );
     assert!(
         completed.output.get("post_edit_check").is_none(),
@@ -1563,16 +508,18 @@ async fn builtin_edit_tools_run_post_edit_check_in_user_sandbox_not_on_local_hos
 
     let completed = invoke_completed_with_context(
         &runtime,
-        WRITE_FILE_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
         json!({"path": "/workspace/new.rs", "content": "fn hello() {}\n"}),
         context,
     )
     .await;
 
-    assert_eq!(
-        completed.output["success"],
-        json!(true),
-        "edit must succeed"
+    assert!(
+        completed.output["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("Successfully wrote")),
+        "edit must succeed: {}",
+        completed.output
     );
     assert_eq!(
         completed.output["post_edit_check"]["new_output"]
@@ -1597,33 +544,30 @@ async fn builtin_edit_tools_run_post_edit_check_in_user_sandbox_not_on_local_hos
     );
 }
 
-fn assert_aggregate_scan_limit(output: &Value) {
-    assert_eq!(output["truncated"], json!(true));
-    assert_eq!(output["limit_reason"], json!("aggregate_scan_bytes"));
-    assert_eq!(output["bytes_scanned"], json!(60 * 1024 * 1024));
-    assert_eq!(output["max_scan_bytes"], json!(64 * 1024 * 1024));
-}
-
-fn max_read_size() -> usize {
-    10 * 1024 * 1024
-}
-
-/// Editing an existing file requires a prior full `read_file` (read-before-edit
-/// guard). Tests that exercise unrelated write/patch behavior seed that state
-/// through the public read path.
-async fn seed_read_state<R: HostRuntime + ?Sized>(
+/// Editing an existing file requires a prior `read` of that file in the same
+/// run: the read records the hashline snapshot tag the edit anchors on. This
+/// helper seeds that state through the public read path and returns the
+/// `[path#TAG]` header line the edit input must carry.
+async fn seed_read_tag<R: HostRuntime + ?Sized>(
     runtime: &R,
     path: &str,
     context: ExecutionContext,
-) {
-    invoke_with_context(
+) -> String {
+    let read = invoke_with_context(
         runtime,
-        READ_FILE_CAPABILITY_ID,
+        CODING_READ_CAPABILITY_ID,
         json!({"path": path}),
         context,
     )
     .await
-    .expect("read_file seeds read-before-edit state");
+    .expect("read seeds the hashline snapshot");
+    read["output"]
+        .as_str()
+        .expect("coding read returns text")
+        .lines()
+        .next()
+        .expect("coding read starts with the hashline header")
+        .to_string()
 }
 
 async fn invoke_with_context<R: HostRuntime + ?Sized>(
@@ -1690,6 +634,127 @@ async fn invoke_failure_with_context<R: HostRuntime + ?Sized>(
     }
 }
 
+/// Deterministic in-memory `AccountedArtifactPersister` for agent-scoped
+/// dispatch: unique monotonic `ArtifactId`s, checked byte length, digest over
+/// the persisted bytes, and the metadata content type. Agent-scoped dispatch
+/// requires a persister (the kernel guard fails with `Resource` otherwise);
+/// mirrors the loop ingress contract.
+#[derive(Default)]
+struct TestArtifactPersister {
+    next_id: AtomicU64,
+}
+
+#[async_trait]
+impl AccountedArtifactPersister for TestArtifactPersister {
+    async fn persist(
+        &self,
+        metadata: ArtifactWriteMetadata,
+        bytes: &[u8],
+        _receipt: &ResourceReceipt,
+    ) -> Result<CompletedArtifact, ArtifactWriteError> {
+        let artifact_id = ArtifactId::new(self.next_id.fetch_add(1, Ordering::Relaxed));
+        let byte_len = u64::try_from(bytes.len()).map_err(|_| ArtifactWriteError::Storage)?;
+        Ok(CompletedArtifact {
+            artifact_ref: ArtifactRef::new(artifact_id),
+            byte_len,
+            total_lines: None,
+            content_type: metadata.content_type,
+            digest: ArtifactDigest::from_bytes(bytes),
+        })
+    }
+}
+
+/// Minimal `ArtifactPersistencePort` for the coding spill path. Coding output
+/// above the inline ceiling allocates/appends/finalizes through this port
+/// (distinct from the kernel's accounted persister above), so a fixture
+/// without it cannot exercise a spilled preview at all.
+#[derive(Default)]
+struct TestArtifactStore {
+    bytes: tokio::sync::Mutex<Vec<u8>>,
+    content_type: tokio::sync::Mutex<Option<String>>,
+}
+
+#[async_trait]
+impl ironclaw_host_api::artifact::ArtifactAccessPort for TestArtifactStore {
+    async fn read(
+        &self,
+        _request: ironclaw_host_api::artifact::ArtifactReadRequest,
+    ) -> Result<
+        Option<ironclaw_host_api::artifact::ArtifactReadChunk>,
+        ironclaw_host_api::artifact::ArtifactAccessError,
+    > {
+        Ok(None)
+    }
+}
+
+#[async_trait]
+impl ironclaw_host_api::artifact::ArtifactPersistencePort for TestArtifactStore {
+    async fn allocate(
+        &self,
+        metadata: ArtifactWriteMetadata,
+    ) -> Result<ironclaw_host_api::artifact::ArtifactWriteHandle, ArtifactWriteError> {
+        let handle = ironclaw_host_api::artifact::ArtifactWriteHandle::new(
+            ArtifactId::new(0),
+            metadata.owner_scope.clone(),
+            metadata.namespace,
+        );
+        *self.content_type.lock().await = Some(metadata.content_type);
+        self.bytes.lock().await.clear();
+        Ok(handle)
+    }
+
+    async fn append(
+        &self,
+        _handle: &ironclaw_host_api::artifact::ArtifactWriteHandle,
+        chunk: &[u8],
+    ) -> Result<(), ArtifactWriteError> {
+        self.bytes.lock().await.extend_from_slice(chunk);
+        Ok(())
+    }
+
+    async fn finalize(
+        &self,
+        handle: ironclaw_host_api::artifact::ArtifactWriteHandle,
+    ) -> Result<CompletedArtifact, ArtifactWriteError> {
+        let bytes = self.bytes.lock().await;
+        let content_type = self
+            .content_type
+            .lock()
+            .await
+            .clone()
+            .ok_or(ArtifactWriteError::InvalidHandle)?;
+        Ok(CompletedArtifact {
+            artifact_ref: ArtifactRef::new(handle.artifact_id()),
+            byte_len: u64::try_from(bytes.len()).map_err(|_| ArtifactWriteError::Storage)?,
+            total_lines: None,
+            content_type,
+            digest: ArtifactDigest::from_bytes(&bytes),
+        })
+    }
+}
+
+fn runtime_with_filesystem_and_artifacts<F>(filesystem: F) -> impl HostRuntime
+where
+    F: RootFilesystem + 'static,
+{
+    let artifacts = Arc::new(TestArtifactStore::default());
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(filesystem),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
+    .with_artifact_ports(artifacts.clone(), artifacts)
+    .with_accounted_artifact_persistence(Arc::new(TestArtifactPersister::default()))
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing()
+}
+
 fn runtime_with_filesystem<F>(filesystem: F) -> impl HostRuntime
 where
     F: RootFilesystem + 'static,
@@ -1705,6 +770,7 @@ where
     .with_first_party_capabilities(Arc::new(
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
+    .with_accounted_artifact_persistence(Arc::new(TestArtifactPersister::default()))
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -1729,6 +795,7 @@ where
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
     .with_runtime_process_port(process_port)
+    .with_accounted_artifact_persistence(Arc::new(TestArtifactPersister::default()))
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -1755,6 +822,7 @@ where
     ))
     .with_runtime_process_port(process_port)
     .with_post_edit_check(post_edit_check)
+    .with_accounted_artifact_persistence(Arc::new(TestArtifactPersister::default()))
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -1787,6 +855,7 @@ where
     .with_runtime_process_port(process_port)
     .with_post_edit_check(post_edit_check)
     .with_runtime_policy(policy)
+    .with_accounted_artifact_persistence(Arc::new(TestArtifactPersister::default()))
     .with_trust_policy(Arc::new(trust_policy()));
     if let Some(user_sandbox_process_port) = user_sandbox_process_port {
         services = services.with_user_sandbox_process_port(user_sandbox_process_port);
@@ -1914,14 +983,13 @@ fn registry() -> ExtensionRegistry {
     registry
 }
 
-fn coding_capability_ids() -> [&'static str; 6] {
+fn coding_capability_ids() -> [&'static str; 5] {
     [
-        READ_FILE_CAPABILITY_ID,
-        WRITE_FILE_CAPABILITY_ID,
-        LIST_DIR_CAPABILITY_ID,
+        CODING_READ_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
+        CODING_EDIT_CAPABILITY_ID,
         GLOB_CAPABILITY_ID,
         GREP_CAPABILITY_ID,
-        APPLY_PATCH_CAPABILITY_ID,
     ]
 }
 
@@ -1940,178 +1008,6 @@ fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (DiskFilesy
     )])
     .unwrap();
     (filesystem, mounts)
-}
-
-struct StatLenOverrideFilesystem {
-    inner: DiskFilesystem,
-    suffix: &'static str,
-    len: u64,
-}
-
-#[async_trait]
-impl RootFilesystem for StatLenOverrideFilesystem {
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir(path).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        let mut stat = self.inner.stat(path).await?;
-        if path.as_str().ends_with(self.suffix) {
-            stat.len = self.len;
-        }
-        Ok(stat)
-    }
-
-    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
-        self.inner.read_file(path).await
-    }
-
-    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
-        self.inner.write_file(path, bytes).await
-    }
-
-    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.create_dir_all(path).await
-    }
-}
-
-/// KEPT (not folded to `ironclaw_filesystem::FaultInjecting`): the coding
-/// `write_file`/`apply_patch` tools call `create_dir_all` on the target's parent
-/// before writing (see `coding::paths::create_parent_dir_unless_sensitive`).
-/// `FaultInjecting` gates only the unified entry/event ops and leaves the legacy
-/// `create_dir_all` at its trait default, which returns `Unsupported` instead of
-/// delegating to the inner `DiskFilesystem` — the tool maps that to
-/// `FilesystemDenied`/`Authorization`, masking the injected write fault. This
-/// delegator forwards `create_dir_all` to the real backend and faults only
-/// `write_file`, preserving the `Backend` assertion.
-struct WriteFailureFilesystem {
-    inner: DiskFilesystem,
-    fail_suffix: &'static str,
-}
-
-#[async_trait]
-impl RootFilesystem for WriteFailureFilesystem {
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir(path).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        self.inner.stat(path).await
-    }
-
-    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
-        self.inner.read_file(path).await
-    }
-
-    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
-        if path.as_str().ends_with(self.fail_suffix) {
-            return Err(FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::WriteFile,
-                reason: "disk full".to_string(),
-            });
-        }
-        self.inner.write_file(path, bytes).await
-    }
-
-    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.create_dir_all(path).await
-    }
-}
-
-/// KEPT (not folded to `ironclaw_filesystem::FaultInjecting`): this fake returns
-/// [`FilesystemError::BackendInfrastructure`], a variant `FaultKind` cannot
-/// express (it covers only `Backend`/`BackendBusy`/`NotFound`/`Unsupported`).
-/// Folding it would change the injected error and lose the
-/// `BackendInfrastructure -> Backend` mapping this test pins.
-struct ReadInfrastructureFailureFilesystem {
-    inner: DiskFilesystem,
-    fail_suffix: &'static str,
-}
-
-#[async_trait]
-impl RootFilesystem for ReadInfrastructureFailureFilesystem {
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir(path).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        self.inner.stat(path).await
-    }
-
-    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
-        if path.as_str().ends_with(self.fail_suffix) {
-            return Err(FilesystemError::BackendInfrastructure {
-                operation: FilesystemOperation::ReadFile,
-                reason: "injected read infrastructure failure".to_string(),
-            });
-        }
-        self.inner.read_file(path).await
-    }
-
-    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
-        self.inner.write_file(path, bytes).await
-    }
-
-    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.create_dir_all(path).await
-    }
-}
-
-struct ManySkippedEntriesFilesystem;
-
-#[async_trait]
-impl RootFilesystem for ManySkippedEntriesFilesystem {
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        Ok((0..50_001)
-            .map(|index| DirEntry {
-                name: format!("skip-{index:05}.rs"),
-                path: VirtualPath::new(format!("{}/skip-{index:05}.rs", path.as_str())).unwrap(),
-                file_type: FileType::File,
-            })
-            .collect())
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        if !path.as_str().contains("/skip-") {
-            return Ok(FileStat {
-                path: path.clone(),
-                file_type: FileType::Directory,
-                len: 0,
-                modified: None,
-                sensitive: false,
-            });
-        }
-        Err(FilesystemError::Backend {
-            path: path.clone(),
-            operation: FilesystemOperation::Stat,
-            reason: "injected stat failure".to_string(),
-        })
-    }
-
-    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
-        Err(FilesystemError::Backend {
-            path: path.clone(),
-            operation: FilesystemOperation::ReadFile,
-            reason: "unexpected read".to_string(),
-        })
-    }
-
-    async fn write_file(&self, path: &VirtualPath, _bytes: &[u8]) -> Result<(), FilesystemError> {
-        Err(FilesystemError::Backend {
-            path: path.clone(),
-            operation: FilesystemOperation::WriteFile,
-            reason: "unexpected write".to_string(),
-        })
-    }
-
-    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        Err(FilesystemError::Backend {
-            path: path.clone(),
-            operation: FilesystemOperation::CreateDirAll,
-            reason: "unexpected mkdir".to_string(),
-        })
-    }
 }
 
 fn execution_context_with_mounts<const N: usize>(
@@ -2134,6 +1030,13 @@ fn execution_context_with_mounts<const N: usize>(
     )
     .unwrap();
     context.run_id = Some(RunId::new());
+    // Agent-scoped dispatch requires a durable artifact namespace (plus a
+    // persister, which every runtime builder here wires). Derive it from the
+    // context's run identity so the harness mirrors the loop ingress contract
+    // instead of tripping the kernel's agent-scoped guard.
+    context.artifact_namespace = Some(ArtifactNamespaceId::from_root_run(
+        context.run_id.unwrap_or_default(),
+    ));
     context
 }
 
@@ -2160,6 +1063,10 @@ fn builtin_effects() -> Vec<EffectKind> {
         EffectKind::DispatchCapability,
         EffectKind::ReadFilesystem,
         EffectKind::WriteFilesystem,
+        // The coding edit descriptor declares delete authority (REM/MV file ops),
+        // so the coding grants must honestly carry it or every edit that the
+        // authorization fold plans with delete authority is policy-denied.
+        EffectKind::DeleteFilesystem,
     ]
 }
 
@@ -2177,53 +1084,8 @@ fn trust_policy() -> HostTrustPolicy {
     .unwrap()
 }
 
-/// `/` must mean the workspace in every coding tool, not fail with a blank path.
-///
-/// Observed repeatedly on live demo runs. An agent that globbed with a leading wildcard, or looked at
-/// the root to see what existed, got:
-///
-/// ```text
-/// path  is not under an available scoped root (available roots: skills, system skills,
-/// tenant-shared skills, workspace)
-/// ```
-///
-/// The offending path renders BLANK because the safe-summary encoder maps `/` to a space, so the
-/// message named nothing and the agent could only guess. `list_dir` had been special-cased; `glob`,
-/// `grep` and `read_file` had not. Table-driven so a tool cannot be fixed in isolation again.
 #[tokio::test]
-async fn coding_tools_treat_the_filesystem_root_as_the_workspace() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("marker.txt"), "found me").unwrap();
-    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
-    let runtime = runtime_with_filesystem(filesystem);
-
-    for (capability, input) in [
-        (GLOB_CAPABILITY_ID, json!({"path": "/", "pattern": "*.txt"})),
-        (GREP_CAPABILITY_ID, json!({"path": "/", "pattern": "found"})),
-        (LIST_DIR_CAPABILITY_ID, json!({"path": "/"})),
-    ] {
-        let outcome = invoke_with_context(
-            &runtime,
-            capability,
-            input.clone(),
-            execution_context_with_mounts(coding_capability_ids(), mounts.clone()),
-        )
-        .await;
-
-        assert!(
-            outcome.is_ok(),
-            "{capability} must accept `/` as the workspace; got {outcome:?} for input {input}"
-        );
-    }
-}
-
-/// A path the tools resolve relative to the workspace stays resolvable when written and read back.
-///
-/// The write-then-read round trip is the invariant an agent depends on when it authors a script and
-/// then uses it, and it is the one that silently broke when `/workspace` meant two different
-/// directories to different tools.
-#[tokio::test]
-async fn a_relative_path_written_by_write_file_is_readable_by_read_file() {
+async fn a_relative_path_written_by_write_is_readable_by_read() {
     let temp = tempfile::tempdir().unwrap();
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
     let runtime = runtime_with_filesystem(filesystem);
@@ -2231,7 +1093,7 @@ async fn a_relative_path_written_by_write_file_is_readable_by_read_file() {
 
     invoke_with_context(
         &runtime,
-        WRITE_FILE_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
         json!({"path": "scripts/egfr.py", "content": "print('staged')\n"}),
         context(),
     )
@@ -2240,7 +1102,7 @@ async fn a_relative_path_written_by_write_file_is_readable_by_read_file() {
 
     let read = invoke_with_context(
         &runtime,
-        READ_FILE_CAPABILITY_ID,
+        CODING_READ_CAPABILITY_ID,
         json!({"path": "scripts/egfr.py"}),
         context(),
     )
@@ -2248,10 +1110,132 @@ async fn a_relative_path_written_by_write_file_is_readable_by_read_file() {
     .expect("the same relative path must be readable");
 
     assert!(
-        read["content"]
+        read["output"]
             .as_str()
-            .expect("read_file returns text")
+            .expect("coding read returns text")
             .contains("staged"),
-        "write_file and read_file must resolve one relative path to one place; got {read:?}"
+        "write and read must resolve one relative path to one place; got {read:?}"
+    );
+}
+
+/// Regression (PinchBench payload parity): an engine-bounded `read` window
+/// above the host's 24 KiB inline threshold must stay inline and whole.
+///
+/// Spilling is what activates the kernel's canonical bound, so routing large
+/// reads through an artifact capped payload per call far below what the
+/// pre-pinned `read_file` delivered (46.5 KiB median, 75.4 KiB max, no
+/// artifact). Because context accumulates, that shrinks payload and *raises*
+/// total tokens for the same file: measured 5.9x smaller payloads for 2.53x the
+/// input tokens.
+#[tokio::test]
+async fn an_engine_bounded_read_window_stays_inline_above_the_host_threshold() {
+    let temp = tempfile::tempdir().unwrap();
+    let body: String = (1..=4_000usize)
+        .map(|n| format!("line {n:05} {}\n", "transcript filler text".repeat(3)))
+        .collect();
+    std::fs::write(temp.path().join("transcript.md"), &body).unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem_and_artifacts(filesystem);
+
+    // ~400 rendered lines: over the 24 KiB host threshold that used to force a
+    // spill, under the document inline ceiling.
+    let read = invoke_with_context(
+        &runtime,
+        CODING_READ_CAPABILITY_ID,
+        json!({"path": "transcript.md:100-700"}),
+        execution_context_with_mounts(coding_capability_ids(), mounts),
+    )
+    .await
+    .expect("an engine-bounded window must be readable");
+
+    let output = read["output"].as_str().expect("coding read returns text");
+    assert!(
+        output.len() > 24 * 1024,
+        "fixture must exceed the 24 KiB host inline threshold to be meaningful; got {} bytes",
+        output.len()
+    );
+    assert!(
+        read.get("artifact_ref").is_none(),
+        "an engine-bounded window must not spill: spilling is what caps the payload; got {read:?}"
+    );
+    assert!(
+        output.contains("line 00100 ") && output.contains("line 00500 "),
+        "the whole requested span must be delivered inline"
+    );
+    assert!(
+        !output.contains("artifact output elided"),
+        "a window delivered whole must carry no elision marker"
+    );
+}
+
+/// Regression (PinchBench transcript tasks): a spilled `read` of an explicit
+/// contiguous line range must not come back with its middle deleted.
+///
+/// The old adapter preview kept a head and a tail and dropped everything
+/// between with a bare `... [artifact output elided] ...` marker that named no
+/// continuation. On a ~5,000-line transcript the model received ~24% of the
+/// lines it asked for, could not tell which span was missing, and burned a
+/// second call re-reading the gap — measured as 236 of 956 read calls eliding
+/// content across 52 of 147 benchmark tasks. The window must instead stay
+/// contiguous and name the artifact selector to resume from.
+#[tokio::test]
+async fn a_spilled_read_window_stays_contiguous_and_names_its_resume_selector() {
+    let temp = tempfile::tempdir().unwrap();
+    // Distinctive per-line payload so a deleted middle is detectable by content
+    // rather than by byte count alone.
+    let total_lines = 4_000usize;
+    let body: String = (1..=total_lines)
+        .map(|n| format!("line {n:05} {}\n", "transcript filler text".repeat(3)))
+        .collect();
+    std::fs::write(temp.path().join("transcript.md"), &body).unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem_and_artifacts(filesystem);
+
+    let read = invoke_with_context(
+        &runtime,
+        CODING_READ_CAPABILITY_ID,
+        json!({"path": "transcript.md:100-2400"}),
+        execution_context_with_mounts(coding_capability_ids(), mounts),
+    )
+    .await
+    .expect("a wide contiguous range must be readable");
+
+    let output = read["output"].as_str().expect("coding read returns text");
+    assert!(
+        read["artifact_ref"].is_string(),
+        "an oversized window must spill to a durable artifact; got {read:?}"
+    );
+    assert!(
+        !output.contains("artifact output elided"),
+        "a document window must never have its middle deleted; got:\n{output}"
+    );
+
+    // Every rendered line number present must be strictly consecutive: a hole
+    // is exactly what forced the model to re-read the gap.
+    let rendered: Vec<u64> = output
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .filter_map(|(number, _)| number.trim().parse::<u64>().ok())
+        .collect();
+    assert!(
+        rendered.len() > 1,
+        "the preview must carry numbered lines; got:\n{output}"
+    );
+    for pair in rendered.windows(2) {
+        assert_eq!(
+            pair[1],
+            pair[0] + 1,
+            "rendered lines must stay contiguous, found a gap {} -> {} in:\n{output}",
+            pair[0],
+            pair[1]
+        );
+    }
+
+    // The model must be told how to continue, in the engine's own selector
+    // idiom, rather than being left to guess the next window.
+    let artifact_ref = read["artifact_ref"].as_str().expect("artifact ref string");
+    assert!(
+        output.contains(&format!("Use {artifact_ref}:")) && output.contains("to continue"),
+        "a truncated window must name the artifact selector to resume from; got:\n{output}"
     );
 }

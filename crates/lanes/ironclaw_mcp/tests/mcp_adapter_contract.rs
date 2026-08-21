@@ -1773,7 +1773,11 @@ async fn mcp_runtime_enforces_output_limit_and_releases_reservation() {
 }
 
 #[tokio::test]
-async fn mcp_runtime_can_enforce_client_reported_output_size_without_serializing_for_size() {
+async fn mcp_runtime_enforces_limit_on_serialized_canonical_output_size() {
+    // The durable-artifact cutover made the serialized canonical output the
+    // single source of truth for size accounting, so a client-reported
+    // `output_bytes` is NOT trusted as the enforcement basis — the runtime
+    // serializes regardless and bounds on the real byte length.
     let package = package_from_manifest(MCP_MANIFEST);
     let client = RecordingMcpClient::new(Ok(McpClientOutput {
         output: json!({"small": true}),
@@ -1810,10 +1814,12 @@ async fn mcp_runtime_can_enforce_client_reported_output_size_without_serializing
         .await
         .unwrap_err();
 
-    assert!(matches!(
-        err,
-        McpError::OutputLimitExceeded { actual: 1_000, .. }
-    ));
+    let McpError::OutputLimitExceeded { limit, actual } = err else {
+        panic!("expected serialized-size output limit, got {err:?}");
+    };
+    assert_eq!(limit, 8);
+    // `{"small": true}` serializes to 14 bytes.
+    assert_eq!(actual, 14);
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
 }
@@ -2725,6 +2731,14 @@ impl ResourceGovernor for ReleaseFailingGovernor {
     ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
         self.inner
             .reserve_with_id_and_outcome(scope, estimate, reservation_id)
+    }
+    fn grow_reservation_with_outcome(
+        &self,
+        reservation_id: ResourceReservationId,
+        additional: ResourceEstimate,
+    ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
+        self.inner
+            .grow_reservation_with_outcome(reservation_id, additional)
     }
 
     fn reconcile(

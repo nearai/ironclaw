@@ -488,6 +488,7 @@ fn auth_execution_context(
 ) -> Result<ironclaw_host_api::scope::ExecutionContext, AuthProductError> {
     let context = ironclaw_host_api::scope::ExecutionContext {
         run_id: None,
+        artifact_namespace: None,
         invocation_id: resource_scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,

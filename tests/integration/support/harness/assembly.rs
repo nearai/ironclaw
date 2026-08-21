@@ -1,6 +1,9 @@
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -15,11 +18,16 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    artifact::{
+        AccountedArtifactPersister, ArtifactDigest, ArtifactId, ArtifactRef, ArtifactWriteError,
+        ArtifactWriteMetadata, CompletedArtifact,
+    },
     capability::EffectKind,
     dispatch::CredentialStageError,
     ids::{CapabilityId, ExtensionId, PackageId, SecretHandle},
     mount::{MountGrant, MountPermissions, MountView},
     path::{HostPath, MountAlias, VirtualPath},
+    resource::ResourceReceipt,
 };
 use ironclaw_host_runtime::{
     BUILTIN_FIRST_PARTY_PROVIDER, CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest,
@@ -57,6 +65,41 @@ pub(crate) fn default_capability_io_pair() -> (
 ) {
     let capability_io = Arc::new(ironclaw_composition::ProductLiveCapabilityIo::default());
     (capability_io.clone(), capability_io)
+}
+
+/// Deterministic in-memory `AccountedArtifactPersister` for agent-scoped test
+/// runtimes.
+///
+/// Agent-scoped dispatch REQUIRES an artifact persister (the kernel guard
+/// fails with `Resource` when a caller scope carries an agent but no
+/// persistence is wired). This double mirrors the production persister's
+/// observable contract without any backing store: unique monotonically
+/// increasing `ArtifactId`s, checked byte length, digest over the persisted
+/// bytes, and the metadata content type — everything the pinned coding
+/// artifact-backed output path asserts.
+#[derive(Default)]
+pub(crate) struct TestArtifactPersister {
+    next_id: AtomicU64,
+}
+
+#[async_trait::async_trait]
+impl AccountedArtifactPersister for TestArtifactPersister {
+    async fn persist(
+        &self,
+        metadata: ArtifactWriteMetadata,
+        bytes: &[u8],
+        _receipt: &ResourceReceipt,
+    ) -> Result<CompletedArtifact, ArtifactWriteError> {
+        let artifact_id = ArtifactId::new(self.next_id.fetch_add(1, Ordering::Relaxed));
+        let byte_len = u64::try_from(bytes.len()).map_err(|_| ArtifactWriteError::Storage)?;
+        Ok(CompletedArtifact {
+            artifact_ref: ArtifactRef::new(artifact_id),
+            byte_len,
+            total_lines: None,
+            content_type: metadata.content_type,
+            digest: ArtifactDigest::from_bytes(bytes),
+        })
+    }
 }
 
 pub(crate) fn standalone_host_runtime_with_http_egress(
@@ -140,6 +183,7 @@ pub(crate) fn standalone_host_runtime_over_filesystem_with_registry_and_runtime_
     }))
     .with_first_party_capabilities(Arc::new(first_party_handlers))
     .with_first_party_http_egress(egress)
+    .with_accounted_artifact_persistence(Arc::new(TestArtifactPersister::default()))
     .with_trust_policy(Arc::new(first_party_trust_policy()?));
     // Inject the recording process port when provided; `None` defaults to
     // `HostProcessPort` (real execution).
@@ -182,6 +226,7 @@ pub(crate) fn standalone_trigger_only_host_runtime(
             active_run_lookup,
         )?,
     ))
+    .with_accounted_artifact_persistence(Arc::new(TestArtifactPersister::default()))
     .with_trust_policy(Arc::new(first_party_trust_policy()?));
 
     Ok(Arc::new(services.host_runtime_for_local_testing()))
@@ -360,6 +405,7 @@ pub(crate) fn standalone_host_runtime_with_registry_and_egress(
         ironclaw_triggers::InMemoryTriggerRepository::default(),
     ))?))
     .with_runtime_http_egress(runtime_http_egress)
+    .with_accounted_artifact_persistence(Arc::new(TestArtifactPersister::default()))
     .with_trust_policy(Arc::new(github_first_party_trust_policy()?))
     .try_with_host_http_egress((*network_egress).clone())
     .map_err(|report| std::io::Error::other(format!("host HTTP egress failed: {report:?}")))?
@@ -393,6 +439,7 @@ pub(crate) fn standalone_host_runtime_with_live_http_egress(
     )
     .with_secret_store(Arc::new(SecretStore::ephemeral()))
     .with_first_party_capabilities(Arc::new(first_party_handlers))
+    .with_accounted_artifact_persistence(Arc::new(TestArtifactPersister::default()))
     .try_with_host_http_egress(PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::new(
         Duration::from_secs(2),
     )))
@@ -437,6 +484,7 @@ pub(crate) fn standalone_host_runtime_with_real_egress_pipeline(
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
         ironclaw_triggers::InMemoryTriggerRepository::default(),
     ))?))
+    .with_accounted_artifact_persistence(Arc::new(TestArtifactPersister::default()))
     .try_with_host_http_egress_with_body_store(
         PolicyNetworkHttpEgress::new_with_resolver(network_transport, StaticNetworkResolver),
         scoped_filesystem,

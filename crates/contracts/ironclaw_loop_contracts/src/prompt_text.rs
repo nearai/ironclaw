@@ -3,6 +3,7 @@ use super::{
 };
 
 const MODEL_SAFE_SUMMARY_MAX_BYTES: usize = 4096;
+const VERIFIED_CATALOG_DESCRIPTION_MAX_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PromptTextSurface {
@@ -15,7 +16,8 @@ pub(super) enum PromptTextSurface {
 impl PromptTextSurface {
     const fn max_bytes(self) -> usize {
         match self {
-            Self::SafeSummary | Self::VerifiedCatalogDescription => MODEL_SAFE_SUMMARY_MAX_BYTES,
+            Self::SafeSummary => MODEL_SAFE_SUMMARY_MAX_BYTES,
+            Self::VerifiedCatalogDescription => VERIFIED_CATALOG_DESCRIPTION_MAX_BYTES,
             Self::GenericModelContent | Self::TrustedSkillInstruction => {
                 LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES
             }
@@ -195,5 +197,23 @@ mod tests {
                 .expect_err("oversized content is rejected on every surface");
             assert_eq!(too_big.kind, AgentLoopHostErrorKind::PolicyDenied);
         }
+    }
+
+    #[test]
+    fn verified_catalog_descriptions_allow_bundled_tool_documentation_over_summary_limit() {
+        let description = "x".repeat(6 * 1024);
+        validate_prompt_text(
+            description.clone(),
+            "capability description",
+            PromptTextSurface::VerifiedCatalogDescription,
+        )
+        .expect("verified bundled descriptions may exceed the safe-summary budget");
+
+        validate_prompt_text(
+            description,
+            "capability summary",
+            PromptTextSurface::SafeSummary,
+        )
+        .expect_err("untrusted safe summaries retain the 4 KiB boundary");
     }
 }

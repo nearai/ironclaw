@@ -24,7 +24,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .thread("conv-ask-each-time")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 json!({"path": "/workspace/ask-each-time.txt", "content": "ask each time payload"}),
             ),
             RebornScriptedReply::text("file written after ask-each-time approval"),
@@ -37,7 +37,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     g.capability_harness()
         .ok_or("live_approvals always uses HostRuntime")?
         .set_ask_each_time_override_for_test(
-            &CapabilityId::new("builtin.write_file")?,
+            &CapabilityId::new("builtin.write")?,
             h.binding.tenant_id.clone(),
             h.binding.actor_user_id.clone(),
         )

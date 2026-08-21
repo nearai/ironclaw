@@ -529,6 +529,14 @@ impl ResourceGovernor for ReleaseFailingGovernor {
         self.inner
             .reserve_with_id_and_outcome(scope, estimate, reservation_id)
     }
+    fn grow_reservation_with_outcome(
+        &self,
+        reservation_id: ResourceReservationId,
+        additional: ResourceEstimate,
+    ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
+        self.inner
+            .grow_reservation_with_outcome(reservation_id, additional)
+    }
 
     fn reconcile(
         &self,

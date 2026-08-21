@@ -174,7 +174,9 @@ impl ProcessAuthorizationRemintPort for ProcessAuthorizationReminter {
             mounts,
             resource_reservation,
         } = continuation;
+        let artifact_namespace = invocation.artifact_namespace;
         let invocation = Invocation {
+            artifact_namespace,
             activity_id: invocation.activity_id,
             capability: invocation.capability,
             input: request.input.clone(),

@@ -7,6 +7,7 @@ pub(crate) mod file;
 pub(crate) mod github;
 pub(crate) mod mock_mcp;
 pub(crate) mod outbound;
+pub(crate) mod pinned_coding;
 pub(crate) mod process;
 pub(crate) mod profile;
 pub(crate) mod project;

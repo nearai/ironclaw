@@ -12,6 +12,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
+    artifact::{ArtifactNamespaceId, CompletedArtifact},
     authorized::Authorized,
     decision::RuntimeCredentialAuthRequirement,
     host_remediation::HostRemediation,
@@ -134,6 +135,8 @@ pub struct CapabilityDispatchRequest {
     /// Loop turn-run identity forwarded from `ExecutionContext::run_id`.
     /// `None` for non-loop callers.
     pub run_id: Option<RunId>,
+    /// Durable artifact namespace shared by a root loop run and its descendants.
+    pub artifact_namespace: Option<ArtifactNamespaceId>,
     /// Authoritative invocation origin preserved from the sealed
     /// [`Authorized`] witness for capability-boundary policy.
     pub origin: InvocationOrigin,
@@ -184,6 +187,12 @@ pub struct CapabilityDispatchResult {
     pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub usage: ResourceUsage,
     pub receipt: ResourceReceipt,
+    pub completed_artifact: Option<CompletedArtifact>,
+    /// Stable digest of the full canonical output before any bounded transport.
+    pub canonical_output_digest: Option<crate::result_meta::OutputDigest>,
+    /// Number of elements in the full top-level JSON array before bounded
+    /// transport, when the canonical output is an array.
+    pub canonical_item_count: Option<u64>,
 }
 
 /// Stable input issue code for dispatch validation failures.

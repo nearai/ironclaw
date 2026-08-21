@@ -29,6 +29,7 @@ impl CapabilityAuthorizer for TestAuthorizer {}
 
 fn invocation() -> Invocation {
     Invocation {
+        artifact_namespace: None,
         activity_id: ActivityId::new(),
         capability: CapabilityId::new("shell.exec").unwrap(),
         input: serde_json::json!({}),

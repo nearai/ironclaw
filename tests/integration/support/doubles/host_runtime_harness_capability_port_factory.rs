@@ -13,6 +13,7 @@ use super::super::harness::HostRuntimeCapabilityHarness;
 pub(crate) struct HostRuntimeHarnessCapabilityPortFactory {
     pub(crate) harness: Arc<HostRuntimeCapabilityHarness>,
     pub(crate) milestone_sink: Arc<dyn ironclaw_loop_contracts::LoopHostMilestoneSink>,
+    pub(crate) thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
     pub(crate) trajectory_observer: Option<Arc<dyn ironclaw_composition::RebornTrajectoryObserver>>,
 }
 
@@ -26,6 +27,7 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
             .create_recording_capability_port(
                 run_context,
                 &self.milestone_sink,
+                Arc::clone(&self.thread_service),
                 self.trajectory_observer.clone(),
                 CapabilitySurfacePolicy::allow_all(),
             )
@@ -41,6 +43,7 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
             .create_recording_capability_port(
                 run_context,
                 &self.milestone_sink,
+                Arc::clone(&self.thread_service),
                 self.trajectory_observer.clone(),
                 surface_policy.as_ref().clone(),
             )

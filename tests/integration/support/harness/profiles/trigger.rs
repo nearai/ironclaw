@@ -6,8 +6,8 @@ use ironclaw_host_api::{
     mount::{MountPermissions, MountView},
 };
 use ironclaw_host_runtime::{
-    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+    CODING_WRITE_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
 };
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
@@ -39,14 +39,14 @@ pub(crate) async fn trigger_management_tools() -> HarnessResult<HostRuntimeCapab
     trigger_management_tools_profile()?.build().await
 }
 
-/// Trigger verbs PLUS `builtin.write_file` on ONE runtime (#5886 hold
+/// Trigger verbs PLUS `builtin.write` on ONE runtime (#5886 hold
 /// visibility): auto-approve stays ON so the verbs dispatch gate-free, and a
 /// scenario installs an `AskEachTime` override to gate only the write.
 pub(crate) fn trigger_management_with_gated_write_profile() -> HarnessResult<ToolsProfile> {
     let mut profile = trigger_management_tools_profile()?;
     profile
         .capability_ids
-        .push(CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?);
+        .push(CapabilityId::new(CODING_WRITE_CAPABILITY_ID)?);
     profile.effect_kinds.push(EffectKind::WriteFilesystem);
     profile.options = HostRuntimeHarnessOptions::new(
         workspace_mounts(MountPermissions::read_write_list_delete())?,

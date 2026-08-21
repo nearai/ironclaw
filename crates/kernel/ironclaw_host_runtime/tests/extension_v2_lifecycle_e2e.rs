@@ -126,6 +126,7 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
     let result = dispatch_port
         .dispatch_json(Authorized::seal_for_test(
             Invocation {
+                artifact_namespace: None,
                 activity_id: ActivityId::new(),
                 capability: CapabilityId::new("script.echo").unwrap(),
                 input: json!({"message":"hello"}),
@@ -216,6 +217,7 @@ async fn sandbox_runtime_adapter_governor_failure_surfaces_script_dispatch_error
     let result = dispatch_port
         .dispatch_json(Authorized::seal_for_test(
             Invocation {
+                artifact_namespace: None,
                 activity_id: ActivityId::new(),
                 capability: capability_id,
                 input: json!({"message":"hello"}),
@@ -643,6 +645,8 @@ impl BoundCapabilityAdapter for RecordingAdapter {
             })?;
 
         Ok(RuntimeAdapterResult {
+            canonical_output_digest: None,
+            completed_artifact: None,
             output: self.output.clone(),
             display_preview: None,
             usage,

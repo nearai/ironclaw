@@ -1950,7 +1950,7 @@ pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> 
     Ok(profile)
 }
 
-/// [`extension_delivery_tools_profile`] PLUS `builtin.write_file`, so a
+/// [`extension_delivery_tools_profile`] PLUS `builtin.write`, so a
 /// scripted run can raise a REAL `BlockedApproval` gate while the whole
 /// channel/coordinator surface (Slack + Telegram adapters, recording vendor
 /// egress, delivery coordinator) stays wired.
@@ -1974,10 +1974,10 @@ pub(crate) fn extension_delivery_with_gated_write_tools_profile() -> HarnessResu
     profile
         .capability_ids
         .push(ironclaw_host_api::ids::CapabilityId::new(
-            ironclaw_host_runtime::WRITE_FILE_CAPABILITY_ID,
+            ironclaw_host_runtime::CODING_WRITE_CAPABILITY_ID,
         )?);
     // The lifecycle chain this profile inherits from mounts nothing;
-    // `write_file` needs a workspace to write into.
+    // `write` needs a workspace to write into.
     profile.options.mounts = super::super::workspace_mounts(
         ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
     )?;

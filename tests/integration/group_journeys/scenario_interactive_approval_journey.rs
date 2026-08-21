@@ -1,6 +1,6 @@
 //! Canonical multi-turn JOURNEY over ONE conversation/harness: chains, on a
-//! single thread, turn 1 (gated `write_file` → APPROVE → persists), turn 2
-//! (gated `write_file` → DENY → suppressed, non-retryable auth failure), turn 3
+//! single thread, turn 1 (gated `write` → APPROVE → persists), turn 2
+//! (gated `write` → DENY → suppressed, non-retryable auth failure), turn 3
 //! (plain follow-up carrying prior turns' history).
 //!
 //! Journey value (not re-tested here) = the CHAINING across turns on one
@@ -20,13 +20,13 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .script([
             // turn 1 (2 entries: gated call + post-resume reply)
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 json!({"path": "/workspace/journey-approved.txt", "content": "APPROVED_PAYLOAD"}),
             ),
             RebornScriptedReply::text("first file written after approval"),
             // turn 2 (2 entries: gated call + post-resume reply)
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 json!({"path": "/workspace/journey-denied.txt", "content": "should not persist"}),
             ),
             RebornScriptedReply::text("understood, the second write was not authorized"),

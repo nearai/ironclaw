@@ -57,7 +57,8 @@ use ironclaw_secrets::SecretStore;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 
 use super::harness::{
-    RecordingRuntimeHttpEgress, StandaloneRootMounts, standalone_root_filesystem,
+    RecordingRuntimeHttpEgress, StandaloneRootMounts, TestArtifactPersister,
+    standalone_root_filesystem,
 };
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -155,6 +156,7 @@ pub(super) fn standalone_host_runtime_with_web_access(
     .with_secret_store(Arc::new(SecretStore::ephemeral()))
     .with_first_party_capabilities(Arc::new(handlers))
     .with_first_party_http_egress(http_egress)
+    .with_accounted_artifact_persistence(Arc::new(TestArtifactPersister::default()))
     .with_trust_policy(Arc::new(web_access_first_party_trust_policy()?));
 
     Ok(Arc::new(services.host_runtime_for_local_testing()))

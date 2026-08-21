@@ -23,6 +23,7 @@ mod structured_finalization;
 mod subagent_result;
 mod summary_artifacts;
 mod title;
+mod tool_artifacts;
 mod tool_result_records;
 mod tool_result_reference;
 
@@ -84,6 +85,9 @@ pub use ironclaw_common::{AttachmentKind, AttachmentRef};
 pub use ironclaw_llm::agent_message;
 pub use service::SessionThreadService;
 pub use subagent_result::FramedSubagentText;
+pub use tool_artifacts::{
+    DurableToolArtifactStore, LegacyResultArtifactRequest, TOOL_ARTIFACT_CHUNK_BYTES,
+};
 pub use tool_result_reference::{
     ProviderToolCallReferenceEnvelope, ToolResultIntrinsicOutcome, ToolResultReferenceEnvelope,
     ToolResultSafeSummary,

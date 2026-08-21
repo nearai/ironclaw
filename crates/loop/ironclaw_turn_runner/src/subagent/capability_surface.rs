@@ -180,9 +180,8 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_intersects_base_and_material_allowsets_for_subagent_context() {
-        let base = allowlist(&["builtin.read_file", "builtin.write_file"]);
-        let material_caps =
-            BTreeSet::from([cap("builtin.read_file"), cap("builtin.spawn_subagent")]);
+        let base = allowlist(&["builtin.read", "builtin.write"]);
+        let material_caps = BTreeSet::from([cap("builtin.read"), cap("builtin.spawn_subagent")]);
         let resolver = SubagentCapabilitySurfaceResolver::new(
             Arc::new(StaticResolver(base.clone())),
             Arc::new(SucceedingSource(SubagentPromptMaterial {
@@ -200,13 +199,12 @@ mod tests {
             .await
             .expect("subagent runs should intersect base and material allowsets");
 
-        assert_eq!(resolved, allowlist(&["builtin.read_file"]));
+        assert_eq!(resolved, allowlist(&["builtin.read"]));
     }
 
     #[tokio::test]
     async fn resolve_returns_material_allowset_when_base_is_all_for_subagent_context() {
-        let material_caps =
-            BTreeSet::from([cap("builtin.read_file"), cap("builtin.spawn_subagent")]);
+        let material_caps = BTreeSet::from([cap("builtin.read"), cap("builtin.spawn_subagent")]);
         let resolver = SubagentCapabilitySurfaceResolver::new(
             Arc::new(StaticResolver(CapabilitySurfacePolicy::allow_all())),
             Arc::new(SucceedingSource(SubagentPromptMaterial {
@@ -229,7 +227,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_returns_base_allowset_for_non_subagent_runs_without_material_source() {
-        let base = allowlist(&["builtin.read_file", "builtin.write_file"]);
+        let base = allowlist(&["builtin.read", "builtin.write"]);
         let resolver = SubagentCapabilitySurfaceResolver::new(
             Arc::new(StaticResolver(base.clone())),
             Arc::new(FailingSource),

@@ -43,7 +43,6 @@ mod model_gateway_error_mapping;
 mod model_routes;
 mod model_visible_scrub;
 mod prompt_context_budget;
-mod result_read;
 mod skill_activation;
 mod skill_bundle_context_source;
 mod skill_bundle_source;
@@ -80,10 +79,11 @@ pub use cancellation_port::{
     verify_product_live_cancellation_probe,
 };
 pub use capability_port::{
-    CapabilityResultWrite, CapabilityTrajectoryObserver, CapabilityWriteResult,
-    DecoratingLoopCapabilityPortFactory, DurablePersistence, HostRuntimeLoopCapabilityPort,
-    HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityPortDecorator,
-    LoopCapabilityPortFactory, LoopCapabilityResultWriter, loop_driver_execution_extension_id,
+    CapabilityResultUpdate, CapabilityResultWrite, CapabilityTrajectoryObserver,
+    CapabilityWriteResult, DecoratingLoopCapabilityPortFactory, DurablePersistence,
+    HostRuntimeLoopCapabilityPort, HostRuntimeLoopCapabilityPortFactory,
+    LoopCapabilityInputResolver, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
+    LoopCapabilityResultWriter, loop_driver_execution_extension_id,
 };
 pub use capability_surface_filter::{
     CapabilitySurfacePolicyFilter, CapabilitySurfaceVisibleFilter,
@@ -127,9 +127,6 @@ pub use model_routes::{
     ResolvedModelRouteSnapshot, StaticModelRouteResolver,
 };
 pub use model_visible_scrub::scrub_model_visible_detail;
-pub use result_read::{RESULT_READ_CAPABILITY_ID, result_read_capability};
-#[cfg(feature = "test-support")]
-pub use result_read::{RESULT_READ_CAPABILITY_ID_FOR_TEST, wrap_result_read_capability_for_test};
 pub use skill_activation::{
     DEFAULT_MAX_ACTIVE_SKILLS, DEFAULT_MAX_SKILL_CONTEXT_TOKENS, FirstPartySelectableSkillsRuntime,
     FirstPartySkillsExtension, FirstPartySkillsExtensionError, FirstPartySkillsExtensionHandles,
@@ -217,9 +214,11 @@ use ironclaw_loop_contracts::{
     LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInlineMessageBody, LoopInputCursor,
     LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopModelUsage,
     LoopPromptBundleAuthority, LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort,
-    LoopSafeSummary, LoopTranscriptPort, MemoryPromptContextLoad, MemoryPromptContextService,
-    ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode, SystemInferenceContextMessage,
-    SystemInferenceContextRole, UpdateAssistantDraft, VisibleCapabilityRequest,
+    LoopSafeSummary, LoopTranscriptPort, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+    MemoryPromptContextLoad, MemoryPromptContextService, ModelProfileId, ModelStreamChunk,
+    ModelVisibleArtifact, ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput,
+    PromptMode, SystemInferenceContextMessage, SystemInferenceContextRole, ToolObservationDetail,
+    ToolObservationStatus, UpdateAssistantDraft, VisibleCapabilityRequest,
     VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
     sort_instruction_snippets_for_prompt,
 };
@@ -1514,6 +1513,7 @@ where
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
     prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
+    legacy_result_artifacts: Option<Arc<ironclaw_threads::DurableToolArtifactStore>>,
 }
 
 impl<S, G> ThreadBackedLoopModelPort<S, G>
@@ -1545,6 +1545,7 @@ where
             attachment_read_port: None,
             stream_sink: None,
             prompt_diagnostic_sink: None,
+            legacy_result_artifacts: None,
         }
     }
 
@@ -1573,7 +1574,16 @@ where
             attachment_read_port: None,
             stream_sink: None,
             prompt_diagnostic_sink: None,
+            legacy_result_artifacts: None,
         }
+    }
+
+    pub fn with_legacy_result_artifacts(
+        mut self,
+        artifacts: Arc<ironclaw_threads::DurableToolArtifactStore>,
+    ) -> Self {
+        self.legacy_result_artifacts = Some(artifacts);
+        self
     }
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
@@ -2026,7 +2036,9 @@ where
                 let Some(content_ref) = message_ref_from_context(&message) else {
                     continue;
                 };
-                let tool_result_content = tool_result_content_for_context_message(&message)?;
+                let tool_result_content = self
+                    .tool_result_content_for_context_message(&message)
+                    .await?;
                 let image_parts = self.read_image_parts(&message.image_attachments).await;
                 messages.push(HostManagedModelMessage {
                     role: model_role_for_kind(message.kind),
@@ -2196,7 +2208,9 @@ where
                 content: context_message.content.clone(),
                 content_ref: message.content_ref,
                 tool_result_provider_call: context_message.tool_result_provider_call.clone(),
-                tool_result_content: tool_result_content_for_context_message(context_message)?,
+                tool_result_content: self
+                    .tool_result_content_for_context_message(context_message)
+                    .await?,
                 image_parts,
             });
         }
@@ -3466,6 +3480,140 @@ fn role_for_kind(kind: MessageKind) -> &'static str {
     }
 }
 
+impl<S, G> ThreadBackedLoopModelPort<S, G>
+where
+    S: SessionThreadService + ?Sized + Send + Sync,
+    G: HostManagedModelGateway + ?Sized + Send + Sync,
+{
+    async fn tool_result_content_for_context_message(
+        &self,
+        message: &ContextMessage,
+    ) -> Result<Option<HostManagedToolResultContent>, AgentLoopHostError> {
+        if message.kind != MessageKind::ToolResultReference {
+            return Ok(None);
+        }
+        let envelope =
+            ToolResultReferenceEnvelope::from_json_str(&message.content).map_err(|error| {
+                raw_agent_loop_host_error(
+                    "model_context",
+                    "decode_tool_result_reference",
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "tool result reference transcript content is invalid",
+                    error,
+                )
+            })?;
+        let observation_kind = envelope
+            .model_observation
+            .as_ref()
+            .and_then(|value| value.get("detail"))
+            .and_then(|value| value.get("kind"))
+            .and_then(serde_json::Value::as_str);
+        let Some(artifacts) = self.legacy_result_artifacts.as_ref() else {
+            return Ok(Some(HostManagedToolResultContent::Reference { envelope }));
+        };
+        // Only the retired result-reference shape (or an observation with no
+        // typed detail) needs lazy artifact migration. Current inline results,
+        // artifact references, and failure observations are already complete.
+        if observation_kind.is_some_and(|kind| kind != "result_reference") {
+            return Ok(Some(HostManagedToolResultContent::Reference { envelope }));
+        }
+        let producer_capability_id = message
+            .tool_result_provider_call
+            .as_ref()
+            .map(|call| call.capability_id.clone())
+            .map(Ok)
+            .unwrap_or_else(|| {
+                ironclaw_host_api::ids::CapabilityId::new("builtin.legacy_result")
+                    .map_err(|error| error.to_string())
+            })
+            .map_err(|error| {
+                raw_agent_loop_host_error(
+                    "model_context",
+                    "project_legacy_result",
+                    AgentLoopHostErrorKind::Internal,
+                    "legacy result projection capability identity is invalid",
+                    error,
+                )
+            })?;
+        let projection = artifacts
+            .project_legacy_result(ironclaw_threads::LegacyResultArtifactRequest {
+                owner_scope: ironclaw_host_api::artifact::ArtifactOwnerScope::from_resource_scope(
+                    &self.run_context.scope.to_resource_scope(),
+                ),
+                namespace: self.run_context.effective_artifact_namespace(),
+                producer_capability_id,
+                thread_scope: self.thread_scope.clone(),
+                thread_id: self.run_context.thread_id.clone(),
+                result_ref: envelope.result_ref.clone(),
+            })
+            .await;
+        // Fail soft: migrating a historical result into an artifact is an
+        // OPTIONAL upgrade of ONE transcript message. An un-projectable record
+        // (no durable tool result record backs a live capability result, for
+        // instance) must degrade that message to the reference it already is —
+        // the model keeps the safe summary and can still page the result ref —
+        // never abort the whole prompt build and terminalize the run.
+        let completed = match projection {
+            Ok(completed) => completed,
+            Err(error) => {
+                tracing::debug!(
+                    component = "model_context",
+                    operation = "project_legacy_result",
+                    result_ref = %envelope.result_ref,
+                    %error,
+                    "historical tool result could not be projected as an artifact; \
+                     keeping the existing reference"
+                );
+                return Ok(Some(HostManagedToolResultContent::Reference { envelope }));
+            }
+        };
+        let artifact_ref = completed.artifact_ref.to_string();
+        let model_observation = ModelVisibleToolObservation {
+            schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+            status: ToolObservationStatus::Success,
+            summary: envelope.safe_summary.as_str().to_string(),
+            detail: ToolObservationDetail::ArtifactReference {
+                artifact_ref: artifact_ref.clone(),
+                preview: None,
+                total_bytes: completed.byte_len,
+                item_count: None,
+            },
+            artifacts: vec![ModelVisibleArtifact {
+                artifact_ref,
+                summary: "Full capability result".to_string(),
+            }],
+            trust: ObservationTrust::UntrustedToolOutput,
+            recovery: None,
+        };
+        model_observation
+            .validate()
+            .map_err(|reason| AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, reason))?;
+        let projected = envelope
+            .replacing_model_observation(serde_json::to_value(model_observation).map_err(
+                |error| {
+                    raw_agent_loop_host_error(
+                        "model_context",
+                        "project_legacy_result",
+                        AgentLoopHostErrorKind::Internal,
+                        "historical artifact observation could not be serialized",
+                        error,
+                    )
+                },
+            )?)
+            .map_err(|error| {
+                raw_agent_loop_host_error(
+                    "model_context",
+                    "project_legacy_result",
+                    AgentLoopHostErrorKind::Internal,
+                    "historical artifact observation is invalid",
+                    error,
+                )
+            })?;
+        Ok(Some(HostManagedToolResultContent::Reference {
+            envelope: projected,
+        }))
+    }
+}
 fn model_role_for_kind(kind: MessageKind) -> HostManagedModelMessageRole {
     match kind {
         MessageKind::User => HostManagedModelMessageRole::User,
@@ -3476,25 +3624,6 @@ fn model_role_for_kind(kind: MessageKind) -> HostManagedModelMessageRole {
         MessageKind::ToolResultReference => HostManagedModelMessageRole::ToolResult,
         MessageKind::CapabilityDisplayPreview => HostManagedModelMessageRole::System,
     }
-}
-
-fn tool_result_content_for_context_message(
-    message: &ContextMessage,
-) -> Result<Option<HostManagedToolResultContent>, AgentLoopHostError> {
-    if message.kind != MessageKind::ToolResultReference {
-        return Ok(None);
-    }
-    let envelope =
-        ToolResultReferenceEnvelope::from_json_str(&message.content).map_err(|error| {
-            raw_agent_loop_host_error(
-                "model_context",
-                "decode_tool_result_reference",
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "tool result reference transcript content is invalid",
-                error,
-            )
-        })?;
-    Ok(Some(HostManagedToolResultContent::Reference { envelope }))
 }
 
 fn safe_context_summary(kind: MessageKind) -> &'static str {

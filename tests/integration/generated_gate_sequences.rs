@@ -46,7 +46,7 @@ use serde_json::json;
 
 /// The capability the gate guards. Named once so the effect-count assertion
 /// and the scripted call cannot drift apart.
-const GATED_CAPABILITY: &str = "builtin.write_file";
+const GATED_CAPABILITY: &str = "builtin.write";
 
 // The complete seven-axis denominator and its selected pairwise crossings live
 // in `tests/e2e/state_machine_coverage.py`. This target supplies the executable

@@ -547,7 +547,7 @@ test("groupMessages: activity run falls back to tool update timestamps", () => {
     {
       id: "tool-list",
       role: "tool_activity",
-      toolName: "list_dir",
+      toolName: "read",
       updatedAt: "2026-06-16T09:44:23.277989Z",
     },
   ]);

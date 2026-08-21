@@ -1903,6 +1903,27 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(root_plan["root_partitions"], [0])
         self.assertEqual(integration_plan["integration_lanes"], [0])
 
+    def test_llm_trace_fixture_readme_plans_like_shared_replay_support(self) -> None:
+        """`tests/fixtures/llm_traces/README.md` documents the fixture format
+        of the shared `TraceLlm` replay provider (`tests/support/trace_llm.rs`),
+        so it plans exactly like shared root-test support: a representative
+        root partition, no integration lane.
+
+        Regression fixture: the coding-tool cutover renamed the pinned tool
+        surface and edited this README to match, and the fail-closed arm
+        rejected that PR as an unmapped test path. The mapping is exact —
+        a sibling fixture without a decision still fails closed.
+        """
+        plan = self.plan("pull_request", ["tests/fixtures/llm_traces/README.md"])
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["root_partitions"], [0])
+        self.assertEqual(plan["integration_lanes"], [])
+
+        with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
+            self.plan(
+                "pull_request",
+                ["tests/fixtures/llm_traces/spot/tool_echo.json"],
+            )
     def test_direct_root_support_runs_both_representative_tiers(self) -> None:
         # tests/support/mod.rs is compiled into the root suites AND the
         # integration group targets (via `#[path = "../../support/mod.rs"]`),
@@ -1930,6 +1951,35 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )
 
         self.assertEqual(plan["integration_lanes"], [expected_lane])
+
+    def test_pinned_contract_fixture_selects_its_owning_root_partition(self) -> None:
+        prefix = "tests/fixtures/pinned_coding_contract/"
+        expected_owner = "tests/reborn_coding_contract_snapshot.rs"
+        for fixture_prefix in (
+            "tests/fixtures/pinned_coding_contract/",
+            "tests/support/pinned_coding_contract/",
+        ):
+            self.assertEqual(
+                planner.ROOT_FIXTURE_PREFIX_OWNERS[fixture_prefix],
+                expected_owner,
+            )
+        owner = expected_owner
+        expected_partition = planner._root_test_partitions()[owner]
+
+        plan = self.plan("pull_request", [f"{prefix}golden/errors/read.json"])
+
+        self.assertEqual(plan["root_partitions"], [expected_partition])
+        self.assertEqual(plan["integration_lanes"], [])
+
+        support_plan = self.plan(
+            "pull_request", ["tests/support/pinned_coding_contract/mod.rs"]
+        )
+        self.assertEqual(support_plan["root_partitions"], [expected_partition])
+        self.assertEqual(support_plan["integration_lanes"], [])
+
+    def test_shared_root_support_selects_representative_partition(self) -> None:
+        plan = self.plan("pull_request", ["tests/support/mod.rs"])
+        self.assertEqual(plan["root_partitions"], [0])
 
     def test_unowned_snapshot_still_fails_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):

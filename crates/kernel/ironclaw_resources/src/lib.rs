@@ -795,6 +795,27 @@ pub trait ResourceGovernor: Send + Sync {
         reservation_id: ResourceReservationId,
     ) -> Result<ReservationOutcome, ResourceError>;
 
+    /// Expands an active reservation before accepting additional output.
+    ///
+    /// The additional estimate is checked against every account in the
+    /// reservation's original cascade. No capacity changes if the expansion
+    /// is denied.
+    fn grow_reservation(
+        &self,
+        reservation_id: ResourceReservationId,
+        additional: ResourceEstimate,
+    ) -> Result<ResourceReservation, ResourceError> {
+        self.grow_reservation_with_outcome(reservation_id, additional)
+            .map(|outcome| outcome.reservation)
+    }
+
+    /// Expands an active reservation and returns threshold warnings.
+    fn grow_reservation_with_outcome(
+        &self,
+        reservation_id: ResourceReservationId,
+        additional: ResourceEstimate,
+    ) -> Result<ReservationOutcome, ResourceError>;
+
     /// Reconciles an active reservation with actual usage and releases reserved capacity exactly once.
     fn reconcile(
         &self,
@@ -1503,6 +1524,19 @@ where
         result
     }
 
+    fn grow_reservation_with_outcome(
+        &self,
+        reservation_id: ResourceReservationId,
+        additional: ResourceEstimate,
+    ) -> Result<ReservationOutcome, ResourceError> {
+        let now = self.clock.now();
+        let result = self.update_active_state(move |state| {
+            grow_reservation_in_state(state, reservation_id, additional.clone(), now)
+        });
+        emit_reserve_events(self.event_sink.as_ref(), &result, now);
+        result
+    }
+
     fn reconcile(
         &self,
         reservation_id: ResourceReservationId,
@@ -1953,6 +1987,18 @@ impl ResourceGovernor for InMemoryResourceGovernor {
         result
     }
 
+    fn grow_reservation_with_outcome(
+        &self,
+        reservation_id: ResourceReservationId,
+        additional: ResourceEstimate,
+    ) -> Result<ReservationOutcome, ResourceError> {
+        let now = self.clock.now();
+        let result =
+            grow_reservation_in_state(&mut self.lock_state(), reservation_id, additional, now);
+        emit_reserve_events(self.event_sink.as_ref(), &result, now);
+        result
+    }
+
     fn reconcile(
         &self,
         reservation_id: ResourceReservationId,
@@ -2197,6 +2243,193 @@ pub(crate) fn reserve_with_outcome_in_state(
         reservation,
         warnings,
     })
+}
+
+pub(crate) fn grow_reservation_in_state(
+    state: &mut ResourceState,
+    reservation_id: ResourceReservationId,
+    additional: ResourceEstimate,
+    now: DateTime<Utc>,
+) -> Result<ReservationOutcome, ResourceError> {
+    validate_estimate(&additional)?;
+    let mut record = state
+        .reservations
+        .get(&reservation_id)
+        .cloned()
+        .ok_or(ResourceError::UnknownReservation { id: reservation_id })?;
+    if record.status != ReservationStatus::Active {
+        let status = record.status;
+        return Err(ResourceError::ReservationClosed {
+            id: reservation_id,
+            status,
+        });
+    }
+
+    let expanded_estimate = add_estimates(&record.reservation.estimate, &additional)?;
+    let requested = ResourceTally::from_estimate(&additional);
+    let mut warnings = Vec::new();
+    for account in &record.accounts {
+        advance_period_if_rolled_over(state, account, now);
+        if let Some(limits) = state.limits.get(account) {
+            let usage = state
+                .usage_by_account
+                .get(account)
+                .cloned()
+                .unwrap_or_default();
+            let reserved = state
+                .reserved_by_account
+                .get(account)
+                .cloned()
+                .unwrap_or_default();
+            let outcome = evaluate_cascade_for_account(
+                account,
+                limits,
+                &usage,
+                &reserved,
+                &requested,
+                state.period_anchors.get(account).copied(),
+            )?;
+            match outcome {
+                CascadeOutcome::Allow(mut account_warnings) => {
+                    warnings.append(&mut account_warnings);
+                }
+                CascadeOutcome::RequiresApproval {
+                    warnings: mut account_warnings,
+                    needed,
+                } => {
+                    warnings.append(&mut account_warnings);
+                    return Err(ResourceError::RequiresApproval {
+                        needed: Box::new(needed),
+                        warnings,
+                    });
+                }
+                CascadeOutcome::Deny {
+                    warnings: mut account_warnings,
+                    denial,
+                } => {
+                    warnings.append(&mut account_warnings);
+                    return Err(ResourceError::LimitExceeded {
+                        denial: Box::new(denial),
+                        warnings,
+                    });
+                }
+            }
+        }
+    }
+
+    for account in &record.accounts {
+        state
+            .reserved_by_account
+            .entry(account.clone())
+            .or_default()
+            .add_assign(&requested);
+    }
+    record.tally.add_assign(&requested);
+    record.reservation.estimate = expanded_estimate;
+    let reservation = record.reservation.clone();
+    state.reservations.insert(reservation_id, record);
+    Ok(ReservationOutcome {
+        reservation,
+        warnings,
+    })
+}
+
+fn add_estimates(
+    current: &ResourceEstimate,
+    additional: &ResourceEstimate,
+) -> Result<ResourceEstimate, ResourceError> {
+    Ok(ResourceEstimate {
+        usd: add_optional_decimal(current.usd, additional.usd, ResourceDimension::Usd)?,
+        input_tokens: add_optional_u64(
+            current.input_tokens,
+            additional.input_tokens,
+            ResourceDimension::InputTokens,
+        )?,
+        output_tokens: add_optional_u64(
+            current.output_tokens,
+            additional.output_tokens,
+            ResourceDimension::OutputTokens,
+        )?,
+        wall_clock_ms: add_optional_u64(
+            current.wall_clock_ms,
+            additional.wall_clock_ms,
+            ResourceDimension::WallClockMs,
+        )?,
+        output_bytes: add_optional_u64(
+            current.output_bytes,
+            additional.output_bytes,
+            ResourceDimension::OutputBytes,
+        )?,
+        network_egress_bytes: add_optional_u64(
+            current.network_egress_bytes,
+            additional.network_egress_bytes,
+            ResourceDimension::NetworkEgressBytes,
+        )?,
+        process_count: add_optional_u32(
+            current.process_count,
+            additional.process_count,
+            ResourceDimension::ProcessCount,
+        )?,
+        concurrency_slots: add_optional_u32(
+            current.concurrency_slots,
+            additional.concurrency_slots,
+            ResourceDimension::ConcurrencySlots,
+        )?,
+    })
+}
+
+fn add_optional_decimal(
+    current: Option<Decimal>,
+    additional: Option<Decimal>,
+    dimension: ResourceDimension,
+) -> Result<Option<Decimal>, ResourceError> {
+    match (current, additional) {
+        (None, None) => Ok(None),
+        (current, additional) => current
+            .unwrap_or_default()
+            .checked_add(additional.unwrap_or_default())
+            .map(Some)
+            .ok_or(ResourceError::InvalidEstimate {
+                dimension,
+                reason: "overflow",
+            }),
+    }
+}
+
+fn add_optional_u64(
+    current: Option<u64>,
+    additional: Option<u64>,
+    dimension: ResourceDimension,
+) -> Result<Option<u64>, ResourceError> {
+    match (current, additional) {
+        (None, None) => Ok(None),
+        (current, additional) => current
+            .unwrap_or_default()
+            .checked_add(additional.unwrap_or_default())
+            .map(Some)
+            .ok_or(ResourceError::InvalidEstimate {
+                dimension,
+                reason: "overflow",
+            }),
+    }
+}
+
+fn add_optional_u32(
+    current: Option<u32>,
+    additional: Option<u32>,
+    dimension: ResourceDimension,
+) -> Result<Option<u32>, ResourceError> {
+    match (current, additional) {
+        (None, None) => Ok(None),
+        (current, additional) => current
+            .unwrap_or_default()
+            .checked_add(additional.unwrap_or_default())
+            .map(Some)
+            .ok_or(ResourceError::InvalidEstimate {
+                dimension,
+                reason: "overflow",
+            }),
+    }
 }
 
 pub(crate) fn reconcile_in_state(

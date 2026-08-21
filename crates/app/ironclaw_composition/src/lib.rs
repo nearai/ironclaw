@@ -455,6 +455,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/suggestions",
     "/turns",
     "/resources",
+    "/artifacts",
     "/engine",
     "/skills",
     "/workspace",
@@ -883,6 +884,13 @@ mod mount_view_tests {
         assert_eq!(
             resolved.as_str(),
             "/tenants/__system__/users/__system__/turns/state.json"
+        );
+        let artifact_path = view
+            .resolve(&ScopedPath::new("/artifacts/output.json").unwrap())
+            .unwrap();
+        assert_eq!(
+            artifact_path.as_str(),
+            "/tenants/__system__/users/__system__/artifacts/output.json"
         );
     }
 

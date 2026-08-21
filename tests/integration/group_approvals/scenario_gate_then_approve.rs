@@ -1,4 +1,4 @@
-//! Scenario: a gated `builtin.write_file` raises a real `BlockedApproval` gate;
+//! Scenario: a gated `builtin.write` raises a real `BlockedApproval` gate;
 //! approving it resumes the run to completion.
 //!
 //! Real path: scripted tool call → first-party runtime → `PermissionMode::Ask`
@@ -17,7 +17,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .thread("conv-approve")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 json!({"path": "/workspace/approved.txt", "content": "approved write"}),
             ),
             RebornScriptedReply::text("file written after approval"),

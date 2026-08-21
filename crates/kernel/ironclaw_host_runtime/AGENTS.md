@@ -20,7 +20,7 @@
   (`surface`); the hot capability catalog
   `HotCapabilityCatalog`/`HotCapabilityRecord`/`publish_hot_capability_catalog`
   (`capability_catalog`).
-- First-party capabilities: the `FirstPartyCapabilityRegistry`/handler/request/result (`first_party`) and the builtin tool set `BuiltinFirstPartyTools` with capability IDs (echo/time/json/http/shell/read_file/write_file/list_dir/glob/grep/apply_patch) and `builtin_first_party_handlers`/`_package` (`first_party_tools`). Several builtins keep only their manifest, registry wiring, and handler adapter here — their executor lives in `ironclaw_extension_support` (the coding tools, and since WS3 the skill-install source fetcher). See "Agent-loop touch points" below for which half goes where.
+- First-party capabilities: the `FirstPartyCapabilityRegistry`/handler/request/result (`first_party`) and the builtin tool set `BuiltinFirstPartyTools` with capability IDs (echo/time/json/http/shell/read/write/edit/glob/grep) and `builtin_first_party_handlers`/`_package` (`first_party_tools`). Several builtins keep only their manifest, registry wiring, and handler adapter here — their executor lives in `ironclaw_extension_support` (the pinned coding tools, and since WS3 the skill-install source fetcher). See "Agent-loop touch points" below for which half goes where.
 - Host-owned extension contract *discovery*: `discover_extensions_with_default_host_api_contracts*`, `discover_extensions_tolerant_bounded*` (`extension_contracts`) — the `RootFilesystem` binding, which is this crate's job. The two **default sets** those functions apply are **not** owned here (WS3 row 3, PROPOSAL §6.5.9): `ironclaw_host_api::host_port::default_host_port_catalog` and `ironclaw_extension_registry::default_host_api_contract_registry` each live with the vocabulary they enumerate. Do not re-add either one — or a `pub use` shim for them — to this crate. Product-specific manifest contracts are still added by the owning composition/product layer.
 - Obligation handling (`obligations`), split along its **three chartered owners** so no single file fuses them again (PROPOSAL §6.5.9, CHECKLIST WS3). Put new obligation code in the owner it belongs to, never in `mod.rs`:
   - `obligations::handler` — which obligations apply and what each one does before/after dispatch: `BuiltinObligationHandler`, the `CapabilityObligationHandler` impl, and the audit / redaction / resource-ceiling / mount validation behind them.
@@ -109,8 +109,10 @@
 
 - Add a new runtime service module when the service has its own authority,
   readiness, or resource accounting boundary.
-- Add a first-party tool file per capability, except for tightly-coupled
-  v1-compatible coding-tool families that share one legacy surface contract.
+- Add a first-party tool file per capability, except for the pinned coding family
+  (read/write/edit/glob/grep), which shares the host-half file
+  `first_party_tools/coding.rs` and is implemented per-engine in
+  `ironclaw_extension_support::coding::pinned`.
 - Keep readiness checks near the runtime service they validate;
   driver/product readiness belongs in `ironclaw_turn_runner`.
 

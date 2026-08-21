@@ -303,6 +303,7 @@ fn execution_context_for_scope<'a>(
 ) -> ExecutionContext {
     let caller = ExtensionId::new("extension-tool-test-caller").expect("valid extension id"); // safety: static test extension id is valid.
     let context = ExecutionContext {
+        artifact_namespace: None,
         run_id: Some(RunId::new()),
         origin: None,
         invocation_id: resource_scope.invocation_id,

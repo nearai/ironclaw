@@ -129,7 +129,7 @@ fn local_host_effective_policy() -> EffectiveRuntimePolicy {
 }
 
 /// Local trusted-laptop policy with minimal approvals, so an in-workspace
-/// `write_file` auto-proceeds instead of parking on a destructive-write gate.
+/// `write` auto-proceeds instead of parking on a destructive-write gate.
 /// Used by the file-production test, which is about download — not approval.
 fn local_yolo_effective_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
@@ -365,7 +365,7 @@ const CSV_BODY: &str = "name,score\nalice,90\nbob,85\n";
 const PDF_BODY: &str = "%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n";
 
 /// Scripted gateway that drives the agent to produce two downloadable files —
-/// a CSV then a PDF — via `builtin.write_file`, then emit a final reply that
+/// a CSV then a PDF — via `builtin.write`, then emit a final reply that
 /// references both `/workspace` paths. Exercises the full "agent produces a
 /// file the user can download" flow against the real loop + capability host.
 #[derive(Debug, Default)]
@@ -401,7 +401,7 @@ async fn register_write(
         .map_err(|err| {
             HostManagedModelError::safe(
                 HostManagedModelErrorKind::InvalidRequest,
-                format!("register_provider_tool_call(write_file) failed: {err}"),
+                format!("register_provider_tool_call(write) failed: {err}"),
             )
         })
 }
@@ -433,7 +433,7 @@ impl HostManagedModelGateway for WriteFileGateway {
             index
         };
 
-        let write_id = CapabilityId::new("builtin.write_file").expect("write_file capability id");
+        let write_id = CapabilityId::new("builtin.write").expect("write capability id");
         let write_tool = capabilities
             .tool_definitions()
             .map_err(|err| {
@@ -444,7 +444,7 @@ impl HostManagedModelGateway for WriteFileGateway {
             })?
             .into_iter()
             .find(|def| def.capability_id == write_id)
-            .expect("builtin.write_file must be visible in standalone capability surface");
+            .expect("builtin.write must be visible in standalone capability surface");
 
         // One tool round writes both files (mirrors the single-round shape the
         // echo gateway proves), then the follow-up call emits the final reply.
@@ -2468,7 +2468,7 @@ async fn webui_filesystem_memory_mount_is_scoped_to_authenticated_user() {
 }
 
 /// End-to-end: the agent writes a CSV and a PDF into its project workspace via
-/// `write_file`, and both are then listable and downloadable through the v2
+/// `write`, and both are then listable and downloadable through the v2
 /// project-filesystem endpoints with the right mime, attachment disposition,
 /// and exact bytes — while a path outside the workspace is refused.
 #[tokio::test]

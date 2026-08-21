@@ -219,6 +219,9 @@ impl ExternalToolCapabilityPort {
             let write = self
                 .result_writer
                 .write_capability_result(CapabilityResultWrite {
+                    receipt: None,
+                    completed_artifact: None,
+                    canonical_output_digest: None,
                     run_context: &self.run_context,
                     input_ref: &request.input_ref,
                     invocation_id: InvocationId::new(),
@@ -226,6 +229,7 @@ impl ExternalToolCapabilityPort {
                     output,
                     display_preview: None,
                     durable_persistence: DurablePersistence::Persist,
+                    canonical_item_count: None,
                 })
                 .await?;
             // The parked call is resolved: drop its pending-call record so a run

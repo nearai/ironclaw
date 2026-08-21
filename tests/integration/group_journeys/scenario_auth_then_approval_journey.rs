@@ -1,6 +1,6 @@
 //! C-JOURNEY convergence scenario: one conversation chains an APPROVAL gate
 //! then an AUTH gate on the SAME capability call (turn 1, `github.get_repo`),
-//! then a plain APPROVAL gate on a different capability (turn 2, `write_file`),
+//! then a plain APPROVAL gate on a different capability (turn 2, `write`),
 //! then a follow-up (turn 3) — all on ONE `HostRuntimeCapabilityHarness`
 //! runtime. Distinct from `scenario_interactive_approval_journey`
 //! (approval → approval only): here gate classes chain WITHIN one capability
@@ -29,7 +29,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
             ),
             // turn 2 (2 entries: approval-gated call + post-resume reply)
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 json!({"path": "/workspace/auth-journey-approved.txt", "content": "AUTH_JOURNEY_PAYLOAD"}),
             ),
             RebornScriptedReply::text("file written after approval"),
@@ -60,7 +60,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // proves the credential-backed re-dispatch actually ran.
     h.assert_tool_result_contains("octocat/hello-world").await?;
 
-    // --- turn 2: write_file approval gate (same conversation, next turn) ---
+    // --- turn 2: write approval gate (same conversation, next turn) ---
     let (run2, gate2) = h
         .submit_turn_until_blocked("AUTHJOURNEY_TURN2 write the approved file")
         .await?;

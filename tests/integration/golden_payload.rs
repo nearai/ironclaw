@@ -133,15 +133,26 @@ async fn golden_context_surfacing() {
 /// entries for a production capability whose descriptor is parallel-safe.
 /// The executor unit test pins actual overlap with deterministic scheduling.
 /// This integration test first creates its own file fixture through the real
-/// write capability, then pins descriptor classification, composition wiring,
+/// write capability (scripted under the pinned coding provider name `write`,
+/// as advertised), then pins descriptor classification, composition wiring,
 /// durable result persistence, exact dispatch count, and input-order replay.
+///
+/// The two reads use the pinned exact-range form `:raw:N-N` so each call
+/// returns ONLY its own line ("first" / "second"): numbered `:N-N` reads
+/// deliberately pad 1 leading + 3 trailing context lines (`read_single_range`
+/// in crates/extensions/ironclaw_extension_support/src/coding/pinned/read.rs,
+/// `RANGE_LEADING_CONTEXT_LINES`/`RANGE_TRAILING_CONTEXT_LINES` in the pinned
+/// upstream `read-format.ts`), which on this tiny fixture renders the whole
+/// file byte-identically for both selectors and would hide per-call result
+/// association. Raw mode is what the pinned upstream guarantees for "exactly
+/// the requested single line" (`read-raw-range.test.ts`).
 #[tokio::test]
 async fn golden_parallel_tool_calls() {
     let h = RebornIntegrationHarness::test_default()
         .with_durable_capability_io_file_tools()
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 json!({
                     "path": "/workspace/parallel.txt",
                     "content": "first\nsecond\n"
@@ -149,12 +160,12 @@ async fn golden_parallel_tool_calls() {
             ),
             RebornScriptedReply::tool_calls([
                 (
-                    "builtin.read_file",
-                    json!({"path": "/workspace/parallel.txt", "offset": 1, "limit": 1}),
+                    "builtin.read",
+                    json!({"path": "/workspace/parallel.txt:raw:1-1"}),
                 ),
                 (
-                    "builtin.read_file",
-                    json!({"path": "/workspace/parallel.txt", "offset": 2, "limit": 1}),
+                    "builtin.read",
+                    json!({"path": "/workspace/parallel.txt:raw:2-2"}),
                 ),
             ]),
             RebornScriptedReply::text("read both"),
@@ -165,9 +176,18 @@ async fn golden_parallel_tool_calls() {
     h.submit_turn("write a file, then read both lines")
         .await
         .expect("turn completes");
-    h.assert_tool_invocation_count("builtin.read_file", 2)
+    h.assert_tool_invocation_count("builtin.read", 2)
         .await
         .expect("both parallel-safe read calls reached the production capability host once");
+    h.assert_capability_result_count("builtin.read", 2)
+        .await
+        .expect("each parallel read call recorded its own distinct result (no dedup/collision)");
+    h.assert_tool_result_contains("first")
+        .await
+        .expect("the :raw:1-1 read result ('first') surfaced to the model");
+    h.assert_tool_result_contains("second")
+        .await
+        .expect("the :raw:2-2 read result ('second') surfaced to the model");
     h.assert_golden_payload("parallel_tool_calls");
     h.assert_reply_eq("read both")
         .await
@@ -207,7 +227,8 @@ async fn golden_image_attachment_turn() {
 }
 
 /// (h) Gated turn (approve arm): a real `BlockedApproval` gate raised by a
-/// scripted `builtin.write_file` call, approved, and resumed. Snapshots both
+/// scripted `builtin.write` call (emitting the exact pinned coding provider
+/// name `write`, as advertised), approved, and resumed. Snapshots both
 /// captured inference calls around the gate, pinning that a resume doesn't
 /// silently drop, duplicate, or reorder history. Distinct from (b): this one
 /// actually parks on `TurnStatus::BlockedApproval` between the two calls.
@@ -220,7 +241,7 @@ async fn golden_gated_turn_approve() {
         .thread("golden-gated-approve")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 json!({"path": "/workspace/golden.txt", "content": "golden write"}),
             ),
             RebornScriptedReply::text("file written"),

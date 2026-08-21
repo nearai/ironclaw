@@ -621,7 +621,7 @@ async fn product_event_stream_projects_runtime_activity_failure_summary() {
     let agent_id = AgentId::new("webui-activity-summary-agent").unwrap();
     let thread_id = ThreadId::new("webui-activity-summary-thread").unwrap();
     let invocation_id = InvocationId::new();
-    let capability = CapabilityId::new("builtin.read_file").unwrap();
+    let capability = CapabilityId::new("builtin.read").unwrap();
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     event_log
         .append(
@@ -632,9 +632,7 @@ async fn product_event_stream_projects_runtime_activity_failure_summary() {
                 Some(RuntimeKind::FirstParty),
                 "operation_failed",
             )
-            .with_error_summary(
-                "read_file failed for path workspace ironclaw_issues.json: file not found",
-            ),
+            .with_error_summary("Path '/workspace/ironclaw_issues.json' not found"),
         )
         .await
         .unwrap();
@@ -677,13 +675,13 @@ async fn product_event_stream_enriches_activity_with_display_preview_from_store(
     let thread_id = ThreadId::new("webui-preview-thread").unwrap();
     let invocation_id = InvocationId::new();
     let run_id = TurnRunId::new();
-    let capability = CapabilityId::new("builtin.read_file").unwrap();
+    let capability = CapabilityId::new("builtin.read").unwrap();
     let input_ref = preview_input_ref("webui-preview-input");
     let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
     display_previews.record_input(
         &run_id.to_string(),
         &input_ref,
-        "read_file",
+        "read",
         &serde_json::json!({
             "path": "src/main.rs",
             "token": "sk-secret",
@@ -738,7 +736,7 @@ async fn product_event_stream_enriches_activity_with_display_preview_from_store(
                     if preview.invocation_id == invocation_id
                         && preview.thread_id.as_ref() == Some(&thread_id)
                         && preview.capability_id == capability
-                        && preview.title == "read_file"
+                        && preview.title == "read"
                         && preview.subtitle.as_deref() == Some("src/main.rs")
                         && preview.input_summary.as_deref().is_some_and(|summary| summary.contains("path: src/main.rs"))
                         && preview.output_preview.as_deref() == Some("fn main() {}")
@@ -756,13 +754,13 @@ async fn product_event_stream_enriches_activity_with_display_preview_from_store(
 #[tokio::test]
 async fn capability_display_preview_store_redacts_unsafe_paths_and_secrets() {
     let run_id = TurnRunId::new();
-    let capability = CapabilityId::new("builtin.read_file").unwrap();
+    let capability = CapabilityId::new("builtin.read").unwrap();
     let input_ref = preview_input_ref("redacted-preview-input");
     let store = CapabilityDisplayPreviewStore::default();
     store.record_input(
         &run_id.to_string(),
         &input_ref,
-        "read_file",
+        "read",
         &serde_json::json!({
             "path": "/Users/alice/secret.rs",
             "api_key": "sk-secret"

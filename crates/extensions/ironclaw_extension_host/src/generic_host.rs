@@ -539,6 +539,7 @@ fn descriptors_from_dynamic_schemas(
                 resource_profile: capability.resource_profile.clone(),
                 origin_gate_matrix: capability.origin_gate_matrix.clone(),
                 standard_op: capability.standard_op,
+                provider_tool_name: capability.provider_tool_name.clone(),
             })
         })
         .collect()
@@ -572,6 +573,7 @@ fn placeholder_descriptors_from_manifest(
                 resource_profile: capability.resource_profile.clone(),
                 origin_gate_matrix: capability.origin_gate_matrix.clone(),
                 standard_op: capability.standard_op,
+                provider_tool_name: capability.provider_tool_name.clone(),
             },
         )
         .collect()

@@ -309,7 +309,7 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
                 "scheduled automation cannot mutate routines",
             ));
         }
-        bounded_input_size(request.capability_id.as_str(), &request.input)?;
+        bounded_input_size(&request.input)?;
         let started = Instant::now();
         let output = match request.capability_id.as_str() {
             TRIGGER_CREATE_CAPABILITY_ID => {

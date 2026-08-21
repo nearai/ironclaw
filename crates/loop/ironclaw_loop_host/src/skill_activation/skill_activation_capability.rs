@@ -101,6 +101,9 @@ where
         let write_result = invocation
             .result_writer
             .write_capability_result(CapabilityResultWrite {
+                receipt: None,
+                completed_artifact: None,
+                canonical_output_digest: None,
                 run_context: &invocation.run_context,
                 input_ref: &invocation.request.input_ref,
                 invocation_id: InvocationId::new(),
@@ -108,6 +111,7 @@ where
                 output,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
+                canonical_item_count: None,
             })
             .await?;
         Ok(resolution::completed(

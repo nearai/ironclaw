@@ -1168,12 +1168,17 @@ pub fn claimed_turn_run_from_process_claim(
             reason: "claimed agent-turn process missing resolved_run_profile metadata".to_string(),
         });
     };
+    let spawn_tree_root_run_id = claimed
+        .state
+        .root_process_id
+        .map(turn_run_id_from_process_id);
     let state = turn_run_state_from_process_snapshot(claimed.state)?;
     Ok(ClaimedTurnRun {
         state,
         resolved_run_profile,
         subagent_depth: metadata.subagent_depth,
         spawn_tree_descendant_cap: metadata.spawn_tree_descendant_cap,
+        spawn_tree_root_run_id,
         subagent_activation_provenance: metadata.subagent_activation_provenance,
         runner_id: turn_runner_id_from_worker(&claimed.worker_id)?,
         lease_token: turn_lease_token_from_process(&claimed.lease_token)?,
@@ -1183,6 +1188,9 @@ pub fn claimed_turn_run_from_process_claim(
 impl From<&ClaimedTurnRun> for ClaimedProcess {
     fn from(claimed: &ClaimedTurnRun) -> Self {
         let mut state = claimed.state.to_process_state_snapshot();
+        state.root_process_id = claimed
+            .spawn_tree_root_run_id
+            .map(process_id_from_turn_run_id);
         state.metadata =
             json!({ "agent_turn": AgentTurnProcessStateMetadata::from_claimed(claimed) });
         Self {

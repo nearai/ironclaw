@@ -171,6 +171,8 @@ pub struct Invocation {
     pub actor: Actor,
     /// Where the call came from — the only fact the kernel consults about origin.
     pub origin: InvocationOrigin,
+    /// Durable artifact namespace shared by a root loop run and its descendants.
+    pub artifact_namespace: Option<crate::artifact::ArtifactNamespaceId>,
     /// Host-derived resource estimate, consumed by `authorize()` at reservation
     /// (§5.3.3). Never model-supplied.
     pub estimate: ResourceEstimate,
@@ -311,6 +313,7 @@ mod tests {
         ] {
             let kind = origin.kind();
             let inv = Invocation {
+                artifact_namespace: None,
                 activity_id: ActivityId::new(),
                 capability: CapabilityId::new("shell.exec").unwrap(),
                 input: serde_json::json!({ "cmd": "echo hi" }),

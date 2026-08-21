@@ -1,13 +1,22 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use async_trait::async_trait;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
+    artifact::{
+        ArtifactAccessError, ArtifactAccessPort, ArtifactDigest, ArtifactId, ArtifactNamespaceId,
+        ArtifactOwnerScope, ArtifactPersistencePort, ArtifactReadChunk, ArtifactReadRequest,
+        ArtifactRef, ArtifactWriteError, ArtifactWriteHandle, ArtifactWriteMetadata,
+        CompletedArtifact,
+    },
     decision::RuntimeCredentialAuthRequirement,
     dispatch::{DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind},
     ids::{ExtensionId, RunId, SecretHandle, UserId, VendorId},
     invocation::InvocationOrigin,
-    resource::{ResourceEstimate, ResourceReservation, ResourceScope},
+    resource::{ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage},
     runtime::RuntimeKind,
 };
 use serde_json::json;
@@ -109,6 +118,7 @@ async fn first_party_handler_receives_authenticated_actor_distinct_from_subject_
 
     adapter
         .dispatch_json(RuntimeLaneRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: None,
             package: &package,
@@ -177,6 +187,7 @@ async fn first_party_adapter_forwards_scheduled_loop_origin_unchanged() {
 
     adapter
         .dispatch_json(RuntimeLaneRequest {
+            artifact_namespace: None,
             run_id: Some(run_id),
             origin: Some(origin.clone()),
             package: &package,
@@ -273,6 +284,7 @@ async fn first_party_adapter_maps_handler_auth_required_to_dispatch_auth_require
 
     let result = adapter
         .dispatch_json(RuntimeLaneRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: None,
             package: &package,
@@ -339,6 +351,7 @@ async fn first_party_adapter_releases_reservation_when_handler_returns_auth_requ
 
     let result = adapter
         .dispatch_json(RuntimeLaneRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: None,
             package: &package,
@@ -396,6 +409,7 @@ async fn first_party_adapter_forwards_required_secrets_from_auth_required_handle
 
     let result = adapter
         .dispatch_json(RuntimeLaneRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: None,
             package: &package,
@@ -460,6 +474,7 @@ async fn first_party_adapter_forwards_credential_requirements_from_auth_required
 
     let result = adapter
         .dispatch_json(RuntimeLaneRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: None,
             package: &package,
@@ -517,6 +532,7 @@ async fn first_party_adapter_maps_panicking_handler_to_backend() {
 
     let result = adapter
         .dispatch_json(RuntimeLaneRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: None,
             package: &package,
@@ -651,6 +667,15 @@ impl ResourceGovernor for ReconcileFailingGovernor {
             .reserve_with_id_and_outcome(scope, estimate, reservation_id)
     }
 
+    fn grow_reservation_with_outcome(
+        &self,
+        reservation_id: ironclaw_host_api::ids::ResourceReservationId,
+        additional: ironclaw_host_api::resource::ResourceEstimate,
+    ) -> Result<ironclaw_resources::ReservationOutcome, ironclaw_resources::ResourceError> {
+        self.inner
+            .grow_reservation_with_outcome(reservation_id, additional)
+    }
+
     fn reconcile(
         &self,
         reservation_id: ironclaw_host_api::ids::ResourceReservationId,
@@ -714,6 +739,7 @@ async fn first_party_adapter_releases_reservation_when_reconcile_fails_after_suc
 
     let result = adapter
         .dispatch_json(RuntimeLaneRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: None,
             package: &package,
@@ -786,6 +812,14 @@ impl ResourceGovernor for ReleaseFailsOnceGovernor {
         estimate: ironclaw_host_api::resource::ResourceEstimate,
     ) -> Result<ironclaw_resources::ReservationOutcome, ironclaw_resources::ResourceError> {
         self.inner.reserve_with_outcome(scope, estimate)
+    }
+    fn grow_reservation_with_outcome(
+        &self,
+        reservation_id: ironclaw_host_api::ids::ResourceReservationId,
+        additional: ironclaw_host_api::resource::ResourceEstimate,
+    ) -> Result<ironclaw_resources::ReservationOutcome, ironclaw_resources::ResourceError> {
+        self.inner
+            .grow_reservation_with_outcome(reservation_id, additional)
     }
 
     fn reserve_with_id_and_outcome(
@@ -870,6 +904,7 @@ async fn first_party_adapter_retries_a_failed_reservation_release_on_the_next_di
         SecretMode::ScrubbedEnv,
     );
     let lane_request = || RuntimeLaneRequest {
+        artifact_namespace: None,
         run_id: None,
         origin: None,
         package: &package,
@@ -981,6 +1016,7 @@ async fn first_party_adapter_defers_a_failed_release_after_planner_failure() {
     );
     let reservation = prepared_reservation(&governor, &scope);
     let request = |reservation: Option<ResourceReservation>| RuntimeLaneRequest {
+        artifact_namespace: None,
         run_id: None,
         origin: None,
         package: &package,
@@ -1051,6 +1087,7 @@ async fn first_party_adapter_defers_a_failed_release_after_service_resolution_fa
     );
     let reservation = prepared_reservation(&governor, &scope);
     let request = |reservation: Option<ResourceReservation>| RuntimeLaneRequest {
+        artifact_namespace: None,
         run_id: None,
         origin: None,
         package: &package,
@@ -1157,6 +1194,7 @@ async fn first_party_adapter_releases_reservation_when_dispatch_future_is_cancel
     let estimate = ResourceEstimate::default().set_output_bytes(128);
 
     let dispatch = adapter.dispatch_json(RuntimeLaneRequest {
+        artifact_namespace: None,
         run_id: None,
         origin: None,
         package: &package,
@@ -1206,8 +1244,255 @@ impl crate::FirstPartyCapabilityHandler for SucceedingFirstPartyHandler {
             output: serde_json::json!({"ok": true}),
             display_preview: None,
             usage: ironclaw_host_api::resource::ResourceUsage::default(),
+            canonical_output_digest: None,
+            pending_artifact: None,
         })
     }
+}
+
+struct RecordingArtifactStore {
+    append_calls: AtomicUsize,
+    bytes: Mutex<Vec<u8>>,
+}
+
+impl RecordingArtifactStore {
+    fn new() -> Self {
+        Self {
+            append_calls: AtomicUsize::new(0),
+            bytes: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl ArtifactAccessPort for RecordingArtifactStore {
+    async fn read(
+        &self,
+        _request: ArtifactReadRequest,
+    ) -> Result<Option<ArtifactReadChunk>, ArtifactAccessError> {
+        Ok(None)
+    }
+}
+
+#[async_trait]
+impl ArtifactPersistencePort for RecordingArtifactStore {
+    async fn allocate(
+        &self,
+        metadata: ArtifactWriteMetadata,
+    ) -> Result<ArtifactWriteHandle, ArtifactWriteError> {
+        Ok(ArtifactWriteHandle::new(
+            ArtifactId::new(0),
+            metadata.owner_scope,
+            metadata.namespace,
+        ))
+    }
+
+    async fn append(
+        &self,
+        _handle: &ArtifactWriteHandle,
+        chunk: &[u8],
+    ) -> Result<(), ArtifactWriteError> {
+        self.append_calls.fetch_add(1, Ordering::SeqCst);
+        self.bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(chunk);
+        Ok(())
+    }
+
+    async fn finalize(
+        &self,
+        handle: ArtifactWriteHandle,
+    ) -> Result<CompletedArtifact, ArtifactWriteError> {
+        let bytes = self
+            .bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(CompletedArtifact {
+            artifact_ref: ArtifactRef::new(handle.artifact_id()),
+            byte_len: u64::try_from(bytes.len()).unwrap(),
+            total_lines: None,
+            content_type: "text/plain; charset=utf-8".to_string(),
+            digest: ArtifactDigest::from_bytes(&bytes),
+        })
+    }
+}
+
+struct PendingArtifactHandler {
+    bytes: Vec<u8>,
+}
+
+#[async_trait]
+impl crate::FirstPartyCapabilityHandler for PendingArtifactHandler {
+    async fn dispatch(
+        &self,
+        request: crate::FirstPartyCapabilityRequest,
+    ) -> Result<crate::FirstPartyCapabilityResult, crate::FirstPartyCapabilityError> {
+        let namespace = request.services.artifact_namespace.unwrap();
+        let handle = request
+            .services
+            .artifact_persistence
+            .as_ref()
+            .unwrap()
+            .allocate(ArtifactWriteMetadata {
+                write_key: None,
+                owner_scope: ArtifactOwnerScope::from_resource_scope(&request.scope),
+                namespace,
+                producer_capability_id: request.capability_id,
+                content_type: "text/plain; charset=utf-8".to_string(),
+                expected_bytes: Some(u64::try_from(self.bytes.len()).unwrap()),
+            })
+            .await
+            .unwrap();
+        Ok(crate::FirstPartyCapabilityResult::new(
+            json!({
+                "output": "bounded preview",
+                "artifact_ref": ArtifactRef::new(handle.artifact_id()).to_string(),
+            }),
+            ResourceUsage::default().set_output_bytes(u64::try_from(self.bytes.len()).unwrap()),
+        )
+        .with_pending_artifact(crate::first_party::PendingFirstPartyArtifact {
+            handle,
+            bytes: self.bytes.clone(),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn first_party_artifact_growth_is_denied_before_any_chunk_is_appended() {
+    let descriptor = test_descriptor(RuntimeKind::FirstParty, Vec::new());
+    let store = Arc::new(RecordingArtifactStore::new());
+    let registry = Arc::new(FirstPartyCapabilityRegistry::new().with_handler(
+        descriptor.id.clone(),
+        Arc::new(PendingArtifactHandler {
+            bytes: vec![b'x'; 64],
+        }),
+    ));
+    let resolver = ConfiguredInvocationServicesResolver::new(
+        Arc::new(DiskFilesystem::new()),
+        None,
+        Arc::new(HostProcessPort::new()),
+        None,
+    )
+    .with_artifact_ports(store.clone(), store.clone());
+    let adapter = FirstPartyRuntimeAdapter::from_registry(registry, Arc::new(resolver));
+    let filesystem = DiskFilesystem::new();
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    governor
+        .set_limit(
+            ResourceAccount::tenant(scope.tenant_id.clone()),
+            ironclaw_resources::ResourceLimits::default().set_max_output_bytes(16),
+        )
+        .unwrap();
+    let package = test_package(WASM_MANIFEST, "test-wasm");
+    let policy = policy_with(
+        FilesystemBackendKind::HostWorkspace,
+        ProcessBackendKind::LocalHost,
+        NetworkMode::DirectLogged,
+        SecretMode::ScrubbedEnv,
+    );
+
+    let error = adapter
+        .dispatch_json(RuntimeLaneRequest {
+            artifact_namespace: Some(ArtifactNamespaceId::from_root_run(RunId::new())),
+            run_id: None,
+            origin: None,
+            package: &package,
+            descriptor: &descriptor,
+            filesystem: &filesystem,
+            governor: &governor,
+            runtime_policy: &policy,
+            capability_id: &descriptor.id,
+            scope,
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default().set_output_bytes(8),
+            mounts: None,
+            resource_reservation: None,
+            input: json!({}),
+        })
+        .await
+        .expect_err("reservation growth above quota fails");
+
+    assert!(matches!(
+        error,
+        DispatchError::Rejected {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+            ..
+        }
+    ));
+    assert_eq!(
+        store.append_calls.load(Ordering::SeqCst),
+        0,
+        "quota must grow before artifact bytes are accepted"
+    );
+}
+
+#[tokio::test]
+async fn runtime_result_artifact_first_party_reconciles_canonical_json_bytes() {
+    let descriptor = test_descriptor(RuntimeKind::FirstParty, Vec::new());
+    let registry = Arc::new(
+        FirstPartyCapabilityRegistry::new()
+            .with_handler(descriptor.id.clone(), Arc::new(SucceedingFirstPartyHandler)),
+    );
+    let adapter = FirstPartyRuntimeAdapter::from_registry(
+        registry,
+        Arc::new(ConfiguredInvocationServicesResolver::new(
+            Arc::new(DiskFilesystem::new()),
+            None,
+            Arc::new(HostProcessPort::new()),
+            None,
+        )),
+    );
+    let filesystem = DiskFilesystem::new();
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let package = test_package(WASM_MANIFEST, "test-wasm");
+    let policy = policy_with(
+        FilesystemBackendKind::HostWorkspace,
+        ProcessBackendKind::LocalHost,
+        NetworkMode::DirectLogged,
+        SecretMode::ScrubbedEnv,
+    );
+
+    let result = adapter
+        .dispatch_json(RuntimeLaneRequest {
+            artifact_namespace: None,
+            run_id: None,
+            origin: None,
+            package: &package,
+            descriptor: &descriptor,
+            filesystem: &filesystem,
+            governor: &governor,
+            runtime_policy: &policy,
+            capability_id: &descriptor.id,
+            scope,
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default(),
+            mounts: None,
+            resource_reservation: None,
+            input: json!({}),
+        })
+        .await
+        .expect("first-party dispatch succeeds");
+    let canonical_len = u64::try_from(serde_json::to_vec(&result.output).unwrap().len()).unwrap();
+
+    assert_eq!(result.output_bytes, canonical_len);
+    assert_eq!(result.usage.output_bytes, canonical_len);
+    assert_eq!(
+        result
+            .receipt
+            .actual
+            .as_ref()
+            .map(|usage| usage.output_bytes),
+        Some(canonical_len)
+    );
+    assert_eq!(governor.usage_for(&account).output_bytes, canonical_len);
+    assert!(
+        result.completed_artifact.is_none(),
+        "the dispatcher, not the lane adapter, owns canonical artifact finalization"
+    );
 }
 
 /// Handler that returns `Err(FirstPartyCapabilityError::Dispatch)` with
@@ -1271,6 +1556,7 @@ async fn first_party_adapter_preserves_handler_error_when_account_failed_reconci
 
     let result = adapter
         .dispatch_json(RuntimeLaneRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: None,
             package: &package,

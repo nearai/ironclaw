@@ -2,7 +2,7 @@
 //! `RecordingProcessPort` implements `RuntimeProcessPort` without spawning a
 //! real OS process: every `run_command` call is recorded and returns a benign
 //! success (exit 0, empty output) by default — the default port for
-//! `BuiltinHttpTools` so `builtin.shell` test turns are safe without system setup.
+//! `BuiltinHttpTools` so `builtin.bash` test turns are safe without system setup.
 
 // Not every test binary that mounts this support tree exercises the recording
 // process port — mirrors the `#![allow(dead_code)]` used in sibling modules.

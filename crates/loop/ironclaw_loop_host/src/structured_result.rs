@@ -123,6 +123,9 @@ impl SyntheticCapabilityHandler for StructuredResultHandler {
         let mut write = invocation
             .result_writer
             .write_capability_result(CapabilityResultWrite {
+                receipt: None,
+                completed_artifact: None,
+                canonical_output_digest: None,
                 run_context: &invocation.run_context,
                 input_ref: &invocation.request.input_ref,
                 invocation_id: InvocationId::new(),
@@ -132,6 +135,7 @@ impl SyntheticCapabilityHandler for StructuredResultHandler {
                 // The validated value IS the run's terminal output: durable,
                 // read back by the product tier after the run completes.
                 durable_persistence: DurablePersistence::Persist,
+                canonical_item_count: None,
             })
             .await?;
         write.model_observation = Some(ModelVisibleToolObservation {

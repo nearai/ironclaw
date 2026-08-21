@@ -52,6 +52,7 @@ fn first_party_test_package(service: &str, capability_id: &str) -> ExtensionPack
                 runtime_credentials: Vec::new(),
                 resource_profile: None,
                 origin_gate_matrix: None,
+                provider_tool_name: None,
             }],
             hooks: Vec::new(),
         },

@@ -5,7 +5,8 @@ use super::{
     ProcessControlMutation, ProcessJournalMaterializedState, ProcessTransitionMutation, rows,
 };
 use crate::{
-    ClaimProcessesRequest, CloseProcessDependencyRequest, OpenProcessDependencyRequest,
+    ClaimProcessDependencySettlementRequest, ClaimProcessesRequest, CloseProcessDependencyRequest,
+    CompleteProcessDependencySettlementRequest, OpenProcessDependencyRequest,
     ProcessConcurrencyLimits, ProcessLeaseRequest, PruneReleasedProcessRequest,
     RecordProcessCheckpointRequest, RecoverExpiredProcessLeasesRequest, ReleaseProcessTreeRequest,
     ReserveProcessTreeRequest, SettleProcessDependencyRequest, SubmitProcessAtEdgeRequest,
@@ -50,6 +51,8 @@ pub(super) enum StoredProcessCommand {
     ReleaseTree(ReleaseProcessTreeRequest),
     PruneTree(PruneReleasedProcessRequest),
     OpenDependency(OpenProcessDependencyRequest),
+    ClaimDependencySettlement(ClaimProcessDependencySettlementRequest),
+    CompleteDependencySettlement(CompleteProcessDependencySettlementRequest),
     SettleDependency(SettleProcessDependencyRequest),
     TransitionDependency(TransitionProcessDependencyRequest),
     ConsumeDependency(CloseProcessDependencyRequest),
@@ -162,7 +165,21 @@ impl StoredProcessCommand {
                     request.dependency_process_id,
                 );
             }
+            Self::ClaimDependencySettlement(request) => {
+                add_dependency_references(
+                    &mut references,
+                    request.dependent_process_id,
+                    request.dependency_process_id,
+                );
+            }
             Self::TransitionDependency(request) => {
+                add_dependency_references(
+                    &mut references,
+                    request.dependent_process_id,
+                    request.dependency_process_id,
+                );
+            }
+            Self::CompleteDependencySettlement(request) => {
                 add_dependency_references(
                     &mut references,
                     request.dependent_process_id,

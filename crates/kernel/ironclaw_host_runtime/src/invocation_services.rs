@@ -18,6 +18,11 @@ use ironclaw_filesystem::{
     VersionedEntry,
 };
 use ironclaw_host_api::{
+    artifact::{
+        ArtifactAccessError, ArtifactAccessPort, ArtifactNamespaceId, ArtifactOwnerScope,
+        ArtifactPersistencePort, ArtifactReadChunk, ArtifactReadRequest, ArtifactReadTarget,
+        ScopedArtifactReader,
+    },
     dispatch::RuntimeDispatchErrorKind,
     http::{
         RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
@@ -46,6 +51,9 @@ use ironclaw_runtime_policy::ExecutionPlan;
 #[non_exhaustive]
 pub struct InvocationServices {
     pub filesystem: Arc<dyn RootFilesystem>,
+    pub artifact_namespace: Option<ArtifactNamespaceId>,
+    pub artifact_reader: Option<Arc<dyn ScopedArtifactReader>>,
+    pub artifact_persistence: Option<Arc<dyn ArtifactPersistencePort>>,
     pub runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub tool_call_http_egress: Option<Arc<dyn ToolCallHttpEgress>>,
     /// One-shot stager for host-held/host-minted credential material.
@@ -62,7 +70,7 @@ pub struct InvocationServices {
     pub audit_sink: Option<Arc<dyn AuditSink>>,
     pub unsafe_raw_diagnostics_allowed: bool,
     /// Operator-configured post-edit check appended to successful
-    /// `builtin.write_file` / `builtin.apply_patch` output, bundled with the
+    /// `builtin.write` / `builtin.edit` output, bundled with the
     /// process port that runs it. Resolved once per invocation; `None` keeps
     /// the feature off for this invocation. The edit plans declare no process
     /// effect, so the resolver — the only layer that inspects process backends
@@ -79,6 +87,15 @@ impl fmt::Debug for InvocationServices {
         formatter
             .debug_struct("InvocationServices")
             .field("filesystem", &"[REDACTED]")
+            .field("artifact_namespace", &self.artifact_namespace)
+            .field(
+                "artifact_reader",
+                &self.artifact_reader.as_ref().map(|_| "[CONFIGURED]"),
+            )
+            .field(
+                "artifact_persistence",
+                &self.artifact_persistence.as_ref().map(|_| "[CONFIGURED]"),
+            )
             .field(
                 "runtime_http_egress",
                 &self.runtime_http_egress.as_ref().map(|_| "[REDACTED]"),
@@ -137,6 +154,7 @@ pub struct InvocationServicesResolutionRequest<'a> {
     pub plan: &'a ExecutionPlan,
     pub scope: &'a ResourceScope,
     pub mounts: Option<&'a MountView>,
+    pub artifact_namespace: Option<ArtifactNamespaceId>,
 }
 
 /// Resolves concrete host API services for one planned invocation.
@@ -184,6 +202,8 @@ impl InvocationServicesError {
 #[derive(Clone)]
 pub struct ConfiguredInvocationServicesResolver {
     filesystem: Arc<dyn RootFilesystem>,
+    artifact_access: Option<Arc<dyn ArtifactAccessPort>>,
+    artifact_persistence: Option<Arc<dyn ArtifactPersistencePort>>,
     runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     tool_call_http_egress: Option<Arc<dyn ToolCallHttpEgress>>,
     runtime_secret_material_stager: Option<RuntimeSecretMaterialStager>,
@@ -203,6 +223,8 @@ impl ConfiguredInvocationServicesResolver {
     ) -> Self {
         Self {
             filesystem,
+            artifact_access: None,
+            artifact_persistence: None,
             runtime_http_egress,
             tool_call_http_egress: None,
             runtime_secret_material_stager: None,
@@ -249,6 +271,16 @@ impl ConfiguredInvocationServicesResolver {
         self.post_edit_check = Some(post_edit_check);
         self
     }
+
+    pub fn with_artifact_ports(
+        mut self,
+        access: Arc<dyn ArtifactAccessPort>,
+        persistence: Arc<dyn ArtifactPersistencePort>,
+    ) -> Self {
+        self.artifact_access = Some(access);
+        self.artifact_persistence = Some(persistence);
+        self
+    }
 }
 
 impl InvocationServicesResolver for ConfiguredInvocationServicesResolver {
@@ -287,8 +319,22 @@ impl InvocationServicesResolver for ConfiguredInvocationServicesResolver {
         if plan.requires_secret && self.secret_store.is_none() {
             return Err(InvocationServicesError::SecretAccessRequired);
         }
+        let artifact_reader = request.artifact_namespace.and_then(|namespace| {
+            self.artifact_access.as_ref().map(|access| {
+                Arc::new(BoundArtifactReader {
+                    inner: Arc::clone(access),
+                    owner_scope: ArtifactOwnerScope::from_resource_scope(request.scope),
+                    namespace,
+                }) as Arc<dyn ScopedArtifactReader>
+            })
+        });
         Ok(InvocationServices {
             filesystem,
+            artifact_namespace: request.artifact_namespace,
+            artifact_reader,
+            artifact_persistence: request
+                .artifact_namespace
+                .and_then(|_| self.artifact_persistence.clone()),
             runtime_http_egress: plan
                 .requires_network
                 .then(|| self.runtime_http_egress.clone())
@@ -324,6 +370,28 @@ impl InvocationServicesResolver for ConfiguredInvocationServicesResolver {
                     .map(|process| PostEditCheckService { config, process })
             }),
         })
+    }
+}
+
+struct BoundArtifactReader {
+    inner: Arc<dyn ArtifactAccessPort>,
+    owner_scope: ArtifactOwnerScope,
+    namespace: ArtifactNamespaceId,
+}
+
+#[async_trait]
+impl ScopedArtifactReader for BoundArtifactReader {
+    async fn read(
+        &self,
+        target: ArtifactReadTarget,
+    ) -> Result<Option<ArtifactReadChunk>, ArtifactAccessError> {
+        self.inner
+            .read(ArtifactReadRequest {
+                owner_scope: self.owner_scope.clone(),
+                namespace: self.namespace,
+                target,
+            })
+            .await
     }
 }
 
@@ -437,8 +505,8 @@ impl MountScopedRootFilesystem {
     /// nothing written under it reports `NotFound`, which is right for an
     /// ordinary path and wrong for the root --- and it broke every brand-new
     /// per-caller workspace, whose `tenants/{tenant}/users/{user}` directory
-    /// does not exist until the first write, so `list_dir` and `glob` failed
-    /// instead of reporting an empty workspace. Roots read as EMPTY; anything
+    /// does not exist until the first write, so `glob` failed instead of
+    /// reporting an empty workspace. Roots read as EMPTY; anything
     /// deeper keeps reporting `NotFound`.
     fn is_mount_root(&self, path: &VirtualPath) -> bool {
         self.mounts.mounts.iter().any(|grant| &grant.target == path)

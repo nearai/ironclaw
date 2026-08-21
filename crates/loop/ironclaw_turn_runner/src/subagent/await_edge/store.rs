@@ -2,14 +2,14 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
-use ironclaw_host_api::ids::ProcessId;
+use chrono::{Duration, Utc};
 use ironclaw_host_api::turn::{LoopMessageRef, TurnRunId, TurnScope};
+use ironclaw_host_api::{artifact::CompletedArtifact, ids::ProcessId};
 use ironclaw_processes::{
-    CloseProcessDependencyRequest, ProcessDependencyPort, ProcessDependencyQuery,
+    ClaimProcessDependencySettlementRequest, CloseProcessDependencyRequest,
+    CompleteProcessDependencySettlementRequest, ProcessDependencyPort, ProcessDependencyQuery,
     ProcessDependencyRecord, ProcessDependencyState, ProcessJournalStoreError,
-    ProcessLifecycleStatus, ProcessTerminalEvidence, SettleProcessDependencyRequest,
-    TransitionProcessDependencyRequest,
+    ProcessLifecycleStatus, ProcessTerminalEvidence, TransitionProcessDependencyRequest,
 };
 
 use super::{
@@ -19,6 +19,25 @@ use super::{
 
 pub struct AwaitEdgeStore {
     dependencies: Arc<dyn ProcessDependencyPort<Error = ProcessJournalStoreError>>,
+}
+
+pub enum SettlementClaim {
+    Acquired {
+        edge: AwaitEdge,
+        claim_token: String,
+    },
+    Pending,
+    Completed {
+        edge: AwaitEdge,
+        artifact: CompletedArtifact,
+    },
+}
+
+pub(super) struct SettlementCompletion {
+    pub terminal_kind: EdgeTerminalKind,
+    pub terminal_byte_len: Option<u64>,
+    pub terminal_reason: Option<String>,
+    pub completed_artifact: CompletedArtifact,
 }
 
 impl AwaitEdgeStore {
@@ -104,7 +123,7 @@ impl AwaitEdgeStore {
             settled_at: None,
         };
         edge.state = match record.state {
-            ProcessDependencyState::Open => AwaitEdgeState::Open,
+            ProcessDependencyState::Open | ProcessDependencyState::Settling => AwaitEdgeState::Open,
             ProcessDependencyState::Settled => AwaitEdgeState::Settled,
             ProcessDependencyState::ResultAppended => AwaitEdgeState::ResultAppended,
             ProcessDependencyState::AttentionScheduled => AwaitEdgeState::AttentionScheduled,
@@ -146,31 +165,83 @@ impl AwaitEdgeStore {
             .map_err(map_process_error)
     }
 
-    pub async fn settle(
+    pub async fn claim_settlement(
         &self,
         scope: &TurnScope,
         parent_run_id: TurnRunId,
         child_run_id: TurnRunId,
-        terminal_kind: EdgeTerminalKind,
-        terminal_byte_len: Option<u64>,
-        terminal_reason: Option<String>,
-    ) -> Result<Option<AwaitEdge>, AwaitEdgeStoreError> {
-        self.dependencies
-            .settle_process_dependency(SettleProcessDependencyRequest {
+    ) -> Result<SettlementClaim, AwaitEdgeStoreError> {
+        let claimed_at = Utc::now();
+        let claim_token = uuid::Uuid::new_v4().to_string();
+        let record = self
+            .dependencies
+            .claim_process_dependency_settlement(ClaimProcessDependencySettlementRequest {
                 dependent_process_id: Self::process_id(parent_run_id),
                 dependency_process_id: Self::process_id(child_run_id),
                 scope: scope.to_resource_scope(),
+                claim_token: claim_token.clone(),
+                claimed_at,
+                lease_expires_at: claimed_at + Duration::seconds(30),
+            })
+            .await
+            .map_err(map_process_error)?
+            .ok_or_else(|| AwaitEdgeStoreError::Backend {
+                reason: "process dependency disappeared during settlement claim".to_string(),
+            })?;
+        if let Some(artifact) = record.completed_artifact.clone() {
+            return Ok(SettlementClaim::Completed {
+                edge: Self::edge_from_record(record)?,
+                artifact,
+            });
+        }
+        let acquired = record
+            .settlement
+            .as_ref()
+            .is_some_and(|claim| claim.claim_token == claim_token);
+        if acquired {
+            Ok(SettlementClaim::Acquired {
+                edge: Self::edge_from_record(record)?,
+                claim_token,
+            })
+        } else {
+            Ok(SettlementClaim::Pending)
+        }
+    }
+
+    pub(super) async fn complete_settlement(
+        &self,
+        scope: &TurnScope,
+        parent_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+        claim_token: String,
+        completion: SettlementCompletion,
+    ) -> Result<SettlementClaim, AwaitEdgeStoreError> {
+        let record = self
+            .dependencies
+            .complete_process_dependency_settlement(CompleteProcessDependencySettlementRequest {
+                dependent_process_id: Self::process_id(parent_run_id),
+                dependency_process_id: Self::process_id(child_run_id),
+                scope: scope.to_resource_scope(),
+                claim_token,
                 terminal: ProcessTerminalEvidence {
-                    status: terminal_kind.to_process_status(),
-                    output_bytes: terminal_byte_len,
-                    sanitized_reason: terminal_reason,
+                    status: completion.terminal_kind.to_process_status(),
+                    output_bytes: completion.terminal_byte_len,
+                    sanitized_reason: completion.terminal_reason,
                 },
+                completed_artifact: completion.completed_artifact,
                 settled_at: Utc::now(),
             })
             .await
             .map_err(map_process_error)?
-            .map(Self::edge_from_record)
-            .transpose()
+            .ok_or_else(|| AwaitEdgeStoreError::Backend {
+                reason: "process dependency disappeared during settlement completion".to_string(),
+            })?;
+        let artifact = record.completed_artifact.clone();
+        let edge = Self::edge_from_record(record)?;
+        match artifact {
+            Some(artifact) => Ok(SettlementClaim::Completed { edge, artifact }),
+            None => Ok(SettlementClaim::Pending),
+        }
     }
 
     /// `Settled -> ResultAppended`, recording the parent-thread message the

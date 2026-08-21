@@ -12,7 +12,7 @@
 //! cycle-3 fix lane's verification (50 libsql + 40 in-memory runs, 0 flakes).
 //!
 //! Every scenario in that test drives the REAL gate path: scripted
-//! `builtin.write_file` call → real `TurnStatus::BlockedApproval` gate
+//! `builtin.write` call → real `TurnStatus::BlockedApproval` gate
 //! (auto-approve disabled for the group at construction) → real
 //! `ApprovalResolver` (`approve_gate`/`deny_gate`) → `coordinator.resume_turn`.
 //! Only the model is faked. Exception: `failure_category_demasked` drives a
@@ -39,7 +39,7 @@
 //! (C-DURABLE). Then `approve_always_persists_cross_thread` (HEADLINE) flips
 //! the toggle ON and MUST run before `ask_each_time_resumes_once`
 //! (W4-ASK-EACH-ONCE, #5306 class), which installs a persistent group-wide
-//! `AskEachTime` override on `builtin.write_file` and so must run LAST.
+//! `AskEachTime` override on `builtin.write` and so must run LAST.
 
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
@@ -107,7 +107,7 @@ async fn approvals_group_e2e() {
     scenario_approve_always_persists_cross_thread::run(&g)
         .await
         .expect("approve-always persists cross-thread");
-    // W4-ASK-EACH-ONCE: must run after every other `builtin.write_file`
+    // W4-ASK-EACH-ONCE: must run after every other `builtin.write`
     // scenario above -- installs a persistent group-wide `AskEachTime`
     // override that would otherwise force-gate their plain-Ask-mode writes.
     report.record(
@@ -185,7 +185,7 @@ async fn approvals_group_libsql_e2e() {
     scenario_approve_always_persists_cross_thread::run(&g)
         .await
         .expect("approve-always persists cross-thread");
-    // W4-ASK-EACH-ONCE: must run after every other `builtin.write_file`
+    // W4-ASK-EACH-ONCE: must run after every other `builtin.write`
     // scenario above because it flips approval preferences.
     report.record(
         "ask_each_time_resumes_once",

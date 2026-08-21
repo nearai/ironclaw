@@ -882,6 +882,7 @@ async fn configure_admin_group(
         invocation_id,
     };
     let context = ExecutionContext {
+        artifact_namespace: None,
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,

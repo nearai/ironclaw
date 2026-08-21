@@ -552,25 +552,19 @@ fn result_progress_of(progress: CapabilityProgress) -> ResultProgress {
     }
 }
 
-/// The #5838 first-look inline CONTENT preview and its continuation metadata from
-/// a loop tool observation, when present.
+/// The first-look inline content and continuation metadata from a loop tool
+/// observation, when present.
 ///
-/// The inline content the model reads without a follow-up `result_read` lives on
-/// the `ResultReference` detail's `preview` — NOT the generic `summary` caption
-/// (routing content through `SafeSummary` dropped every delimiter-bearing/JSON
-/// result and scrubbed `Secretary`, forcing a re-read amnesia loop). It is carried
-/// as a [`ModelResultPreview`]: delimiters/newlines retained, credential-redacted
-/// at a word boundary, up to 24 KiB. The paired [`ResultPreviewMeta`] carries the
-/// TRUNCATED-preview continuation info (`result_read` / large results): the
-/// referenced result ref, full byte size, next offset, and JSON-array element
-/// count, so the model reads the full result. This metadata is preserved even
-/// when the preview text is rejected: continuation authority belongs to the
-/// durable source result, not to the ephemeral invocation presenting it. Detail
-/// kinds other than `ResultReference` have no inline content.
+/// The inline content lives on the result detail's `preview`, not the generic
+/// `summary` caption. It is carried as a [`ModelResultPreview`], preserving
+/// delimiters and newlines while applying credential redaction at a word
+/// boundary. New truncated results carry a canonical `artifact://` URI in
+/// [`ResultPreviewMeta`] for the pinned coding `read` tool. Historical result-reference
+/// metadata remains replayable.
 ///
-/// `own_result_ref` is this outcome's own loop result ref: the referenced ref is
-/// carried only when it DIFFERS (a `result_read` presenting another result's ref);
-/// otherwise the reconstruction uses the outcome's own ref, keeping the wire clean.
+/// `own_result_ref` is this outcome's own loop result ref. A differing
+/// historical referenced ref is preserved; otherwise reconstruction uses the
+/// outcome's own ref.
 fn result_preview_parts(
     observation: Option<ModelVisibleToolObservation>,
     own_result_ref: &LoopResultRef,
@@ -587,37 +581,72 @@ fn result_preview_parts(
         summary, detail, ..
     } = observation;
     let summary = SafeSummary::new(summary).ok();
-    let ToolObservationDetail::ResultReference {
-        result_ref,
-        preview,
-        total_bytes,
-        next_offset,
-        item_count,
-        ..
-    } = detail
-    else {
-        return empty;
-    };
-    // Credential material is masked instead of discarding the whole preview.
-    // The result ref and paging metadata are independent host-authored authority:
-    // keep them even when no preview was supplied or the remaining content is
-    // rejected, so replay can continue against the durable source.
-    let preview = preview.and_then(|text| ModelResultPreview::redacted(text).ok());
-    let referenced_result_ref = if result_ref == own_result_ref.as_str() {
-        None
-    } else {
-        LoopRef::new(result_ref).ok()
-    };
-    (
-        preview,
-        ResultPreviewMeta {
-            referenced_result_ref,
+    match detail {
+        ToolObservationDetail::InlineResult {
+            content,
+            byte_len: _,
+            item_count,
+        } => (
+            ModelResultPreview::redacted(content).ok(),
+            ResultPreviewMeta {
+                referenced_result_ref: None,
+                artifact_ref: None,
+                // `None` is the typed marker for a complete inline preview;
+                // truncated results carry their full size here.
+                total_bytes: None,
+                next_offset: None,
+                item_count,
+                summary,
+            },
+        ),
+        ToolObservationDetail::ResultReference {
+            result_ref,
+            preview,
             total_bytes,
             next_offset,
             item_count,
-            summary,
-        },
-    )
+            ..
+        } => {
+            // Credential material is masked instead of discarding the whole preview.
+            // The result ref and paging metadata are independent host-authored authority:
+            // keep them even when no preview was supplied or the remaining content is
+            // rejected, so replay can continue against the durable source.
+            let preview = preview.and_then(|text| ModelResultPreview::redacted(text).ok());
+            let referenced_result_ref = if result_ref == own_result_ref.as_str() {
+                None
+            } else {
+                LoopRef::new(result_ref).ok()
+            };
+            (
+                preview,
+                ResultPreviewMeta {
+                    referenced_result_ref,
+                    artifact_ref: None,
+                    total_bytes,
+                    next_offset,
+                    item_count,
+                    summary,
+                },
+            )
+        }
+        ToolObservationDetail::ArtifactReference {
+            artifact_ref,
+            total_bytes,
+            preview,
+            item_count,
+        } => (
+            preview.and_then(|text| ModelResultPreview::redacted(text).ok()),
+            ResultPreviewMeta {
+                referenced_result_ref: None,
+                artifact_ref: artifact_ref.parse().ok(),
+                total_bytes: Some(total_bytes),
+                next_offset: None,
+                item_count,
+                summary,
+            },
+        ),
+        _ => empty,
+    }
 }
 
 /// The observation's generic `summary` as a bounded [`SafeSummary`] caption — the

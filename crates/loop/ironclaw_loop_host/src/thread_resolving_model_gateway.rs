@@ -41,6 +41,7 @@ where
     pub context_window_cache: Option<Arc<ThreadContextWindowCache>>,
     pub attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     pub prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
+    pub legacy_result_artifacts: Option<Arc<ironclaw_threads::DurableToolArtifactStore>>,
 }
 
 /// Resolves a thread's transcript into a host-managed model request.
@@ -68,6 +69,7 @@ where
     context_window_cache: Option<Arc<ThreadContextWindowCache>>,
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
+    legacy_result_artifacts: Option<Arc<ironclaw_threads::DurableToolArtifactStore>>,
 }
 
 impl<S, G> ThreadResolvingLoopModelGateway<S, G>
@@ -88,6 +90,7 @@ where
             prompt_authority,
             context_window_cache,
             attachment_read_port,
+            legacy_result_artifacts,
             prompt_diagnostic_sink,
         } = parts;
         Self {
@@ -102,6 +105,7 @@ where
             prompt_authority,
             context_window_cache,
             attachment_read_port,
+            legacy_result_artifacts,
             prompt_diagnostic_sink,
         }
     }
@@ -164,6 +168,9 @@ where
         }
         if let Some(port) = self.attachment_read_port.as_ref() {
             model_port = model_port.with_attachment_read_port(Arc::clone(port));
+        }
+        if let Some(artifacts) = self.legacy_result_artifacts.as_ref() {
+            model_port = model_port.with_legacy_result_artifacts(Arc::clone(artifacts));
         }
         if let Some(sink) = self.prompt_diagnostic_sink.as_ref() {
             model_port = model_port.with_prompt_diagnostic_sink(Arc::clone(sink));

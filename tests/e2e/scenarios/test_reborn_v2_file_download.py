@@ -1,10 +1,10 @@
 """Reborn WebChat v2: agent-produced files are downloadable from the UI.
 
 Drives the real `ironclaw-reborn serve` binary (v2 SPA) under the
-`local-dev-yolo` profile — minimal approvals, so an in-workspace `write_file`
+`local-dev-yolo` profile — minimal approvals, so an in-workspace `write`
 auto-proceeds instead of parking on a destructive-write gate. The mock LLM
-turns the prompt into two Reborn `builtin.write_file` capability calls via the
-provider-facing `builtin__write_file` name (a CSV and a PDF), then a reply that
+turns the prompt into two Reborn `builtin.write` capability calls via the
+provider-facing `write` name (a CSV and a PDF), then a reply that
 references their `/workspace` paths. The SPA turns those Markdown links into
 authenticated previews whose Download actions save the files.
 

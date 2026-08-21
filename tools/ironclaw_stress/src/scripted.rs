@@ -196,10 +196,10 @@ pub(crate) const PLACEHOLDER_TEXT: &str =
 )]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ScriptKey {
-    /// `builtin.write_file` then `builtin.read_file` of the same unique
+    /// `builtin.write` then `builtin.read` of the same unique
     /// workspace path.
-    #[value(name = "write_file_roundtrip")]
-    WriteFileRoundtrip,
+    #[value(name = "write_roundtrip")]
+    WriteRoundtrip,
     /// `ironclaw.memory.write` of the whole target (one replace plus
     /// zero-or-more appends when the document exceeds one bounded chunk)
     /// then a size-aware checkpoint of the shared relative memory target
@@ -228,7 +228,7 @@ impl ScriptKey {
 
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            Self::WriteFileRoundtrip => "write_file_roundtrip",
+            Self::WriteRoundtrip => "write_roundtrip",
             Self::MemoryRoundtrip => "memory_roundtrip",
             Self::MemoryGrow => "memory_grow",
             Self::MemoryMixed => "memory_mixed",
@@ -251,14 +251,14 @@ impl ScriptKey {
     /// three quarters; mixed: first half then second half).
     pub(crate) fn steps(self, size_bytes: usize) -> Vec<ScriptStep> {
         let mut steps = match self {
-            Self::WriteFileRoundtrip => vec![
+            Self::WriteRoundtrip => vec![
                 ScriptStep {
-                    capability_id: "builtin.write_file",
+                    capability_id: "builtin.write",
                     kind: StepKind::WriteFile,
                     step_index: 0,
                 },
                 ScriptStep {
-                    capability_id: "builtin.read_file",
+                    capability_id: "builtin.read",
                     kind: StepKind::ReadFile,
                     step_index: 0,
                 },
@@ -370,7 +370,7 @@ fn bounded_chunks(size_bytes: usize, max_chunk: usize) -> Vec<usize> {
 /// One tool call of a scripted sequence.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ScriptStep {
-    /// Dotted capability id the step targets (e.g. `builtin.write_file`).
+    /// Dotted capability id the step targets (e.g. `builtin.write`).
     pub(crate) capability_id: &'static str,
     /// Zero-based position of this step in the operation's full plan,
     /// stamped by [`ScriptKey::steps`]. Write steps embed it as a
@@ -1511,14 +1511,22 @@ fn result_text(op: &ScriptedOp, verdict: Verdict) -> String {
     format!("{RESULT_PREFIX} {} {}", op.identity(), verdict.as_str())
 }
 
-/// Resolve the advertised wire name for a capability id, accepting the
-/// `__`-encoded form or the dotted capability id. The bare tool name is
-/// deliberately not a candidate: an extension could export a same-named
-/// tool and the script would silently drive a different capability.
+/// Resolve the advertised wire name for a capability id. Pinned coding tools
+/// override the derived provider spelling, so their canonical ids map only to
+/// the exact bare names advertised by the live manifest. Other capabilities
+/// retain the derived encoded/dotted resolution used by the stress harness.
 pub(crate) fn resolve_wire_name(
     available_tool_names: &HashSet<String>,
     capability_id: &str,
 ) -> Option<String> {
+    let provider_override = match capability_id {
+        "builtin.write" => Some("write"),
+        "builtin.read" => Some("read"),
+        _ => None,
+    };
+    if let Some(provider_name) = provider_override {
+        return available_tool_names.get(provider_name).cloned();
+    }
     let encoded = capability_id.replace('.', "__");
     for candidate in [encoded.as_str(), capability_id] {
         if let Some(name) = available_tool_names.get(candidate) {
@@ -1787,7 +1795,7 @@ mod tests {
     fn decide_returns_none_without_marker() {
         let messages = vec![user("plain chat message")];
         assert_eq!(
-            decide(&messages, &tools(&["builtin__write_file"])),
+            decide(&messages, &tools(&["builtin__write"])),
             ScriptedDecision::None
         );
     }
@@ -2045,55 +2053,51 @@ mod tests {
     }
 
     #[test]
-    fn write_file_roundtrip_uses_unique_path_and_steps() {
-        let marker = marker_message(ScriptKey::WriteFileRoundtrip, "u2", "7", 8192);
+    fn write_roundtrip_uses_unique_path_and_steps() {
+        let marker = marker_message(ScriptKey::WriteRoundtrip, "u2", "7", 8192);
         let messages = vec![user(&marker)];
-        match decide(
-            &messages,
-            &tools(&["builtin__write_file", "builtin__read_file"]),
-        ) {
+        match decide(&messages, &tools(&["write", "read"])) {
             ScriptedDecision::ToolCalls(calls) => {
                 assert_eq!(calls.len(), 1, "file plans keep one call per response");
-                assert_eq!(calls[0].wire_name, "builtin__write_file");
+                assert_eq!(calls[0].wire_name, "write");
                 assert_eq!(calls[0].arguments["path"], "stress/u2__7.txt");
                 assert_eq!(calls[0].arguments["content"].as_str().unwrap().len(), 8192);
             }
-            other => panic!("expected write_file tool call, got {other:?}"),
+            other => panic!("expected write tool call, got {other:?}"),
         }
-        let after_write = vec![
-            user(&marker),
-            tool_result("Tool write_file returned: written"),
-        ];
-        match decide(
-            &after_write,
-            &tools(&["builtin__write_file", "builtin__read_file"]),
-        ) {
+        let after_write = vec![user(&marker), tool_result("Tool write returned: written")];
+        match decide(&after_write, &tools(&["write", "read"])) {
             ScriptedDecision::ToolCalls(calls) => {
                 assert_eq!(calls.len(), 1, "file plans keep one call per response");
-                assert_eq!(calls[0].wire_name, "builtin__read_file");
+                assert_eq!(calls[0].wire_name, "read");
                 assert_eq!(calls[0].arguments["path"], "stress/u2__7.txt");
             }
-            other => panic!("expected read_file tool call, got {other:?}"),
+            other => panic!("expected read tool call, got {other:?}"),
         }
     }
 
     #[test]
-    fn wire_name_resolution_accepts_encoded_and_dotted_only() {
-        let encoded = tools(&["builtin__write_file"]);
+    fn wire_name_resolution_honors_coding_overrides_and_derived_names() {
+        let coding = tools(&["write", "read"]);
         assert_eq!(
-            resolve_wire_name(&encoded, "builtin.write_file").as_deref(),
-            Some("builtin__write_file")
+            resolve_wire_name(&coding, "builtin.write").as_deref(),
+            Some("write")
         );
-        let dotted = tools(&["builtin.write_file"]);
         assert_eq!(
-            resolve_wire_name(&dotted, "builtin.write_file").as_deref(),
-            Some("builtin.write_file")
+            resolve_wire_name(&coding, "builtin.read").as_deref(),
+            Some("read")
         );
-        // The bare name is not a candidate: an extension could export a
-        // same-named tool and the script would silently bind to it.
-        let bare = tools(&["write_file"]);
-        assert_eq!(resolve_wire_name(&bare, "builtin.write_file"), None);
-        assert_eq!(resolve_wire_name(&tools(&[]), "builtin.write_file"), None);
+        assert_eq!(
+            resolve_wire_name(&tools(&["builtin__write"]), "builtin.write"),
+            None,
+            "retired derived spelling must not alias the pinned coding provider override"
+        );
+        let encoded = tools(&["ironclaw__memory__write"]);
+        assert_eq!(
+            resolve_wire_name(&encoded, "ironclaw.memory.write").as_deref(),
+            Some("ironclaw__memory__write")
+        );
+        assert_eq!(resolve_wire_name(&tools(&[]), "builtin.write"), None);
     }
 
     #[test]
@@ -2184,7 +2188,7 @@ mod tests {
     fn expected_tool_results_per_script() {
         // Small documents fit one chunk per phase, so the counts match the
         // fixed plans: 2, 2, 3, and 4 tool results.
-        assert_eq!(ScriptKey::WriteFileRoundtrip.expected_tool_results(4096), 2);
+        assert_eq!(ScriptKey::WriteRoundtrip.expected_tool_results(4096), 2);
         assert_eq!(ScriptKey::MemoryRoundtrip.expected_tool_results(4096), 2);
         assert_eq!(ScriptKey::MemoryGrow.expected_tool_results(4096), 3);
         assert_eq!(ScriptKey::MemoryMixed.expected_tool_results(4096), 4);
@@ -2309,8 +2313,8 @@ mod tests {
         let parsed = op(key, user_id, op_id, size);
         let marker = marker_message(key, user_id, op_id, size);
         let available = tools(&[
-            "builtin__write_file",
-            "builtin__read_file",
+            "write",
+            "read",
             "ironclaw__memory__write",
             "ironclaw__memory__read",
             "ironclaw__memory__search",
@@ -2722,7 +2726,7 @@ mod tests {
     #[test]
     fn small_and_file_plans_emit_one_call_per_response() {
         for (key, size) in [
-            (ScriptKey::WriteFileRoundtrip, 4096),
+            (ScriptKey::WriteRoundtrip, 4096),
             (ScriptKey::MemoryRoundtrip, 4096),
             (ScriptKey::MemoryGrow, 4096),
             (ScriptKey::MemoryMixed, 4096),
@@ -3185,8 +3189,8 @@ mod tests {
         result_for: &dyn Fn(&ScriptStep, usize) -> String,
     ) -> (ScriptedDriver, ScriptedDecision, usize) {
         let available = tools(&[
-            "builtin__write_file",
-            "builtin__read_file",
+            "write",
+            "read",
             "ironclaw__memory__write",
             "ironclaw__memory__read",
             "ironclaw__memory__search",
@@ -3618,8 +3622,8 @@ mod tests {
         result_for: &dyn Fn(&ScriptStep, usize, usize) -> String,
     ) -> (ScriptedDriver, ScriptedDecision, usize) {
         let available = tools(&[
-            "builtin__write_file",
-            "builtin__read_file",
+            "write",
+            "read",
             "ironclaw__memory__write",
             "ironclaw__memory__read",
             "ironclaw__memory__search",
@@ -3669,7 +3673,7 @@ mod tests {
     }
 
     #[test]
-    fn driver_retries_failed_write_once_then_confirms() {
+    fn driver_retries_failed_memory_write_once_then_confirms() {
         // The write's first attempt returns a structured error observation
         // whose recovery explicitly permits an identical replay (the
         // transient CAS-contention shape, `same_call_retry=allowed`); the
@@ -3951,23 +3955,23 @@ mod tests {
     }
 
     #[test]
-    fn driver_retries_failed_write_file_once_then_confirms() {
-        // write_file_roundtrip: the write_file call fails once with an
+    fn driver_retries_failed_write_once_then_confirms() {
+        // write_roundtrip: the write call fails once with an
         // observation that explicitly allows an identical replay and
         // succeeds on retry; the read returns this operation's token:
         // Confirmed.
-        let parsed = op(ScriptKey::WriteFileRoundtrip, "u2", "7", 8192);
+        let parsed = op(ScriptKey::WriteRoundtrip, "u2", "7", 8192);
         let own = parsed.readback_token();
         let error_obs = r#"{"schema_version":1,"status":"error","summary":"the tool call failed","detail":{"kind":"generic_failure","failure_kind":"backend"},"artifacts":[],"recovery":{"same_call_retry":"allowed","recovery_hint":"wait_then_retry"},"trust":"untrusted_tool_output"}"#;
         let (driver, decision, rounds) = drive_retrying_plan(
-            ScriptKey::WriteFileRoundtrip,
+            ScriptKey::WriteRoundtrip,
             "u2",
             "7",
             8192,
             &|step, _, attempt| match step.kind {
                 StepKind::ReadFile => own.clone(),
                 StepKind::WriteFile if attempt == 1 => error_obs.to_string(),
-                _ => "Tool builtin.write_file returned: ok".to_string(),
+                _ => "Tool write returned: ok".to_string(),
             },
         );
         assert_eq!(
@@ -3976,7 +3980,7 @@ mod tests {
         );
         assert_eq!(
             rounds, 3,
-            "write_file, retry, read: three responses before the verdict"
+            "write, retry, read: three responses before the verdict"
         );
         assert!(driver.sessions.is_empty());
         assert!(driver.call_to_session.is_empty());

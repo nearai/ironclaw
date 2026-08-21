@@ -139,6 +139,12 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// Build through the Docker-backed sandbox profile instead of the normal
     /// local-development profile. Only the real sandbox-shell E2E enables it.
     pub(crate) sandboxed_shell: bool,
+    /// Issue #7392 slice 3 seam: when `true`, the composed runtime's
+    /// built-in first-party package + handlers are the pinned coding variants
+    /// (exact `read`/`write`/`edit`/`glob`/`grep` model surface). Only
+    /// `coding_tools()`-family profiles set it; every other harness
+    /// keeps the stock surface byte-identical.
+    pub(crate) coding_tools: bool,
     /// Raise the deployment's workspace scoping to per-caller, exactly as
     /// `serve` does unconditionally
     /// (`RebornRuntimeInput::with_workspace_scoped_per_caller_services`,
@@ -175,6 +181,7 @@ impl HostRuntimeHarnessOptions {
             trigger_active_run_lookup_requested: false,
             google_oauth_backend_for_test: false,
             sandboxed_shell: false,
+            coding_tools: false,
             workspace_scoped_per_caller: false,
         }
     }
@@ -189,6 +196,13 @@ impl HostRuntimeHarnessOptions {
 
     pub(crate) fn with_sandboxed_shell(mut self) -> Self {
         self.sandboxed_shell = true;
+        self
+    }
+
+    /// Select the pinned coding built-in package + handlers (issue #7392
+    /// slice 3). See `coding_tools`'s doc.
+    pub(crate) fn with_coding_tools(mut self) -> Self {
+        self.coding_tools = true;
         self
     }
 

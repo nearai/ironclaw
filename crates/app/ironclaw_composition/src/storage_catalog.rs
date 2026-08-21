@@ -64,6 +64,12 @@ const REQUIRED_RUNTIME_STORAGE_PLANES: &[RuntimeStoragePlane] = &[
         txn: TxnCapability::None,
     },
     RuntimeStoragePlane {
+        name: "tool artifacts",
+        path: "/artifacts",
+        capabilities: BYTE_STORE_CAPABILITIES,
+        txn: TxnCapability::Cas,
+    },
+    RuntimeStoragePlane {
         name: "persistent memory",
         path: "/memory",
         capabilities: MEMORY_STORE_CAPABILITIES,
@@ -237,6 +243,7 @@ mod tests {
             "/tenants",
             "/events",
             "/memory",
+            "/artifacts",
             "/projects",
             "/system/extensions",
             "/system/settings",
@@ -263,6 +270,7 @@ mod tests {
             "/tenants",
             "/events",
             "/memory",
+            "/artifacts",
             "/projects",
             "/system/extensions",
             "/system/settings",

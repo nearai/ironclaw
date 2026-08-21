@@ -1,0 +1,46 @@
+{
+  "tool": "glob",
+  "note": "Representative model-visible error shapes for the pinned `glob` tool at commit 08819b279cf02ae2545e69dad7111ab48d91d35e. `template` is verbatim from the cited upstream source; `example` renders the template with representative values.",
+  "entries": [
+    {
+      "case": "root_not_allowed",
+      "kind": "error",
+      "template": "Searching from root directory '/' is not allowed",
+      "example": "Searching from root directory '/' is not allowed",
+      "source_path": "packages/coding-agent/src/tools/glob.ts",
+      "source_line": 172
+    },
+    {
+      "case": "empty_path",
+      "kind": "error",
+      "template": "`path` must contain non-empty globs or paths",
+      "example": "`path` must contain non-empty globs or paths",
+      "source_path": "packages/coding-agent/src/tools/glob.ts",
+      "source_line": 221
+    },
+    {
+      "case": "path_not_found",
+      "kind": "error",
+      "template": "Path not found: ${missingPaths}",
+      "example": "Path not found: src/nope.ts, tests/nope.rs",
+      "source_path": "packages/coding-agent/src/tools/glob.ts",
+      "source_line": 233
+    },
+    {
+      "case": "internal_url_glob_not_supported",
+      "kind": "error",
+      "template": "Glob patterns are not supported for internal URLs: ${rawPattern}",
+      "example": "Glob patterns are not supported for internal URLs: memory://notes/*.md",
+      "source_path": "packages/coding-agent/src/tools/glob.ts",
+      "source_line": 188
+    },
+    {
+      "case": "internal_url_no_backing_file",
+      "kind": "error",
+      "template": "Cannot find internal URL without a backing file: ${rawPattern}",
+      "example": "Cannot find internal URL without a backing file: memory://missing",
+      "source_path": "packages/coding-agent/src/tools/glob.ts",
+      "source_line": 216
+    }
+  ]
+}

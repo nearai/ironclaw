@@ -28,10 +28,11 @@ use ironclaw_loop_contracts::{
     LoopRunContext, ProviderToolCall,
 };
 use ironclaw_loop_host::{
-    CapabilityResolveError, CapabilityResultWrite, CapabilitySurfaceProfileResolver,
-    CapabilityWriteResult, HostIdentityContextSource, HostInputQueue,
-    HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, RunCancellationFactory, loop_driver_execution_extension_id,
+    CapabilityResolveError, CapabilityResultUpdate, CapabilityResultWrite,
+    CapabilitySurfaceProfileResolver, CapabilityWriteResult, HostIdentityContextSource,
+    HostInputQueue, HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, RunCancellationFactory,
+    loop_driver_execution_extension_id,
 };
 use ironclaw_loop_host::{
     ModelRoute, ModelRouteError, ModelRoutePolicy, ModelRouteResolver, ModelSelectionMode,
@@ -258,12 +259,26 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
             capability_id,
             output,
             display_preview,
+            receipt: _,
+            completed_artifact,
+            canonical_output_digest: _,
+            canonical_item_count: _,
             // `ProductLiveCapabilityIo` is an ephemeral in-memory test fixture
             // (see crate CONTRACT.md / #5902) that never durably persists a
             // result, so the durable-vs-inline distinction does not apply here.
             durable_persistence: _,
         } = write;
-        let byte_len = serialized_json_len(&output, "capability result")?;
+        let staged_byte_len = serialized_json_len(&output, "capability result")?;
+        // The transport output may be a bounded preview of a larger durable
+        // artifact (the canonical-size contract the production
+        // `StagedCapabilityIo` enforces). The byte length the LOOP sees must
+        // reflect the FULL result size — it feeds the per-capability
+        // compaction byte-cap, which is about memory pressure, not model
+        // visibility.
+        let byte_len: u64 = completed_artifact
+            .as_ref()
+            .map(|artifact| artifact.byte_len)
+            .unwrap_or(staged_byte_len as u64);
         let result_ref =
             LoopResultRef::new(format!("result:{}.{}", run_context.run_id, Uuid::new_v4()))
                 .map_err(|_| {
@@ -280,14 +295,14 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
             "capability result",
             results.len(),
             results.values().map(|result| result.byte_len).sum(),
-            byte_len,
+            staged_byte_len,
         )?;
         results.insert(
             result_ref.as_str().to_string(),
             StagedCapabilityResult {
                 run_id: run_context.run_id.to_string(),
                 output: output.clone(),
-                byte_len,
+                byte_len: staged_byte_len,
             },
         );
         self.display_previews.record_result_with_preview(
@@ -298,14 +313,12 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
                 capability_id,
                 result_ref: result_ref.as_str(),
                 output: &output,
-                output_bytes: byte_len.try_into().unwrap_or(u64::MAX),
+                output_bytes: byte_len,
             },
             display_preview.as_ref(),
         );
         Ok(CapabilityWriteResult::from_output(
-            result_ref,
-            byte_len as u64,
-            &output,
+            result_ref, byte_len, &output,
         ))
     }
 
@@ -341,7 +354,7 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
         run_context: &LoopRunContext,
         result_ref: &LoopResultRef,
         output: serde_json::Value,
-    ) -> Result<u64, AgentLoopHostError> {
+    ) -> Result<CapabilityResultUpdate, AgentLoopHostError> {
         ensure_ref_scoped_to_run("result", result_ref.as_str(), run_context)?;
         let byte_len = serialized_json_len(&output, "capability result")?;
         let mut results = self
@@ -392,7 +405,10 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
                 byte_len,
             },
         );
-        Ok(byte_len as u64)
+        Ok(CapabilityResultUpdate {
+            byte_len: byte_len as u64,
+            completed_artifact: None,
+        })
     }
 
     async fn delete_capability_result(
@@ -926,243 +942,5 @@ pub fn capability_allowlist(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use ironclaw_host_api::{
-        dispatch::CapabilityDisplayOutputPreview,
-        ids::{AgentId, InvocationId, ProviderToolName, TenantId, ThreadId},
-    };
-    use ironclaw_loop_contracts::{RunProfileResolutionRequest, RunProfileResolver};
-    use ironclaw_loop_host::DurablePersistence;
-    use ironclaw_turn_runner::planned_driver_factory::default_planned_run_profile_resolver;
-    use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
-
-    #[tokio::test]
-    async fn capability_io_records_read_file_display_preview() {
-        let io = ProductLiveCapabilityIo::default();
-        let run_context = loop_run_context().await;
-        let tool_call = ProviderToolCall {
-            provider_id: "provider".to_string(),
-            provider_model_id: "model".to_string(),
-            turn_id: Some("turn_1".to_string()),
-            id: "call_1".to_string(),
-            name: ProviderToolName::new("read_file").expect("provider tool name"),
-            arguments: serde_json::json!({"path": "src/main.rs", "api_key": "sk-secret"}),
-            response_reasoning: None,
-            reasoning: None,
-            signature: None,
-        };
-        let input_ref = io
-            .register_provider_tool_call_input(&run_context, &tool_call)
-            .await
-            .expect("input staged");
-        let invocation_id = InvocationId::new();
-        let capability_id = CapabilityId::new("builtin.read_file").unwrap();
-        io.write_capability_result(CapabilityResultWrite {
-            run_context: &run_context,
-            input_ref: &input_ref,
-            invocation_id,
-            capability_id: &capability_id,
-            output: serde_json::json!({"content": "fn main() {}"}),
-            display_preview: None,
-            durable_persistence: DurablePersistence::Persist,
-        })
-        .await
-        .map(|_| ())
-        .expect("result staged");
-
-        let record = io
-            .display_previews
-            .record_for_invocation(invocation_id)
-            .expect("preview recorded");
-        assert_eq!(record.title, "read_file");
-        assert_eq!(record.subtitle.as_deref(), Some("src/main.rs"));
-        assert!(
-            record
-                .input_summary
-                .as_deref()
-                .is_some_and(|summary| summary.contains("path: src/main.rs"))
-        );
-        assert_eq!(record.output_preview.as_deref(), Some("fn main() {}"));
-        assert_eq!(record.output_kind.as_deref(), Some("text"));
-        let rendered = serde_json::to_string(&record.input_summary).unwrap();
-        assert!(!rendered.contains("sk-secret"));
-    }
-
-    /// Regression (#activity-card-args): in production the loop wraps this
-    /// resolver with `ProviderToolCallInputResolver`, which owns the canonical
-    /// (digest) ref and bypasses `register_provider_tool_call_input` — it drives
-    /// the display-preview recording via `record_provider_tool_call_display_input`
-    /// instead. Recording under that canonical ref must still surface
-    /// `input_summary` when the result is written under the same ref; otherwise
-    /// the activity card shows the tool with no arguments.
-    #[tokio::test]
-    async fn capability_io_records_display_input_via_provider_tool_call_hook() {
-        let io = ProductLiveCapabilityIo::default();
-        let run_context = loop_run_context().await;
-        // The model-facing provider tool name is the lossy `__` encoding; the
-        // resolved capability id is the dotted form. The display must key off
-        // the capability id so the card title and per-tool summary are correct.
-        let tool_call = ProviderToolCall {
-            provider_id: "provider".to_string(),
-            provider_model_id: "model".to_string(),
-            turn_id: Some("turn_1".to_string()),
-            id: "call_1".to_string(),
-            name: ProviderToolName::new("nearai__web_search").expect("provider tool name"),
-            arguments: serde_json::json!({"query": "deploy status"}),
-            response_reasoning: None,
-            reasoning: None,
-            signature: None,
-        };
-        let capability_id = CapabilityId::new("nearai.web_search").unwrap();
-        // The decorator owns this ref; it is NOT produced by
-        // `register_provider_tool_call_input` here.
-        let input_ref = CapabilityInputRef::new(format!(
-            "input:provider-tool-call:{}:digest",
-            run_context.run_id
-        ))
-        .expect("valid ref");
-
-        io.record_provider_tool_call_display_input(
-            &run_context,
-            &input_ref,
-            &capability_id,
-            &tool_call,
-        );
-
-        let invocation_id = InvocationId::new();
-        io.write_capability_result(CapabilityResultWrite {
-            run_context: &run_context,
-            input_ref: &input_ref,
-            invocation_id,
-            capability_id: &capability_id,
-            output: serde_json::json!({"results": []}),
-            display_preview: None,
-            durable_persistence: DurablePersistence::Persist,
-        })
-        .await
-        .map(|_| ())
-        .expect("result staged");
-
-        let record = io
-            .display_previews
-            .record_for_invocation(invocation_id)
-            .expect("preview recorded");
-        // Title is the dotted capability id, not the `__` provider tool name.
-        assert_eq!(record.title, "nearai.web_search");
-        // The per-tool web_search matcher fires (query summarized), rather than
-        // falling back to a raw JSON dump.
-        assert!(
-            record
-                .input_summary
-                .as_deref()
-                .is_some_and(|summary| summary.contains("query: deploy status")),
-            "input summary should use the web_search matcher, got {:?}",
-            record.input_summary,
-        );
-    }
-
-    #[tokio::test]
-    async fn capability_io_records_display_preview_side_channel() {
-        let io = ProductLiveCapabilityIo::default();
-        let run_context = loop_run_context().await;
-        let input_ref = io
-            .stage_input(
-                &run_context,
-                serde_json::json!({"path": "/workspace/main.rs"}),
-            )
-            .expect("input staged");
-        let invocation_id = InvocationId::new();
-        let capability_id = CapabilityId::new("builtin.write_file").unwrap();
-        io.write_capability_result(CapabilityResultWrite {
-            run_context: &run_context,
-            input_ref: &input_ref,
-            invocation_id,
-            capability_id: &capability_id,
-            output: serde_json::json!({"success": true}),
-            display_preview: Some(CapabilityDisplayOutputPreview {
-                output_summary: Some("Edited 1 file: +1/-1".to_string()),
-                output_preview:
-                    "--- a/workspace/main.rs\n+++ b/workspace/main.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n"
-                        .to_string(),
-                output_kind: "unified_diff".to_string(),
-                subtitle: Some("/workspace/main.rs".to_string()),
-                truncated: false,
-            }),
-            durable_persistence: DurablePersistence::Persist,
-        })
-        .await
-        .map(|_| ())
-        .expect("result staged");
-        let record = io
-            .display_previews
-            .record_for_invocation(invocation_id)
-            .expect("preview recorded");
-        assert_eq!(record.output_kind.as_deref(), Some("unified_diff"));
-        assert_eq!(
-            record.output_summary.as_deref(),
-            Some("Edited 1 file: +1/-1")
-        );
-        assert!(
-            record
-                .output_preview
-                .as_deref()
-                .is_some_and(|preview| preview.contains("+new"))
-        );
-        assert_eq!(record.subtitle.as_deref(), Some("/workspace/main.rs"));
-    }
-
-    #[tokio::test]
-    async fn capability_io_prunes_display_preview_with_run() {
-        let io = ProductLiveCapabilityIo::default();
-        let run_context = loop_run_context().await;
-        let input_ref = io
-            .stage_input(&run_context, serde_json::json!({"text": "ok"}))
-            .expect("input staged");
-        let invocation_id = InvocationId::new();
-        let capability_id = CapabilityId::new("demo.echo").unwrap();
-        io.write_capability_result(CapabilityResultWrite {
-            run_context: &run_context,
-            input_ref: &input_ref,
-            invocation_id,
-            capability_id: &capability_id,
-            output: serde_json::json!({"reply": "ok"}),
-            display_preview: None,
-            durable_persistence: DurablePersistence::Persist,
-        })
-        .await
-        .map(|_| ())
-        .expect("result staged");
-        assert!(
-            io.display_previews
-                .record_for_invocation(invocation_id)
-                .is_some()
-        );
-
-        io.prune_run(&run_context).expect("run pruned");
-        assert!(
-            io.display_previews
-                .record_for_invocation(invocation_id)
-                .is_none()
-        );
-    }
-
-    async fn loop_run_context() -> LoopRunContext {
-        let resolved = default_planned_run_profile_resolver()
-            .unwrap()
-            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
-            .await
-            .unwrap();
-        LoopRunContext::new(
-            TurnScope::new(
-                TenantId::new("preview-tenant").unwrap(),
-                Some(AgentId::new("preview-agent").unwrap()),
-                None,
-                ThreadId::new("preview-thread").unwrap(),
-            ),
-            TurnId::new(),
-            TurnRunId::new(),
-            resolved,
-        )
-    }
-}
+#[path = "product_live_adapters_tests.rs"]
+mod tests;

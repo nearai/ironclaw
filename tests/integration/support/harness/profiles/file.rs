@@ -8,8 +8,8 @@ use ironclaw_host_api::{
     mount::MountPermissions,
 };
 use ironclaw_host_runtime::{
-    DOCUMENT_EDIT_CAPABILITY_ID, HTML_TO_PDF_CAPABILITY_ID, JSON_CAPABILITY_ID,
-    READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+    CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID, DOCUMENT_EDIT_CAPABILITY_ID,
+    GLOB_CAPABILITY_ID, HTML_TO_PDF_CAPABILITY_ID, JSON_CAPABILITY_ID,
 };
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
@@ -20,8 +20,9 @@ fn file_tools_with_runtime_policy(
 ) -> HarnessResult<ToolsProfile> {
     Ok(ToolsProfile {
         capability_ids: vec![
-            CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?,
-            CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
+            CapabilityId::new(CODING_WRITE_CAPABILITY_ID)?,
+            CapabilityId::new(CODING_READ_CAPABILITY_ID)?,
+            CapabilityId::new(GLOB_CAPABILITY_ID)?,
         ],
         effect_kinds: vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
         options: HostRuntimeHarnessOptions::new(
@@ -92,23 +93,14 @@ pub(crate) async fn file_tools_requiring_approval() -> HarnessResult<HostRuntime
 }
 
 /// Same capability set as [`file_tools`], but opts the harness into the real
-/// `StagedCapabilityIo` (durable tool-result projection seam, issue #5838)
-/// instead of the ephemeral `ProductLiveCapabilityIo` test double, so
-/// `read_file`'s large output is persisted durably and `result_read` can page
-/// through it. Auto-approve on, like `file_tools`.
+/// `StagedCapabilityIo` so large outputs are persisted as artifacts that the
+/// pinned coding `read` tool can consume. Auto-approve on, like `file_tools`.
 pub(crate) fn file_tools_with_durable_capability_io_profile() -> HarnessResult<ToolsProfile> {
     let mut profile = file_tools_with_runtime_policy(Some(
         ironclaw_composition::standalone_unrestricted_runtime_policy(true)?,
     ))?
     .with_auto_approve_default(true);
     profile.options = std::mem::take(&mut profile.options).with_durable_capability_io();
-    // Grants the synthetic `result_read` id so
-    // `apply_synthetic_capability_wrappers` wraps it onto this harness's
-    // port (mirrors `project_create`'s `PROJECT_CREATE_CAPABILITY_ID`
-    // opt-in pattern -- see `profiles/project.rs`).
-    profile.capability_ids.push(CapabilityId::new(
-        ironclaw_composition::test_support::RESULT_READ_CAPABILITY_ID,
-    )?);
     // `builtin.json` (`parse`) is the minimal granted capability whose output
     // is a top-level JSON array, needed to drive the truncated-array
     // `item_count` observation through this durable-io seam.
@@ -128,7 +120,7 @@ pub(crate) async fn file_tools_with_durable_capability_io()
 
 pub(crate) fn write_only_profile() -> HarnessResult<ToolsProfile> {
     Ok(ToolsProfile {
-        capability_ids: vec![CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?],
+        capability_ids: vec![CapabilityId::new(CODING_WRITE_CAPABILITY_ID)?],
         effect_kinds: vec![EffectKind::WriteFilesystem],
         options: HostRuntimeHarnessOptions::new(
             workspace_mounts(MountPermissions::read_write_list_delete())?,

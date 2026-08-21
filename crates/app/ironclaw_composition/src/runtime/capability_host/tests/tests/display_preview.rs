@@ -53,26 +53,24 @@ async fn capability_io_writes_display_preview_to_durable_history() {
         .await
         .expect("input stages");
     let invocation_id = InvocationId::new();
-    let capability_id = CapabilityId::new("builtin.write_file").expect("capability id");
+    let capability_id = CapabilityId::new("builtin.write").expect("capability id");
 
     capability_io
-        .write_capability_result(CapabilityResultWrite {
-            run_context: &run_context,
-            input_ref: &input_ref,
-            invocation_id,
-            capability_id: &capability_id,
-            output: serde_json::json!({"success": true}),
-            display_preview: Some(CapabilityDisplayOutputPreview {
-                output_summary: Some("Edited 1 file: +1/-1".to_string()),
-                output_preview:
-                    "--- a/workspace/main.rs\n+++ b/workspace/main.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n"
-                        .to_string(),
-                output_kind: "unified_diff".to_string(),
-                subtitle: Some("/workspace/main.rs".to_string()),
-                truncated: false,
-            }),
-            durable_persistence: DurablePersistence::Persist,
-        })
+        .write_capability_result(CapabilityResultWrite { receipt: None, run_context: &run_context,
+        completed_artifact: None,
+        canonical_output_digest: None,
+        input_ref: &input_ref,
+        invocation_id,
+        capability_id: &capability_id,
+        output: serde_json::json!({"output": "[main.rs#1A2B]\nSuccessfully wrote 3 bytes to main.rs"}),
+        display_preview: Some(CapabilityDisplayOutputPreview {
+            output_summary: Some("wrote main.rs".to_string()),
+            output_preview: "[main.rs#1A2B]\n1:new\n".to_string(),
+            output_kind: "text".to_string(),
+            subtitle: Some("/workspace/main.rs".to_string()),
+            truncated: false,
+        }),
+        durable_persistence: DurablePersistence::Persist, canonical_item_count: None })
         .await
         .map(|_| ())
         .expect("result stages");
@@ -93,17 +91,14 @@ async fn capability_io_writes_display_preview_to_durable_history() {
         serde_json::from_str(preview_message.content.as_deref().expect("preview content"))
             .expect("preview envelope parses");
 
-    assert_eq!(envelope.output_kind.as_deref(), Some("unified_diff"));
-    assert_eq!(
-        envelope.output_summary.as_deref(),
-        Some("Edited 1 file: +1/-1")
-    );
+    assert_eq!(envelope.output_kind.as_deref(), Some("text"));
+    assert_eq!(envelope.output_summary.as_deref(), Some("wrote main.rs"));
     assert_eq!(envelope.subtitle.as_deref(), Some("/workspace/main.rs"));
     assert!(
         envelope
             .output_preview
             .as_deref()
-            .is_some_and(|preview| preview.contains("+new"))
+            .is_some_and(|preview| preview.contains("1:new"))
     );
 }
 

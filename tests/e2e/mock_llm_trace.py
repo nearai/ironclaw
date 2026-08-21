@@ -439,7 +439,26 @@ def _canonical_trace_result_payload(content: object) -> object:
     if not _is_trace_result_evidence(content):
         return content
     detail = content.get("detail")
-    if not isinstance(detail, dict) or not isinstance(detail.get("preview"), str):
+    if not isinstance(detail, dict):
+        return content
+    # Current observation shape: complete canonical JSON rides inline under
+    # `detail.content` (kind "inline_result"). A payload that does not parse
+    # as JSON stays evidence so bindings fail loudly instead of guessing.
+    if detail.get("kind") == "inline_result":
+        inline = detail.get("content")
+        byte_len = detail.get("byte_len")
+        if (
+            not isinstance(inline, str)
+            or isinstance(byte_len, bool)
+            or not isinstance(byte_len, int)
+            or byte_len != len(inline.encode("utf-8"))
+        ):
+            return content
+        try:
+            return json.loads(inline)
+        except json.JSONDecodeError:
+            return content
+    if not isinstance(detail.get("preview"), str):
         return content
     byte_len = detail.get("byte_len")
     total_bytes = detail.get("total_bytes")

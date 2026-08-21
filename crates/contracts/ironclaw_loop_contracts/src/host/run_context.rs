@@ -3,10 +3,11 @@
 
 use std::{future::Future, pin::Pin};
 
-use ironclaw_host_api::resource::ResourceScope;
 use ironclaw_host_api::{
-    ids::{ThreadId, UserId},
+    artifact::ArtifactNamespaceId,
+    ids::{RunId, ThreadId, UserId},
     output::OutputContract,
+    resource::ResourceScope,
 };
 use serde::{Deserialize, Serialize};
 
@@ -242,6 +243,8 @@ pub struct LoopRunContext {
     pub thread_id: ThreadId,
     pub turn_id: TurnId,
     pub run_id: TurnRunId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_namespace: Option<ArtifactNamespaceId>,
     pub resolved_run_profile: ResolvedRunProfile,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_model_route: Option<LoopModelRouteSnapshot>,
@@ -277,6 +280,9 @@ impl LoopRunContext {
             thread_id,
             turn_id,
             run_id,
+            artifact_namespace: Some(ArtifactNamespaceId::from_root_run(RunId::from_uuid(
+                run_id.as_uuid(),
+            ))),
             resolved_run_profile,
             resolved_model_route: None,
             loop_driver_id,
@@ -304,6 +310,17 @@ impl LoopRunContext {
     pub fn with_accepted_message_ref(mut self, accepted_message_ref: AcceptedMessageRef) -> Self {
         self.accepted_message_ref = Some(accepted_message_ref);
         self
+    }
+
+    pub fn with_artifact_namespace(mut self, namespace: ArtifactNamespaceId) -> Self {
+        self.artifact_namespace = Some(namespace);
+        self
+    }
+
+    pub fn effective_artifact_namespace(&self) -> ArtifactNamespaceId {
+        self.artifact_namespace.unwrap_or_else(|| {
+            ArtifactNamespaceId::from_root_run(RunId::from_uuid(self.run_id.as_uuid()))
+        })
     }
 
     pub fn actor(&self) -> Option<&TurnActor> {

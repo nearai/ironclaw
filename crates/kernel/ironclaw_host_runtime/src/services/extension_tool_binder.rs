@@ -157,6 +157,7 @@ where
             .dispatch_json(
                 self.lane,
                 RuntimeLaneRequest {
+                    artifact_namespace: None,
                     package: &self.package,
                     descriptor,
                     filesystem: self.filesystem.as_ref(),

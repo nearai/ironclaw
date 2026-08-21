@@ -5,7 +5,7 @@ use super::legacy_capability_fixture_to_v2;
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -34,6 +34,10 @@ use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{
     DiskFilesystem, Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, RootFilesystem,
     ScopedFilesystem,
+};
+use ironclaw_host_api::artifact::{
+    AccountedArtifactPersister, ArtifactDigest, ArtifactId, ArtifactRef, ArtifactWriteError,
+    ArtifactWriteMetadata, CompletedArtifact,
 };
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::process::{
@@ -264,6 +268,63 @@ pub(crate) fn assert_completed_outcome(
 pub(crate) type InMemoryHostRuntimeServices =
     HostRuntimeServices<DiskFilesystem, InMemoryResourceGovernor>;
 
+/// Deterministic in-memory `AccountedArtifactPersister` for agent-scoped
+/// dispatch: unique monotonic `ArtifactId`s, checked byte length, digest over
+/// the persisted bytes, and the metadata content type. Mirrors the loop
+/// ingress contract.
+#[derive(Default)]
+pub(crate) struct TestArtifactPersister {
+    next_id: AtomicU64,
+}
+
+#[async_trait]
+impl AccountedArtifactPersister for TestArtifactPersister {
+    async fn persist(
+        &self,
+        metadata: ArtifactWriteMetadata,
+        bytes: &[u8],
+        _receipt: &ResourceReceipt,
+    ) -> Result<CompletedArtifact, ArtifactWriteError> {
+        let artifact_id = ArtifactId::new(self.next_id.fetch_add(1, Ordering::Relaxed));
+        let byte_len = u64::try_from(bytes.len()).map_err(|_| ArtifactWriteError::Storage)?;
+        Ok(CompletedArtifact {
+            artifact_ref: ArtifactRef::new(artifact_id),
+            byte_len,
+            total_lines: None,
+            content_type: metadata.content_type,
+            digest: ArtifactDigest::from_bytes(bytes),
+        })
+    }
+}
+
+/// Test-only extension wiring a deterministic in-memory
+/// [`AccountedArtifactPersister`] into a [`HostRuntimeServices`] builder.
+///
+/// Agent-scoped dispatch requires both a durable artifact namespace (derived
+/// by `DefaultHostRuntime` when the context carries none) and an accounted
+/// persister; the kernel guard fails closed with `FailureKind::Resource`
+/// ("resource governor storage error") otherwise. Every harness builder that
+/// dispatches agent-scoped capabilities wires this. Tests that deliberately
+/// assert the fail-closed guard must NOT call this helper and must pin the
+/// `Resource` failure (or clear the context's artifact namespace).
+pub(crate) trait WithTestArtifactPersistence<F, G>
+where
+    F: RootFilesystem + 'static,
+    G: ResourceGovernor + 'static,
+{
+    fn with_test_artifact_persistence(self) -> HostRuntimeServices<F, G>;
+}
+
+impl<F, G> WithTestArtifactPersistence<F, G> for HostRuntimeServices<F, G>
+where
+    F: RootFilesystem + 'static,
+    G: ResourceGovernor + 'static,
+{
+    fn with_test_artifact_persistence(self) -> HostRuntimeServices<F, G> {
+        self.with_accounted_artifact_persistence(Arc::new(TestArtifactPersister::default()))
+    }
+}
+
 pub(crate) struct RecordingInvocationApprovalStores {
     pub(crate) runs:
         ironclaw_processes::ProcessInvocationStateStore<ironclaw_filesystem::InMemoryBackend>,
@@ -440,6 +501,7 @@ pub(crate) fn approval_resume_fixture_with_manifest(
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
     )))
+    .with_test_artifact_persistence()
     .with_event_sink(Arc::new(events.clone()));
 
     ApprovalResumeFixture {
@@ -473,6 +535,7 @@ pub(crate) fn resume_runtime_with_empty_registry(
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
     )))
+    .with_test_artifact_persistence()
     .host_runtime_for_local_testing()
 }
 
@@ -501,6 +564,7 @@ pub(crate) fn resume_runtime_with_policy(
     )))
     .with_event_sink(Arc::new(fixture.events.clone()))
     .with_runtime_policy(policy)
+    .with_test_artifact_persistence()
     .host_runtime_for_local_testing()
 }
 
@@ -755,14 +819,18 @@ impl ScriptExecutor for RecordingScriptExecutor {
             Some(reservation) => reservation,
             None => budget.reserve(request.scope.clone(), request.estimate.clone())?,
         };
-        let usage = ResourceUsage::default();
+        let output = request.invocation.input;
+        let output_bytes = serde_json::to_vec(&output)
+            .map(|bytes| bytes.len() as u64)
+            .unwrap_or(0);
+        let usage = ResourceUsage::default().set_output_bytes(output_bytes);
         let receipt = budget.reconcile(reservation.id, usage.clone())?;
         Ok(ScriptExecutionResult {
             result: CapabilityHostResult {
-                output: request.invocation.input,
+                output,
                 reservation_id: reservation.id,
                 usage,
-                output_bytes: 0,
+                output_bytes,
             },
             receipt,
         })
@@ -1197,16 +1265,24 @@ where
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct FailingCleanupResourceGovernor;
+#[derive(Debug, Default)]
+pub(crate) struct FailingCleanupResourceGovernor {
+    inner: InMemoryResourceGovernor,
+}
+
+impl FailingCleanupResourceGovernor {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+}
 
 impl ResourceGovernor for FailingCleanupResourceGovernor {
     fn set_limit(
         &self,
-        _account: ResourceAccount,
-        _limits: ResourceLimits,
+        account: ResourceAccount,
+        limits: ResourceLimits,
     ) -> Result<(), ResourceError> {
-        Ok(())
+        self.inner.set_limit(account, limits)
     }
 
     fn reserve_with_outcome(
@@ -1214,14 +1290,7 @@ impl ResourceGovernor for FailingCleanupResourceGovernor {
         scope: ResourceScope,
         estimate: ResourceEstimate,
     ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
-        Ok(ironclaw_resources::ReservationOutcome {
-            reservation: ResourceReservation {
-                id: ResourceReservationId::new(),
-                scope,
-                estimate,
-            },
-            warnings: Vec::new(),
-        })
+        self.inner.reserve_with_outcome(scope, estimate)
     }
 
     fn reserve_with_id_and_outcome(
@@ -1230,14 +1299,17 @@ impl ResourceGovernor for FailingCleanupResourceGovernor {
         estimate: ResourceEstimate,
         reservation_id: ResourceReservationId,
     ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
-        Ok(ironclaw_resources::ReservationOutcome {
-            reservation: ResourceReservation {
-                id: reservation_id,
-                scope,
-                estimate,
-            },
-            warnings: Vec::new(),
-        })
+        self.inner
+            .reserve_with_id_and_outcome(scope, estimate, reservation_id)
+    }
+
+    fn grow_reservation_with_outcome(
+        &self,
+        reservation_id: ResourceReservationId,
+        additional: ResourceEstimate,
+    ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
+        self.inner
+            .grow_reservation_with_outcome(reservation_id, additional)
     }
 
     fn reconcile(
@@ -1692,6 +1764,7 @@ pub(crate) fn execution_context_without_grants() -> ExecutionContext {
 
 pub(crate) fn execution_context_without_grants_for_scope(scope: ResourceScope) -> ExecutionContext {
     let context = ExecutionContext {
+        artifact_namespace: None,
         run_id: Some(RunId::new()),
         origin: None,
         invocation_id: scope.invocation_id,
@@ -1748,6 +1821,7 @@ pub(crate) fn execution_context_with_effect_grants_for_scope(
     allowed_effects: Vec<EffectKind>,
 ) -> ExecutionContext {
     let context = ExecutionContext {
+        artifact_namespace: None,
         run_id: Some(RunId::new()),
         origin: None,
         invocation_id: scope.invocation_id,
@@ -2082,6 +2156,7 @@ pub(crate) async fn wasm_runtime_for_component(
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_runtime_http_egress(Arc::clone(&http))
+    .with_test_artifact_persistence()
     .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
     .unwrap();
 
@@ -2122,6 +2197,7 @@ pub(crate) async fn wasm_runtime_for_component_with_slow_zero_body_http(
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_runtime_http_egress(Arc::clone(&http))
+    .with_test_artifact_persistence()
     .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
     .unwrap();
 

@@ -1616,7 +1616,7 @@ async fn register_notification_channels(
         .expect("seed the creator's notification channels");
 }
 
-/// Gate `builtin.write_file` for this run owner only. `AskEachTime` beats
+/// Gate `builtin.write` for this run owner only. `AskEachTime` beats
 /// global auto-approve (#4776 precedence), so the delivery/lifecycle verbs
 /// keep dispatching gate-free while the scripted write raises a REAL gate.
 async fn gate_the_write(group: &RebornIntegrationGroup, harness: &RebornIntegrationHarness) {
@@ -1624,8 +1624,8 @@ async fn gate_the_write(group: &RebornIntegrationGroup, harness: &RebornIntegrat
         .capability_harness()
         .expect("delivery-with-gated-write always uses HostRuntime")
         .set_ask_each_time_override_for_test(
-            &ironclaw_host_api::ids::CapabilityId::new("builtin.write_file")
-                .expect("write_file capability id"),
+            &ironclaw_host_api::ids::CapabilityId::new("builtin.write")
+                .expect("write capability id"),
             harness.binding.tenant_id.clone(),
             harness.binding.actor_user_id.clone(),
         )
@@ -1726,7 +1726,7 @@ async fn blocked_fire_fans_out_and_first_approve_wins() {
             GATED_FIRE_PROMPT,
             [
                 RebornScriptedReply::tool_call(
-                    "builtin.write_file",
+                    "builtin.write",
                     json!({"path": "/workspace/fanout-report.txt", "content": "nightly deploy report"}),
                 ),
                 RebornScriptedReply::text(GATED_FIRE_REPLY),
@@ -1839,7 +1839,7 @@ async fn empty_notification_set_keeps_blocked_fire_in_app_only() {
             GATED_FIRE_PROMPT,
             [
                 RebornScriptedReply::tool_call(
-                    "builtin.write_file",
+                    "builtin.write",
                     json!({"path": "/workspace/in-app-only.txt", "content": "nightly deploy report"}),
                 ),
                 RebornScriptedReply::text(GATED_FIRE_REPLY),
@@ -2092,8 +2092,8 @@ async fn blocked_fire_pushes_web_app_notice_to_enrolled_browser() {
             GATED_FIRE_PROMPT,
             [
                 RebornScriptedReply::tool_call(
-                    "builtin.write_file",
-                    json!({"path": "/workspace/web-app-report.txt", "content": "nightly deploy report"}),
+                    "builtin.write",
+                    json!({"path": "/workspace/web-push-report.txt", "content": "nightly deploy report"}),
                 ),
                 RebornScriptedReply::text(GATED_FIRE_REPLY),
             ],
@@ -2240,8 +2240,8 @@ async fn gone_push_subscription_is_pruned_after_notice_attempt() {
             GATED_FIRE_PROMPT,
             [
                 RebornScriptedReply::tool_call(
-                    "builtin.write_file",
-                    json!({"path": "/workspace/web-app-prune.txt", "content": "nightly deploy report"}),
+                    "builtin.write",
+                    json!({"path": "/workspace/web-push-prune.txt", "content": "nightly deploy report"}),
                 ),
                 RebornScriptedReply::text(GATED_FIRE_REPLY),
             ],

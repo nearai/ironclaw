@@ -179,6 +179,10 @@ fn completed_or_output_violation_outcome(
         output: dispatch.output,
         display_preview: dispatch.display_preview,
         usage: dispatch.usage,
+        receipt: Some(dispatch.receipt),
+        completed_artifact: dispatch.completed_artifact,
+        canonical_output_digest: dispatch.canonical_output_digest,
+        canonical_item_count: dispatch.canonical_item_count,
     };
 
     if let Some(op) = standard_op

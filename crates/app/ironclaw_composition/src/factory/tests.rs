@@ -1968,6 +1968,7 @@ async fn production_database_root_filesystem_mounts_canonical_runtime_roots() {
     assert_eq!(
         mounted_roots,
         vec![
+            "/artifacts",
             "/events",
             "/memory",
             "/projects",
@@ -2820,8 +2821,8 @@ async fn standalone_workspace_mounts_do_not_authorize_skill_writes() {
 
     let failure = invoke_json(
         &services,
-        "builtin.write_file",
-        workspace_context("builtin.write_file"),
+        "builtin.write",
+        workspace_context("builtin.write"),
         serde_json::json!({
             "path": "/skills/blocked/SKILL.md",
             "content": skill_md("blocked", "blocked skill", "BLOCKED")

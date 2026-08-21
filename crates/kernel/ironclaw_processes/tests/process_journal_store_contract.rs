@@ -7,6 +7,7 @@ use ironclaw_filesystem::{
     PostgresRootFilesystem, RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
+    artifact::{ArtifactDigest, ArtifactId, ArtifactRef, CompletedArtifact},
     ids::{AgentId, InvocationId, ProcessId, ProjectId, TenantId, ThreadId, UserId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{HostPath, MountAlias, ScopedPath, VirtualPath},
@@ -14,7 +15,8 @@ use ironclaw_host_api::{
     turn::{SanitizedFailure, TurnCheckpointId, TurnGateRef, TurnId, TurnRunId},
 };
 use ironclaw_processes::{
-    CancelProcessRequest, ClaimProcessesRequest, CloseProcessDependencyRequest, FailProcessRequest,
+    CancelProcessRequest, ClaimProcessDependencySettlementRequest, ClaimProcessesRequest,
+    CloseProcessDependencyRequest, CompleteProcessDependencySettlementRequest, FailProcessRequest,
     GetProcessCheckpointRequest, GetProcessInputRequest, GetProcessSnapshotRequest,
     JournaledProcessSnapshot, KillProcessRequest, MAX_CRASH_RECOVERY_RECLAIMS,
     MAX_PROCESS_CHECKPOINT_PAYLOAD_BYTES, MAX_PROCESS_INPUT_PAYLOAD_BYTES,
@@ -33,8 +35,8 @@ use ironclaw_processes::{
     ProcessSubmissionEdge, ProcessSubmissionPort, ProcessSuspension, ProcessSuspensionKind,
     ProcessTerminalEvidence, ProcessTransitionPort, ProcessTreePort, ProcessWorkerId,
     PruneReleasedProcessRequest, RecordProcessCheckpointRequest, ReleaseProcessTreeRequest,
-    ReserveProcessTreeRequest, ResumeProcessRequest, SettleProcessDependencyRequest,
-    StopProcessRequest, SubmitProcessAtEdgeRequest, SubmitProcessRequest, SuspendProcessRequest,
+    ReserveProcessTreeRequest, ResumeProcessRequest, StopProcessRequest,
+    SubmitProcessAtEdgeRequest, SubmitProcessRequest, SuspendProcessRequest,
     TransitionProcessDependencyRequest,
 };
 use serde_json::json;
@@ -3026,20 +3028,42 @@ async fn consuming_dependency_atomically_releases_tree_capacity() {
         "a rejected child submission must not leave an orphan dependency"
     );
 
-    let settled = store
-        .settle_process_dependency(SettleProcessDependencyRequest {
+    let claim_token = "process-contract-settlement".to_string();
+    let claimed_at = Utc::now();
+    store
+        .claim_process_dependency_settlement(ClaimProcessDependencySettlementRequest {
             dependent_process_id: root_id,
             dependency_process_id: child_id,
             scope: child_scope.clone(),
+            claim_token: claim_token.clone(),
+            claimed_at,
+            lease_expires_at: claimed_at + chrono::Duration::seconds(30),
+        })
+        .await
+        .expect("claim dependency settlement")
+        .expect("dependency exists");
+    let settled = store
+        .complete_process_dependency_settlement(CompleteProcessDependencySettlementRequest {
+            dependent_process_id: root_id,
+            dependency_process_id: child_id,
+            scope: child_scope.clone(),
+            claim_token,
             terminal: ProcessTerminalEvidence {
                 status: ProcessLifecycleStatus::Completed,
                 output_bytes: Some(42),
                 sanitized_reason: None,
             },
+            completed_artifact: CompletedArtifact {
+                artifact_ref: ArtifactRef::new(ArtifactId::new(42)),
+                byte_len: 42,
+                total_lines: Some(1),
+                content_type: "application/json".to_string(),
+                digest: ArtifactDigest::from_bytes(b"process dependency result"),
+            },
             settled_at: Utc::now(),
         })
         .await
-        .expect("settle dependency")
+        .expect("complete dependency settlement")
         .expect("dependency exists");
     assert_eq!(settled.state, ProcessDependencyState::Settled);
 
@@ -3130,20 +3154,42 @@ where
         })
         .await
         .expect("open dependency");
+    let claim_token = "transition-helper-settlement".to_string();
+    let claimed_at = Utc::now();
     store
-        .settle_process_dependency(SettleProcessDependencyRequest {
+        .claim_process_dependency_settlement(ClaimProcessDependencySettlementRequest {
             dependent_process_id: dependent,
             dependency_process_id: dependency,
             scope: scope(),
+            claim_token: claim_token.clone(),
+            claimed_at,
+            lease_expires_at: claimed_at + chrono::Duration::seconds(30),
+        })
+        .await
+        .expect("claim dependency settlement")
+        .expect("dependency exists");
+    store
+        .complete_process_dependency_settlement(CompleteProcessDependencySettlementRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: dependency,
+            scope: scope(),
+            claim_token,
             terminal: ProcessTerminalEvidence {
                 status: ProcessLifecycleStatus::Completed,
                 output_bytes: Some(7),
                 sanitized_reason: None,
             },
+            completed_artifact: CompletedArtifact {
+                artifact_ref: ArtifactRef::new(ArtifactId::new(7)),
+                byte_len: 7,
+                total_lines: Some(1),
+                content_type: "application/json".to_string(),
+                digest: ArtifactDigest::from_bytes(b"transition helper result"),
+            },
             settled_at: Utc::now(),
         })
         .await
-        .expect("settle dependency")
+        .expect("complete dependency settlement")
         .expect("dependency exists");
     (dependent, dependency)
 }

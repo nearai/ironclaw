@@ -112,10 +112,7 @@ where
                 )
             })?
             .len() as u64;
-        let output_bytes = output
-            .output_bytes
-            .unwrap_or(serialized_len)
-            .max(serialized_len);
+        let output_bytes = serialized_len;
         if output_bytes > self.config.max_output_bytes {
             return Err(release_after_failure(
                 budget,
@@ -128,7 +125,7 @@ where
         }
 
         let mut usage = output.usage;
-        usage.output_bytes = usage.output_bytes.max(output_bytes);
+        usage.output_bytes = output_bytes;
         // No stdio process accounting here: `prepare_client_request` rejects
         // `stdio` with `ExternalStdioTransportUnsupported` and everything that
         // is not `http`/`sse` with `UnsupportedTransport`, so this lane spawns

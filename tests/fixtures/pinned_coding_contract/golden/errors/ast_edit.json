@@ -1,0 +1,38 @@
+{
+  "tool": "ast_edit",
+  "note": "Representative model-visible error shapes for the pinned `ast_edit` tool at commit 08819b279cf02ae2545e69dad7111ab48d91d35e. `template` is verbatim from the cited upstream source; `example` renders the template with representative values.",
+  "entries": [
+    {
+      "case": "empty_op_pattern",
+      "kind": "error",
+      "template": "`ops[${index}].pat` must be a non-empty pattern",
+      "example": "`ops[0].pat` must be a non-empty pattern",
+      "source_path": "packages/coding-agent/src/tools/ast-edit.ts",
+      "source_line": 270
+    },
+    {
+      "case": "empty_ops",
+      "kind": "error",
+      "template": "`ops` must include at least one op entry",
+      "example": "`ops` must include at least one op entry",
+      "source_path": "packages/coding-agent/src/tools/ast-edit.ts",
+      "source_line": 275
+    },
+    {
+      "case": "duplicate_rewrite_pattern",
+      "kind": "error",
+      "template": "Duplicate rewrite pattern: ${pat}",
+      "example": "Duplicate rewrite pattern: $NAME",
+      "source_path": "packages/coding-agent/src/tools/ast-edit.ts",
+      "source_line": 280
+    },
+    {
+      "case": "external_url_not_rewritable",
+      "kind": "error",
+      "template": "Cannot rewrite external URL: ${rawPath}. Use `read` or `search` to inspect fetched web content; ast_edit only applies to local files.",
+      "example": "Cannot rewrite external URL: https://example.com/x.md. Use `read` or `search` to inspect fetched web content; ast_edit only applies to local files.",
+      "source_path": "packages/coding-agent/src/tools/ast-edit.ts",
+      "source_line": 297
+    }
+  ]
+}

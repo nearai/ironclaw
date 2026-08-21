@@ -19,7 +19,7 @@ use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
-const GATED_CAPABILITY: &str = "builtin.write_file";
+const GATED_CAPABILITY: &str = "builtin.write";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PostRestartAction {

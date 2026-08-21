@@ -5,7 +5,7 @@
 //! through. Covers both "approval-settings non-leak" and "auto-approve
 //! non-leak", which are the SAME mechanic.
 //!
-//! Actor A grants always-allow for its own owner, then A's gated `write_file`
+//! Actor A grants always-allow for its own owner, then A's gated `write`
 //! completes with NO gate. Actor B — a DISTINCT actor over the SAME shared
 //! auto-approve store — issues the IDENTICAL call and still raises a real
 //! `BlockedApproval` gate, because A's grant is scoped to A's owner alone.
@@ -25,7 +25,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .thread("conv-approve-iso-a")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 json!({"path": "/workspace/actor_a.txt", "content": "actor-a-write"}),
             ),
             RebornScriptedReply::text("wrote without a gate"),
@@ -47,7 +47,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     a.submit_turn("write the actor-a file")
         .await
         .map_err(|e| format!("[A write submit — grant must skip the gate] {e}"))?;
-    a.assert_tool_invoked("builtin.write_file")
+    a.assert_tool_invoked("builtin.write")
         .await
         .map_err(|e| format!("[A write invoked] {e}"))?;
     a.assert_workspace_file_contains("actor_a.txt", "actor-a-write")
@@ -60,7 +60,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .with_actor_id("reborn-actor-b")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 json!({"path": "/workspace/actor_b.txt", "content": "actor-b-write"}),
             ),
             // Trailing reply so a LEAK (B wrongly inheriting A's grant) surfaces

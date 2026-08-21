@@ -24,11 +24,12 @@ const MAX_MODEL_VISIBLE_BINARY_INLINE_BYTES: usize = 512;
 const MAX_MODEL_VISIBLE_RESPONSE_HEADERS: usize = 32;
 const MAX_MODEL_VISIBLE_RESPONSE_HEADER_NAME_BYTES: usize = 128;
 const MAX_MODEL_VISIBLE_RESPONSE_HEADER_VALUE_BYTES: usize = 1024;
-const HTTP_TRUNCATION_HINT: &str = "Response body was truncated for the model-visible budget. Use builtin.http.save with save_to, then builtin.read_file with offsets, to inspect the full sanitized body.";
+const HTTP_TRUNCATION_HINT: &str = "Response body was truncated for the model-visible budget. Use builtin.http.save with save_to, then read the saved path with selectors to inspect the full sanitized body.";
 
 pub(super) struct HttpDispatchOutput {
     pub output: Value,
     pub network_egress_bytes: u64,
+    pub pending_artifact: Option<crate::first_party::PendingFirstPartyArtifact>,
 }
 
 pub(super) fn shape_response(
@@ -80,6 +81,7 @@ pub(super) fn shape_response(
     HttpDispatchOutput {
         output: Value::Object(output),
         network_egress_bytes: response.request_bytes,
+        pending_artifact: None,
     }
 }
 

@@ -8,8 +8,9 @@
 //! (the #6129 substring-`secret` bug), forcing the model into a re-read amnesia
 //! loop. `ModelResultPreview` is the content vehicle instead:
 //!
-//! - **24 KiB** bound — mirrors `ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES`
-//!   (the largest raw first-look chunk the model reads at once).
+//! - **[`crate::artifact::ARTIFACT_INLINE_PREVIEW_MAX_BYTES`] bound** — the same
+//!   cap the inline observation detail itself is validated against (the largest
+//!   raw first-look chunk the model reads at once).
 //! - **tolerates delimiters and newlines** — it is the tool's own raw-ish output,
 //!   so `{ } [ ] / < >` and multi-line structure are legitimate content, not a
 //!   redaction signal. (Rejects only NUL and other disallowed control chars.)
@@ -26,11 +27,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::HostApiError;
 
-/// Maximum size of a model-visible result preview, in bytes. Mirrors
-/// `ironclaw_threads::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES` (24 KiB) — the
-/// largest raw first-look chunk a `result_read` returns — so the inline preview
-/// and a follow-up read share one cap.
-pub const MODEL_RESULT_PREVIEW_MAX_BYTES: usize = 24 * 1024;
+/// Maximum size of a model-visible result preview, in bytes.
+///
+/// This MUST stay equal to [`crate::artifact::ARTIFACT_INLINE_PREVIEW_MAX_BYTES`],
+/// the cap `ToolObservationDetail::InlineResult` content is validated against.
+/// A smaller bound here does not shrink anything: the capability host has
+/// already accepted and persisted the larger inline observation, so the loop's
+/// `Outcome` collapse can only DROP the preview
+/// (`ModelResultPreview::redacted(..).ok()`), which degrades a fresh result into
+/// the retired `result_reference` observation shape — content the model cannot
+/// read and prompt construction cannot migrate.
+pub const MODEL_RESULT_PREVIEW_MAX_BYTES: usize =
+    crate::artifact::ARTIFACT_INLINE_PREVIEW_MAX_BYTES;
 
 /// A bounded, credential-redacted, model-visible preview of a tool result's
 /// content. Tolerates delimiters/newlines (it is the tool's own output); refuses
@@ -313,10 +321,18 @@ mod tests {
         }
     }
 
+    /// The preview cap must equal the inline-observation cap. A smaller preview
+    /// bound cannot reject anything at the source — the capability host has
+    /// already emitted the larger inline observation — it only drops the
+    /// preview mid-collapse and degrades a fresh result into the retired
+    /// `result_reference` shape.
     #[test]
-    fn bounds_at_24_kib() {
+    fn bounds_at_the_inline_observation_cap() {
         assert!(ModelResultPreview::new("x".repeat(MODEL_RESULT_PREVIEW_MAX_BYTES)).is_ok());
-        assert_eq!(MODEL_RESULT_PREVIEW_MAX_BYTES, 24 * 1024);
+        assert_eq!(
+            MODEL_RESULT_PREVIEW_MAX_BYTES,
+            crate::artifact::ARTIFACT_INLINE_PREVIEW_MAX_BYTES
+        );
         let err = ModelResultPreview::new("x".repeat(MODEL_RESULT_PREVIEW_MAX_BYTES + 1))
             .unwrap_err()
             .to_string();

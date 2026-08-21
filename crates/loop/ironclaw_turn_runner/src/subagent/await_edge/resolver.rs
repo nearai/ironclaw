@@ -31,7 +31,10 @@ use ironclaw_turns::{
     TurnCoordinator, TurnError, TurnLifecycleEvent, TurnRunRecord,
 };
 
-use super::{AwaitEdge, AwaitEdgeState, EdgeTerminalKind, store::AwaitEdgeStore};
+use super::{
+    AwaitEdge, AwaitEdgeState, EdgeTerminalKind,
+    store::{AwaitEdgeStore, SettlementClaim, SettlementCompletion},
+};
 use crate::subagent::spawn_result::{
     SpawnedChildRunPayload, SubagentSpawnStatus as PayloadSpawnStatus, SubagentTerminalEventKind,
     SubagentTerminalEventPayload,
@@ -468,6 +471,7 @@ where
         };
         self.thread_service
             .update_tool_result_reference(UpdateToolResultReferenceRequest {
+                model_observation: None,
                 scope: thread_scope,
                 thread_id: edge.parent_thread_id.clone(),
                 turn_run_id: parent_run_id.to_string(),
@@ -609,43 +613,53 @@ where
         terminal_kind: EdgeTerminalKind,
         event: &TurnLifecycleEvent,
     ) -> Result<ResolveOutcome, TurnError> {
-        let Some(edge) = self
+        let claim = self
             .store
-            .peek(child_scope, parent_run_id, child_run_id)
+            .claim_settlement(child_scope, parent_run_id, child_run_id)
             .await
-            .map_err(store_error)?
-        else {
-            return Ok(ResolveOutcome::AlreadyClosed);
-        };
-        if edge.state == AwaitEdgeState::Open {
-            let output = self
-                .child_terminal_output(
-                    &edge,
-                    event.owner_user_id.clone(),
-                    event.status,
-                    event.sanitized_reason.clone(),
-                )
-                .await?;
-            let payload = background_completion_payload(event, &edge, &output)?;
-            let parent_run_context = self.parent_run_context(&edge);
-            let byte_len = self
-                .result_writer()?
-                .update_capability_result(&parent_run_context, &edge.result_ref, payload)
-                .await
-                .map_err(|error| TurnError::Unavailable {
-                    reason: error.safe_summary,
-                })?;
-            self.store
-                .settle(
-                    child_scope,
-                    parent_run_id,
-                    child_run_id,
-                    terminal_kind,
-                    Some(byte_len),
-                    event.sanitized_reason.clone(),
-                )
-                .await
-                .map_err(store_error)?;
+            .map_err(store_error)?;
+        match claim {
+            SettlementClaim::Pending => return Ok(ResolveOutcome::AlreadyClosed),
+            SettlementClaim::Completed { .. } => {}
+            SettlementClaim::Acquired { edge, claim_token } => {
+                let output = self
+                    .child_terminal_output(
+                        &edge,
+                        event.owner_user_id.clone(),
+                        event.status,
+                        event.sanitized_reason.clone(),
+                    )
+                    .await?;
+                let payload = background_completion_payload(event, &edge, &output)?;
+                let parent_run_context = self.parent_run_context(&edge);
+                let update = self
+                    .result_writer()?
+                    .update_capability_result(&parent_run_context, &edge.result_ref, payload)
+                    .await
+                    .map_err(|error| TurnError::Unavailable {
+                        reason: error.safe_summary,
+                    })?;
+                let artifact = update
+                    .completed_artifact
+                    .ok_or_else(|| TurnError::Unavailable {
+                        reason: "subagent settlement did not persist its artifact".to_string(),
+                    })?;
+                self.store
+                    .complete_settlement(
+                        child_scope,
+                        parent_run_id,
+                        child_run_id,
+                        claim_token,
+                        SettlementCompletion {
+                            terminal_kind,
+                            terminal_byte_len: Some(update.byte_len),
+                            terminal_reason: event.sanitized_reason.clone(),
+                            completed_artifact: artifact,
+                        },
+                    )
+                    .await
+                    .map_err(store_error)?;
+            }
         }
 
         self.drain_settled_group(child_scope, parent_run_id, child_run_id)
@@ -1355,20 +1369,30 @@ mod tests {
             _run_context: &LoopRunContext,
             _result_ref: &ironclaw_host_api::turn::LoopResultRef,
             output: serde_json::Value,
-        ) -> Result<u64, AgentLoopHostError> {
-            let byte_len = serde_json::to_vec(&output)
-                .map_err(|error| {
-                    AgentLoopHostError::new(
-                        ironclaw_loop_contracts::AgentLoopHostErrorKind::Unavailable,
-                        error.to_string(),
-                    )
-                })?
-                .len() as u64;
+        ) -> Result<ironclaw_loop_host::CapabilityResultUpdate, AgentLoopHostError> {
+            let bytes = serde_json::to_vec(&output).map_err(|error| {
+                AgentLoopHostError::new(
+                    ironclaw_loop_contracts::AgentLoopHostErrorKind::Unavailable,
+                    error.to_string(),
+                )
+            })?;
+            let byte_len = bytes.len() as u64;
             self.updates
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(output);
-            Ok(byte_len)
+            Ok(ironclaw_loop_host::CapabilityResultUpdate {
+                byte_len,
+                completed_artifact: Some(ironclaw_host_api::artifact::CompletedArtifact {
+                    artifact_ref: ironclaw_host_api::artifact::ArtifactRef::new(
+                        ironclaw_host_api::artifact::ArtifactId::new(1),
+                    ),
+                    byte_len,
+                    total_lines: Some(1),
+                    content_type: "application/json".to_string(),
+                    digest: ironclaw_host_api::artifact::ArtifactDigest::from_bytes(&bytes),
+                }),
+            })
         }
     }
 
@@ -1648,18 +1672,38 @@ mod tests {
                 .await
                 .expect("submit child process");
             if terminal_kind == EdgeTerminalKind::Completed {
+                let claim = edge_store
+                    .claim_settlement(&child_scope, parent_run_id, child_run_id)
+                    .await
+                    .expect("claim edge settlement");
+                let SettlementClaim::Acquired { claim_token, .. } = claim else {
+                    panic!("new edge settlement must be acquired");
+                };
                 edge_store
-                    .settle(
+                    .complete_settlement(
                         &child_scope,
                         parent_run_id,
                         child_run_id,
-                        terminal_kind,
-                        Some(17),
-                        terminal_reason.clone(),
+                        claim_token,
+                        SettlementCompletion {
+                            terminal_kind,
+                            terminal_byte_len: Some(17),
+                            terminal_reason: terminal_reason.clone(),
+                            completed_artifact: ironclaw_host_api::artifact::CompletedArtifact {
+                                artifact_ref: ironclaw_host_api::artifact::ArtifactRef::new(
+                                    ironclaw_host_api::artifact::ArtifactId::new(17),
+                                ),
+                                byte_len: 17,
+                                total_lines: Some(1),
+                                content_type: "application/json".to_string(),
+                                digest: ironclaw_host_api::artifact::ArtifactDigest::from_bytes(
+                                    b"completed artifact",
+                                ),
+                            },
+                        },
                     )
                     .await
-                    .expect("settle edge")
-                    .expect("edge exists");
+                    .expect("complete edge settlement");
             }
             children.push((child_scope, child_run_id, result_ref, terminal_kind));
         }
@@ -1728,31 +1772,49 @@ mod tests {
         );
 
         let failed = &children[1];
-        let outcome = resolver
-            .settle_and_maybe_drain(
+        let terminal_event = TurnLifecycleEvent {
+            cursor: ironclaw_host_api::turn::EventCursor(8),
+            scope: failed.0.clone(),
+            occurred_at: Some(Utc::now()),
+            owner_user_id: Some(user_id.clone()),
+            run_id: failed.1,
+            status: TurnStatus::Failed,
+            kind: ironclaw_turns::TurnEventKind::Failed,
+            blocked_gate: None,
+            sanitized_reason: Some("sanitized child failure".to_string()),
+            retryable: Some(false),
+            detail: None,
+        };
+        let (first, concurrent) = tokio::join!(
+            resolver.settle_and_maybe_drain(
                 &failed.0,
                 parent_run_id,
                 failed.1,
                 EdgeTerminalKind::Failed,
-                &TurnLifecycleEvent {
-                    cursor: ironclaw_host_api::turn::EventCursor(8),
-                    scope: failed.0.clone(),
-                    occurred_at: Some(Utc::now()),
-                    owner_user_id: Some(user_id.clone()),
-                    run_id: failed.1,
-                    status: TurnStatus::Failed,
-                    kind: ironclaw_turns::TurnEventKind::Failed,
-                    blocked_gate: None,
-                    sanitized_reason: Some("sanitized child failure".to_string()),
-                    retryable: Some(false),
-                    detail: None,
-                },
-            )
-            .await
-            .expect("settle and drain group");
-        assert_eq!(outcome, ResolveOutcome::Resumed);
+                &terminal_event,
+            ),
+            resolver.settle_and_maybe_drain(
+                &failed.0,
+                parent_run_id,
+                failed.1,
+                EdgeTerminalKind::Failed,
+                &terminal_event,
+            ),
+        );
+        let outcomes = [
+            first.expect("first concurrent settle"),
+            concurrent.expect("second concurrent settle"),
+        ];
+        assert!(outcomes.contains(&ResolveOutcome::Resumed));
+        assert!(
+            outcomes.iter().any(|outcome| matches!(
+                outcome,
+                ResolveOutcome::AlreadyClosed | ResolveOutcome::Drained
+            )),
+            "the losing settlement must observe the durable winner: {outcomes:?}",
+        );
         let updates = recording_writer.updates();
-        assert_eq!(updates.len(), 1, "only the open child result is staged");
+        assert_eq!(updates.len(), 1, "only the winning settlement writes");
         assert!(
             updates[0].to_string().contains("\"failed\""),
             "staged terminal payload records the child's failed status: {updates:?}"

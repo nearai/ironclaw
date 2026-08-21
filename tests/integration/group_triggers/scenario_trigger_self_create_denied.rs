@@ -157,6 +157,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .create_recording_capability_port(
             &run_context,
             &milestone_sink,
+            h.thread_service_for_test()?,
             None,
             ironclaw_host_api::capability_surface::CapabilitySurfacePolicy::allow_all(),
         )

@@ -1,0 +1,22 @@
+{
+  "tool": "ast_grep",
+  "note": "Representative model-visible error shapes for the pinned `ast_grep` tool at commit 08819b279cf02ae2545e69dad7111ab48d91d35e. `template` is verbatim from the cited upstream source; `example` renders the template with representative values.",
+  "entries": [
+    {
+      "case": "empty_pattern",
+      "kind": "error",
+      "template": "`pat` must be a non-empty pattern",
+      "example": "`pat` must be a non-empty pattern",
+      "source_path": "packages/coding-agent/src/tools/ast-grep.ts",
+      "source_line": 201
+    },
+    {
+      "case": "skip_negative",
+      "kind": "error",
+      "template": "skip must be a non-negative number",
+      "example": "skip must be a non-negative number",
+      "source_path": "packages/coding-agent/src/tools/ast-grep.ts",
+      "source_line": 206
+    }
+  ]
+}

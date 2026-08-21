@@ -8,7 +8,7 @@
 //! `submit_turn_until_blocked` — pinning that trigger-origin runs raise, park
 //! on, and resume from approval gates exactly like interactive runs (nothing
 //! in the scheduled_trigger surface/deny-map (#5505) suppresses the
-//! `builtin.write_file` Ask gate; only trigger mutator verbs are stripped).
+//! `builtin.write` Ask gate; only trigger mutator verbs are stripped).
 //!
 //! Each arm builds its OWN `live_approvals` group: the two fires would
 //! otherwise interleave one shared script and one shared approval store,
@@ -30,7 +30,7 @@ pub async fn run_approve(g: &RebornIntegrationGroup) -> HarnessResult<()> {
             "write the scheduled report",
             [
                 RebornScriptedReply::tool_call(
-                    "builtin.write_file",
+                    "builtin.write",
                     json!({"path": "/workspace/triggered-approved.txt", "content": "triggered approved write"}),
                 ),
                 RebornScriptedReply::text("report written after approval"),
@@ -81,7 +81,7 @@ pub async fn run_deny(g: &RebornIntegrationGroup) -> HarnessResult<()> {
             "write the scheduled report",
             [
                 RebornScriptedReply::tool_call(
-                    "builtin.write_file",
+                    "builtin.write",
                     json!({"path": "/workspace/triggered-denied.txt", "content": "should not persist"}),
                 ),
                 RebornScriptedReply::text("understood, the scheduled write was not authorized"),
@@ -143,7 +143,7 @@ pub async fn run_wrong_scope_resume_rejected(g: &RebornIntegrationGroup) -> Harn
             "write the scheduled report",
             [
                 RebornScriptedReply::tool_call(
-                    "builtin.write_file",
+                    "builtin.write",
                     json!({"path": "/workspace/triggered-wrong-scope.txt", "content": "triggered wrong-scope write"}),
                 ),
                 RebornScriptedReply::text("report written after approval"),

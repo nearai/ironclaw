@@ -52,7 +52,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // write gates while the trigger verbs stay auto-approved.
     capability_harness
         .set_ask_each_time_override_for_test(
-            &CapabilityId::new("builtin.write_file")?,
+            &CapabilityId::new("builtin.write")?,
             creator.binding.tenant_id.clone(),
             creator.binding.actor_user_id.clone(),
         )
@@ -65,7 +65,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
             "write the scheduled report",
             [
                 RebornScriptedReply::tool_call(
-                    "builtin.write_file",
+                    "builtin.write",
                     json!({"path": "/workspace/triggered-hold.txt", "content": "hold visible"}),
                 ),
                 RebornScriptedReply::text("report written after approval"),

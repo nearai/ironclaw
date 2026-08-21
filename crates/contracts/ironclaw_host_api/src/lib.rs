@@ -36,6 +36,7 @@
 
 pub mod action;
 pub mod approval;
+pub mod artifact;
 pub mod attachment;
 pub mod audit;
 pub mod authorized;

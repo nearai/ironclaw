@@ -16,8 +16,8 @@ use tracing::warn;
 use crate::{
     ResourceAccount, ResourceError, ResourceEstimate, ResourceGovernorStore,
     ResourceGovernorStorePort, ResourceLimits, ResourceState, ResourceUsage,
-    account_snapshot_in_state, reconcile_in_state, release_in_state, reserve_with_outcome_in_state,
-    set_limit_in_state,
+    account_snapshot_in_state, grow_reservation_in_state, reconcile_in_state, release_in_state,
+    reserve_with_outcome_in_state, set_limit_in_state,
 };
 
 use super::{fs_error, storage_error};
@@ -82,6 +82,11 @@ pub(super) enum ResourceGovernorDelta {
         reservation_id: ResourceReservationId,
         at: DateTime<Utc>,
     },
+    GrowReservation {
+        reservation_id: ResourceReservationId,
+        additional: ResourceEstimate,
+        at: DateTime<Utc>,
+    },
     Reconcile {
         reservation_id: ResourceReservationId,
         actual: ResourceUsage,
@@ -115,6 +120,11 @@ impl ResourceGovernorDelta {
                 at,
             } => reserve_with_outcome_in_state(state, scope, estimate, reservation_id, at)
                 .map(|_| ()),
+            Self::GrowReservation {
+                reservation_id,
+                additional,
+                at,
+            } => grow_reservation_in_state(state, reservation_id, additional, at).map(|_| ()),
             Self::Reconcile {
                 reservation_id,
                 actual,

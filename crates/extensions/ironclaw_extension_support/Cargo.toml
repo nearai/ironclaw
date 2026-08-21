@@ -27,6 +27,10 @@ publish = false
 # `reborn_same_layer_edge_inventory.rs`.
 layer = "runtimes"
 
+[features]
+# Dev-only seam exposing the pinned coding differential harness to root integration tests.
+test-support = []
+
 [dependencies]
 async-trait = "0.1"
 base64 = "0.23.0"
@@ -54,6 +58,10 @@ url = "2"
 # ZIP skill bundles fetched by `builtin.skill_install` from an HTTPS/GitHub
 # source are extracted here (WS3, moved from `ironclaw_host_runtime`).
 zip = { version = "8", default-features = false, features = ["deflate"] }
+# pinned coding engines (issue #7392 slice 2): the pinned hashline tag is a
+# 4-hex uppercase xxHash32 of the normalized file text; tag parity requires
+# xxHash32 specifically (no blake3/sha2 substitute).
+xxhash-rust = { version = "0.8", features = ["xxh32"] }
 
 [dev-dependencies]
 ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", features = ["test-support"] }

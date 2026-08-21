@@ -7,7 +7,7 @@ mod reborn_support;
 mod support;
 
 use ironclaw_host_api::ids::CapabilityId;
-use ironclaw_host_runtime::{GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID};
+use ironclaw_host_runtime::{CODING_READ_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID};
 use ironclaw_loop_contracts::LoopHostMilestoneKind;
 use ironclaw_loop_host::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::TurnStatus;
@@ -23,28 +23,24 @@ const BETA_CONTENT: &str = "Project Beta has no marker.";
 
 #[tokio::test]
 async fn reborn_trace_coding_read_tools_parity() {
-    let list_dir = CapabilityId::new(LIST_DIR_CAPABILITY_ID).expect("valid capability id");
+    let read_dir = CapabilityId::new(CODING_READ_CAPABILITY_ID).expect("valid capability id");
     let glob = CapabilityId::new(GLOB_CAPABILITY_ID).expect("valid capability id");
     let grep = CapabilityId::new(GREP_CAPABILITY_ID).expect("valid capability id");
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![
                 RebornScriptedProviderToolCall::new(
-                    list_dir.clone(),
-                    "call_list_dir_notes",
+                    read_dir.clone(),
+                    "call_read_dir_notes",
                     serde_json::json!({
                         "path": "/workspace/notes",
-                        "recursive": "true",
-                        "max_depth": "1",
                     }),
                 ),
                 RebornScriptedProviderToolCall::new(
                     glob.clone(),
                     "call_glob_notes",
                     serde_json::json!({
-                        "path": "/workspace",
-                        "pattern": "notes/*.md",
-                        "max_results": "5",
+                        "path": "notes/*.md",
                     }),
                 ),
                 RebornScriptedProviderToolCall::new(
@@ -52,11 +48,7 @@ async fn reborn_trace_coding_read_tools_parity() {
                     "call_grep_marker",
                     serde_json::json!({
                         "path": "/workspace",
-                        "pattern": "deterministic_marker_3702",
-                        "glob": "notes/*.md",
-                        "output_mode": "content",
-                        "case_insensitive": "true",
-                        "head_limit": "5",
+                        "pattern": "DETERMINISTIC_MARKER_3702",
                     }),
                 ),
             ],
@@ -97,21 +89,24 @@ async fn reborn_trace_coding_read_tools_parity() {
 
     let invocations = harness.capability_invocations();
     assert_eq!(invocations.len(), 3);
-    assert_eq!(invocations[0].capability_id, list_dir);
+    assert_eq!(invocations[0].capability_id, read_dir);
     assert_eq!(invocations[1].capability_id, glob);
     assert_eq!(invocations[2].capability_id, grep);
 
     let results = harness.capability_results();
     assert_eq!(results.len(), 3);
-    assert_eq!(results[0].capability_id, list_dir);
+    assert_eq!(results[0].capability_id, read_dir);
     assert_entries_include(&results[0].output, &["alpha.md", "beta.md"]);
     assert_eq!(results[1].capability_id, glob);
-    assert_files_include(&results[1].output, &["notes/alpha.md", "notes/beta.md"]);
+    assert_files_include(&results[1].output, &["alpha.md", "beta.md"]);
     assert_files_exclude(&results[1].output, &["README.txt"]);
     assert_eq!(results[2].capability_id, grep);
-    assert_eq!(
-        results[2].output["content"],
-        "notes/alpha.md:1:Project Alpha contains DETERMINISTIC_MARKER_3702."
+    let grep_output = results[2].output["output"]
+        .as_str()
+        .expect("grep output text");
+    assert!(
+        grep_output.contains("1:Project Alpha contains DETERMINISTIC_MARKER_3702."),
+        "grep must surface the deterministic marker match row, got {grep_output}"
     );
 
     let requests = harness.model_requests();
@@ -155,40 +150,31 @@ fn seed_workspace(harness: &RebornBinaryE2EHarness) {
 }
 
 fn assert_entries_include(output: &serde_json::Value, expected: &[&str]) {
-    let entries = output["entries"]
-        .as_array()
-        .expect("list_dir entries")
-        .iter()
-        .map(|entry| entry.as_str().expect("entry string"))
-        .collect::<Vec<_>>();
+    let text = output["output"].as_str().expect("directory read output");
     for expected_entry in expected {
         assert!(
-            entries.iter().any(|entry| entry.contains(expected_entry)),
-            "expected list_dir output to include {expected_entry:?}, got {entries:?}"
+            text.contains(expected_entry),
+            "expected directory read output to include {expected_entry:?}, got {text:?}"
         );
     }
 }
 
 fn assert_files_include(output: &serde_json::Value, expected: &[&str]) {
-    let files = output["files"].as_array().expect("glob files");
+    let text = output["output"].as_str().expect("glob output");
     for expected_file in expected {
         assert!(
-            files
-                .iter()
-                .any(|file| file.as_str() == Some(*expected_file)),
-            "expected glob output to include {expected_file:?}, got {files:?}"
+            text.contains(expected_file),
+            "expected glob output to include {expected_file:?}, got {text:?}"
         );
     }
 }
 
 fn assert_files_exclude(output: &serde_json::Value, expected: &[&str]) {
-    let files = output["files"].as_array().expect("glob files");
+    let text = output["output"].as_str().expect("glob output");
     for unexpected_file in expected {
         assert!(
-            files
-                .iter()
-                .all(|file| file.as_str() != Some(*unexpected_file)),
-            "expected glob output to exclude {unexpected_file:?}, got {files:?}"
+            !text.contains(unexpected_file),
+            "expected glob output to exclude {unexpected_file:?}, got {text:?}"
         );
     }
 }

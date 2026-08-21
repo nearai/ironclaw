@@ -275,6 +275,12 @@ impl ProcessJournalMaterializedState {
             StoredProcessCommand::ReleaseTree(request) => self.apply_release_tree(request),
             StoredProcessCommand::PruneTree(request) => self.apply_prune_tree(request),
             StoredProcessCommand::OpenDependency(request) => self.apply_open_dependency(request),
+            StoredProcessCommand::ClaimDependencySettlement(request) => {
+                self.apply_claim_dependency_settlement(request)
+            }
+            StoredProcessCommand::CompleteDependencySettlement(request) => {
+                self.apply_complete_dependency_settlement(request)
+            }
             StoredProcessCommand::SettleDependency(request) => {
                 self.apply_settle_dependency(request)
             }
@@ -443,6 +449,8 @@ impl ProcessJournalMaterializedState {
                     group_ref: dependency.group_ref,
                     state: crate::ProcessDependencyState::Open,
                     terminal: None,
+                    settlement: None,
+                    completed_artifact: None,
                     created_at: snapshot.created_at,
                     settled_at: None,
                     consumed_at: None,
@@ -1117,6 +1125,8 @@ impl ProcessJournalMaterializedState {
             group_ref: request.group_ref,
             state: crate::ProcessDependencyState::Open,
             terminal: None,
+            settlement: None,
+            completed_artifact: None,
             created_at: request.created_at,
             settled_at: None,
             consumed_at: None,
@@ -1125,6 +1135,77 @@ impl ProcessJournalMaterializedState {
         };
         self.dependencies.insert(key, record.clone());
         Ok(StoredCommandOutcome::Dependency(Some(record)))
+    }
+
+    fn apply_claim_dependency_settlement(
+        &mut self,
+        request: crate::ClaimProcessDependencySettlementRequest,
+    ) -> Result<StoredCommandOutcome, ProcessJournalStoreError> {
+        if request.claim_token.is_empty() || request.lease_expires_at <= request.claimed_at {
+            return Err(ProcessJournalStoreError::InvalidRequest(
+                "dependency settlement claim must carry a token and future lease".to_string(),
+            ));
+        }
+        let key = (request.dependent_process_id, request.dependency_process_id);
+        let Some(record) = self.dependencies.get_mut(&key) else {
+            return Ok(StoredCommandOutcome::Dependency(None));
+        };
+        if !same_lineage_scope(&record.scope, &request.scope) {
+            return Err(ProcessJournalStoreError::UnauthorizedScope);
+        }
+        match record.state {
+            crate::ProcessDependencyState::Open => {}
+            crate::ProcessDependencyState::Settling => {
+                let active = record
+                    .settlement
+                    .as_ref()
+                    .is_some_and(|claim| claim.lease_expires_at > request.claimed_at);
+                if active {
+                    return Ok(StoredCommandOutcome::Dependency(Some(record.clone())));
+                }
+            }
+            _ => return Ok(StoredCommandOutcome::Dependency(Some(record.clone()))),
+        }
+        record.state = crate::ProcessDependencyState::Settling;
+        record.settlement = Some(crate::ProcessDependencySettlement {
+            claim_token: request.claim_token,
+            lease_expires_at: request.lease_expires_at,
+        });
+        Ok(StoredCommandOutcome::Dependency(Some(record.clone())))
+    }
+
+    fn apply_complete_dependency_settlement(
+        &mut self,
+        request: crate::CompleteProcessDependencySettlementRequest,
+    ) -> Result<StoredCommandOutcome, ProcessJournalStoreError> {
+        if !request.terminal.status.is_terminal() {
+            return Err(ProcessJournalStoreError::InvalidRequest(
+                "dependency terminal evidence must carry a terminal process status".to_string(),
+            ));
+        }
+        let key = (request.dependent_process_id, request.dependency_process_id);
+        let Some(record) = self.dependencies.get_mut(&key) else {
+            return Ok(StoredCommandOutcome::Dependency(None));
+        };
+        if !same_lineage_scope(&record.scope, &request.scope) {
+            return Err(ProcessJournalStoreError::UnauthorizedScope);
+        }
+        if record.state != crate::ProcessDependencyState::Settling {
+            return Ok(StoredCommandOutcome::Dependency(Some(record.clone())));
+        }
+        let owns_claim = record
+            .settlement
+            .as_ref()
+            .is_some_and(|claim| claim.claim_token == request.claim_token);
+        if !owns_claim {
+            return Ok(StoredCommandOutcome::Dependency(Some(record.clone())));
+        }
+        record.state = crate::ProcessDependencyState::Settled;
+        record.terminal = Some(request.terminal);
+        record.completed_artifact = Some(request.completed_artifact);
+        record.settled_at = Some(request.settled_at);
+        record.settlement = None;
+        Ok(StoredCommandOutcome::Dependency(Some(record.clone())))
     }
 
     fn apply_settle_dependency(
@@ -1173,6 +1254,7 @@ impl ProcessJournalMaterializedState {
             // Enumerated, not a wildcard: a new terminal variant must fail to
             // compile here, in the one file that owns the paired release.
             crate::ProcessDependencyState::Open
+            | crate::ProcessDependencyState::Settling
             | crate::ProcessDependencyState::Settled
             | crate::ProcessDependencyState::ResultAppended
             | crate::ProcessDependencyState::AttentionScheduled

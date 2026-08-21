@@ -23,8 +23,8 @@ use ironclaw_loop_contracts::{
     ProviderToolCall,
 };
 use ironclaw_loop_host::{
-    CapabilityResultWrite, CapabilityWriteResult, LoopCapabilityInputResolver,
-    LoopCapabilityResultWriter,
+    CapabilityResultUpdate, CapabilityResultWrite, CapabilityWriteResult,
+    LoopCapabilityInputResolver, LoopCapabilityResultWriter,
 };
 use ironclaw_turns::LoopResultRef;
 
@@ -85,8 +85,8 @@ impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
         run_context: &LoopRunContext,
         result_ref: &LoopResultRef,
         output: serde_json::Value,
-    ) -> Result<u64, AgentLoopHostError> {
-        let byte_len = self
+    ) -> Result<CapabilityResultUpdate, AgentLoopHostError> {
+        let update = self
             .result_writer
             .update_capability_result(run_context, result_ref, output.clone())
             .await?;
@@ -99,6 +99,6 @@ impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
             })?,
             output,
         });
-        Ok(byte_len)
+        Ok(update)
     }
 }

@@ -6,16 +6,21 @@ use std::{
 };
 
 use chrono::Utc;
-use uuid::Uuid;
-
 use ironclaw_assistant::OutboundPreferencesProductService;
 use ironclaw_host_api::{
+    artifact::{
+        ARTIFACT_INLINE_PREVIEW_MAX_BYTES, AccountedArtifactPersister, ArtifactOwnerScope,
+        ArtifactWriteMetadata,
+    },
     capability::EffectKind,
     capability_surface::CapabilitySurfacePolicy,
-    ids::{CapabilityId, ExtensionId, InvocationId, UserId},
+    ids::{CapabilityId, ExtensionId, InvocationId, ResourceReservationId, UserId},
+    model_result_preview::ModelResultPreview,
     mount::MountView,
     resolution::Resolution,
-    resource::ResourceScope,
+    resource::{
+        ReservationStatus, ResourceEstimate, ResourceReceipt, ResourceScope, ResourceUsage,
+    },
     result_meta::FailureKind,
     runtime::{RuntimeKind, TrustClass},
     scope::ExecutionContext,
@@ -26,14 +31,17 @@ use ironclaw_host_runtime::{
 #[cfg(test)]
 use ironclaw_loop_host::HostManagedToolResultDiagnosticCapture;
 use ironclaw_loop_host::{
-    CapabilityResultWrite, CapabilityTrajectoryObserver, CapabilityWriteResult, DurablePersistence,
-    HostManagedModelGateway, HostManagedPromptDiagnosticSink, HostManagedToolDiagnosticEmitter,
-    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
-    ThreadScopeResolver, loop_driver_execution_extension_id,
+    CapabilityResultUpdate, CapabilityResultWrite, CapabilityTrajectoryObserver,
+    CapabilityWriteResult, DurablePersistence, HostManagedModelGateway,
+    HostManagedPromptDiagnosticSink, HostManagedToolDiagnosticEmitter, LoopCapabilityInputResolver,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, ThreadScopeResolver,
+    loop_driver_execution_extension_id,
 };
 use ironclaw_product_contracts::{
     inspector::TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES, project_service::ProjectService,
 };
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputRef,
@@ -42,10 +50,11 @@ use ironclaw_loop_contracts::{
     ModelVisibleToolObservation, ObservationTrust, ProviderToolCall, ToolObservationDetail,
     ToolObservationStatus, resolution,
 };
+use ironclaw_resources::{ResourceError, ResourceGovernor};
 use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
     CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, SessionThreadService,
-    TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadMessageId, ThreadScope,
+    ThreadMessageId, ThreadScope, ToolResultSafeSummary, UpdateToolResultReferenceRequest,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{ExternalToolCatalog, LoopResultRef};
@@ -77,18 +86,12 @@ pub(crate) use ironclaw_assistant::{
 use ironclaw_extension_host::capability_surface::{
     ExtensionCapabilitySurface, ExtensionCapabilitySurfaceSource,
 };
-#[cfg(feature = "test-support")]
-pub(crate) use ironclaw_loop_host::RESULT_READ_CAPABILITY_ID_FOR_TEST;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use ironclaw_loop_host::SKILL_ACTIVATE_CAPABILITY_ID;
 use refreshing_capability_port::{
     RefreshingCapabilityPortConfig, create_refreshing_capability_port,
 };
 
-#[cfg(feature = "test-support")]
-pub(super) use ironclaw_loop_host::wrap_result_read_capability_for_test;
-/// Test-only bridge (result_read seam, issue #5838), co-located with the
-/// capability it wraps and re-exported here for the `runtime` caller.
 #[cfg(feature = "test-support")]
 pub(super) use refreshing_capability_port::create_refreshing_capability_port_for_test;
 
@@ -165,6 +168,10 @@ pub(super) fn capability_wiring(
             fallback_user_id.clone(),
             tool_diagnostic_sink,
         )
+        .with_artifact_services(
+            Arc::clone(&services.artifact_persistence),
+            Arc::clone(&services.artifact_governor),
+        )
         .with_observer(capability_observer),
     );
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
@@ -214,7 +221,6 @@ pub(super) fn capability_wiring(
             milestone_sink,
             skill_activation_source,
             project_service,
-            thread_service,
             trajectory_observer,
             outbound_preferences_service,
             outbound_preference_write_requires_approval,
@@ -251,7 +257,6 @@ struct RefreshingLoopCapabilityPortFactory {
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     skill_activation_source: Option<Arc<ComposedSelectableSkillContextSource>>,
     project_service: Arc<dyn ProjectService>,
-    thread_service: Arc<dyn SessionThreadService>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     outbound_preference_write_requires_approval: bool,
@@ -352,7 +357,6 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
             milestone_sink: Arc::clone(&self.milestone_sink),
             skill_activation_source: self.skill_activation_source.clone(),
             project_service: Arc::clone(&self.project_service),
-            thread_service: Arc::clone(&self.thread_service),
             // Same observer drives both the input hook (on the capability port the
             // refreshing helper builds) and the result hook (on `StagedCapabilityIo`),
             // so the two callbacks correlate by `call_id` for one tool call.
@@ -380,18 +384,16 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
 
 const CAPABILITY_IO_MAX_STAGED_REFS: usize = 1024;
 const CAPABILITY_IO_MAX_STAGED_BYTES: usize = 4 * 1024 * 1024;
-const DURABLE_TOOL_RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
-/// First-look preview bound on the initial result-reference observation.
-/// Matches `result_read`'s max chunk size so the preview is exactly the
-/// first chunk `result_read` would itself return at `offset: 0` — a model
-/// that pages past `next_offset` sees no gap or overlap.
-const RESULT_PREVIEW_MAX_BYTES: usize = TOOL_RESULT_RECORD_READ_MAX_BYTES;
+/// Maximum canonical result content carried inline to the model.
+const RESULT_PREVIEW_MAX_BYTES: usize = ARTIFACT_INLINE_PREVIEW_MAX_BYTES;
 
 struct StagedCapabilityIo {
     inputs: StdMutex<StagedValueStore>,
     results: StdMutex<StagedValueStore>,
     display_previews: Arc<CapabilityDisplayPreviewStore>,
     durable_previews: Option<DurableCapabilityDisplayPreviewSink>,
+    artifact_persistence: Option<Arc<dyn AccountedArtifactPersister>>,
+    artifact_governor: Option<Arc<dyn ResourceGovernor>>,
     /// Optional consumer hook. This struct drives only the *result* half of the
     /// trajectory observer (via `write_capability_result`); the resolved
     /// tool-call inputs are emitted upstream by `HostRuntimeLoopCapabilityPort`
@@ -423,6 +425,8 @@ impl StagedCapabilityIo {
             results: StdMutex::new(StagedValueStore::default()),
             display_previews,
             durable_previews: None,
+            artifact_persistence: None,
+            artifact_governor: None,
             observer: None,
             tool_diagnostics: HostManagedToolDiagnosticEmitter::default(),
         }
@@ -442,6 +446,8 @@ impl StagedCapabilityIo {
                 thread_service,
                 fallback_user_id,
             }),
+            artifact_persistence: None,
+            artifact_governor: None,
             observer: None,
             tool_diagnostics: HostManagedToolDiagnosticEmitter::new(tool_diagnostic_sink),
         }
@@ -450,6 +456,16 @@ impl StagedCapabilityIo {
     /// Attach a trajectory observer (no-op when `None`).
     fn with_observer(mut self, observer: Option<Arc<dyn CapabilityTrajectoryObserver>>) -> Self {
         self.observer = observer;
+        self
+    }
+
+    fn with_artifact_services(
+        mut self,
+        persistence: Arc<dyn AccountedArtifactPersister>,
+        governor: Arc<dyn ResourceGovernor>,
+    ) -> Self {
+        self.artifact_persistence = Some(persistence);
+        self.artifact_governor = Some(governor);
         self
     }
 
@@ -462,62 +478,6 @@ impl StagedCapabilityIo {
             .lock()
             .map_err(|_| capability_io_error())
             .map(|results| results.get(result_ref).cloned())
-    }
-
-    async fn persist_tool_result(
-        &self,
-        run_context: &LoopRunContext,
-        result_ref: &LoopResultRef,
-        content: Vec<u8>,
-    ) -> Result<(), AgentLoopHostError> {
-        let Some((durable_previews, scope)) = self.durable_tool_result_scope(run_context)? else {
-            return Ok(());
-        };
-        match durable_previews
-            .thread_service
-            .put_tool_result_record(ironclaw_threads::PutToolResultRecordRequest {
-                scope,
-                thread_id: run_context.thread_id.clone(),
-                result_ref: result_ref.as_str().to_string(),
-                content,
-            })
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(error) => Err(durable_result_store_error(error)),
-        }
-    }
-
-    async fn update_persisted_tool_result(
-        &self,
-        run_context: &LoopRunContext,
-        result_ref: &LoopResultRef,
-        content: Vec<u8>,
-    ) -> Result<(), AgentLoopHostError> {
-        let Some((durable_previews, scope)) = self.durable_tool_result_scope(run_context)? else {
-            return Ok(());
-        };
-        match durable_previews
-            .thread_service
-            .update_tool_result_record(ironclaw_threads::UpdateToolResultRecordRequest {
-                scope,
-                thread_id: run_context.thread_id.clone(),
-                result_ref: result_ref.as_str().to_string(),
-                content,
-            })
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(ironclaw_threads::SessionThreadError::UnknownThread { thread_id }) => {
-                tracing::debug!(
-                    thread_id = %thread_id,
-                    result_ref = result_ref.as_str(),
-                    "capability-host durable tool result update skipped: thread is unknown"
-                );
-                Ok(())
-            }
-            Err(error) => Err(durable_result_store_error(error)),
-        }
     }
 
     fn durable_tool_result_scope(
@@ -892,7 +852,11 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
             capability_id,
             output,
             display_preview,
+            receipt,
+            completed_artifact,
             durable_persistence,
+            canonical_output_digest,
+            canonical_item_count,
         } = write;
         let result_ref =
             LoopResultRef::new(format!("result:{}.{}", run_context.run_id, Uuid::new_v4()))
@@ -902,23 +866,158 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
                         "capability result ref could not be represented",
                     )
                 })?;
-        let output_content = serialized_result_output(&output)?;
-        let item_count = output.as_array().map(|items| items.len() as u64);
+        let (output_content, output_bytes, item_count, preview, artifact) = if let Some(artifact) =
+            completed_artifact
+        {
+            let accounted_bytes = receipt
+                .and_then(|receipt| receipt.actual.as_ref())
+                .map(|usage| usage.output_bytes);
+            if accounted_bytes != Some(artifact.byte_len) {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "completed capability artifact does not match accounting evidence",
+                ));
+            }
+            if artifact.byte_len > RESULT_PREVIEW_MAX_BYTES as u64 {
+                let (content, text) = if let Some(text) = output.as_str() {
+                    (text.as_bytes().to_vec(), text.to_string())
+                } else {
+                    let content = serialized_result_output(&output)?;
+                    let text = std::str::from_utf8(&content)
+                        .map_err(|_| {
+                            AgentLoopHostError::new(
+                                AgentLoopHostErrorKind::InvalidInvocation,
+                                "large capability result preview cannot be represented",
+                            )
+                        })?
+                        .to_string();
+                    (content, text)
+                };
+                let preview_len = u64::try_from(content.len()).map_err(|_| {
+                    AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::InvalidInvocation,
+                        "large capability result preview length is unsupported",
+                    )
+                })?;
+                if content.len() > RESULT_PREVIEW_MAX_BYTES || preview_len >= artifact.byte_len {
+                    return Err(AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::InvalidInvocation,
+                        "large capability result preview does not match artifact evidence",
+                    ));
+                }
+                (
+                    content,
+                    artifact.byte_len,
+                    canonical_item_count,
+                    Some(FirstLookResultPreview {
+                        text,
+                        next_offset: Some(preview_len),
+                    }),
+                    Some(artifact.clone()),
+                )
+            } else {
+                let content = serialized_result_output(&output)?;
+                if u64::try_from(content.len()).ok() != Some(artifact.byte_len) {
+                    return Err(AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::InvalidInvocation,
+                        "inline capability result does not match artifact evidence",
+                    ));
+                }
+                let item_count = canonical_item_count
+                    .or_else(|| output.as_array().map(|items| items.len() as u64));
+                let preview = first_look_result_preview(&content);
+                (
+                    content,
+                    artifact.byte_len,
+                    item_count,
+                    preview,
+                    Some(artifact.clone()),
+                )
+            }
+        } else {
+            if receipt.is_some() {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "completed runtime result is missing its durable artifact",
+                ));
+            }
+            let content = serialized_result_output(&output)?;
+            let content_len = u64::try_from(content.len()).map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::BudgetExceeded,
+                    "capability result byte length is outside the supported range",
+                )
+            })?;
+            let item_count =
+                canonical_item_count.or_else(|| output.as_array().map(|items| items.len() as u64));
+            let preview = first_look_result_preview(&content);
+            let artifact = if matches!(durable_persistence, DurablePersistence::InlineOnly) {
+                None
+            } else {
+                match (
+                    &self.artifact_persistence,
+                    &self.artifact_governor,
+                    &self.durable_previews,
+                ) {
+                    (Some(persistence), Some(governor), Some(durable_previews)) => {
+                        let scope =
+                            resource_scope_for_run(run_context, &durable_previews.fallback_user_id);
+                        let reservation = governor
+                            .reserve(
+                                scope.clone(),
+                                ResourceEstimate::default().set_output_bytes(content_len),
+                            )
+                            .map_err(|_| {
+                                AgentLoopHostError::new(
+                                    AgentLoopHostErrorKind::BudgetExceeded,
+                                    "capability result artifact budget is unavailable",
+                                )
+                            })?;
+                        let fallback_receipt = match governor.reconcile(
+                            reservation.id,
+                            ResourceUsage::default().set_output_bytes(content_len),
+                        ) {
+                            Ok(receipt) => receipt,
+                            Err(_) => {
+                                let _ = governor.release(reservation.id);
+                                return Err(AgentLoopHostError::new(
+                                    AgentLoopHostErrorKind::BudgetExceeded,
+                                    "capability result artifact accounting failed",
+                                ));
+                            }
+                        };
+                        Some(
+                            persistence
+                                .persist(
+                                    ArtifactWriteMetadata {
+                                        write_key: None,
+                                        owner_scope: ArtifactOwnerScope::from_resource_scope(
+                                            &scope,
+                                        ),
+                                        namespace: run_context.effective_artifact_namespace(),
+                                        producer_capability_id: capability_id.clone(),
+                                        content_type: "application/json".to_string(),
+                                        expected_bytes: Some(content_len),
+                                    },
+                                    &content,
+                                    &fallback_receipt,
+                                )
+                                .await
+                                .map_err(artifact_store_error)?,
+                        )
+                    }
+                    _ => None,
+                }
+            };
+            (content, content_len, item_count, preview, artifact)
+        };
         let serialized_bytes = output_content.len();
-        let output_bytes = serialized_bytes.try_into().unwrap_or(u64::MAX);
-        // Snapshot the first-look preview from the same bytes the durable
-        // record stores, before `output_content` is moved into persistence,
-        // so its offsets line up exactly with what `result_read` returns.
-        let preview = first_look_result_preview(&output_content);
         let diagnostic_result = self
             .tool_diagnostics
             .prepare_result(&output_content, TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES);
-        // See `DurablePersistence` doc comment for the Persist/InlineOnly split.
-        if matches!(durable_persistence, DurablePersistence::Persist) {
-            self.persist_tool_result(run_context, &result_ref, output_content)
-                .await?;
+        if serialized_bytes <= CAPABILITY_IO_MAX_STAGED_BYTES {
+            self.stage_result_best_effort(&result_ref, output.clone(), serialized_bytes);
         }
-        self.stage_result_best_effort(&result_ref, output.clone(), serialized_bytes);
         self.display_previews.record_result_with_preview(
             CapabilityDisplayPreviewResult {
                 run_id: &run_context.run_id.to_string(),
@@ -966,12 +1065,38 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
         );
         let mut write_result =
             CapabilityWriteResult::from_output(result_ref, output_bytes, &output);
-        write_result.model_observation = Some(result_reference_observation(
-            &write_result.result_ref,
-            write_result.byte_len,
-            preview,
-            item_count,
-        ));
+        let preview_incomplete = preview
+            .as_ref()
+            .and_then(|preview| preview.next_offset)
+            .is_some();
+        if let Some(canonical_output_digest) = canonical_output_digest {
+            write_result.output_digest = Some(canonical_output_digest);
+        } else if preview_incomplete {
+            // Synthetic/internal callers without a canonical digest must not
+            // mistake the bounded preview's digest for the full result.
+            write_result.output_digest = None;
+        }
+        write_result.model_observation = Some(
+            if preview_incomplete && matches!(durable_persistence, DurablePersistence::Persist) {
+                let artifact = artifact.as_ref().ok_or_else(|| {
+                    AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::Unavailable,
+                        "durable capability result artifact is unavailable",
+                    )
+                })?;
+                artifact_reference_observation(artifact, preview.as_ref(), item_count)
+            } else {
+                inline_result_observation(
+                    preview.ok_or_else(|| {
+                        AgentLoopHostError::new(
+                            AgentLoopHostErrorKind::InvalidInvocation,
+                            "inline capability result is unavailable",
+                        )
+                    })?,
+                    item_count,
+                )
+            },
+        );
         Ok(write_result)
     }
 
@@ -1024,14 +1149,130 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
         run_context: &LoopRunContext,
         result_ref: &LoopResultRef,
         output: serde_json::Value,
-    ) -> Result<u64, AgentLoopHostError> {
+    ) -> Result<CapabilityResultUpdate, AgentLoopHostError> {
         ensure_ref_scope("result", result_ref.as_str(), run_context)?;
         let content = serialized_result_output(&output)?;
-        let bytes = content.len();
-        self.update_persisted_tool_result(run_context, result_ref, content)
-            .await?;
-        self.stage_result_best_effort(result_ref, output, bytes);
-        Ok(bytes as u64)
+        let byte_len = u64::try_from(content.len()).map_err(|_| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::BudgetExceeded,
+                "capability result byte length is outside the supported range",
+            )
+        })?;
+        let Some((durable_previews, thread_scope)) = self.durable_tool_result_scope(run_context)?
+        else {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "synthetic capability settlement requires durable artifact services",
+            ));
+        };
+        let (Some(persistence), Some(governor)) =
+            (&self.artifact_persistence, &self.artifact_governor)
+        else {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "capability result artifact services are unavailable",
+            ));
+        };
+        let resource_scope =
+            resource_scope_for_run(run_context, &durable_previews.fallback_user_id);
+        let estimate = ResourceEstimate::default().set_output_bytes(byte_len);
+        let usage = ResourceUsage::default().set_output_bytes(byte_len);
+        let reservation_id = settlement_reservation_id(&resource_scope, run_context, result_ref)?;
+        let newly_reserved = match governor.reserve_with_id(
+            resource_scope.clone(),
+            estimate.clone(),
+            reservation_id,
+        ) {
+            Ok(_) => true,
+            Err(ResourceError::ReservationAlreadyExists { .. }) => false,
+            Err(_) => {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::BudgetExceeded,
+                    "capability result artifact budget is unavailable",
+                ));
+            }
+        };
+        let receipt = match governor.reconcile(reservation_id, usage.clone()) {
+            Ok(receipt) => receipt,
+            Err(ResourceError::ReservationClosed {
+                status: ReservationStatus::Reconciled,
+                ..
+            }) if !newly_reserved => ResourceReceipt {
+                id: reservation_id,
+                scope: resource_scope.clone(),
+                status: ReservationStatus::Reconciled,
+                estimate,
+                actual: Some(usage),
+            },
+            Err(_) => {
+                if newly_reserved {
+                    let _ = governor.release(reservation_id);
+                }
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::BudgetExceeded,
+                    "capability result artifact accounting failed",
+                ));
+            }
+        };
+        let producer_capability_id = CapabilityId::new("builtin.spawn_subagent").map_err(|_| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                "subagent capability identity is invalid",
+            )
+        })?;
+        let artifact = persistence
+            .persist(
+                ArtifactWriteMetadata {
+                    write_key: None,
+                    owner_scope: ArtifactOwnerScope::from_resource_scope(&resource_scope),
+                    namespace: run_context.effective_artifact_namespace(),
+                    producer_capability_id,
+                    content_type: "application/json".to_string(),
+                    expected_bytes: Some(byte_len),
+                },
+                &content,
+                &receipt,
+            )
+            .await
+            .map_err(artifact_store_error)?;
+        let preview = first_look_result_preview(&content);
+        let observation = artifact_reference_observation(
+            &artifact,
+            preview.as_ref(),
+            output.as_array().map(|items| items.len() as u64),
+        );
+        let model_observation = serde_json::to_value(observation).map_err(|error| {
+            ironclaw_loop_host::raw_agent_loop_host_error(
+                "capability_host_io",
+                "serialize_settled_result_observation",
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "settled capability result observation could not be serialized",
+                error,
+            )
+        })?;
+        durable_previews
+            .thread_service
+            .update_tool_result_reference(UpdateToolResultReferenceRequest {
+                scope: thread_scope,
+                thread_id: run_context.thread_id.clone(),
+                turn_run_id: run_context.run_id.to_string(),
+                result_ref: result_ref.as_str().to_string(),
+                provider_call_id: None,
+                safe_summary: ToolResultSafeSummary::new("subagent completed").map_err(|_| {
+                    AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::Internal,
+                        "subagent completion summary is invalid",
+                    )
+                })?,
+                model_observation: Some(model_observation),
+            })
+            .await
+            .map_err(durable_result_store_error)?;
+        self.stage_result_best_effort(result_ref, output, content.len());
+        Ok(CapabilityResultUpdate {
+            byte_len,
+            completed_artifact: Some(artifact),
+        })
     }
 
     async fn delete_capability_result(
@@ -1058,12 +1299,6 @@ fn serialized_result_output(output: &serde_json::Value) -> Result<Vec<u8>, Agent
             error,
         )
     })?;
-    if content.len() > DURABLE_TOOL_RESULT_MAX_BYTES {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::BudgetExceeded,
-            "capability result exceeds the durable storage limit",
-        ));
-    }
     Ok(content)
 }
 
@@ -1076,8 +1311,8 @@ struct FirstLookResultPreview {
 }
 
 /// Builds the inline first-look preview from the same serialized bytes the
-/// durable record stores, so a truncated preview's `next_offset` matches
-/// exactly what `result_read` would return continuing from that offset.
+/// durable artifact stores, so a truncated preview's `next_offset` matches
+/// the selector offset used when the coding `read` tool reads the artifact URI.
 fn first_look_result_preview(serialized: &[u8]) -> Option<FirstLookResultPreview> {
     let Ok(full_text) = std::str::from_utf8(serialized) else {
         return None;
@@ -1106,75 +1341,119 @@ fn floor_char_boundary(value: &str, index: usize) -> usize {
     index
 }
 
-/// Truncated-preview summary text; names the full array's element count when
-/// known so the model doesn't misread a truncated array preview as the whole
-/// result (issue: byte-slice lands mid-JSON-array).
-fn truncated_preview_summary(next_offset: u64, item_count: Option<u64>) -> String {
-    let base = format!(
-        "Tool completed; preview truncated, use result_read with the result \
-         reference and offset {next_offset} for more output."
-    );
+/// Truncated-artifact observation caption; names the full array's element
+/// count when known so the model does not misread a truncated array preview
+/// as the whole result.
+///
+/// The caption must survive the strict `SafeSummary` collapse in
+/// `result_preview_parts` (path/payload delimiters and credential markers are
+/// rejected), so the `artifact://` reference itself is deliberately NOT
+/// interpolated here — it rides the observation's `detail.artifact_ref` and
+/// `artifacts` list, which the transcript carries verbatim.
+fn truncated_artifact_summary(item_count: Option<u64>) -> String {
+    let base = "Tool completed; full output is stored in a durable artifact.";
     match item_count {
         Some(count) => format!("{base} Full result is a JSON array of {count} items."),
-        None => base,
+        None => base.to_string(),
     }
 }
 
-fn result_reference_observation(
-    result_ref: &LoopResultRef,
-    byte_len: u64,
-    preview: Option<FirstLookResultPreview>,
+fn inline_result_observation(
+    preview: FirstLookResultPreview,
     item_count: Option<u64>,
 ) -> ModelVisibleToolObservation {
-    let (summary, preview_text, total_bytes, next_offset, item_count) = match preview {
-        Some(FirstLookResultPreview {
-            text,
-            next_offset: Some(next_offset),
-        }) => (
-            truncated_preview_summary(next_offset, item_count),
-            Some(text),
-            Some(byte_len),
-            Some(next_offset),
-            item_count,
-        ),
-        Some(FirstLookResultPreview {
-            text,
-            next_offset: None,
-        }) => (
-            "Tool completed; preview contains the full result.".to_string(),
-            Some(text),
-            Some(byte_len),
-            None,
-            None,
-        ),
-        None => (
-            "Tool completed; use result_read with the result reference for more output."
-                .to_string(),
-            None,
-            None,
-            None,
-            None,
-        ),
-    };
+    let byte_len = preview.text.len() as u64;
     ModelVisibleToolObservation {
         schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
         status: ToolObservationStatus::Success,
-        summary,
-        detail: ToolObservationDetail::ResultReference {
-            result_ref: result_ref.as_str().to_string(),
+        summary: "Tool completed; inline content contains the full result.".to_string(),
+        detail: ToolObservationDetail::InlineResult {
+            content: preview.text,
             byte_len,
-            preview: preview_text,
-            total_bytes,
-            next_offset,
+            item_count,
+        },
+        artifacts: Vec::new(),
+        recovery: None,
+        trust: ObservationTrust::UntrustedToolOutput,
+    }
+}
+
+fn artifact_reference_observation(
+    artifact: &ironclaw_host_api::artifact::CompletedArtifact,
+    preview: Option<&FirstLookResultPreview>,
+    item_count: Option<u64>,
+) -> ModelVisibleToolObservation {
+    let artifact_ref = artifact.artifact_ref.to_string();
+    ModelVisibleToolObservation {
+        schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+        status: ToolObservationStatus::Success,
+        summary: truncated_artifact_summary(item_count),
+        detail: ToolObservationDetail::ArtifactReference {
+            artifact_ref: artifact_ref.clone(),
+            total_bytes: artifact.byte_len,
+            // Credential-bearing preview text is SUPPRESSED (not masked): the
+            // model-visible observation must never carry raw capability
+            // output that fails the preview content contract, and the durable
+            // artifact reference plus `item_count` remain the continuation
+            // authority. Benign previews pass through unchanged.
+            preview: preview
+                .filter(|preview| ModelResultPreview::new(preview.text.clone()).is_ok())
+                .map(|preview| preview.text.clone()),
             item_count,
         },
         artifacts: vec![ModelVisibleArtifact {
-            artifact_ref: result_ref.as_str().to_string(),
-            summary: "Stored tool result".to_string(),
+            artifact_ref,
+            summary: "Stored tool output".to_string(),
         }],
         recovery: None,
         trust: ObservationTrust::UntrustedToolOutput,
     }
+}
+
+fn settlement_reservation_id(
+    resource_scope: &ResourceScope,
+    run_context: &LoopRunContext,
+    result_ref: &LoopResultRef,
+) -> Result<ResourceReservationId, AgentLoopHostError> {
+    let mut hasher = Sha256::new();
+    hasher.update(resource_scope.tenant_id.as_str().as_bytes());
+    hasher.update([0]);
+    hasher.update(resource_scope.user_id.as_str().as_bytes());
+    for value in [
+        resource_scope.agent_id.as_ref().map(|id| id.as_str()),
+        resource_scope.project_id.as_ref().map(|id| id.as_str()),
+        resource_scope.mission_id.as_ref().map(|id| id.as_str()),
+        resource_scope.thread_id.as_ref().map(|id| id.as_str()),
+    ] {
+        hasher.update([0]);
+        if let Some(value) = value {
+            hasher.update(value.as_bytes());
+        }
+    }
+    hasher.update(
+        run_context
+            .effective_artifact_namespace()
+            .as_run_id()
+            .as_uuid()
+            .as_bytes(),
+    );
+    hasher.update(result_ref.as_str().as_bytes());
+    let digest = hasher.finalize();
+    let mut uuid_bytes = [0_u8; 16];
+    uuid_bytes.copy_from_slice(&digest[..16]);
+    Ok(ResourceReservationId::from_uuid(Uuid::from_bytes(
+        uuid_bytes,
+    )))
+}
+
+fn artifact_store_error(
+    error: ironclaw_host_api::artifact::ArtifactWriteError,
+) -> AgentLoopHostError {
+    tracing::warn!(error = %error, "durable tool artifact persistence failed");
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        "durable tool artifact storage is unavailable",
+    )
 }
 
 fn durable_result_store_error(error: ironclaw_threads::SessionThreadError) -> AgentLoopHostError {

@@ -94,6 +94,7 @@ fn capability_descriptors(resolved: &ResolvedExtensionManifest) -> Vec<Capabilit
             resource_profile: tool.resource_profile.clone(),
             origin_gate_matrix: tool.origin_gate_matrix.clone(),
             standard_op: tool.standard_op,
+            provider_tool_name: tool.provider_tool_name.clone(),
         })
         .collect()
 }

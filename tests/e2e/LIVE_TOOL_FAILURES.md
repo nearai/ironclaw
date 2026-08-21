@@ -204,7 +204,7 @@ split is:
   assistant claimed and what actually happened.
 
 `#2025` improved file/coding tools by making their operational contract clearer
-(`write_file` vs workspace memory, `apply_patch` precision, file history). It
+(`write` vs workspace memory, `edit` precision, file history). It
 did **not** make tool descriptions carry higher-level workflow policy. That same
 principle should apply here.
 

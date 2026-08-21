@@ -577,9 +577,9 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
         .expect("the fired routine's action must reach the model");
     // Issue #5838: a result under the inline first-look preview cap
     // (`STANDALONE_RESULT_PREVIEW_MAX_BYTES`) legitimately appears inline in
-    // `detail.preview` so the model does not need a follow-up `result_read`
-    // call; the marker here is well under the cap. Mirrors
-    // `assert_standalone_result_reference` in
+    // the observation (`detail.content`), so the model does not need a
+    // follow-up read call; the marker here is well under the cap. Mirrors
+    // `assert_standalone_result_observation` in
     // `crates/app/ironclaw_composition/src/runtime.rs`.
     assert!(
         tool_result.content.contains(QA_DM_ACTION_MARKER),
@@ -590,7 +590,7 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
         tool_result.tool_result_content.as_ref()
     else {
         panic!(
-            "fired routine replay should carry a result-reference envelope, got {:?}",
+            "fired routine replay should carry an artifact-backed tool-result envelope, got {:?}",
             tool_result.tool_result_content
         );
     };
@@ -602,11 +602,7 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
         .expect("fired routine replay should include a model observation");
     assert_eq!(observation["schema_version"], json!(1));
     assert_eq!(observation["status"], json!("success"));
-    assert_eq!(observation["detail"]["kind"], json!("result_reference"));
-    assert_eq!(
-        observation["detail"]["result_ref"],
-        json!(envelope.result_ref)
-    );
+    assert_eq!(observation["detail"]["kind"], json!("inline_result"));
     assert_eq!(
         settled.last_status,
         Some(TriggerRunStatus::Ok),

@@ -305,6 +305,8 @@ async fn redact_output_clears_display_preview_side_channel() {
     let estimate = ResourceEstimate::default();
     let obligations = vec![Obligation::RedactOutput];
     let dispatch = CapabilityDispatchResult {
+        completed_artifact: None,
+        canonical_output_digest: None,
         capability_id: capability_id.clone(),
         provider: context.extension_id.clone(),
         runtime: RuntimeKind::Wasm,
@@ -324,6 +326,7 @@ async fn redact_output_clears_display_preview_side_channel() {
             estimate: ResourceEstimate::default(),
             actual: None,
         },
+        canonical_item_count: None,
     };
 
     let completed = handler
@@ -370,6 +373,8 @@ async fn complete_dispatch_extracts_base64_document_into_text() {
     let obligations = vec![Obligation::RedactOutput];
     let encoded = base64::engine::general_purpose::STANDARD.encode(b"name,age\nAlice,30");
     let dispatch = CapabilityDispatchResult {
+        completed_artifact: None,
+        canonical_output_digest: None,
         capability_id: capability_id.clone(),
         provider: context.extension_id.clone(),
         runtime: RuntimeKind::Wasm,
@@ -388,6 +393,7 @@ async fn complete_dispatch_extracts_base64_document_into_text() {
             estimate: ResourceEstimate::default(),
             actual: None,
         },
+        canonical_item_count: None,
     };
 
     let completed = handler
@@ -457,6 +463,8 @@ async fn leak_detector_block_records_security_audit_event_through_complete_dispa
     //   - no payload (the offending string never appears in the event)
     let leaky_payload = serde_json::Value::String("hello AKIAIOSFODNN7EXAMPLE goodbye".to_string());
     let dispatch = CapabilityDispatchResult {
+        completed_artifact: None,
+        canonical_output_digest: None,
         capability_id: capability_id.clone(),
         provider: context.extension_id.clone(),
         runtime: RuntimeKind::Wasm,
@@ -470,6 +478,7 @@ async fn leak_detector_block_records_security_audit_event_through_complete_dispa
             estimate: ResourceEstimate::default(),
             actual: None,
         },
+        canonical_item_count: None,
     };
 
     let request = CapabilityObligationCompletionRequest {
@@ -546,6 +555,8 @@ async fn leak_detector_block_without_security_sink_does_not_panic() {
     let estimate = ResourceEstimate::default();
     let obligations = vec![Obligation::RedactOutput];
     let dispatch = CapabilityDispatchResult {
+        completed_artifact: None,
+        canonical_output_digest: None,
         capability_id: capability_id.clone(),
         provider: context.extension_id.clone(),
         runtime: RuntimeKind::Wasm,
@@ -559,6 +570,7 @@ async fn leak_detector_block_without_security_sink_does_not_panic() {
             estimate: ResourceEstimate::default(),
             actual: None,
         },
+        canonical_item_count: None,
     };
 
     let result = handler
@@ -611,6 +623,7 @@ fn execution_context() -> ExecutionContext {
         invocation_id,
     };
     ExecutionContext {
+        artifact_namespace: None,
         run_id: None,
         origin: None,
         invocation_id,

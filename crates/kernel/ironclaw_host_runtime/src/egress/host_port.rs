@@ -208,6 +208,7 @@ fn execution_context_for_host_http_egress(
     trust: TrustClass,
 ) -> Result<ExecutionContext, RuntimeHttpEgressError> {
     let context = ExecutionContext {
+        artifact_namespace: None,
         run_id: None,
         origin: None,
         invocation_id: scope.invocation_id,

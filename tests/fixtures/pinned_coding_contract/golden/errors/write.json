@@ -1,0 +1,62 @@
+{
+  "tool": "write",
+  "note": "Representative model-visible error shapes for the pinned `write` tool at commit 08819b279cf02ae2545e69dad7111ab48d91d35e. `template` is verbatim from the cited upstream source; `example` renders the template with representative values.",
+  "entries": [
+    {
+      "case": "unknown_uri_like_target",
+      "kind": "error",
+      "template": "Unknown URI-like write target '${trimmed}'.${suggestion} Prefix the path with './' to write it as a filesystem path.",
+      "example": "Unknown URI-like write target 'foo://bar'. Did you mean 'xd://bar'? Prefix the path with './' to write it as a filesystem path.",
+      "source_path": "packages/coding-agent/src/tools/write.ts",
+      "source_line": 128
+    },
+    {
+      "case": "bulk_directive_duplicate",
+      "kind": "error",
+      "template": "Bulk directive lists conflict #${id} twice — each id may appear once.",
+      "example": "Bulk directive lists conflict #3 twice — each id may appear once.",
+      "source_path": "packages/coding-agent/src/tools/write.ts",
+      "source_line": 246
+    },
+    {
+      "case": "archive_path_dotdot",
+      "kind": "error",
+      "template": "Archive path cannot contain '..'",
+      "example": "Archive path cannot contain '..'",
+      "source_path": "packages/coding-agent/src/tools/write.ts",
+      "source_line": 461
+    },
+    {
+      "case": "sqlite_db_not_found",
+      "kind": "error",
+      "template": "SQLite database '${displayPath}' not found",
+      "example": "SQLite database 'data.db' not found",
+      "source_path": "packages/coding-agent/src/tools/write.ts",
+      "source_line": 750
+    },
+    {
+      "case": "sqlite_write_content_object",
+      "kind": "error",
+      "template": "SQLite write content must be a JSON object",
+      "example": "SQLite write content must be a JSON object",
+      "source_path": "packages/coding-agent/src/tools/write.ts",
+      "source_line": 783
+    },
+    {
+      "case": "conflict_target_missing",
+      "kind": "error",
+      "template": "Conflict #${entry.id} target '${entry.displayPath}' no longer exists.",
+      "example": "Conflict #2 target 'src/main.rs' no longer exists.",
+      "source_path": "packages/coding-agent/src/tools/write.ts",
+      "source_line": 840
+    },
+    {
+      "case": "xd_not_mounted",
+      "kind": "error",
+      "template": "xd:// is not mounted in this session.",
+      "example": "xd:// is not mounted in this session.",
+      "source_path": "packages/coding-agent/src/tools/write.ts",
+      "source_line": 1152
+    }
+  ]
+}

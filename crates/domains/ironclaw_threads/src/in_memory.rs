@@ -1175,9 +1175,14 @@ impl SessionThreadService for InMemorySessionThreadService {
                     "tool result reference content is missing".to_string(),
                 )
             })?;
-            let envelope = ToolResultReferenceEnvelope::from_json_str(content)
+            let mut envelope = ToolResultReferenceEnvelope::from_json_str(content)
                 .map_err(SessionThreadError::Serialization)?
                 .with_safe_summary(request.safe_summary);
+            if let Some(observation) = request.model_observation {
+                envelope = envelope
+                    .replacing_model_observation(observation)
+                    .map_err(SessionThreadError::Serialization)?;
+            }
             message.content = Some(
                 serde_json::to_string(&envelope)
                     .map_err(|error| SessionThreadError::Serialization(error.to_string()))?,

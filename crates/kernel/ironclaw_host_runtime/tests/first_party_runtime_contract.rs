@@ -49,6 +49,9 @@ use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort};
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use serde_json::{Value, json};
 
+mod support;
+use support::host_runtime_harness::WithTestArtifactPersistence;
+
 const FIRST_PARTY_STAGED_SECRET: &str = "sk-first-party-staged-secret";
 
 #[tokio::test]
@@ -73,6 +76,7 @@ async fn host_runtime_invokes_first_party_handler_through_capability_host() {
     .with_trust_policy(Arc::new(first_party_trust_policy()))
     .with_invocation_state(Arc::clone(&run_state))
     .with_event_sink(Arc::new(events.clone()))
+    .with_test_artifact_persistence()
     .host_runtime_for_local_testing();
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
@@ -147,6 +151,7 @@ async fn first_party_handler_uses_staged_secret_through_production_host_egress()
     .try_with_host_http_egress(network)
     .unwrap()
     .with_trust_policy(Arc::new(first_party_trust_policy()))
+    .with_test_artifact_persistence()
     .host_runtime_for_local_testing();
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant_with_secret(&handle)],
@@ -432,6 +437,7 @@ async fn first_party_handler_error_reconciles_reported_usage_after_side_effect()
     )
     .with_first_party_capabilities(Arc::new(first_party))
     .with_trust_policy(Arc::new(first_party_trust_policy()))
+    .with_test_artifact_persistence()
     .host_runtime_for_local_testing();
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
@@ -476,6 +482,7 @@ async fn first_party_handler_panic_fails_closed_and_releases_reservation() {
     .with_trust_policy(Arc::new(first_party_trust_policy()))
     .with_invocation_state(Arc::clone(&run_state))
     .with_event_sink(Arc::new(events.clone()))
+    .with_test_artifact_persistence()
     .host_runtime_for_local_testing();
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
@@ -527,6 +534,7 @@ async fn first_party_missing_handler_fails_closed_without_side_effect_handler() 
     .with_first_party_capabilities(Arc::new(first_party))
     .with_trust_policy(Arc::new(first_party_trust_policy()))
     .with_event_sink(Arc::new(events.clone()))
+    .with_test_artifact_persistence()
     .host_runtime_for_local_testing();
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
@@ -706,6 +714,7 @@ fn first_party_registry_with_effects(effects: Vec<EffectKind>) -> ExtensionRegis
                 max_egress_bytes: None,
                 resource_profile: None,
                 origin_gate_matrix: None,
+                provider_tool_name: None,
             }],
             hooks: Vec::new(),
         },
@@ -807,6 +816,7 @@ fn http_first_party_services(
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(first_party))
+    .with_test_artifact_persistence()
 }
 
 async fn invoke_http_fixture(

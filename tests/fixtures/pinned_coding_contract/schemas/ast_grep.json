@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "properties": {
+    "pat": {
+      "type": "string",
+      "description": "ast pattern"
+    },
+    "path": {
+      "type": "string",
+      "description": "file, directory, glob, or internal URL to search; pass several as a semicolon-delimited list (\"src; tests\"). Omitted -> searches the workspace root (\".\")"
+    },
+    "skip": {
+      "type": "number",
+      "description": "matches to skip"
+    }
+  },
+  "required": [
+    "pat"
+  ],
+  "additionalProperties": false
+}

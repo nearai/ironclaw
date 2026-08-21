@@ -231,6 +231,20 @@ where
         &scoped_filesystem,
     )));
     let (runtime_policy, process_binding) = runtime_policy.into_parts();
+    let artifact_store = Arc::new(
+        ironclaw_threads::DurableToolArtifactStore::new(Arc::clone(&filesystem)).map_err(
+            |error| crate::RebornCompositionError::InvalidConfig {
+                reason: format!("tool artifact store initialization failed: {error}"),
+            },
+        )?,
+    );
+    let artifact_access: Arc<dyn ironclaw_host_api::artifact::ArtifactAccessPort> =
+        artifact_store.clone();
+    let artifact_persistence: Arc<dyn ironclaw_host_api::artifact::ArtifactPersistencePort> =
+        artifact_store.clone();
+    let accounted_artifact_persistence: Arc<
+        dyn ironclaw_host_api::artifact::AccountedArtifactPersister,
+    > = artifact_store;
 
     let services = with_shared_host_runtime_wiring!(
         HostRuntimeServices::new(
@@ -254,6 +268,8 @@ where
             ironclaw_turn_runner::planned_driver_factory::default_planned_run_profile_resolver()?,
         ),
     )
+    .with_artifact_ports(artifact_access, artifact_persistence)
+    .with_accounted_artifact_persistence(accounted_artifact_persistence)
     .with_turn_run_wake_notifier(turn_run_wake_notifier);
     let event_stores = match event_store {
         ProductionEventStoresInput::Config(config) => {
@@ -333,6 +349,7 @@ pub(super) async fn build_backend_production(
     stores: ProductionStoreBundle,
     trigger_repository: Arc<dyn TriggerRepository>,
     leader_lock: ironclaw_auth::CredentialRefreshLeaderLock,
+    _coding_tools_for_test: bool,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     let RebornProductionBuildContext {
         profile,
@@ -625,6 +642,25 @@ pub(super) async fn build_backend_production(
         );
     }
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
+    let artifact_store = Arc::new(
+        ironclaw_threads::DurableToolArtifactStore::new(Arc::clone(&stores.filesystem)).map_err(
+            |error| RebornBuildError::InvalidConfig {
+                reason: format!("tool artifact store initialization failed: {error}"),
+            },
+        )?,
+    );
+    artifact_store
+        .bind_legacy_result_service(Arc::clone(&thread_service))
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("legacy result artifact projection wiring failed: {error}"),
+        })?;
+    let artifact_access: Arc<dyn ironclaw_host_api::artifact::ArtifactAccessPort> =
+        artifact_store.clone();
+    let artifact_persistence: Arc<dyn ironclaw_host_api::artifact::ArtifactPersistencePort> =
+        artifact_store.clone();
+    let accounted_artifact_persistence: Arc<
+        dyn ironclaw_host_api::artifact::AccountedArtifactPersister,
+    > = artifact_store.clone();
     let host_runtime_event_sink: Arc<dyn EventSink> = runtime_event_sink.clone();
     let services = with_shared_host_runtime_wiring!(
         HostRuntimeServices::new(
@@ -646,6 +682,8 @@ pub(super) async fn build_backend_production(
         turn_state = Arc::clone(&process_turn_state),
         run_profile_resolver = planned_run_profile_resolver()?,
     )
+    .with_artifact_ports(artifact_access, artifact_persistence)
+    .with_accounted_artifact_persistence(Arc::clone(&accounted_artifact_persistence))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_resource_governor(Arc::clone(&resource_governor))
     .with_production_reborn_event_stores_and_sink(event_stores, host_runtime_event_sink)
@@ -1393,6 +1431,9 @@ pub(super) async fn build_backend_production(
         delivery_registrations,
         delivery_client_bootstrap,
         host_runtime,
+        artifact_persistence: accounted_artifact_persistence,
+        artifact_store,
+        artifact_governor: resource_governor,
         user_sandbox_process_port,
         #[cfg(test)]
         turn_coordinator,
@@ -1535,15 +1576,28 @@ pub(super) struct DurableJournalLanes {
     resource_governor: Option<Arc<CompositeRootFilesystem>>,
 }
 
-async fn finish_production_backend(
-    context: RebornProductionBuildContext,
+struct ProductionBackendParts {
     filesystem: Arc<CompositeRootFilesystem>,
     journal_lanes: DurableJournalLanes,
     trigger_repository: Arc<dyn TriggerRepository>,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     event_store_config: ironclaw_event_store::RebornEventStoreConfig,
     leader_lock: ironclaw_auth::CredentialRefreshLeaderLock,
+}
+
+async fn finish_production_backend(
+    context: RebornProductionBuildContext,
+    parts: ProductionBackendParts,
+    coding_tools_for_test: bool,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
+    let ProductionBackendParts {
+        filesystem,
+        journal_lanes,
+        trigger_repository,
+        secret_master_key,
+        event_store_config,
+        leader_lock,
+    } = parts;
     let DurableJournalLanes {
         process_journal: process_journal_filesystem,
         resource_governor: resource_governor_filesystem,
@@ -1558,7 +1612,14 @@ async fn finish_production_backend(
     )
     .await?
     .with_process_journal_filesystem(process_journal_filesystem);
-    build_backend_production(context, stores, trigger_repository, leader_lock).await
+    build_backend_production(
+        context,
+        stores,
+        trigger_repository,
+        leader_lock,
+        coding_tools_for_test,
+    )
+    .await
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1568,6 +1629,7 @@ pub(super) async fn build_libsql_production(
     path_or_url: String,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     process_local_resource_governor_singleton: bool,
+    coding_tools_for_test: bool,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     use ironclaw_filesystem::LibSqlRootFilesystem;
 
@@ -1602,15 +1664,19 @@ pub(super) async fn build_libsql_production(
     )?;
     finish_production_backend(
         context,
-        filesystem,
-        DurableJournalLanes {
-            process_journal: Some(Arc::clone(&journal_lane)),
-            resource_governor: Some(journal_lane),
+        ProductionBackendParts {
+            filesystem,
+            journal_lanes: DurableJournalLanes {
+                process_journal: Some(Arc::clone(&journal_lane)),
+                resource_governor: Some(journal_lane),
+            },
+            trigger_repository,
+            secret_master_key,
+            event_store_config,
+            leader_lock:
+                ironclaw_auth::CredentialRefreshLeaderLock::always_leader_for_single_writer(),
         },
-        trigger_repository,
-        secret_master_key,
-        event_store_config,
-        ironclaw_auth::CredentialRefreshLeaderLock::always_leader_for_single_writer(),
+        coding_tools_for_test,
     )
     .await
 }
@@ -1621,6 +1687,7 @@ pub(super) async fn build_postgres_production(
     process_journal_pool: Option<deadpool_postgres::Pool>,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     process_local_resource_governor_singleton: bool,
+    coding_tools_for_test: bool,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     use ironclaw_filesystem::PostgresRootFilesystem;
 
@@ -1664,18 +1731,23 @@ pub(super) async fn build_postgres_production(
         .transpose()?;
     finish_production_backend(
         context,
-        filesystem,
-        DurableJournalLanes {
-            process_journal: process_journal_filesystem,
-            // Postgres governor writes already use the pooled data plane.
-            resource_governor: None,
+        ProductionBackendParts {
+            filesystem,
+            journal_lanes: DurableJournalLanes {
+                process_journal: process_journal_filesystem,
+                // Postgres governor writes already use the pooled data plane.
+                resource_governor: None,
+            },
+            trigger_repository,
+            secret_master_key,
+            event_store_config: ironclaw_event_store::RebornEventStoreConfig::PostgresPool {
+                pool: ironclaw_filesystem::PostgresConnectionPool::new(pool),
+            },
+            leader_lock: ironclaw_auth::CredentialRefreshLeaderLock::for_postgres(
+                pool_for_refresh_lock,
+            ),
         },
-        trigger_repository,
-        secret_master_key,
-        ironclaw_event_store::RebornEventStoreConfig::PostgresPool {
-            pool: ironclaw_filesystem::PostgresConnectionPool::new(pool),
-        },
-        ironclaw_auth::CredentialRefreshLeaderLock::for_postgres(pool_for_refresh_lock),
+        coding_tools_for_test,
     )
     .await
 }

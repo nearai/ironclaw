@@ -19,7 +19,7 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, ECHO_CAPABILITY_ID,
+    BUILTIN_FIRST_PARTY_PROVIDER, CODING_EDIT_CAPABILITY_ID, ECHO_CAPABILITY_ID,
     RuntimeApprovalGate, RuntimeCapabilityOutcome, SHELL_CAPABILITY_ID,
 };
 
@@ -1152,10 +1152,9 @@ async fn standalone_ungranted_capability_returns_denied_not_approval_gate() {
     .await
     .expect("standalone services build"); // safety: test-only helper in #[cfg(test)] module.
     let host_runtime = services.host_runtime.as_ref(); // safety: test-only helper in #[cfg(test)] module.
-    // Context grants only shell; apply_patch is not in the grant set.
+    // Context grants only shell; edit is not in the grant set.
     let context = shell_execution_context("standalone-deny-owner", "thread-deny-passthrough");
-    let capability_id =
-        CapabilityId::new(APPLY_PATCH_CAPABILITY_ID).expect("apply_patch capability"); // safety: test-only helper in #[cfg(test)] module.
+    let capability_id = CapabilityId::new(CODING_EDIT_CAPABILITY_ID).expect("edit capability"); // safety: test-only helper in #[cfg(test)] module.
 
     let outcome = host_runtime
         .invoke_capability((

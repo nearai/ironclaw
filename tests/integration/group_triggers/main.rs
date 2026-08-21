@@ -206,7 +206,7 @@ async fn triggered_gate_group() {
 
     // #5886 RED: a gate-parked triggered fire must surface a derived
     // active_hold on both read surfaces. Own combined group: trigger verbs
-    // need auto-approve ON while write_file gates via an AskEachTime override
+    // need auto-approve ON while write gates via an AskEachTime override
     // — neither `triggers()` nor `live_approvals()` offers both.
     let g_hold = RebornIntegrationGroup::triggers_with_gated_write()
         .await

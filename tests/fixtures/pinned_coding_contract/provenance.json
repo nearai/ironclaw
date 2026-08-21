@@ -1,0 +1,638 @@
+{
+  "schema_version": 1,
+  "upstream": {
+    "repository": "https://github.com/can1357/oh-my-pi",
+    "commit": "08819b279cf02ae2545e69dad7111ab48d91d35e",
+    "commit_short": "08819b2",
+    "license": "MIT",
+    "license_file": "licenses/LICENSE",
+    "license_upstream_path": "LICENSE",
+    "license_notice": "MIT License, Copyright (c) 2025 Mario Zechner, Copyright (c) 2025-2026 Can B\u00f6l\u00fck (see the vendored licenses/LICENSE; the MIT notice must be preserved in any substantial derived work)",
+    "capture_note": "Verbatim files copied byte-for-byte from the pinned commit; schemas rendered from the pinned omptype/pi-ai wire pipeline (toolWireSchema: toJsonSchema draft-2020-12, prune undefined unions, upgrade/postProcess, closeDeclaredObjects)."
+  },
+  "ironclaw_modifications": "None. All snapshotted prompt/grammar/source bytes are verbatim upstream copies; the rendered schema JSON files are derived output of the pinned upstream schema definitions through the pinned upstream rendering pipeline, and the golden error/output fixtures transcribe upstream templates verbatim with representative example values.",
+  "manifest": {
+    "path": "manifest.json",
+    "sha256": "028ea7bdf6442df8cccea948194560b6becf1913a7678145bd199f5feda5ff6e",
+    "bytes": 13073,
+    "role": "manifest",
+    "note": "Snapshot inventory checksummed here so the manifest itself is covered by the offline integrity test; provenance.json is the only self-exempt metadata file."
+  },
+  "files": [
+    {
+      "path": "packages/coding-agent/src/tools/read.ts",
+      "sha256": "68d98d5f003a3ad4749bb61e323df4031e42241220d0eaea2e9196e67e38253a",
+      "bytes": 79698,
+      "role": "tool-definition",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/tools/write.ts",
+      "sha256": "d044b2292f710296e50c3e6f982c4d8ced1775d7a5e4914ce30c13bdc2933820",
+      "bytes": 66713,
+      "role": "tool-definition",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/tools/glob.ts",
+      "sha256": "1279e406fb0b527888634bbcb779103c8260613ea6dd0adde0c5d56361b4fbf2",
+      "bytes": 26089,
+      "role": "tool-definition",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/tools/grep.ts",
+      "sha256": "fb776546ba31d1b99a268bb0930a2f68787b8ce192ed1cfea8547c739e91fc30",
+      "bytes": 74480,
+      "role": "tool-definition",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/tools/bash.ts",
+      "sha256": "3d5a426ed89078da75e8c161b28c4247b799f7fe6a738be4c80807f26f7feb1e",
+      "bytes": 69858,
+      "role": "tool-definition",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/tools/ast-grep.ts",
+      "sha256": "f24b959faf68f7d4a44b04aee1219831ae389ba72e5180a84bee87d4cd87776d",
+      "bytes": 20347,
+      "role": "tool-definition",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/tools/ast-edit.ts",
+      "sha256": "f6448083aa0ec501752bc4328156b7e34b3b1cff40729643963a5b9f91a190f2",
+      "bytes": 29000,
+      "role": "tool-definition",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/edit/index.ts",
+      "sha256": "75bf278559c8e7117d3fb4f9988cd25aae90fa73dd38554747c8ee78954f23f4",
+      "bytes": 25927,
+      "role": "tool-definition",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/prompts/tools/read.md",
+      "sha256": "d19aa10c85e0a2247f7085d26d33a9bde78efaac2137f53c34683a3fc720eef5",
+      "bytes": 2113,
+      "role": "prompt",
+      "snapshotted": true,
+      "snapshot_path": "prompts/read.md"
+    },
+    {
+      "path": "packages/coding-agent/src/prompts/tools/write.md",
+      "sha256": "3458583ab276bffc38f5370c5ef2367e0133a803342e56ec062b363542069e61",
+      "bytes": 676,
+      "role": "prompt",
+      "snapshotted": true,
+      "snapshot_path": "prompts/write.md"
+    },
+    {
+      "path": "packages/coding-agent/src/prompts/tools/glob.md",
+      "sha256": "adcf8979c4d20958fada6cfb1b95ac687a2a64ac61793fb1b17436a08ed5b848",
+      "bytes": 750,
+      "role": "prompt",
+      "snapshotted": true,
+      "snapshot_path": "prompts/glob.md"
+    },
+    {
+      "path": "packages/coding-agent/src/prompts/tools/grep.md",
+      "sha256": "64a238ece171bad78a0a99df8c48af19c5e1757b97880a7bb39a88da992f7196",
+      "bytes": 593,
+      "role": "prompt",
+      "snapshotted": true,
+      "snapshot_path": "prompts/grep.md"
+    },
+    {
+      "path": "packages/coding-agent/src/prompts/tools/bash.md",
+      "sha256": "feb4077f6c712c4add5eb47cd96f60b18a49c450c89b9d7ac4397a2c2cd100cc",
+      "bytes": 1881,
+      "role": "prompt",
+      "snapshotted": true,
+      "snapshot_path": "prompts/bash.md"
+    },
+    {
+      "path": "packages/coding-agent/src/prompts/tools/ast-grep.md",
+      "sha256": "4a21d31d8cc00f5073bf79b43748de434c58d8a02ed6c251b811fe43d5fc48f0",
+      "bytes": 1333,
+      "role": "prompt",
+      "snapshotted": true,
+      "snapshot_path": "prompts/ast-grep.md"
+    },
+    {
+      "path": "packages/coding-agent/src/prompts/tools/ast-edit.md",
+      "sha256": "d5cfe448ba43fce306a88c5dd637bfb003a73ebddc1f56534063ef0af82d7c54",
+      "bytes": 1134,
+      "role": "prompt",
+      "snapshotted": true,
+      "snapshot_path": "prompts/ast-edit.md"
+    },
+    {
+      "path": "packages/coding-agent/src/prompts/tools/apply-patch.md",
+      "sha256": "8d2da4eb6bcabe446b0d3d3dfc11f6efee20ebd02271572e2bc42aff942687cc",
+      "bytes": 2903,
+      "role": "prompt",
+      "snapshotted": true,
+      "snapshot_path": "prompts/apply-patch.md"
+    },
+    {
+      "path": "packages/coding-agent/src/prompts/tools/patch.md",
+      "sha256": "7febd0389ff6f3f295aa6b7d2936b4682dc485f43ba8f74f5a37cce6d05a2a0d",
+      "bytes": 2765,
+      "role": "prompt",
+      "snapshotted": true,
+      "snapshot_path": "prompts/patch.md"
+    },
+    {
+      "path": "packages/coding-agent/src/prompts/tools/replace.md",
+      "sha256": "a2d6c459f4a42e06f03cf418199918f6f78c40630d2a56324521c2f123be6923",
+      "bytes": 1366,
+      "role": "prompt",
+      "snapshotted": true,
+      "snapshot_path": "prompts/replace.md"
+    },
+    {
+      "path": "packages/hashline/src/prompt.md",
+      "sha256": "e6a30ef11c49c1b4f648e57793b8d52a47511068d2846fb67f1a57d02b00f165",
+      "bytes": 6016,
+      "role": "prompt",
+      "snapshotted": true,
+      "snapshot_path": "prompts/hashline.md"
+    },
+    {
+      "path": "packages/hashline/src/grammar.lark",
+      "sha256": "18e52e832a82352bb5161061f8fb7e390f95d5d096fa0ecff4ddfa8fe6c2db0d",
+      "bytes": 717,
+      "role": "grammar",
+      "snapshotted": true,
+      "snapshot_path": "grammars/hashline.lark"
+    },
+    {
+      "path": "packages/coding-agent/src/edit/modes/apply-patch.lark",
+      "sha256": "d6367f4826ed608c424b0a308f3d6163527df63c22513d089b91863552f8bfeb",
+      "bytes": 578,
+      "role": "grammar",
+      "snapshotted": true,
+      "snapshot_path": "grammars/apply-patch.lark"
+    },
+    {
+      "path": "packages/coding-agent/src/tools/read-selector.ts",
+      "sha256": "fde67025e41068c73c40605c56e64941c8355fb03c12a22fb150d026cfad7eae",
+      "bytes": 3372,
+      "role": "selector-source",
+      "snapshotted": true,
+      "snapshot_path": "sources/read-selector.ts"
+    },
+    {
+      "path": "packages/coding-agent/src/tools/read-path-resolution.ts",
+      "sha256": "19e69ff4f51ce4611f28af226960d174cd7aa9f23a959dd4c063e0ebad2174a7",
+      "bytes": 1627,
+      "role": "selector-source",
+      "snapshotted": true,
+      "snapshot_path": "sources/read-path-resolution.ts"
+    },
+    {
+      "path": "packages/coding-agent/src/tools/tool-errors.ts",
+      "sha256": "1bbb052538b5a8d16e759580dfce670ea5bfe496b5991d8c9f15627fa06d353d",
+      "bytes": 1603,
+      "role": "error-source",
+      "snapshotted": true,
+      "snapshot_path": "sources/tool-errors.ts"
+    },
+    {
+      "path": "packages/coding-agent/src/tools/match-line-format.ts",
+      "sha256": "42bfb4ecf37ac6797f679a18756550206cb1366394de18bf7005dd09992a8d98",
+      "bytes": 700,
+      "role": "format-source",
+      "snapshotted": true,
+      "snapshot_path": "sources/match-line-format.ts"
+    },
+    {
+      "path": "packages/coding-agent/src/tools/read-format.ts",
+      "sha256": "007ca638d8c8a0d12686ff8f1c78d44e41be4e42316955b9403f344388274ec3",
+      "bytes": 23276,
+      "role": "format-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/tools/read-renderer.ts",
+      "sha256": "55d02bf41516832a79e8f3f6e68d83bd53752e7c54bafedcd70574061b53821a",
+      "bytes": 11732,
+      "role": "format-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/tools/render-utils.ts",
+      "sha256": "550467ec13071d2f698d11b0618c12069b76931846d4448f8f8d0c72d4278ce0",
+      "bytes": 33478,
+      "role": "format-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/tools/path-utils.ts",
+      "sha256": "ab53adf304b413bdd6885c9d5d92749169d3d5dead729c22cddd26d870b25258",
+      "bytes": 56888,
+      "role": "selector-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/tools/output-meta.ts",
+      "sha256": "8674d593dd96bf8c2008f92d70357ec12a8603d92411ace0c51096e4a0e134dc",
+      "bytes": 28995,
+      "role": "format-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/tools/tool-result.ts",
+      "sha256": "6d0fcb80c1e12a6a34c938d6c9bb1b520eec3b1e6daa7bf59ee930e8c312079f",
+      "bytes": 2813,
+      "role": "format-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/edit/hashline/params.ts",
+      "sha256": "11161b704a2f68d33708aa22b30f7cbb876471602b910a970e62374f0dc7c0d1",
+      "bytes": 396,
+      "role": "schema-dsl",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/edit/hashline/execute.ts",
+      "sha256": "3740073c305512b847f9ab52c9f387c9b4ba554418e79256c3c42eca399895a2",
+      "bytes": 12549,
+      "role": "edit-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/edit/hashline/block-resolver.ts",
+      "sha256": "b83df4cad1f1bbb9000af08fe1fa71dad82ca5ff98b45388e241e1400263e13b",
+      "bytes": 1526,
+      "role": "edit-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/edit/hashline/diff.ts",
+      "sha256": "ceb1ce45df6a708c9eec491d6b7117384f86229b6a855a46b10b1f2ea263f645",
+      "bytes": 16305,
+      "role": "edit-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/edit/hashline/filesystem.ts",
+      "sha256": "ea5dacb149facb49192118aeed6d28762563a16656d0113768ff628a43f98015",
+      "bytes": 9939,
+      "role": "edit-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/edit/hashline/index.ts",
+      "sha256": "fe47fc32071854ca48bbd30f00ef836fd6bab3f895a0a00c4ebe1262c39f4327",
+      "bytes": 141,
+      "role": "edit-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/edit/hashline/noop-loop-guard.ts",
+      "sha256": "ad080f5bacf18455fce3b008a4279245b72aa6eb6a597fb260c64fe5d53317fc",
+      "bytes": 4012,
+      "role": "edit-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/edit/modes/apply-patch.ts",
+      "sha256": "af95169c09df68cc08aac7499ba381ab485e69dde452fa752527a05957846aa7",
+      "bytes": 1541,
+      "role": "edit-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/edit/modes/patch.ts",
+      "sha256": "5dbd9dbeac49393ff603b2e49694ec8ea08e4d427e965f4e4154beba3f719003",
+      "bytes": 67426,
+      "role": "edit-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/edit/modes/replace.ts",
+      "sha256": "5561cbb244117e8c89c0af49e9c67b7ae1e20cdbbdc396c5ac0f63d46983b3e4",
+      "bytes": 38985,
+      "role": "edit-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/utils/edit-mode.ts",
+      "sha256": "cc4acf003e3fa3553fa35d88ebc8705ab30b9e42ddacd157ed3a8dce046bcd85",
+      "bytes": 2032,
+      "role": "edit-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/hashline/src/apply.ts",
+      "sha256": "da39ca3854783f83465d96132e65ae01059692b9ca68c805c3391733eed72cdc",
+      "bytes": 55130,
+      "role": "hashline-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/hashline/src/block.ts",
+      "sha256": "2181fefef8180fb0cf8a9d04a19b0b56cfaabf7d54cc7204b36bee2d091f6fba",
+      "bytes": 10544,
+      "role": "hashline-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/hashline/src/clipboard.ts",
+      "sha256": "30788591845b8964bfa116de9403ef711aadd68daf5497ebc08cec1c2db07de1",
+      "bytes": 7630,
+      "role": "hashline-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/hashline/src/diff-preview.ts",
+      "sha256": "28342bd9dc1775ce72fc8fa1d584032437588fce8b6b8bfb07ae10450a8f539e",
+      "bytes": 4513,
+      "role": "hashline-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/hashline/src/format.ts",
+      "sha256": "550ae42c8cfdfd89a4ea48e5d51a0aa52d197187e681995819a5a05a6d68e85c",
+      "bytes": 6123,
+      "role": "hashline-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/hashline/src/fs.ts",
+      "sha256": "e4877eb5e077ddb11966bd3d8f62ac97c9be57d1b2e138b07b72af8d03d8be26",
+      "bytes": 8008,
+      "role": "hashline-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/hashline/src/index.ts",
+      "sha256": "28e5d3d707c84907c591028b36eacf1a1a168bcc478c190cbbe44f08747a2b73",
+      "bytes": 487,
+      "role": "hashline-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/hashline/src/input.ts",
+      "sha256": "25aa04b4de6c435e61cc6ffc71b78c6ed8803bd7e793244b30479e61374c1614",
+      "bytes": 20416,
+      "role": "hashline-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/hashline/src/messages.ts",
+      "sha256": "f2d34c01b7312d639113590b5d6d551d1290670970407c90dea50009974236e8",
+      "bytes": 26707,
+      "role": "hashline-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/hashline/src/mismatch.ts",
+      "sha256": "7bec8e5969ea9e3ad8591f56870d507411b9c2d5218a30d18388d5492ee0bc88",
+      "bytes": 5085,
+      "role": "hashline-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/hashline/src/normalize.ts",
+      "sha256": "4ce074ec7e514f6d459803c8c424fc9cb623fd3c1cb7dbdb3114eb7f893ce3c4",
+      "bytes": 1388,
+      "role": "hashline-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/hashline/src/parser.ts",
+      "sha256": "cc01c94a7a4656948ebbf2fde835c0b7fa7361fe21939013ebd4071cd0d9d948",
+      "bytes": 28687,
+      "role": "hashline-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/hashline/src/patcher.ts",
+      "sha256": "148d30191a4d267ffcb5d57965c4e53a53232afd7fb5784e8c76680209e7ae91",
+      "bytes": 31832,
+      "role": "hashline-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/hashline/src/prefixes.ts",
+      "sha256": "c310dbe895515bd96abbe348492bc1bde3411b697c134536814bd8d900477694",
+      "bytes": 5615,
+      "role": "hashline-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/hashline/src/recovery.ts",
+      "sha256": "79e5b01517ac997a5e963076e6e0a9996909e47831feedbdc6e9fbdf63d2fa30",
+      "bytes": 12590,
+      "role": "hashline-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/hashline/src/snapshots.ts",
+      "sha256": "38cb1d2d2751b19d19b10678eaa7ab8aa15064d91690261c95e99cb0fb21537d",
+      "bytes": 10389,
+      "role": "hashline-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/hashline/src/stream.ts",
+      "sha256": "56a463a5e892930cd8dd5ced4d6e639c80ead4dc29a23079bab5806a845b4bf4",
+      "bytes": 3793,
+      "role": "hashline-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/hashline/src/tokenizer.ts",
+      "sha256": "8eaef72073362972dbc23fb8939c788d92be4d3dcfd77185d9a2b9fd53ef9284",
+      "bytes": 19922,
+      "role": "hashline-source",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/hashline/src/types.ts",
+      "sha256": "caa6d7500a89d8aa8ec5e36d6d9f183a1cc7f2cf5fa966f740f2dd9ef02fdf6d",
+      "bytes": 8270,
+      "role": "hashline-source",
+      "snapshotted": false
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "545636e19386d3d4e0ae6d77354527499999c3ebfbca61b9fa5aa4ead7c0b308",
+      "bytes": 1106,
+      "role": "license",
+      "snapshotted": true,
+      "snapshot_path": "licenses/LICENSE"
+    },
+    {
+      "path": "packages/coding-agent/src/session/streaming-output.ts",
+      "sha256": "c64b20523d625a8121c915e5fe796ccce5230e55fa93b23d4e34e03cc7abf5eb",
+      "bytes": 51007,
+      "role": "format-source",
+      "snapshotted": false
+    }
+  ],
+  "derived": [
+    {
+      "path": "golden/errors/ast_edit.json",
+      "sha256": "78a2529ddd6758cae3e70da52af304000eccae4297baeca667c49b81f29a2e76",
+      "bytes": 1645,
+      "role": "error-golden",
+      "note": "Representative ast_edit error shapes; templates verbatim from cited upstream sources"
+    },
+    {
+      "path": "golden/errors/ast_grep.json",
+      "sha256": "fe3c07430b7536502d8e7a459fa6278569c0bc2a2badb0c55423674b675b8aef",
+      "bytes": 836,
+      "role": "error-golden",
+      "note": "Representative ast_grep error shapes; templates verbatim from cited upstream sources"
+    },
+    {
+      "path": "golden/errors/edit.json",
+      "sha256": "0eb6b916dcb71fec47130f0083a6328e84c56ba61200a00b44c74ddafb5a4409",
+      "bytes": 4544,
+      "role": "error-golden",
+      "note": "Representative edit/hashline error shapes; templates verbatim from cited upstream sources"
+    },
+    {
+      "path": "golden/errors/glob.json",
+      "sha256": "75192f50c313d611e321608ff396cdc58ed1c934ecfe5465059da7b68958b14e",
+      "bytes": 1835,
+      "role": "error-golden",
+      "note": "Representative glob error shapes; templates verbatim from cited upstream sources"
+    },
+    {
+      "path": "golden/errors/grep.json",
+      "sha256": "20535a7c2be3ff425b1be691745dec5026d95cad4300063dc6787f94ef13e609",
+      "bytes": 2976,
+      "role": "error-golden",
+      "note": "Representative grep error shapes; templates verbatim from cited upstream sources"
+    },
+    {
+      "path": "golden/errors/bash.json",
+      "sha256": "2efc46e45741acac2c3a04c1cf655f67c812374d0efa3b52ccdd608510c864f6",
+      "bytes": 1168,
+      "role": "error-golden",
+      "note": "Representative bash error shapes; templates verbatim from the cited upstream source"
+    },
+    {
+      "path": "golden/errors/read.json",
+      "sha256": "dd70b1de1af27f21f29cb4b72e8b6c57d7c9ab79a27c6106e4cfb1a212b1d3a8",
+      "bytes": 2884,
+      "role": "error-golden",
+      "note": "Representative read error shapes; templates verbatim from cited upstream sources"
+    },
+    {
+      "path": "golden/errors/write.json",
+      "sha256": "a1691095dfb4b9924d7f8ffeb50c25dbaa0dda1e88ac8f8d56dd41c521fffc6c",
+      "bytes": 2548,
+      "role": "error-golden",
+      "note": "Representative write error shapes; templates verbatim from cited upstream sources"
+    },
+    {
+      "path": "golden/output/edit.json",
+      "sha256": "13d6606eff154a8fc393572699fc201aa81d4768ebbfc3bf3a4e26adec4180f7",
+      "bytes": 2982,
+      "role": "output-golden",
+      "note": "Edit/hashline output-format examples; templates verbatim from cited upstream sources"
+    },
+    {
+      "path": "golden/output/grep.json",
+      "sha256": "074660cdf762e9050f9d52fa9fd0987629295318d33d0261f5bc8a48c13c6bfd",
+      "bytes": 1529,
+      "role": "output-golden",
+      "note": "Grep/ast_grep match-line format examples; template verbatim from match-line-format.ts"
+    },
+    {
+      "path": "golden/output/read.json",
+      "sha256": "6d7dcc37f7016d7fa36cc575904147e29af447a5990d7d1cb668e7414bc79987",
+      "bytes": 2687,
+      "role": "output-golden",
+      "note": "Read output-format examples; templates verbatim from cited upstream sources"
+    },
+    {
+      "path": "golden/artifacts.json",
+      "sha256": "5a14e63ec8f1c2d21ffa4cc741b57feb124f0bfe10c70653e7e85a8c52bb8eea",
+      "bytes": 1435,
+      "role": "artifact-golden",
+      "note": "Artifact URI allocation, parse, resolution, and hosted oversized-error cases transcribed from pinned artifact-protocol.ts and session/artifacts.ts"
+    },
+    {
+      "path": "golden/selectors.json",
+      "sha256": "48c6b964a4fd04bff613cdfb3b2b644a1dc0f601b33d66a1574b3112ea83554b",
+      "bytes": 5608,
+      "role": "selector-golden",
+      "note": "Deterministic parseSel/parseLineRanges cases generated by running the pinned upstream selector logic (verbatim copies in the generator)"
+    },
+    {
+      "path": "schemas/ast_edit.json",
+      "sha256": "3d99a1087b1d33a2c56dad04235d8287fdfd4f1c0a5cdc934106179abe5d47ad",
+      "bytes": 897,
+      "role": "rendered-schema",
+      "note": "Rendered from astEditSchema (ast-edit.ts:46-57) through the pinned pi-ai toolWireSchema pipeline"
+    },
+    {
+      "path": "schemas/ast_grep.json",
+      "sha256": "3d1bd599fa46064b86c5b0e6a5dd11d35c9eac82597286e126b34c86332a2ad2",
+      "bytes": 498,
+      "role": "rendered-schema",
+      "note": "Rendered from astGrepSchema (ast-grep.ts:39-44) through the pinned pi-ai toolWireSchema pipeline"
+    },
+    {
+      "path": "schemas/edit.json",
+      "sha256": "c4ea21c6059fda953a717786f9520b446ca91992f2a3708319e4e32888bf9490",
+      "bytes": 156,
+      "role": "rendered-schema",
+      "note": "Rendered from hashlineEditParamsSchema (edit/hashline/params.ts:8-11), the default edit mode, through the pinned pi-ai toolWireSchema pipeline"
+    },
+    {
+      "path": "schemas/glob.json",
+      "sha256": "fdfb5cccadc8d81538aa0695c8b313f7a76103d74fa82624e4c418a7eb77d232",
+      "bytes": 574,
+      "role": "rendered-schema",
+      "note": "Rendered from findSchema (glob.ts:43-51) through the pinned pi-ai toolWireSchema pipeline"
+    },
+    {
+      "path": "schemas/grep.json",
+      "sha256": "6078697d559621f1f32b0f446da9c0490fe75646a1db69ecf8ab99026d0a982d",
+      "bytes": 837,
+      "role": "rendered-schema",
+      "note": "Rendered from searchSchema (grep.ts:74-88) through the pinned pi-ai toolWireSchema pipeline"
+    },
+    {
+      "path": "schemas/bash.json",
+      "sha256": "b8b3fd978be410427764dae9d20ed6ec42aa7f1524e5628e840c085d80ebccf6",
+      "bytes": 681,
+      "role": "rendered-schema",
+      "note": "Rendered from bashSchemaBase (bash.ts:305-311) through the pinned pi-ai toolWireSchema pipeline"
+    },
+    {
+      "path": "schemas/read.json",
+      "sha256": "c96e326e2858b4eb4e7c554ca2df6059bcf226b452694d01b4f603ce1bbd7dc3",
+      "bytes": 271,
+      "role": "rendered-schema",
+      "note": "Rendered from readSchema (read.ts:339-347) through the pinned pi-ai toolWireSchema pipeline"
+    },
+    {
+      "path": "schemas/write.json",
+      "sha256": "d3a917e0e3107a6a8cdcd1777856ad5c074928f5e4c23b9ae3ee3b71be68b5fa",
+      "bytes": 287,
+      "role": "rendered-schema",
+      "note": "Rendered from writeSchema (write.ts:298-302) through the pinned pi-ai toolWireSchema pipeline"
+    },
+    {
+      "path": "prompts/read.rendered.md",
+      "sha256": "c6193578598413a47283a597fa210e7a873c296d7b73e0d052840b57c1454ff0",
+      "bytes": 2013,
+      "role": "rendered-prompt",
+      "note": "prompts/read.md rendered through the pinned upstream prompt.render pipeline with the issue #7392 target context (DEFAULT_LIMIT=3000, DEFAULT_MAX_LINES=3000, IS_HL_MODE=true, IS_LINE_NUMBER_MODE=false, INSPECT_IMAGE_ENABLED=false); context and path also recorded in manifest.json under tools.read.rendered_prompt"
+    }
+  ]
+}

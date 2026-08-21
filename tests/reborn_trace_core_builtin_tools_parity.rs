@@ -19,7 +19,7 @@ use axum::{
 use ironclaw_host_api::action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern};
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_host_runtime::{
-    APPLY_PATCH_CAPABILITY_ID, HTTP_CAPABILITY_ID, JSON_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
+    CODING_EDIT_CAPABILITY_ID, CODING_READ_CAPABILITY_ID, HTTP_CAPABILITY_ID, JSON_CAPABILITY_ID,
     TIME_CAPABILITY_ID,
 };
 use ironclaw_loop_contracts::LoopHostMilestoneKind;
@@ -39,8 +39,14 @@ async fn reborn_trace_core_builtin_tools_parity() {
     let time = CapabilityId::new(TIME_CAPABILITY_ID).expect("valid capability id");
     let json = CapabilityId::new(JSON_CAPABILITY_ID).expect("valid capability id");
     let http = CapabilityId::new(HTTP_CAPABILITY_ID).expect("valid capability id");
-    let read_file = CapabilityId::new(READ_FILE_CAPABILITY_ID).expect("valid capability id");
-    let apply_patch = CapabilityId::new(APPLY_PATCH_CAPABILITY_ID).expect("valid capability id");
+    let read = CapabilityId::new(CODING_READ_CAPABILITY_ID).expect("valid capability id");
+    let edit = CapabilityId::new(CODING_EDIT_CAPABILITY_ID).expect("valid capability id");
+    // The hashline edit anchors on the deterministic snapshot tag of the
+    // seeded file: `[path#TAG]` must match the tag the read engine records
+    // for the same run (compute_file_hash is the engine's own seam).
+    let patch_tag = ironclaw_extension_support::coding::pinned::harness::compute_file_hash(
+        "alpha\nneeds-patch\nomega\n",
+    );
     let live_http = LiveHttpServer::start().await;
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
@@ -77,7 +83,7 @@ async fn reborn_trace_core_builtin_tools_parity() {
         },
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![RebornScriptedProviderToolCall::new(
-                read_file.clone(),
+                read.clone(),
                 "call_read_patch_target",
                 serde_json::json!({"path": "/workspace/patch-target.txt"}),
             )],
@@ -85,12 +91,10 @@ async fn reborn_trace_core_builtin_tools_parity() {
         },
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![RebornScriptedProviderToolCall::new(
-                apply_patch.clone(),
-                "call_apply_patch",
+                edit.clone(),
+                "call_edit_patch_target",
                 serde_json::json!({
-                    "path": "/workspace/patch-target.txt",
-                    "old_string": "needs-patch",
-                    "new_string": "patched",
+                    "input": format!("[/workspace/patch-target.txt#{patch_tag}]\nPUT 2:\n+patched\n"),
                 }),
             )],
             expected_tool_results: Vec::new(),
@@ -144,8 +148,8 @@ async fn reborn_trace_core_builtin_tools_parity() {
     assert_eq!(invocations[0].capability_id, time);
     assert_eq!(invocations[1].capability_id, json);
     assert_eq!(invocations[2].capability_id, http);
-    assert_eq!(invocations[3].capability_id, read_file);
-    assert_eq!(invocations[4].capability_id, apply_patch);
+    assert_eq!(invocations[3].capability_id, read);
+    assert_eq!(invocations[4].capability_id, edit);
 
     let seen_requests = live_http.requests();
     assert_eq!(seen_requests.len(), 1);
@@ -172,7 +176,7 @@ async fn reborn_trace_core_builtin_tools_parity() {
         requests[3].messages.iter().any(|message| message.role
             == HostManagedModelMessageRole::ToolResult
             && message.content.contains("result:")),
-        "apply_patch result ref should be visible before final reply"
+        "edit result ref should be visible before final reply"
     );
 
     assert_milestone_order(

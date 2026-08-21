@@ -970,6 +970,15 @@ mod tests {
                 .reserve_with_id_and_outcome(scope, estimate, reservation_id)
         }
 
+        fn grow_reservation_with_outcome(
+            &self,
+            reservation_id: ResourceReservationId,
+            additional: ResourceEstimate,
+        ) -> Result<ReservationOutcome, ResourceError> {
+            self.inner
+                .grow_reservation_with_outcome(reservation_id, additional)
+        }
+
         fn reconcile(
             &self,
             reservation_id: ResourceReservationId,
@@ -1581,6 +1590,14 @@ mod tests {
                 self.inner
                     .reserve_with_id_and_outcome(scope, estimate, reservation_id)
             }
+            fn grow_reservation_with_outcome(
+                &self,
+                reservation_id: ResourceReservationId,
+                additional: ResourceEstimate,
+            ) -> Result<ReservationOutcome, ResourceError> {
+                self.inner
+                    .grow_reservation_with_outcome(reservation_id, additional)
+            }
             fn reconcile(
                 &self,
                 reservation_id: ResourceReservationId,
@@ -1690,6 +1707,15 @@ mod tests {
             ) -> Result<ReservationOutcome, ResourceError> {
                 self.inner
                     .reserve_with_id_and_outcome(scope, estimate, reservation_id)
+            }
+
+            fn grow_reservation_with_outcome(
+                &self,
+                reservation_id: ResourceReservationId,
+                additional: ResourceEstimate,
+            ) -> Result<ReservationOutcome, ResourceError> {
+                self.inner
+                    .grow_reservation_with_outcome(reservation_id, additional)
             }
 
             fn reconcile(

@@ -586,6 +586,7 @@ mod tests {
                             max_egress_bytes: None,
                             resource_profile: None,
                             origin_gate_matrix: None,
+                            provider_tool_name: None,
                         }],
                     },
                     VirtualPath::new(format!("/system/extensions/{provider}")).unwrap(),

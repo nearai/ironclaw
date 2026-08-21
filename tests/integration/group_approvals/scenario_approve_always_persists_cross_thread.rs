@@ -27,7 +27,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .thread("conv-approve-always-user")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 json!({"path": "/workspace/auto.txt", "content": "auto-approved"}),
             ),
             RebornScriptedReply::text("wrote without a gate"),

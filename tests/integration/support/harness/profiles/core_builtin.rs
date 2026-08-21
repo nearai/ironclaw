@@ -28,11 +28,11 @@ use ironclaw_host_api::{
     runtime::RuntimeKind,
 };
 use ironclaw_host_runtime::{
-    APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, HTTP_CAPABILITY_ID,
-    HTTP_SAVE_CAPABILITY_ID, HostRuntime, JSON_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
-    MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
-    RuntimeProcessPort, SHELL_CAPABILITY_ID, TIME_CAPABILITY_ID,
+    BUILTIN_FIRST_PARTY_PROVIDER, CODING_BASH_CAPABILITY_ID, CODING_EDIT_CAPABILITY_ID,
+    CODING_READ_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
+    JSON_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID,
+    MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, NATIVE_MEMORY_FIRST_PARTY_PROVIDER,
+    PROFILE_SET_CAPABILITY_ID, RuntimeProcessPort, TIME_CAPABILITY_ID,
 };
 
 /// How [`core_builtin_tools`] constructs HTTP egress. The three modes are
@@ -61,7 +61,7 @@ pub(crate) struct CoreBuiltinOptions {
     /// Defaults to `http_test_policy()`; override via `.with_network_policy(..)`.
     pub(crate) network_policy: NetworkPolicy,
     /// `true` (default) injects the inert `RecordingProcessPort` so
-    /// `builtin.shell` invocations in tests never spawn a real OS process.
+    /// `builtin.bash` invocations in tests never spawn a real OS process.
     /// `.with_live_shell()` sets this `false`, which skips injection and lets
     /// `HostRuntimeServices` default to the real `HostProcessPort`.
     /// Consulted for `EgressMode::Recording` and `EgressMode::RealPipeline`;
@@ -125,7 +125,7 @@ impl CoreBuiltinOptions {
 }
 
 /// Core built-in tools (`time`/`json`/`http`/`memory_*`/`profile_set`/
-/// `read_file`/`apply_patch`/`shell`). See [`CoreBuiltinOptions`] for the axes.
+/// `read`/`edit`/`shell`). See [`CoreBuiltinOptions`] for the axes.
 pub(crate) async fn core_builtin_tools(
     options: CoreBuiltinOptions,
 ) -> HarnessResult<HostRuntimeCapabilityHarness> {
@@ -145,7 +145,7 @@ pub(crate) async fn core_builtin_tools(
                 .into(),
         );
     }
-    // Inject the inert recording port by default so `builtin.shell`
+    // Inject the inert recording port by default so `builtin.bash`
     // invocations in tests never spawn a real OS process. `.with_live_shell()`
     // sets `recording_process = false`, which skips injection and lets
     // `HostRuntimeServices` default to the real `HostProcessPort`.
@@ -332,12 +332,12 @@ pub(crate) fn core_builtin_tools_capability_ids() -> HarnessResult<Vec<Capabilit
         CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
         CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
         CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?,
-        CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
-        CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?,
-        // `builtin.shell` on the surface so scripted shell calls route
+        CapabilityId::new(CODING_READ_CAPABILITY_ID)?,
+        CapabilityId::new(CODING_EDIT_CAPABILITY_ID)?,
+        // `builtin.bash` on the model surface so scripted command calls route
         // through the process port (recording by default, live via
         // `.with_live_shell()`).
-        CapabilityId::new(SHELL_CAPABILITY_ID)?,
+        CapabilityId::new(CODING_BASH_CAPABILITY_ID)?,
     ])
 }
 
@@ -366,9 +366,9 @@ fn core_builtin_tools_from_runtime(
         EffectKind::WriteFilesystem,
         EffectKind::Network,
         EffectKind::SpawnProcess,
-        // `builtin.shell` declares ExecuteCode; the grant's allowed_effects
-        // must include it or the authorizer denies the capability before
-        // it reaches the process port.
+        // `builtin.bash` declares ExecuteCode; the grant's allowed_effects
+        // must include it or the authorizer denies the capability before it
+        // reaches the process port.
         EffectKind::ExecuteCode,
     ];
     let (io, result_writer_io) = super::super::default_capability_io_pair();
@@ -381,7 +381,6 @@ fn core_builtin_tools_from_runtime(
         pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
         io: Mutex::new(io),
         result_writer_io: Mutex::new(result_writer_io),
-        durable_capability_io_thread_service: Mutex::new(None),
         durable_capability_io_requested: false,
         root,
         workspace_root,

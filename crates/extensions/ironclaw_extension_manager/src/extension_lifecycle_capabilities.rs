@@ -190,6 +190,7 @@ fn lifecycle_manifest_with_visibility(
             hard_ceiling: None,
         }),
         origin_gate_matrix: Some(lifecycle_origin_gate_matrix(id)),
+        provider_tool_name: None,
     })
 }
 

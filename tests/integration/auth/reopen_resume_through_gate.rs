@@ -36,7 +36,7 @@ use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
-const CAPABILITY_ID: &str = "builtin.write_file";
+const CAPABILITY_ID: &str = "builtin.write";
 
 #[tokio::test]
 async fn gate_survives_storage_reopen_and_resumes_to_completion() {

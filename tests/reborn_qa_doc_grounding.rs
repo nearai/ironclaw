@@ -8,7 +8,7 @@
 //!   the reply references a doc and the latest news.
 //!
 //! Drive documents are modeled as workspace files served through the real
-//! `builtin.read_file` capability; "latest news" is fetched through the
+//! `builtin.read` capability; "latest news" is fetched through the
 //! real `builtin.http` capability against a live loopback server.
 
 #[allow(dead_code)]
@@ -29,7 +29,7 @@ use axum::{
     routing::get,
 };
 use ironclaw_host_api::ids::CapabilityId;
-use ironclaw_host_runtime::{HTTP_CAPABILITY_ID, READ_FILE_CAPABILITY_ID};
+use ironclaw_host_runtime::{CODING_READ_CAPABILITY_ID, HTTP_CAPABILITY_ID};
 use ironclaw_loop_host::HostManagedModelResponse;
 use ironclaw_turns::TurnStatus;
 use parity_qa_support::binary_e2e::{HarnessWaitConfig, RebornBinaryE2EHarness};
@@ -47,11 +47,11 @@ const COMPANY_DOC_CONTENT: &str = "PepsiCo brief: meeting about agent-assisted s
 async fn reborn_qa_strategy_doc_becomes_knowledge_base_for_answers() {
     const REPLY: &str = "I read the NEAR AI Strategy doc: user-owned agents are the core pillar. I can answer strategy questions from it.";
 
-    let read_file = CapabilityId::new(READ_FILE_CAPABILITY_ID).expect("valid capability id");
+    let read = CapabilityId::new(CODING_READ_CAPABILITY_ID).expect("valid capability id");
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![RebornScriptedProviderToolCall::new(
-                read_file.clone(),
+                read.clone(),
                 "call_read_strategy_doc",
                 serde_json::json!({"path": "/workspace/drive/near-ai-strategy.md"}),
             )],
@@ -89,7 +89,7 @@ async fn reborn_qa_strategy_doc_becomes_knowledge_base_for_answers() {
 
     let invocations = harness.capability_invocations();
     assert_eq!(invocations.len(), 1);
-    assert_eq!(invocations[0].capability_id, read_file);
+    assert_eq!(invocations[0].capability_id, read);
 
     let results = harness.capability_results();
     assert_eq!(results.len(), 1);
@@ -114,7 +114,7 @@ fn live_http_wait() -> HarnessWaitConfig {
 async fn reborn_qa_meeting_prep_references_company_doc_and_latest_news() {
     const REPLY: &str = "Your next meeting is with PepsiCo: the PepsiCo brief covers supply chain pilots, and the latest news is 'PepsiCo expands AI logistics program'.";
 
-    let read_file = CapabilityId::new(READ_FILE_CAPABILITY_ID).expect("valid capability id");
+    let read = CapabilityId::new(CODING_READ_CAPABILITY_ID).expect("valid capability id");
     let http = CapabilityId::new(HTTP_CAPABILITY_ID).expect("valid capability id");
     let server =
         LiveLoopbackHttpServer::start(Router::new().route("/news/pepsico", get(company_news)))
@@ -123,7 +123,7 @@ async fn reborn_qa_meeting_prep_references_company_doc_and_latest_news() {
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![
                 RebornScriptedProviderToolCall::new(
-                    read_file.clone(),
+                    read.clone(),
                     "call_read_company_doc",
                     serde_json::json!({"path": "/workspace/drive/companies/pepsico.md"}),
                 ),
@@ -172,7 +172,7 @@ async fn reborn_qa_meeting_prep_references_company_doc_and_latest_news() {
 
     let invocations = harness.capability_invocations();
     assert_eq!(invocations.len(), 2);
-    assert_eq!(invocations[0].capability_id, read_file);
+    assert_eq!(invocations[0].capability_id, read);
     assert_eq!(invocations[1].capability_id, http);
 
     let results = harness.capability_results();

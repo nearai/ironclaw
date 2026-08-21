@@ -5,6 +5,7 @@
 //! through `CapabilityHost`, trust policy, grants, resource accounting, and
 //! runtime dispatch before any handler runs.
 
+mod coding;
 mod echo;
 mod http;
 mod http_output;
@@ -31,9 +32,6 @@ use ironclaw_extension_registry::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionManifest, ExtensionPackage,
     MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
-use ironclaw_extension_support::coding::{
-    CodingCapabilityError, CodingCapabilityKind, CodingCapabilityRequest, CodingCapabilityState,
-};
 use ironclaw_host_api::{
     capability::{EffectKind, OriginGateMatrix, OriginGatePolicy, PermissionMode},
     capability_profile::CapabilityProfileSchemaRef,
@@ -57,6 +55,12 @@ pub(crate) use self::schemas::{
     resolve_builtin_input_schema_ref, resolve_native_memory_input_schema_ref,
 };
 
+use coding::coding_manifests;
+pub use coding::{
+    CODING_BASH_CAPABILITY_ID, CODING_EDIT_CAPABILITY_ID, CODING_GLOB_CAPABILITY_ID,
+    CODING_GREP_CAPABILITY_ID, CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID, CodingTools,
+    DOCUMENT_EDIT_CAPABILITY_ID, HTML_TO_PDF_CAPABILITY_ID, coding_package, insert_coding_handlers,
+};
 pub use echo::ECHO_CAPABILITY_ID;
 pub use http::{HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID};
 pub use ironclaw_memory::{
@@ -127,96 +131,27 @@ pub(crate) fn builtin_provider_allowlist() -> std::collections::BTreeSet<Extensi
     }
     allowlist
 }
-pub const READ_FILE_CAPABILITY_ID: &str = "builtin.read_file";
-pub const WRITE_FILE_CAPABILITY_ID: &str = "builtin.write_file";
-pub const LIST_DIR_CAPABILITY_ID: &str = "builtin.list_dir";
+// Canonical capability ids of the pinned `glob` and `grep` engines
+// (`coding.rs` aliases these as `CODING_GLOB_CAPABILITY_ID` /
+// `CODING_GREP_CAPABILITY_ID`). The
+// v1 coding ids they replaced (`builtin.read_file`, `builtin.write_file`,
+// `builtin.list_dir`, `builtin.apply_patch`) are retired.
 pub const GLOB_CAPABILITY_ID: &str = "builtin.glob";
 pub const GREP_CAPABILITY_ID: &str = "builtin.grep";
-pub const APPLY_PATCH_CAPABILITY_ID: &str = "builtin.apply_patch";
-pub const DOCUMENT_EDIT_CAPABILITY_ID: &str = "builtin.document_edit";
-pub const HTML_TO_PDF_CAPABILITY_ID: &str = "builtin.html_to_pdf";
 
-// `builtin.shell` is the only built-in first-party handler that directly
-// requires a RuntimeProcessPort. `builtin.spawn_subagent` declares
-// SpawnProcess as an authorization effect, but child-run scheduling is governed
-// by runtime-policy planning rather than this process-port capability list.
-const PROCESS_PORT_BACKED_BUILTIN_CAPABILITY_IDS: &[&str] = &[SHELL_CAPABILITY_ID];
+// `builtin.shell` and the pinned `builtin.bash` are the built-in first-party
+// handlers that directly require a RuntimeProcessPort. `builtin.spawn_subagent`
+// declares SpawnProcess as an authorization effect, but child-run scheduling is
+// governed by runtime-policy planning rather than this process-port capability list.
+const PROCESS_PORT_BACKED_BUILTIN_CAPABILITY_IDS: &[&str] =
+    &[SHELL_CAPABILITY_ID, coding::CODING_BASH_CAPABILITY_ID];
 
 const MAX_FIRST_PARTY_INPUT_BYTES: usize = 1_048_576;
 const MAX_WRITE_FILE_INPUT_BYTES: usize = 6 * 1024 * 1024;
-const MAX_APPLY_PATCH_INPUT_BYTES: usize = 21 * 1024 * 1024;
 const FIRST_PARTY_DEFAULT_OUTPUT_BYTES: u64 = 16 * 1024;
 pub(super) const FIRST_PARTY_MAX_OUTPUT_BYTES: u64 = 1_048_576;
 const FIRST_PARTY_DEFAULT_WALL_CLOCK_MS: u64 = 100;
 const FIRST_PARTY_MAX_WALL_CLOCK_MS: u64 = 5_000;
-
-#[derive(Debug, Clone, Copy)]
-struct CodingCapabilityMetadata {
-    id: &'static str,
-    kind: CodingCapabilityKind,
-    description: &'static str,
-    effects: &'static [EffectKind],
-    max_input_bytes: usize,
-}
-
-const CODING_CAPABILITIES: &[CodingCapabilityMetadata] = &[
-    CodingCapabilityMetadata {
-        id: READ_FILE_CAPABILITY_ID,
-        kind: CodingCapabilityKind::ReadFile,
-        description: "Read text files; return DOCX, XLSX, and PPTX as structured addressable views; and extract text from formats such as PDF, through scoped mounts with v1 read_file output shape",
-        effects: &[EffectKind::ReadFilesystem],
-        max_input_bytes: MAX_FIRST_PARTY_INPUT_BYTES,
-    },
-    CodingCapabilityMetadata {
-        id: WRITE_FILE_CAPABILITY_ID,
-        kind: CodingCapabilityKind::WriteFile,
-        description: "Write content through scoped mounts with v1 write_file output shape",
-        effects: &[EffectKind::WriteFilesystem],
-        max_input_bytes: MAX_WRITE_FILE_INPUT_BYTES,
-    },
-    CodingCapabilityMetadata {
-        id: LIST_DIR_CAPABILITY_ID,
-        kind: CodingCapabilityKind::ListDir,
-        description: "List directory contents through scoped mounts with v1 list_dir output shape",
-        effects: &[EffectKind::ReadFilesystem],
-        max_input_bytes: MAX_FIRST_PARTY_INPUT_BYTES,
-    },
-    CodingCapabilityMetadata {
-        id: GLOB_CAPABILITY_ID,
-        kind: CodingCapabilityKind::Glob,
-        description: "Find files under a scoped directory with v1 glob output shape",
-        effects: &[EffectKind::ReadFilesystem],
-        max_input_bytes: MAX_FIRST_PARTY_INPUT_BYTES,
-    },
-    CodingCapabilityMetadata {
-        id: GREP_CAPABILITY_ID,
-        kind: CodingCapabilityKind::Grep,
-        description: "Search scoped file contents with v1 grep output modes",
-        effects: &[EffectKind::ReadFilesystem],
-        max_input_bytes: MAX_FIRST_PARTY_INPUT_BYTES,
-    },
-    CodingCapabilityMetadata {
-        id: APPLY_PATCH_CAPABILITY_ID,
-        kind: CodingCapabilityKind::ApplyPatch,
-        description: "Apply exact/fuzzy search-replace edits through scoped mounts",
-        effects: &[EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
-        max_input_bytes: MAX_APPLY_PATCH_INPUT_BYTES,
-    },
-    CodingCapabilityMetadata {
-        id: DOCUMENT_EDIT_CAPABILITY_ID,
-        kind: CodingCapabilityKind::DocumentEdit,
-        description: "Apply structural edits to a .docx/.xlsx/.pptx (accept or reject tracked changes, set a cell formula, clone a slide) and write the result to a new file, preserving every part the edit does not touch",
-        effects: &[EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
-        max_input_bytes: MAX_APPLY_PATCH_INPUT_BYTES,
-    },
-    CodingCapabilityMetadata {
-        id: HTML_TO_PDF_CAPABILITY_ID,
-        kind: CodingCapabilityKind::HtmlToPdf,
-        description: "Render HTML (headings, paragraphs, lists, emphasis) to a new PDF file; existing PDFs are never edited in place",
-        effects: &[EffectKind::WriteFilesystem],
-        max_input_bytes: MAX_APPLY_PATCH_INPUT_BYTES,
-    },
-];
 
 /// Create the host-assigned package that declares built-in first-party
 /// capabilities for the capability surface.
@@ -273,9 +208,9 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
 pub fn builtin_first_party_package_for_process_backend(
     process_backend: ProcessBackendKind,
 ) -> Result<ExtensionPackage, ExtensionError> {
-    let mut package = builtin_first_party_package()?;
-    restrict_package_for_process_backend(&mut package, process_backend)?;
-    Ok(package)
+    // Process restrictions are applied after assembling the canonical
+    // coding-first builtin package.
+    coding_package(process_backend)
 }
 
 fn restrict_package_for_process_backend(
@@ -289,42 +224,49 @@ fn restrict_package_for_process_backend(
         // direct container networking but no host network service. These are
         // not host-filesystem or host-network effects, so do not ask the
         // invocation resolver to bind either service. Brokered network effects
-        // remain a follow-up once shell traffic can traverse ironclaw_network.
-        append_user_sandbox_shell_guidance(package)?;
+        // remain a follow-up once process traffic can traverse ironclaw_network.
+        append_user_sandbox_process_guidance(package)?;
         for effect in [
             EffectKind::ReadFilesystem,
             EffectKind::WriteFilesystem,
             EffectKind::Network,
         ] {
             remove_builtin_capability_effect(package, SHELL_CAPABILITY_ID, effect)?;
+            remove_builtin_capability_effect(package, coding::CODING_BASH_CAPABILITY_ID, effect)?;
         }
     }
     Ok(())
 }
 
-fn append_user_sandbox_shell_guidance(
+fn append_user_sandbox_process_guidance(
     package: &mut ExtensionPackage,
 ) -> Result<(), ExtensionError> {
     const GUIDANCE: &str = " Runs inside a per-user sandbox with a writable persistent `/workspace` and a read-only system filesystem. Install Python packages under `/workspace`, preferably with `python3 -m venv /workspace/.venv`, then use `/workspace/.venv/bin/python` and `/workspace/.venv/bin/pip` in later calls because shell process state does not persist between calls.";
 
-    let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID)?;
-    let descriptor = package
-        .capabilities
-        .iter_mut()
-        .find(|candidate| candidate.id == capability_id)
-        .ok_or_else(|| ExtensionError::InvalidManifest {
-            reason: format!("built-in first-party package is missing capability {capability_id}"),
-        })?;
-    let manifest = package
-        .manifest
-        .capabilities
-        .iter_mut()
-        .find(|candidate| candidate.id == capability_id)
-        .ok_or_else(|| ExtensionError::InvalidManifest {
-            reason: format!("built-in first-party manifest is missing capability {capability_id}"),
-        })?;
-    descriptor.description.push_str(GUIDANCE);
-    manifest.description.push_str(GUIDANCE);
+    for capability_id in [SHELL_CAPABILITY_ID, coding::CODING_BASH_CAPABILITY_ID] {
+        let capability_id = CapabilityId::new(capability_id)?;
+        let descriptor = package
+            .capabilities
+            .iter_mut()
+            .find(|candidate| candidate.id == capability_id)
+            .ok_or_else(|| ExtensionError::InvalidManifest {
+                reason: format!(
+                    "built-in first-party package is missing capability {capability_id}"
+                ),
+            })?;
+        let manifest = package
+            .manifest
+            .capabilities
+            .iter_mut()
+            .find(|candidate| candidate.id == capability_id)
+            .ok_or_else(|| ExtensionError::InvalidManifest {
+                reason: format!(
+                    "built-in first-party manifest is missing capability {capability_id}"
+                ),
+            })?;
+        descriptor.description.push_str(GUIDANCE);
+        manifest.description.push_str(GUIDANCE);
+    }
     Ok(())
 }
 
@@ -412,21 +354,6 @@ fn remove_builtin_capability_effect(
     descriptor.effects.retain(|candidate| *candidate != effect);
     manifest.effects.retain(|candidate| *candidate != effect);
     Ok(())
-}
-
-fn coding_manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
-    CODING_CAPABILITIES
-        .iter()
-        .map(|metadata| {
-            first_party_capability_manifest(
-                metadata.id,
-                metadata.description,
-                metadata.effects.to_vec(),
-                PermissionMode::Allow,
-                resource_profile(),
-            )
-        })
-        .collect()
 }
 
 /// Create handlers for all built-in first-party capabilities using an
@@ -594,9 +521,7 @@ fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, H
         .with_handler(CapabilityId::new(HTTP_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(HTTP_SAVE_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(SHELL_CAPABILITY_ID)?, handler.clone());
-    for metadata in CODING_CAPABILITIES {
-        registry.insert_handler(CapabilityId::new(metadata.id)?, handler.clone());
-    }
+    insert_coding_handlers(&mut registry)?;
     registry.insert_handler(
         CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID)?,
         handler.clone(),
@@ -674,6 +599,9 @@ fn first_party_capability_manifest(
         max_egress_bytes: None,
         resource_profile,
         origin_gate_matrix: Some(first_party_origin_gate_matrix(id)),
+        // The stock builtins never declare a provider-name override; their
+        // model-visible names derive from the capability id.
+        provider_tool_name: None,
     })
 }
 
@@ -692,62 +620,7 @@ fn first_party_origin_gate_matrix(id: &str) -> OriginGateMatrix {
 }
 
 #[derive(Debug, Default)]
-pub struct BuiltinFirstPartyTools {
-    coding_state: CodingCapabilityState,
-    post_edit_check_seen: crate::post_edit_check::PostEditCheckSeenLines,
-}
-
-impl BuiltinFirstPartyTools {
-    /// Run the operator-configured post-edit check after a SUCCESSFUL
-    /// `write_file` / `apply_patch` and append the advisory `post_edit_check`
-    /// value to the edit's model-visible output. Read-only coding tools never
-    /// trigger it, and it never fails the edit — the edit already succeeded
-    /// when this runs. The invocation-services resolver only supplies
-    /// `services.post_edit_check` when the process policy permits spawning
-    /// through `services.process`, so no placement decision happens here.
-    ///
-    /// Returns `true` when a check process actually ran (completed or timed
-    /// out), so the caller can account for it like a `builtin.shell` spawn.
-    async fn append_post_edit_check(
-        &self,
-        kind: CodingCapabilityKind,
-        request: &FirstPartyCapabilityRequest,
-        output: &mut serde_json::Value,
-    ) -> bool {
-        if !matches!(
-            kind,
-            CodingCapabilityKind::WriteFile | CodingCapabilityKind::ApplyPatch
-        ) {
-            return false;
-        }
-        let Some(service) = &request.services.post_edit_check else {
-            return false;
-        };
-        // Run the check through the resolver-selected, deployment-isolated
-        // process port (user sandbox under hosted multi-tenant), NOT
-        // `services.process` (the deployment-blind local port the edit plan
-        // carries), and in the mount that backs the just-edited file (from the
-        // edit result's `path`), so a multi-mount workspace checks the edited
-        // project rather than an arbitrary first writable mount.
-        let edited_scoped_path = output.get("path").and_then(serde_json::Value::as_str);
-        let Some(check) = crate::post_edit_check::run_post_edit_check(
-            &self.post_edit_check_seen,
-            service.process.as_ref(),
-            &request.scope,
-            request.mounts.as_ref(),
-            edited_scoped_path,
-            &service.config,
-        )
-        .await
-        else {
-            return false;
-        };
-        if let Some(object) = output.as_object_mut() {
-            object.insert("post_edit_check".to_string(), check);
-        }
-        true
-    }
-}
+pub struct BuiltinFirstPartyTools {}
 
 #[async_trait]
 impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
@@ -755,11 +628,12 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
         &self,
         mut request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
-        bounded_input_size(request.capability_id.as_str(), &request.input)?;
+        bounded_input_size(&request.input)?;
         normalize_optional_null_sentinels(&mut request);
         let start = Instant::now();
         let mut network_egress_bytes = 0;
-        let mut process_count = 0u32;
+        let process_count = 0u32;
+        let mut pending_artifact = None;
         let (output, display_preview) = match request.capability_id.as_str() {
             ECHO_CAPABILITY_ID => (echo::dispatch(&request.input)?, None),
             TIME_CAPABILITY_ID => (time::dispatch(&request.input)?, None),
@@ -767,6 +641,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
             HTTP_CAPABILITY_ID | HTTP_SAVE_CAPABILITY_ID => {
                 let result = http::dispatch(&request).await?;
                 network_egress_bytes = result.network_egress_bytes;
+                pending_artifact = result.pending_artifact;
                 (result.output, None)
             }
             SHELL_CAPABILITY_ID => {
@@ -815,35 +690,13 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                 trace_commons::dispatch_account_login_link(&request).await?,
                 None,
             ),
-            capability_id => {
-                let Some(metadata) = coding_capability_metadata(capability_id) else {
-                    return Err(FirstPartyCapabilityError::new(
-                        RuntimeDispatchErrorKind::UndeclaredCapability,
-                    ));
-                };
-                let coding_request = CodingCapabilityRequest::new(
-                    &request.capability_id,
-                    metadata.kind,
-                    &request.scope,
-                    request.run_id,
-                    request.mounts.as_ref(),
-                    Arc::clone(&request.services.filesystem),
-                    &request.input,
-                );
-                let mut result = self
-                    .coding_state
-                    .dispatch(&coding_request)
-                    .await
-                    .map_err(coding_error)?;
-                if self
-                    .append_post_edit_check(metadata.kind, &request, &mut result.output)
-                    .await
-                {
-                    // The advisory check spawned one process; account for it
-                    // exactly like a `builtin.shell` invocation.
-                    process_count = 1;
-                }
-                (result.output, result.display_preview)
+            // The pinned coding surface (`builtin.read`/`write`/`edit`/`glob`/
+            // `grep`) is dispatched by `CodingTools`, registered through
+            // `insert_coding_handlers`; this handler owns no coding ids.
+            _ => {
+                return Err(FirstPartyCapabilityError::new(
+                    RuntimeDispatchErrorKind::UndeclaredCapability,
+                ));
             }
         };
         let wall_clock_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
@@ -869,18 +722,33 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
             .set_output_bytes(output_bytes)
             .set_network_egress_bytes(network_egress_bytes)
             .set_process_count(process_count);
-        Ok(FirstPartyCapabilityResult::new(output, usage).with_display_preview(display_preview))
+        let result =
+            FirstPartyCapabilityResult::new(output, usage).with_display_preview(display_preview);
+        Ok(match pending_artifact {
+            Some(artifact) => result.with_pending_artifact(artifact),
+            None => result,
+        })
     }
 }
 
+/// Bounded-input check with the default first-party byte cap, shared by every
+/// non-coding built-in handler.
 pub(super) fn bounded_input_size(
-    capability_id: &str,
     input: &serde_json::Value,
 ) -> Result<(), FirstPartyCapabilityError> {
-    let bytes = serde_json::to_vec(input).map_err(|_| input_error())?;
-    let max_bytes = coding_capability_metadata(capability_id)
-        .map(|metadata| metadata.max_input_bytes)
-        .unwrap_or(MAX_FIRST_PARTY_INPUT_BYTES);
+    bounded_input_size_with_max(input, MAX_FIRST_PARTY_INPUT_BYTES)
+}
+
+/// Bounded-input check with an explicit byte cap. The coding adapter uses this
+/// with its own metadata table (`first_party_tools::coding`).
+pub(super) fn bounded_input_size_with_max(
+    input: &serde_json::Value,
+    max_bytes: usize,
+) -> Result<(), FirstPartyCapabilityError> {
+    let bytes = serde_json::to_vec(input).map_err(|error| {
+        tracing::debug!(%error, "failed to serialize first-party capability input");
+        input_error()
+    })?;
     if bytes.len() > max_bytes {
         return Err(FirstPartyCapabilityError::new(
             RuntimeDispatchErrorKind::Resource,
@@ -893,7 +761,10 @@ pub(super) fn bounded_output_bytes(
     output: &serde_json::Value,
     max_bytes: u64,
 ) -> Result<u64, FirstPartyCapabilityError> {
-    let bytes = serde_json::to_vec(output).map_err(|_| input_error())?;
+    let bytes = serde_json::to_vec(output).map_err(|error| {
+        tracing::debug!(%error, "failed to serialize first-party capability output");
+        input_error()
+    })?;
     let bytes = u64::try_from(bytes.len())
         .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputTooLarge))?;
     if bytes > max_bytes {
@@ -1008,16 +879,45 @@ fn operation_error() -> FirstPartyCapabilityError {
     FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
 }
 
-fn coding_error(error: CodingCapabilityError) -> FirstPartyCapabilityError {
-    match error.safe_summary() {
-        Some(summary) => FirstPartyCapabilityError::with_safe_summary(error.kind(), summary),
-        None => FirstPartyCapabilityError::new(error.kind()),
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn coding_capability_metadata(capability_id: &str) -> Option<CodingCapabilityMetadata> {
-    CODING_CAPABILITIES
-        .iter()
-        .copied()
-        .find(|metadata| metadata.id == capability_id)
+    #[test]
+    fn canonical_builtin_package_exposes_only_coding_and_no_result_reader() {
+        let package = builtin_first_party_package().expect("canonical built-in package");
+        let provider_names = package
+            .capabilities
+            .iter()
+            .filter_map(|descriptor| {
+                descriptor
+                    .provider_tool_name
+                    .as_ref()
+                    .map(|name| name.as_str())
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        for name in ["read", "write", "edit", "glob", "grep"] {
+            assert!(
+                provider_names.contains(name),
+                "canonical package must expose coding tool {name}"
+            );
+        }
+        let capability_ids = package
+            .capabilities
+            .iter()
+            .map(|descriptor| descriptor.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        for retired in [
+            "builtin.read_file",
+            "builtin.write_file",
+            "builtin.list_dir",
+            "builtin.apply_patch",
+            "builtin.result_read",
+        ] {
+            assert!(
+                !capability_ids.contains(retired),
+                "retired capability {retired} must not remain in the canonical package"
+            );
+        }
+    }
 }

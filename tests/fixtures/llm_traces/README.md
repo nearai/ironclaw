@@ -52,7 +52,7 @@ A trace is a model name and a list of **turns**. Each turn pairs a user message 
         {
           "response": {
             "type": "tool_calls",
-            "tool_calls": [{ "id": "c1", "name": "write_file", "arguments": {"path": "/tmp/test.txt", "content": "hello"} }],
+            "tool_calls": [{ "id": "c1", "name": "write", "arguments": {"path": "/tmp/test.txt", "content": "hello"} }],
             "input_tokens": 60, "output_tokens": 20
           }
         },
@@ -71,7 +71,7 @@ A trace is a model name and a list of **turns**. Each turn pairs a user message 
         {
           "response": {
             "type": "tool_calls",
-            "tool_calls": [{ "id": "c2", "name": "write_file", "arguments": {"path": "/tmp/test.txt", "content": "goodbye"} }],
+            "tool_calls": [{ "id": "c2", "name": "write", "arguments": {"path": "/tmp/test.txt", "content": "goodbye"} }],
             "input_tokens": 100, "output_tokens": 20
           }
         },
@@ -168,7 +168,7 @@ Trace fixtures must produce deterministic results across runs. **Do not use tool
 
 **Avoid:**
 - `time` -- output changes every run
-- `list_dir` on directories not created by the trace itself
+- `read` (directory listings) on directories not created by the trace itself
 - `shell` with commands that depend on system state (e.g. `date`, `ps`, `ls /var`)
 - `http` -- external endpoints may change or be unavailable
 - `memory_search` unless the trace writes the memory entry first
@@ -176,11 +176,11 @@ Trace fixtures must produce deterministic results across runs. **Do not use tool
 **Prefer:**
 - `echo` -- always returns its input
 - `json` -- deterministic parsing/formatting
-- `write_file` + `read_file` -- self-contained if the trace writes first
+- `write` + `read` -- self-contained if the trace writes first
 - `memory_write` + `memory_read` -- deterministic if the trace writes first
 - `shell` with deterministic commands (e.g. `echo "hello"`, `printf`)
 
-When a trace needs to exercise a stateful tool (like `list_dir`), have an earlier step create the expected state (e.g. `write_file` to create the directory contents first).
+When a trace needs to exercise a stateful tool (like `read` on a directory), have an earlier step create the expected state (e.g. `write` to create the directory contents first).
 
 ### Response types
 
@@ -207,7 +207,7 @@ Returns a `CompletionResponse` / `ToolCompletionResponse` with no tool calls and
   "tool_calls": [
     {
       "id": "call_write_1",
-      "name": "write_file",
+      "name": "write",
       "arguments": { "path": "/tmp/test.txt", "content": "hello" }
     }
   ],
@@ -223,7 +223,7 @@ Returns a `ToolCompletionResponse` with `FinishReason::ToolUse`. The agent loop 
 | Field | Type | Description |
 |-------|------|-------------|
 | `id` | string | Unique call ID. Convention: `call_{tool}_{n}`. |
-| `name` | string | Must match a registered tool name (e.g. `echo`, `write_file`, `read_file`, `memory_write`, `shell`). |
+| `name` | string | Must match a registered tool name (e.g. `echo`, `write`, `read`, `memory_write`, `shell`). The pinned coding surface is `write` (input `{path, content}`), `read` (input `{path}`; also serves directory listings), `edit`, `glob`, `grep`. |
 | `arguments` | object | Tool parameters as JSON. Must conform to the tool's `parameters_schema()`. |
 
 #### Binding a later call to an earlier tool result
@@ -429,7 +429,7 @@ Example -- multi-turn steering:
         {
           "response": {
             "type": "tool_calls",
-            "tool_calls": [{ "id": "c1", "name": "write_file", "arguments": {"path": "/tmp/test.txt", "content": "hello"} }],
+            "tool_calls": [{ "id": "c1", "name": "write", "arguments": {"path": "/tmp/test.txt", "content": "hello"} }],
             "input_tokens": 60, "output_tokens": 20
           }
         },
@@ -442,7 +442,7 @@ Example -- multi-turn steering:
         {
           "response": {
             "type": "tool_calls",
-            "tool_calls": [{ "id": "c2", "name": "write_file", "arguments": {"path": "/tmp/test.txt", "content": "goodbye"} }],
+            "tool_calls": [{ "id": "c2", "name": "write", "arguments": {"path": "/tmp/test.txt", "content": "goodbye"} }],
             "input_tokens": 100, "output_tokens": 20
           }
         },

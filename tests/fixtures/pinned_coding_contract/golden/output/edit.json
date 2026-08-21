@@ -1,0 +1,51 @@
+{
+  "tool": "edit",
+  "note": "Deterministic model-visible output format examples for the pinned `edit` tool (default hashline mode) at commit 08819b279cf02ae2545e69dad7111ab48d91d35e. Templates verbatim from the cited upstream sources; examples render them with representative values.",
+  "formats": [
+    {
+      "case": "success_header_and_preview",
+      "template": "[${path}#${TAG}]${previewBlock}${warningsBlock}",
+      "example": "[foo.ts#1A2B]\n- old line\n+ new line",
+      "source_path": "packages/coding-agent/src/edit/hashline/execute.ts",
+      "source_line": 185,
+      "note": "The response leads with the new snapshot header so the model can anchor follow-up edits; diff preview and 'Warnings:' blocks follow."
+    },
+    {
+      "case": "deleted",
+      "template": "Deleted ${path}",
+      "example": "Deleted src/old.ts",
+      "source_path": "packages/coding-agent/src/edit/hashline/execute.ts",
+      "source_line": 126
+    },
+    {
+      "case": "noop_no_change",
+      "template": "Edits to ${path} parsed and applied cleanly, but produced no change: your body row(s) are byte-identical to the file at the targeted lines. The bug is somewhere else — re-read the file before issuing another edit. Do NOT widen the payload or add lines; verify the anchor first.",
+      "example": "Edits to foo.ts parsed and applied cleanly, but produced no change: your body row(s) are byte-identical to the file at the targeted lines. The bug is somewhere else — re-read the file before issuing another edit. Do NOT widen the payload or add lines; verify the anchor first.",
+      "source_path": "packages/coding-agent/src/edit/hashline/execute.ts",
+      "source_line": 50
+    },
+    {
+      "case": "block_resolution",
+      "template": "${OP} → resolved ${span} (${count} line${s})${suffix}",
+      "example": "PUT 42*: → resolved lines 42-44 (3 lines)",
+      "source_path": "packages/coding-agent/src/edit/hashline/execute.ts",
+      "source_line": 60,
+      "note": "BLOCK_OP_LABELS: replace=PUT N*:, insert_after=PUT >N*:, cut=CUT N*, paste_after=PUT >N*:."
+    },
+    {
+      "case": "moved",
+      "template": "Moved to ${destination}",
+      "example": "Moved to src/renamed.ts",
+      "source_path": "packages/coding-agent/src/edit/hashline/execute.ts",
+      "source_line": 186
+    },
+    {
+      "case": "multi_entry_aggregate_failure",
+      "template": "Error editing ${path} (entry ${index} of ${count}): ${errorText}\n${appliedNote}${notAppliedNote}",
+      "example": "Error editing foo.ts (entry 2 of 3): Line 500 does not exist (file has 42 lines)\nEntry 1 was already applied.\nEntry 3 was NOT applied; re-read the file and re-issue only the failed and unapplied entries.",
+      "source_path": "packages/coding-agent/src/edit/index.ts",
+      "source_line": 264,
+      "note": "Aggregate shapes: 'Entry 1 was already applied.' / 'Entries 1-N were already applied.' and 'Entry N was NOT applied' / 'Entries N-M were NOT applied'."
+    }
+  ]
+}

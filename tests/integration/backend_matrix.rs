@@ -155,6 +155,7 @@ async fn message_lookup_indexes_share_the_message_row(#[case] storage: StorageMo
             provider_call_id: Some("call-1".to_string()),
             safe_summary: ToolResultSafeSummary::new("provider result updated")
                 .expect("valid summary"),
+            model_observation: None,
         })
         .await
         .expect("provider-call lookup targets the exact row");

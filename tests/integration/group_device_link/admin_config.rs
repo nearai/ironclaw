@@ -69,6 +69,7 @@ pub async fn replace_admin_configuration(
         mission_id: None,
         thread_id: None,
         run_id: None,
+        artifact_namespace: None,
         origin: Some(InvocationOrigin::Product(ProductKind::new("webui")?)),
         extension_id: product_ingress.clone(),
         runtime: RuntimeKind::FirstParty,

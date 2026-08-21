@@ -149,7 +149,7 @@ pub fn attachment_scoped_path(
 /// any backend. A read-only mount therefore fails closed with
 /// [`FilesystemError::PermissionDenied`]. Because the agent's file tools
 /// resolve through the same `MountView`, the returned `ScopedPath` is readable
-/// by `file_read`/`list_dir` in this and later turns with no extra wiring.
+/// by the `read` tool in this and later turns with no extra wiring.
 ///
 /// `bytes` is rejected with [`AttachmentLandingError::TooLarge`] before any
 /// write when it exceeds `max_bytes` (see [`DEFAULT_MAX_ATTACHMENT_BYTES`]).

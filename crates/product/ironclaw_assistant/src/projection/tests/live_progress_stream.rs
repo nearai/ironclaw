@@ -1020,7 +1020,7 @@ async fn product_event_stream_redacts_live_tool_failure_filename_detail() {
     let thread_id = fixture.thread_id.clone();
     let scope = fixture.scope.clone();
     let run_id = TurnRunId::new();
-    let capability_id = CapabilityId::new("builtin.read_file").unwrap();
+    let capability_id = CapabilityId::new("builtin.read").unwrap();
     let activity_id = CapabilityActivityId::new();
 
     fixture

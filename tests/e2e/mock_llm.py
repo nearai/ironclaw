@@ -38,7 +38,7 @@ CANNED_RESPONSES = [
     (re.compile(r"link test", re.IGNORECASE),
      "See [the pull request](https://example.com/pr/1) for details."),
     # Reborn v2 download chips: after the agent writes a CSV and a PDF (the
-    # builtin__write_file dispatch lives in TOOL_CALL_PATTERNS), it replies
+    # pinned coding `write` dispatch lives in TOOL_CALL_PATTERNS), it replies
     # referencing their /workspace paths so the WebUI renders downloadable file
     # chips. Fires after the tool calls run (match_tool_call dedups the
     # already-run writes).
@@ -249,24 +249,24 @@ TOOL_CALL_PATTERNS = [
         lambda _: {},
     ),
     # Reborn v2 download chips: one assistant turn writes a CSV and a PDF into
-    # the project workspace. Reborn exposes this first-party tool by capability
-    # id; the provider-facing tool name sanitizes dots as "__". After both
-    # results land, match_tool_call dedups builtin__write_file and the
-    # conversation falls through to the CANNED_RESPONSES reply that
-    # references the two paths.
+    # the project workspace. The pinned coding tools are exposed with their exact
+    # provider names (issue #7392), so the mock emits `write` with the pinned
+    # coding input shape (`path` + `content`). After both results land,
+    # match_tool_call dedups write and the conversation falls through to the
+    # CANNED_RESPONSES reply that references the two paths.
     (
         re.compile(r"produce a downloadable csv and pdf", re.IGNORECASE),
-        "builtin__write_file",
+        "write",
         lambda _: [
             {
-                "tool_name": "builtin__write_file",
+                "tool_name": "write",
                 "arguments": {
                     "path": "/workspace/report.csv",
                     "content": "name,score\nalice,90\nbob,85\n",
                 },
             },
             {
-                "tool_name": "builtin__write_file",
+                "tool_name": "write",
                 "arguments": {
                     "path": "/workspace/report.pdf",
                     "content": (
@@ -279,7 +279,7 @@ TOOL_CALL_PATTERNS = [
     ),
     (
         re.compile(r"reborn write approval file (?P<label>[a-z0-9_-]+)", re.IGNORECASE),
-        "builtin__write_file",
+        "write",
         lambda m: {
             "path": f"/workspace/reborn-approval-{m.group('label')}.txt",
             "content": f"approved {m.group('label')}\n",

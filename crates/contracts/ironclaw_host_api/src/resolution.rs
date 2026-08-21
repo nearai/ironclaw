@@ -439,17 +439,15 @@ pub struct OutcomeRefs {
     /// inline preview (was the `ResultReference` observation's `detail.preview`).
     /// A [`ModelResultPreview`], NOT a [`SafeSummary`]: it carries the tool's own
     /// output (delimiters, JSON, newlines), credential-redacted at a word
-    /// boundary, up to 24 KiB — so the model sees the result inline without a
-    /// follow-up `result_read`. The full bytes stay host-owned behind `result`;
-    /// `None` when no preview is staged or the content failed the credential
-    /// redaction contract.
+    /// boundary, up to 24 KiB — so the model sees small results inline. Larger
+    /// results remain host-owned behind an `artifact://` URI that the pinned coding
+    /// `read` tool accepts; `None` when no preview is staged or the content
+    /// failed the credential redaction contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<ModelResultPreview>,
-    /// Continuation metadata for a TRUNCATED first-look preview so the model can
-    /// read the full result (`result_read`, large results): the referenced ref,
-    /// full byte size, next offset, and JSON-array element count. The metadata
-    /// remains present when an unsafe preview is suppressed, so the durable
-    /// source ref stays authoritative without exposing rejected content.
+    /// Metadata for a truncated first-look preview: the canonical artifact URI,
+    /// full byte size, next offset, and JSON-array element count. It remains
+    /// present when an unsafe preview is suppressed.
     #[serde(default, skip_serializing_if = "ResultPreviewMeta::is_empty")]
     pub preview_meta: ResultPreviewMeta,
     /// The preserved originating loop result ref, so output the loop staged under
@@ -470,13 +468,15 @@ pub struct OutcomeRefs {
 /// suppressed by model-visible safety validation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ResultPreviewMeta {
-    /// The result ref the preview is OF. A `result_read` reading ANOTHER result
-    /// presents that original's ref (so the model continues reading the original,
-    /// not the read's own chunk output); for a normal completed result it equals
-    /// the outcome's own result ref. `None` => the outcome's own result
+    /// Historical source result reference retained for replay compatibility.
+    /// New results use `artifact_ref`; `None` means the outcome's own result
     /// (`OutcomeRefs::origin`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub referenced_result_ref: Option<LoopRef>,
+    /// Canonical durable artifact containing the full output for new results.
+    /// Historical result-reference continuations leave this absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_ref: Option<crate::artifact::ArtifactRef>,
     /// Full byte size of the referenced result when the preview is a truncated
     /// chunk; `None` for a complete inline preview.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -490,15 +490,10 @@ pub struct ResultPreviewMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_count: Option<u64>,
     /// The observation's own model-visible summary caption — the host-authored
-    /// text describing the preview (e.g. "preview truncated, use result_read …").
-    /// It is DISTINCT from the completed [`Outcome::summary`] caption (the result
-    /// message's `safe_summary`, often a generic "capability completed"): the
-    /// producer authors a richer summary on the `ResultReference` observation, and
-    /// the collapse would otherwise drop it, so the reconstructed observation would
-    /// fall back to the generic caption and lose the truncation/continuation hint.
-    /// Carried here so the executor rebuilds the observation with the producer's
-    /// exact summary. `None` when the observation carried none or it failed the
-    /// caption redaction contract (best-effort; the outcome caption stands in).
+    /// text describing the preview or canonical artifact URI. It is distinct
+    /// from the completed [`Outcome::summary`] caption. Carried here so replay
+    /// preserves the producer's exact continuation hint. `None` when the
+    /// observation carried none or caption redaction rejected it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<SafeSummary>,
 }
@@ -508,6 +503,7 @@ impl ResultPreviewMeta {
     /// absent) — the `skip_serializing_if` predicate keeping the wire clean.
     pub fn is_empty(&self) -> bool {
         self.referenced_result_ref.is_none()
+            && self.artifact_ref.is_none()
             && self.total_bytes.is_none()
             && self.next_offset.is_none()
             && self.item_count.is_none()

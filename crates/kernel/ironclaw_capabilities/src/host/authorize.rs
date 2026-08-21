@@ -576,6 +576,7 @@ where
         // reconstructs `LoopRun` for transitional compatibility.
         let origin = context.resolved_origin()?;
         let invocation = Invocation {
+            artifact_namespace: context.artifact_namespace,
             activity_id: ActivityId::from_uuid(context.invocation_id.as_uuid()),
             capability: capability_id.clone(),
             // PROVISIONAL (Slice C): the loop expresses input by reference; the

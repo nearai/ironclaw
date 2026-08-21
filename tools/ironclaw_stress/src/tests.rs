@@ -217,13 +217,13 @@ fn scripted_api_rejects_out_of_range_doc_sizes() {
 }
 
 #[test]
-fn scripted_api_hot_writers_reject_file_roundtrip_script() {
+fn scripted_api_hot_writers_reject_write_roundtrip_script() {
     let mut args = scripted_api_args();
-    args.api_scripted_tool = Some(scripted::ScriptKey::WriteFileRoundtrip);
+    args.api_scripted_tool = Some(scripted::ScriptKey::WriteRoundtrip);
     args.api_hot_writers = 2;
 
     let error = validate_args(&args)
-        .expect_err("hot writers need a shared document; write_file_roundtrip uses per-op paths");
+        .expect_err("hot writers need a shared document; write_roundtrip uses per-op paths");
 
     assert!(error.contains("--api-hot-writers requires a memory script"));
 }

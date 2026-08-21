@@ -234,6 +234,7 @@ where
             .dispatch_json(
                 self.lane,
                 RuntimeLaneRequest {
+                    artifact_namespace: request.artifact_namespace,
                     package: &self.package,
                     descriptor: &self.descriptor,
                     filesystem: self.filesystem.as_ref(),

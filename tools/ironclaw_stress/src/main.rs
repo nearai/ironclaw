@@ -1235,10 +1235,10 @@ fn validate_args(args: &Args) -> Result<(), String> {
         if !args.scenario.is_api_capacity() {
             return Err("--api-scripted-tool requires --scenario api-user-capacity".to_string());
         }
-        if *key == scripted::ScriptKey::WriteFileRoundtrip && args.api_hot_writers > 0 {
+        if *key == scripted::ScriptKey::WriteRoundtrip && args.api_hot_writers > 0 {
             return Err(
                 "--api-hot-writers requires a memory script (memory_roundtrip, memory_grow, \
-                 or memory_mixed); write_file_roundtrip targets a per-operation path and \
+                 or memory_mixed); write_roundtrip targets a per-operation path and \
                  cannot exercise shared-document contention"
                     .to_string(),
             );

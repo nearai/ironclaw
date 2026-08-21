@@ -2014,7 +2014,7 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
         .thread("conv-webui-api2-approval-refresh")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 serde_json::json!({"path": "/workspace/api2_refresh_approved.txt", "content": "API2_REFRESH_PAYLOAD"}),
             ),
             RebornScriptedReply::text("file written after the post-refresh approval"),

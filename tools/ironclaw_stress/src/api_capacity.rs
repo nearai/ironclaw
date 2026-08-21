@@ -1777,7 +1777,7 @@ impl ApiHarness {
     }
 
     /// Enable the per-user Tools global auto-approve setting so scripted
-    /// gated tool calls (`builtin.write_file`, memory writes) can execute
+    /// gated tool calls (`builtin.write`, memory writes) can execute
     /// without an interactive approver.
     async fn enable_tools_auto_approve(&self, user: &ApiUser) -> ApiCallResult {
         self.request_json(
@@ -1910,7 +1910,7 @@ async fn setup_users(
                     }
                 };
                 if enable_auto_approve {
-                    // Scripted tools (`builtin.write_file`, memory writes) are
+                    // Scripted tools (`builtin.write`, memory writes) are
                     // gated_unless_granted for loop-run origins; enable the
                     // per-user Tools auto-approve setting through the same
                     // settings API a real user would use.
@@ -3349,11 +3349,11 @@ mod tests {
     #[test]
     fn mock_streaming_tool_call_chunks_carry_indexed_delta_tool_calls() {
         let call = scripted::ToolCallSpec {
-            wire_name: "builtin__write_file".to_string(),
+            wire_name: "write".to_string(),
             arguments: json!({"path": "stress/u0__1.txt", "content": "payload"}),
         };
         let second_call = scripted::ToolCallSpec {
-            wire_name: "builtin__read_file".to_string(),
+            wire_name: "read".to_string(),
             arguments: json!({"path": "stress/u0__1.txt"}),
         };
         let (header, body, done) =
@@ -3362,7 +3362,7 @@ mod tests {
         let header_call = &header["choices"][0]["delta"]["tool_calls"][0];
         assert_eq!(header_call["index"], 0);
         assert_eq!(header_call["id"], "call-stress-7");
-        assert_eq!(header_call["function"]["name"], "builtin__write_file");
+        assert_eq!(header_call["function"]["name"], "write");
         let second_header_call = &header["choices"][0]["delta"]["tool_calls"][1];
         assert_eq!(second_header_call["index"], 1);
         assert_eq!(second_header_call["id"], "call-stress-7-1");

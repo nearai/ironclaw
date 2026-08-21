@@ -13,6 +13,9 @@ mod grep_tool;
 mod inputs;
 mod patch;
 mod paths;
+/// Exact pinned OMP coding engines used by the production first-party adapter.
+#[doc(hidden)]
+pub mod pinned;
 mod state;
 mod text;
 mod types;

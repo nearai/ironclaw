@@ -34,8 +34,8 @@ use crate::{
     ResourceAccount, ResourceError, ResourceGovernor, ResourceGovernorStore,
     ResourceGovernorStorePort, ResourceLimits, ResourceReceipt, ResourceTally, SystemClock,
     account_snapshot_in_state, advance_period_if_rolled_over, emit_reserve_events,
-    most_specific_account, reconcile_in_state, release_in_state, reserve_with_outcome_in_state,
-    set_limit_in_state, validate_reservation_in_state,
+    grow_reservation_in_state, most_specific_account, reconcile_in_state, release_in_state,
+    reserve_with_outcome_in_state, set_limit_in_state, validate_reservation_in_state,
 };
 use crate::{ResourceEstimate, ResourceUsage};
 
@@ -662,6 +662,74 @@ where
                         scope,
                         estimate,
                         reservation_id,
+                        at: now,
+                    };
+                    let pending = match self.enqueue_delta(&authority, delta) {
+                        Ok(pending) => pending,
+                        Err(error) => return self.invalidate_authority(&authority, error),
+                    };
+                    (outcome, pending)
+                }
+                Err(error) => {
+                    let result = Err(error);
+                    emit_reserve_events(self.event_sink.as_ref(), &result, now);
+                    return result;
+                }
+            }
+        };
+        if let Err(failure) = self.finish_delta(&authority, pending) {
+            return self.fail_delta(&authority, failure);
+        }
+        let result = Ok(outcome);
+        emit_reserve_events(self.event_sink.as_ref(), &result, now);
+        result
+    }
+
+    fn grow_reservation_with_outcome(
+        &self,
+        reservation_id: ResourceReservationId,
+        additional: ResourceEstimate,
+    ) -> Result<ReservationOutcome, ResourceError> {
+        let authority = self.authority()?;
+        authority.check_available()?;
+        let accounts = {
+            let reservations = authority.lock_reservations()?;
+            let Some(record) = reservations.get(&reservation_id) else {
+                return Err(ResourceError::UnknownReservation { id: reservation_id });
+            };
+            record.accounts.clone()
+        };
+        let now = self.clock.now();
+        let (outcome, pending) = {
+            let _commit = authority.lock_commit_for_accounts(&accounts)?;
+            let mut reservations = authority.lock_reservations()?;
+            let Some(record) = reservations.get(&reservation_id).cloned() else {
+                return Err(ResourceError::UnknownReservation { id: reservation_id });
+            };
+            let mut locked = authority.lock_accounts(&accounts)?;
+            let mut state =
+                locked.state_for_accounts(&accounts, HashMap::from([(reservation_id, record)]));
+            let result =
+                grow_reservation_in_state(&mut state, reservation_id, additional.clone(), now);
+            if result.is_ok() {
+                locked.write_accounts_from_state(&accounts, &state);
+                let record = state
+                    .reservations
+                    .get(&reservation_id)
+                    .cloned()
+                    .ok_or_else(|| storage_error("growth removed reservation record"));
+                match record {
+                    Ok(record) => {
+                        reservations.insert(reservation_id, record);
+                    }
+                    Err(error) => return self.invalidate_authority(&authority, error),
+                }
+            }
+            match result {
+                Ok(outcome) => {
+                    let delta = ResourceGovernorDelta::GrowReservation {
+                        reservation_id,
+                        additional,
                         at: now,
                     };
                     let pending = match self.enqueue_delta(&authority, delta) {

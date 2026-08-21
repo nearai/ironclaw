@@ -3262,6 +3262,7 @@ where
         let provider_call_id = request.provider_call_id.clone();
         let thread_id_for_error = request.thread_id.clone();
         let safe_summary = request.safe_summary;
+        let model_observation = request.model_observation;
         let now = Utc::now();
         let updated = self
             .apply_message_update(
@@ -3284,9 +3285,14 @@ where
                         "tool result reference content is missing".to_string(),
                     )
                 })?;
-                let envelope = ToolResultReferenceEnvelope::from_json_str(content)
+                let mut envelope = ToolResultReferenceEnvelope::from_json_str(content)
                     .map_err(SessionThreadError::Serialization)?
                     .with_safe_summary(safe_summary.clone());
+                if let Some(observation) = model_observation.clone() {
+                    envelope = envelope
+                        .replacing_model_observation(observation)
+                        .map_err(SessionThreadError::Serialization)?;
+                }
                 let content = serde_json::to_string(&envelope)
                     .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
                 message.content = Some(content.clone());

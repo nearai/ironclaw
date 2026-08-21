@@ -332,7 +332,18 @@ where
             }
         };
 
-        let output_bytes = output.stdout.len() as u64;
+        let output_bytes = match serde_json::to_vec(&parsed) {
+            Ok(bytes) => bytes.len().min(u64::MAX as usize) as u64,
+            Err(error) => {
+                return Err(release_after_failure(
+                    budget,
+                    reservation.id,
+                    ScriptError::InvalidOutput {
+                        reason: error.to_string(),
+                    },
+                ));
+            }
+        };
         let usage = ResourceUsage::default()
             .set_wall_clock_ms(output.wall_clock_ms)
             .set_output_bytes(output_bytes)

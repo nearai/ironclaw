@@ -209,6 +209,7 @@ async fn filesystem_tool_result_update_targets_the_exact_provider_call_row() {
 
     let updated = service
         .update_tool_result_reference(UpdateToolResultReferenceRequest {
+            model_observation: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),

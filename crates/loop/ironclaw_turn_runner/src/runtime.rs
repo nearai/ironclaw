@@ -354,6 +354,7 @@ where
     /// textual `<attachments>` pointer (the same fallback a text-only model
     /// gets) rather than failing the turn.
     pub attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
+    pub legacy_result_artifacts: Option<Arc<ironclaw_threads::DurableToolArtifactStore>>,
     /// Process-local operator diagnostics captured at the resolved prompt boundary.
     pub prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
     /// Shared run-scoped intent store used by the explicit attachment
@@ -864,6 +865,9 @@ where
     host_factory = host_factory.with_cancellation_factory(cancellation_factory);
     if let Some(port) = parts.attachment_read_port {
         host_factory = host_factory.with_attachment_read_port(port);
+    }
+    if let Some(artifacts) = parts.legacy_result_artifacts {
+        host_factory = host_factory.with_legacy_result_artifacts(artifacts);
     }
     if let Some(sink) = parts.prompt_diagnostic_sink {
         host_factory = host_factory.with_prompt_diagnostic_sink(sink);

@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    artifact::ArtifactNamespaceId,
     capability::CapabilitySet,
     error::HostApiError,
     ids::{
@@ -70,6 +71,9 @@ pub struct ExecutionContext {
     /// treat `None` as its own bucket, never as a wildcard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<RunId>,
+    /// Durable artifact namespace shared by a root run and all descendants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_namespace: Option<ArtifactNamespaceId>,
     /// Authoritative origin of this invocation — where the call came from
     /// (§5.2.1), stamped host-side by the ingress that builds the context:
     /// loop orchestration stamps [`InvocationOrigin::LoopRun`], product
@@ -123,6 +127,7 @@ impl ExecutionContext {
             mission_id: None,
             thread_id: None,
             run_id: None,
+            artifact_namespace: None,
             origin: None,
             extension_id,
             runtime,

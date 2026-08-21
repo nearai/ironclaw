@@ -19,7 +19,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .thread("conv-approval-durable")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 json!({"path": "/workspace/durable.txt", "content": "durable write"}),
             ),
             RebornScriptedReply::text("file written after approval"),

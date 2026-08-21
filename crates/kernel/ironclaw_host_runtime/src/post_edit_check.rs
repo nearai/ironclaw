@@ -1,6 +1,6 @@
 //! Operator-configured post-edit check for the coding tools.
 //!
-//! After a successful `builtin.write_file` / `builtin.apply_patch` dispatch,
+//! After a successful `builtin.write` / `builtin.edit` dispatch,
 //! host runtime can run one operator-configured shell command (for example
 //! `cargo check --message-format=short 2>&1`) through the invocation's
 //! [`RuntimeProcessPort`](crate::RuntimeProcessPort) and append only the
@@ -48,7 +48,7 @@ use ironclaw_host_api::process::{CommandExecutionRequest, RuntimeProcessError};
 /// The operator post-edit check config bundled with the process port that must
 /// run it, resolved to the deployment's process-isolation boundary.
 ///
-/// Edit plans (`builtin.write_file` / `builtin.apply_patch`) declare only
+/// Edit plans (`builtin.write` / `builtin.edit`) declare only
 /// filesystem effects, so `InvocationServices::process` carries the local host
 /// port even under a hosted deployment. Running the check through that port
 /// would execute the operator command on the shared provider host. The

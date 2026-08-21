@@ -1,5 +1,6 @@
 use chrono::Utc;
 use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_host_api::artifact::{ArtifactDigest, ArtifactId, ArtifactRef};
 use ironclaw_host_api::ids::{AgentId, CapabilityId, ProcessId, TenantId, ThreadId, UserId};
 use ironclaw_host_api::turn::{
     LoopMessageRef, LoopResultRef, TurnActor, TurnGateRef, TurnRunId, TurnScope,
@@ -113,6 +114,8 @@ fn record(
             output_bytes: Some(42),
             sanitized_reason: Some("terminal-reason".to_string()),
         }),
+        settlement: None,
+        completed_artifact: None,
         created_at: edge.created_at,
         settled_at: Some(Utc::now()),
         consumed_at: None,
@@ -128,6 +131,15 @@ fn edge_projection_matrix_covers_every_dependency_and_terminal_state() {
     let cases = [
         (
             ProcessDependencyState::Open,
+            AwaitEdgeState::Open,
+            ReservationReleaseState::Unclaimed,
+            ProcessLifecycleStatus::Completed,
+            Some(EdgeTerminalKind::Completed),
+        ),
+        // A claimed-but-uncompleted settlement is still an open await from the
+        // loop tier's side: nothing is deliverable until the claimant finishes.
+        (
+            ProcessDependencyState::Settling,
             AwaitEdgeState::Open,
             ReservationReleaseState::Unclaimed,
             ProcessLifecycleStatus::Completed,
@@ -330,18 +342,37 @@ async fn settled_background_edge(
         })
         .await
         .expect("open dependency");
-    let settled = store
-        .settle(
+    let SettlementClaim::Acquired { claim_token, .. } = store
+        .claim_settlement(&scope, parent_run_id, child_run_id)
+        .await
+        .expect("claim settlement")
+    else {
+        panic!("a fresh edge must hand its settlement claim to the first claimant");
+    };
+    let completion = store
+        .complete_settlement(
             &scope,
             parent_run_id,
             child_run_id,
-            EdgeTerminalKind::Completed,
-            Some(17),
-            None,
+            claim_token,
+            SettlementCompletion {
+                terminal_kind: EdgeTerminalKind::Completed,
+                terminal_byte_len: Some(17),
+                terminal_reason: None,
+                completed_artifact: CompletedArtifact {
+                    artifact_ref: ArtifactRef::new(ArtifactId::new(17)),
+                    byte_len: 17,
+                    total_lines: Some(1),
+                    content_type: "application/json".to_string(),
+                    digest: ArtifactDigest::from_bytes(b"background child result"),
+                },
+            },
         )
         .await
-        .expect("settle edge")
-        .expect("edge exists");
+        .expect("complete settlement");
+    let SettlementClaim::Completed { edge: settled, .. } = completion else {
+        panic!("completing a claim must yield the settled edge and its artifact");
+    };
     assert_eq!(settled.state, AwaitEdgeState::Settled);
     (scope, parent_run_id, child_run_id)
 }

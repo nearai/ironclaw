@@ -666,7 +666,13 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
         .await
         .unwrap();
 
-    assert_eq!(surface.capabilities.len(), package.capabilities.len());
+    let model_visible_count = package
+        .manifest
+        .capabilities
+        .iter()
+        .filter(|capability| capability.visibility == CapabilityVisibility::Model)
+        .count();
+    assert_eq!(surface.capabilities.len(), model_visible_count);
     for capability in &surface.capabilities {
         jsonschema::validator_for(&capability.descriptor.parameters_schema).unwrap_or_else(
             |error| {
@@ -687,7 +693,7 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
             capability.descriptor.parameters_schema
         );
     }
-    assert_schema_has_property(&surface, "builtin.glob", "pattern");
+    assert_schema_has_property(&surface, "builtin.glob", "path");
     assert_schema_has_property(&surface, "builtin.grep", "pattern");
     assert_schema_has_property(&surface, "builtin.skill_install", "content");
     assert_schema_has_property(&surface, "builtin.skill_install", "url");
@@ -701,136 +707,67 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
     // prose half of a skill.
     assert_schema_has_property(&surface, "builtin.skill_install", "files");
 
-    let apply_patch_schema = &surface
+    // The edit capability is the pinned hashline `builtin.edit`: input is the
+    // anchored hashline script, exactly the schema pinned at
+    // `schemas/builtin/coding.edit.input.v1.json` (CODING_EDIT_SCHEMA). The retired
+    // apply_patch shape (`path`/`old_string`/`new_string`/`edits`/`replace_all`)
+    // must not resurface: `additionalProperties: false` rejects each of those
+    // fields outright.
+    let edit_schema = &surface
         .capabilities
         .iter()
-        .find(|capability| capability.descriptor.id == capability_id("builtin.apply_patch"))
-        .expect("builtin.apply_patch should be visible")
+        .find(|capability| capability.descriptor.id == capability_id("builtin.edit"))
+        .expect("builtin.edit should be visible")
         .descriptor
         .parameters_schema;
-    let apply_patch_validator =
-        jsonschema::validator_for(apply_patch_schema).expect("apply_patch schema is valid");
-    apply_patch_validator
+    let edit_validator =
+        jsonschema::validator_for(edit_schema).expect("builtin.edit schema is valid");
+    edit_validator
         .validate(&json!({
-            "path": "/workspace/main.rs",
-            "old_string": "old",
-            "new_string": "new"
+            "input": "[src/main.rs#tag]\nPUT 1:\n+new line\n"
         }))
-        .expect("apply_patch schema should accept canonical single-edit input");
-    apply_patch_validator
-        .validate(&json!({
-            "path": "/workspace/main.rs",
-            "edits": [{"old_string": "old", "new_string": "new"}]
-        }))
-        .expect("apply_patch schema should accept canonical multi-edit input");
-    apply_patch_validator
-        .validate(&json!({
-            "path": "/workspace/main.rs",
-            "edits": [{"old_string": "old", "new_string": "new"}],
-            "replace_all": true
-        }))
-        .expect("apply_patch schema should accept replace_all with one edit");
-    apply_patch_validator
-        .validate(&json!({
-            "path": "/workspace/main.rs",
-            "old_string": "old",
-            "new_string": "new",
-            "edits": null
-        }))
-        .expect("apply_patch schema should accept null edits placeholder with single edit");
-    apply_patch_validator
-        .validate(&json!({
-            "path": "/workspace/main.rs",
-            "old_string": "old",
-            "new_string": "new",
-            "edits": "null"
-        }))
-        .expect("apply_patch schema should accept string null edits placeholder with single edit");
-    apply_patch_validator
-        .validate(&json!({
-            "path": "/workspace/main.rs",
-            "old_string": "null",
-            "new_string": null,
-            "edits": [{"old_string": "old", "new_string": "new"}]
-        }))
-        .expect("apply_patch schema should accept inactive single-edit placeholders with edits");
+        .expect("builtin.edit schema should accept canonical hashline input");
+    edit_validator
+        .validate(&json!({"input": ""}))
+        .expect("builtin.edit schema should accept any string input");
     assert!(
-        apply_patch_validator
-            .validate(&json!({
-                "path": "/workspace/main.rs",
-                "edits": []
-            }))
-            .is_err(),
-        "apply_patch schema should reject empty edits"
+        edit_validator.validate(&json!({})).is_err(),
+        "builtin.edit schema should require the input field"
     );
     assert!(
-        apply_patch_validator
+        edit_validator.validate(&json!({"input": 42})).is_err(),
+        "builtin.edit schema should reject non-string input"
+    );
+    assert!(
+        edit_validator
+            .validate(&json!({"input": "", "path": "/workspace/main.rs"}))
+            .is_err(),
+        "builtin.edit schema should reject the retired apply_patch path field"
+    );
+    assert!(
+        edit_validator
             .validate(&json!({
-                "path": "/workspace/main.rs",
-                "old_string": "null",
+                "input": "",
+                "old_string": "old",
                 "new_string": "new"
             }))
             .is_err(),
-        "apply_patch schema should reject active string null old_string placeholder"
+        "builtin.edit schema should reject retired apply_patch single-edit fields"
     );
     assert!(
-        apply_patch_validator
+        edit_validator
             .validate(&json!({
-                "path": "/workspace/main.rs",
-                "old_string": "old",
-                "new_string": "null"
-            }))
-            .is_err(),
-        "apply_patch schema should reject active string null new_string placeholder"
-    );
-    assert!(
-        apply_patch_validator
-            .validate(&json!({
-                "path": "/workspace/main.rs",
-                "edits": [
-                    {"old_string": "old", "new_string": "new"},
-                    {"old_string": "other", "new_string": "replacement"}
-                ],
-                "replace_all": true
-            }))
-            .is_err(),
-        "apply_patch schema should reject replace_all with multiple edits"
-    );
-    assert!(
-        apply_patch_validator
-            .validate(&json!({
-                "path": "/workspace/main.rs",
-                "old_string": "null",
-                "new_string": null,
-                "edits": [
-                    {"old_string": "old", "new_string": "new"},
-                    {"old_string": "other", "new_string": "replacement"}
-                ],
-                "replace_all": true
-            }))
-            .is_err(),
-        "apply_patch schema should reject replace_all multi-edit even with placeholders"
-    );
-    assert!(
-        apply_patch_validator
-            .validate(&json!({
-                "path": "/workspace/main.rs",
-                "old_string": "old",
-                "new_string": "new",
+                "input": "",
                 "edits": [{"old_string": "old", "new_string": "new"}]
             }))
             .is_err(),
-        "apply_patch schema should reject complete single-edit shape mixed with edits array"
+        "builtin.edit schema should reject the retired apply_patch edits array"
     );
     assert!(
-        apply_patch_validator
-            .validate(&json!({
-                "path": "/workspace/main.rs",
-                "old_string": "old",
-                "edits": [{"old_string": "old", "new_string": "new"}]
-            }))
+        edit_validator
+            .validate(&json!({"input": "", "replace_all": true}))
             .is_err(),
-        "apply_patch schema should reject mixed top-level edit shapes"
+        "builtin.edit schema should reject the retired apply_patch replace_all field"
     );
 
     let trigger_create = surface
@@ -2378,6 +2315,8 @@ impl TrustPolicy for PanicTrustPolicy {
 
 fn dispatch_result() -> CapabilityDispatchResult {
     CapabilityDispatchResult {
+        completed_artifact: None,
+        canonical_output_digest: None,
         capability_id: capability_id("echo.say"),
         provider: ExtensionId::new("echo").unwrap(),
         runtime: RuntimeKind::Wasm,
@@ -2391,6 +2330,7 @@ fn dispatch_result() -> CapabilityDispatchResult {
             estimate: ResourceEstimate::default(),
             actual: Some(ResourceUsage::default()),
         },
+        canonical_item_count: None,
     }
 }
 

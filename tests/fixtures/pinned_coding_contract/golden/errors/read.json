@@ -1,0 +1,70 @@
+{
+  "tool": "read",
+  "note": "Representative model-visible error shapes for the pinned `read` tool at commit 08819b279cf02ae2545e69dad7111ab48d91d35e. `template` is verbatim from the cited upstream source; `example` renders the template with representative values.",
+  "entries": [
+    {
+      "case": "invalid_selector",
+      "kind": "error",
+      "template": "Invalid selector ':${sel}'. Use :N, :N-M, :N+K, :N- (open-ended), a comma-separated list of ranges, :raw, or a range combined with raw (e.g. :raw:50-100).",
+      "example": "Invalid selector ':raw:raw'. Use :N, :N-M, :N+K, :N- (open-ended), a comma-separated list of ranges, :raw, or a range combined with raw (e.g. :raw:50-100).",
+      "source_path": "packages/coding-agent/src/tools/read-selector.ts",
+      "source_line": 34
+    },
+    {
+      "case": "path_not_found",
+      "kind": "error",
+      "template": "Path '${localReadPath}' not found",
+      "example": "Path 'src/gone.rs' not found",
+      "source_path": "packages/coding-agent/src/tools/read.ts",
+      "source_line": 1003
+    },
+    {
+      "case": "multi_range_directory",
+      "kind": "error",
+      "template": "Multi-range line selectors are not supported for directory listings.",
+      "example": "Multi-range line selectors are not supported for directory listings.",
+      "source_path": "packages/coding-agent/src/tools/read.ts",
+      "source_line": 1012
+    },
+    {
+      "case": "url_reads_disabled",
+      "kind": "error",
+      "template": "URL reads are disabled by settings.",
+      "example": "URL reads are disabled by settings.",
+      "source_path": "packages/coding-agent/src/tools/read.ts",
+      "source_line": 806
+    },
+    {
+      "case": "image_too_large",
+      "kind": "error",
+      "template": "Image file too large: ${sizeStr} exceeds ${maxStr} limit.",
+      "example": "Image file too large: 21MB exceeds 20MB limit.",
+      "source_path": "packages/coding-agent/src/tools/read.ts",
+      "source_line": 581
+    },
+    {
+      "case": "cannot_combine_query_with_line_selectors",
+      "kind": "error",
+      "template": "Cannot combine query extraction with line selectors",
+      "example": "Cannot combine query extraction with line selectors",
+      "source_path": "packages/coding-agent/src/tools/read.ts",
+      "source_line": 1847
+    },
+    {
+      "case": "xd_not_mounted",
+      "kind": "error",
+      "template": "xd:// is not mounted in this session.",
+      "example": "xd:// is not mounted in this session.",
+      "source_path": "packages/coding-agent/src/tools/read.ts",
+      "source_line": 1862
+    },
+    {
+      "case": "read_directory_failed",
+      "kind": "error",
+      "template": "Cannot read directory: ${message}",
+      "example": "Cannot read directory: EACCES: permission denied",
+      "source_path": "packages/coding-agent/src/tools/read.ts",
+      "source_line": 1964
+    }
+  ]
+}

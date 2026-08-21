@@ -28,8 +28,9 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    ECHO_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
-    SurfaceKind, VisibleCapabilityRequest as HostVisibleCapabilityRequest,
+    CODING_BASH_CAPABILITY_ID, CODING_READ_CAPABILITY_ID, ECHO_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SurfaceKind,
+    VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, CapabilityInputRef, InMemoryLoopHostMilestoneSink,
@@ -99,6 +100,9 @@ async fn write_capability_result_for_test(
     let capability_id = capability_id(capability);
     let CapabilityWriteResult { result_ref, .. } = io
         .write_capability_result(CapabilityResultWrite {
+            receipt: None,
+            completed_artifact: None,
+            canonical_output_digest: None,
             run_context,
             input_ref,
             invocation_id: InvocationId::new(),
@@ -106,6 +110,7 @@ async fn write_capability_result_for_test(
             output,
             display_preview: None,
             durable_persistence: DurablePersistence::Persist,
+            canonical_item_count: None,
         })
         .await?;
     Ok(result_ref)
@@ -184,6 +189,9 @@ async fn capability_io_write_capability_result_returns_serialized_payload_byte_l
 
     let CapabilityWriteResult { byte_len, .. } = io
         .write_capability_result(CapabilityResultWrite {
+            receipt: None,
+            completed_artifact: None,
+            canonical_output_digest: None,
             run_context: &run_context,
             input_ref: &input_ref,
             invocation_id: InvocationId::new(),
@@ -191,6 +199,7 @@ async fn capability_io_write_capability_result_returns_serialized_payload_byte_l
             output: output.clone(),
             display_preview: None,
             durable_persistence: DurablePersistence::Persist,
+            canonical_item_count: None,
         })
         .await
         .unwrap();
@@ -533,29 +542,29 @@ async fn standalone_adapter_gates_builtin_echo_when_global_auto_approve_is_off()
 }
 
 #[tokio::test]
-async fn standalone_adapter_invokes_builtin_shell_through_product_live_surface() {
+async fn standalone_adapter_invokes_builtin_bash_through_product_live_surface() {
     let root = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(ironclaw_composition::local_filesystem_build_input(
-        "builtin-shell-owner",
+        "builtin-bash-owner",
         root.path().join("standalone"),
     ))
     .await;
-    let run_context = loop_run_context("builtin-shell").await;
+    let run_context = loop_run_context("builtin-bash").await;
     disable_global_auto_approve_for_run(
         &services,
         &run_context,
-        UserId::new("user-builtin-shell").unwrap(),
+        UserId::new("user-builtin-bash").unwrap(),
     )
     .await;
     let io = Arc::new(ProductLiveCapabilityIo::default());
     let input_ref = io
         .stage_input(
             &run_context,
-            serde_json::json!({ "command": "echo hello product shell" }),
+            serde_json::json!({ "command": "echo hello product bash" }),
         )
         .unwrap();
-    let capability_id = capability_id(SHELL_CAPABILITY_ID);
-    let shell_effects = vec![
+    let capability_id = capability_id(CODING_BASH_CAPABILITY_ID);
+    let bash_effects = vec![
         EffectKind::DispatchCapability,
         EffectKind::ReadFilesystem,
         EffectKind::WriteFilesystem,
@@ -563,14 +572,14 @@ async fn standalone_adapter_invokes_builtin_shell_through_product_live_surface()
         EffectKind::SpawnProcess,
         EffectKind::ExecuteCode,
     ];
-    let user_id = UserId::new("user-builtin-shell").unwrap();
-    let shell_grant = CapabilityGrant {
+    let user_id = UserId::new("user-builtin-bash").unwrap();
+    let bash_grant = CapabilityGrant {
         id: CapabilityGrantId::new(),
         capability: capability_id.clone(),
         grantee: Principal::User(user_id.clone()),
         issued_by: Principal::HostRuntime,
         constraints: GrantConstraints {
-            allowed_effects: shell_effects.clone(),
+            allowed_effects: bash_effects.clone(),
             mounts: MountView::default(),
             network: NetworkPolicy {
                 allowed_targets: vec![NetworkTargetPattern {
@@ -601,12 +610,12 @@ async fn standalone_adapter_invokes_builtin_shell_through_product_live_surface()
                     CapabilitySurfacePolicy::allow_all(),
                 )
                 .with_grants(CapabilitySet {
-                    grants: vec![shell_grant],
+                    grants: vec![bash_grant],
                 })
                 .with_provider_trust_for_effects(
                     ExtensionId::new("builtin").unwrap(),
                     EffectiveTrustClass::user_trusted(),
-                    shell_effects,
+                    bash_effects,
                 ),
             ),
             capability_input_resolver: io.clone(),
@@ -631,7 +640,7 @@ async fn standalone_adapter_invokes_builtin_shell_through_product_live_surface()
             .descriptors
             .iter()
             .any(|descriptor| descriptor.capability_id == capability_id),
-        "builtin shell must be visible through the product-live adapter surface"
+        "builtin bash must be visible through the product-live adapter surface"
     );
 
     let outcome = capability_port
@@ -646,7 +655,7 @@ async fn standalone_adapter_invokes_builtin_shell_through_product_live_surface()
         .await
         .unwrap();
     let Resolution::Blocked(blocked) = outcome else {
-        panic!("expected approval gate for builtin shell outcome, got {outcome:?}");
+        panic!("expected approval gate for builtin bash outcome, got {outcome:?}");
     };
     assert_eq!(blocked.kind(), "approval");
     // The minted gate ref is an opaque uuid; the originating loop gate ref
@@ -1026,7 +1035,7 @@ async fn adapter_config_can_authorize_non_dispatch_provider_trust_effects() {
     .await;
     let run_context = loop_run_context("read-effect").await;
     let io = Arc::new(ProductLiveCapabilityIo::default());
-    let capability_id = capability_id(READ_FILE_CAPABILITY_ID);
+    let capability_id = capability_id(CODING_READ_CAPABILITY_ID);
     let adapters = adapters_from_runtime(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
@@ -1042,7 +1051,7 @@ async fn adapter_config_can_authorize_non_dispatch_provider_trust_effects() {
                 )
                 .with_grants(grants_for_principal_with_effects(
                     Principal::User(UserId::new("user-read-effect").unwrap()),
-                    [READ_FILE_CAPABILITY_ID],
+                    [CODING_READ_CAPABILITY_ID],
                     vec![EffectKind::ReadFilesystem],
                 ))
                 .with_provider_trust_for_effects(
@@ -1078,7 +1087,7 @@ async fn adapter_config_can_authorize_non_dispatch_provider_trust_effects() {
 }
 
 #[tokio::test]
-async fn standalone_adapter_invokes_read_file_with_configured_mounts() {
+async fn standalone_adapter_invokes_read_with_configured_mounts() {
     let root = tempfile::tempdir().unwrap();
     let storage_root = root.path().join("standalone");
     std::fs::create_dir_all(storage_root.join("workspace")).unwrap();
@@ -1099,10 +1108,10 @@ async fn standalone_adapter_invokes_read_file_with_configured_mounts() {
     let input_ref = io
         .stage_input(
             &run_context,
-            serde_json::json!({ "path": "/workspace/readme.md", "limit": 1 }),
+            serde_json::json!({ "path": "/workspace/readme.md:1" }),
         )
         .unwrap();
-    let capability_id = capability_id(READ_FILE_CAPABILITY_ID);
+    let capability_id = capability_id(CODING_READ_CAPABILITY_ID);
     let mounts = read_only_workspace_mounts();
     let adapters = adapters_from_runtime(
         &services,
@@ -1120,7 +1129,7 @@ async fn standalone_adapter_invokes_read_file_with_configured_mounts() {
                 .with_mounts(mounts.clone())
                 .with_grants(grants_for_principal_with_effects_and_mounts(
                     Principal::User(UserId::new("user-read-file").unwrap()),
-                    [READ_FILE_CAPABILITY_ID],
+                    [CODING_READ_CAPABILITY_ID],
                     vec![EffectKind::ReadFilesystem],
                     mounts,
                 ))
@@ -1159,7 +1168,7 @@ async fn standalone_adapter_invokes_read_file_with_configured_mounts() {
         .await
         .unwrap();
     let Resolution::Done(completed) = outcome else {
-        panic!("expected completed read_file outcome, got {outcome:?}");
+        panic!("expected completed read outcome, got {outcome:?}");
     };
     // The minted `refs.result` is an opaque uuid; the loop result ref the io
     // staged the output under is preserved on `refs.origin`.
@@ -1173,13 +1182,12 @@ async fn standalone_adapter_invokes_read_file_with_configured_mounts() {
     )
     .expect("valid loop result ref");
     let output = io.result_for_ref(&run_context, &result_ref).unwrap();
-    assert_eq!(output["path"], serde_json::json!("/workspace/readme.md"));
-    assert_eq!(output["lines_shown"], serde_json::json!(1));
     assert!(
-        output["content"]
+        output["output"]
             .as_str()
-            .expect("read_file content should be text")
-            .contains("alpha")
+            .expect("coding read returns text")
+            .contains("1:alpha"),
+        "the read output must render the file rows, got {output}"
     );
 }
 
@@ -1398,6 +1406,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
     ));
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        legacy_result_artifacts: None,
         prompt_diagnostic_sink: None,
         reply_attachment_intent_port: None,
         gate_record_store: None,

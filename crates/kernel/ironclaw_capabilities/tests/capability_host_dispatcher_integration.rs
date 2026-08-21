@@ -15,9 +15,13 @@ use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
     Timestamp,
     action::NetworkPolicy,
+    artifact::{
+        AccountedArtifactPersister, ArtifactDigest, ArtifactId, ArtifactNamespaceId, ArtifactRef,
+        ArtifactWriteError, ArtifactWriteMetadata, CompletedArtifact,
+    },
     capability::{CapabilitySet, EffectKind, GrantConstraints},
     dispatch::{DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind},
-    ids::{ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, UserId},
+    ids::{ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, RunId, UserId},
     mount::MountView,
     resource::{ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage},
     runtime::{RuntimeKind, TrustClass},
@@ -38,9 +42,10 @@ async fn capability_host_invokes_through_runtime_dispatcher_and_completes_run() 
     let authorizer = GrantAuthorizer::new();
     let host = capability_host(registry.as_ref(), &dispatcher, &authorizer)
         .with_invocation_state(&run_state);
-    let context = execution_context(CapabilitySet {
+    let mut context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
     });
+    context.artifact_namespace = Some(ArtifactNamespaceId::from_root_run(RunId::new()));
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
     let estimate = ResourceEstimate::default().set_output_bytes(4_096);
@@ -101,7 +106,8 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
     let block_host = capability_host(registry.as_ref(), &dispatcher, &ApprovalAuthorizer)
         .with_invocation_state(&block_run_state)
         .with_approval_requests(&approval_requests);
-    let context = execution_context(CapabilitySet::default());
+    let mut context = execution_context(CapabilitySet::default());
+    context.artifact_namespace = Some(ArtifactNamespaceId::from_root_run(RunId::new()));
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
     let estimate = ResourceEstimate::default().set_output_bytes(1_024);
@@ -425,6 +431,8 @@ impl BoundCapabilityAdapter for RecordingRuntimeAdapter {
                 detail: None,
             })?;
         Ok(RuntimeAdapterResult {
+            canonical_output_digest: None,
+            completed_artifact: None,
             output,
             display_preview: None,
             usage,
@@ -467,8 +475,41 @@ fn runtime_dispatcher_stack(
         },
     });
     let dispatcher = RuntimeDispatcher::from_arcs(resolver, Arc::clone(&governor))
-        .with_event_sink_arc(Arc::new(events.clone()));
+        .with_event_sink_arc(Arc::new(events.clone()))
+        .with_artifact_persistence_arc(Arc::new(TestArtifactPersister::default()));
     (registry, dispatcher, governor, events, adapter)
+}
+
+/// Deterministic in-memory `AccountedArtifactPersister` for agent-scoped
+/// dispatch: unique monotonic `ArtifactId`s, checked byte length, and a digest
+/// over the persisted bytes. Mirrors the host-runtime harness persister and
+/// the loop ingress contract.
+#[derive(Default)]
+struct TestArtifactPersister {
+    next_id: std::sync::atomic::AtomicU64,
+}
+
+#[async_trait]
+impl AccountedArtifactPersister for TestArtifactPersister {
+    async fn persist(
+        &self,
+        metadata: ArtifactWriteMetadata,
+        bytes: &[u8],
+        _receipt: &ResourceReceipt,
+    ) -> Result<CompletedArtifact, ArtifactWriteError> {
+        let artifact_id = ArtifactId::new(
+            self.next_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        );
+        let byte_len = u64::try_from(bytes.len()).map_err(|_| ArtifactWriteError::Storage)?;
+        Ok(CompletedArtifact {
+            artifact_ref: ArtifactRef::new(artifact_id),
+            byte_len,
+            total_lines: None,
+            content_type: metadata.content_type,
+            digest: ArtifactDigest::from_bytes(bytes),
+        })
+    }
 }
 
 async fn approve_dispatch(

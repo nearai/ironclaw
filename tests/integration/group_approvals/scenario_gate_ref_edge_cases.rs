@@ -24,7 +24,7 @@ pub async fn stale_gate_ref_resume(g: &RebornIntegrationGroup) -> HarnessResult<
         .thread("conv-stale-gate-ref")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 json!({"path": "/workspace/stale_ref.txt", "content": "stale ref write"}),
             ),
             RebornScriptedReply::text("file written after approval"),

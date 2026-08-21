@@ -502,7 +502,7 @@ async def test_reborn_legacy_always_approve_survives_reborn_restart(
     reborn_v2_restartable_server,
 ):
     state, start_server, stop_server = reborn_v2_restartable_server
-    capability_id = "builtin.write_file"
+    capability_id = "builtin.write"
 
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
         base_url = state["base_url"]

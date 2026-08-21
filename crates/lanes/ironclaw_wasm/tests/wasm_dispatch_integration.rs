@@ -22,6 +22,10 @@ use ironclaw_filesystem::{DiskFilesystem, RootFilesystem};
 use ironclaw_host_api::{
     Timestamp,
     action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    artifact::{
+        AccountedArtifactPersister, ArtifactDigest, ArtifactId, ArtifactNamespaceId, ArtifactRef,
+        ArtifactWriteError, ArtifactWriteMetadata, CompletedArtifact,
+    },
     authorized::Authorized,
     dispatch::{
         CapabilityDispatchRequest, DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind,
@@ -33,14 +37,15 @@ use ironclaw_host_api::{
     },
     ids::{
         ActivityId, AgentId, CapabilityId, CorrelationId, InvocationId, MissionId, ProductKind,
-        ProjectId, ResourceReservationId, TenantId, ThreadId, UserId,
+        ProjectId, ResourceReservationId, RunId, TenantId, ThreadId, UserId,
     },
     invocation::{Actor, Invocation, InvocationOrigin},
     lane::RuntimeLane,
     mount::MountView,
     path::{HostPath, VirtualPath},
     resource::{
-        ReservationStatus, ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
+        ReservationStatus, ResourceEstimate, ResourceReceipt, ResourceReservation, ResourceScope,
+        ResourceUsage,
     },
     runtime::RuntimeKind,
 };
@@ -777,6 +782,39 @@ fn dispatcher_for(
         .collect::<HashMap<_, _>>();
     let resolver: Arc<dyn ToolResolver> = Arc::new(MapResolver { bindings });
     RuntimeDispatcher::from_arcs(resolver, governor)
+        .with_artifact_persistence_arc(Arc::new(TestArtifactPersister::default()))
+}
+
+/// Deterministic in-memory `AccountedArtifactPersister` for agent-scoped
+/// dispatch: unique monotonic `ArtifactId`s, checked byte length, and a digest
+/// over the persisted bytes. Mirrors the host-runtime harness persister and
+/// the loop ingress contract.
+#[derive(Default)]
+struct TestArtifactPersister {
+    next_id: std::sync::atomic::AtomicU64,
+}
+
+#[async_trait]
+impl AccountedArtifactPersister for TestArtifactPersister {
+    async fn persist(
+        &self,
+        metadata: ArtifactWriteMetadata,
+        bytes: &[u8],
+        _receipt: &ResourceReceipt,
+    ) -> Result<CompletedArtifact, ArtifactWriteError> {
+        let artifact_id = ArtifactId::new(
+            self.next_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        );
+        let byte_len = u64::try_from(bytes.len()).map_err(|_| ArtifactWriteError::Storage)?;
+        Ok(CompletedArtifact {
+            artifact_ref: ArtifactRef::new(artifact_id),
+            byte_len,
+            total_lines: None,
+            content_type: metadata.content_type,
+            digest: ArtifactDigest::from_bytes(bytes),
+        })
+    }
 }
 
 struct MapResolver {
@@ -906,6 +944,8 @@ fn execute_prepared_wasm(
         }
     };
     Ok(RuntimeAdapterResult {
+        canonical_output_digest: None,
+        completed_artifact: None,
         output,
         display_preview: None,
         output_bytes: execution.usage.output_bytes,
@@ -1010,6 +1050,7 @@ fn dispatch_request(capability: &str, input: Value) -> Authorized {
         .set_output_bytes(10_000);
     Authorized::seal_for_test(
         Invocation {
+            artifact_namespace: Some(ArtifactNamespaceId::from_root_run(RunId::new())),
             activity_id: ActivityId::new(),
             capability: CapabilityId::new(capability).unwrap(),
             input,

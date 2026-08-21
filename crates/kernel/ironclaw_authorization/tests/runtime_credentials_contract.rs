@@ -354,6 +354,7 @@ fn wasm_descriptor() -> CapabilityDescriptor {
         resource_profile: None,
         origin_gate_matrix: None,
         standard_op: None,
+        provider_tool_name: None,
     }
 }
 
@@ -399,6 +400,7 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
         invocation_id,
     };
     ExecutionContext {
+        artifact_namespace: None,
         run_id: None,
         origin: None,
         invocation_id,

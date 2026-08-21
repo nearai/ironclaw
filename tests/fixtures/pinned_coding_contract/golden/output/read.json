@@ -1,0 +1,54 @@
+{
+  "tool": "read",
+  "note": "Deterministic model-visible output format examples for the pinned `read` tool at commit 08819b279cf02ae2545e69dad7111ab48d91d35e. All templates below are verbatim from the cited upstream sources; examples render them with representative values.",
+  "formats": [
+    {
+      "case": "hashline_header_in_workspace",
+      "template": "[${basename}#${TAG}]",
+      "example": "[main.rs#1A2B]",
+      "source_path": "packages/hashline/src/format.ts",
+      "source_line": 133,
+      "note": "In-workspace reads collapse to the bare filename (formatReadHashlineHeader); out-of-workspace paths keep a shortened absolute path. TAG is a 4-hex uppercase xxHash32 of the normalized file text."
+    },
+    {
+      "case": "hashline_header_out_of_workspace",
+      "template": "[${shortenedPath}#${TAG}]",
+      "example": "[~/.claude/settings.json#3C4D]",
+      "source_path": "packages/coding-agent/src/tools/read-format.ts",
+      "source_line": 21,
+      "note": "Absolute display paths stay directly resolvable; ~ is kept via shortenPath."
+    },
+    {
+      "case": "hashline_numbered_line",
+      "template": "${LINE}:${TEXT}",
+      "example": "42:fn main() {}",
+      "source_path": "packages/hashline/src/format.ts",
+      "source_line": 138,
+      "note": "Numbered lines use ':' as the body separator in hashline mode; the plain (non-edit) mode uses '|'."
+    },
+    {
+      "case": "elision_footer_single",
+      "template": "[…${elidedLines}ln elided; re-read needed ranges with ${readPath}:${selector}]",
+      "example": "[…1200ln elided; re-read needed ranges with src/foo.ts:50-200]",
+      "source_path": "packages/coding-agent/src/tools/read-format.ts",
+      "source_line": 224,
+      "note": "FOOTER_RANGE_SAMPLES=2; with more elided ranges the tail switches to ', e.g. <path>:<first-samples>'."
+    },
+    {
+      "case": "head_truncation_notice",
+      "template": "\n\n[Showing lines ${start}-${end} of ${total}. Use :${nextOffset} to continue]",
+      "example": "\n\n[Showing lines 1-3000 of 9000. Use :3001 to continue]",
+      "source_path": "packages/coding-agent/src/session/streaming-output.ts",
+      "source_line": 1434,
+      "note": "DEFAULT_MAX_LINES=3000, DEFAULT_MAX_BYTES=50KB."
+    },
+    {
+      "case": "tail_truncation_notice",
+      "template": "\n\n[Showing lines ${start}-${end} of ${total}${fullOutputPart}${suffix}]",
+      "example": "\n\n[Showing lines 6001-9000 of 9000. Full output: /tmp/out.txt]",
+      "source_path": "packages/coding-agent/src/session/streaming-output.ts",
+      "source_line": 1414,
+      "note": "Partial last lines render as [Showing last <bytes> of line <end> ...] instead."
+    }
+  ]
+}

@@ -4,9 +4,11 @@ Target-architecture entry: PROPOSAL §6.4.10, `families/domains.md`.
 
 Turn a file's bytes into plain text by format. One `src/lib.rs`, no I/O, no
 async, no knowledge of where the bytes came from — the same three functions
-serve chat attachments (`ironclaw_attachments`), capability download output
-(`ironclaw_host_runtime`), and the `read_file` coding tool
-(`ironclaw_extension_support`).
+serve chat attachments (`ironclaw_attachments`) and capability download output
+(`ironclaw_host_runtime`). A third consumer, the `read_file` coding tool in
+`ironclaw_extension_support`, was retired in the coding-tool cutover; its
+replacement, the `read` tool (`ironclaw_extension_support::coding::pinned`),
+does not use this crate.
 
 ## The public surface, and why it is this small
 
@@ -50,11 +52,13 @@ does.
 
 This was a doc comment before it was a type, and the doc comment only sat on
 one of the two boundary sites — the other one leaked the raw string into a
-model-facing safe summary in `ironclaw_extension_support`'s `read_file`. The
-regression test for that lives at the call site
-(`coding/file.rs::tests::read_file_extraction_failure_summary_carries_no_parser_detail`),
-not here: `Display` alone is the helper, and the wrapper that composes the
-summary is what actually leaked.
+model-facing safe summary in `ironclaw_extension_support`'s `read_file` coding
+tool. The call-site regression test for that leak was removed with the tool in
+the coding-tool cutover (the `read` tool that replaced it — the pinned engine
+in `ironclaw_extension_support::coding::pinned` — does not use this crate), so
+`every_extraction_failure_display_is_content_free` is now the sole guard:
+`Display` is the helper, and the wrapper that composes the summary is what
+would leak.
 
 ## Never contains
 
@@ -76,6 +80,5 @@ ZIP-reading path that bypasses it.
 
 All in `src/lib.rs`. `cargo test -p ironclaw_extractors`. The consumers own
 their own rendering tests; if you change what an extractor returns, check
-`ironclaw_attachments::inbound`, `ironclaw_host_runtime::document_output`, and
-`ironclaw_extension_support::coding::file` — those are the three callers, and
-there are no others.
+`ironclaw_attachments::inbound` and `ironclaw_host_runtime::document_output` —
+those are the two callers, and there are no others.

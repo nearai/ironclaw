@@ -27,15 +27,18 @@ impl SubagentFlavorId {
     }
 }
 
+/// Tool identities available to subagent flavors, mapped 1:1 onto the current
+/// pinned coding first-party surface. Directory listing is served by `builtin.read`
+/// (there is no separate `list_dir` identity), so no two variants share a
+/// capability id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentToolId {
-    ReadFile,
-    WriteFile,
-    ApplyPatch,
-    Shell,
-    ListFiles,
-    Search,
+    Read,
+    Write,
+    Edit,
+    Bash,
+    Grep,
     Glob,
     Http,
 }
@@ -49,12 +52,11 @@ impl SubagentToolId {
     /// runtime capability surface.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::ReadFile => "builtin.read_file",
-            Self::WriteFile => "builtin.write_file",
-            Self::ApplyPatch => "builtin.apply_patch",
-            Self::Shell => "builtin.shell",
-            Self::ListFiles => "builtin.list_dir",
-            Self::Search => "builtin.grep",
+            Self::Read => "builtin.read",
+            Self::Write => "builtin.write",
+            Self::Edit => "builtin.edit",
+            Self::Bash => "builtin.bash",
+            Self::Grep => "builtin.grep",
             Self::Glob => "builtin.glob",
             Self::Http => "builtin.http",
         }
@@ -75,30 +77,23 @@ pub struct SubagentFlavor {
 // NOT a capability the subagent invokes, so there is no `builtin.message`
 // capability in the first-party registry and it must not appear in any
 // allowlist. See `subagent::completion_observer`.
-const GENERAL_TOOLS: &[SubagentToolId] = &[
-    SubagentToolId::ReadFile,
-    SubagentToolId::ListFiles,
-    SubagentToolId::Search,
-];
+const GENERAL_TOOLS: &[SubagentToolId] = &[SubagentToolId::Read, SubagentToolId::Grep];
 const EXPLORER_TOOLS: &[SubagentToolId] = &[
-    SubagentToolId::ReadFile,
-    SubagentToolId::ListFiles,
-    SubagentToolId::Search,
+    SubagentToolId::Read,
+    SubagentToolId::Grep,
     SubagentToolId::Glob,
 ];
 const CODER_TOOLS: &[SubagentToolId] = &[
-    SubagentToolId::ReadFile,
-    SubagentToolId::WriteFile,
-    SubagentToolId::ApplyPatch,
-    SubagentToolId::Shell,
-    SubagentToolId::ListFiles,
-    SubagentToolId::Search,
+    SubagentToolId::Read,
+    SubagentToolId::Write,
+    SubagentToolId::Edit,
+    SubagentToolId::Bash,
+    SubagentToolId::Grep,
     SubagentToolId::Glob,
 ];
 const PLANNER_TOOLS: &[SubagentToolId] = &[
-    SubagentToolId::ReadFile,
-    SubagentToolId::ListFiles,
-    SubagentToolId::Search,
+    SubagentToolId::Read,
+    SubagentToolId::Grep,
     SubagentToolId::Glob,
     SubagentToolId::Http,
 ];
@@ -109,28 +104,28 @@ pub const BUILTIN_SUBAGENT_FLAVORS: &[SubagentFlavor] = &[
         direction: DirectionId::General,
         tool_allowlist: GENERAL_TOOLS,
         allow_nesting: false,
-        summary: "read-only file exploration (read_file, list_dir, grep)",
+        summary: "read-only file exploration (read, grep)",
     },
     SubagentFlavor {
         id: SubagentFlavorId::Explorer,
         direction: DirectionId::Explorer,
         tool_allowlist: EXPLORER_TOOLS,
         allow_nesting: false,
-        summary: "read + glob over filesystem (read_file, list_dir, grep, glob)",
+        summary: "read + glob over filesystem (read, grep, glob)",
     },
     SubagentFlavor {
         id: SubagentFlavorId::Coder,
         direction: DirectionId::Coder,
         tool_allowlist: CODER_TOOLS,
         allow_nesting: false,
-        summary: "read + write + shell (read_file, write_file, apply_patch, shell, list_dir, grep, glob)",
+        summary: "read + write + bash (read, write, edit, bash, grep, glob)",
     },
     SubagentFlavor {
         id: SubagentFlavorId::Planner,
         direction: DirectionId::Planner,
         tool_allowlist: PLANNER_TOOLS,
         allow_nesting: false,
-        summary: "read codebase + web research, returns a structured implementation plan (read_file, list_dir, grep, glob, http)",
+        summary: "read codebase + web research, returns a structured implementation plan (read, grep, glob, http)",
     },
 ];
 
@@ -245,8 +240,7 @@ mod tests {
         assert_eq!(
             ids,
             vec![
-                "builtin.read_file",
-                "builtin.list_dir",
+                "builtin.read",
                 "builtin.grep",
                 "builtin.glob",
                 "builtin.http",
@@ -268,19 +262,11 @@ mod tests {
     fn explorer_flavor_is_read_only() {
         let flavor = lookup_flavor(SubagentFlavorId::Explorer).expect("explorer flavor");
         let ids: Vec<&str> = flavor.tool_allowlist.iter().map(|t| t.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec![
-                "builtin.read_file",
-                "builtin.list_dir",
-                "builtin.grep",
-                "builtin.glob",
-            ]
-        );
-        // No write/shell/web surface for explorer.
-        assert!(!ids.contains(&"builtin.write_file"));
-        assert!(!ids.contains(&"builtin.apply_patch"));
-        assert!(!ids.contains(&"builtin.shell"));
+        assert_eq!(ids, vec!["builtin.read", "builtin.grep", "builtin.glob",]);
+        // No write/bash/web surface for explorer.
+        assert!(!ids.contains(&"builtin.write"));
+        assert!(!ids.contains(&"builtin.edit"));
+        assert!(!ids.contains(&"builtin.bash"));
         assert!(!ids.contains(&"builtin.http"));
         assert!(!flavor.allow_nesting);
     }
@@ -292,11 +278,10 @@ mod tests {
         assert_eq!(
             ids,
             vec![
-                "builtin.read_file",
-                "builtin.write_file",
-                "builtin.apply_patch",
-                "builtin.shell",
-                "builtin.list_dir",
+                "builtin.read",
+                "builtin.write",
+                "builtin.edit",
+                "builtin.bash",
                 "builtin.grep",
                 "builtin.glob",
             ]
@@ -327,6 +312,44 @@ mod tests {
                 .iter()
                 .flat_map(|flavor| flavor.tool_allowlist.iter())
                 .all(|tool| tool.as_str() != DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+        );
+    }
+
+    #[test]
+    fn flavor_allowlists_emit_only_current_coding_surface() {
+        // Cutover invariant: no flavor may emit a retired coding-tool identity
+        // (read_file/write_file/list_dir/apply_patch), and the deduped union of
+        // all allowlists must be exactly the current pinned coding surface — two variants
+        // must never share a capability id.
+        let retired = [
+            "builtin.read_file",
+            "builtin.write_file",
+            "builtin.list_dir",
+            "builtin.apply_patch",
+        ];
+        let mut emitted: Vec<&str> = BUILTIN_SUBAGENT_FLAVORS
+            .iter()
+            .flat_map(|flavor| flavor.tool_allowlist.iter().map(|tool| tool.as_str()))
+            .collect();
+        for id in &emitted {
+            assert!(
+                !retired.contains(id),
+                "flavor allowlist must not emit retired identity {id}"
+            );
+        }
+        emitted.sort_unstable();
+        emitted.dedup();
+        assert_eq!(
+            emitted,
+            vec![
+                "builtin.bash",
+                "builtin.edit",
+                "builtin.glob",
+                "builtin.grep",
+                "builtin.http",
+                "builtin.read",
+                "builtin.write",
+            ]
         );
     }
 
@@ -456,11 +479,10 @@ mod tests {
         // The flavor allowlist must be a subset of these; the filter narrows the
         // host surface down to the flavor's declared allowlist.
         const HOST_SURFACE: &[&str] = &[
-            "builtin.read_file",
-            "builtin.write_file",
-            "builtin.apply_patch",
-            "builtin.shell",
-            "builtin.list_dir",
+            "builtin.read",
+            "builtin.write",
+            "builtin.edit",
+            "builtin.bash",
             "builtin.grep",
             "builtin.glob",
             "builtin.http",
@@ -707,18 +729,18 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn explorer_cannot_see_or_invoke_write_shell_or_spawn() {
+        async fn explorer_cannot_see_or_invoke_write_bash_or_spawn() {
             let (filter, spy) = filter_for_flavor(SubagentFlavorId::Explorer).await;
 
             // Visible surface and provider tool definitions equal the read-only
-            // allowlist exactly — write/shell/spawn never appear.
+            // allowlist exactly — write/bash/spawn never appear.
             let expected = expected_surface(SubagentFlavorId::Explorer);
             assert_eq!(visible_ids(&filter).await, expected);
             assert_eq!(definition_ids(&filter), expected);
             for forbidden in [
-                "builtin.write_file",
-                "builtin.apply_patch",
-                "builtin.shell",
+                "builtin.write",
+                "builtin.edit",
+                "builtin.bash",
                 "builtin.spawn_subagent",
             ] {
                 assert!(
@@ -730,9 +752,9 @@ mod tests {
             // Invocation of forbidden capabilities is denied and never reaches
             // the inner host port.
             for forbidden in [
-                "builtin.write_file",
-                "builtin.apply_patch",
-                "builtin.shell",
+                "builtin.write",
+                "builtin.edit",
+                "builtin.bash",
                 "builtin.spawn_subagent",
             ] {
                 let outcome = filter
@@ -747,24 +769,21 @@ mod tests {
 
             // A permitted read capability passes through to the host.
             let outcome = filter
-                .invoke_capability(invocation("builtin.read_file"))
+                .invoke_capability(invocation("builtin.read"))
                 .await
                 .expect("outcome");
-            assert!(
-                !is_denied(&outcome),
-                "read_file must be allowed for explorer"
-            );
+            assert!(!is_denied(&outcome), "read must be allowed for explorer");
 
             let invoked = spy.invoked.lock().expect("invoked lock").clone();
-            assert_eq!(invoked, vec!["builtin.read_file".to_string()]);
+            assert_eq!(invoked, vec!["builtin.read".to_string()]);
         }
 
         #[tokio::test]
-        async fn coder_gets_exactly_read_write_shell_surface_without_spawn() {
+        async fn coder_gets_exactly_read_write_bash_surface_without_spawn() {
             let (filter, spy) = filter_for_flavor(SubagentFlavorId::Coder).await;
 
             // Effective surface equals the coder allowlist exactly — read, write,
-            // apply_patch, shell, list_dir, grep, glob — and nothing more.
+            // edit, bash, grep, glob — and nothing more.
             let expected = expected_surface(SubagentFlavorId::Coder);
             assert_eq!(visible_ids(&filter).await, expected);
             assert_eq!(definition_ids(&filter), expected);
@@ -800,18 +819,18 @@ mod tests {
             let (filter, spy) = filter_for_flavor_with_base(
                 SubagentFlavorId::Coder,
                 CapabilitySurfacePolicy::allow_only([
-                    cap("builtin.read_file"),
-                    cap("builtin.shell"),
+                    cap("builtin.read"),
+                    cap("builtin.bash"),
                     cap("builtin.http"),
                 ]),
             )
             .await;
 
-            let expected = vec!["builtin.read_file".to_string(), "builtin.shell".to_string()];
+            let expected = vec!["builtin.bash".to_string(), "builtin.read".to_string()];
             assert_eq!(visible_ids(&filter).await, expected);
             assert_eq!(definition_ids(&filter), expected);
 
-            for denied in ["builtin.apply_patch", "builtin.http"] {
+            for denied in ["builtin.edit", "builtin.http"] {
                 let outcome = filter
                     .invoke_capability(invocation(denied))
                     .await
@@ -823,23 +842,21 @@ mod tests {
             }
 
             let outcome = filter
-                .invoke_capability(invocation("builtin.shell"))
+                .invoke_capability(invocation("builtin.bash"))
                 .await
                 .expect("outcome");
-            assert!(!is_denied(&outcome), "shell must remain allowed");
+            assert!(!is_denied(&outcome), "bash must remain allowed");
             assert_eq!(
                 spy.invoked.lock().expect("invoked lock").clone(),
-                vec!["builtin.shell".to_string()]
+                vec!["builtin.bash".to_string()]
             );
         }
 
         #[tokio::test]
         async fn non_subagent_surface_preserves_outer_profile_surface() {
             let context = test_run_context("caller-level-non-subagent");
-            let base_policy = CapabilitySurfacePolicy::allow_only([
-                cap("builtin.read_file"),
-                cap("builtin.http"),
-            ]);
+            let base_policy =
+                CapabilitySurfacePolicy::allow_only([cap("builtin.read"), cap("builtin.http")]);
             let source: Arc<dyn SubagentPromptMaterialSource> =
                 Arc::new(RebornSubagentPromptMaterialSource::new(
                     ProcessRuntimeSystem::in_memory_ephemeral()
@@ -875,10 +892,11 @@ mod tests {
                     expected,
                     "{flavor:?} tool definitions"
                 );
-                // These flavors must never expose write/shell/spawn.
+                // These flavors must never expose write/bash/spawn.
                 for forbidden in [
-                    "builtin.write_file",
-                    "builtin.shell",
+                    "builtin.write",
+                    "builtin.edit",
+                    "builtin.bash",
                     "builtin.spawn_subagent",
                 ] {
                     let outcome = filter

@@ -7,7 +7,7 @@ mod reborn_support;
 mod support;
 
 use ironclaw_host_api::ids::CapabilityId;
-use ironclaw_host_runtime::READ_FILE_CAPABILITY_ID;
+use ironclaw_host_runtime::CODING_READ_CAPABILITY_ID;
 use ironclaw_loop_contracts::LoopHostMilestoneKind;
 use ironclaw_loop_host::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::TurnStatus;
@@ -19,16 +19,16 @@ use parity_qa_support::{
 };
 use reborn_support::doubles::RecordingTestCapabilityPort;
 
-/// Exercises read_file with a missing `path` parameter, proving malformed real
+/// Exercises read with a missing `path` parameter, proving malformed real
 /// built-in tool input is returned to the model and the turn can recover.
 #[tokio::test]
 async fn reborn_trace_error_path_parity() {
-    let read_file = CapabilityId::new(READ_FILE_CAPABILITY_ID).expect("valid capability id");
+    let read = CapabilityId::new(CODING_READ_CAPABILITY_ID).expect("valid capability id");
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![RebornScriptedProviderToolCall::new(
-                read_file.clone(),
-                "call_read_file_missing_path",
+                read.clone(),
+                "call_read_missing_path",
                 serde_json::json!({}),
             )],
             expected_tool_results: Vec::new(),
@@ -60,7 +60,7 @@ async fn reborn_trace_error_path_parity() {
 
     let invocations = harness.capability_invocations();
     assert_eq!(invocations.len(), 1);
-    assert_eq!(invocations[0].capability_id, read_file);
+    assert_eq!(invocations[0].capability_id, read);
 
     let requests = harness.model_requests();
     assert_eq!(requests.len(), 2);
@@ -69,7 +69,7 @@ async fn reborn_trace_error_path_parity() {
             message.role == HostManagedModelMessageRole::ToolResult
                 && message.content.contains("path")
         }),
-        "the retrying model turn must observe why read_file input was invalid"
+        "the retrying model turn must observe why read input was invalid"
     );
     assert_eq!(harness.remaining_model_responses(), 0);
     assert!(harness.milestones().iter().any(|milestone| matches!(
@@ -167,17 +167,17 @@ async fn reborn_trace_invalid_input_recovers_with_changed_action() {
 }
 
 /// Exercises the model replay guard for scripted calls whose capability was not
-/// advertised by the active surface. The harness exposes only write_file, then
-/// the trace asks for read_file, so `provider_tool_calls_response` must reject
+/// advertised by the active surface. The harness exposes only write, then
+/// the trace asks for read, so `provider_tool_calls_response` must reject
 /// the model output before registration and retry with corrective context.
 #[tokio::test]
 async fn reborn_trace_unadvertised_capability_is_rejected() {
-    let read_file = CapabilityId::new(READ_FILE_CAPABILITY_ID).expect("valid capability id");
+    let read = CapabilityId::new(CODING_READ_CAPABILITY_ID).expect("valid capability id");
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![RebornScriptedProviderToolCall::new(
-                read_file,
-                "call_read_file_unadvertised",
+                read,
+                "call_read_unadvertised",
                 serde_json::json!({
                     "path": "/workspace/should-not-be-visible.txt",
                 }),
@@ -186,7 +186,7 @@ async fn reborn_trace_unadvertised_capability_is_rejected() {
         },
         RebornModelReplayStep::Response {
             response: HostManagedModelResponse::assistant_reply(
-                "I cannot call read_file because it is not available in this turn.",
+                "I cannot call read because it is not available in this turn.",
             ),
             expected_tool_results: Vec::new(),
         },

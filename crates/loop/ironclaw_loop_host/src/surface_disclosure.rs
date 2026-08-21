@@ -8,8 +8,8 @@ use ironclaw_host_api::{
     resolution::{Resolution, ResolutionBatch},
 };
 use ironclaw_host_runtime::{
-    APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
-    READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+    CODING_BASH_CAPABILITY_ID, CODING_EDIT_CAPABILITY_ID, CODING_GLOB_CAPABILITY_ID,
+    CODING_GREP_CAPABILITY_ID, CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID,
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, CapabilityCallCandidate, CapabilityDescriptorView, LoopCapabilityPort,
@@ -145,8 +145,8 @@ impl HostSurfaceDisclosure {
         description: &mut String,
         parameters_schema: &mut serde_json::Value,
     ) {
-        if capability_id.as_str() == SHELL_CAPABILITY_ID {
-            append_description_note(description, LOCAL_HOST_SHELL_NOTE);
+        if capability_id.as_str() == CODING_BASH_CAPABILITY_ID {
+            append_description_note(description, LOCAL_HOST_BASH_NOTE);
             return;
         }
         if !scoped_path_capability(capability_id.as_str()) {
@@ -160,17 +160,16 @@ impl HostSurfaceDisclosure {
     }
 }
 
-const LOCAL_HOST_SHELL_NOTE: &str = "Runs on the local host with configured host process and network access. Local-host shell command paths may use /workspace and /host aliases when those roots are configured; they are translated to the confirmed local workspace and host-home paths before execution.";
+const LOCAL_HOST_BASH_NOTE: &str = "Runs on the local host with configured host process and network access. Local-host bash command paths may use /workspace and /host aliases when those roots are configured; they are translated to the confirmed local workspace and host-home paths before execution.";
 
 fn scoped_path_capability(capability_id: &str) -> bool {
     matches!(
         capability_id,
-        READ_FILE_CAPABILITY_ID
-            | WRITE_FILE_CAPABILITY_ID
-            | LIST_DIR_CAPABILITY_ID
-            | GLOB_CAPABILITY_ID
-            | GREP_CAPABILITY_ID
-            | APPLY_PATCH_CAPABILITY_ID
+        CODING_READ_CAPABILITY_ID
+            | CODING_WRITE_CAPABILITY_ID
+            | CODING_EDIT_CAPABILITY_ID
+            | CODING_GLOB_CAPABILITY_ID
+            | CODING_GREP_CAPABILITY_ID
     )
 }
 
@@ -192,7 +191,7 @@ fn confirmed_host_roots_note(aliases: &[&str]) -> Option<String> {
     let roots = aliases.join(", ");
     let mut note = format!("Available scoped roots: {roots}.");
     note.push_str(" /host is the confirmed host home mount; prefer /host over raw home paths.");
-    note.push_str(" In local-host shell, the same roots are available as command path aliases.");
+    note.push_str(" In local-host bash, the same roots are available as command path aliases.");
     Some(note)
 }
 

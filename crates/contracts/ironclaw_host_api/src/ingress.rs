@@ -866,7 +866,7 @@ mod tests {
                     .expect("valid host port"),
             },
             AllowedEffectPath::CapabilityHost {
-                capability_id: CapabilityId::new("builtin.read_file").expect("valid capability"),
+                capability_id: CapabilityId::new("builtin.read").expect("valid capability"),
             },
         ];
 

@@ -1376,6 +1376,9 @@ impl ToolDisclosureCapabilityPort {
         let write = self
             .result_writer
             .write_capability_result(CapabilityResultWrite {
+                receipt: None,
+                completed_artifact: None,
+                canonical_output_digest: None,
                 run_context: &self.run_context,
                 input_ref: &request.input_ref,
                 invocation_id: InvocationId::new(),
@@ -1383,6 +1386,7 @@ impl ToolDisclosureCapabilityPort {
                 output,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
+                canonical_item_count: None,
             })
             .await?;
         Ok(resolution::completed(
@@ -2304,11 +2308,8 @@ mod tests {
 
     #[tokio::test]
     async fn visible_surface_preserves_verified_catalog_description_provenance() {
-        let mut definition = provider_definition(
-            "fixture.read_file",
-            "read_file",
-            "Verified catalog description",
-        );
+        let mut definition =
+            provider_definition("fixture.read", "read", "Verified catalog description");
         definition.description_trust =
             ironclaw_host_api::capability::CapabilityDescriptionTrust::VerifiedCatalog;
         let inner = Arc::new(SpyPort {
@@ -2331,7 +2332,7 @@ mod tests {
         let descriptor = surface
             .descriptors
             .iter()
-            .find(|descriptor| descriptor.safe_name == "read_file")
+            .find(|descriptor| descriptor.safe_name == "read")
             .expect("core capability remains visible");
 
         assert_eq!(
@@ -2343,7 +2344,7 @@ mod tests {
     #[tokio::test]
     async fn search_discloses_tool_call_dispatches_target_and_promotes_next_turn() {
         let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition("fixture.read", "read", "Read a file"),
             provider_definition(
                 "fixture.hidden",
                 "hidden_tool",
@@ -2627,7 +2628,7 @@ mod tests {
     #[tokio::test]
     async fn direct_deferred_catalog_tool_dispatches_target_and_promotes_next_turn() {
         let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition("fixture.read", "read", "Read a file"),
             provider_definition(
                 "fixture.hidden",
                 "hidden_tool",
@@ -2749,7 +2750,7 @@ mod tests {
         // directly callable — without this the model inspects a tool it can never
         // reach and loops.
         let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition("fixture.read", "read", "Read a file"),
             provider_definition("fixture.hidden", "hidden_tool", "Hidden operation"),
             provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
             provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
@@ -2830,7 +2831,7 @@ mod tests {
         // schema as a recoverable completion WITHOUT dispatching the target blind,
         // so the model's retry can be well-formed.
         let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition("fixture.read", "read", "Read a file"),
             provider_definition("fixture.hidden", "hidden_tool", "Hidden operation"),
             provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
             provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
@@ -2904,7 +2905,7 @@ mod tests {
         // pass validation dispatches straight to the target (no wasted round-trip),
         // matching the zero-round-trip pre-disclosure behavior.
         let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition("fixture.read", "read", "Read a file"),
             provider_definition("fixture.hidden", "hidden_tool", "Hidden operation"),
             provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
             provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
@@ -2961,7 +2962,7 @@ mod tests {
         // "made progress" schema responses and the no-progress detector would
         // never observe the repeated failure.
         let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition("fixture.read", "read", "Read a file"),
             provider_definition("fixture.hidden", "hidden_tool", "Hidden operation"),
             provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
             provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
@@ -3046,7 +3047,7 @@ mod tests {
         // model might otherwise copy can no longer reach this port: `ProviderToolName`
         // excludes dots, so the gateway rejects such a call before it lands here.)
         let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition("fixture.read", "read", "Read a file"),
             provider_definition(
                 "google-calendar.list_events",
                 "google-calendar__list_events",
@@ -3116,7 +3117,7 @@ mod tests {
         // (completed or gate-suspended), so a mere search/describe still does not,
         // and the advertised surface does not balloon toward "all tools".
         let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition("fixture.read", "read", "Read a file"),
             provider_definition("fixture.suspends", "suspends_tool", "Needs approval"),
             provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
             provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
@@ -3205,7 +3206,7 @@ mod tests {
         // is not available"). Callable must be a superset of everything advertised
         // this turn AND still include the deferred long tail.
         let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition("fixture.read", "read", "Read a file"),
             provider_definition("fixture.hidden", "hidden_tool", "Hidden operation"),
             provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
             provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
@@ -3263,7 +3264,7 @@ mod tests {
     #[tokio::test]
     async fn direct_provider_encoded_builtin_dispatches_and_promotes() {
         let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition("fixture.read", "read", "Read a file"),
             provider_definition("builtin.echo", "echo", "Echo the input"),
             provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
             provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
@@ -3395,7 +3396,7 @@ mod tests {
         // — if it did, this tool would fail "unresolved unadvertised" exactly like
         // the long tail of extension/MCP tools would in production.
         let definitions = vec![
-            provider_definition("builtin.read_file", "builtin__read_file", "Read a file"),
+            provider_definition("builtin.read", "read", "Read a file"),
             provider_definition(
                 "gmail.send_message",
                 "gmail__send_message",
@@ -3528,7 +3529,7 @@ mod tests {
         // bridge must be no stricter than a direct call: an undisclosed catalog
         // tool resolves and dispatches to the target.
         let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition("fixture.read", "read", "Read a file"),
             provider_definition(
                 "fixture.hidden",
                 "hidden_tool",
@@ -3623,7 +3624,7 @@ mod tests {
         // provider response. (Observed live with gpt-5.5: repeated tool_call
         // validation rejections, run ending Failed / driver_protocol_violation.)
         let definitions = vec![
-            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition("fixture.read", "read", "Read a file"),
             provider_definition("fixture.explodes", "register_explodes", "Register fails"),
             provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
             provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
@@ -3695,11 +3696,7 @@ mod tests {
         // Recursion guard: tool_call(name = a bridge) must NOT re-enter the
         // bridge or dispatch anything — it is a model-recoverable failure.
         let inner = Arc::new(SpyPort {
-            definitions: vec![provider_definition(
-                "fixture.read_file",
-                "read_file",
-                "Read a file",
-            )],
+            definitions: vec![provider_definition("fixture.read", "read", "Read a file")],
             surface_version: CapabilitySurfaceVersion::new("surface:test")
                 .expect("valid surface version"),
             registered_calls: Mutex::new(Vec::new()),
@@ -3773,11 +3770,7 @@ mod tests {
     #[tokio::test]
     async fn advertised_tool_describe_errors_are_recoverable_without_dispatch() {
         let inner = Arc::new(SpyPort {
-            definitions: vec![provider_definition(
-                "fixture.read_file",
-                "read_file",
-                "Read a file",
-            )],
+            definitions: vec![provider_definition("fixture.read", "read", "Read a file")],
             surface_version: CapabilitySurfaceVersion::new("surface:test")
                 .expect("valid surface version"),
             registered_calls: Mutex::new(Vec::new()),
@@ -3858,11 +3851,7 @@ mod tests {
         // Unknown-target guard: tool_call(name = not in catalog) must be a
         // model-recoverable failure and must not dispatch to the inner port.
         let inner = Arc::new(SpyPort {
-            definitions: vec![provider_definition(
-                "fixture.read_file",
-                "read_file",
-                "Read a file",
-            )],
+            definitions: vec![provider_definition("fixture.read", "read", "Read a file")],
             surface_version: CapabilitySurfaceVersion::new("surface:test")
                 .expect("valid surface version"),
             registered_calls: Mutex::new(Vec::new()),
@@ -3937,7 +3926,7 @@ mod tests {
     async fn promotions_are_scoped_by_full_turn_scope_not_thread_only() {
         let inner = Arc::new(SpyPort {
             definitions: vec![
-                provider_definition("fixture.read_file", "read_file", "Read a file"),
+                provider_definition("fixture.read", "read", "Read a file"),
                 provider_definition(
                     "fixture.hidden",
                     "hidden_tool",
@@ -4043,11 +4032,7 @@ mod tests {
     #[tokio::test]
     async fn tool_search_rejects_missing_non_string_or_blank_query() {
         let inner = Arc::new(SpyPort {
-            definitions: vec![provider_definition(
-                "fixture.read_file",
-                "read_file",
-                "Read a file",
-            )],
+            definitions: vec![provider_definition("fixture.read", "read", "Read a file")],
             surface_version: CapabilitySurfaceVersion::new("surface:test")
                 .expect("valid surface version"),
             registered_calls: Mutex::new(Vec::new()),

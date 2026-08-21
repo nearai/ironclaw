@@ -6,10 +6,9 @@
 //! usage. Authority decisions remain in `CapabilityHost`/authorization and the
 //! runtime-policy/planning layers.
 
-use std::{collections::HashMap, fmt, sync::Arc};
-
 use async_trait::async_trait;
 use ironclaw_host_api::{
+    artifact::ArtifactWriteHandle,
     decision::RuntimeCredentialAuthRequirement,
     dispatch::{
         CapabilityDisplayOutputPreview, DispatchFailureDetail, DispatchInputIssue,
@@ -20,8 +19,10 @@ use ironclaw_host_api::{
     invocation::InvocationOrigin,
     mount::MountView,
     resource::{ResourceEstimate, ResourceScope, ResourceUsage},
+    result_meta::OutputDigest,
 };
 use serde_json::Value;
+use std::{collections::HashMap, fmt, sync::Arc};
 
 use crate::InvocationServices;
 
@@ -104,6 +105,9 @@ impl FirstPartyCapabilityRequest {
             mounts: None,
             services: InvocationServices {
                 filesystem: Arc::new(ironclaw_filesystem::InMemoryBackend::new()),
+                artifact_namespace: None,
+                artifact_reader: None,
+                artifact_persistence: None,
                 runtime_http_egress,
                 tool_call_http_egress: None,
                 runtime_secret_material_stager: None,
@@ -118,6 +122,12 @@ impl FirstPartyCapabilityRequest {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingFirstPartyArtifact {
+    pub handle: ArtifactWriteHandle,
+    pub bytes: Vec<u8>,
+}
+
 /// Normalized first-party capability output before resource reconciliation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -125,6 +135,10 @@ pub struct FirstPartyCapabilityResult {
     pub output: Value,
     pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub usage: ResourceUsage,
+    pub(crate) canonical_output_digest: Option<OutputDigest>,
+    /// Allocated but not yet persisted raw output. The runtime adapter grows
+    /// the active reservation before appending each chunk.
+    pub(crate) pending_artifact: Option<PendingFirstPartyArtifact>,
 }
 
 impl FirstPartyCapabilityResult {
@@ -133,6 +147,8 @@ impl FirstPartyCapabilityResult {
             output,
             display_preview: None,
             usage,
+            canonical_output_digest: None,
+            pending_artifact: None,
         }
     }
 
@@ -141,6 +157,16 @@ impl FirstPartyCapabilityResult {
         display_preview: Option<CapabilityDisplayOutputPreview>,
     ) -> Self {
         self.display_preview = display_preview;
+        self
+    }
+
+    pub(crate) fn with_canonical_output_digest(mut self, digest: OutputDigest) -> Self {
+        self.canonical_output_digest = Some(digest);
+        self
+    }
+
+    pub(crate) fn with_pending_artifact(mut self, artifact: PendingFirstPartyArtifact) -> Self {
+        self.pending_artifact = Some(artifact);
         self
     }
 }

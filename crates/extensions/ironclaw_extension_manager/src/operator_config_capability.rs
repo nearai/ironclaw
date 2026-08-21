@@ -99,6 +99,7 @@ fn manifest() -> Result<CapabilityManifest, ExtensionError> {
             hard_ceiling: None,
         }),
         origin_gate_matrix: Some(OriginGateMatrix::product_consent_only()),
+        provider_tool_name: None,
     })
 }
 
@@ -128,6 +129,7 @@ fn tool_permission_manifest() -> Result<CapabilityManifest, ExtensionError> {
             hard_ceiling: None,
         }),
         origin_gate_matrix: Some(OriginGateMatrix::product_consent_only()),
+        provider_tool_name: None,
     })
 }
 

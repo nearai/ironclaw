@@ -31,6 +31,8 @@ pub(crate) enum BuiltinCapabilityPolicyError {
     MissingGrant { capability: CapabilityId },
     #[error("standalone capability policy is missing its built-in shell grant")]
     MissingShellGrant,
+    #[error("standalone capability policy is missing its pinned bash grant")]
+    MissingBashGrant,
     #[error("standalone capability policy has empty effect set for {target}")]
     EmptyEffects { target: String },
     #[error("standalone capability policy has duplicate effect {effect:?} for {target}")]
@@ -70,23 +72,34 @@ impl BuiltinCapabilityPolicy {
             }
         })?;
 
-        let shell = self
-            .grants
-            .iter_mut()
-            .find(|grant| grant.capability.as_str() == ironclaw_host_runtime::SHELL_CAPABILITY_ID)
-            .ok_or(BuiltinCapabilityPolicyError::MissingShellGrant)?;
-        shell.effects.retain(|effect| {
-            !matches!(
-                effect,
-                EffectKind::ReadFilesystem | EffectKind::WriteFilesystem
-            )
-        });
-        // The sandbox transport supplies its own per-user `/workspace` bind.
-        // Passing the host runtime's tenant-workspace grant would either expose
-        // the wrong storage boundary or fail its trusted-mount resolution.
-        shell.mounts = CapabilityMountProfile::Ambient;
-        shell.network = CapabilityNetworkProfile::SandboxManagedEgress;
-        shell.network_override = Some(network_override);
+        for (capability_id, missing_error) in [
+            (
+                ironclaw_host_runtime::SHELL_CAPABILITY_ID,
+                BuiltinCapabilityPolicyError::MissingShellGrant,
+            ),
+            (
+                ironclaw_host_runtime::CODING_BASH_CAPABILITY_ID,
+                BuiltinCapabilityPolicyError::MissingBashGrant,
+            ),
+        ] {
+            let grant = self
+                .grants
+                .iter_mut()
+                .find(|grant| grant.capability.as_str() == capability_id)
+                .ok_or(missing_error)?;
+            grant.effects.retain(|effect| {
+                !matches!(
+                    effect,
+                    EffectKind::ReadFilesystem | EffectKind::WriteFilesystem
+                )
+            });
+            // The sandbox transport supplies its own per-user `/workspace` bind.
+            // Passing the host runtime's tenant-workspace grant would either expose
+            // the wrong storage boundary or fail its trusted-mount resolution.
+            grant.mounts = CapabilityMountProfile::Ambient;
+            grant.network = CapabilityNetworkProfile::SandboxManagedEgress;
+            grant.network_override = Some(network_override.clone());
+        }
         Ok(self)
     }
 
@@ -638,7 +651,13 @@ mod tests {
         );
         assert!(
             policy
-                .grant(&CapabilityId::new("builtin.apply_patch").expect("capability id"))
+                .grant(&CapabilityId::new("builtin.bash").expect("capability id"))
+                .is_ok(),
+            "the pinned bash engine must be production-granted to become model-visible"
+        );
+        assert!(
+            policy
+                .grant(&CapabilityId::new("builtin.edit").expect("capability id"))
                 .is_ok()
         );
         for (capability, expected_effects) in [
@@ -801,23 +820,31 @@ mod tests {
     }
 
     #[test]
-    fn user_sandbox_shell_grant_uses_transport_workspace_and_managed_egress() {
+    fn user_sandbox_process_grants_use_transport_workspace_and_managed_egress() {
         let policy = builtin_capability_policy()
             .expect("policy parses")
             .for_process_backend(ProcessBackendKind::UserSandbox)
             .expect("user-sandbox policy projects");
         let shell_id = CapabilityId::new("builtin.shell").expect("capability id");
-        let shell = policy.grant(&shell_id).expect("shell grant");
 
-        for effect in [EffectKind::ReadFilesystem, EffectKind::WriteFilesystem] {
-            assert!(!shell.effects.contains(&effect));
+        for capability in ["builtin.shell", "builtin.bash"] {
+            let grant = policy
+                .grant(&CapabilityId::new(capability).expect("capability id"))
+                .expect("process-backed capability grant");
+
+            for effect in [EffectKind::ReadFilesystem, EffectKind::WriteFilesystem] {
+                assert!(
+                    !grant.effects.contains(&effect),
+                    "{capability} must use sandbox filesystem transport"
+                );
+            }
+            assert!(grant.effects.contains(&EffectKind::Network));
+            assert_eq!(
+                grant.network,
+                CapabilityNetworkProfile::SandboxManagedEgress
+            );
+            assert_eq!(grant.mounts, CapabilityMountProfile::Ambient);
         }
-        assert!(shell.effects.contains(&EffectKind::Network));
-        assert_eq!(
-            shell.network,
-            CapabilityNetworkProfile::SandboxManagedEgress
-        );
-        assert_eq!(shell.mounts, CapabilityMountProfile::Ambient);
 
         let network = policy
             .grant_constraints_for(
@@ -854,6 +881,19 @@ mod tests {
         assert!(matches!(
             policy.for_process_backend(ProcessBackendKind::UserSandbox),
             Err(BuiltinCapabilityPolicyError::MissingShellGrant)
+        ));
+    }
+
+    #[test]
+    fn user_sandbox_policy_fails_closed_without_a_bash_grant() {
+        let mut policy = builtin_capability_policy().expect("policy parses");
+        policy.grants.retain(|grant| {
+            grant.capability.as_str() != ironclaw_host_runtime::CODING_BASH_CAPABILITY_ID
+        });
+
+        assert!(matches!(
+            policy.for_process_backend(ProcessBackendKind::UserSandbox),
+            Err(BuiltinCapabilityPolicyError::MissingBashGrant)
         ));
     }
 

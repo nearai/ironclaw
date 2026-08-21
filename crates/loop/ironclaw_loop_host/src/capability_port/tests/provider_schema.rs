@@ -71,3 +71,38 @@ fn provider_tool_name_normalizes_provider_unsafe_characters() {
     assert_eq!(name.as_str(), "demo__echo__v1");
     provider_validation::validate_provider_tool_name(name.as_str()).expect("provider-safe name");
 }
+
+#[test]
+fn provider_tool_name_override_advertises_exactly_without_alias() {
+    let capability_id = CapabilityId::new("builtin.read").expect("valid capability id");
+    let override_name = ProviderToolName::new("read").expect("provider tool name");
+    let advertised =
+        resolve_provider_tool_name(&capability_id, Some(&override_name), &HashMap::new())
+            .expect("override resolves");
+
+    assert_eq!(advertised.as_str(), "read");
+}
+
+#[test]
+fn provider_tool_name_without_override_derives_unchanged() {
+    let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+    let advertised = resolve_provider_tool_name(&capability_id, None, &HashMap::new())
+        .expect("derived name resolves");
+
+    assert_eq!(advertised.as_str(), "demo__echo");
+}
+
+#[test]
+fn provider_tool_name_override_collision_fails_loudly() {
+    let capability_id = CapabilityId::new("builtin.read").expect("valid capability id");
+    let mut existing = HashMap::new();
+    existing.insert(
+        ProviderToolName::new("read").expect("provider tool name"),
+        CapabilityId::new("builtin.write").expect("valid capability id"),
+    );
+    let override_name = ProviderToolName::new("read").expect("provider tool name");
+    let error = resolve_provider_tool_name(&capability_id, Some(&override_name), &existing)
+        .expect_err("colliding override is rejected");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+}

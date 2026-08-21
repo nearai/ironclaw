@@ -10,20 +10,20 @@ use std::{collections::BTreeSet, time::Duration};
 
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_host_runtime::{
-    APPLY_PATCH_CAPABILITY_ID, ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID, ECHO_CAPABILITY_ID,
-    GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID,
-    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
+    ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID, CODING_BASH_CAPABILITY_ID,
+    CODING_EDIT_CAPABILITY_ID, CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID,
+    ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
+    HTTP_SAVE_CAPABILITY_ID, JSON_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
-    TIME_CAPABILITY_ID, TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
-    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
-    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
-    TRIGGER_RUN_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_package,
-    native_memory_first_party_package,
+    PROFILE_SET_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID,
+    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TRIGGER_RUN_CAPABILITY_ID,
+    builtin_first_party_package, native_memory_first_party_package,
 };
 use ironclaw_loop_contracts::LoopHostMilestoneKind;
 use ironclaw_loop_host::{HostManagedModelMessageRole, HostManagedModelResponse};
@@ -58,12 +58,12 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     MEMORY_TREE_CAPABILITY_ID,
     PROFILE_SET_CAPABILITY_ID,
     SHELL_CAPABILITY_ID,
-    READ_FILE_CAPABILITY_ID,
-    WRITE_FILE_CAPABILITY_ID,
-    LIST_DIR_CAPABILITY_ID,
+    CODING_BASH_CAPABILITY_ID,
+    CODING_READ_CAPABILITY_ID,
+    CODING_WRITE_CAPABILITY_ID,
     GLOB_CAPABILITY_ID,
     GREP_CAPABILITY_ID,
-    APPLY_PATCH_CAPABILITY_ID,
+    CODING_EDIT_CAPABILITY_ID,
     SPAWN_SUBAGENT_CAPABILITY_ID,
     SKILL_LIST_CAPABILITY_ID,
     SKILL_INSTALL_CAPABILITY_ID,
@@ -96,7 +96,7 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     // attempt ledger.
     ironclaw_host_runtime::OUTBOUND_DELIVER_CAPABILITY_ID,
     // This capability's production runtime proof writes a CSV through
-    // `builtin.write_file`, invokes the attachment tool through the real
+    // `builtin.write`, invokes the attachment tool through the real
     // host/runtime/loop chain, and verifies the finalized assistant message:
     // `runtime::tests::outbound_delivery::
     // production_reply_attachment_capability_registers_durable_run_intent`.
@@ -150,7 +150,7 @@ fn reborn_builtin_first_party_capability_e2e_coverage_is_complete() {
 #[tokio::test]
 async fn reborn_trace_process_first_party_tools_parity() {
     let echo = CapabilityId::new(ECHO_CAPABILITY_ID).expect("valid capability id");
-    let shell = CapabilityId::new(SHELL_CAPABILITY_ID).expect("valid capability id");
+    let bash = CapabilityId::new(CODING_BASH_CAPABILITY_ID).expect("valid capability id");
     let spawn_subagent =
         CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID).expect("valid capability id");
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
@@ -202,14 +202,14 @@ async fn reborn_trace_process_first_party_tools_parity() {
 
     let requests = harness.model_requests();
     assert_eq!(requests.len(), 2);
-    // The loop approval-gates shell execution; the product-live adapter e2e
-    // covers direct shell execution while this test guards model-surface parity.
+    // The loop approval-gates command execution; the product-live adapter e2e
+    // covers direct execution while this test guards model-surface parity.
     assert!(
         requests[0]
             .messages
             .iter()
-            .any(|message| message.content.contains(shell.as_str())),
-        "shell must be advertised on the Reborn model-facing first-party surface"
+            .any(|message| message.content.contains(bash.as_str())),
+        "bash must be advertised on the Reborn model-facing first-party surface"
     );
     // TEMP(disable-spawn-subagents): spawn_subagent is temporarily disabled via
     // the outermost capability deny filter in the default planned runtime, so it

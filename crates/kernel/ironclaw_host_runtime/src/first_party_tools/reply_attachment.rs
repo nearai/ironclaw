@@ -359,6 +359,9 @@ mod tests {
         request.mounts = mounts;
         request.services = InvocationServices {
             filesystem: root,
+            artifact_namespace: None,
+            artifact_reader: None,
+            artifact_persistence: None,
             runtime_http_egress: None,
             tool_call_http_egress: None,
             runtime_secret_material_stager: None,

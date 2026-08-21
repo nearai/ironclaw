@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Local path, internal URI (e.g. memory://, skill://), or URL. Inline selectors are supported."
+    }
+  },
+  "required": [
+    "path"
+  ],
+  "additionalProperties": false
+}

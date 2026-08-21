@@ -1,0 +1,70 @@
+{
+  "tool": "grep",
+  "note": "Representative model-visible error shapes for the pinned `grep` tool at commit 08819b279cf02ae2545e69dad7111ab48d91d35e. `template` is verbatim from the cited upstream source; `example` renders the template with representative values.",
+  "entries": [
+    {
+      "case": "invalid_regex",
+      "kind": "error",
+      "template": "Invalid regex: ${message}",
+      "example": "Invalid regex: missing )",
+      "source_path": "packages/coding-agent/src/tools/grep.ts",
+      "source_line": 433
+    },
+    {
+      "case": "pattern_empty",
+      "kind": "error",
+      "template": "Pattern must not be empty",
+      "example": "Pattern must not be empty",
+      "source_path": "packages/coding-agent/src/tools/grep.ts",
+      "source_line": 953
+    },
+    {
+      "case": "skip_negative",
+      "kind": "error",
+      "template": "Skip must be a non-negative number",
+      "example": "Skip must be a non-negative number",
+      "source_path": "packages/coding-agent/src/tools/grep.ts",
+      "source_line": 960
+    },
+    {
+      "case": "line_range_selector_requires_single_file",
+      "kind": "error",
+      "template": "Line-range selector requires a single file, not a glob: ${entry}",
+      "example": "Line-range selector requires a single file, not a glob: src/*.ts:50-100",
+      "source_path": "packages/coding-agent/src/tools/grep.ts",
+      "source_line": 189
+    },
+    {
+      "case": "line_range_path_not_found",
+      "kind": "error",
+      "template": "Path not found for line-range selector: ${original}",
+      "example": "Path not found for line-range selector: src/gone.rs:50-100",
+      "source_path": "packages/coding-agent/src/tools/grep.ts",
+      "source_line": 1071
+    },
+    {
+      "case": "line_range_target_is_directory",
+      "kind": "error",
+      "template": "Line-range selector requires a single file: ${original} is a directory",
+      "example": "Line-range selector requires a single file: src is a directory",
+      "source_path": "packages/coding-agent/src/tools/grep.ts",
+      "source_line": 1074
+    },
+    {
+      "case": "archive_members_unreadable",
+      "kind": "error",
+      "template": "Cannot search archive member(s): ${members}. Read the member with `read <archive>:<member>` and inspect the returned text, or pass a UTF-8 text member.",
+      "example": "Cannot search archive member(s): data.bin. Read the member with `read app.zip:data.bin` and inspect the returned text, or pass a UTF-8 text member.",
+      "source_path": "packages/coding-agent/src/tools/grep.ts",
+      "source_line": 1007
+    },
+    {
+      "case": "path_not_found_multi",
+      "kind": "error",
+      "template": "Path not found: ${missingPaths}; list each target in the semicolon-delimited `path`${archiveHint}",
+      "example": "Path not found: a.ts, b.rs; list each target in the semicolon-delimited `path`",
+      "source_path": "packages/coding-agent/src/tools/grep.ts",
+      "source_line": 1110
+    }
+  ]
+}

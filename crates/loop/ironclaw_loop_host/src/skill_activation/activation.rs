@@ -1452,15 +1452,15 @@ struct SkillBodyContext {
 
 /// Appended to a staged skill's body so its own commands work verbatim.
 ///
-/// Names the shell's `workdir` parameter explicitly: with the directory merely stated, the model ran
-/// `python3 scripts/egfr.py` from the shell's default cwd, missed the file, and re-typed the
+/// Names bash's `cwd` parameter explicitly: with the directory merely stated, the model ran
+/// `python3 scripts/egfr.py` from bash's default cwd, missed the file, and re-typed the
 /// algorithm inline. A body's relative paths only mean anything from the skill's own directory, and
 /// which directory that is depends on the deployment.
 fn staged_files_note(runnable_dir: &str) -> String {
     format!(
         "\n\n---\n\nThis skill's files are staged at `{runnable_dir}`. When running any command from \
-this skill, set the shell's `workdir` parameter to `{runnable_dir}` so the relative paths above \
-resolve as written — for example `workdir: \"{runnable_dir}\"` with `command: \"python3 \
+this skill, set bash's `cwd` parameter to `{runnable_dir}` so the relative paths above \
+resolve as written — for example `cwd: \"{runnable_dir}\"` with `command: \"python3 \
 scripts/<script>.py\"`. The copy under `/skills/` is read-only and cannot be executed.\n"
     )
 }

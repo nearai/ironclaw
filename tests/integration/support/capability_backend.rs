@@ -62,11 +62,10 @@ pub(super) enum RebornCapabilityBackend {
     /// recorded. Distinct from `BuiltinHttpTools`, whose
     /// `RecordingRuntimeHttpEgress` bypasses that whole pipeline.
     BuiltinHttpToolsRealEgress,
-    /// `write_file`/`read_file` (same as `file_tools()`), but backed by the
-    /// REAL `StagedCapabilityIo` (durable tool-result projection seam,
-    /// issue #5838) instead of the ephemeral `ProductLiveCapabilityIo` test
-    /// double -- so a large `read_file` result is persisted durably and
-    /// `result_read` can page through it.
+    /// `write`/`read` (same as `file_tools()`), but backed by the
+    /// real `StagedCapabilityIo` instead of the ephemeral
+    /// `ProductLiveCapabilityIo` test double, so artifact-backed result
+    /// projection follows the production path.
     FileToolsDurableIo,
     /// Harness-port-seam Change 4: the same `BuiltinHttpTools` backend with an
     /// additional confirmed `/host` mount grant, so
@@ -74,12 +73,19 @@ pub(super) enum RebornCapabilityBackend {
     /// without a confirmed host-home mount) is observable at the
     /// integration tier.
     BuiltinHttpToolsConfirmedHostMount,
-    /// `builtin.shell` through the production Docker sandbox composition.
+    /// `builtin.bash` through the production Docker sandbox composition.
     SandboxShellTools,
+    /// Issue #7392 slice 3 registration seam: the pinned coding first-party
+    /// surface (exact `read`/`write`/`edit`/`glob`/`grep`/`bash` names, pinned
+    /// schemas/descriptions) selected in the composed runtime via
+    /// `HostRuntimeHarnessOptions::with_coding_tools`. Same real
+    /// capability path as `BuiltinHttpTools` — CapabilityHost, grants,
+    /// approvals, RootFilesystem/MountView.
+    CodingTools,
 }
 
 /// Which process port the built `BuiltinHttpTools` runtime installs for
-/// `builtin.shell`. These are mutually exclusive; the builder holds exactly one.
+/// `builtin.bash`. These are mutually exclusive; the builder holds exactly one.
 #[derive(Debug, Clone, Default)]
 pub(super) enum ShellMode {
     /// Slice 5 default: the inert `RecordingProcessPort` records the command and
@@ -257,6 +263,31 @@ impl RebornCapabilityBackend {
                 }
                 let host_runtime =
                     super::harness::profiles::sandbox_shell::sandbox_shell_tools().await?;
+                GroupCapability::HostRuntime(Arc::new(host_runtime))
+            }
+            RebornCapabilityBackend::CodingTools => {
+                if !matches!(shell_mode, ShellMode::Inert) {
+                    return Err(
+                        "coding harness has no shell capability and does not support \
+                         shell mode overrides"
+                            .into(),
+                    );
+                }
+                if park_capability_gate.is_some() {
+                    return Err("park_tool_dispatch is only supported by \
+                         RebornCapabilityBackend::BuiltinHttpTools"
+                        .into());
+                }
+                if !keyed_http_responses.is_empty()
+                    || !web_access_response_bodies.is_empty()
+                    || !github_network_responses.is_empty()
+                    || !real_egress_response_bodies.is_empty()
+                {
+                    return Err(
+                        "coding harness does not support scripted network egress inputs".into(),
+                    );
+                }
+                let host_runtime = super::harness::profiles::pinned_coding::coding_tools().await?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
         })

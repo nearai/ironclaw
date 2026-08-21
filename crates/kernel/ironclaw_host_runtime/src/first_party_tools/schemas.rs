@@ -1067,8 +1067,34 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["trigger_id"],
             "additionalProperties": false
         }),
-        _ => return None,
+        _ => return resolve_coding_input_schema_ref(reference),
     })
+}
+
+/// Resolve the exact pinned OMP coding input schema assets.
+fn resolve_coding_input_schema_ref(reference: &str) -> Option<Value> {
+    let raw = match reference {
+        "schemas/builtin/coding.read.input.v1.json" => {
+            ironclaw_extension_support::coding::pinned::pinned_assets::CODING_READ_SCHEMA
+        }
+        "schemas/builtin/coding.write.input.v1.json" => {
+            ironclaw_extension_support::coding::pinned::pinned_assets::CODING_WRITE_SCHEMA
+        }
+        "schemas/builtin/coding.edit.input.v1.json" => {
+            ironclaw_extension_support::coding::pinned::pinned_assets::CODING_EDIT_SCHEMA
+        }
+        "schemas/builtin/coding.glob.input.v1.json" => {
+            ironclaw_extension_support::coding::pinned::pinned_assets::CODING_GLOB_SCHEMA
+        }
+        "schemas/builtin/coding.grep.input.v1.json" => {
+            ironclaw_extension_support::coding::pinned::pinned_assets::CODING_GREP_SCHEMA
+        }
+        "schemas/builtin/coding.bash.input.v1.json" => {
+            ironclaw_extension_support::coding::pinned::pinned_assets::CODING_BASH_SCHEMA
+        }
+        _ => return None,
+    };
+    serde_json::from_str(raw).ok()
 }
 
 fn timestamp_input_schema(description: &str) -> Value {
@@ -1149,7 +1175,7 @@ fn response_body_limit_schema(require_save_to: bool) -> Value {
     let description = if require_save_to {
         "Maximum sanitized response body bytes to fetch and save. Defaults to 10 MiB; smaller values are honored."
     } else {
-        "Maximum inline response body bytes exposed to the model. Defaults to a small model-visible budget and is capped at 256 KiB; smaller values are honored, and oversized bodies are truncated or summarized with guidance to use builtin.http.save."
+        "Maximum response body bytes exposed inline to the model. Defaults to 48 KiB and is capped at 256 KiB; smaller values are honored. Successful sanitized bodies larger than the inline artifact threshold return a bounded preview plus artifact_ref instead of losing the remaining bytes."
     };
     json!({
         "type": "integer",

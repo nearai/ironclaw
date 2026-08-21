@@ -9,7 +9,7 @@ use ironclaw_host_api::{
     mount::MountPermissions,
     runtime::RuntimeKind,
 };
-use ironclaw_host_runtime::{READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID};
+use ironclaw_host_runtime::{CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID};
 
 use super::super::super::github as github_support;
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
@@ -20,7 +20,7 @@ use super::super::{
 };
 
 /// C-JOURNEY convergence seam: surfaces the file-tool approval-gate
-/// capabilities (`write_file`/`read_file` @ `Ask`) AND a single GitHub
+/// capabilities (`write`/`read` @ `Ask`) AND a single GitHub
 /// capability (`github.get_repo`) on the SAME `build_reborn_services`
 /// local-dev runtime (the one wired with the stores both gate classes'
 /// resume paths need). Distinct from `github_issue_tools_auth_required`
@@ -65,8 +65,8 @@ pub(crate) fn file_and_github_auth_tools_profile() -> HarnessResult<ToolsProfile
     ));
     Ok(ToolsProfile {
         capability_ids: vec![
-            CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?,
-            CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
+            CapabilityId::new(CODING_WRITE_CAPABILITY_ID)?,
+            CapabilityId::new(CODING_READ_CAPABILITY_ID)?,
             CapabilityId::new("github.get_repo")?,
         ],
         effect_kinds: standalone_all_effects(),
@@ -161,7 +161,6 @@ fn github_issue_tools_with_credential_result(
         pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
         io: Mutex::new(io),
         result_writer_io: Mutex::new(result_writer_io),
-        durable_capability_io_thread_service: Mutex::new(None),
         durable_capability_io_requested: false,
         root,
         workspace_root,

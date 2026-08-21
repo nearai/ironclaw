@@ -29,7 +29,7 @@ use serde_json::json;
 fn gated_write_script(path: &str, reply: &str) -> [RebornScriptedReply; 2] {
     [
         RebornScriptedReply::tool_call(
-            "builtin.write_file",
+            "builtin.write",
             json!({"path": path, "content": "ACTOR_PAYLOAD"}),
         ),
         RebornScriptedReply::text(reply),

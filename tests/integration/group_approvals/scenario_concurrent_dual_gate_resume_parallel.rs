@@ -17,7 +17,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .thread("conv-concurrent-dual-gate-parallel-a")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 json!({"path": format!("/workspace/{path_a}"), "content": content_a}),
             ),
             RebornScriptedReply::text("A: write approved"),
@@ -28,7 +28,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .thread("conv-concurrent-dual-gate-parallel-b")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 json!({"path": format!("/workspace/{path_b}"), "content": content_b}),
             ),
             RebornScriptedReply::text("B: write was not authorized"),

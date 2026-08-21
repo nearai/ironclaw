@@ -77,6 +77,7 @@ fn local_resolver_accepts_local_required_process_backend() {
 
     let services = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -101,6 +102,7 @@ fn local_resolver_rejects_hosted_local_host_process_backend() {
 
     let error = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -143,6 +145,7 @@ async fn local_resolver_routes_post_edit_check_to_the_deployment_isolated_proces
         plan.resolved_profile = resolved_profile;
         resolver
             .resolve(InvocationServicesResolutionRequest {
+                artifact_namespace: None,
                 plan: &plan,
                 scope: &ResourceScope::system(),
                 mounts: None,
@@ -226,6 +229,7 @@ fn local_resolver_rejects_sandbox_process_backend_without_local_fallback() {
 
     let error = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -255,6 +259,7 @@ async fn local_resolver_uses_configured_sandbox_process_backend() {
 
     let services = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -289,6 +294,7 @@ fn local_resolver_rejects_unsupported_required_process_backend() {
 
     let error = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -317,6 +323,7 @@ fn local_resolver_does_not_require_process_for_pure_plan() {
 
     resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -339,6 +346,7 @@ fn local_resolver_rejects_unsupported_filesystem_backend() {
 
     let error = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -383,6 +391,7 @@ async fn hosted_tenant_workspace_uses_the_invocations_scoped_mounts() {
 
     let services = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: Some(&mounts),
@@ -414,6 +423,7 @@ fn local_resolver_accepts_host_workspace_and_home_when_filesystem_required() {
 
     let services = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -444,6 +454,7 @@ fn local_resolver_rejects_hosted_raw_host_filesystem_backends() {
 
         let error = resolver
             .resolve(InvocationServicesResolutionRequest {
+                artifact_namespace: None,
                 plan: &plan,
                 scope: &ResourceScope::system(),
                 mounts: None,
@@ -477,6 +488,7 @@ fn local_resolver_accepts_hosted_scoped_virtual_filesystem_with_mounts() {
 
     let services = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: Some(&mounts),
@@ -513,6 +525,7 @@ async fn hosted_scoped_virtual_filesystem_services_enforce_mount_targets() {
 
     let services = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: Some(&mounts),
@@ -552,6 +565,7 @@ async fn hosted_scoped_virtual_filesystem_services_enforce_mount_permissions() {
 
     let services = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: Some(&mounts),
@@ -595,6 +609,7 @@ async fn hosted_scoped_virtual_filesystem_delete_if_version_delegates_to_inner_b
 
     let services = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: Some(&mounts),
@@ -672,6 +687,7 @@ async fn hosted_scoped_virtual_filesystem_delete_if_version_denies_when_delete_m
 
     let services = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: Some(&mounts),
@@ -717,6 +733,7 @@ fn local_resolver_rejects_hosted_scoped_virtual_filesystem_without_mounts() {
 
     let error = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -746,6 +763,7 @@ fn local_resolver_ignores_unsupported_filesystem_backend_when_not_required() {
 
     resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -772,6 +790,7 @@ async fn unused_filesystem_backend_resolves_to_denied_filesystem_services() {
 
     let services = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -799,6 +818,7 @@ fn local_resolver_rejects_denied_required_network() {
 
     let error = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -827,6 +847,7 @@ fn local_resolver_rejects_required_network_when_egress_service_is_absent() {
 
     let error = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -860,6 +881,7 @@ fn local_resolver_accepts_brokered_required_network_with_egress_service() {
 
     let services = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -889,6 +911,7 @@ fn local_resolver_accepts_hosted_brokered_required_network() {
 
     let services = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -925,6 +948,7 @@ fn local_resolver_accepts_hosted_and_enterprise_allowlist_required_network() {
 
         let services = resolver
             .resolve(InvocationServicesResolutionRequest {
+                artifact_namespace: None,
                 plan: &plan,
                 scope: &ResourceScope::system(),
                 mounts: None,
@@ -955,6 +979,7 @@ fn local_resolver_rejects_hosted_direct_required_network() {
 
     let error = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -988,6 +1013,7 @@ fn local_resolver_accepts_direct_required_network_with_egress_service() {
 
     let services = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -1016,6 +1042,7 @@ fn local_resolver_allows_raw_diagnostics_only_for_standalone_and_yolo() {
     plan.resolved_profile = RuntimeProfile::LocalSafe;
     let services = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -1026,6 +1053,7 @@ fn local_resolver_allows_raw_diagnostics_only_for_standalone_and_yolo() {
     plan.resolved_profile = RuntimeProfile::LocalHost;
     let services = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -1036,6 +1064,7 @@ fn local_resolver_allows_raw_diagnostics_only_for_standalone_and_yolo() {
     plan.resolved_profile = RuntimeProfile::LocalYolo;
     let services = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -1062,6 +1091,7 @@ fn local_resolver_hides_runtime_http_egress_when_network_is_not_required() {
 
     let services = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -1089,6 +1119,7 @@ fn local_resolver_hides_secret_store_when_secret_is_not_required() {
 
     let services = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -1111,6 +1142,7 @@ fn local_resolver_rejects_required_secret_when_secret_store_is_absent() {
 
     let error = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -1143,6 +1175,7 @@ fn local_resolver_accepts_brokered_required_secret_with_secret_store() {
 
     let services = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -1185,6 +1218,7 @@ fn local_resolver_accepts_tenant_and_org_broker_required_secrets() {
 
         let services = resolver
             .resolve(InvocationServicesResolutionRequest {
+                artifact_namespace: None,
                 plan: &plan,
                 scope: &ResourceScope::system(),
                 mounts: None,
@@ -1216,6 +1250,7 @@ fn local_resolver_rejects_hosted_inherited_env_secret() {
 
     let error = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,
@@ -1249,6 +1284,7 @@ fn local_resolver_accepts_required_secret_when_secret_store_is_available() {
 
     let services = resolver
         .resolve(InvocationServicesResolutionRequest {
+            artifact_namespace: None,
             plan: &plan,
             scope: &ResourceScope::system(),
             mounts: None,

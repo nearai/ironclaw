@@ -56,7 +56,8 @@ use super::{
     HostStage, InputStage, InputStep, ModelInput, ModelStage, ModelStep, PromptInput, PromptStage,
     PromptStep, StageContext, TurnCompletedStep, UserFacingInputDrainMode,
     append_capability_result_ref, completed_exit, consume_drainable_inputs,
-    sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
+    model_observation_from_outcome, sanitize_result_ref_suffix,
+    synthetic_provider_error_result_ref,
 };
 
 #[allow(dead_code)]

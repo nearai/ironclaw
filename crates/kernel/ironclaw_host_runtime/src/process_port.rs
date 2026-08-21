@@ -6,11 +6,13 @@
 //! existing local-host behavior behind an explicit port without changing
 //! placement semantics.
 
+use std::sync::Arc;
 use std::{collections::HashMap, path::PathBuf, process::Stdio, time::Duration};
 
 use async_trait::async_trait;
 use ironclaw_host_api::process::{
-    CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
+    CommandExecutionOutput, CommandExecutionRequest, CommandExecutor, RuntimeProcessError,
+    SandboxCommandTransport,
 };
 use ironclaw_host_api::resource::ResourceScope;
 #[cfg(unix)]
@@ -361,6 +363,24 @@ async fn terminate_child_tree(child: &mut tokio::process::Child) {
     }
     if let Err(error) = child.wait().await {
         tracing::debug!(?error, "best-effort reap of terminated child failed");
+    }
+}
+
+/// Every kernel process port satisfies the placement-neutral command executor
+/// contract, so runtimes-layer engines (the pinned `bash` coding engine) can
+/// drive whichever process backend composition selected without depending on
+/// this crate. The named adapter keeps the `Arc<dyn RuntimeProcessPort>` ->
+/// `Arc<dyn CommandExecutor>` conversion explicit (trait-object unsizing only
+/// follows declared supertraits, not blanket impls).
+pub(crate) struct RuntimeProcessPortExecutor(pub(crate) Arc<dyn RuntimeProcessPort>);
+
+#[async_trait]
+impl CommandExecutor for RuntimeProcessPortExecutor {
+    async fn run_command(
+        &self,
+        request: CommandExecutionRequest,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        self.0.run_command(request).await
     }
 }
 

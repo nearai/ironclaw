@@ -1782,3 +1782,127 @@ fn failed_journal_projection_preserves_reason_detail_and_retryability() {
     assert_eq!(entry.detail.as_deref(), Some("safe provider diagnostic"));
     assert_eq!(entry.retryable, Some(true));
 }
+
+#[test]
+fn dependency_settlement_claim_is_exclusive_and_expired_claim_can_resume() {
+    use chrono::Duration;
+    use ironclaw_host_api::artifact::{ArtifactDigest, ArtifactId, ArtifactRef, CompletedArtifact};
+
+    let request_scope = scope("settlement-claim");
+    let parent_id = ProcessId::new();
+    let child_id = ProcessId::new();
+    let mut state = ProcessJournalMaterializedState::default();
+    state.processes.insert(
+        parent_id,
+        snapshot(
+            parent_id,
+            ProcessLifecycleStatus::Running,
+            request_scope.clone(),
+        ),
+    );
+    state
+        .apply_open_dependency(OpenProcessDependencyRequest {
+            dependent_process_id: parent_id,
+            dependency_process_id: child_id,
+            root_process_id: parent_id,
+            scope: request_scope.clone(),
+            group_ref: None,
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .expect("open dependency");
+
+    let claimed_at = Utc::now();
+    let first = state
+        .apply_claim_dependency_settlement(crate::ClaimProcessDependencySettlementRequest {
+            dependent_process_id: parent_id,
+            dependency_process_id: child_id,
+            scope: request_scope.clone(),
+            claim_token: "first".to_string(),
+            claimed_at,
+            lease_expires_at: claimed_at + Duration::seconds(30),
+        })
+        .expect("first claim");
+    assert!(matches!(
+        first,
+        StoredCommandOutcome::Dependency(Some(record))
+            if record.settlement.as_ref().map(|claim| claim.claim_token.as_str()) == Some("first")
+    ));
+
+    let concurrent = state
+        .apply_claim_dependency_settlement(crate::ClaimProcessDependencySettlementRequest {
+            dependent_process_id: parent_id,
+            dependency_process_id: child_id,
+            scope: request_scope.clone(),
+            claim_token: "concurrent".to_string(),
+            claimed_at: claimed_at + Duration::seconds(1),
+            lease_expires_at: claimed_at + Duration::seconds(31),
+        })
+        .expect("concurrent claim observes winner");
+    assert!(matches!(
+        concurrent,
+        StoredCommandOutcome::Dependency(Some(record))
+            if record.settlement.as_ref().map(|claim| claim.claim_token.as_str()) == Some("first")
+    ));
+
+    let takeover_at = claimed_at + Duration::seconds(31);
+    state
+        .apply_claim_dependency_settlement(crate::ClaimProcessDependencySettlementRequest {
+            dependent_process_id: parent_id,
+            dependency_process_id: child_id,
+            scope: request_scope.clone(),
+            claim_token: "takeover".to_string(),
+            claimed_at: takeover_at,
+            lease_expires_at: takeover_at + Duration::seconds(30),
+        })
+        .expect("expired claim is resumed");
+    let artifact = CompletedArtifact {
+        artifact_ref: ArtifactRef::new(ArtifactId::new(7)),
+        byte_len: 7,
+        total_lines: Some(1),
+        content_type: "application/json".to_string(),
+        digest: ArtifactDigest::from_bytes(b"settled"),
+    };
+    let stale_completion = state
+        .apply_complete_dependency_settlement(crate::CompleteProcessDependencySettlementRequest {
+            dependent_process_id: parent_id,
+            dependency_process_id: child_id,
+            scope: request_scope.clone(),
+            claim_token: "first".to_string(),
+            terminal: ProcessTerminalEvidence {
+                status: ProcessLifecycleStatus::Completed,
+                output_bytes: Some(7),
+                sanitized_reason: None,
+            },
+            completed_artifact: artifact.clone(),
+            settled_at: Utc::now(),
+        })
+        .expect("stale completion is an idempotent observation");
+    assert!(matches!(
+        stale_completion,
+        StoredCommandOutcome::Dependency(Some(record))
+            if record.state == ProcessDependencyState::Settling
+    ));
+
+    let completed = state
+        .apply_complete_dependency_settlement(crate::CompleteProcessDependencySettlementRequest {
+            dependent_process_id: parent_id,
+            dependency_process_id: child_id,
+            scope: request_scope,
+            claim_token: "takeover".to_string(),
+            terminal: ProcessTerminalEvidence {
+                status: ProcessLifecycleStatus::Completed,
+                output_bytes: Some(7),
+                sanitized_reason: None,
+            },
+            completed_artifact: artifact.clone(),
+            settled_at: Utc::now(),
+        })
+        .expect("takeover completes");
+    assert!(matches!(
+        completed,
+        StoredCommandOutcome::Dependency(Some(record))
+            if record.state == ProcessDependencyState::Settled
+                && record.completed_artifact == Some(artifact)
+    ));
+}

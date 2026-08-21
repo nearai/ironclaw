@@ -667,6 +667,7 @@ mod tests {
             resource_profile: None,
             origin_gate_matrix: None,
             standard_op: None,
+            provider_tool_name: None,
         };
         let registry = ExtensionRegistry::new();
         let runtime_policy = test_runtime_policy();
@@ -710,6 +711,7 @@ mod tests {
             resource_profile: None,
             origin_gate_matrix: None,
             standard_op: None,
+            provider_tool_name: None,
         };
         let registry = ExtensionRegistry::new();
         let runtime_policy = test_runtime_policy();
@@ -752,6 +754,7 @@ mod tests {
             resource_profile: None,
             origin_gate_matrix: None,
             standard_op: None,
+            provider_tool_name: None,
         };
         let registry = ExtensionRegistry::new();
         let runtime_policy = test_runtime_policy();
@@ -795,6 +798,7 @@ mod tests {
             resource_profile: None,
             origin_gate_matrix: None,
             standard_op: None,
+            provider_tool_name: None,
         };
         let registry = ExtensionRegistry::new();
         let runtime_policy = test_runtime_policy();

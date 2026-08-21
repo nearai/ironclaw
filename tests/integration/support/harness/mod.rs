@@ -73,11 +73,11 @@ pub(crate) use super::doubles::{
     RecordingTestCapabilityPort, StaticCapabilitySurfaceProfileResolver, VendorResponseRouter,
 };
 pub(crate) use assembly::{
-    StandaloneRootMounts, TriggerActiveRunLookupHostRuntime, bundled_extension_provider_trust,
-    capability_ids_from_strs, copy_dir_recursive, default_capability_io_pair,
-    host_runtime_storage_roots, http_test_policy, memory_mounts, qa_smoke_mounts, skill_mounts,
-    standalone_all_effects, standalone_host_runtime_with_http_egress,
-    standalone_host_runtime_with_live_http_egress,
+    StandaloneRootMounts, TestArtifactPersister, TriggerActiveRunLookupHostRuntime,
+    bundled_extension_provider_trust, capability_ids_from_strs, copy_dir_recursive,
+    default_capability_io_pair, host_runtime_storage_roots, http_test_policy, memory_mounts,
+    qa_smoke_mounts, skill_mounts, standalone_all_effects,
+    standalone_host_runtime_with_http_egress, standalone_host_runtime_with_live_http_egress,
     standalone_host_runtime_with_real_egress_pipeline,
     standalone_host_runtime_with_registry_and_egress, standalone_mount_descriptor,
     standalone_root_filesystem, wildcard_test_policy, workspace_mounts,
@@ -197,7 +197,7 @@ impl HarnessCapabilityMode {
             Self::HostRuntime(harness) => {
                 if harness.durable_capability_io_requested {
                     harness.install_durable_capability_io(
-                        turn_thread_service,
+                        Arc::clone(&turn_thread_service),
                         trajectory_observer.clone(),
                     );
                 }
@@ -220,7 +220,11 @@ impl HarnessCapabilityMode {
                     harness.install_trigger_active_run_lookup_for_test(&process_system)?;
                 }
                 Ok((
-                    harness.capability_factory(milestone_sink, trajectory_observer),
+                    harness.capability_factory(
+                        milestone_sink,
+                        turn_thread_service,
+                        trajectory_observer,
+                    ),
                     Arc::new(HostRuntimeHarnessSurfaceResolver),
                     harness.input_resolver(),
                     harness.capability_result_writer(),
@@ -281,14 +285,6 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// Result-writer half; see `io`'s doc -- always the SAME underlying
     /// object as `io`, coerced to the other trait.
     result_writer_io: Mutex<Arc<dyn LoopCapabilityResultWriter>>,
-    /// Set by `install_durable_capability_io`: the session thread service
-    /// backing `io`/`result_writer_io`. `None` until then (or forever, for
-    /// harnesses that never opt in). Also used to wrap the synthetic
-    /// `result_read` capability (`apply_synthetic_capability_wrappers`) so a
-    /// scripted `result_read` call can page through the durable record `io`
-    /// just persisted.
-    durable_capability_io_thread_service:
-        Mutex<Option<Arc<dyn ironclaw_threads::SessionThreadService>>>,
     /// Set from `HostRuntimeHarnessOptions::with_durable_capability_io()` at
     /// construction; read by the capability-mode assembly (`into_parts`) to
     /// decide whether to call `install_durable_capability_io` once the real
@@ -747,6 +743,7 @@ impl HostRuntimeCapabilityHarness {
             recording_network_egress,
             google_oauth_backend_for_test,
             sandboxed_shell,
+            coding_tools,
             workspace_scoped_per_caller,
         } = options;
         let root = Arc::new(if sandboxed_shell {
@@ -884,11 +881,17 @@ impl HostRuntimeCapabilityHarness {
                     reply_target_binding_id: service_label.to_string(),
                 });
         }
-        let (services, resource_governor) =
+        let (services, resource_governor) = if coding_tools {
+            ironclaw_composition::test_support::build_runtime_with_resource_governor_and_coding_tools_for_test(
+                runtime_input,
+            )
+            .await?
+        } else {
             ironclaw_composition::test_support::build_runtime_with_resource_governor_for_test(
                 runtime_input,
             )
-            .await?;
+            .await?
+        };
         if seed_extension_credentials {
             profiles::extension::seed_extension_lifecycle_credentials(&services, &user_id).await?;
         }
@@ -1020,7 +1023,6 @@ impl HostRuntimeCapabilityHarness {
             pending_approval_scopes,
             io: Mutex::new(io),
             result_writer_io: Mutex::new(result_writer_io),
-            durable_capability_io_thread_service: Mutex::new(None),
             durable_capability_io_requested: durable_capability_io,
             root,
             workspace_root,
@@ -1085,11 +1087,13 @@ impl HostRuntimeCapabilityHarness {
     pub(crate) fn capability_factory(
         self: &Arc<Self>,
         milestone_sink: Arc<dyn ironclaw_loop_contracts::LoopHostMilestoneSink>,
+        thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
         trajectory_observer: Option<Arc<dyn ironclaw_composition::RebornTrajectoryObserver>>,
     ) -> Arc<dyn LoopCapabilityPortFactory> {
         Arc::new(HostRuntimeHarnessCapabilityPortFactory {
             harness: Arc::clone(self),
             milestone_sink,
+            thread_service,
             trajectory_observer,
         })
     }
@@ -1146,13 +1150,12 @@ impl HostRuntimeCapabilityHarness {
     ) {
         let (io, result_writer_io) =
             ironclaw_composition::test_support::staged_capability_io_with_observer_for_test(
-                thread_service.clone(),
+                thread_service,
                 self.user_id.clone(),
                 trajectory_observer,
             );
         *self.io.lock().unwrap() = io;
         *self.result_writer_io.lock().unwrap() = result_writer_io;
-        *self.durable_capability_io_thread_service.lock().unwrap() = Some(thread_service);
     }
 
     /// #5886: re-wire `builtin.trigger_list` dispatch to a REAL
@@ -1309,7 +1312,7 @@ impl HostRuntimeCapabilityHarness {
         Ok(())
     }
 
-    /// Install a sticky scripted `builtin.shell` process result on the inert
+    /// Install a sticky scripted `builtin.bash` process result on the inert
     /// recording process port (mirrors `install_http_responses`). Errors if the
     /// harness has no recording port (e.g. the `.with_live_shell()` path).
     pub(crate) fn install_process_script(
@@ -1794,6 +1797,7 @@ impl HostRuntimeCapabilityHarness {
         self: &Arc<Self>,
         run_context: &LoopRunContext,
         milestone_sink: &Arc<dyn ironclaw_loop_contracts::LoopHostMilestoneSink>,
+        thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
         trajectory_observer: Option<Arc<dyn ironclaw_composition::RebornTrajectoryObserver>>,
         surface_policy: ironclaw_host_api::capability_surface::CapabilitySurfacePolicy,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
@@ -2023,26 +2027,7 @@ impl HostRuntimeCapabilityHarness {
             milestone_sink: milestone_sink.clone(),
             skill_activation_source: self.skill_activation_source.clone(),
             project_service,
-            // result_read (durable tool-result projection seam, issue
-            // #5838): production always wires the run's session thread
-            // service into the synthetic `result_read` capability, so
-            // this is a required (non-`Option`) field. Harnesses that
-            // opted into `.with_durable_capability_io()` populate
-            // `durable_capability_io_thread_service` with the REAL group
-            // thread service; every other harness gets a fresh in-memory
-            // no-op service, mirroring the `project_service`/
-            // `tool_permission_overrides` "no opinion -> default" pattern
-            // above -- `result_read` is simply never granted for those
-            // harnesses (not in `capability_ids`), so the default is
-            // never actually read.
-            thread_service: self
-                .durable_capability_io_thread_service
-                .lock()
-                .unwrap()
-                .clone()
-                .unwrap_or_else(|| {
-                    Arc::new(ironclaw_threads::InMemorySessionThreadService::default())
-                }),
+            thread_service,
             trajectory_observer,
             // Feeds the same active-extension authority (installed +
             // activated extensions like `github`, `gmail`, MCP servers)

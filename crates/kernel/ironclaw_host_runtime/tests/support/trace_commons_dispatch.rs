@@ -21,6 +21,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use async_trait::async_trait;
 use axum::{Router, extract::State, routing::post};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_authorization::GrantAuthorizer;
@@ -29,10 +30,14 @@ use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::result_meta::FailureKind;
 use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkTargetPattern},
+    artifact::{
+        AccountedArtifactPersister, ArtifactDigest, ArtifactId, ArtifactNamespaceId, ArtifactRef,
+        ArtifactWriteError, ArtifactWriteMetadata, CompletedArtifact,
+    },
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
     ids::{CapabilityGrantId, CapabilityId, ExtensionId, PackageId, RunId, UserId},
     mount::MountView,
-    resource::ResourceEstimate,
+    resource::{ResourceEstimate, ResourceReceipt},
     runtime::{RuntimeKind, TrustClass},
     runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
@@ -270,6 +275,7 @@ pub fn execution_context_with_network(
     )
     .unwrap();
     context.run_id = Some(RunId::new());
+    context.artifact_namespace = Some(ArtifactNamespaceId::from_root_run(context.run_id.unwrap()));
     context
 }
 
@@ -346,6 +352,7 @@ pub fn runtime() -> impl HostRuntime {
     .expect("real http egress wiring must succeed")
     .with_runtime_policy(network_permitted_policy())
     .with_trust_policy(Arc::new(trust_policy()))
+    .with_accounted_artifact_persistence(Arc::new(TestArtifactPersister::default()))
     .host_runtime_for_local_testing()
 }
 
@@ -405,4 +412,36 @@ pub fn find_persisted_login_link(dir: &std::path::Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Deterministic in-memory `AccountedArtifactPersister` for agent-scoped
+/// dispatch: unique monotonic `ArtifactId`s, checked byte length, and a digest
+/// over the persisted bytes. Mirrors the host-runtime harness persister and
+/// the loop ingress contract.
+#[derive(Default)]
+struct TestArtifactPersister {
+    next_id: std::sync::atomic::AtomicU64,
+}
+
+#[async_trait]
+impl AccountedArtifactPersister for TestArtifactPersister {
+    async fn persist(
+        &self,
+        metadata: ArtifactWriteMetadata,
+        bytes: &[u8],
+        _receipt: &ResourceReceipt,
+    ) -> Result<CompletedArtifact, ArtifactWriteError> {
+        let artifact_id = ArtifactId::new(
+            self.next_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        );
+        let byte_len = u64::try_from(bytes.len()).map_err(|_| ArtifactWriteError::Storage)?;
+        Ok(CompletedArtifact {
+            artifact_ref: ArtifactRef::new(artifact_id),
+            byte_len,
+            total_lines: None,
+            content_type: metadata.content_type,
+            digest: ArtifactDigest::from_bytes(bytes),
+        })
+    }
 }

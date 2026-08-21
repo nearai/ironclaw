@@ -10,6 +10,7 @@ use futures_util::FutureExt;
 
 use ironclaw_extension_registry::ExtensionPackage;
 use ironclaw_host_api::{
+    artifact::{ArtifactDigest, ArtifactWriteError},
     capability::CapabilityDescriptor,
     dispatch::DispatchAuthRequirement,
     ids::UserId,
@@ -116,6 +117,7 @@ where
     /// Loop turn-run identity forwarded from the dispatch request. `None`
     /// for non-loop callers.
     pub run_id: Option<ironclaw_host_api::ids::RunId>,
+    pub artifact_namespace: Option<ironclaw_host_api::artifact::ArtifactNamespaceId>,
     /// Host-sealed origin used by capability-boundary policy.
     pub origin: Option<InvocationOrigin>,
     pub estimate: ResourceEstimate,
@@ -241,7 +243,6 @@ impl<T> ServiceResolvedRuntimeAdapter<T> {
         }
     }
 }
-
 #[async_trait]
 impl<F, G, T> RuntimeAdapter<F, G> for ServiceResolvedRuntimeAdapter<T>
 where
@@ -270,6 +271,7 @@ where
             })?;
         self.invocation_services
             .resolve(InvocationServicesResolutionRequest {
+                artifact_namespace: request.artifact_namespace,
                 plan: &plan,
                 scope: &request.scope,
                 mounts: request.mounts.as_ref(),
@@ -455,11 +457,13 @@ where
             })?;
 
         Ok(RuntimeAdapterResult {
+            canonical_output_digest: None,
             output: execution.result.output,
             display_preview: None,
             usage: execution.result.usage,
             receipt: execution.receipt,
             output_bytes: execution.result.output_bytes,
+            completed_artifact: None,
         })
     }
 }
@@ -534,11 +538,13 @@ where
             })?;
 
         Ok(RuntimeAdapterResult {
+            canonical_output_digest: None,
             output: execution.result.output,
             display_preview: None,
             usage: execution.result.usage,
             receipt: execution.receipt,
             output_bytes: execution.result.output_bytes,
+            completed_artifact: None,
         })
     }
 }
@@ -650,7 +656,6 @@ impl FirstPartyRuntimeAdapter {
         }
     }
 }
-
 #[async_trait]
 impl<F, G> RuntimeAdapter<F, G> for FirstPartyRuntimeAdapter
 where
@@ -743,6 +748,7 @@ where
         let services = self
             .invocation_services
             .resolve(InvocationServicesResolutionRequest {
+                artifact_namespace: request.artifact_namespace,
                 plan: &plan,
                 scope: &request.scope,
                 mounts: request.mounts.as_ref(),
@@ -773,6 +779,7 @@ where
             used_prepared_reservation,
         );
         tracing::debug!("first-party runtime adapter services resolved");
+        let artifact_persistence = services.artifact_persistence.clone();
 
         let reserve_started_at = latency_started_at();
         let reservation = match request.resource_reservation {
@@ -822,6 +829,7 @@ where
         // reservation instead of leaking it permanently. Every early `return`
         // below drops the still-armed guard, which releases.
         let reservation_id = reservation.id;
+        let mut reserved_output_bytes = reservation.estimate.output_bytes.unwrap_or(0);
         let guard = ReservationGuard::new(request.governor, reservation_id);
         let first_party_resource_error =
             || first_party_dispatch_error(RuntimeDispatchErrorKind::Resource, None, None);
@@ -933,25 +941,100 @@ where
             }
         };
 
-        let serialize_started_at = latency_started_at();
-        let output_bytes = serde_json::to_vec(&result.output)
-            .map(|bytes| bytes.len() as u64)
-            .map_err(|_| {
-                tracing::debug!(
-                    reservation_id = %reservation_id,
-                    "first-party runtime adapter output serialization failed"
-                );
-                trace_first_party_stage_and_dispatch_error(
-                    "serialize_output",
-                    latency_fields.as_ref(),
-                    serialize_started_at,
-                    dispatch_started_at,
-                    RuntimeDispatchErrorKind::OutputDecode.as_str(),
-                    used_prepared_reservation,
-                );
-                // Dropping `guard` releases the reservation.
-                first_party_dispatch_error(RuntimeDispatchErrorKind::OutputDecode, None, None)
+        let mut result = result;
+        let completed_artifact = if let Some(pending) = result.pending_artifact.take() {
+            let persistence = artifact_persistence.ok_or_else(|| {
+                first_party_dispatch_error(RuntimeDispatchErrorKind::OperationFailed, None, None)
             })?;
+            let write_state = persistence
+                .state(&pending.handle)
+                .await
+                .map_err(first_party_artifact_error)?;
+            let persisted_len = usize::try_from(write_state.persisted_bytes)
+                .map_err(|_| first_party_resource_error())?;
+            let persisted_prefix = pending
+                .bytes
+                .get(..persisted_len)
+                .ok_or_else(first_party_resource_error)?;
+            if ArtifactDigest::from_bytes(persisted_prefix) != write_state.persisted_digest {
+                return Err(first_party_artifact_error(
+                    ArtifactWriteError::DigestMismatch,
+                ));
+            }
+
+            let mut persisted_remaining = persisted_len;
+            for chunk in pending.bytes.chunks(64 * 1024) {
+                let chunk_len =
+                    u64::try_from(chunk.len()).map_err(|_| first_party_resource_error())?;
+                let covered = reserved_output_bytes.min(chunk_len);
+                reserved_output_bytes -= covered;
+                let additional = chunk_len.saturating_sub(covered);
+                if additional > 0 {
+                    request
+                        .governor
+                        .grow_reservation(
+                            reservation_id,
+                            ResourceEstimate::default().set_output_bytes(additional),
+                        )
+                        .map_err(|_| first_party_resource_error())?;
+                }
+                if persisted_remaining >= chunk.len() {
+                    persisted_remaining -= chunk.len();
+                    continue;
+                }
+                let unpersisted = &chunk[persisted_remaining..];
+                persisted_remaining = 0;
+                persistence
+                    .append(&pending.handle, unpersisted)
+                    .await
+                    .map_err(first_party_artifact_error)?;
+            }
+            let completed = match write_state.completed {
+                Some(completed)
+                    if completed.byte_len == pending.bytes.len() as u64
+                        && completed.digest == ArtifactDigest::from_bytes(&pending.bytes) =>
+                {
+                    completed
+                }
+                Some(_) => {
+                    return Err(first_party_artifact_error(
+                        ArtifactWriteError::DigestMismatch,
+                    ));
+                }
+                None => persistence
+                    .finalize(pending.handle)
+                    .await
+                    .map_err(first_party_artifact_error)?,
+            };
+            Some(completed)
+        } else {
+            None
+        };
+
+        let serialize_started_at = latency_started_at();
+
+        let serialized_output = serde_json::to_vec(&result.output).map_err(|_| {
+            tracing::debug!(
+                reservation_id = %reservation_id,
+                "first-party runtime adapter output serialization failed"
+            );
+            trace_first_party_stage_and_dispatch_error(
+                "serialize_output",
+                latency_fields.as_ref(),
+                serialize_started_at,
+                dispatch_started_at,
+                RuntimeDispatchErrorKind::OutputDecode.as_str(),
+                used_prepared_reservation,
+            );
+            // Dropping `guard` releases the reservation.
+            first_party_dispatch_error(RuntimeDispatchErrorKind::OutputDecode, None, None)
+        })?;
+        let canonical_output_bytes = u64::try_from(serialized_output.len()).map_err(|_| {
+            first_party_dispatch_error(RuntimeDispatchErrorKind::Resource, None, None)
+        })?;
+        let output_bytes = completed_artifact
+            .as_ref()
+            .map_or(canonical_output_bytes, |artifact| artifact.byte_len);
         trace_first_party_latency_ok(
             "serialize_output",
             latency_fields.as_ref(),
@@ -960,7 +1043,7 @@ where
             used_prepared_reservation,
         );
         let mut usage = result.usage;
-        usage.output_bytes = usage.output_bytes.max(output_bytes);
+        usage.output_bytes = output_bytes;
         // Happy path: reconcile inline so we preserve the existing
         // warn-on-release-error-after-reconcile-failure diagnostic. `disarm`
         // hands reservation ownership back from the guard; both reconcile
@@ -1020,11 +1103,13 @@ where
         );
 
         Ok(RuntimeAdapterResult {
+            canonical_output_digest: result.canonical_output_digest,
             output: result.output,
             display_preview: result.display_preview,
             usage,
             receipt,
             output_bytes,
+            completed_artifact,
         })
     }
 }
@@ -1330,6 +1415,16 @@ pub(super) fn wasm_error_kind(error: &WasmError) -> RuntimeDispatchErrorKind {
         WasmError::ExecutionFailed { .. } => RuntimeDispatchErrorKind::Guest,
         WasmError::InvalidSchema(_) => RuntimeDispatchErrorKind::Manifest,
     }
+}
+
+fn first_party_artifact_error(error: ArtifactWriteError) -> DispatchError {
+    let kind = match error {
+        ArtifactWriteError::Budget => RuntimeDispatchErrorKind::Resource,
+        ArtifactWriteError::InvalidHandle
+        | ArtifactWriteError::DigestMismatch
+        | ArtifactWriteError::Storage => RuntimeDispatchErrorKind::OperationFailed,
+    };
+    first_party_dispatch_error(kind, None, None)
 }
 
 fn sanitize_mcp_client_error(error: &McpError) -> String {

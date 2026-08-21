@@ -13,7 +13,7 @@
 //!    `UNGATED_LOOP_RUN_CAPABILITIES` (`ironclaw_host_api`) is the exact set of
 //!    builtins the model (`LoopRun` origin) may invoke with NO approval gate. It
 //!    is the security-critical list: an entry here is a capability whose effects
-//!    reviewers judged safe to run ungated. This test freezes the current 17 ids
+//!    reviewers judged safe to run ungated. This test freezes the current 16 ids
 //!    (checked-in `EXPECTED_UNGATED_SEED`) so any addition or removal is a
 //!    reviewed diff — the same "frozen list only changes under review" property
 //!    `reborn_capability_dto_collapse_ratchet` gives its DTO set. An addition
@@ -45,7 +45,7 @@
 //! ## Behavior-preserving grandfathered seed (deviates from §10 "starts empty")
 //!
 //! The design doc's §10 imagines the Ungated allowlist STARTING EMPTY and growing
-//! only under review. S3 instead SEEDED it with the 17 builtins already ungated
+//! under review. S3 instead SEEDED it with the 16 builtins already ungated
 //! under today's `AskDestructive` effect gate (their effects are a subset of
 //! `{read_filesystem, dispatch_capability}` or are approval-exempt) — a deliberate
 //! behavior-preservation choice so folding the matrix into `authorize()` (S4)
@@ -106,8 +106,11 @@ const EXPECTED_UNGATED_SEED: &[&str] = &[
     "ironclaw.memory.search",
     "ironclaw.memory.read",
     "ironclaw.memory.tree",
-    "builtin.read_file",
-    "builtin.list_dir",
+    // Reviewed transfer, not an addition: the retired `read_file`/`list_dir`
+    // builtins migrated to the single pinned coding `read` engine with the same read-only
+    // effect posture, and their reviewed Ungated slot moves to its id. The dead
+    // ids hold no exemption.
+    "builtin.read",
     "builtin.glob",
     "builtin.grep",
     "builtin.skill_list",
@@ -185,7 +188,7 @@ fn collect_capability_tables<'a>(value: &'a toml::Value, out: &mut Vec<&'a toml:
 }
 
 /// Invariant 1 (of the S5 ratchet): the Ungated allowlist is pinned to the
-/// reviewed 17-id seed, deduplicated, and every id well-formed. See the header.
+/// reviewed 16-id seed, deduplicated, and every id well-formed. See the header.
 #[test]
 fn ungated_loop_run_allowlist_is_pinned_to_reviewed_seed() {
     let actual: BTreeSet<&str> = UNGATED_LOOP_RUN_CAPABILITIES.iter().copied().collect();
@@ -218,8 +221,8 @@ fn ungated_loop_run_allowlist_is_pinned_to_reviewed_seed() {
     }
     assert_eq!(
         EXPECTED_UNGATED_SEED.len(),
-        17,
-        "the reviewed S5 seed is 17 ids; a size change is a reviewed diff"
+        16,
+        "the reviewed S5 seed is 16 ids; a size change is a reviewed diff"
     );
 }
 

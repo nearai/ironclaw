@@ -1,0 +1,30 @@
+{
+  "tool": "bash",
+  "note": "Representative model-visible error shapes for the pinned `bash` tool at commit 08819b279cf02ae2545e69dad7111ab48d91d35e. `template` is verbatim from the cited upstream source; `example` renders the template with representative values.",
+  "entries": [
+    {
+      "case": "invalid_env_name",
+      "kind": "error",
+      "template": "Invalid bash env name: ${key}",
+      "example": "Invalid bash env name: BAD-NAME",
+      "source_path": "packages/coding-agent/src/tools/bash.ts",
+      "source_line": 380
+    },
+    {
+      "case": "working_directory_missing",
+      "kind": "error",
+      "template": "Working directory does not exist: ${commandCwd}",
+      "example": "Working directory does not exist: /workspace/missing",
+      "source_path": "packages/coding-agent/src/tools/bash.ts",
+      "source_line": 1035
+    },
+    {
+      "case": "missing_exit_status",
+      "kind": "error",
+      "template": "${outputText}\n\nCommand failed: missing exit status",
+      "example": "(no output)\n\nCommand failed: missing exit status",
+      "source_path": "packages/coding-agent/src/tools/bash.ts",
+      "source_line": 660
+    }
+  ]
+}

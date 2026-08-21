@@ -52,6 +52,7 @@ fn descriptor_with_runtime(
         resource_profile: None,
         origin_gate_matrix: None,
         standard_op: None,
+        provider_tool_name: None,
     }
 }
 

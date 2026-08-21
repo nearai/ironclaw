@@ -184,6 +184,12 @@ struct RawToolV3 {
     /// `NetworkPolicy.max_egress_bytes` at grant issuance.
     #[serde(default)]
     max_egress_bytes: Option<u64>,
+    /// Optional exact provider-facing tool name (issue #7392 provider-name
+    /// resolver). `#[serde(default)]` so tools without the key parse to
+    /// `None`; validated and threaded through `RawCapabilityV2` in the
+    /// per-tool loop, never consumed unchecked.
+    #[serde(default)]
+    provider_tool_name: Option<String>,
     #[serde(default)]
     resource_profile: Option<ironclaw_host_api::resource::ResourceProfile>,
 }
@@ -477,6 +483,7 @@ pub(crate) fn parse_v3(
             runtime_credentials: template_credentials.clone(),
             resource_profile: None,
             origin_gate_matrix: mcp.origin_gate_matrix.clone(),
+            provider_tool_name: None,
         };
         capabilities.push(
             CapabilityDeclV2::from_raw(raw_capability, &id, host_port_catalog, None).map_err(
@@ -592,13 +599,14 @@ pub(crate) fn parse_v3(
                     || !tool.network_targets.is_empty()
                     || tool.max_egress_bytes.is_some()
                     || tool.output_schema_ref.is_some()
+                    || tool.provider_tool_name.is_some()
                 {
                     return Err(ManifestV3Error::Invalid {
                         reason: format!(
                             "static tool `{}` on an [mcp] manifest inherits the server \
                              connection template; remove its credentials, effects, \
-                             network_targets, max_egress_bytes, output_schema_ref, and \
-                             resource_profile",
+                             network_targets, max_egress_bytes, output_schema_ref, \
+                             provider_tool_name, and resource_profile",
                             tool.id
                         ),
                     });
@@ -622,6 +630,7 @@ pub(crate) fn parse_v3(
                     runtime_credentials: template_credentials.clone(),
                     resource_profile: None,
                     origin_gate_matrix: mcp.origin_gate_matrix.clone(),
+                    provider_tool_name: None,
                 }
             }
             _ => RawCapabilityV2 {
@@ -655,6 +664,7 @@ pub(crate) fn parse_v3(
                     .collect::<Result<Vec<_>, _>>()?,
                 resource_profile: tool.resource_profile,
                 origin_gate_matrix: tool.origin_gate_matrix,
+                provider_tool_name: tool.provider_tool_name,
             },
         };
         // Requested, not granted: a memory provider's declared tool gating is

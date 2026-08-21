@@ -19,7 +19,6 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::{mount::MountView, resource::ResourceScope};
-
 /// Metadata for command output persisted behind a saved-output reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SavedCommandOutput {
@@ -90,4 +89,22 @@ pub trait SandboxCommandTransport: Send + Sync {
     async fn shutdown(&self) -> Result<(), RuntimeProcessError> {
         Ok(())
     }
+}
+
+/// Placement-neutral command executor consumed by runtimes-layer engines
+/// (e.g. the pinned `bash` coding engine).
+///
+/// The kernel's [`RuntimeProcessPort`] implementations (local host process,
+/// user sandbox) satisfy this contract with the same normalized
+/// `CommandExecutionRequest` -> `CommandExecutionOutput` shape, so an engine
+/// can drive whichever process backend the composition selected without an
+/// upward dependency into `ironclaw_host_runtime`. The engine must not reach
+/// for host-only behavior (workdir aliases, saved-output publishing) through
+/// this port; those stay kernel-owned.
+#[async_trait]
+pub trait CommandExecutor: Send + Sync {
+    async fn run_command(
+        &self,
+        request: CommandExecutionRequest,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError>;
 }

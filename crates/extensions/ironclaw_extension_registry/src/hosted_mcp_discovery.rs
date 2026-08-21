@@ -53,6 +53,7 @@ pub fn package_with_discovered_hosted_mcp_tools(
             resource_profile: capability.resource_profile.clone(),
             origin_gate_matrix: capability.origin_gate_matrix.clone(),
             standard_op: capability.standard_op,
+            provider_tool_name: capability.provider_tool_name.clone(),
         })
         .collect();
 
@@ -224,6 +225,9 @@ fn discovered_capability_manifest(
         max_egress_bytes: None,
         resource_profile: template.resource_profile.clone(),
         origin_gate_matrix: template.origin_gate_matrix.clone(),
+        // Live-discovered MCP tools never carry a manifest-declared provider
+        // name override; the MCP server's own tool names are the wire names.
+        provider_tool_name: None,
     })
 }
 

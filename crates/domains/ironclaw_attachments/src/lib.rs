@@ -2,9 +2,11 @@
 //!
 //! Inbound attachments must not be transient turn context: their bytes are
 //! written into the agent-accessible project filesystem so an agent can
-//! `file_read` / `list_dir` them in this turn or any later turn of the same
-//! project. This crate owns the single landing routine every channel converges
-//! on, so there is no per-channel persistence path to drift.
+//! `read` them in this turn or any later turn of the same project (the `read`
+//! tool also serves directory listings, so a landed attachment directory is
+//! reachable the same way). This crate owns the single landing routine every
+//! channel converges on, so there is no per-channel persistence path to
+//! drift.
 //!
 //! The bytes are written **through the project-scoped [`ScopedFilesystem`]
 //! authority** — the same authority the agent's file tools resolve through — so

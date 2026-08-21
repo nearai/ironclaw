@@ -20,6 +20,22 @@ impl LoopCapabilityPort for RecordingDelegatingCapabilityPort {
         self.inner.tool_definitions()
     }
 
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ironclaw_loop_contracts::ProviderToolCallCapabilityIds, AgentLoopHostError> {
+        // MUST delegate to inner. The `LoopCapabilityPort` default resolves a
+        // call by searching `self.tool_definitions()` (the disclosed/advertised
+        // surface), which rejects every name that resolves only at the port
+        // boundary — deferred/disclosed tools, synthetic capabilities, and
+        // other inner-resolvable names — with "outside the visible capability
+        // surface" before the inner snapshot can resolve it. This is the model
+        // gateway's resolvability pre-check, so it must reach inner (same
+        // reason the surface-tracking wrapper in `ironclaw_turn_runner`
+        // delegates).
+        self.inner.provider_tool_call_capability_ids(tool_call)
+    }
+
     fn validate_provider_tool_call(
         &self,
         tool_call: &ProviderToolCall,

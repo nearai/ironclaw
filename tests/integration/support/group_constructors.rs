@@ -53,13 +53,28 @@ async fn build_group_capability_with_base(
 }
 
 impl RebornIntegrationGroup {
-    /// Group with real file-tool approval stores (write_file/read_file at
+    /// Group with real file-tool approval stores (write/read at
     /// `PermissionMode::Ask`). Auto-approve is disabled for the group scope at
     /// construction so gated tool calls raise real `BlockedApproval` gates.
     /// Resolve with `approve_gate`/`deny_gate` per thread; re-enable with
     /// `enable_auto_approve` for the no-gate arm.
     pub async fn live_approvals() -> HarnessResult<Self> {
         Self::builder().live_approvals().await
+    }
+
+    /// Group with the pinned coding first-party surface (issue #7392
+    /// slice 3): exact `read`/`write`/`edit`/`glob`/`grep` tools with the
+    /// pinned schemas/descriptions, dispatched through the real capability
+    /// path. Auto-approve is enabled.
+    pub async fn coding_tools() -> HarnessResult<Self> {
+        Self::builder().coding_tools().await
+    }
+
+    /// Same pinned coding surface with auto-approve DISABLED, so a scripted
+    /// coding `write` raises a real `BlockedApproval` gate through the
+    /// ordinary gate path (resolve with `approve_gate`/`deny_gate`).
+    pub async fn coding_tools_with_approvals() -> HarnessResult<Self> {
+        Self::builder().coding_tools_with_approvals().await
     }
 
     /// Group with core built-in tools (memory/http/echo/time/json/shell).
@@ -139,7 +154,7 @@ impl RebornIntegrationGroup {
         Self::builder().extension_delivery().await
     }
 
-    /// [`Self::extension_delivery`] plus `builtin.write_file`, so a background
+    /// [`Self::extension_delivery`] plus `builtin.write`, so a background
     /// run can park on a REAL approval gate while its notification channels
     /// stay deliverable. Auto-approve is ON; gate the write per-scenario with
     /// `set_ask_each_time_override_for_test`.
@@ -239,7 +254,7 @@ impl RebornIntegrationGroup {
         Self::builder().triggers().await
     }
 
-    /// Trigger verbs plus `builtin.write_file` on one runtime (#5886
+    /// Trigger verbs plus `builtin.write` on one runtime (#5886
     /// blocked-trigger visibility). Auto-approve is ON so the verbs dispatch
     /// gate-free; a scenario gates the write via
     /// `set_ask_each_time_override_for_test`.
@@ -282,7 +297,7 @@ impl RebornIntegrationGroup {
         Self::builder().multiuser_memory_tools().await
     }
 
-    /// C-MULTIUSER: file-approval tools (write_file/read_file @ `Ask`) with
+    /// C-MULTIUSER: file-approval tools (write/read @ `Ask`) with
     /// **per-actor capability scoping**. A grant via
     /// [`RebornIntegrationGroup::enable_auto_approve_for_owner`] and an explicit
     /// OFF via [`RebornIntegrationGroup::disable_auto_approve_for_owner`] each
@@ -395,6 +410,38 @@ impl RebornIntegrationGroupBuilder {
         let arc = group
             .capability_harness()
             .expect("live_approvals always uses HostRuntime");
+        arc.disable_global_auto_approve(scope).await?;
+        Ok(group)
+    }
+
+    /// Build a pinned coding group. See [`RebornIntegrationGroup::coding_tools`].
+    pub async fn coding_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime = super::super::harness::profiles::pinned_coding::coding_tools().await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
+    /// Build a pinned coding group whose writes raise real approval gates. See
+    /// [`RebornIntegrationGroup::coding_tools_with_approvals`].
+    pub async fn coding_tools_with_approvals(self) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        let host_runtime = build_group_capability_with_base(
+            super::super::harness::profiles::pinned_coding::coding_tools_requiring_approval_profile()?,
+            &base,
+        )
+        .await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        let group = self.into_group(base, capability).await?;
+        // Disable auto-approve once so every thread faces real approval gates
+        // (the profile already disables it for the harness users; this also
+        // covers the product scope, mirroring `live_approvals`).
+        let scope = group
+            .shared
+            .auto_approve_scope()
+            .expect("coding approvals always uses HostRuntime; scope is always Some");
+        let arc = group
+            .capability_harness()
+            .expect("coding approvals always uses HostRuntime");
         arc.disable_global_auto_approve(scope).await?;
         Ok(group)
     }
@@ -912,7 +959,7 @@ impl RebornIntegrationGroupBuilder {
 
     /// Per-actor-scoped file-approval group. See
     /// [`RebornIntegrationGroup::multiuser_approvals`]. Real approval stores
-    /// (write_file/read_file @ `Ask`) plus per-actor capability dispatch;
+    /// (write/read @ `Ask`) plus per-actor capability dispatch;
     /// auto-approve defaults ON per owner, so a test that needs an owner to
     /// GATE sets that owner OFF via `disable_auto_approve_for_owner` — the
     /// per-user setting is what isolation asserts. Dispatch user == turn owner,
@@ -935,7 +982,7 @@ impl RebornIntegrationGroupBuilder {
     /// resolver a scoped deployment's factory uses
     /// (`scoped_workspace_mount_view_for_test`). File tools stay at `Ask`
     /// (per-owner auto-approve toggles like `multiuser_approvals`) and the
-    /// coding-read verbs (`list_dir`/`glob`/`grep`) are surfaced so a fresh
+    /// coding-read verbs (`glob`/`grep`) are surfaced so a fresh
     /// caller's never-written workspace root is read through the production
     /// turn path.
     ///
@@ -949,7 +996,6 @@ impl RebornIntegrationGroupBuilder {
     /// construction: `workspace_scoping_tests` (crate tier) and the two-user
     /// `webui_v2_e2e` workspace test.
     pub async fn multiuser_scoped_workspace(self) -> HarnessResult<RebornIntegrationGroup> {
-        use ironclaw_host_api::ids::CapabilityId;
         let base = self.build_base().await?;
         let actor_user = base.canonical_actor_user()?;
         let product_scope = &base.product_harness.scope;
@@ -967,13 +1013,16 @@ impl RebornIntegrationGroupBuilder {
             ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
         )
         .map_err(|error| format!("scoped workspace mount view: {error}"))?;
-        let mut profile =
-            super::super::harness::profiles::file::file_tools_requiring_approval_profile()?;
-        profile.capability_ids.extend([
-            CapabilityId::new(ironclaw_host_runtime::LIST_DIR_CAPABILITY_ID)?,
-            CapabilityId::new(ironclaw_host_runtime::GLOB_CAPABILITY_ID)?,
-            CapabilityId::new(ironclaw_host_runtime::GREP_CAPABILITY_ID)?,
-        ]);
+        let mut profile = super::super::harness::profiles::pinned_coding::coding_tools_requiring_approval_profile()?;
+        profile.capability_ids.retain(|capability| {
+            matches!(
+                capability.as_str(),
+                ironclaw_host_runtime::CODING_READ_CAPABILITY_ID
+                    | ironclaw_host_runtime::CODING_WRITE_CAPABILITY_ID
+                    | ironclaw_host_runtime::CODING_GLOB_CAPABILITY_ID
+                    | ironclaw_host_runtime::CODING_GREP_CAPABILITY_ID
+            )
+        });
         profile.options.mounts = scoped_view;
         profile.options = profile.options.with_workspace_scoped_per_caller();
         let host_runtime = profile

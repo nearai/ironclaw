@@ -7,7 +7,7 @@ use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, TenantId, UserId},
     mount::MountPermissions,
 };
-use ironclaw_host_runtime::SHELL_CAPABILITY_ID;
+use ironclaw_host_runtime::CODING_BASH_CAPABILITY_ID;
 
 pub(crate) async fn sandbox_shell_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
     let runtime_policy =
@@ -23,7 +23,7 @@ pub(crate) async fn sandbox_shell_tools() -> HarnessResult<HostRuntimeCapability
     .with_durable_capability_io();
 
     ToolsProfile {
-        capability_ids: vec![CapabilityId::new(SHELL_CAPABILITY_ID)?],
+        capability_ids: vec![CapabilityId::new(CODING_BASH_CAPABILITY_ID)?],
         effect_kinds: vec![
             EffectKind::DispatchCapability,
             EffectKind::ExecuteCode,

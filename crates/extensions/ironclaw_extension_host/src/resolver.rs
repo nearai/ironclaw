@@ -115,6 +115,8 @@ impl BoundCapabilityAdapter for SnapshotBoundCapability {
             ..ResourceUsage::default()
         };
         Ok(RuntimeAdapterResult {
+            canonical_output_digest: None,
+            completed_artifact: None,
             output: result.output,
             display_preview: result.display_preview,
             output_bytes,

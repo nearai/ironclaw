@@ -1473,6 +1473,7 @@ async fn host_runtime_services_builds_dispatcher_runtime_and_health_from_registe
     .with_approval_requests(approval_requests)
     .with_capability_leases(capability_leases)
     .with_script_runtime(script_runtime)
+    .with_test_artifact_persistence()
     .with_event_sink(Arc::new(events.clone()));
 
     let runtime = services.host_runtime_for_local_testing();
@@ -1579,7 +1580,8 @@ async fn host_runtime_services_writes_runtime_events_to_durable_event_log_metada
         vec![EffectKind::DispatchCapability],
     )))
     .with_durable_event_log(Arc::clone(&event_log))
-    .with_script_runtime(script_runtime);
+    .with_script_runtime(script_runtime)
+    .with_test_artifact_persistence();
     let scope = sample_scope(InvocationId::new());
     let payload = json!({
         "message": "RAW_EVENT_INPUT_SENTINEL_3147 /tmp/private-event-path",
@@ -1680,7 +1682,8 @@ async fn host_runtime_services_consumes_reborn_jsonl_event_store_without_v1_comp
         vec![EffectKind::DispatchCapability],
     )))
     .with_script_runtime(script_runtime)
-    .with_event_sink(Arc::new(DurableEventSink::new(Arc::clone(&event_log))));
+    .with_event_sink(Arc::new(DurableEventSink::new(Arc::clone(&event_log))))
+    .with_test_artifact_persistence();
 
     let scope = sample_scope(InvocationId::new());
     let outcome = services
@@ -1745,7 +1748,8 @@ async fn host_runtime_services_durable_event_replay_cursor_and_gap_behavior() {
         vec![EffectKind::DispatchCapability],
     )))
     .with_durable_event_log(Arc::clone(&event_log))
-    .with_script_runtime(script_runtime);
+    .with_script_runtime(script_runtime)
+    .with_test_artifact_persistence();
     let scope = sample_scope(InvocationId::new());
     let stream = EventStreamKey::from_scope(&scope);
 
@@ -1834,7 +1838,8 @@ async fn host_runtime_services_runtime_events_project_through_replay_projection_
     .with_script_runtime(Arc::new(ScriptRuntime::new(
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
-    )));
+    )))
+    .with_test_artifact_persistence();
     let scope = sample_scope(InvocationId::new());
     let payload = json!({
         "message": "RAW_PROJECTION_INPUT_SENTINEL_3022 /tmp/private-projection-path",
@@ -1928,7 +1933,8 @@ async fn host_runtime_services_projection_rejects_foreign_cursor_and_surfaces_re
     .with_script_runtime(Arc::new(ScriptRuntime::new(
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
-    )));
+    )))
+    .with_test_artifact_persistence();
     let scope_a = sample_scope(InvocationId::new());
     let scope_b = ResourceScope {
         thread_id: Some(ThreadId::new("thread-b").unwrap()),
@@ -2036,7 +2042,8 @@ async fn host_runtime_services_jsonl_event_store_projects_same_runtime_sequence_
     .with_script_runtime(Arc::new(ScriptRuntime::new(
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
-    )));
+    )))
+    .with_test_artifact_persistence();
     let scope = sample_scope(InvocationId::new());
     let payload = json!({
         "message": "JSONL_RAW_INPUT_SENTINEL_3022 /tmp/jsonl-private-path",
@@ -2131,7 +2138,8 @@ async fn host_runtime_services_approval_resolution_projects_durable_audit_metada
     .with_script_runtime(Arc::new(ScriptRuntime::new(
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
-    )));
+    )))
+    .with_test_artifact_persistence();
     let runtime = services.host_runtime_for_local_testing();
     let scope = sample_scope(InvocationId::new());
     let context = execution_context_without_grants_for_scope(scope.clone());
@@ -3519,7 +3527,8 @@ async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_secret_store(Arc::clone(&secret_store))
-    .with_script_runtime(Arc::clone(&script_runtime));
+    .with_script_runtime(Arc::clone(&script_runtime))
+    .with_test_artifact_persistence();
     let runtime = services.host_runtime_for_local_testing();
     let context = execution_context_without_grants();
     let scope = context.resource_scope.clone();
@@ -3592,6 +3601,126 @@ async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
         script_runtime.recorded_mounts().len(),
         1,
         "dispatch must have been called exactly once"
+    );
+}
+
+// Agent-scoped auth-resume without a caller-stamped artifact namespace must
+// derive one exactly like invoke/spawn/approval-resume: the kernel's
+// agent-scoped guard fails closed with a storage error (surfaced as "the tool
+// ran out of resources") when the invocation carries no namespace, and the
+// initial gate outcomes do NOT carry the derived namespace — so
+// `auth_resume_capability` must derive it afresh on the BlockedAuth
+// re-dispatch. Regression for the cutover guard that missed this entry path;
+// pins the same durable-artifact contract as
+// `agent_scoped_dispatch_without_stamped_namespace_derives_one_and_persists`
+// in first_party_coding_tools.rs.
+#[tokio::test]
+async fn host_runtime_services_auth_resume_without_stamped_namespace_derives_one_and_persists() {
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
+    let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let secret_handle = SecretHandle::new("auth_resume_token").unwrap();
+    let script_runtime = Arc::new(RecordingScriptExecutor::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(DiskFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenSecretObligationAuthorizer {
+            handle: secret_handle.clone(),
+        }),
+        ironclaw_processes::in_memory_backed_process_services(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_invocation_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_script_runtime(Arc::clone(&script_runtime))
+    .with_test_artifact_persistence();
+    let runtime = services.host_runtime_for_local_testing();
+    let mut context = execution_context_without_grants();
+    assert!(
+        context.agent_id.is_some(),
+        "fixture must be agent-scoped to exercise the agent-scoped guard"
+    );
+    context.artifact_namespace = None;
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "auth-resume namespace derivation"});
+
+    // Initial dispatch → approval gate (the gate outcome carries no derived
+    // namespace, so the auth-resume below must derive one independently).
+    let gate = block_for_approval(&runtime, context.clone(), estimate.clone(), input.clone()).await;
+    approve_dispatch_for_services(&services, &scope, gate.approval_request_id, None).await;
+
+    // Approval resume with the credential absent → AuthRequired / BlockedAuth
+    // (that resume path derives its own namespace).
+    let auth_gate = runtime
+        .resume_capability((
+            context.clone(),
+            gate.approval_request_id,
+            script_capability_id(),
+            estimate.clone(),
+            input.clone(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(auth_gate, RuntimeCapabilityOutcome::AuthRequired(_)),
+        "expected AuthRequired after credential-missing resume, got {auth_gate:?}"
+    );
+
+    // Supply the credential, then auth-resume with the same namespace-less
+    // agent-scoped context.
+    secret_store
+        .put(
+            scope.clone(),
+            secret_handle,
+            SecretMaterial::from("test-secret-value"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let auth_resumed = runtime
+        .auth_resume_capability((
+            context,
+            script_capability_id(),
+            estimate,
+            input.clone(),
+            Some(gate.approval_request_id),
+        ))
+        .await
+        .unwrap();
+
+    match auth_resumed {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, script_capability_id());
+            assert_eq!(completed.output, input);
+            assert!(
+                completed.completed_artifact.is_some(),
+                "agent-scoped auth-resume must persist canonical output as a durable artifact"
+            );
+            assert!(
+                completed.canonical_output_digest.is_some(),
+                "the completed result must carry the canonical output digest"
+            );
+        }
+        other => {
+            panic!("expected completed auth-resume outcome with a derived namespace, got {other:?}")
+        }
+    }
+    let completed_run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(
+        completed_run.status,
+        ProcessInvocationStatus::Completed,
+        "auth_resume must complete the BlockedAuth run"
     );
 }
 
@@ -4108,7 +4237,8 @@ async fn host_runtime_spawn_process_sandbox_blocks_for_approval_before_executor(
     .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
-    .with_process_sandbox_executor(Arc::clone(&sandbox_executor));
+    .with_process_sandbox_executor(Arc::clone(&sandbox_executor))
+    .with_test_artifact_persistence();
     let runtime = services.host_runtime_for_local_testing();
     let scope = sample_scope(InvocationId::new());
     let context = execution_context_without_grants_for_scope(scope.clone());
@@ -4155,6 +4285,101 @@ async fn host_runtime_spawn_process_sandbox_blocks_for_approval_before_executor(
     };
     wait_for_sandbox_process_result(&sandbox_executor, &scope, process_id, result_store.as_ref())
         .await;
+}
+
+// Agent-scoped spawn-resume without a caller-stamped artifact namespace must
+// derive one exactly like the other dispatch entry paths: the kernel's
+// agent-scoped guard fails closed with a storage error (surfaced as "the tool
+// ran out of resources") when the invocation carries no namespace, and the
+// initial gate outcome does not carry the derived namespace — so an approved
+// spawn-resume that omits it would fail before ever reaching the process
+// sandbox. Regression for the cutover guard that missed
+// `resume_spawn_capability`.
+#[tokio::test]
+async fn host_runtime_services_spawn_resume_without_stamped_namespace_derives_one_and_spawns() {
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
+    let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
+    let process_services = ironclaw_processes::in_memory_backed_process_services();
+    let result_store = process_services.result_store();
+    let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_host_bundled_manifest(
+            PROCESS_SANDBOX_MANIFEST,
+        )),
+        Arc::new(DiskFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        process_services,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "system.process_sandbox",
+        process_sandbox_authority_effects(),
+    )))
+    .with_invocation_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_process_sandbox_executor(Arc::clone(&sandbox_executor))
+    .with_test_artifact_persistence();
+    let runtime = services.host_runtime_for_local_testing();
+    let scope = sample_scope(InvocationId::new());
+    let mut context = execution_context_without_grants_for_scope(scope.clone());
+    assert!(
+        context.agent_id.is_some(),
+        "fixture must be agent-scoped to exercise the agent-scoped guard"
+    );
+    context.artifact_namespace = None;
+    let input = process_sandbox_input();
+    let estimate = process_sandbox_estimate();
+
+    // Initial spawn → approval gate (the gate outcome carries no namespace).
+    let blocked = runtime
+        .spawn_capability((
+            context.clone(),
+            process_sandbox_capability_id(),
+            estimate.clone(),
+            input.clone(),
+        ))
+        .await
+        .unwrap();
+    let approval_request_id = match blocked {
+        RuntimeCapabilityOutcome::ApprovalRequired(gate) => gate.approval_request_id,
+        other => panic!("expected approval gate, got {other:?}"),
+    };
+    approve_spawn_for_services(&services, &scope, approval_request_id, None).await;
+
+    // Approved spawn-resume with the same namespace-less agent-scoped context
+    // must derive a namespace and reach the sandbox executor.
+    let resumed = runtime
+        .resume_spawn_capability((
+            context,
+            approval_request_id,
+            process_sandbox_capability_id(),
+            estimate,
+            input,
+        ))
+        .await
+        .unwrap();
+
+    let process_id = match resumed {
+        RuntimeCapabilityOutcome::SpawnedProcess(handle) => handle.process_id,
+        other => {
+            panic!("expected spawned process after namespace-derived spawn resume, got {other:?}")
+        }
+    };
+    // The sandbox executor records the request when the process manager starts
+    // the spawn (asynchronously after the resume returns); the wait below polls
+    // the executor's recorded requests AND the result store, so it is the
+    // authoritative proof that the approved resume reached the executor. The
+    // explicit reach assertion follows the wait: asserting on the immediate
+    // return races the background supervisor.
+    wait_for_sandbox_process_result(&sandbox_executor, &scope, process_id, result_store.as_ref())
+        .await;
+    assert!(
+        !sandbox_executor.requests().is_empty(),
+        "the approved spawn resume must reach the process sandbox executor"
+    );
 }
 
 #[tokio::test]
@@ -4415,7 +4640,8 @@ async fn host_runtime_services_installs_builtin_obligation_handler_with_audit_si
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_audit_sink(Arc::clone(&audit))
-    .with_script_runtime(script_runtime);
+    .with_script_runtime(script_runtime)
+    .with_test_artifact_persistence();
 
     let outcome = services
         .host_runtime_for_local_testing()
@@ -4457,7 +4683,8 @@ async fn host_runtime_services_maps_script_exit_failure_through_private_adapter(
         ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_script_runtime(script_runtime);
+    .with_script_runtime(script_runtime)
+    .with_test_artifact_persistence();
 
     let outcome = services
         .host_runtime_for_local_testing()
@@ -4484,7 +4711,8 @@ async fn host_runtime_services_maps_mcp_client_failure_through_private_adapter()
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::new()))
-    .with_mcp_runtime(Arc::new(ClientErrorMcpExecutor));
+    .with_mcp_runtime(Arc::new(ClientErrorMcpExecutor))
+    .with_test_artifact_persistence();
 
     let outcome = services
         .host_runtime_for_local_testing()
@@ -4511,7 +4739,8 @@ async fn host_runtime_services_surfaces_invalid_mcp_catalog_without_retrying() {
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::new()))
-    .with_mcp_runtime(Arc::new(InvalidToolCatalogMcpExecutor));
+    .with_mcp_runtime(Arc::new(InvalidToolCatalogMcpExecutor))
+    .with_test_artifact_persistence();
 
     let outcome = services
         .host_runtime_for_local_testing()
@@ -4566,7 +4795,8 @@ async fn host_runtime_services_applies_scoped_mount_obligation_to_script_runtime
         "script",
         vec![EffectKind::DispatchCapability],
     )))
-    .with_script_runtime(Arc::clone(&script_runtime));
+    .with_script_runtime(Arc::clone(&script_runtime))
+    .with_test_artifact_persistence();
 
     let outcome = services
         .host_runtime_for_local_testing()
@@ -4618,7 +4848,8 @@ async fn host_runtime_services_rejects_broader_scoped_mount_before_dispatch() {
         "script",
         vec![EffectKind::DispatchCapability],
     )))
-    .with_script_runtime(Arc::clone(&script_runtime));
+    .with_script_runtime(Arc::clone(&script_runtime))
+    .with_test_artifact_persistence();
 
     let outcome = services
         .host_runtime_for_local_testing()
@@ -4662,7 +4893,8 @@ async fn host_runtime_services_writes_obligation_audit_records_to_durable_log_me
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_durable_audit_log(Arc::clone(&audit_log))
-    .with_script_runtime(script_runtime);
+    .with_script_runtime(script_runtime)
+    .with_test_artifact_persistence();
     let scope = sample_scope(InvocationId::new());
     let payload = json!({
         "message": "RAW_INPUT_SENTINEL_3147 /tmp/private-host-path",
@@ -4779,7 +5011,8 @@ async fn host_runtime_services_projects_resource_network_secret_obligation_audit
     .with_script_runtime(Arc::new(ScriptRuntime::new(
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
-    )));
+    )))
+    .with_test_artifact_persistence();
     let scope = sample_scope(InvocationId::new());
     secret_store
         .put(
@@ -4905,7 +5138,8 @@ async fn host_runtime_services_enforces_output_limit_and_reconciles_resource_usa
         "script",
         vec![EffectKind::DispatchCapability],
     )))
-    .with_script_runtime(script_runtime);
+    .with_script_runtime(script_runtime)
+    .with_test_artifact_persistence();
     let input = json!({"message": "this output is deliberately too large"});
 
     let outcome = services
@@ -4964,7 +5198,8 @@ async fn host_runtime_services_releases_reservation_when_dispatch_preflight_fail
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
         "script",
         vec![EffectKind::DispatchCapability],
-    )));
+    )))
+    .with_test_artifact_persistence();
 
     let outcome = services
         .host_runtime_for_local_testing()
@@ -5015,7 +5250,8 @@ async fn host_runtime_services_fails_closed_when_durable_obligation_audit_append
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_durable_audit_log(Arc::new(FailingDurableAuditLog))
-    .with_script_runtime(script_runtime);
+    .with_script_runtime(script_runtime)
+    .with_test_artifact_persistence();
 
     let outcome = services
         .host_runtime_for_local_testing()
@@ -5072,6 +5308,7 @@ async fn host_runtime_services_routes_wasm_http_through_per_invocation_policy_ha
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_runtime_http_egress(Arc::clone(&egress))
+    .with_test_artifact_persistence()
     .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
     .unwrap();
     let capability_id = CapabilityId::new("wasm-http.success").unwrap();
@@ -5137,6 +5374,7 @@ async fn host_runtime_services_wasm_secret_exists_reflects_staged_credential() {
     )
     .with_secret_store(Arc::clone(&secret_store))
     .with_runtime_http_egress(Arc::clone(&egress))
+    .with_test_artifact_persistence()
     .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
     .unwrap();
     let capability_id = CapabilityId::new("wasm-secrets.secret_exists").unwrap();
@@ -5203,6 +5441,7 @@ async fn host_runtime_services_wasm_secret_exists_false_without_staged_credentia
     )
     .with_secret_store(Arc::new(SecretStore::ephemeral()))
     .with_runtime_http_egress(Arc::clone(&egress))
+    .with_test_artifact_persistence()
     .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
     .unwrap();
     let capability_id = CapabilityId::new("wasm-secrets.secret_exists").unwrap();
@@ -5314,6 +5553,7 @@ async fn host_runtime_services_routes_cached_wasm_http_through_per_invocation_po
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_runtime_http_egress(Arc::clone(&egress))
+    .with_test_artifact_persistence()
     .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
     .unwrap();
     let runtime = services.host_runtime_for_local_testing();
@@ -5393,7 +5633,8 @@ async fn host_runtime_services_wasm_http_uses_production_staged_network_and_secr
             true,
             "https://example.test/api".to_string(),
         ),
-    ])));
+    ])))
+    .with_test_artifact_persistence();
     let services = services
         .try_with_host_http_egress(network.clone())
         .unwrap()
@@ -5474,7 +5715,8 @@ async fn host_runtime_services_wasm_http_rejects_secret_store_lease_before_trans
     .with_secret_store(Arc::clone(&secret_store))
     .with_wasm_runtime_credential_provider(Arc::new(SecretStoreLeaseCredentials {
         handle: secret_handle.clone(),
-    }));
+    }))
+    .with_test_artifact_persistence();
     let services = services
         .try_with_host_http_egress(network.clone())
         .unwrap()
@@ -5549,7 +5791,8 @@ async fn host_runtime_services_wasm_http_missing_staged_secret_stays_before_tran
             true,
             "https://example.test/api".to_string(),
         ),
-    ])));
+    ])))
+    .with_test_artifact_persistence();
     let services = services
         .try_with_host_http_egress(network.clone())
         .unwrap()
@@ -5783,7 +6026,7 @@ async fn host_runtime_services_cancel_does_not_reclassify_committed_kill_when_cl
     let runtime = HostRuntimeServices::new(
         registry,
         Arc::new(DiskFilesystem::new()),
-        Arc::new(FailingCleanupResourceGovernor),
+        Arc::new(FailingCleanupResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         process_services,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
@@ -6129,7 +6372,7 @@ async fn process_obligation_lifecycle_does_not_clean_handoffs_twice_after_backgr
 async fn process_obligation_lifecycle_surfaces_resource_cleanup_errors_after_terminal_transition() {
     let reservation_id = ResourceReservationId::new();
     let inner_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
-    let governor = Arc::new(FailingCleanupResourceGovernor);
+    let governor = Arc::new(FailingCleanupResourceGovernor::new());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
         Arc::new(SecretStore::ephemeral()),

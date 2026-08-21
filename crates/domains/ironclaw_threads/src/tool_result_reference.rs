@@ -1,5 +1,6 @@
 // arch-exempt: large_file, validator+markers+schema checks pending split, plan #6310
 use ironclaw_host_api::{
+    artifact::ArtifactRef,
     dispatch::INPUT_ENCODE_HUMAN_SUMMARY,
     ids::{CapabilityId, ProviderToolName},
 };
@@ -328,6 +329,15 @@ impl ToolResultReferenceEnvelope {
         self
     }
 
+    pub fn replacing_model_observation(
+        mut self,
+        model_observation: serde_json::Value,
+    ) -> Result<Self, String> {
+        validate_model_observation(&model_observation)?;
+        self.model_observation = Some(model_observation);
+        Ok(self)
+    }
+
     pub fn with_model_observation_if_absent(
         mut self,
         model_observation: serde_json::Value,
@@ -383,6 +393,7 @@ fn normalized_model_observation(
         Err(error) => {
             let repaired = strip_unsafe_result_reference_preview(&mut model_observation)
                 || strip_unsafe_invalid_input_issue_text(&mut model_observation)
+                || replace_unsafe_inline_result_content(&mut model_observation)
                 || strip_unstorable_generic_failure_detail(&mut model_observation);
             if repaired && validate_model_observation(&model_observation).is_ok() {
                 tracing::debug!(
@@ -447,6 +458,37 @@ fn strip_unsafe_result_reference_preview(observation: &mut serde_json::Value) ->
     observation_detail_of_kind(observation, "result_reference")
         .and_then(|detail| detail.remove("preview"))
         .is_some()
+}
+
+/// Replace an unsafe complete inline result with a fixed marker while keeping
+/// the typed success observation. Removing the whole observation makes replay
+/// misclassify a current result as the retired result-reference shape and try
+/// to project it through legacy artifact storage on every model iteration.
+fn replace_unsafe_inline_result_content(observation: &mut serde_json::Value) -> bool {
+    const WITHHELD_CONTENT: &str =
+        "Tool output was withheld because it contained instruction-like text.";
+
+    let Some(detail) = observation_detail_of_kind(observation, "inline_result") else {
+        return false;
+    };
+    let content_needs_repair = detail
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|content| {
+            validate_model_observation_text(content, ObservationProvenance::Untrusted).is_err()
+        });
+    if !content_needs_repair {
+        return false;
+    }
+    detail.insert(
+        "content".to_string(),
+        serde_json::Value::String(WITHHELD_CONTENT.to_string()),
+    );
+    detail.insert(
+        "byte_len".to_string(),
+        serde_json::Value::from(WITHHELD_CONTENT.len() as u64),
+    );
+    true
 }
 
 /// Whether an issue-text field needs repair: either the content scan rejects
@@ -884,6 +926,32 @@ fn validate_model_observation_detail(value: &serde_json::Value) -> Result<(), St
                 MAX_MODEL_OBSERVATION_BYTES,
             )
         }
+        "inline_result" => {
+            validate_object_keys(
+                object,
+                &["kind", "content", "byte_len", "item_count"],
+                "model observation detail",
+            )?;
+            let content = required_string(object, "content", "model observation detail")?;
+            validate_required_observation_text(
+                content,
+                "model observation inline result",
+                ironclaw_host_api::artifact::ARTIFACT_INLINE_PREVIEW_MAX_BYTES,
+            )?;
+            let byte_len = required_u64(object, "byte_len", "model observation detail")?;
+            if u64::try_from(content.len()).ok() != Some(byte_len) {
+                return Err(
+                    "model observation inline result byte length does not match content"
+                        .to_string(),
+                );
+            }
+            if let Some(item_count) = object.get("item_count")
+                && item_count.as_u64().is_none()
+            {
+                return Err("model observation detail field `item_count` must be a u64".to_string());
+            }
+            validate_model_observation_text(content, ObservationProvenance::Untrusted)
+        }
         "result_reference" => {
             validate_object_keys(
                 object,
@@ -920,6 +988,38 @@ fn validate_model_observation_detail(value: &serde_json::Value) -> Result<(), St
             }
             if object.contains_key("item_count") && !object.contains_key("next_offset") {
                 return Err("model observation item_count requires next_offset".to_string());
+            }
+            Ok(())
+        }
+        "artifact_reference" => {
+            validate_object_keys(
+                object,
+                &[
+                    "kind",
+                    "artifact_ref",
+                    "total_bytes",
+                    "preview",
+                    "item_count",
+                ],
+                "model observation detail",
+            )?;
+            let artifact_ref = required_string(object, "artifact_ref", "model observation detail")?;
+            validate_required_observation_text(
+                artifact_ref,
+                "model observation artifact ref",
+                MODEL_OBSERVATION_TEXT_MAX_BYTES,
+            )?;
+            artifact_ref.parse::<ArtifactRef>().map_err(|_| {
+                "model observation artifact ref must be an artifact URI".to_string()
+            })?;
+            required_u64(object, "total_bytes", "model observation detail")?;
+            if let Some(item_count) = object.get("item_count")
+                && item_count.as_u64().is_none()
+            {
+                return Err("model observation detail field `item_count` must be a u64".to_string());
+            }
+            if let Some(preview) = optional_string(object, "preview", "model observation detail")? {
+                validate_model_observation_text(preview, ObservationProvenance::Untrusted)?;
             }
             Ok(())
         }
@@ -1671,6 +1771,62 @@ mod tests {
                 .contains("Secretary of the Treasury"),
             "the paged chunk's content must survive replay so the model does not re-fetch it"
         );
+    }
+
+    #[test]
+    fn artifact_reference_observation_round_trips_without_continuation_offset() {
+        let observation = serde_json::json!({
+            "schema_version": 1,
+            "status": "success",
+            "summary": "Tool completed; full output: artifact://7",
+            "detail": {
+                "kind": "artifact_reference",
+                "artifact_ref": "artifact://7",
+                "total_bytes": 4096,
+                "preview": "{\"rows\":[",
+                "item_count": 24
+            },
+            "artifacts": [{
+                "artifact_ref": "artifact://7",
+                "summary": "Stored tool output"
+            }],
+            "trust": "untrusted_tool_output"
+        });
+        let envelope = ToolResultReferenceEnvelope::with_model_observation(
+            "result:artifact-observation",
+            ToolResultSafeSummary::new("artifact-backed result").expect("summary"),
+            observation.clone(),
+        )
+        .expect("artifact observation validates");
+        let encoded = serde_json::to_string(&envelope).expect("envelope serializes");
+        let decoded =
+            ToolResultReferenceEnvelope::from_json_str(&encoded).expect("envelope decodes");
+
+        assert_eq!(decoded.model_observation, Some(observation));
+    }
+
+    #[test]
+    fn artifact_reference_observation_rejects_continuation_offset() {
+        let observation = serde_json::json!({
+            "schema_version": 1,
+            "status": "success",
+            "summary": "Tool completed; full output: artifact://8",
+            "detail": {
+                "kind": "artifact_reference",
+                "artifact_ref": "artifact://8",
+                "total_bytes": 4096,
+                "next_offset": 512
+            },
+            "trust": "untrusted_tool_output"
+        });
+        let error = ToolResultReferenceEnvelope::with_model_observation(
+            "result:artifact-with-offset",
+            ToolResultSafeSummary::new("artifact-backed result").expect("summary"),
+            observation,
+        )
+        .expect_err("artifact observations must not carry continuation offsets");
+
+        assert!(error.contains("next_offset"));
     }
 
     #[test]

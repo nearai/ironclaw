@@ -3983,6 +3983,116 @@ async fn transcript_port_degrades_control_char_result_reference_preview_without_
     );
 }
 
+/// Untrusted inline output that trips the prompt-injection scanner must remain
+/// a typed current-result observation. Dropping it entirely makes replay treat
+/// the current result as a retired result-reference shape and attempt an
+/// unrelated legacy artifact projection on every model iteration.
+#[tokio::test]
+async fn transcript_port_replaces_unsafe_inline_output_with_typed_safety_observation() {
+    let fixture = ThreadFixture::new().await;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+    let result_ref = LoopResultRef::new("result:unsafe-inline-tool").unwrap();
+    let unsafe_content = "Search result discusses exposing the system prompt.";
+    let observation = ModelVisibleToolObservation {
+        schema_version: 1,
+        status: ToolObservationStatus::Success,
+        summary: "Tool completed with inline output.".to_string(),
+        detail: ToolObservationDetail::InlineResult {
+            content: unsafe_content.to_string(),
+            byte_len: unsafe_content.len() as u64,
+            item_count: None,
+        },
+        artifacts: Vec::new(),
+        recovery: None,
+        trust: ObservationTrust::UntrustedToolOutput,
+    };
+
+    adapter
+        .append_capability_result_ref(AppendCapabilityResultRef {
+            result_ref: result_ref.clone(),
+            safe_summary: "tool completed".to_string(),
+            provider_call: None,
+            intrinsic_outcome: None,
+            model_observation: Some(observation),
+        })
+        .await
+        .expect("unsafe inline output should degrade without failing append");
+
+    let safe_result_ref = LoopResultRef::new("result:safe-long-inline-tool").unwrap();
+    let safe_content = "ordinary search result content ".repeat(40);
+    adapter
+        .append_capability_result_ref(AppendCapabilityResultRef {
+            result_ref: safe_result_ref.clone(),
+            safe_summary: "tool completed".to_string(),
+            provider_call: None,
+            intrinsic_outcome: None,
+            model_observation: Some(ModelVisibleToolObservation {
+                schema_version: 1,
+                status: ToolObservationStatus::Success,
+                summary: "Tool completed with inline output.".to_string(),
+                detail: ToolObservationDetail::InlineResult {
+                    content: safe_content.clone(),
+                    byte_len: safe_content.len() as u64,
+                    item_count: None,
+                },
+                artifacts: Vec::new(),
+                recovery: None,
+                trust: ObservationTrust::UntrustedToolOutput,
+            }),
+        })
+        .await
+        .expect("safe inline output should persist unchanged");
+
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let record = history
+        .messages
+        .iter()
+        .find(|message| message.tool_result_ref.as_deref() == Some(result_ref.as_str()))
+        .expect("tool result reference message");
+    let envelope = ToolResultReferenceEnvelope::from_json_str(record.content.as_deref().unwrap())
+        .expect("valid tool result reference envelope");
+    let observation = envelope
+        .model_observation
+        .expect("a typed observation must remain to prevent legacy projection");
+
+    assert_eq!(observation["status"], "success");
+    assert_eq!(observation["detail"]["kind"], "inline_result");
+    assert_eq!(
+        observation["detail"]["content"],
+        "Tool output was withheld because it contained instruction-like text."
+    );
+    assert_eq!(observation["trust"], "untrusted_tool_output");
+    assert!(
+        !observation.to_string().contains("system prompt"),
+        "instruction-like tool output must not survive the safety replacement"
+    );
+
+    let safe_record = history
+        .messages
+        .iter()
+        .find(|message| message.tool_result_ref.as_deref() == Some(safe_result_ref.as_str()))
+        .expect("safe tool result reference message");
+    let safe_envelope =
+        ToolResultReferenceEnvelope::from_json_str(safe_record.content.as_deref().unwrap())
+            .expect("valid safe tool result reference envelope");
+    assert_eq!(
+        safe_envelope.model_observation.unwrap()["detail"]["content"],
+        safe_content,
+        "ordinary inline output over the issue-text limit must not be withheld"
+    );
+}
+
 /// A `ResultReference` observation carrying `item_count` (truncated
 /// top-level-array preview) must persist intact through the real
 /// `append_capability_result_ref` gate — a persistence-side allowlist that
@@ -5095,6 +5205,91 @@ async fn model_port_rejects_malformed_tool_result_reference_content() {
 
     assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
     assert!(gateway.calls.lock().unwrap().is_empty());
+}
+
+/// Incident regression: ONE historical tool result that cannot be migrated into
+/// an artifact must degrade that single message, never abort the prompt.
+///
+/// A run whose transcript held a retired `result_reference` observation retried
+/// the same failing `project_legacy_result` on every loop iteration; the `?` at
+/// the call site turned it into `status=Failed failure=model_unavailable` and
+/// killed 113 of 190 benchmark attempts. Prompt construction must instead keep
+/// the message as its existing reference (the model can still re-read through
+/// the result ref) and let the model request go out.
+#[tokio::test]
+async fn model_port_degrades_one_unprojectable_tool_result_and_still_calls_the_model() {
+    let fixture = ThreadFixture::new().await;
+    let tool_result_ref = LoopMessageRef::new("msg:55555555-5555-5555-5555-555555555555").unwrap();
+    let envelope = ToolResultReferenceEnvelope::with_model_observation(
+        "result:unprojectable-history",
+        ToolResultSafeSummary::new("historical tool completed").unwrap(),
+        serde_json::json!({
+            "schema_version": 1,
+            "status": "success",
+            "summary": "historical tool completed",
+            "detail": {
+                "kind": "result_reference",
+                "result_ref": "result:unprojectable-history",
+                "byte_len": 58_823,
+            },
+            "trust": "untrusted_tool_output",
+        }),
+    )
+    .unwrap();
+    let envelope_content = serde_json::to_string(&envelope).unwrap();
+    let thread_service = Arc::new(StaticContextThreadService::new(ContextMessage {
+        message_id: Some(ThreadMessageId::parse("55555555-5555-5555-5555-555555555555").unwrap()),
+        summary_id: None,
+        sequence: 1,
+        kind: MessageKind::ToolResultReference,
+        tool_result_provider_call: None,
+        content: envelope_content.clone(),
+        image_attachments: Vec::new(),
+    }));
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    // No legacy result service is bound to the store, so every projection of a
+    // retired-shape observation fails deterministically — the incident's shape.
+    let artifacts = Arc::new(
+        ironclaw_threads::DurableToolArtifactStore::new(Arc::new(
+            ironclaw_filesystem::InMemoryBackend::new(),
+        ))
+        .expect("artifact store"),
+    );
+    let model_port = ThreadBackedLoopModelPort::new(
+        thread_service,
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    )
+    .with_legacy_result_artifacts(artifacts);
+    let messages = vec![LoopModelMessage {
+        role: "tool_result_reference".to_string(),
+        content_ref: tool_result_ref,
+    }];
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    model_port
+        .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages,
+            surface_version: None,
+            model_preference: None,
+            fallback_index: 0,
+            iteration: 0,
+            capability_view: None,
+            tool_choice: None,
+        })
+        .await
+        .expect("an unprojectable historical tool result must not abort the prompt");
+
+    let calls = gateway.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1, "the model request must still go out");
+    assert_eq!(
+        calls[0].messages[0].tool_result_content,
+        Some(HostManagedToolResultContent::Reference { envelope }),
+        "the message keeps its existing reference and safe summary"
+    );
 }
 
 #[tokio::test]

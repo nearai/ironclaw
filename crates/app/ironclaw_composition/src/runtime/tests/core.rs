@@ -863,7 +863,7 @@ struct ToolCallingGateway {
 }
 
 #[derive(Debug, Default)]
-struct SandboxShellCallingGateway {
+struct SandboxBashCallingGateway {
     calls: StdMutex<usize>,
 }
 
@@ -878,13 +878,12 @@ struct WorkspaceListingGateway {
     requests: StdMutex<Vec<HostManagedModelRequest>>,
 }
 
-// Standalone model replay is a bounded reference observation: for a
-// result under the inline first-look preview cap (issue #5838,
-// the standalone result-preview limit), the raw content legitimately
-// appears inline in `detail.preview` so the model does not need a
-// follow-up `result_read` call; only content beyond the cap requires one.
-// Both fixtures below are well under the cap.
-fn assert_standalone_result_reference(tool_result: &HostManagedModelMessage, raw_marker: &str) {
+// Standalone model replay is a bounded artifact-backed observation: for a
+// result under the inline first-look preview cap, the canonical content appears
+// in `detail.content`, so the model does not need a follow-up read. Results
+// beyond the cap advertise their artifact URI instead. Both fixtures below are
+// well under the cap.
+fn assert_standalone_result_observation(tool_result: &HostManagedModelMessage, raw_marker: &str) {
     assert!(
         tool_result.content.contains(raw_marker),
         "a result under the first-look preview cap should appear inline in model replay: {}",
@@ -894,7 +893,7 @@ fn assert_standalone_result_reference(tool_result: &HostManagedModelMessage, raw
         tool_result.tool_result_content.as_ref()
     else {
         panic!(
-            "model replay should carry a result-reference envelope, got {:?}",
+            "model replay should carry an artifact-backed tool-result envelope, got {:?}",
             tool_result.tool_result_content
         );
     };
@@ -903,16 +902,18 @@ fn assert_standalone_result_reference(tool_result: &HostManagedModelMessage, raw
     let observation = envelope
         .model_observation
         .as_ref()
-        .expect("result-reference replay should include a model observation");
+        .expect("artifact-backed replay should include a model observation");
     assert_eq!(observation["schema_version"], serde_json::json!(1));
     assert_eq!(observation["status"], serde_json::json!("success"));
     assert_eq!(
         observation["detail"]["kind"],
-        serde_json::json!("result_reference")
+        serde_json::json!("inline_result")
     );
-    assert_eq!(
-        observation["detail"]["result_ref"],
-        serde_json::json!(envelope.result_ref)
+    assert!(
+        observation["detail"]["content"]
+            .as_str()
+            .is_some_and(|content| content.contains(raw_marker)),
+        "inline observation must retain the complete small result"
     );
 }
 
@@ -1134,7 +1135,7 @@ impl HostManagedModelGateway for ToolCallingGateway {
                 .iter()
                 .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
                 .expect("second model call should include tool result");
-            assert_standalone_result_reference(tool_result, "hello from tool");
+            assert_standalone_result_observation(tool_result, "hello from tool");
             let provider_call = tool_result
                 .tool_result_provider_call
                 .as_ref()
@@ -1187,7 +1188,7 @@ impl HostManagedModelGateway for ToolCallingGateway {
 }
 
 #[async_trait]
-impl HostManagedModelGateway for SandboxShellCallingGateway {
+impl HostManagedModelGateway for SandboxBashCallingGateway {
     async fn stream_model(
         &self,
         _request: HostManagedModelRequest,
@@ -1204,7 +1205,7 @@ impl HostManagedModelGateway for SandboxShellCallingGateway {
         capabilities: Arc<dyn LoopCapabilityPort>,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         let call_index = {
-            let mut calls = self.calls.lock().expect("shell gateway lock poisoned");
+            let mut calls = self.calls.lock().expect("bash gateway lock poisoned");
             let call_index = *calls;
             *calls += 1;
             call_index
@@ -1214,55 +1215,46 @@ impl HostManagedModelGateway for SandboxShellCallingGateway {
                 .messages
                 .iter()
                 .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
-                .expect("second model call should include shell result");
+                .expect("second model call should include bash result");
             assert!(
                 tool_result.content.contains("railway-sandbox-marker"),
-                "shell result should come from the configured sandbox transport: {}",
+                "bash result should come from the configured sandbox transport: {}",
                 tool_result.content
             );
-            let envelope: serde_json::Value = serde_json::from_str(&tool_result.content)
-                .expect("tool result should be a structured reference envelope");
-            let preview = envelope["model_observation"]["detail"]["preview"]
-                .as_str()
-                .expect("tool result should include an inline preview");
-            let shell_output: serde_json::Value =
-                serde_json::from_str(preview).expect("shell preview should be structured JSON");
-            assert_eq!(
-                shell_output["sandboxed"],
-                serde_json::json!(true),
-                "model-visible shell result must report sandbox execution"
-            );
-            return Ok(HostManagedModelResponse::assistant_reply(
-                "sandbox shell ok",
-            ));
+            return Ok(HostManagedModelResponse::assistant_reply("sandbox bash ok"));
         }
 
         let surface = capabilities
             .visible_capabilities(VisibleCapabilityRequest)
             .await
             .map_err(model_capability_error)?;
-        let shell_id = CapabilityId::new(ironclaw_host_runtime::SHELL_CAPABILITY_ID)
-            .expect("shell capability id");
+        let bash_id = CapabilityId::new(ironclaw_host_runtime::CODING_BASH_CAPABILITY_ID)
+            .expect("bash capability id");
         assert!(
             surface
                 .descriptors
                 .iter()
-                .any(|descriptor| descriptor.capability_id == shell_id),
-            "builtin shell must be visible for a sandboxed hosted profile"
+                .any(|descriptor| descriptor.capability_id == bash_id),
+            "pinned bash must be visible for a sandboxed hosted profile; visible: {:?}",
+            surface
+                .descriptors
+                .iter()
+                .map(|descriptor| descriptor.capability_id.as_str())
+                .collect::<Vec<_>>()
         );
-        let shell_tool = capabilities
+        let bash_tool = capabilities
             .tool_definitions()
             .map_err(model_capability_error)?
             .into_iter()
-            .find(|definition| definition.capability_id == shell_id)
-            .expect("shell provider tool definition");
+            .find(|definition| definition.capability_id == bash_id)
+            .expect("bash provider tool definition");
         let candidate = capabilities
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
                 provider_id: "test-provider".to_string(),
                 provider_model_id: "test-model".to_string(),
-                turn_id: Some("provider-turn-shell".to_string()),
-                id: "shell-call-1".to_string(),
-                name: shell_tool.name,
+                turn_id: Some("provider-turn-bash".to_string()),
+                id: "bash-call-1".to_string(),
+                name: bash_tool.name,
                 arguments: serde_json::json!({"command": "printf railway-sandbox-marker"}),
                 response_reasoning: None,
                 reasoning: None,
@@ -1332,8 +1324,8 @@ impl HostManagedModelGateway for LargeEchoToolCallingGateway {
                 tool_result.content.len()
             );
             assert!(
-                tool_result.content.contains("result_reference"),
-                "model replay must carry a bounded result-reference observation"
+                tool_result.content.contains("artifact_reference"),
+                "model replay must carry a bounded artifact-reference observation"
             );
             assert!(
                 tool_result.content.len() <= TOOL_RESULT_RECORD_READ_MAX_BYTES * 2,
@@ -1342,21 +1334,22 @@ impl HostManagedModelGateway for LargeEchoToolCallingGateway {
             );
             assert!(
                 tool_result.content.contains("Secretary of the Treasury"),
-                "the initial result-reference preview must retain ordinary document text"
+                "the initial artifact-reference preview must retain ordinary document text"
             );
-            let result_ref = match tool_result.tool_result_content.as_ref() {
-                Some(HostManagedToolResultContent::Reference { envelope }) => {
-                    envelope.result_ref.clone()
-                }
-                other => panic!("expected a result reference, got {other:?}"),
-            };
-            let result_read_id = CapabilityId::new("builtin.result_read").expect("reader id");
-            let result_read_tool = capabilities
+            let observation: serde_json::Value =
+                serde_json::from_str(&tool_result.content).expect("result observation");
+            let artifact_ref = observation["model_observation"]["detail"]["artifact_ref"]
+                .as_str()
+                .expect("large result advertises artifact URI")
+                .to_string();
+            let bounded_artifact_ref = format!("{artifact_ref}:bytes:0-3071");
+            let read_id = CapabilityId::new("builtin.read").expect("reader id");
+            let read_tool = capabilities
                 .tool_definitions()
                 .map_err(model_capability_error)?
                 .into_iter()
-                .find(|definition| definition.capability_id == result_read_id)
-                .expect("result_read provider tool definition");
+                .find(|definition| definition.capability_id == read_id)
+                .expect("coding read provider tool definition");
             let candidate = capabilities
                 .register_provider_tool_call(RegisterProviderToolCallRequest::new(
                     ProviderToolCall {
@@ -1364,11 +1357,9 @@ impl HostManagedModelGateway for LargeEchoToolCallingGateway {
                         provider_model_id: "test-model".to_string(),
                         turn_id: Some("provider-turn-2".to_string()),
                         id: "call-2".to_string(),
-                        name: result_read_tool.name,
+                        name: read_tool.name,
                         arguments: serde_json::json!({
-                            "result_ref": result_ref,
-                            "offset": 0,
-                            "max_bytes": 2048,
+                            "path": bounded_artifact_ref,
                         }),
                         response_reasoning: None,
                         reasoning: None,
@@ -1392,37 +1383,30 @@ impl HostManagedModelGateway for LargeEchoToolCallingGateway {
                         && message
                             .tool_result_provider_call
                             .as_ref()
-                            .is_some_and(|call| {
-                                call.capability_id.as_str() == "builtin.result_read"
-                            })
+                            .is_some_and(|call| call.capability_id.as_str() == "builtin.read")
                 })
-                .expect("third model call should include result_read output");
+                .expect("third model call should include coding read output");
             assert!(
                 tool_result.content.contains(LARGE_ECHO_MESSAGE),
-                "result_read must expose its bounded chunk to the model"
-            );
-            assert!(
-                !tool_result.content.contains(LARGE_ECHO_TAIL),
-                "the result_read response must remain bounded"
+                "bounded artifact read must expose the requested byte range"
             );
             let observation: serde_json::Value =
-                serde_json::from_str(&tool_result.content).expect("result_read observation");
-            let detail = &observation["model_observation"]["detail"];
+                serde_json::from_str(&tool_result.content).expect("result observation");
             assert_eq!(
-                detail["result_ref"], observation["result_ref"],
-                "result_read replay must expose only the original pageable result reference"
+                observation["model_observation"]["detail"]["kind"],
+                serde_json::json!("inline_result")
+            );
+            let content = observation["model_observation"]["detail"]["content"]
+                .as_str()
+                .expect("bounded artifact read content");
+            assert!(
+                content.contains(LARGE_ECHO_MESSAGE) && !content.contains(LARGE_ECHO_TAIL),
+                "coding read must expose only the requested bounded artifact range"
             );
             assert!(
-                detail["total_bytes"]
-                    .as_u64()
-                    .is_some_and(|total_bytes| total_bytes > 2048),
-                "result_read replay must expose total bytes for continuation: {}",
-                tool_result.content
-            );
-            assert_eq!(
-                detail["next_offset"].as_u64(),
-                Some(2048),
-                "result_read replay must expose the next offset for continuation"
+                tool_result.content.len() <= TOOL_RESULT_RECORD_READ_MAX_BYTES * 2,
+                "coding read replay must stay bounded, got {} bytes",
+                tool_result.content.len()
             );
             return Ok(HostManagedModelResponse::assistant_reply("tool ok"));
         }
@@ -1546,24 +1530,24 @@ impl HostManagedModelGateway for WorkspaceListingGateway {
                 .iter()
                 .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
                 .expect("second model call should include tool result");
-            assert_standalone_result_reference(tool_result, "workspace-sentinel.txt");
+            assert_standalone_result_observation(tool_result, "workspace-sentinel.txt");
             return Ok(HostManagedModelResponse::assistant_reply("workspace ok"));
         }
 
-        let list_dir_id = CapabilityId::new("builtin.list_dir").expect("list_dir id");
-        let list_dir_tool = capabilities
+        let glob_id = CapabilityId::new("builtin.glob").expect("glob id");
+        let glob_tool = capabilities
             .tool_definitions()
             .map_err(model_capability_error)?
             .into_iter()
-            .find(|definition| definition.capability_id == list_dir_id)
-            .expect("list_dir provider tool definition");
+            .find(|definition| definition.capability_id == glob_id)
+            .expect("glob provider tool definition");
         let candidate = capabilities
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
                 provider_id: "test-provider".to_string(),
                 provider_model_id: "test-model".to_string(),
                 turn_id: Some("provider-turn-1".to_string()),
                 id: "call-1".to_string(),
-                name: list_dir_tool.name,
+                name: glob_tool.name,
                 arguments: serde_json::json!({"path": "/workspace"}),
                 response_reasoning: None,
                 reasoning: None,
@@ -3398,7 +3382,7 @@ impl ironclaw_host_api::process::SandboxCommandTransport for RecordingSandboxTra
 }
 
 #[derive(Debug, Default)]
-struct ShellRecordingSandboxTransport {
+struct BashRecordingSandboxTransport {
     requests: StdMutex<Vec<ironclaw_host_api::process::CommandExecutionRequest>>,
     shutdown_calls: AtomicUsize,
 }
@@ -3419,7 +3403,7 @@ fn user_sandbox_shutdown_error_preserves_runtime_process_source() {
 }
 
 #[async_trait]
-impl ironclaw_host_api::process::SandboxCommandTransport for ShellRecordingSandboxTransport {
+impl ironclaw_host_api::process::SandboxCommandTransport for BashRecordingSandboxTransport {
     async fn run_command(
         &self,
         request: ironclaw_host_api::process::CommandExecutionRequest,
@@ -3449,10 +3433,10 @@ impl ironclaw_host_api::process::SandboxCommandTransport for ShellRecordingSandb
 }
 
 #[tokio::test]
-async fn railway_sandbox_profile_routes_model_shell_call_to_user_sandbox_process_port() {
+async fn railway_sandbox_profile_routes_model_bash_call_to_user_sandbox_process_port() {
     let root = tempfile::tempdir().expect("tempdir");
-    let gateway = Arc::new(SandboxShellCallingGateway::default());
-    let sandbox_transport = Arc::new(ShellRecordingSandboxTransport::default());
+    let gateway = Arc::new(SandboxBashCallingGateway::default());
+    let sandbox_transport = Arc::new(BashRecordingSandboxTransport::default());
     let input = RebornRuntimeInput::from_build_input(
         crate::deployment::local_filesystem_build_input_with_profile(
             RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway,
@@ -3490,14 +3474,14 @@ async fn railway_sandbox_profile_routes_model_shell_call_to_user_sandbox_process
         .await;
     let reply = tokio::time::timeout(
         RUNTIME_SEND_TIMEOUT,
-        runtime.send_user_message(&conversation, "run the shell marker"),
+        runtime.send_user_message(&conversation, "run the bash marker"),
     )
     .await
-    .expect("sandbox shell turn should finish")
-    .expect("sandbox shell turn succeeds");
+    .expect("sandbox bash turn should finish")
+    .expect("sandbox bash turn succeeds");
 
     assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
-    assert_eq!(reply.text.as_deref(), Some("sandbox shell ok"));
+    assert_eq!(reply.text.as_deref(), Some("sandbox bash ok"));
     {
         let requests = sandbox_transport
             .requests
@@ -3506,7 +3490,7 @@ async fn railway_sandbox_profile_routes_model_shell_call_to_user_sandbox_process
         assert_eq!(
             requests.len(),
             1,
-            "shell must use the sandbox transport once"
+            "bash must use the sandbox transport once"
         );
         assert_eq!(requests[0].command, "printf railway-sandbox-marker");
     }
@@ -4645,7 +4629,7 @@ async fn standalone_runtime_forwards_tool_call_trajectory_to_raw_observer() {
     })
     .with_poll_settings(PollSettings {
         interval: Duration::from_millis(10),
-        max_total: Duration::from_secs(3),
+        max_total: RUNTIME_SEND_TIMEOUT,
     })
     // Raw (not safe-preview) so we can assert verbatim arguments + output.
     .with_raw_trajectory_observer(observer.clone())
@@ -4656,13 +4640,24 @@ async fn standalone_runtime_forwards_tool_call_trajectory_to_raw_observer() {
     runtime
         .enable_global_auto_approve_for_test(&conversation)
         .await;
-    let reply = tokio::time::timeout(
+    let reply = match tokio::time::timeout(
         RUNTIME_SEND_TIMEOUT,
         runtime.send_user_message(&conversation, "use echo tool"),
     )
     .await
-    .expect("runtime send should finish")
-    .expect("runtime send should succeed");
+    {
+        Ok(Ok(reply)) => reply,
+        outcome => panic!(
+            "runtime send failed after {} capability-aware calls, {} plain calls, and {}/{} observed inputs/results: {outcome:?}",
+            *gateway.calls.lock().expect("gateway calls"),
+            *gateway
+                .stream_model_calls
+                .lock()
+                .expect("plain gateway calls"),
+            observer.inputs.lock().expect("observer inputs").len(),
+            observer.results.lock().expect("observer results").len(),
+        ),
+    };
     assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
     // Shut down before inspecting the recorded callbacks so the std-Mutex
     // guards are never held across an `.await` (clippy::await_holding_lock).
@@ -4722,7 +4717,7 @@ async fn standalone_runtime_safe_preview_observer_receives_bounded_payload() {
     })
     .with_poll_settings(PollSettings {
         interval: Duration::from_millis(10),
-        max_total: Duration::from_secs(3),
+        max_total: RUNTIME_SEND_TIMEOUT,
     })
     // Default path → safe-preview truncation applied before the observer.
     .with_trajectory_observer(observer.clone())
@@ -4733,13 +4728,20 @@ async fn standalone_runtime_safe_preview_observer_receives_bounded_payload() {
     runtime
         .enable_global_auto_approve_for_test(&conversation)
         .await;
-    let reply = tokio::time::timeout(
+    let reply = match tokio::time::timeout(
         RUNTIME_SEND_TIMEOUT,
         runtime.send_user_message(&conversation, "echo a big payload"),
     )
     .await
-    .expect("runtime send should finish")
-    .expect("runtime send should succeed");
+    {
+        Ok(Ok(reply)) => reply,
+        outcome => panic!(
+            "runtime send failed after {} model calls and {}/{} observed inputs/results: {outcome:?}",
+            *gateway.calls.lock().expect("gateway calls"),
+            observer.inputs.lock().expect("observer inputs").len(),
+            observer.results.lock().expect("observer results").len(),
+        ),
+    };
     assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
     // Shut down before inspecting the recorded callbacks so the std-Mutex
     // guards are never held across an `.await` (clippy::await_holding_lock).
@@ -4748,22 +4750,22 @@ async fn standalone_runtime_safe_preview_observer_receives_bounded_payload() {
     let original_len = large_echo_message().len();
 
     let inputs = observer.inputs.lock().expect("inputs lock");
-    assert_eq!(inputs.len(), 2, "echo and result_read inputs observed");
+    assert_eq!(inputs.len(), 2, "echo and coding read inputs observed");
     let observed_message = inputs[0].2["message"].as_str().expect("message string");
     assert!(
         observed_message.len() < original_len && observed_message.contains("[truncated"),
         "observer should receive a truncated preview of the large argument, got {} bytes",
         observed_message.len()
     );
-    assert_eq!(inputs[1].1, "builtin.result_read");
+    assert_eq!(inputs[1].1, "builtin.read");
 
     let results = observer.results.lock().expect("results lock");
-    assert_eq!(results.len(), 2, "echo and result_read outputs observed");
+    assert_eq!(results.len(), 2, "echo and coding read outputs observed");
     assert!(
         results[0].2.to_string().contains("[truncated"),
         "observer should receive a truncated preview of the large result"
     );
-    assert_eq!(results[1].1, "builtin.result_read");
+    assert_eq!(results[1].1, "builtin.read");
 }
 
 #[tokio::test]
@@ -7961,23 +7963,23 @@ const OWNER: &str = "two-thread-owner";
 const AGENT: &str = "two-thread-agent";
 
 /// A mocked model doing what the demo's second thread does: read the activated body, take the
-/// workdir it ADVERTISES, and run the skill's command there through the real `builtin.shell`.
+/// workdir it ADVERTISES, and run the skill's command there through the real pinned `bash`.
 ///
 /// The point is path provenance. The sibling fixture walks the workspace and runs the script with
 /// `std::process::Command`, which proves the bytes landed but says nothing about the string handed
 /// to the model — and a wrong string is what shipped once. Parsed from the body, so a wrong
 /// advertised path fails this test.
 #[derive(Debug, Default)]
-struct SkillShellGateway {
+struct SkillBashGateway {
     calls: StdMutex<usize>,
     /// The workdir the body advertised, as the model read it.
     advertised_workdir: StdMutex<Option<String>>,
-    /// The shell's own stdout, replayed back to the model on the following call.
-    shell_output: StdMutex<Option<String>>,
+    /// Bash stdout, replayed back to the model on the following call.
+    bash_output: StdMutex<Option<String>>,
 }
 
 #[async_trait]
-impl HostManagedModelGateway for SkillShellGateway {
+impl HostManagedModelGateway for SkillBashGateway {
     async fn stream_model(
         &self,
         _request: HostManagedModelRequest,
@@ -7994,7 +7996,7 @@ impl HostManagedModelGateway for SkillShellGateway {
         capabilities: Arc<dyn LoopCapabilityPort>,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         let call_index = {
-            let mut calls = self.calls.lock().expect("skill shell gateway lock");
+            let mut calls = self.calls.lock().expect("skill bash gateway lock");
             let index = *calls;
             *calls += 1;
             index
@@ -8007,7 +8009,7 @@ impl HostManagedModelGateway for SkillShellGateway {
                 .iter()
                 .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
             {
-                *self.shell_output.lock().expect("shell output lock") =
+                *self.bash_output.lock().expect("bash output lock") =
                     Some(tool_result.content.clone());
             }
             return Ok(HostManagedModelResponse::assistant_reply("done"));
@@ -8025,24 +8027,25 @@ impl HostManagedModelGateway for SkillShellGateway {
         });
         *self.advertised_workdir.lock().expect("workdir lock") = Some(workdir.clone());
 
-        let shell_id = CapabilityId::new("builtin.shell").expect("shell id");
-        let shell_tool = capabilities
+        let bash_id =
+            CapabilityId::new(ironclaw_host_runtime::CODING_BASH_CAPABILITY_ID).expect("bash id");
+        let bash_tool = capabilities
             .tool_definitions()
             .map_err(model_capability_error)?
             .into_iter()
-            .find(|definition| definition.capability_id == shell_id)
-            .expect("builtin.shell must be offered under a policy with a process backend");
+            .find(|definition| definition.capability_id == bash_id)
+            .expect("pinned bash must be offered under a policy with a process backend");
         let candidate = capabilities
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
                 provider_id: "test-provider".to_string(),
                 provider_model_id: "test-model".to_string(),
-                turn_id: Some("skill-shell-turn".to_string()),
-                id: "call-skill-shell".to_string(),
-                name: shell_tool.name,
+                turn_id: Some("skill-bash-turn".to_string()),
+                id: "call-skill-bash".to_string(),
+                name: bash_tool.name,
                 // Exactly the shape the note tells the model to use.
                 arguments: serde_json::json!({
                     "command": "python3 scripts/egfr.py --scr 1.3 --age 62 --female",
-                    "workdir": workdir,
+                    "cwd": workdir,
                 }),
                 response_reasoning: None,
                 reasoning: None,
@@ -8226,8 +8229,7 @@ async fn thread_one_authors_a_scripted_skill_and_thread_two_executes_it() {
 
 /// The demo end to end, with the model mocked and everything around it real.
 ///
-/// Thread 1 installs a skill carrying a script; thread 2 is a NEW runtime over the same store whose
-/// mocked model reads the advertised workdir and runs the command through the real `builtin.shell`.
+/// mocked model reads the advertised workdir and runs the command through the real pinned `bash`.
 /// Closes the half the sibling fixture cannot see: the path the model is TOLD. When that string was
 /// wrong, every command failed with `Failed to spawn command` and nothing noticed.
 #[tokio::test]
@@ -8255,7 +8257,7 @@ async fn the_model_runs_a_skills_script_from_the_workdir_the_body_advertises() {
     runtime.shutdown().await.expect("thread one shutdown");
 
     // ── Thread 2: a later conversation, driven by the mocked model ─────────────────────────────
-    let gateway = Arc::new(SkillShellGateway::default());
+    let gateway = Arc::new(SkillBashGateway::default());
     let runtime = build_reborn_runtime(
         two_thread_runtime_input(storage_root.clone()).with_model_gateway_override(gateway.clone()),
     )
@@ -8282,21 +8284,21 @@ async fn the_model_runs_a_skills_script_from_the_workdir_the_body_advertises() {
          resolved a second time by the shell and the directory does not exist"
     );
 
-    let shell_output = gateway
-        .shell_output
+    let bash_output = gateway
+        .bash_output
         .lock()
-        .expect("shell output lock")
+        .expect("bash output lock")
         .clone()
-        .expect("the shell call must have produced a result the model could read");
+        .expect("the bash call must have produced a result the model could read");
     assert!(
-        !shell_output.contains("Failed to spawn command")
-            && !shell_output.contains("No such file or directory"),
-        "the shell must resolve the advertised workdir; got {shell_output}"
+        !bash_output.contains("Failed to spawn command")
+            && !bash_output.contains("No such file or directory"),
+        "bash must resolve the advertised workdir; got {bash_output}"
     );
     assert!(
-        shell_output.contains("FIXTURE-OK") && shell_output.contains("stage=G3a"),
-        "the answer must come from the staged script itself, through the shell the model called, \
-         not from re-derived arithmetic; got {shell_output}"
+        bash_output.contains("FIXTURE-OK") && bash_output.contains("stage=G3a"),
+        "the answer must come from the staged script itself, through bash the model called, \
+         not from re-derived arithmetic; got {bash_output}"
     );
 
     runtime.shutdown().await.expect("thread two shutdown");

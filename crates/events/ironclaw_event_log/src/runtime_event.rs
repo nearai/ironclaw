@@ -963,6 +963,7 @@ fn mentions_workspace_file_context(lower: &str) -> bool {
         "write_file",
         "list_dir",
         "path workspace",
+        "path '",
     ]
     .iter()
     .any(|phrase| contains_bounded_phrase(lower, phrase))
@@ -1359,6 +1360,21 @@ mod tests {
         )
         .with_error_summary("read_file failed for /tmp/api_key.txt: secret leaked");
         let wire = serde_json::to_string(&path_event).expect("serialize runtime event");
+        let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize runtime event");
+        assert_eq!(
+            decoded.error_summary.as_deref(),
+            Some(WORKSPACE_FILE_ERROR_SUMMARY)
+        );
+
+        let pinned_read_path_event = RuntimeEvent::capability_activity_failed(
+            scope(),
+            capability(),
+            None,
+            None,
+            "operation_failed",
+        )
+        .with_error_summary("Path '/workspace/ironclaw_issues.json' not found");
+        let wire = serde_json::to_string(&pinned_read_path_event).expect("serialize runtime event");
         let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize runtime event");
         assert_eq!(
             decoded.error_summary.as_deref(),

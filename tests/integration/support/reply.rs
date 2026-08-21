@@ -13,6 +13,36 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TOOL_CALL_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Provider-name overrides on the first-party surface (the pinned coding
+/// package's `provider_tool_name` seam in
+/// `ironclaw_host_runtime::first_party_tools::coding`): these capability ids
+/// are advertised to the model under an EXACT name, not the derived
+/// `'.' → "__"` encoding. A scripted model call for one of them must emit the
+/// advertised name (what a real model would produce), so `tool_call` /
+/// `tool_calls` resolve the override here before falling back to the
+/// encoding.
+const CODING_PROVIDER_NAME_OVERRIDES: &[(&str, &str)] = &[
+    ("builtin.read", "read"),
+    ("builtin.write", "write"),
+    ("builtin.edit", "edit"),
+    ("builtin.glob", "glob"),
+    ("builtin.grep", "grep"),
+    ("builtin.bash", "bash"),
+];
+
+/// The provider-facing tool name a scripted model call for `capability_id`
+/// emits: the exact override name when the capability carries one, else the
+/// `'.' → "__"` encoding `ProviderToolName::new` requires (it rejects dots).
+fn provider_tool_name(capability_id: &str) -> String {
+    CODING_PROVIDER_NAME_OVERRIDES
+        .iter()
+        .find(|(id, _)| *id == capability_id)
+        .map_or_else(
+            || capability_id.replace('.', "__"),
+            |(_, name)| (*name).to_string(),
+        )
+}
+
 /// One scripted model turn.
 pub struct RebornScriptedReply {
     step: TraceStep,
@@ -35,15 +65,19 @@ impl RebornScriptedReply {
     }
 
     /// Scripts one model tool-call turn (CapabilityId, e.g. `"builtin.http"`).
-    /// Applies the `'.' → "__"` encoding `ProviderToolName::new` requires (it
-    /// rejects dots); `model_replay.rs`'s `trace_provider_tool_name` has an
-    /// identical, independent encoder for the fixture-replay seam — keep both
-    /// in sync if the mapping changes. NOT collision-safe (`.` vs `__` can
-    /// collide) and not length-truncated — fine for single-capability tests
-    /// only. The `id` auto-fills from a process-scoped counter, canonicalized
+    /// The emitted provider name is the capability's exact
+    /// `provider_tool_name` override when it carries one (the pinned coding
+    /// tools `read`/`write`/`edit`/`glob`/`grep`/`bash` — see
+    /// [`CODING_PROVIDER_NAME_OVERRIDES`]), else the `'.' → "__"` encoding
+    /// `ProviderToolName::new` requires (it rejects dots);
+    /// `model_replay.rs`'s `trace_provider_tool_name` has an identical,
+    /// independent encoder for the fixture-replay seam — keep both in sync
+    /// if the mapping changes. NOT collision-safe (`.` vs `__` can collide)
+    /// and not length-truncated — fine for single-capability tests only.
+    /// The `id` auto-fills from a process-scoped counter, canonicalized
     /// per trace by `scripted_provider::scripted_trace_llm`.
     pub fn tool_call(capability_id: &str, arguments: serde_json::Value) -> Self {
-        let name = capability_id.replace('.', "__");
+        let name = provider_tool_name(capability_id);
         let id = format!("call-{}", NEXT_TOOL_CALL_ID.fetch_add(1, Ordering::Relaxed));
         Self {
             step: TraceStep {
@@ -72,7 +106,7 @@ impl RebornScriptedReply {
             .into_iter()
             .map(|(capability_id, arguments)| TraceToolCall {
                 id: format!("call-{}", NEXT_TOOL_CALL_ID.fetch_add(1, Ordering::Relaxed)),
-                name: capability_id.replace('.', "__"),
+                name: provider_tool_name(capability_id),
                 arguments,
             })
             .collect();

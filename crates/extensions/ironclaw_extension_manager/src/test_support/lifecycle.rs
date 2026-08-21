@@ -1,4 +1,7 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
 
 use async_trait::async_trait;
 use ironclaw_approvals::{ApprovalRequestStore, ApprovalRequestStorePort as _};
@@ -19,13 +22,17 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{
     action::Action,
+    artifact::{
+        AccountedArtifactPersister, ArtifactDigest, ArtifactId, ArtifactRef, ArtifactWriteError,
+        ArtifactWriteMetadata, CompletedArtifact,
+    },
     capability::CapabilityDescriptor,
     decision::{Decision, Obligation, Obligations},
     dispatch::CredentialStageError,
     ids::{CapabilityId, VendorId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
-    resource::{ResourceEstimate, ResourceScope, ResourceUsage},
+    resource::{ResourceEstimate, ResourceReceipt, ResourceScope, ResourceUsage},
     result_meta::FailureKind,
     scope::{ExecutionContext, Principal},
 };
@@ -237,7 +244,8 @@ async fn build_lifecycle_test_services_over_backing(
         HostTrustPolicy::new(vec![Box::new(AdminConfig::new())]).expect("trust policy"),
     ))
     .with_secret_store_dyn(Arc::clone(&secret_store))
-    .with_runtime_credential_account_resolver(credential_resolver);
+    .with_runtime_credential_account_resolver(credential_resolver)
+    .with_accounted_artifact_persistence(Arc::new(TestArtifactPersister::default()));
     host_services = match network_http_egress {
         Some(egress) => host_services
             .try_with_host_http_egress(egress)
@@ -754,6 +762,35 @@ fn register_bundled_first_party_handlers_for_lifecycle_tests(
 }
 
 struct NoopFirstPartyHandler;
+
+/// Deterministic in-memory `AccountedArtifactPersister` for agent-scoped
+/// lifecycle-test dispatch: unique monotonic `ArtifactId`s, checked byte
+/// length, and a digest over the persisted bytes. Mirrors the loop ingress
+/// contract and the host-runtime harness persister.
+#[derive(Default)]
+struct TestArtifactPersister {
+    next_id: AtomicU64,
+}
+
+#[async_trait]
+impl AccountedArtifactPersister for TestArtifactPersister {
+    async fn persist(
+        &self,
+        metadata: ArtifactWriteMetadata,
+        bytes: &[u8],
+        _receipt: &ResourceReceipt,
+    ) -> Result<CompletedArtifact, ArtifactWriteError> {
+        let artifact_id = ArtifactId::new(self.next_id.fetch_add(1, Ordering::Relaxed));
+        let byte_len = u64::try_from(bytes.len()).map_err(|_| ArtifactWriteError::Storage)?;
+        Ok(CompletedArtifact {
+            artifact_ref: ArtifactRef::new(artifact_id),
+            byte_len,
+            total_lines: None,
+            content_type: metadata.content_type,
+            digest: ArtifactDigest::from_bytes(bytes),
+        })
+    }
+}
 
 #[async_trait]
 impl FirstPartyCapabilityHandler for NoopFirstPartyHandler {

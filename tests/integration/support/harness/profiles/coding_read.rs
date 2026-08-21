@@ -2,18 +2,18 @@
 //! of the `ToolsProfile` pattern (see `harness/options.rs`).
 
 use ironclaw_host_api::{capability::EffectKind, ids::CapabilityId, mount::MountPermissions};
-use ironclaw_host_runtime::{GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID};
+use ironclaw_host_runtime::{CODING_READ_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID};
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{HarnessResult, HostRuntimeCapabilityHarness, workspace_mounts};
 
-/// Read-only coding tools (`list_dir`/`glob`/`grep`). Auto-approve is enabled
+/// Read-only coding tools (`read`/`glob`/`grep`). Auto-approve is enabled
 /// for the product and harness users so the model-visible surface dispatches
 /// without a gate.
 pub(crate) fn coding_read_tools_profile() -> HarnessResult<ToolsProfile> {
     Ok(ToolsProfile {
         capability_ids: vec![
-            CapabilityId::new(LIST_DIR_CAPABILITY_ID)?,
+            CapabilityId::new(CODING_READ_CAPABILITY_ID)?,
             CapabilityId::new(GLOB_CAPABILITY_ID)?,
             CapabilityId::new(GREP_CAPABILITY_ID)?,
         ],

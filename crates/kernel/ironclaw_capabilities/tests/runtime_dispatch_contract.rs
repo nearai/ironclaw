@@ -21,23 +21,30 @@ use ironclaw_capabilities::{
     RuntimeDispatcher, ToolResolver,
 };
 use ironclaw_host_api::{
+    artifact::{
+        ARTIFACT_INLINE_PREVIEW_MAX_BYTES, AccountedArtifactPersister, ArtifactDigest, ArtifactId,
+        ArtifactNamespaceId, ArtifactRef, ArtifactWriteError, ArtifactWriteMetadata,
+        CompletedArtifact,
+    },
     authorized::Authorized,
     dispatch::{
         CapabilityDispatchRequest, CapabilityDispatcher, DispatchError, DispatchFailureKind,
         RuntimeDispatchErrorKind,
     },
     ids::{
-        ActivityId, CapabilityId, CorrelationId, ExtensionId, InvocationId, MissionId, ProductKind,
-        ProjectId, TenantId, ThreadId, UserId,
+        ActivityId, AgentId, CapabilityId, CorrelationId, ExtensionId, InvocationId, MissionId,
+        ProductKind, ProjectId, RunId, TenantId, ThreadId, UserId,
     },
     invocation::{Actor, Invocation, InvocationOrigin},
     lane::RuntimeLane,
     mount::MountView,
     resource::{
-        ReservationStatus, ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
+        ReservationStatus, ResourceEstimate, ResourceReceipt, ResourceReservation, ResourceScope,
+        ResourceUsage,
     },
     runtime::RuntimeKind,
 };
+use ironclaw_loop_contracts::ContentDigest;
 use ironclaw_resources::*;
 use serde_json::{Value, json};
 
@@ -45,6 +52,7 @@ use serde_json::{Value, json};
 async fn dispatcher_routes_capability_through_resolved_binding() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let scope = sample_scope();
+    let artifact_namespace = ArtifactNamespaceId::from_root_run(RunId::new());
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
     governor
         .set_limit(
@@ -63,6 +71,7 @@ async fn dispatcher_routes_capability_through_resolved_binding() {
     let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
     let result = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
+            artifact_namespace: Some(artifact_namespace),
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("echo.say").unwrap(),
@@ -96,7 +105,113 @@ async fn dispatcher_routes_capability_through_resolved_binding() {
     );
     assert_eq!(requests[0].scope, scope);
     assert_eq!(requests[0].mounts, None);
+    assert_eq!(requests[0].artifact_namespace, Some(artifact_namespace));
     assert_eq!(requests[0].input, json!({"message": "hello dispatcher"}));
+}
+
+#[tokio::test]
+async fn runtime_result_artifact_dispatcher_persists_once_and_bounds_transport() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let namespace = ArtifactNamespaceId::from_root_run(RunId::new());
+    // Sized off the ceiling itself, not a literal: the fixture only proves the
+    // bound fires if it actually exceeds it.
+    let full_output = json!({"content": "x".repeat(2 * ARTIFACT_INLINE_PREVIEW_MAX_BYTES)});
+    let canonical = serde_json::to_vec(&full_output).unwrap();
+    let canonical_len = u64::try_from(canonical.len()).unwrap();
+    let expected_content_digest = ContentDigest::from_json_value(&full_output).unwrap();
+    let binding = RecordingBinding::new(full_output, Arc::clone(&governor));
+    let resolver = ScriptedResolver::from_entries([(
+        "extension.large_result",
+        resolved("extension", RuntimeKind::Wasm, binding),
+    )]);
+    let persister = Arc::new(RecordingArtifactPersister::default());
+    let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref())
+        .with_artifact_persistence_arc(persister.clone());
+
+    let result = dispatcher
+        .dispatch_json(authorized(CapabilityDispatchRequest {
+            artifact_namespace: Some(namespace),
+            run_id: None,
+            origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+            capability_id: CapabilityId::new("extension.large_result").unwrap(),
+            scope,
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default().set_output_bytes(canonical_len),
+            mounts: None,
+            resource_reservation: None,
+            input: json!({}),
+        }))
+        .await
+        .unwrap();
+
+    let completed = result.completed_artifact.expect("artifact finalized");
+    assert_eq!(completed.byte_len, canonical_len);
+    assert_eq!(completed.digest, ArtifactDigest::from_bytes(&canonical));
+    assert_eq!(
+        result
+            .canonical_output_digest
+            .expect("canonical output digest")
+            .value(),
+        expected_content_digest.0
+    );
+    let preview = result
+        .output
+        .as_str()
+        .expect("transport is bounded preview");
+    assert!(preview.len() <= ARTIFACT_INLINE_PREVIEW_MAX_BYTES);
+    assert!(u64::try_from(preview.len()).unwrap() < canonical_len);
+    assert_eq!(
+        result
+            .receipt
+            .actual
+            .as_ref()
+            .map(|usage| usage.output_bytes),
+        Some(canonical_len)
+    );
+    assert_eq!(governor.usage_for(&account).output_bytes, canonical_len);
+
+    let calls = persister.calls();
+    assert_eq!(calls.len(), 1, "canonical output is persisted exactly once");
+    assert_eq!(calls[0].bytes, canonical);
+    assert_eq!(calls[0].receipt, result.receipt);
+    assert_eq!(calls[0].metadata.expected_bytes, Some(canonical_len));
+    assert_eq!(calls[0].metadata.namespace, namespace);
+}
+
+#[tokio::test]
+async fn agent_scoped_dispatch_without_artifact_persistence_never_invokes_adapter() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let binding = RecordingBinding::new(json!({"must_not_run": true}), Arc::clone(&governor));
+    let resolver = ScriptedResolver::from_entries([(
+        "extension.requires_artifact",
+        resolved("extension", RuntimeKind::Wasm, binding.clone()),
+    )]);
+    let mut scope = sample_scope();
+    scope.agent_id = Some(AgentId::new("agent-a").unwrap());
+    let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
+
+    let result = dispatcher
+        .dispatch_json(authorized(CapabilityDispatchRequest {
+            artifact_namespace: Some(ArtifactNamespaceId::from_root_run(RunId::new())),
+            run_id: None,
+            origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+            capability_id: CapabilityId::new("extension.requires_artifact").unwrap(),
+            scope,
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default(),
+            mounts: None,
+            resource_reservation: None,
+            input: json!({}),
+        }))
+        .await;
+
+    assert!(result.is_err(), "missing persistence must fail closed");
+    assert!(
+        binding.requests().is_empty(),
+        "persistence must be preflighted before adapter side effects"
+    );
 }
 
 #[tokio::test]
@@ -148,6 +263,7 @@ async fn dispatcher_fails_unknown_capability_before_any_binding_work() {
     let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
     let err = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("missing.say").unwrap(),
@@ -180,6 +296,7 @@ async fn dispatcher_releases_prepared_reservation_when_resolution_fails() {
     let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
     let err = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("missing.say").unwrap(),
@@ -218,6 +335,7 @@ async fn dispatcher_hands_prepared_reservation_to_the_binding() {
     let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
     let result = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("echo.say").unwrap(),
@@ -260,6 +378,7 @@ async fn dispatcher_rejects_stale_authorized_lane_before_binding_dispatch() {
     let err = dispatcher
         .dispatch_json(authorized_with_lane(
             CapabilityDispatchRequest {
+                artifact_namespace: None,
                 run_id: None,
                 origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
                 capability_id: CapabilityId::new("echo.say").unwrap(),
@@ -303,6 +422,7 @@ async fn dispatcher_fails_closed_when_prepared_reservation_was_revoked_before_bi
     let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
     let err = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("echo.say").unwrap(),
@@ -435,6 +555,55 @@ impl ToolResolver for ScriptedResolver {
     }
 }
 
+#[derive(Clone)]
+struct ArtifactPersistCall {
+    metadata: ArtifactWriteMetadata,
+    bytes: Vec<u8>,
+    receipt: ResourceReceipt,
+}
+
+#[derive(Default)]
+struct RecordingArtifactPersister {
+    calls: Mutex<Vec<ArtifactPersistCall>>,
+}
+
+impl RecordingArtifactPersister {
+    fn calls(&self) -> Vec<ArtifactPersistCall> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+#[async_trait]
+impl AccountedArtifactPersister for RecordingArtifactPersister {
+    async fn persist(
+        &self,
+        metadata: ArtifactWriteMetadata,
+        bytes: &[u8],
+        receipt: &ResourceReceipt,
+    ) -> Result<CompletedArtifact, ArtifactWriteError> {
+        let mut calls = self
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let artifact_id = ArtifactId::new(u64::try_from(calls.len()).unwrap());
+        calls.push(ArtifactPersistCall {
+            metadata: metadata.clone(),
+            bytes: bytes.to_vec(),
+            receipt: receipt.clone(),
+        });
+        Ok(CompletedArtifact {
+            artifact_ref: ArtifactRef::new(artifact_id),
+            byte_len: u64::try_from(bytes.len()).unwrap(),
+            total_lines: None,
+            content_type: metadata.content_type,
+            digest: ArtifactDigest::from_bytes(bytes),
+        })
+    }
+}
+
 /// A scripted binding that mirrors the real lane legs: reconcile the prepared
 /// reservation when one was handed over, else reserve fresh and reconcile.
 #[derive(Clone)]
@@ -448,6 +617,7 @@ struct RecordingBinding {
 struct RecordedBindingRequest {
     capability_id: CapabilityId,
     scope: ResourceScope,
+    artifact_namespace: Option<ArtifactNamespaceId>,
     mounts: Option<MountView>,
     resource_reservation: Option<ResourceReservation>,
     input: Value,
@@ -489,6 +659,7 @@ impl BoundCapabilityAdapter for RecordingBinding {
         self.requests.lock().unwrap().push(RecordedBindingRequest {
             capability_id: request.capability_id.clone(),
             scope: request.scope.clone(),
+            artifact_namespace: request.artifact_namespace,
             mounts: request.mounts.clone(),
             resource_reservation: request.resource_reservation.clone(),
             input: request.input.clone(),
@@ -523,6 +694,8 @@ impl BoundCapabilityAdapter for RecordingBinding {
                 detail: None,
             })?;
         Ok(RuntimeAdapterResult {
+            canonical_output_digest: None,
+            completed_artifact: None,
             output: self.output.clone(),
             display_preview: None,
             output_bytes,
@@ -543,7 +716,9 @@ fn authorized(request: CapabilityDispatchRequest) -> Authorized {
 }
 
 fn authorized_with_lane(request: CapabilityDispatchRequest, lane: RuntimeLane) -> Authorized {
+    let artifact_namespace = request.artifact_namespace;
     let invocation = Invocation {
+        artifact_namespace,
         activity_id: ActivityId::new(),
         capability: request.capability_id,
         input: request.input,
@@ -572,6 +747,7 @@ fn authorized_with_lane(request: CapabilityDispatchRequest, lane: RuntimeLane) -
 
 fn sample_request(capability_id: &str, input: Value) -> Authorized {
     authorized(CapabilityDispatchRequest {
+        artifact_namespace: None,
         run_id: None,
         origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
         capability_id: CapabilityId::new(capability_id).unwrap(),

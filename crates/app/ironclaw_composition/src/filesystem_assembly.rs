@@ -250,6 +250,12 @@ where
             IndexPolicy::NotIndexed,
         ),
         (
+            "/artifacts",
+            "standalone-tool-artifacts",
+            ContentKind::StructuredRecord,
+            IndexPolicy::NotIndexed,
+        ),
+        (
             "/system/extensions/.installations",
             "standalone-extension-installation-state",
             ContentKind::SystemState,
@@ -303,6 +309,7 @@ where
         "/tenants",
         "/events",
         "/memory",
+        "/artifacts",
         "/projects",
         "/system/extensions",
         "/system/settings",

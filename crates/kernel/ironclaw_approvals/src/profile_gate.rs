@@ -731,6 +731,7 @@ mod tests {
             resource_profile: None,
             origin_gate_matrix: None,
             standard_op: None,
+            provider_tool_name: None,
         }
     }
 
@@ -1580,10 +1581,12 @@ mod tests {
         #[tokio::test]
         async fn matrix_fold_is_behavior_neutral_for_loop_run() {
             // (id, effects, matrix loop_run policy) — matrices are the S3 seed:
-            // read_file Ungated; write_file/http/gmail(read+write) GatedUnlessGranted.
+            // the seed ungates the pinned coding `read` id (the reviewed slot the retired
+            // read_file/list_dir entries transferred to); `write` is NOT on the
+            // seed, so it is GatedUnlessGranted like http/gmail(read+write).
             let caps: Vec<(&str, Vec<EffectKind>)> = vec![
-                ("builtin.read_file", vec![EffectKind::ReadFilesystem]),
-                ("builtin.write_file", vec![EffectKind::WriteFilesystem]),
+                ("builtin.read", vec![EffectKind::ReadFilesystem]),
+                ("builtin.write", vec![EffectKind::WriteFilesystem]),
                 (
                     "builtin.http",
                     vec![EffectKind::DispatchCapability, EffectKind::Network],
@@ -1742,10 +1745,10 @@ mod tests {
         async fn forbidden_product_origin_is_denied() {
             // The S3 builtin seed sets product = Forbidden for every cap.
             let cap = descriptor(
-                "builtin.read_file",
+                "builtin.read",
                 vec![EffectKind::ReadFilesystem],
                 PermissionMode::Allow,
-                Some(OriginGateMatrix::builtin_loop_run_seed("builtin.read_file")),
+                Some(OriginGateMatrix::builtin_loop_run_seed("builtin.read")),
             );
             let decision = decide(
                 ApprovalPolicy::AskDestructive,

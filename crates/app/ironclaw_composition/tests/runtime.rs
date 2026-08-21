@@ -909,7 +909,7 @@ impl TurnCoordinator for SpyTurnCoordinator {
     }
 }
 
-/// Scripted gateway that dispatches one `builtin.write_file` call (default
+/// Scripted gateway that dispatches one `builtin.write` call (default
 /// permission `ask`, so it parks the turn on `TurnStatus::BlockedApproval`
 /// instead of completing), then emits a final reply once resumed.
 #[derive(Default)]
@@ -949,7 +949,7 @@ impl HostManagedModelGateway for SingleWriteApprovalGateway {
             ));
         }
 
-        let write_id = CapabilityId::new("builtin.write_file").expect("write_file capability id");
+        let write_id = CapabilityId::new("builtin.write").expect("write capability id");
         let write_tool = capabilities
             .tool_definitions()
             .map_err(|err| {
@@ -960,7 +960,7 @@ impl HostManagedModelGateway for SingleWriteApprovalGateway {
             })?
             .into_iter()
             .find(|def| def.capability_id == write_id)
-            .expect("builtin.write_file must be visible in standalone capability surface");
+            .expect("builtin.write must be visible in standalone capability surface");
         let call = capabilities
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
                 provider_id: "coordinator-spy-provider".to_string(),
@@ -977,7 +977,7 @@ impl HostManagedModelGateway for SingleWriteApprovalGateway {
             .map_err(|err| {
                 HostManagedModelError::safe(
                     HostManagedModelErrorKind::InvalidRequest,
-                    format!("register_provider_tool_call(write_file) failed: {err}"),
+                    format!("register_provider_tool_call(write) failed: {err}"),
                 )
             })?;
         Ok(HostManagedModelResponse::capability_calls(vec![call], ""))

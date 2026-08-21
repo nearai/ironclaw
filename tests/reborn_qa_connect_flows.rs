@@ -17,7 +17,7 @@ mod reborn_support;
 mod support;
 
 use ironclaw_host_api::ids::CapabilityId;
-use ironclaw_host_runtime::WRITE_FILE_CAPABILITY_ID;
+use ironclaw_host_runtime::CODING_WRITE_CAPABILITY_ID;
 use ironclaw_loop_contracts::LoopHostMilestoneKind;
 use ironclaw_loop_host::HostManagedModelResponse;
 use ironclaw_turns::TurnStatus;
@@ -35,7 +35,7 @@ struct ConnectFlowCase {
 }
 
 async fn run_connect_flow(case: ConnectFlowCase) {
-    let write_file = CapabilityId::new(WRITE_FILE_CAPABILITY_ID).expect("valid capability id");
+    let write = CapabilityId::new(CODING_WRITE_CAPABILITY_ID).expect("valid capability id");
     let credential_path = format!("/workspace/connections/{}.json", case.service_slug);
     let credential_content = format!(
         r#"{{"service":"{}","credential":"qa-test-credential"}}"#,
@@ -44,7 +44,7 @@ async fn run_connect_flow(case: ConnectFlowCase) {
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![RebornScriptedProviderToolCall::new(
-                write_file.clone(),
+                write.clone(),
                 format!("call_connect_{}", case.service_slug),
                 serde_json::json!({
                     "path": credential_path,
@@ -106,9 +106,9 @@ async fn run_connect_flow(case: ConnectFlowCase) {
         2,
         "connect credential staging should run once blocked and once resumed"
     );
-    assert_eq!(invocations[0].capability_id, write_file);
+    assert_eq!(invocations[0].capability_id, write);
     assert!(invocations[0].approval_resume.is_none());
-    assert_eq!(invocations[1].capability_id, write_file);
+    assert_eq!(invocations[1].capability_id, write);
     assert!(
         invocations[1].approval_resume.is_some(),
         "approved gate must resume the original blocked connect call"

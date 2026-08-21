@@ -926,6 +926,9 @@ impl SubagentSpawnCapabilityPort {
             .deps
             .result_writer
             .write_capability_result(CapabilityResultWrite {
+                receipt: None,
+                completed_artifact: None,
+                canonical_output_digest: None,
                 run_context: &self.run_context,
                 input_ref: &invocation.input_ref,
                 invocation_id: InvocationId::new(),
@@ -933,6 +936,7 @@ impl SubagentSpawnCapabilityPort {
                 output: payload,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
+                canonical_item_count: None,
             })
             .await?;
         let result_ref = write_result.result_ref;

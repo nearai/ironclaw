@@ -45,3 +45,6 @@ ironclaw_threads = { path = ".", features = ["test-support"] }
 ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+# Dev-only: `ArtifactWriteError` is a unit-variant contract type, so the failing
+# leg of a legacy result projection can only reach the DEBUG log. Pin it there.
+tracing-test = { version = "0.2", features = ["no-env-filter"] }

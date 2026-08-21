@@ -150,6 +150,7 @@ impl BoundCapabilityAdapter for ToolAdapterCapabilityHandler {
             ..ResourceUsage::default()
         };
         Ok(RuntimeAdapterResult {
+            canonical_output_digest: None,
             output: result.output,
             display_preview: result.display_preview,
             output_bytes,
@@ -161,6 +162,7 @@ impl BoundCapabilityAdapter for ToolAdapterCapabilityHandler {
                 estimate,
                 actual: Some(usage),
             },
+            completed_artifact: None,
         })
     }
 }
@@ -302,6 +304,7 @@ mod tests {
             }),
             origin_gate_matrix: None,
             standard_op: None,
+            provider_tool_name: None,
         }
     }
 
@@ -416,6 +419,7 @@ mod tests {
             estimate: ResourceEstimate::default(),
             mounts: None,
             resource_reservation: None,
+            artifact_namespace: None,
             input: json!({}),
         }
     }

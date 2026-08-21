@@ -1,5 +1,6 @@
 mod support;
 
+use support::host_runtime_harness::WithTestArtifactPersistence;
 use support::legacy_capability_fixture_to_v2;
 
 use std::{
@@ -87,7 +88,8 @@ async fn reborn_e2e_gate_invokes_script_through_host_runtime_with_status_events_
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
     )))
-    .with_durable_event_log(Arc::clone(&event_log));
+    .with_durable_event_log(Arc::clone(&event_log))
+    .with_test_artifact_persistence();
     let runtime = services.host_runtime_for_local_testing();
     let context = execution_context_with_dispatch_grant();
     let scope = context.resource_scope.clone();
@@ -301,7 +303,8 @@ async fn reborn_e2e_gate_fails_unsupported_obligations_before_runtime_events_or_
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
     )))
-    .with_event_sink(Arc::new(events.clone()));
+    .with_event_sink(Arc::new(events.clone()))
+    .with_test_artifact_persistence();
     let runtime = services.host_runtime_for_local_testing();
     let context = execution_context_with_dispatch_grant();
     let scope = context.resource_scope.clone();
@@ -351,7 +354,8 @@ async fn reborn_e2e_gate_redacts_runtime_output_before_public_result() {
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
     )))
-    .with_event_sink(Arc::new(events.clone()));
+    .with_event_sink(Arc::new(events.clone()))
+    .with_test_artifact_persistence();
     let runtime = services.host_runtime_for_local_testing();
     let context = execution_context_with_dispatch_grant();
     let scope = context.resource_scope.clone();
@@ -414,7 +418,8 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
         ScriptRuntimeConfig::for_testing(),
         FailingScriptBackend,
     )))
-    .with_event_sink(Arc::new(events.clone()));
+    .with_event_sink(Arc::new(events.clone()))
+    .with_test_artifact_persistence();
     let runtime = services.host_runtime_for_local_testing();
     let context = execution_context_with_dispatch_grant();
     let scope = context.resource_scope.clone();
@@ -515,7 +520,8 @@ async fn reborn_e2e_gate_blocks_oversized_runtime_output_before_publication() {
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
     )))
-    .with_event_sink(Arc::new(events.clone()));
+    .with_event_sink(Arc::new(events.clone()))
+    .with_test_artifact_persistence();
     let runtime = services.host_runtime_for_local_testing();
     let context = execution_context_with_dispatch_grant();
     let scope = context.resource_scope.clone();
@@ -697,7 +703,8 @@ fn approval_resume_fixture() -> ApprovalFixture {
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
     )))
-    .with_event_sink(Arc::new(events.clone()));
+    .with_event_sink(Arc::new(events.clone()))
+    .with_test_artifact_persistence();
 
     ApprovalFixture {
         services,

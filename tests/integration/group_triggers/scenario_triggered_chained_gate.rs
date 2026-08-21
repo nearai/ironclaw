@@ -21,11 +21,11 @@ pub async fn run_chained_approve(g: &RebornIntegrationGroup) -> HarnessResult<()
             "write the scheduled report and then the follow-up note",
             [
                 RebornScriptedReply::tool_call(
-                    "builtin.write_file",
+                    "builtin.write",
                     json!({"path": "/workspace/triggered-chained-a.txt", "content": "triggered chained write A"}),
                 ),
                 RebornScriptedReply::tool_call(
-                    "builtin.write_file",
+                    "builtin.write",
                     json!({"path": "/workspace/triggered-chained-b.txt", "content": "triggered chained write B"}),
                 ),
                 RebornScriptedReply::text("both scheduled writes complete after approval"),

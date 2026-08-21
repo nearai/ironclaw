@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Scoped workspace file or directory path, or artifact://<id> URI. Inline selectors are supported. Web URLs and other URI schemes are not supported."
+    }
+  },
+  "required": [
+    "path"
+  ],
+  "additionalProperties": false
+}

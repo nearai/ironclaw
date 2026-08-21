@@ -79,6 +79,7 @@ where
         cancellation_factory,
         skill_context_source,
         attachment_read_port,
+        legacy_result_artifacts: _,
         prompt_diagnostic_sink,
         reply_attachment_intent_port,
         gate_record_store,

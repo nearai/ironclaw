@@ -1,4 +1,4 @@
-//! Scenario: a gated `builtin.write_file` call raises a real `BlockedApproval`
+//! Scenario: a gated `builtin.write` call raises a real `BlockedApproval`
 //! gate; resolving it via a REAL `submit_inbound(ApprovalResolution)` (the
 //! literal dispatch arm a product adapter's "approve"/"deny" reply hits)
 //! resumes the run — not `approve_gate`/`deny_gate`'s direct
@@ -23,7 +23,7 @@ pub async fn approve(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .thread("conv-submit-inbound-approve")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 json!({"path": "/workspace/submit_inbound_approved.txt", "content": "approved via submit_inbound"}),
             ),
             RebornScriptedReply::text("file written after submit_inbound approval"),
@@ -58,7 +58,7 @@ pub async fn deny(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .thread("conv-submit-inbound-deny")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 json!({"path": "/workspace/submit_inbound_denied.txt", "content": "should not persist"}),
             ),
             RebornScriptedReply::text("understood, the write was not authorized"),

@@ -2165,7 +2165,7 @@ fn capability_result_from_outcome(
         progress: capability_progress_from(outcome.progress),
         terminate_hint: outcome.terminate_hint.should_terminate(),
         byte_len: outcome.refs.byte_len,
-        model_observation: result_reference_observation_from_outcome(outcome),
+        model_observation: model_observation_from_outcome(outcome),
         output_digest: outcome
             .refs
             .output_digest
@@ -2180,19 +2180,16 @@ fn child_result_from_outcome(
         result_ref: loop_result_ref_from_origin(outcome.refs.origin.as_ref())?,
         safe_summary: outcome.summary.as_str().to_string(),
         byte_len: outcome.refs.byte_len,
-        model_observation: result_reference_observation_from_outcome(outcome),
+        model_observation: model_observation_from_outcome(outcome),
     })
 }
 
-/// Rebuild the `ResultReference` model observation from a completed [`Outcome`],
-/// carrying the #5838 first-look inline preview content the model reads without a
-/// follow-up `result_read`. Reconstructed from the channel's real
-/// [`ModelResultPreview`] (`refs.preview`) and its independent continuation
+/// Rebuild the model-visible result observation from a completed [`Outcome`],
+/// carrying its first-look inline preview and canonical artifact continuation
 /// metadata. Metadata-only observations are reconstructed when preview safety
-/// suppresses the text; `None` is reserved for outcomes with neither preview nor
-/// continuation metadata, where `append_capability_result_ref` synthesizes a bare
-/// success observation.
-fn result_reference_observation_from_outcome(
+/// suppresses the text; `None` is reserved for outcomes with neither preview
+/// nor continuation metadata.
+pub(super) fn model_observation_from_outcome(
     outcome: &Outcome,
 ) -> Option<ModelVisibleToolObservation> {
     let preview = outcome.refs.preview.as_ref();
@@ -2200,9 +2197,70 @@ fn result_reference_observation_from_outcome(
     if preview.is_none() && meta.is_empty() {
         return None;
     }
-    // The observation references the preview's OWN result: `preview_meta`'s
-    // referenced ref when it differs (a `result_read` presenting another result),
-    // else the outcome's own preserved origin.
+    if let Some(artifact_ref) = meta.artifact_ref {
+        let artifact_ref = artifact_ref.to_string();
+        return Some(ModelVisibleToolObservation {
+            schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+            status: ToolObservationStatus::Success,
+            summary: meta
+                .summary
+                .as_ref()
+                .map(|summary| summary.as_str().to_string())
+                .unwrap_or_else(|| outcome.summary.as_str().to_string()),
+            detail: ToolObservationDetail::ArtifactReference {
+                artifact_ref: artifact_ref.clone(),
+                total_bytes: meta.total_bytes.unwrap_or(outcome.refs.byte_len),
+                preview: preview.map(|preview| preview.as_str().to_string()),
+                item_count: meta.item_count,
+            },
+            artifacts: vec![ironclaw_loop_contracts::ModelVisibleArtifact {
+                artifact_ref,
+                summary: "Stored tool output".to_string(),
+            }],
+            recovery: None,
+            trust: ObservationTrust::UntrustedToolOutput,
+        });
+    }
+    if meta.referenced_result_ref.is_none()
+        && meta.total_bytes.is_none()
+        && meta.next_offset.is_none()
+        && let Some(preview) = preview
+    {
+        return Some(ModelVisibleToolObservation {
+            schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+            status: ToolObservationStatus::Success,
+            summary: meta
+                .summary
+                .as_ref()
+                .map(|summary| summary.as_str().to_string())
+                .unwrap_or_else(|| outcome.summary.as_str().to_string()),
+            detail: ToolObservationDetail::InlineResult {
+                content: preview.as_str().to_string(),
+                // The inline observation carries the PREVIEW text the model
+                // sees, so `byte_len` must describe that content (the
+                // validator rejects a mismatch). The canonical full-output
+                // size stays on the durable artifact/`total_bytes` when
+                // present; here the preview IS the complete small result.
+                byte_len: preview.as_str().len() as u64,
+                item_count: meta.item_count,
+            },
+            artifacts: Vec::new(),
+            recovery: None,
+            trust: ObservationTrust::UntrustedToolOutput,
+        });
+    }
+    // Historical observations can reference another result; otherwise use the
+    // outcome's own preserved origin.
+    //
+    // A fresh result normally leaves through the artifact or inline branch
+    // above. It can still land HERE when its preview was dropped during the
+    // `Outcome` collapse — `ModelResultPreview::redacted` refuses NUL/control
+    // characters and unmaskable credential text — leaving a summary caption
+    // with no content. The retired shape is the honest remainder in that case:
+    // the model at least keeps a ref it can `result_read`. It must NOT become
+    // the routine outcome for large results; `MODEL_RESULT_PREVIEW_MAX_BYTES`
+    // is pinned to the inline-observation cap so a size mismatch cannot send
+    // ordinary results down this path.
     let result_ref = meta
         .referenced_result_ref
         .as_ref()
@@ -2212,12 +2270,6 @@ fn result_reference_observation_from_outcome(
     Some(ModelVisibleToolObservation {
         schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
         status: ToolObservationStatus::Success,
-        // The observation's OWN producer-authored summary (carried through the
-        // collapse in `preview_meta`), NOT the generic outcome caption: it holds
-        // the truncation/continuation hint ("preview truncated, use result_read …")
-        // that a completed result message's `safe_summary` ("capability completed")
-        // does not. Falls back to the outcome caption when the producer authored no
-        // observation summary (or it failed the caption contract).
         summary: meta
             .summary
             .as_ref()
@@ -2227,8 +2279,6 @@ fn result_reference_observation_from_outcome(
             result_ref,
             byte_len: outcome.refs.byte_len,
             preview: preview.map(|preview| preview.as_str().to_string()),
-            // Continuation metadata for a truncated first-look preview; falls back
-            // to the full inline size for a complete preview.
             total_bytes: meta.total_bytes.or(Some(outcome.refs.byte_len)),
             next_offset: meta.next_offset,
             item_count: meta.item_count,

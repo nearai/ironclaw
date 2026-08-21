@@ -20,6 +20,10 @@ use ironclaw_extension_registry::{
 use ironclaw_host_api::result_meta::FailureKind;
 use ironclaw_host_api::{
     action::NetworkPolicy,
+    artifact::{
+        AccountedArtifactPersister, ArtifactDigest, ArtifactId, ArtifactNamespaceId, ArtifactRef,
+        ArtifactWriteError, ArtifactWriteMetadata, CompletedArtifact,
+    },
     capability::{
         CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
     },
@@ -31,7 +35,9 @@ use ironclaw_host_api::{
     ids::{CapabilityGrantId, CapabilityId, ExtensionId, PackageId, RunId, UserId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
-    resource::{ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage},
+    resource::{
+        ResourceEstimate, ResourceReceipt, ResourceReservation, ResourceScope, ResourceUsage,
+    },
     runtime::{RuntimeKind, TrustClass},
     scope::{ExecutionContext, Principal},
 };
@@ -254,6 +260,8 @@ impl BoundCapabilityAdapter for RecordingRuntimeAdapter {
                 detail: None,
             })?;
         Ok(RuntimeAdapterResult {
+            canonical_output_digest: None,
+            completed_artifact: None,
             output,
             display_preview: None,
             usage,
@@ -350,8 +358,41 @@ fn runtime_dispatcher_stack(
         },
     });
     let dispatcher = RuntimeDispatcher::from_arcs(resolver, Arc::clone(&governor))
-        .with_event_sink_arc(Arc::new(events.clone()));
+        .with_event_sink_arc(Arc::new(events.clone()))
+        .with_artifact_persistence_arc(Arc::new(TestArtifactPersister::default()));
     (registry, dispatcher, governor, events, adapter)
+}
+
+/// Deterministic in-memory `AccountedArtifactPersister` for agent-scoped
+/// dispatch: unique monotonic `ArtifactId`s, checked byte length, and a digest
+/// over the persisted bytes. Mirrors the host-runtime harness persister and
+/// the loop ingress contract.
+#[derive(Default)]
+struct TestArtifactPersister {
+    next_id: std::sync::atomic::AtomicU64,
+}
+
+#[async_trait]
+impl AccountedArtifactPersister for TestArtifactPersister {
+    async fn persist(
+        &self,
+        metadata: ArtifactWriteMetadata,
+        bytes: &[u8],
+        _receipt: &ResourceReceipt,
+    ) -> Result<CompletedArtifact, ArtifactWriteError> {
+        let artifact_id = ArtifactId::new(
+            self.next_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        );
+        let byte_len = u64::try_from(bytes.len()).map_err(|_| ArtifactWriteError::Storage)?;
+        Ok(CompletedArtifact {
+            artifact_ref: ArtifactRef::new(artifact_id),
+            byte_len,
+            total_lines: None,
+            content_type: metadata.content_type,
+            digest: ArtifactDigest::from_bytes(bytes),
+        })
+    }
 }
 
 fn registry_with_echo_capability() -> ExtensionRegistry {
@@ -388,6 +429,7 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
     )
     .unwrap();
     context.run_id = Some(RunId::new());
+    context.artifact_namespace = Some(ArtifactNamespaceId::from_root_run(context.run_id.unwrap()));
     context
 }
 

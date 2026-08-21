@@ -7,7 +7,7 @@ mod reborn_support;
 mod support;
 
 use ironclaw_host_api::ids::CapabilityId;
-use ironclaw_host_runtime::{READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID};
+use ironclaw_host_runtime::{CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID};
 use ironclaw_loop_contracts::LoopHostMilestoneKind;
 use ironclaw_loop_host::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::TurnStatus;
@@ -22,13 +22,13 @@ const EXPECTED_CONTENT: &str = "Hello, E2E test!";
 
 #[tokio::test]
 async fn reborn_trace_file_tools_parity() {
-    let write_file = CapabilityId::new(WRITE_FILE_CAPABILITY_ID).expect("valid capability id");
-    let read_file = CapabilityId::new(READ_FILE_CAPABILITY_ID).expect("valid capability id");
+    let write = CapabilityId::new(CODING_WRITE_CAPABILITY_ID).expect("valid capability id");
+    let read = CapabilityId::new(CODING_READ_CAPABILITY_ID).expect("valid capability id");
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![RebornScriptedProviderToolCall::new(
-                write_file.clone(),
-                "call_write_file_1",
+                write.clone(),
+                "call_write_1",
                 serde_json::json!({
                     "path": "/workspace/generated/hello.txt",
                     "content": EXPECTED_CONTENT,
@@ -38,8 +38,8 @@ async fn reborn_trace_file_tools_parity() {
         },
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![RebornScriptedProviderToolCall::new(
-                read_file.clone(),
-                "call_read_file_1",
+                read.clone(),
+                "call_read_1",
                 serde_json::json!({
                     "path": "/workspace/generated/hello.txt",
                 }),
@@ -80,8 +80,8 @@ async fn reborn_trace_file_tools_parity() {
 
     let invocations = harness.capability_invocations();
     assert_eq!(invocations.len(), 2);
-    assert_eq!(invocations[0].capability_id, write_file);
-    assert_eq!(invocations[1].capability_id, read_file);
+    assert_eq!(invocations[0].capability_id, write);
+    assert_eq!(invocations[1].capability_id, read);
 
     let requests = harness.model_requests();
     assert_eq!(requests.len(), 3);
@@ -103,12 +103,12 @@ async fn reborn_trace_file_tools_parity() {
 
 #[tokio::test]
 async fn reborn_trace_file_write_standalone_approval_gate_bubbles() {
-    let write_file = CapabilityId::new(WRITE_FILE_CAPABILITY_ID).expect("valid capability id");
+    let write = CapabilityId::new(CODING_WRITE_CAPABILITY_ID).expect("valid capability id");
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![RebornScriptedProviderToolCall::new(
-                write_file.clone(),
-                "call_write_file_approval",
+                write.clone(),
+                "call_write_approval",
                 serde_json::json!({
                     "path": "/workspace/generated/approval.txt",
                     "content": "approval required",
@@ -159,9 +159,9 @@ async fn reborn_trace_file_write_standalone_approval_gate_bubbles() {
         .expect("final reply");
     let invocations = harness.capability_invocations();
     assert_eq!(invocations.len(), 2);
-    assert_eq!(invocations[0].capability_id, write_file);
+    assert_eq!(invocations[0].capability_id, write);
     assert!(invocations[0].approval_resume.is_none());
-    assert_eq!(invocations[1].capability_id, write_file);
+    assert_eq!(invocations[1].capability_id, write);
     assert!(
         invocations[1].approval_resume.is_some(),
         "approved gate should resume the original blocked capability, not ask the model for a new tool call"

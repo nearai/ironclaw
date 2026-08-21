@@ -2,6 +2,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_extension_registry::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
     action::{NetworkMethod, NetworkPolicy},
+    artifact::{ArtifactOwnerScope, ArtifactRef, ArtifactWriteError, ArtifactWriteMetadata},
     capability::{EffectKind, PermissionMode},
     dispatch::RuntimeDispatchErrorKind,
     http::{
@@ -18,6 +19,7 @@ use serde_json::Value;
 
 use crate::{
     FirstPartyCapabilityError, FirstPartyCapabilityRequest,
+    first_party::PendingFirstPartyArtifact,
     http_body::{
         RESPONSE_BODY_STORE_FAILED_REASON, RESPONSE_BODY_STORE_UNAUTHORIZED_REASON,
         RESPONSE_BODY_STORE_UNAVAILABLE_REASON,
@@ -26,7 +28,7 @@ use crate::{
 
 use super::{
     first_party_capability_manifest,
-    http_output::{HttpDispatchOutput, classify_status, shape_response},
+    http_output::{HttpDispatchOutput, classify_status, is_error_status, shape_response},
     input_error,
 };
 
@@ -40,6 +42,9 @@ const DEFAULT_INLINE_RESPONSE_BODY_LIMIT: u64 = 48 * 1024;
 const MAX_INLINE_RESPONSE_BODY_LIMIT: u64 = 256 * 1024;
 const DEFAULT_SAVE_RESPONSE_BODY_LIMIT: u64 = 10 * 1024 * 1024;
 const MAX_SAVE_RESPONSE_BODY_LIMIT: u64 = 10 * 1024 * 1024;
+const HTTP_ARTIFACT_RESPONSE_BODY_LIMIT: u64 = MAX_SAVE_RESPONSE_BODY_LIMIT;
+const HTTP_ARTIFACT_INLINE_BODY_THRESHOLD: usize = 16 * 1024;
+const HTTP_ARTIFACT_PREVIEW_BODY_LIMIT: usize = 8 * 1024;
 const DEFAULT_NETWORK_EGRESS_BYTES: u64 = 16 * 1024;
 const MAX_NETWORK_EGRESS_BYTES: u64 = 256 * 1024;
 const MAX_HTTP_HEADERS: usize = 64;
@@ -75,7 +80,7 @@ impl HttpSaveMode {
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     http_manifest(
         HTTP_CAPABILITY_ID,
-        "Perform an outbound HTTP request through host egress. Redirect responses are returned; the host transport does not follow them.",
+        "Perform an outbound HTTP request through host egress. Successful sanitized response bodies larger than the inline budget are retained as artifacts and returned with a bounded preview plus artifact_ref; redirect responses are returned and never followed.",
         vec![EffectKind::DispatchCapability, EffectKind::Network],
     )
 }
@@ -219,9 +224,12 @@ pub(super) async fn dispatch(
         body,
         network_policy: staged_policy_placeholder(),
         credential_injections: Vec::new(),
-        // Always send a bounded limit, even when caller omits the field, so the
-        // host transport stays fail-closed instead of inheriting an unbounded cap.
-        response_body_limit: Some(response_body_limit),
+        // Capture a bounded sanitized response large enough for artifact spill.
+        // `response_body_limit` remains the independently bounded inline budget.
+        response_body_limit: Some(match save_mode {
+            HttpSaveMode::Disabled => response_body_limit.max(HTTP_ARTIFACT_RESPONSE_BODY_LIMIT),
+            HttpSaveMode::Required => response_body_limit,
+        }),
         save_body_to,
         timeout_ms: Some(timeout_ms),
     };
@@ -250,16 +258,95 @@ pub(super) async fn dispatch(
     .await?
     .map_err(|error| http_error(error, save_mode))?;
     let status = response.status;
-    // Shape at the caller's `response_body_limit` so egress-truncation
-    // accounting stays correct: `shape_response` derives
-    // `body_was_truncated_by_egress` from that limit, and a body the egress
-    // already cut at the caller's cap must not be reported as complete. The
-    // failure diagnostic applies its own display budget separately in
-    // `bounded_failure_diagnostic`; the success-budget trim run here is
-    // discarded for error statuses, which is bounded and sub-millisecond.
-    let shaped = shape_response(response, response_body_limit);
+    let shaped =
+        artifact_backed_response(request, response, response_body_limit, save_mode).await?;
     let wall_clock_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
     classify_status(shaped, status, wall_clock_ms)
+}
+
+async fn artifact_backed_response(
+    request: &FirstPartyCapabilityRequest,
+    mut response: ironclaw_host_api::http::RuntimeHttpEgressResponse,
+    response_body_limit: u64,
+    save_mode: HttpSaveMode,
+) -> Result<HttpDispatchOutput, FirstPartyCapabilityError> {
+    let spill_threshold = HTTP_ARTIFACT_INLINE_BODY_THRESHOLD;
+    if save_mode == HttpSaveMode::Required
+        || is_error_status(response.status)
+        || response.saved_body.is_some()
+        || response.body.len() <= spill_threshold
+    {
+        return Ok(shape_response(response, response_body_limit));
+    }
+
+    let artifact_len = u64::try_from(response.body.len())
+        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Resource))?;
+    if artifact_len > HTTP_ARTIFACT_RESPONSE_BODY_LIMIT {
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::Resource,
+        ));
+    }
+    let namespace = request
+        .services
+        .artifact_namespace
+        .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend))?;
+    let persistence = request
+        .services
+        .artifact_persistence
+        .as_ref()
+        .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::MethodMissing))?;
+    let content_type = if std::str::from_utf8(&response.body).is_ok() {
+        "text/plain; charset=utf-8"
+    } else {
+        "application/octet-stream"
+    };
+    let handle = persistence
+        .allocate(ArtifactWriteMetadata {
+            write_key: Some(request.scope.invocation_id),
+            owner_scope: ArtifactOwnerScope::from_resource_scope(&request.scope),
+            namespace,
+            producer_capability_id: request.capability_id.clone(),
+            content_type: content_type.to_string(),
+            expected_bytes: Some(artifact_len),
+        })
+        .await
+        .map_err(http_artifact_write_error)?;
+    let artifact_ref = ArtifactRef::new(handle.artifact_id());
+    let body = std::mem::take(&mut response.body);
+    response
+        .body
+        .extend_from_slice(&body[..body.len().min(HTTP_ARTIFACT_PREVIEW_BODY_LIMIT)]);
+    let mut shaped = shape_response(response, HTTP_ARTIFACT_PREVIEW_BODY_LIMIT as u64);
+    let object = shaped
+        .output
+        .as_object_mut()
+        .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputDecode))?;
+    object.insert(
+        "artifact_ref".to_string(),
+        Value::String(artifact_ref.to_string()),
+    );
+    object.insert("artifact_bytes".to_string(), Value::from(artifact_len));
+    object.insert(
+        "body_truncation_hint".to_string(),
+        Value::String(format!(
+            "Full sanitized response: {artifact_ref}. Use read with selectors to inspect it."
+        )),
+    );
+    shaped.pending_artifact = Some(PendingFirstPartyArtifact {
+        handle,
+        bytes: body,
+    });
+    Ok(shaped)
+}
+
+fn http_artifact_write_error(error: ArtifactWriteError) -> FirstPartyCapabilityError {
+    let kind = match error {
+        ArtifactWriteError::Budget => RuntimeDispatchErrorKind::Resource,
+        ArtifactWriteError::InvalidHandle
+        | ArtifactWriteError::DigestMismatch
+        | ArtifactWriteError::Storage => RuntimeDispatchErrorKind::OperationFailed,
+    };
+    FirstPartyCapabilityError::new(kind)
 }
 
 fn method(input: &Value) -> Result<NetworkMethod, FirstPartyCapabilityError> {
@@ -685,6 +772,9 @@ mod tests {
             mounts: Some(workspace_mount()),
             services: InvocationServices {
                 filesystem: Arc::new(InMemoryBackend::new()),
+                artifact_namespace: None,
+                artifact_reader: None,
+                artifact_persistence: None,
                 runtime_http_egress: Some(runtime_http_egress),
                 tool_call_http_egress: Some(Arc::new(PanickingToolCallHttpEgress)),
                 runtime_secret_material_stager: None,

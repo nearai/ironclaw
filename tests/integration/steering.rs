@@ -138,7 +138,7 @@ async fn queued_steering_survives_runtime_restart() {
         .thread("steering-restart")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 serde_json::json!({
                     "path": "/workspace/steering-restart.txt",
                     "content": "written across restart"

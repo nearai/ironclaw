@@ -58,7 +58,7 @@ async fn uploaded_docx_edit_request_is_refused_and_the_document_comes_back_byte_
         .thread("conv-docx-edit")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 json!({
                     "path": CORRECTED_DOCX,
                     "content": "Clause 4: the review period is thirty days.",
@@ -84,7 +84,7 @@ async fn uploaded_docx_edit_request_is_refused_and_the_document_comes_back_byte_
     h.assert_model_request_contains(TYPO)
         .await
         .expect("the uploaded docx reached the model as extracted text");
-    h.assert_tool_invoked("builtin.write_file")
+    h.assert_tool_invoked("builtin.write")
         .await
         .expect("the write-back was really attempted through capability dispatch");
     h.assert_tool_error_summary_contains("binary documents cannot be edited with text tools")
@@ -195,7 +195,7 @@ async fn redlined_docx_is_read_with_revisions_and_saved_clean_to_a_new_document(
     let h = group
         .thread("conv-docx-redline")
         .script([
-            RebornScriptedReply::tool_call("builtin.read_file", json!({"path": source})),
+            RebornScriptedReply::tool_call("builtin.read", json!({"path": source})),
             RebornScriptedReply::tool_call(
                 "builtin.document_edit",
                 json!({
@@ -204,7 +204,7 @@ async fn redlined_docx_is_read_with_revisions_and_saved_clean_to_a_new_document(
                     "edits": [{"op": "resolve_all_revisions", "disposition": "accept"}],
                 }),
             ),
-            RebornScriptedReply::tool_call("builtin.read_file", json!({"path": output})),
+            RebornScriptedReply::tool_call("builtin.read", json!({"path": output})),
             RebornScriptedReply::text(
                 "Accepted both redlines. The clean contract is at contract-final.docx.",
             ),
@@ -263,7 +263,7 @@ async fn xlsx_formula_is_set_under_a_named_column_and_saved_to_a_new_workbook() 
     let h = group
         .thread("conv-xlsx-formula")
         .script([
-            RebornScriptedReply::tool_call("builtin.read_file", json!({"path": source})),
+            RebornScriptedReply::tool_call("builtin.read", json!({"path": source})),
             RebornScriptedReply::tool_call(
                 "builtin.document_edit",
                 json!({
@@ -278,7 +278,7 @@ async fn xlsx_formula_is_set_under_a_named_column_and_saved_to_a_new_workbook() 
                     }],
                 }),
             ),
-            RebornScriptedReply::tool_call("builtin.read_file", json!({"path": output})),
+            RebornScriptedReply::tool_call("builtin.read", json!({"path": output})),
             RebornScriptedReply::text("Added the total under Amount in expenses-totalled.xlsx."),
         ])
         .build()
@@ -322,7 +322,7 @@ async fn pptx_slide_is_cloned_with_the_source_style_and_saved_to_a_new_deck() {
     let h = group
         .thread("conv-pptx-slide")
         .script([
-            RebornScriptedReply::tool_call("builtin.read_file", json!({"path": source})),
+            RebornScriptedReply::tool_call("builtin.read", json!({"path": source})),
             RebornScriptedReply::tool_call(
                 "builtin.document_edit",
                 json!({
@@ -335,7 +335,7 @@ async fn pptx_slide_is_cloned_with_the_source_style_and_saved_to_a_new_deck() {
                     }],
                 }),
             ),
-            RebornScriptedReply::tool_call("builtin.read_file", json!({"path": output})),
+            RebornScriptedReply::tool_call("builtin.read", json!({"path": output})),
             RebornScriptedReply::text("Added a Q2 slide in the same style as Q1."),
         ])
         .build()
@@ -374,7 +374,7 @@ async fn pdf_is_produced_by_authoring_html_and_rendering_it() {
         .thread("conv-pdf-render")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 json!({"path": "/workspace/report.html", "content": html}),
             ),
             RebornScriptedReply::tool_call(

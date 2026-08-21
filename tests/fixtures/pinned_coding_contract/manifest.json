@@ -1,0 +1,333 @@
+{
+  "schema_version": 1,
+  "pinned_commit": "08819b279cf02ae2545e69dad7111ab48d91d35e",
+  "scope": "Exactly the eight model-visible pinned core coding tools. Test-only contract snapshot; no production registration.",
+  "tool_names": [
+    "read",
+    "write",
+    "edit",
+    "glob",
+    "grep",
+    "bash",
+    "ast_grep",
+    "ast_edit"
+  ],
+  "selector_case_ids": [
+    "",
+    "",
+    "50",
+    "50-",
+    "50-200",
+    "50+150",
+    "5-16,960-973",
+    "5-16,1-3",
+    "1-10,5-20",
+    "5-10,11-12",
+    "10-20,1-5",
+    "5-20,10-",
+    "1..10",
+    "1..",
+    "L5-L10",
+    "raw",
+    "RAW",
+    "conflicts",
+    "raw:50-100",
+    "50-100:raw",
+    "2-4:raw",
+    "abc",
+    "0",
+    "50+0",
+    "200-100",
+    "raw:raw",
+    "conflicts:1-1",
+    "-1",
+    "50-100,200"
+  ],
+  "tools": {
+    "read": {
+      "name": "read",
+      "label": "Read",
+      "schema": "schemas/read.json",
+      "schema_dsl": {
+        "source": "packages/coding-agent/src/tools/read.ts",
+        "lines": "339-347",
+        "variant": "readSchema (default session: memory backend on)"
+      },
+      "prompt": "prompts/read.md",
+      "prompt_render_context": [
+        "DEFAULT_LIMIT (default 3000)",
+        "DEFAULT_MAX_LINES (3000)",
+        "IS_HL_MODE (hashline display mode)",
+        "IS_LINE_NUMBER_MODE",
+        "INSPECT_IMAGE_ENABLED"
+      ],
+      "grammar": null,
+      "selectors_source": "sources/read-selector.ts",
+      "errors_fixture": "golden/errors/read.json",
+      "errors_case_ids": [
+        "invalid_selector",
+        "path_not_found",
+        "multi_range_directory",
+        "url_reads_disabled",
+        "image_too_large",
+        "cannot_combine_query_with_line_selectors",
+        "xd_not_mounted",
+        "read_directory_failed"
+      ],
+      "output_fixture": "golden/output/read.json",
+      "output_case_ids": [
+        "hashline_header_in_workspace",
+        "hashline_header_out_of_workspace",
+        "hashline_numbered_line",
+        "elision_footer_single",
+        "head_truncation_notice",
+        "tail_truncation_notice"
+      ],
+      "rendered_prompt": {
+        "path": "prompts/read.rendered.md",
+        "context": {
+          "DEFAULT_LIMIT": "3000",
+          "DEFAULT_MAX_LINES": "3000",
+          "IS_HL_MODE": true,
+          "IS_LINE_NUMBER_MODE": false,
+          "INSPECT_IMAGE_ENABLED": false
+        },
+        "note": "prompts/read.md is the verbatim upstream Handlebars template; this file is that template rendered through the pinned upstream prompt.render pipeline (packages/utils/src/prompt.ts compile noEscape + post-render format) with the issue #7392 target context: default session (read.defaultLimit unset -> DEFAULT_MAX_LINES=3000 from packages/coding-agent/src/session/streaming-output.ts), hashline display mode on (edit mode hashline, edit tool available), line-number mode off, inspect_image inactive. IS_LINE_NUMBER_MODE is passed by the renderer but not referenced by the template."
+      },
+      "notes": [
+        "strict=true; approval tier 'read' unless path targets ssh -> 'exec'; loadMode 'essential'.",
+        "Description is prompt.render(read.md, context); see prompts/read.md for the template and the render context keys above.",
+        "Selector grammar (:N, :N-M, :N+K, :N-, comma lists, :raw, :conflicts, :raw:N-M) pinned in sources/read-selector.ts + golden/selectors.json.",
+        "Read output: hashline header [basename#TAG] + numbered LINE:content rows; elision footer; truncation notices (see golden/output/read.json)."
+      ]
+    },
+    "write": {
+      "name": "write",
+      "label": "Write",
+      "schema": "schemas/write.json",
+      "schema_dsl": {
+        "source": "packages/coding-agent/src/tools/write.ts",
+        "lines": "298-302"
+      },
+      "prompt": "prompts/write.md",
+      "prompt_render_context": [],
+      "grammar": null,
+      "selectors_source": null,
+      "errors_fixture": "golden/errors/write.json",
+      "errors_case_ids": [
+        "unknown_uri_like_target",
+        "bulk_directive_duplicate",
+        "archive_path_dotdot",
+        "sqlite_db_not_found",
+        "sqlite_write_content_object",
+        "conflict_target_missing",
+        "xd_not_mounted"
+      ],
+      "output_fixture": null,
+      "output_case_ids": null,
+      "notes": [
+        "strict=true; approval 'write' (exec for ssh targets); concurrency 'exclusive'; loadMode 'essential'.",
+        "Supports plain files, archive members, SQLite tables/rows (query params rejected), xd:// devices, conflict:// targets."
+      ]
+    },
+    "edit": {
+      "name": "edit",
+      "label": "Edit",
+      "schema": "schemas/edit.json",
+      "schema_dsl": {
+        "source": "packages/coding-agent/src/edit/hashline/params.ts",
+        "lines": "8-11",
+        "variant": "hashlineEditParamsSchema (default edit mode is hashline; mode is runtime-resolved, see packages/coding-agent/src/utils/edit-mode.ts)"
+      },
+      "prompt": "prompts/hashline.md",
+      "prompt_render_context": [],
+      "grammar": "grammars/hashline.lark",
+      "selectors_source": null,
+      "errors_fixture": "golden/errors/edit.json",
+      "errors_case_ids": [
+        "stale_anchor_hash_recognized",
+        "stale_anchor_hash_unrecognized",
+        "malformed_line_reference",
+        "line_out_of_bounds",
+        "invalid_absolute_range",
+        "per_file_failure_aggregate",
+        "files_not_applied",
+        "auto_piped_bare_body_rows"
+      ],
+      "output_fixture": "golden/output/edit.json",
+      "output_case_ids": [
+        "success_header_and_preview",
+        "deleted",
+        "noop_no_change",
+        "block_resolution",
+        "moved",
+        "multi_entry_aggregate_failure"
+      ],
+      "notes": [
+        "strict=true; approval 'write' (read for internal-URL targets); concurrency 'exclusive'; loadMode 'essential'.",
+        "DEFAULT_EDIT_MODE=hashline (packages/coding-agent/src/utils/edit-mode.ts, pinned). Resolution order: settings getEditVariantForModel(model) -> $env.PI_EDIT_VARIANT -> settings 'edit.mode' -> hashline default. When the resolved mode is hashline and the PI_STRICT_EDIT_MODE flag is unset, case-insensitive model substring exclusions fall back to 'replace': kimi, mimo, deepseek-v4-flash, step-3.7-flash. The primary edit schema stays the hashline payload (issue #7392 target). customFormat exposes the Lark grammar when the provider supports custom tools.",
+        "Hashline payload: PUT/CUT/REM/MV headers, N:=M ranges, +TEXT body rows, @registers, $ EOF, * block suffixes (grammar pinned; semantics in the hashline package sources listed in provenance).",
+        "Stale-anchor behavior: MismatchError shapes (hash recognized / not from session) pinned in golden/errors/edit.json.",
+        "Other mode prompts are snapshotted for later parity work: prompts/apply-patch.md, prompts/patch.md, prompts/replace.md + grammars/apply-patch.lark."
+      ]
+    },
+    "glob": {
+      "name": "glob",
+      "label": "Glob",
+      "schema": "schemas/glob.json",
+      "schema_dsl": {
+        "source": "packages/coding-agent/src/tools/glob.ts",
+        "lines": "43-51"
+      },
+      "prompt": "prompts/glob.md",
+      "prompt_render_context": [],
+      "grammar": null,
+      "selectors_source": null,
+      "errors_fixture": "golden/errors/glob.json",
+      "errors_case_ids": [
+        "root_not_allowed",
+        "empty_path",
+        "path_not_found",
+        "internal_url_glob_not_supported",
+        "internal_url_no_backing_file"
+      ],
+      "output_fixture": null,
+      "output_case_ids": null,
+      "notes": [
+        "strict=true; approval 'read'; loadMode 'essential'.",
+        "DEFAULT_LIMIT=200, MAX_LIMIT=200, DEFAULT_GLOB_TIMEOUT_MS=5000.",
+        "Semicolon-delimited path list; omitted path searches workspace root; 'path' may mix globs and literal paths."
+      ]
+    },
+    "grep": {
+      "name": "grep",
+      "label": "Grep",
+      "schema": "schemas/grep.json",
+      "schema_dsl": {
+        "source": "packages/coding-agent/src/tools/grep.ts",
+        "lines": "74-88"
+      },
+      "prompt": "prompts/grep.md",
+      "prompt_render_context": [],
+      "grammar": null,
+      "selectors_source": "sources/match-line-format.ts",
+      "errors_fixture": "golden/errors/grep.json",
+      "errors_case_ids": [
+        "invalid_regex",
+        "pattern_empty",
+        "skip_negative",
+        "line_range_selector_requires_single_file",
+        "line_range_path_not_found",
+        "line_range_target_is_directory",
+        "archive_members_unreadable",
+        "path_not_found_multi"
+      ],
+      "output_fixture": "golden/output/grep.json",
+      "output_case_ids": [
+        "match_line_hashline_mode",
+        "context_line_hashline_mode",
+        "match_line_plain_mode",
+        "context_line_plain_mode"
+      ],
+      "notes": [
+        "strict=true; approval 'read' ('exec' when any path targets ssh); loadMode 'discoverable'.",
+        "DEFAULT_FILE_LIMIT=20; per-file match cap; skip paginates; <file>:<lines> selectors supported.",
+        "Match line format pinned in sources/match-line-format.ts + golden/output/grep.json."
+      ]
+    },
+    "bash": {
+      "name": "bash",
+      "label": "Bash",
+      "schema": "schemas/bash.json",
+      "schema_dsl": {
+        "source": "packages/coding-agent/src/tools/bash.ts",
+        "lines": "303-320",
+        "variant": "bashSchemaBase (async mode disabled)"
+      },
+      "prompt": "prompts/bash.md",
+      "prompt_render_context": [
+        "asyncEnabled",
+        "autoBackgroundEnabled",
+        "autoBackgroundThresholdSeconds",
+        "hasEval",
+        "hasGlob",
+        "hasGrep",
+        "hasLaunch",
+        "hasRead",
+        "hasShellBuiltins",
+        "isWindows"
+      ],
+      "grammar": null,
+      "selectors_source": null,
+      "errors_fixture": "golden/errors/bash.json",
+      "errors_case_ids": [
+        "invalid_env_name",
+        "working_directory_missing",
+        "missing_exit_status"
+      ],
+      "output_fixture": null,
+      "output_case_ids": null,
+      "notes": [
+        "strict=true; approval 'exec' (critical patterns force exec approval); loadMode 'essential'.",
+        "Base schema exposes command, env, timeout, cwd, and pty. Async is added only when the session enables async execution.",
+        "Timeout defaults to 300 seconds; 0 disables the deadline; nonzero values clamp to 1-3600 seconds."
+      ]
+    },
+    "ast_grep": {
+      "name": "ast_grep",
+      "label": "AST Grep",
+      "schema": "schemas/ast_grep.json",
+      "schema_dsl": {
+        "source": "packages/coding-agent/src/tools/ast-grep.ts",
+        "lines": "39-44"
+      },
+      "prompt": "prompts/ast-grep.md",
+      "prompt_render_context": [],
+      "grammar": null,
+      "selectors_source": "sources/match-line-format.ts",
+      "errors_fixture": "golden/errors/ast_grep.json",
+      "errors_case_ids": [
+        "empty_pattern",
+        "skip_negative"
+      ],
+      "output_fixture": null,
+      "output_case_ids": null,
+      "notes": [
+        "strict=true; approval 'read'; loadMode 'discoverable'.",
+        "Uses the same match-line formatting as grep (hashline vs plain mode)."
+      ]
+    },
+    "ast_edit": {
+      "name": "ast_edit",
+      "label": "AST Edit",
+      "schema": "schemas/ast_edit.json",
+      "schema_dsl": {
+        "source": "packages/coding-agent/src/tools/ast-edit.ts",
+        "lines": "46-57"
+      },
+      "prompt": "prompts/ast-edit.md",
+      "prompt_render_context": [],
+      "grammar": null,
+      "selectors_source": null,
+      "errors_fixture": "golden/errors/ast_edit.json",
+      "errors_case_ids": [
+        "empty_op_pattern",
+        "empty_ops",
+        "duplicate_rewrite_pattern",
+        "external_url_not_rewritable"
+      ],
+      "output_fixture": null,
+      "output_case_ids": null,
+      "notes": [
+        "strict=true; approval 'write' ('read' when all paths are internal URLs); loadMode 'discoverable'.",
+        "ops array of {pat,out} with minItems 1; paths array with minItems 1; duplicate patterns rejected."
+      ]
+    }
+  },
+  "cross_tool_notes": [
+    "Model-visible names are the exact unqualified pinned names; IronClaw canonical CapabilityIds (builtin.read etc.) are a separate mapping applied at the provider boundary (issue #7392).",
+    "Schemas were rendered from the pinned upstream DSL through the pinned upstream wire pipeline (pi-ai toolWireSchema) at capture time; regenerate with the pinned commit's tooling if verification is ever needed.",
+    "Fixture labels: golden/selectors.json is generated (deterministic parse cases produced from the pinned upstream selector logic); golden/errors/*.json and golden/output/*.json are transcribed templates with representative example values. No executable oracle is vendored, so these fixtures pin shape and formatting, not runtime parity.",
+    "Offline byte verification covers the vendored (snapshotted) and derived assets only, plus manifest.json via its provenance record. Unsnapshotted upstream source records in provenance.json are capture-time pins (recorded SHA-256/bytes), not byte-verified offline."
+  ]
+}

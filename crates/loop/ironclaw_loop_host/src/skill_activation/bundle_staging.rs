@@ -1,9 +1,9 @@
 //! Copying an activated skill's files somewhere a host process can open them.
 //!
-//! A bundle lives in the database, and `builtin.shell` is a host process that can only open real
+//! A bundle lives in the database, and `builtin.bash` is a host process that can only open real
 //! host paths. So an agent could read its own script and not run it, and re-derived the method the
 //! skill existed to preserve. Staging writes the bundle's non-manifest files into the workspace,
-//! which is host-backed wherever a shell exists, and tells the model the path. `SKILL.md` is not
+//! which is host-backed wherever bash exists, and tells the model the path. `SKILL.md` is not
 //! staged: it already arrives as model context, and a second copy invites edits discovery never
 //! reads.
 
@@ -150,9 +150,9 @@ where
 {
     /// The working directory the model runs this skill's commands from.
     ///
-    /// Plainly `/workspace/.skills/<name>`, correct only because the shell and the file tools now
+    /// Plainly `/workspace/.skills/<name>`, correct only because bash and the file tools now
     /// resolve `/workspace` to the same directory. Deriving it instead (measuring the staged dir
-    /// against the shell's root) emitted a doubled per-caller segment that both tools resolved
+    /// against bash's root) emitted a doubled per-caller segment that both tools resolved
     /// twice, so every command failed with a spawn error that read like a missing interpreter.
     fn runnable_dir(&self, _scope: &ResourceScope, skill_name: &str) -> String {
         format!("/workspace/{STAGED_SKILLS_DIRNAME}/{skill_name}")
@@ -170,7 +170,7 @@ mod staging_tests {
     };
 
     /// The path handed to the model must be the plain workspace spelling; a per-caller segment here
-    /// is applied a second time by both the shell and the file tools, and the doubled directory
+    /// is applied a second time by both bash and the file tools, and the doubled directory
     /// does not exist.
     #[test]
     fn the_runnable_directory_is_the_plain_workspace_spelling() {
@@ -194,7 +194,7 @@ mod staging_tests {
         assert_eq!(
             stager.runnable_dir(&scope, "egfr-calc"),
             "/workspace/.skills/egfr-calc",
-            "the model must be handed the same spelling both the shell and the file tools resolve; \
+            "the model must be handed the same spelling both bash and the file tools resolve; \
              any per-caller segment here is applied a second time by both and the directory does not \
              exist"
         );

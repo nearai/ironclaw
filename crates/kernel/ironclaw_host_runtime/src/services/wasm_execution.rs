@@ -222,7 +222,7 @@ where
     // Offload it to the blocking pool (mirroring legacy
     // `src/tools/wasm/wrapper.rs`), gated by a semaphore so a storm queues
     // instead of exhausting the blocking pool.
-    let execution = match run_wasm_execution_blocking(
+    let mut execution = match run_wasm_execution_blocking(
         runtime,
         prepared,
         host,
@@ -274,13 +274,25 @@ where
             ));
         }
     };
+    let output_bytes = serde_json::to_vec(&output)
+        .map(|bytes| bytes.len().min(u64::MAX as usize) as u64)
+        .map_err(|error| {
+            dispatch_error_for_runtime(
+                RuntimeKind::Wasm,
+                RuntimeDispatchErrorKind::OutputDecode,
+                Some(error.to_string()),
+            )
+        })?;
+    execution.usage.output_bytes = output_bytes;
     let receipt = guard.reconcile(execution.usage.clone(), wasm_resource_error)?;
     Ok(RuntimeAdapterResult {
+        canonical_output_digest: None,
         output,
         display_preview: None,
-        output_bytes: execution.usage.output_bytes,
+        output_bytes,
         usage: execution.usage,
         receipt,
+        completed_artifact: None,
     })
 }
 
@@ -483,6 +495,16 @@ mod tests {
         ) -> Result<ReservationOutcome, ResourceError> {
             Err(ResourceError::Storage {
                 reason: "reserve unused in guard unit tests".to_string(),
+            })
+        }
+
+        fn grow_reservation_with_outcome(
+            &self,
+            _reservation_id: ResourceReservationId,
+            _additional: ResourceEstimate,
+        ) -> Result<ReservationOutcome, ResourceError> {
+            Err(ResourceError::Storage {
+                reason: "grow_reservation unused in guard unit tests".to_string(),
             })
         }
 

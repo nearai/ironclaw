@@ -131,6 +131,7 @@ fn capability_manifest(
             hard_ceiling: None,
         }),
         origin_gate_matrix: Some(origin_gate_matrix),
+        provider_tool_name: None,
     })
 }
 

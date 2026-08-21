@@ -98,6 +98,7 @@ fn manifest() -> Result<CapabilityManifest, ExtensionError> {
             product: OriginGatePolicy::ConsentSufficient,
             automation: OriginGatePolicy::Forbidden,
         }),
+        provider_tool_name: None,
     })
 }
 

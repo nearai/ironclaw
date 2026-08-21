@@ -19,7 +19,7 @@ test("classifyRisk: read tool mentioning edit in description is not danger", () 
 
 test("classifyRisk: write-like tool name is danger", () => {
   assert.deepEqual(
-    classifyRisk("write_file", "Writes a file", "{}"),
+    classifyRisk("write", "Writes a file", "{}"),
     { tone: "danger", key: "tool.riskWrite" },
   );
 });

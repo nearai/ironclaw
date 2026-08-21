@@ -178,15 +178,38 @@ effects = [
 mounts = "ambient"
 network = "dev_wildcard"
 
+# The pinned bash coding engine uses the same runtime process port as shell and
+# therefore requires the same host authority. User-sandbox projection strips
+# direct filesystem authority and substitutes sandbox transport policy.
 [[grants]]
-capability = "builtin.read_file"
+capability = "builtin.bash"
+effects = [
+    "dispatch_capability",
+    "read_filesystem",
+    "write_filesystem",
+    "spawn_process",
+    "execute_code",
+    "network",
+]
+mounts = "ambient"
+network = "dev_wildcard"
+
+# Canonical pinned coding surface.
+[[grants]]
+capability = "builtin.read"
+effects = ["dispatch_capability", "read_filesystem"]
+mounts = "workspace"
+network = "default"
+
+[[grants]]
+capability = "builtin.write"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
 mounts = "workspace"
 network = "default"
 
 [[grants]]
-capability = "builtin.write_file"
-effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+capability = "builtin.edit"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "delete_filesystem"]
 mounts = "workspace"
 network = "default"
 
@@ -203,28 +226,17 @@ mounts = "workspace"
 network = "default"
 
 [[grants]]
-capability = "builtin.list_dir"
-effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
-mounts = "workspace"
-network = "default"
-
-[[grants]]
 capability = "builtin.glob"
-effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+effects = ["dispatch_capability", "read_filesystem"]
 mounts = "workspace"
 network = "default"
 
 [[grants]]
 capability = "builtin.grep"
-effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+effects = ["dispatch_capability", "read_filesystem"]
 mounts = "workspace"
 network = "default"
 
-[[grants]]
-capability = "builtin.apply_patch"
-effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
-mounts = "workspace"
-network = "default"
 
 [[grants]]
 capability = "builtin.extension_search"

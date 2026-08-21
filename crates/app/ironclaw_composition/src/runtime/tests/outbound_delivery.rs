@@ -98,7 +98,7 @@ impl HostManagedModelGateway for ReplyAttachmentGateway {
         let call = match call_index {
             0 => provider_tool_call(
                 &tool_definitions,
-                "builtin.write_file",
+                "builtin.write",
                 "call-write-reply-attachment",
                 serde_json::json!({
                     "path": "/workspace/reports/result.csv",

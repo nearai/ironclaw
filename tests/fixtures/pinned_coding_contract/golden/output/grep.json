@@ -1,0 +1,37 @@
+{
+  "tool": "grep",
+  "note": "Deterministic model-visible output format examples for match lines, shared by grep/ast-grep style results. Template verbatim from packages/coding-agent/src/tools/match-line-format.ts at commit 08819b279cf02ae2545e69dad7111ab48d91d35e.",
+  "formats": [
+    {
+      "case": "match_line_hashline_mode",
+      "template": "*${LINE}:${TEXT}",
+      "example": "*42:fn main() {}",
+      "source_path": "packages/coding-agent/src/tools/match-line-format.ts",
+      "source_line": 20,
+      "note": "Matched lines are prefixed with '*'; hashline mode separates line and body with ':' so the row is editable."
+    },
+    {
+      "case": "context_line_hashline_mode",
+      "template": " ${LINE}:${TEXT}",
+      "example": " 43:}",
+      "source_path": "packages/coding-agent/src/tools/match-line-format.ts",
+      "source_line": 20,
+      "note": "Context lines are prefixed with a single space so line numbers align in column. Line numbers are never padded."
+    },
+    {
+      "case": "match_line_plain_mode",
+      "template": "*${LINE}|${TEXT}",
+      "example": "*42|fn main() {}",
+      "source_path": "packages/coding-agent/src/tools/match-line-format.ts",
+      "source_line": 23,
+      "note": "Plain (non-hashline) mode keeps the legacy display-only '|' separator."
+    },
+    {
+      "case": "context_line_plain_mode",
+      "template": " ${LINE}|${TEXT}",
+      "example": " 43|}",
+      "source_path": "packages/coding-agent/src/tools/match-line-format.ts",
+      "source_line": 23
+    }
+  ]
+}

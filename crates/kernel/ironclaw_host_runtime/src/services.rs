@@ -32,6 +32,7 @@ use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
+    artifact::{AccountedArtifactPersister, ArtifactAccessPort, ArtifactPersistencePort},
     dispatch::{
         CapabilityDispatcher, DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind,
     },
@@ -149,6 +150,9 @@ where
     audit_sink: Option<Arc<dyn AuditSink>>,
     security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
     secret_store: Option<Arc<dyn SecretStorePort>>,
+    artifact_access: Option<Arc<dyn ArtifactAccessPort>>,
+    artifact_persistence: Option<Arc<dyn ArtifactPersistencePort>>,
+    accounted_artifact_persistence: Option<Arc<dyn AccountedArtifactPersister>>,
     credential_account_store: Arc<dyn CredentialAccountStore>,
     credential_session_store: Arc<dyn CredentialSessionStore>,
     runtime_credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
@@ -461,6 +465,9 @@ where
             audit_sink: None,
             security_audit_sink: None,
             secret_store: None,
+            artifact_access: None,
+            artifact_persistence: None,
+            accounted_artifact_persistence: None,
             credential_account_store,
             credential_session_store,
             runtime_credential_account_resolver: None,
@@ -524,6 +531,24 @@ where
         }
     }
 
+    pub fn with_artifact_ports(
+        mut self,
+        access: Arc<dyn ArtifactAccessPort>,
+        persistence: Arc<dyn ArtifactPersistencePort>,
+    ) -> Self {
+        self.artifact_access = Some(access);
+        self.artifact_persistence = Some(persistence);
+        self
+    }
+
+    pub fn with_accounted_artifact_persistence(
+        mut self,
+        persistence: Arc<dyn AccountedArtifactPersister>,
+    ) -> Self {
+        self.accounted_artifact_persistence = Some(persistence);
+        self
+    }
+
     pub fn security_audit_sink(&self) -> Option<Arc<dyn SecurityAuditSink>> {
         self.security_audit_sink.clone()
     }
@@ -550,6 +575,9 @@ where
         let mut dispatcher = RuntimeDispatcher::from_arcs(resolver, Arc::clone(&self.governor));
         if let Some(event_sink) = &self.event_sink {
             dispatcher = dispatcher.with_event_sink_arc(Arc::clone(event_sink));
+        }
+        if let Some(persistence) = &self.accounted_artifact_persistence {
+            dispatcher = dispatcher.with_artifact_persistence_arc(Arc::clone(persistence));
         }
 
         dispatcher
@@ -614,6 +642,12 @@ where
         )
         .with_tool_call_http_egress(tool_call_http_egress(&self.tool_call_http_egress))
         .with_runtime_secret_material_stager(Some(self.runtime_secret_material_stager()));
+        if let (Some(access), Some(persistence)) =
+            (&self.artifact_access, &self.artifact_persistence)
+        {
+            invocation_services_resolver = invocation_services_resolver
+                .with_artifact_ports(Arc::clone(access), Arc::clone(persistence));
+        }
         if let Some(audit_sink) = &self.audit_sink {
             invocation_services_resolver =
                 invocation_services_resolver.with_audit_sink(Arc::clone(audit_sink));

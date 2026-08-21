@@ -4,6 +4,20 @@ use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
 pub(super) async fn build_production_shaped(
     input: RebornHostBindings,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
+    build_production_shaped_inner(input, false).await
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(super) async fn build_production_shaped_with_coding_tools_for_test(
+    input: RebornHostBindings,
+) -> Result<RebornRuntimeStores, RebornBuildError> {
+    build_production_shaped_inner(input, true).await
+}
+
+async fn build_production_shaped_inner(
+    input: RebornHostBindings,
+    coding_tools_for_test: bool,
+) -> Result<RebornRuntimeStores, RebornBuildError> {
     let RebornHostBindings {
         deployment,
         storage,
@@ -130,6 +144,7 @@ pub(super) async fn build_production_shaped(
                     runtime_policy_for_local_process,
                     postgres_resource_governor_singleton: None,
                 },
+                coding_tools_for_test,
             )
             .await
         }
@@ -167,6 +182,7 @@ pub(super) async fn build_production_shaped(
                         process_local_resource_governor_singleton,
                     ),
                 },
+                coding_tools_for_test,
             )
             .await
         }
@@ -194,6 +210,7 @@ pub(super) async fn build_production_shaped(
                 database_path_or_url,
                 secret_master_key,
                 process_local_resource_governor_singleton,
+                coding_tools_for_test,
             )
             .await
         }
@@ -220,6 +237,7 @@ pub(super) async fn build_production_shaped(
                 pools.process_journal,
                 secret_master_key,
                 process_local_resource_governor_singleton,
+                coding_tools_for_test,
             )
             .await
         }
@@ -250,6 +268,7 @@ struct LocalStorageProductionInput {
 async fn build_local_storage_production_shaped(
     mut context: RebornProductionBuildContext,
     input: LocalStorageProductionInput,
+    coding_tools_for_test: bool,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     let LocalStorageProductionInput {
         root,
@@ -361,6 +380,7 @@ async fn build_local_storage_production_shaped(
             Some(pool) => ironclaw_auth::CredentialRefreshLeaderLock::for_postgres(pool),
             None => ironclaw_auth::CredentialRefreshLeaderLock::always_leader_for_single_writer(),
         },
+        coding_tools_for_test,
     )
     .await
 }

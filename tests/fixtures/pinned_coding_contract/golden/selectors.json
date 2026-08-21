@@ -1,0 +1,353 @@
+[
+  {
+    "sel": "",
+    "selector": {
+      "kind": "none"
+    },
+    "offset_limit": {}
+  },
+  {
+    "sel": "",
+    "selector": {
+      "kind": "none"
+    },
+    "offset_limit": {}
+  },
+  {
+    "sel": "50",
+    "selector": {
+      "kind": "lines",
+      "ranges": [
+        {
+          "startLine": 50
+        }
+      ]
+    },
+    "offset_limit": {
+      "offset": 50
+    }
+  },
+  {
+    "sel": "50-",
+    "selector": {
+      "kind": "lines",
+      "ranges": [
+        {
+          "startLine": 50
+        }
+      ]
+    },
+    "offset_limit": {
+      "offset": 50
+    }
+  },
+  {
+    "sel": "50-200",
+    "selector": {
+      "kind": "lines",
+      "ranges": [
+        {
+          "startLine": 50,
+          "endLine": 200
+        }
+      ]
+    },
+    "offset_limit": {
+      "offset": 50,
+      "limit": 151
+    }
+  },
+  {
+    "sel": "50+150",
+    "selector": {
+      "kind": "lines",
+      "ranges": [
+        {
+          "startLine": 50,
+          "endLine": 199
+        }
+      ]
+    },
+    "offset_limit": {
+      "offset": 50,
+      "limit": 150
+    }
+  },
+  {
+    "sel": "5-16,960-973",
+    "selector": {
+      "kind": "lines",
+      "ranges": [
+        {
+          "startLine": 5,
+          "endLine": 16
+        },
+        {
+          "startLine": 960,
+          "endLine": 973
+        }
+      ]
+    },
+    "offset_limit": {
+      "offset": 5,
+      "limit": 12
+    }
+  },
+  {
+    "sel": "5-16,1-3",
+    "selector": {
+      "kind": "lines",
+      "ranges": [
+        {
+          "startLine": 1,
+          "endLine": 3
+        },
+        {
+          "startLine": 5,
+          "endLine": 16
+        }
+      ]
+    },
+    "offset_limit": {
+      "offset": 1,
+      "limit": 3
+    }
+  },
+  {
+    "sel": "1-10,5-20",
+    "selector": {
+      "kind": "lines",
+      "ranges": [
+        {
+          "startLine": 1,
+          "endLine": 20
+        }
+      ]
+    },
+    "offset_limit": {
+      "offset": 1,
+      "limit": 20
+    }
+  },
+  {
+    "sel": "5-10,11-12",
+    "selector": {
+      "kind": "lines",
+      "ranges": [
+        {
+          "startLine": 5,
+          "endLine": 12
+        }
+      ]
+    },
+    "offset_limit": {
+      "offset": 5,
+      "limit": 8
+    }
+  },
+  {
+    "sel": "10-20,1-5",
+    "selector": {
+      "kind": "lines",
+      "ranges": [
+        {
+          "startLine": 1,
+          "endLine": 5
+        },
+        {
+          "startLine": 10,
+          "endLine": 20
+        }
+      ]
+    },
+    "offset_limit": {
+      "offset": 1,
+      "limit": 5
+    }
+  },
+  {
+    "sel": "5-20,10-",
+    "selector": {
+      "kind": "lines",
+      "ranges": [
+        {
+          "startLine": 5
+        }
+      ]
+    },
+    "offset_limit": {
+      "offset": 5
+    }
+  },
+  {
+    "sel": "1..10",
+    "selector": {
+      "kind": "lines",
+      "ranges": [
+        {
+          "startLine": 1,
+          "endLine": 10
+        }
+      ]
+    },
+    "offset_limit": {
+      "offset": 1,
+      "limit": 10
+    }
+  },
+  {
+    "sel": "1..",
+    "selector": {
+      "kind": "lines",
+      "ranges": [
+        {
+          "startLine": 1
+        }
+      ]
+    },
+    "offset_limit": {
+      "offset": 1
+    }
+  },
+  {
+    "sel": "L5-L10",
+    "selector": {
+      "kind": "lines",
+      "ranges": [
+        {
+          "startLine": 5,
+          "endLine": 10
+        }
+      ]
+    },
+    "offset_limit": {
+      "offset": 5,
+      "limit": 6
+    }
+  },
+  {
+    "sel": "raw",
+    "selector": {
+      "kind": "raw"
+    },
+    "offset_limit": {}
+  },
+  {
+    "sel": "RAW",
+    "selector": {
+      "kind": "raw"
+    },
+    "offset_limit": {}
+  },
+  {
+    "sel": "conflicts",
+    "selector": {
+      "kind": "conflicts"
+    },
+    "offset_limit": {}
+  },
+  {
+    "sel": "raw:50-100",
+    "selector": {
+      "kind": "lines",
+      "ranges": [
+        {
+          "startLine": 50,
+          "endLine": 100
+        }
+      ],
+      "raw": true
+    },
+    "offset_limit": {
+      "offset": 50,
+      "limit": 51
+    }
+  },
+  {
+    "sel": "50-100:raw",
+    "selector": {
+      "kind": "lines",
+      "ranges": [
+        {
+          "startLine": 50,
+          "endLine": 100
+        }
+      ],
+      "raw": true
+    },
+    "offset_limit": {
+      "offset": 50,
+      "limit": 51
+    }
+  },
+  {
+    "sel": "2-4:raw",
+    "selector": {
+      "kind": "lines",
+      "ranges": [
+        {
+          "startLine": 2,
+          "endLine": 4
+        }
+      ],
+      "raw": true
+    },
+    "offset_limit": {
+      "offset": 2,
+      "limit": 3
+    }
+  },
+  {
+    "sel": "abc",
+    "selector": {
+      "kind": "none"
+    },
+    "offset_limit": {}
+  },
+  {
+    "sel": "0",
+    "error": "Line selector 0 is invalid; lines are 1-indexed. Use :1."
+  },
+  {
+    "sel": "50+0",
+    "error": "Invalid range 50+0: count must be >= 1."
+  },
+  {
+    "sel": "200-100",
+    "error": "Invalid range 200-100: end must be >= start."
+  },
+  {
+    "sel": "raw:raw",
+    "error": "Invalid selector ':raw:raw'. Use :N, :N-M, :N+K, :N- (open-ended), a comma-separated list of ranges, :raw, or a range combined with raw (e.g. :raw:50-100)."
+  },
+  {
+    "sel": "conflicts:1-1",
+    "error": "Invalid selector ':conflicts:1-1'. Use :N, :N-M, :N+K, :N- (open-ended), a comma-separated list of ranges, :raw, or a range combined with raw (e.g. :raw:50-100)."
+  },
+  {
+    "sel": "-1",
+    "selector": {
+      "kind": "none"
+    },
+    "offset_limit": {}
+  },
+  {
+    "sel": "50-100,200",
+    "selector": {
+      "kind": "lines",
+      "ranges": [
+        {
+          "startLine": 50,
+          "endLine": 100
+        },
+        {
+          "startLine": 200
+        }
+      ]
+    },
+    "offset_limit": {
+      "offset": 50,
+      "limit": 51
+    }
+  }
+]

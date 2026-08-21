@@ -4,6 +4,7 @@ use chrono::Utc;
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::turn::{LoopResultRef, TurnGateRef, TurnRunId, TurnScope};
 use ironclaw_host_api::{
+    artifact::{ArtifactDigest, ArtifactId, ArtifactRef, CompletedArtifact},
     ids::{AgentId, CapabilityId, InvocationId, ProcessId, ProjectId, TenantId, ThreadId, UserId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
@@ -11,10 +12,11 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_host::{AwaitedChildSetRecord, SpawnSubagentMode, SubagentKindId};
 use ironclaw_processes::{
-    CloseProcessDependencyRequest, ProcessDependencyPort, ProcessDependencyQuery,
+    ClaimProcessDependencySettlementRequest, CloseProcessDependencyRequest,
+    CompleteProcessDependencySettlementRequest, ProcessDependencyPort, ProcessDependencyQuery,
     ProcessDependencyState, ProcessDependencySubmission, ProcessJournalStore, ProcessKind,
     ProcessLifecycleStatus, ProcessOperationId, ProcessSubmissionPort, ProcessTerminalEvidence,
-    SettleProcessDependencyRequest, SubmitProcessRequest,
+    SubmitProcessRequest,
 };
 use ironclaw_turn_runner::subagent::await_edge::{EdgeTerminalKind, store::AwaitEdgeStore};
 
@@ -69,17 +71,39 @@ async fn runner_await_edge_is_a_projection_over_process_dependencies() {
     )
     .await;
 
-    let settled = store
-        .settle(
-            &child_scope,
-            parent_run_id,
-            child_run_id,
-            EdgeTerminalKind::Completed,
-            Some(17),
-            None,
-        )
+    let claim_token = "await-edge-projection".to_string();
+    let claimed_at = Utc::now();
+    journal
+        .claim_process_dependency_settlement(ClaimProcessDependencySettlementRequest {
+            dependent_process_id: ProcessId::from_uuid(parent_run_id.as_uuid()),
+            dependency_process_id: ProcessId::from_uuid(child_run_id.as_uuid()),
+            scope: child_scope.to_resource_scope(),
+            claim_token: claim_token.clone(),
+            claimed_at,
+            lease_expires_at: claimed_at + chrono::Duration::seconds(30),
+        })
         .await
-        .expect("settle edge")
+        .expect("claim edge settlement");
+    journal
+        .complete_process_dependency_settlement(CompleteProcessDependencySettlementRequest {
+            dependent_process_id: ProcessId::from_uuid(parent_run_id.as_uuid()),
+            dependency_process_id: ProcessId::from_uuid(child_run_id.as_uuid()),
+            scope: child_scope.to_resource_scope(),
+            claim_token,
+            terminal: ProcessTerminalEvidence {
+                status: ProcessLifecycleStatus::Completed,
+                output_bytes: Some(17),
+                sanitized_reason: None,
+            },
+            completed_artifact: completed_artifact(17),
+            settled_at: Utc::now(),
+        })
+        .await
+        .expect("complete edge settlement");
+    let settled = store
+        .peek(&child_scope, parent_run_id, child_run_id)
+        .await
+        .expect("peek settled edge")
         .expect("edge exists");
     assert_eq!(settled.terminal_kind, Some(EdgeTerminalKind::Completed));
     store
@@ -149,20 +173,37 @@ async fn process_dependency_journal_stress_closes_each_record_and_releases_capac
         let filesystem = Arc::clone(&filesystem);
         tasks.push(tokio::spawn(async move {
             let handle = ProcessJournalStore::new(filesystem);
+            let claim_token = format!("stress-{child_id}");
+            let claimed_at = Utc::now();
             handle
-                .settle_process_dependency(SettleProcessDependencyRequest {
+                .claim_process_dependency_settlement(ClaimProcessDependencySettlementRequest {
                     dependent_process_id: parent_id,
                     dependency_process_id: child_id,
                     scope: child_scope.clone(),
-                    terminal: ProcessTerminalEvidence {
-                        status: ProcessLifecycleStatus::Completed,
-                        output_bytes: Some(1),
-                        sanitized_reason: None,
-                    },
-                    settled_at: Utc::now(),
+                    claim_token: claim_token.clone(),
+                    claimed_at,
+                    lease_expires_at: claimed_at + chrono::Duration::seconds(30),
                 })
                 .await
-                .expect("settle dependency");
+                .expect("claim dependency settlement");
+            handle
+                .complete_process_dependency_settlement(
+                    CompleteProcessDependencySettlementRequest {
+                        dependent_process_id: parent_id,
+                        dependency_process_id: child_id,
+                        scope: child_scope.clone(),
+                        claim_token,
+                        terminal: ProcessTerminalEvidence {
+                            status: ProcessLifecycleStatus::Completed,
+                            output_bytes: Some(1),
+                            sanitized_reason: None,
+                        },
+                        completed_artifact: completed_artifact(1),
+                        settled_at: Utc::now(),
+                    },
+                )
+                .await
+                .expect("complete dependency settlement");
             handle
                 .consume_process_dependency(CloseProcessDependencyRequest {
                     dependent_process_id: parent_id,
@@ -210,6 +251,16 @@ async fn process_dependency_journal_stress_closes_each_record_and_releases_capac
         None,
     )
     .await;
+}
+
+fn completed_artifact(byte_len: u64) -> CompletedArtifact {
+    CompletedArtifact {
+        artifact_ref: ArtifactRef::new(ArtifactId::new(byte_len)),
+        byte_len,
+        total_lines: Some(1),
+        content_type: "application/json".to_string(),
+        digest: ArtifactDigest::from_bytes(b"subagent dependency result"),
+    }
 }
 
 async fn submit_root<F>(

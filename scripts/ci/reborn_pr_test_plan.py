@@ -339,6 +339,14 @@ INTEGRATION_SUPPORT_OWNERS = {
 INTEGRATION_SNAPSHOT_PREFIX_OWNERS = {
     "tests/snapshots/golden_payload__": "tests/integration/golden_payload.rs",
 }
+# Offline pinned-contract provenance, prompts, schemas, and golden cases are
+# all consumed by the root contract-snapshot target. Route fixture-only changes
+# to that target's partition instead of letting the fail-closed test-path arm
+# reject the plan before any Reborn tests can run.
+ROOT_FIXTURE_PREFIX_OWNERS = {
+    "tests/fixtures/pinned_coding_contract/": "tests/reborn_coding_contract_snapshot.rs",
+    "tests/support/pinned_coding_contract/": "tests/reborn_coding_contract_snapshot.rs",
+}
 # Production files whose changes alter the model-visible prompt or tool
 # surface that `golden_payload` snapshot-pins — the surface digest, the
 # instruction bundle, the communication-context renderer, and the shipped
@@ -996,20 +1004,48 @@ def build_plan(
             root_partitions.add(root_inventory[path])
             reasons.append(f"root test changed: {path}")
             continue
+        root_fixture_owner = next(
+            (
+                owner
+                for prefix, owner in ROOT_FIXTURE_PREFIX_OWNERS.items()
+                if path.startswith(prefix)
+            ),
+            None,
+        )
+        if root_fixture_owner is not None:
+            root_partitions.add(root_inventory[root_fixture_owner])
+            reasons.append(f"root test fixture changed: {path}")
+            continue
+        if path in INTEGRATION_SUPPORT_OWNERS:
+            owner = INTEGRATION_SUPPORT_OWNERS[path]
+            integration_lanes.add(integration_inventory[owner])
+            reasons.append(f"integration test support changed: {path}")
+            continue
+        # `tests/fixtures/llm_traces/README.md` is the format contract of the
+        # shared `TraceLlm` replay provider (`tests/support/trace_llm.rs`): it
+        # documents the fixture JSON every replay consumer loads, so editing it
+        # signals the fixture format (or its documented tool surface) changed
+        # and must run the same representative root partition as the support
+        # file it documents. It is not prose — the coding-tool cutover renamed
+        # the pinned tool surface and edited this README to match, and the
+        # fail-closed arm rejected that PR as an unmapped test path. Exact
+        # path on purpose: the rest of the `llm_traces/` tree stays unmapped
+        # until each subtree is decided (`reborn_qa/` has its own arm below).
         if (
-            path.startswith("tests/support/reborn_parity_qa/")
-            or path == "tests/support_unit_tests.rs"
+            path == "tests/support_unit_tests.rs"
+            or path == "tests/fixtures/llm_traces/README.md"
         ):
             root_partitions.add(0)
             reasons.append(
                 "shared root-test support changed; PR runs a representative partition"
             )
             continue
-        if path.startswith("tests/support/") and path not in INTEGRATION_SUPPORT_OWNERS:
+        if path.startswith("tests/support/"):
             # Direct shared root-test support (tests/support/mod.rs and the
             # modules it declares). The integration group targets also compile
             # this tree via `#[path = "../../support/mod.rs"]`, so schedule a
-            # representative lane of each tier.
+            # representative lane of each tier. Exact integration support
+            # owners returned above with their owning lane.
             root_partitions.add(0)
             integration_lanes.add(0)
             reasons.append(
@@ -1020,11 +1056,6 @@ def build_plan(
         if path in integration_inventory:
             integration_lanes.add(integration_inventory[path])
             reasons.append(f"integration test changed: {path}")
-            continue
-        if path in INTEGRATION_SUPPORT_OWNERS:
-            owner = INTEGRATION_SUPPORT_OWNERS[path]
-            integration_lanes.add(integration_inventory[owner])
-            reasons.append(f"integration test support changed: {path}")
             continue
         snapshot_owner = next(
             (

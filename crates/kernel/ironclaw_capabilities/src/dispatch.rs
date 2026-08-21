@@ -15,6 +15,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_event_log::{EventSink, RuntimeEvent};
 use ironclaw_host_api::{
+    artifact::{
+        ARTIFACT_INLINE_PREVIEW_MAX_BYTES, AccountedArtifactPersister, ArtifactOwnerScope,
+        ArtifactWriteMetadata, CompletedArtifact,
+    },
     authorized::Authorized,
     dispatch::{
         CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
@@ -25,8 +29,10 @@ use ironclaw_host_api::{
     invocation::{Actor, InvocationOrigin},
     lane::RuntimeLane,
     resource::{ResourceReceipt, ResourceReservation, ResourceScope, ResourceUsage},
+    result_meta::OutputDigest,
     runtime::RuntimeKind,
 };
+use ironclaw_loop_contracts::ContentDigest;
 use ironclaw_resources::ResourceGovernor;
 use serde_json::Value;
 
@@ -101,6 +107,8 @@ pub struct RuntimeAdapterResult {
     pub usage: ResourceUsage,
     pub receipt: ResourceReceipt,
     pub output_bytes: u64,
+    pub completed_artifact: Option<CompletedArtifact>,
+    pub canonical_output_digest: Option<OutputDigest>,
 }
 
 /// First-`Some`-wins composition of resolvers (host built-ins chained with
@@ -131,6 +139,7 @@ where
     resolver: ServiceHandle<'a, dyn ToolResolver + 'a>,
     governor: ServiceHandle<'a, G>,
     event_sink: Option<ServiceHandle<'a, dyn EventSink + 'a>>,
+    artifact_persistence: Option<Arc<dyn AccountedArtifactPersister>>,
 }
 
 impl<'a, G> RuntimeDispatcher<'a, G>
@@ -142,6 +151,7 @@ where
             resolver: ServiceHandle::Borrowed(resolver),
             governor: ServiceHandle::Borrowed(governor),
             event_sink: None,
+            artifact_persistence: None,
         }
     }
 
@@ -156,6 +166,7 @@ where
             resolver: ServiceHandle::Shared(resolver),
             governor: ServiceHandle::Shared(governor),
             event_sink: None,
+            artifact_persistence: None,
         }
     }
 
@@ -166,6 +177,14 @@ where
 
     pub fn with_event_sink_arc(mut self, sink: Arc<dyn EventSink>) -> Self {
         self.event_sink = Some(ServiceHandle::Shared(sink));
+        self
+    }
+
+    pub fn with_artifact_persistence_arc(
+        mut self,
+        persistence: Arc<dyn AccountedArtifactPersister>,
+    ) -> Self {
+        self.artifact_persistence = Some(persistence);
         self
     }
 
@@ -205,7 +224,9 @@ where
             _ => None,
         };
         let parent_invocation_id = run_id.map(|run_id| InvocationId::from_uuid(run_id.as_uuid()));
+        let artifact_namespace = invocation.artifact_namespace;
         let mut request = CapabilityDispatchRequest {
+            artifact_namespace,
             capability_id: invocation.capability,
             scope: invocation.scope,
             origin,
@@ -278,7 +299,29 @@ where
         event.parent_invocation_id = parent_invocation_id;
         self.emit_event(event).await?;
 
-        let execution = match resolved
+        if scope.agent_id.is_some()
+            && (artifact_namespace.is_none() || self.artifact_persistence.is_none())
+        {
+            let error = dispatch_resource_error(
+                runtime,
+                ironclaw_resources::ResourceError::Storage {
+                    reason: "agent-scoped runtime dispatch requires artifact persistence"
+                        .to_string(),
+                },
+            );
+            self.emit_dispatch_failure(
+                scope,
+                capability_id,
+                Some(provider),
+                Some(runtime),
+                parent_invocation_id,
+                &error,
+            )
+            .await?;
+            return Err(error);
+        }
+
+        let mut execution = match resolved
             .adapter
             .dispatch_json(CapabilityDispatchRequest {
                 resource_reservation: reservation_guard.take(),
@@ -301,6 +344,133 @@ where
             }
         };
 
+        let mut canonical_output_digest = execution.canonical_output_digest;
+        let canonical_item_count = execution.output.as_array().map(|items| items.len() as u64);
+        let finalize_result: Result<(), DispatchError> = async {
+            let canonical_bytes = serde_json::to_vec(&execution.output).map_err(|_| {
+                dispatch_resource_error(
+                    runtime,
+                    ironclaw_resources::ResourceError::Storage {
+                        reason: "completed runtime output could not be serialized".to_string(),
+                    },
+                )
+            })?;
+            let canonical_len = u64::try_from(canonical_bytes.len()).map_err(|_| {
+                dispatch_resource_error(
+                    runtime,
+                    ironclaw_resources::ResourceError::Storage {
+                        reason: "completed runtime output length is unsupported".to_string(),
+                    },
+                )
+            })?;
+            let accounted_len = execution
+                .completed_artifact
+                .as_ref()
+                .map_or(canonical_len, |artifact| artifact.byte_len);
+            if execution
+                .receipt
+                .actual
+                .as_ref()
+                .map(|usage| usage.output_bytes)
+                != Some(accounted_len)
+            {
+                return Err(dispatch_resource_error(
+                    runtime,
+                    ironclaw_resources::ResourceError::Storage {
+                        reason: "completed runtime accounting does not match durable output"
+                            .to_string(),
+                    },
+                ));
+            }
+            if canonical_output_digest.is_none() {
+                canonical_output_digest = Some(
+                    ContentDigest::from_json_value(&execution.output)
+                        .map(|digest| OutputDigest::new(digest.0))
+                        .map_err(|_| {
+                            dispatch_resource_error(
+                                runtime,
+                                ironclaw_resources::ResourceError::Storage {
+                                    reason: "completed runtime output digest could not be computed"
+                                        .to_string(),
+                                },
+                            )
+                        })?,
+                );
+            }
+            execution.output_bytes = accounted_len;
+            execution.usage.output_bytes = accounted_len;
+            if execution.completed_artifact.is_none()
+                && let (Some(namespace), Some(persistence)) =
+                    (artifact_namespace, self.artifact_persistence.as_ref())
+            {
+                execution.completed_artifact = Some(
+                    persistence
+                        .persist(
+                            ArtifactWriteMetadata {
+                                write_key: None,
+                                owner_scope: ArtifactOwnerScope::from_resource_scope(
+                                    &execution.receipt.scope,
+                                ),
+                                namespace,
+                                producer_capability_id: capability_id.clone(),
+                                content_type: "application/json".to_string(),
+                                expected_bytes: Some(canonical_len),
+                            },
+                            &canonical_bytes,
+                            &execution.receipt,
+                        )
+                        .await
+                        .map_err(|_| {
+                            dispatch_resource_error(
+                                runtime,
+                                ironclaw_resources::ResourceError::Storage {
+                                    reason: "completed runtime artifact persistence failed"
+                                        .to_string(),
+                                },
+                            )
+                        })?,
+                );
+            }
+            // Bounding the transport preview is only safe when the canonical
+            // output was persisted as a durable artifact the model can read
+            // back (the preview is then a reference into that artifact).
+            // Without a persisted artifact, truncating `execution.output`
+            // would silently destroy the result — so the bound applies only
+            // when `completed_artifact` exists.
+            if execution.completed_artifact.is_some()
+                && canonical_bytes.len() > ARTIFACT_INLINE_PREVIEW_MAX_BYTES
+            {
+                let canonical_text = std::str::from_utf8(&canonical_bytes).map_err(|_| {
+                    dispatch_resource_error(
+                        runtime,
+                        ironclaw_resources::ResourceError::Storage {
+                            reason: "completed runtime preview could not be represented"
+                                .to_string(),
+                        },
+                    )
+                })?;
+                let mut end = ARTIFACT_INLINE_PREVIEW_MAX_BYTES;
+                while !canonical_text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                execution.output = Value::String(canonical_text[..end].to_string());
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = finalize_result {
+            self.emit_dispatch_failure(
+                scope.clone(),
+                capability_id.clone(),
+                Some(provider.clone()),
+                Some(runtime),
+                parent_invocation_id,
+                &error,
+            )
+            .await?;
+            return Err(error);
+        }
+
         let mut event = RuntimeEvent::dispatch_succeeded(
             scope,
             capability_id.clone(),
@@ -319,6 +489,9 @@ where
             display_preview: execution.display_preview,
             usage: execution.usage,
             receipt: execution.receipt,
+            completed_artifact: execution.completed_artifact,
+            canonical_output_digest,
+            canonical_item_count,
         })
     }
 

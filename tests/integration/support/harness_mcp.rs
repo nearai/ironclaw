@@ -42,7 +42,8 @@ use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPoli
 use serde_json::json;
 
 use super::harness::{
-    RecordingRuntimeHttpEgress, StandaloneRootMounts, standalone_root_filesystem,
+    RecordingRuntimeHttpEgress, StandaloneRootMounts, TestArtifactPersister,
+    standalone_root_filesystem,
 };
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -97,6 +98,7 @@ pub(super) fn standalone_host_runtime_with_registry_egress_and_mcp(
     ))?))
     .with_first_party_http_egress(first_party_egress)
     .with_mcp_runtime(mcp_runtime)
+    .with_accounted_artifact_persistence(Arc::new(TestArtifactPersister::default()))
     .with_trust_policy(Arc::new(first_party_and_mcp_trust_policy(mcp_provider_id)?));
     Ok(Arc::new(services.host_runtime_for_local_testing()))
 }
@@ -143,6 +145,7 @@ pub(super) fn mock_mcp_extension_package(
             default_permission: PermissionMode::Allow,
             visibility: CapabilityVisibility::Model,
             standard_op: None,
+            provider_tool_name: None,
             input_schema_ref: CapabilityProfileSchemaRef::new(
                 "schemas/mock-mcp/mock.input.v1.json",
             )?,
@@ -176,6 +179,7 @@ pub(super) fn mock_mcp_extension_package(
         resource_profile: None,
         origin_gate_matrix: None,
         standard_op: None,
+        provider_tool_name: None,
     }];
     let root = VirtualPath::new(format!("/system/extensions/{provider_id}"))?;
     Ok(

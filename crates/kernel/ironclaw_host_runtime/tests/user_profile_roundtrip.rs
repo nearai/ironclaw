@@ -19,6 +19,7 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_event_log::InMemoryAuditSink;
@@ -26,6 +27,10 @@ use ironclaw_extension_registry::ExtensionRegistry;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
     action::NetworkPolicy,
+    artifact::{
+        AccountedArtifactPersister, ArtifactDigest, ArtifactId, ArtifactNamespaceId, ArtifactRef,
+        ArtifactWriteError, ArtifactWriteMetadata, CompletedArtifact,
+    },
     capability::{CapabilitySet, EffectKind, GrantConstraints},
     http::{
         RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
@@ -37,7 +42,7 @@ use ironclaw_host_api::{
     },
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
-    resource::ResourceEstimate,
+    resource::{ResourceEstimate, ResourceReceipt},
     runtime::{RuntimeKind, TrustClass},
     runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
@@ -203,6 +208,7 @@ fn agent_scoped_context(
     ctx.agent_id = Some(AgentId::new(agent_id).unwrap());
     ctx.project_id = Some(ProjectId::new(project_id).unwrap());
     ctx.run_id = Some(RunId::new());
+    ctx.artifact_namespace = Some(ArtifactNamespaceId::from_root_run(ctx.run_id.unwrap()));
     ctx.resource_scope.tenant_id = TenantId::new(tenant_id).unwrap();
     ctx.resource_scope.user_id = UserId::new(user_id).unwrap();
     ctx.resource_scope.agent_id = Some(AgentId::new(agent_id).unwrap());
@@ -268,6 +274,7 @@ fn build_runtime(shared_fs: Arc<InMemoryBackend>) -> impl HostRuntime {
     .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
     .with_runtime_policy(local_host_policy())
     .with_trust_policy(Arc::new(trust_policy()))
+    .with_accounted_artifact_persistence(Arc::new(TestArtifactPersister::default()))
     .host_runtime_for_local_testing()
 }
 
@@ -451,4 +458,36 @@ async fn profile_set_for_one_user_is_not_visible_to_another() {
         result.is_none(),
         "user-B must not see user-A's profile; got: {result:?}"
     );
+}
+
+/// Deterministic in-memory `AccountedArtifactPersister` for agent-scoped
+/// dispatch: unique monotonic `ArtifactId`s, checked byte length, and a digest
+/// over the persisted bytes. Mirrors the host-runtime harness persister and
+/// the loop ingress contract.
+#[derive(Default)]
+struct TestArtifactPersister {
+    next_id: std::sync::atomic::AtomicU64,
+}
+
+#[async_trait]
+impl AccountedArtifactPersister for TestArtifactPersister {
+    async fn persist(
+        &self,
+        metadata: ArtifactWriteMetadata,
+        bytes: &[u8],
+        _receipt: &ResourceReceipt,
+    ) -> Result<CompletedArtifact, ArtifactWriteError> {
+        let artifact_id = ArtifactId::new(
+            self.next_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        );
+        let byte_len = u64::try_from(bytes.len()).map_err(|_| ArtifactWriteError::Storage)?;
+        Ok(CompletedArtifact {
+            artifact_ref: ArtifactRef::new(artifact_id),
+            byte_len,
+            total_lines: None,
+            content_type: metadata.content_type,
+            digest: ArtifactDigest::from_bytes(bytes),
+        })
+    }
 }

@@ -496,13 +496,6 @@ reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contract
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
-[[exemption]]
-path = "crates/loop/ironclaw_loop_host/src/result_read.rs"
-lines = [39, 42, 45]
-owner = "@nearai/reborn"
-reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/app/ironclaw_composition/src/lib.rs"
@@ -1706,10 +1699,10 @@ issue = "https://github.com/nearai/ironclaw/issues/7142"
 review_after = "2026-11-30"
 
 [[exemption]]
-path = "crates/extensions/ironclaw_extension_support/src/coding/file.rs"
-lines = [479, 480, 481, 482]
+path = "crates/extensions/ironclaw_extension_support/src/coding/pinned/read.rs"
+lines = [265, 266, 267]
 owner = "@serrrfirat"
-reason = "Sensitive-stat denial arm of list_dir's root guard: requires a sensitive-flagged path fixture the integration workspace profiles do not stage; the sensitive-path denial contract is unit-covered in the owning crate."
+reason = "Sensitive-stat denial arm of the read/list_dir root guard: requires a sensitive-flagged path fixture the integration workspace profiles do not stage; the sensitive-path denial contract is unit-covered in the owning crate."
 issue = "https://github.com/nearai/ironclaw/issues/7142"
 review_after = "2026-11-30"
 

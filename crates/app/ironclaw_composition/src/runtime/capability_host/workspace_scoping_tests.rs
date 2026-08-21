@@ -15,7 +15,7 @@ use ironclaw_host_api::{
     path::VirtualPath,
     resolution::Resolution,
 };
-use ironclaw_host_runtime::WRITE_FILE_CAPABILITY_ID;
+use ironclaw_host_runtime::{CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID};
 use ironclaw_loop_contracts::{
     InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopRequest, LoopRunContext,
     ProviderToolCall, RunProfileResolutionRequest, RunProfileResolver, VisibleCapabilityRequest,
@@ -45,15 +45,15 @@ async fn write_workspace_file_as(
     let outcome = invoke_workspace_tool_as(
         services,
         user_id,
-        "builtin_write_file",
-        WRITE_FILE_CAPABILITY_ID,
+        "builtin_write",
+        CODING_WRITE_CAPABILITY_ID,
         serde_json::json!({
             "path": format!("/workspace/{file_name}"),
             "content": body,
         }),
     )
     .await;
-    assert_tool_succeeded(&outcome, "write_file");
+    assert_tool_succeeded(&outcome, "write");
 }
 
 /// Drive one first-party workspace tool through the production capability port
@@ -95,7 +95,6 @@ async fn invoke_workspace_tool_as(
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         skill_activation_source: None,
         project_service: Arc::clone(&runtime_surfaces.project_service),
-        thread_service: Arc::new(ironclaw_threads::InMemorySessionThreadService::default()),
         trajectory_observer: None,
         outbound_preferences_service: None,
         outbound_preference_write_requires_approval: false,
@@ -168,6 +167,28 @@ fn assert_tool_succeeded(outcome: &ToolOutcome, label: &str) {
         ),
         "{label} should succeed, got {:?}",
         done.verdict
+    );
+}
+
+/// Assert the tool completed with a recoverable failure whose model-visible
+/// diagnostic contains `needle`. The coding engines error with the
+/// pinned `not found` text when the caller's workspace root does not exist
+/// yet — the v1 tools returned empty results for the same input.
+fn assert_tool_failed_containing(outcome: &ToolOutcome, label: &str, needle: &str) {
+    let Resolution::Done(done) = &outcome.resolution else {
+        panic!("{label} should complete, got {:?}", outcome.resolution);
+    };
+    let ironclaw_host_api::resolution::ToolVerdict::RecoverableFailure { diagnostic, .. } =
+        &done.verdict
+    else {
+        panic!("{label} should fail recoverably, got {:?}", done.verdict);
+    };
+    let text = diagnostic.model_visible_text().unwrap_or_else(|| {
+        panic!("{label} failure must carry free-text cause, got {diagnostic:?}")
+    });
+    assert!(
+        text.contains(needle),
+        "{label} failure diagnostic must contain {needle:?}, got {text:?}"
     );
 }
 
@@ -326,11 +347,10 @@ fn provider_tool_call(name: &str, arguments: serde_json::Value) -> ProviderToolC
     }
 }
 
-/// A brand-new caller has no workspace subtree on disk yet. Read tools must
-/// treat that as an EMPTY workspace, not an error --- production shipped with
-/// `builtin.list_dir` and `builtin.glob` failing `operation_failed` for every
-/// fresh hosted user, which left the agent unable to do anything until some
-/// other path happened to create the directory.
+/// A brand-new caller has no workspace subtree on disk yet. The coding engines
+/// fail with the pinned `not found` text until some path creates the
+/// directory; the caller's FIRST write must succeed, create missing parents,
+/// and make the workspace visible to the very next read/glob.
 #[tokio::test]
 async fn fresh_caller_reads_an_empty_workspace_then_writes_into_it() {
     let storage = tempfile::tempdir().expect("temp storage root"); // safety: test-only assertion in #[cfg(test)] module.
@@ -349,36 +369,28 @@ async fn fresh_caller_reads_an_empty_workspace_then_writes_into_it() {
 
     // Nothing has ever written for `newcomer`, so their
     // `tenants/{tenant}/users/newcomer` directory does not exist.
-    let listed = invoke_workspace_tool_as(
+    let read_ws = invoke_workspace_tool_as(
         &services,
         "newcomer",
-        "builtin_list_dir",
-        ironclaw_host_runtime::LIST_DIR_CAPABILITY_ID,
+        "builtin_read",
+        CODING_READ_CAPABILITY_ID,
         serde_json::json!({ "path": "/workspace" }),
     )
     .await;
-    assert_tool_succeeded(&listed, "list_dir on a fresh caller's workspace");
-    let listed_output = listed.output.expect("list_dir returns output");
-    assert_eq!(
-        listed_output["entries"].as_array().map(Vec::len),
-        Some(0),
-        "a fresh caller's workspace lists as empty, got {listed_output}"
-    );
+    assert_tool_failed_containing(&read_ws, "read on a fresh caller's workspace", "not found");
 
     let globbed = invoke_workspace_tool_as(
         &services,
         "newcomer",
         "builtin_glob",
         ironclaw_host_runtime::GLOB_CAPABILITY_ID,
-        serde_json::json!({ "pattern": "**/*" }),
+        serde_json::json!({ "path": "**/*" }),
     )
     .await;
-    assert_tool_succeeded(&globbed, "glob on a fresh caller's workspace");
-    let globbed_output = globbed.output.expect("glob returns output"); // safety: test-only assertion in #[cfg(test)] module.
-    assert_eq!(
-        globbed_output["files"].as_array().map(Vec::len),
-        Some(0),
-        "a fresh caller's glob matches nothing, got {globbed_output}"
+    assert_tool_failed_containing(
+        &globbed,
+        "glob on a fresh caller's workspace",
+        "Path not found",
     );
 
     let grepped = invoke_workspace_tool_as(
@@ -389,12 +401,10 @@ async fn fresh_caller_reads_an_empty_workspace_then_writes_into_it() {
         serde_json::json!({ "pattern": "anything" }),
     )
     .await;
-    assert_tool_succeeded(&grepped, "grep on a fresh caller's workspace");
-    let grepped_output = grepped.output.expect("grep returns output"); // safety: test-only assertion in #[cfg(test)] module.
-    assert_eq!(
-        grepped_output["files"].as_array().map(Vec::len),
-        Some(0),
-        "a fresh caller's grep matches nothing, got {grepped_output}"
+    assert_tool_failed_containing(
+        &grepped,
+        "grep on a fresh caller's workspace",
+        "Path not found",
     );
 
     // The first write from that same fresh caller must succeed and become
@@ -423,15 +433,17 @@ async fn fresh_caller_reads_an_empty_workspace_then_writes_into_it() {
     let relisted = invoke_workspace_tool_as(
         &services,
         "newcomer",
-        "builtin_list_dir",
-        ironclaw_host_runtime::LIST_DIR_CAPABILITY_ID,
-        serde_json::json!({ "path": "/workspace" }),
+        "builtin_glob",
+        ironclaw_host_runtime::GLOB_CAPABILITY_ID,
+        serde_json::json!({ "path": "**/*" }),
     )
     .await;
-    assert_tool_succeeded(&relisted, "list_dir after the first write");
-    let relisted_output = relisted.output.expect("list_dir returns output");
+    assert_tool_succeeded(&relisted, "glob after the first write");
+    let relisted_output = relisted.output.expect("glob returns output");
     assert!(
-        relisted_output.to_string().contains("first.txt"),
+        relisted_output["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("first.txt")),
         "the freshly written file must be listable, got {relisted_output}"
     );
 

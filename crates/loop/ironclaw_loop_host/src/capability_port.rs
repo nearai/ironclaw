@@ -22,14 +22,15 @@ use ironclaw_host_api::{
     invocation::InvocationOrigin,
     mount::MountView,
     resolution::{Resolution, ResolutionBatch},
-    resource::{ResourceEstimate, ResourceScope},
+    resource::{ResourceEstimate, ResourceReceipt, ResourceScope},
     result_meta::{FailureKind, ModelDiagnostic},
     runtime::RuntimeKind,
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
     CapabilityFailureDisposition, HostRuntime, HostRuntimeError, IdempotencyKey,
-    RuntimeBlockedReason, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
+    RuntimeBlockedReason, RuntimeCapabilityCompleted, RuntimeCapabilityFailure,
+    RuntimeCapabilityOutcome,
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
@@ -233,6 +234,12 @@ impl LoopCapabilityInputResolver for ProviderToolCallInputResolver {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityResultUpdate {
+    pub byte_len: u64,
+    pub completed_artifact: Option<ironclaw_host_api::artifact::CompletedArtifact>,
+}
+
 #[async_trait]
 pub trait LoopCapabilityResultWriter: Send + Sync {
     /// Write the result of a completed capability invocation.
@@ -250,7 +257,7 @@ pub trait LoopCapabilityResultWriter: Send + Sync {
         _run_context: &LoopRunContext,
         _result_ref: &LoopResultRef,
         _output: serde_json::Value,
-    ) -> Result<u64, AgentLoopHostError> {
+    ) -> Result<CapabilityResultUpdate, AgentLoopHostError> {
         Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
             "capability result updates are not supported by this writer",
@@ -485,13 +492,10 @@ pub enum DurablePersistence {
     /// for any capability result the model has not already seen in full.
     #[default]
     Persist,
-    /// Skip durable persistence. Reserved for outputs that are already
-    /// fully model-visible inline (e.g. a `result_read` continuation chunk,
-    /// whose bytes are returned directly in the tool observation) — writing
-    /// them durably again would mint a redundant record per chunk with no
-    /// reader that needs it. Best-effort in-memory staging still happens,
-    /// so an immediate re-read from cache can still succeed; a later durable
-    /// read against this ref must fail gracefully as unavailable.
+    /// Skip durable persistence. Reserved for outputs that are already fully
+    /// model-visible inline. Best-effort in-memory staging still happens, so an
+    /// immediate cache read can succeed; a later durable read against this ref
+    /// must fail gracefully as unavailable.
     InlineOnly,
 }
 
@@ -502,6 +506,14 @@ pub struct CapabilityResultWrite<'a> {
     pub capability_id: &'a CapabilityId,
     pub output: serde_json::Value,
     pub display_preview: Option<CapabilityDisplayOutputPreview>,
+    pub receipt: Option<&'a ResourceReceipt>,
+    pub completed_artifact: Option<&'a ironclaw_host_api::artifact::CompletedArtifact>,
+    /// Stable digest of the full canonical output when `output` is only a
+    /// bounded transport preview.
+    pub canonical_output_digest: Option<ContentDigest>,
+    /// Number of elements in the full top-level JSON array when `output` is
+    /// only a bounded transport preview.
+    pub canonical_item_count: Option<u64>,
     pub durable_persistence: DurablePersistence,
 }
 
@@ -1687,6 +1699,9 @@ impl HostRuntimeLoopCapabilityPort {
         let write_result = self
             .result_writer
             .write_capability_result(CapabilityResultWrite {
+                receipt: None,
+                completed_artifact: None,
+                canonical_output_digest: None,
                 run_context: &self.run_context,
                 input_ref: &request.input_ref,
                 invocation_id: InvocationId::from_uuid(request.activity_id.as_uuid()),
@@ -1694,6 +1709,7 @@ impl HostRuntimeLoopCapabilityPort {
                 output,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
+                canonical_item_count: None,
             })
             .await?;
         Ok(GatedResolution::bare(resolution::completed(
@@ -1859,8 +1875,11 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                         "host runtime capability id is reserved for a synthetic loop capability",
                     ));
                 }
-                let provider_tool_name =
-                    provider_tool_name(&capability.descriptor.id, &snapshot.provider_names);
+                let provider_tool_name = resolve_provider_tool_name(
+                    &capability.descriptor.id,
+                    capability.descriptor.provider_tool_name.as_ref(),
+                    &snapshot.provider_names,
+                )?;
                 snapshot
                     .provider_names
                     .insert(provider_tool_name.clone(), capability_id.clone());
@@ -3184,6 +3203,39 @@ fn provider_tool_name(
     provider_tool_name_with_digest(&base, capability_id.as_str(), existing, 0)
 }
 
+/// Resolve the provider-facing tool name for one surfaced capability.
+///
+/// Issue #7392 provider-name resolver: an explicit `provider_tool_name`
+/// override on the descriptor wins for advertisement (validated here at the
+/// provider boundary); without one the name derives from the capability id
+/// (`'.' -> "__"` encoding plus collision-digest suffix, [`provider_tool_name`]).
+/// An override is a clean cutover: only the explicit provider name resolves.
+/// The derived spelling is not retained as an alias.
+///
+/// A collision between an override and any name already registered on the
+/// surface (another capability's override or derived name) fails loudly
+/// rather than silently shadowing that capability.
+fn resolve_provider_tool_name(
+    capability_id: &CapabilityId,
+    override_name: Option<&ProviderToolName>,
+    existing: &HashMap<ProviderToolName, CapabilityId>,
+) -> Result<ProviderToolName, AgentLoopHostError> {
+    let Some(override_name) = override_name else {
+        return Ok(provider_tool_name(capability_id, existing));
+    };
+    let advertised = override_name.clone();
+    if existing
+        .get(&advertised)
+        .is_some_and(|existing_id| existing_id != capability_id)
+    {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "capability provider tool name override collides with another capability on the surface",
+        ));
+    }
+    Ok(advertised)
+}
+
 fn provider_tool_name_with_digest(
     base: &str,
     capability_id: &str,
@@ -3318,6 +3370,7 @@ fn auth_decline_context_from_visible(
     // across tool calls of one run but never leaks into a later run.
     let run_id = ironclaw_host_api::ids::RunId::from_uuid(run_context.run_id.as_uuid());
     context.run_id = Some(run_id);
+    context.artifact_namespace = Some(run_context.effective_artifact_namespace());
     // Authoritative origin (§5.2.1): a tool call inside an agent loop turn-run is
     // model-initiated, so the loop ingress seals `LoopRun`. The kernel would also
     // reconstruct this from `run_id`, but stamping `origin` explicitly makes the
@@ -3621,14 +3674,29 @@ async fn runtime_outcome_to_loop(
     ensure_runtime_outcome_matches(conversion.requested_capability_id, &conversion.outcome)?;
     Ok(match conversion.outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
+            let RuntimeCapabilityCompleted {
+                capability_id,
+                output,
+                display_preview,
+                usage: _,
+                receipt,
+                completed_artifact,
+                canonical_output_digest,
+                canonical_item_count,
+            } = *completed;
             let write_result = result_writer
                 .write_capability_result(CapabilityResultWrite {
+                    receipt: receipt.as_ref(),
+                    completed_artifact: completed_artifact.as_ref(),
+                    canonical_output_digest: canonical_output_digest
+                        .map(|digest| ContentDigest(digest.value())),
+                    canonical_item_count,
                     run_context,
                     input_ref: conversion.input_ref,
                     invocation_id: conversion.invocation_id,
-                    capability_id: &completed.capability_id,
-                    output: completed.output.clone(),
-                    display_preview: completed.display_preview.clone(),
+                    capability_id: &capability_id,
+                    output,
+                    display_preview,
                     durable_persistence: DurablePersistence::Persist,
                 })
                 .await?;
@@ -4662,6 +4730,7 @@ mod tests {
                 resource_profile: None,
                 origin_gate_matrix: None,
                 standard_op: None,
+                provider_tool_name: None,
             },
             description_trust: Default::default(),
             access: VisibleCapabilityAccess::Available,
@@ -5086,10 +5155,14 @@ mod tests {
                 .push(request.clone());
             Ok(RuntimeCapabilityOutcome::Completed(Box::new(
                 RuntimeCapabilityCompleted {
+                    completed_artifact: None,
+                    canonical_output_digest: None,
+                    receipt: None,
                     capability_id: request.1,
                     output: serde_json::json!({"ok": true}),
                     display_preview: None,
                     usage: ResourceUsage::default().set_output_bytes(RECORDING_OUTPUT_BYTES),
+                    canonical_item_count: None,
                 },
             )))
         }
@@ -5238,10 +5311,14 @@ mod tests {
                 .push(request.clone());
             Ok(RuntimeCapabilityOutcome::Completed(Box::new(
                 RuntimeCapabilityCompleted {
+                    completed_artifact: None,
+                    canonical_output_digest: None,
+                    receipt: None,
                     capability_id: request.2,
                     output: serde_json::json!({"resumed": true}),
                     display_preview: None,
                     usage: ResourceUsage::default().set_output_bytes(RECORDING_OUTPUT_BYTES),
+                    canonical_item_count: None,
                 },
             )))
         }

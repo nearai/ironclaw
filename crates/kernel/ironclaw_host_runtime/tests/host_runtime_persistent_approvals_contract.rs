@@ -811,6 +811,8 @@ fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRu
 
 fn dispatch_result() -> CapabilityDispatchResult {
     CapabilityDispatchResult {
+        completed_artifact: None,
+        canonical_output_digest: None,
         capability_id: capability_id(),
         provider: extension_id(),
         runtime: RuntimeKind::Wasm,
@@ -824,6 +826,7 @@ fn dispatch_result() -> CapabilityDispatchResult {
             estimate: ResourceEstimate::default(),
             actual: Some(ResourceUsage::default()),
         },
+        canonical_item_count: None,
     }
 }
 

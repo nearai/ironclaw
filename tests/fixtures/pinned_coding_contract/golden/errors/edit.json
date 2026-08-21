@@ -1,0 +1,70 @@
+{
+  "tool": "edit",
+  "note": "Representative model-visible error shapes for the pinned `edit` tool (default hashline mode) at commit 08819b279cf02ae2545e69dad7111ab48d91d35e. `template` is verbatim from the cited upstream source; `example` renders the template with representative values. Hashline mismatch shapes come from packages/hashline/src/mismatch.ts; multi-entry shapes from packages/coding-agent/src/edit/index.ts.",
+  "entries": [
+    {
+      "case": "stale_anchor_hash_recognized",
+      "kind": "error",
+      "template": "Edit rejected for ${path}: file changed between read and edit.\nSection is bound to #${expectedFileHash}, but the current file hashes to #${actualFileHash}. If a prior edit in this session modified this file, copy the [path#newhash] header from that edit's response; otherwise re-read the file with `read` to refresh the tag before retrying.",
+      "example": "Edit rejected for src/foo.ts: file changed between read and edit.\nSection is bound to #1A2B, but the current file hashes to #3C4D. If a prior edit in this session modified this file, copy the [foo.ts#3C4D] header from that edit's response; otherwise re-read the file with `read` to refresh the tag before retrying.",
+      "source_path": "packages/hashline/src/mismatch.ts",
+      "source_line": 88
+    },
+    {
+      "case": "stale_anchor_hash_unrecognized",
+      "kind": "error",
+      "template": "Edit rejected for ${path}: hash #${expectedFileHash} is not from this session.\nThe current file hashes to #${actualFileHash}. Re-read the file with `read` to copy a current [path#tag] header — never invent the tag and never reuse one from a prior session.",
+      "example": "Edit rejected for src/foo.ts: hash #9F00 is not from this session.\nThe current file hashes to #3C4D. Re-read the file with `read` to copy a current [foo.ts#3C4D] header — never invent the tag and never reuse one from a prior session.",
+      "source_path": "packages/hashline/src/mismatch.ts",
+      "source_line": 82
+    },
+    {
+      "case": "malformed_line_reference",
+      "kind": "error",
+      "template": "Invalid line reference. Expected a bare line number from read/search output plus the section header content-hash tag (for example [src/foo.ts#XXXX] and line \"160\")${received}",
+      "example": "Invalid line reference. Expected a bare line number from read/search output plus the section header content-hash tag (for example [src/foo.ts#1A2B] and line \"160\") Received \"abc\".",
+      "source_path": "packages/hashline/src/mismatch.ts",
+      "source_line": 17
+    },
+    {
+      "case": "line_out_of_bounds",
+      "kind": "error",
+      "template": "Line ${line} does not exist (file has ${lineCount} lines)",
+      "example": "Line 500 does not exist (file has 42 lines)",
+      "source_path": "packages/hashline/src/mismatch.ts",
+      "source_line": 126
+    },
+    {
+      "case": "invalid_absolute_range",
+      "kind": "error",
+      "template": "line ${patchLine}: Invalid absolute range: start ${start}, end ${end}. The value after `.=` is an absolute source line, not a line count or replacement length. For one line use `${single}`.",
+      "example": "line 3: Invalid absolute range: start 10, end 15. The value after `.=` is an absolute source line, not a line count or replacement length. For one line use `PUT 10:`.",
+      "source_path": "packages/hashline/src/messages.ts",
+      "source_line": 82
+    },
+    {
+      "case": "per_file_failure_aggregate",
+      "kind": "error",
+      "template": "Error editing ${path}: ${errorText}",
+      "example": "Error editing src/foo.ts: Line 500 does not exist (file has 42 lines)",
+      "source_path": "packages/coding-agent/src/edit/index.ts",
+      "source_line": 264
+    },
+    {
+      "case": "files_not_applied",
+      "kind": "error",
+      "template": "Files NOT applied: ${skippedPaths}; re-read the affected files and re-issue only the failed and unapplied files.",
+      "example": "Files NOT applied: src/a.ts, src/b.ts; re-read the affected files and re-issue only the failed and unapplied files.",
+      "source_path": "packages/coding-agent/src/edit/index.ts",
+      "source_line": 174
+    },
+    {
+      "case": "auto_piped_bare_body_rows",
+      "kind": "warning",
+      "template": "Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines.",
+      "example": "Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines.",
+      "source_path": "packages/hashline/src/messages.ts",
+      "source_line": 117
+    }
+  ]
+}

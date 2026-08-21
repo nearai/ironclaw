@@ -1,12 +1,10 @@
-//! Production `StagedCapabilityIo` test support (durable tool-result
-//! projection seam, issue #5838).
+//! Production `StagedCapabilityIo` test support for durable tool-result
+//! projection.
 //!
-//! Drives the REAL constructor production's `capability_wiring`
-//! (`runtime/capability_host.rs`) uses to build the shared input-resolver /
-//! result-writer object, so an integration-test harness that opts in
-//! exercises durable tool-result persistence (`put_tool_result_record`) and
-//! `result_read` continuation instead of the ephemeral `ProductLiveCapabilityIo`
-//! test double.
+//! Drives the same constructor as production's capability wiring, so an
+//! integration harness can exercise durable previews and artifact-backed
+//! result persistence instead of the ephemeral `ProductLiveCapabilityIo`
+//! double.
 
 /// Real `StagedCapabilityIo`, wired like production's `capability_wiring`
 /// (`new_with_durable_previews`). Returns two `Arc` clones of ONE underlying

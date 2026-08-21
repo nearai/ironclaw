@@ -935,6 +935,7 @@ async fn append_tool_result_reference_keeps_distinct_provider_calls_with_the_sam
     assert_ne!(second.message_id, first.message_id);
     let updated = service
         .update_tool_result_reference(UpdateToolResultReferenceRequest {
+            model_observation: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -2347,6 +2348,7 @@ async fn append_tool_result_reference_persists_model_observation_in_envelope() {
 
     let updated = service
         .update_tool_result_reference(UpdateToolResultReferenceRequest {
+            model_observation: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),

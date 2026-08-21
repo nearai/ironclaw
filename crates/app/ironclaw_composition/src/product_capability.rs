@@ -16,13 +16,14 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{
     action::NetworkPolicy,
+    artifact::{ArtifactNamespaceId, ArtifactRef},
     capability::{
         CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
     },
     decision::DenyReason,
     ids::{
         ActivityId, CapabilityGrantId, CapabilityId, CorrelationId, DenyRef, ExtensionId, GateRef,
-        InvocationId, ProcessRef, ProductKind, ResultRef,
+        InvocationId, ProcessRef, ProductKind, ResultRef, RunId,
     },
     invocation::InvocationOrigin,
     mount::MountView,
@@ -33,8 +34,8 @@ use ironclaw_host_api::{
     },
     resource::{ResourceEstimate, ResourceScope},
     result_meta::{
-        FailureKind, ModelDiagnostic, ModelFailureDiagnostic, ResultProgress, ResumeToken,
-        TerminateHint,
+        FailureKind, ModelDiagnostic, ModelFailureDiagnostic, OutputDigest, ResultProgress,
+        ResumeToken, TerminateHint,
     },
     runtime::{RuntimeKind, TrustClass},
     safe_summary::SafeSummary,
@@ -45,6 +46,8 @@ use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceEr
 
 use crate::RebornRuntime;
 use ironclaw_skills::ScopedSkillManagementMountResolver;
+use serde::{Deserialize, Serialize};
+
 const PRODUCT_RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
 const PRODUCT_RESULT_METADATA_MAX_BYTES: usize = 4 * 1024;
 const PRODUCT_RESULT_ROOT: &str = "/product-results";
@@ -73,6 +76,13 @@ struct ProductResultMetadata {
 #[derive(Clone)]
 pub(crate) enum ProductResultFilesystem {
     Composite(Arc<ScopedFilesystem<CompositeRootFilesystem>>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ProductResultArtifactMetadata {
+    artifact_ref: ArtifactRef,
+    byte_len: u64,
+    output_digest: Option<OutputDigest>,
 }
 
 impl RuntimeProductCapabilityInvoker {
@@ -144,7 +154,7 @@ impl ProductCapabilityInvoker for RuntimeProductCapabilityInvoker {
         if let Some(replayed) = self.results.replay(&scope, invocation_id).await? {
             return Ok(replayed);
         }
-        persist_product_output(&self.results, &scope, invocation_id, output, summary).await
+        persist_product_output(&self.results, &scope, invocation_id, output, summary, None).await
     }
 }
 
@@ -175,6 +185,9 @@ fn product_execution_context(
         })
         .unwrap_or_default();
     let context = ExecutionContext {
+        artifact_namespace: Some(ArtifactNamespaceId::from_root_run(RunId::from_uuid(
+            activity_id.as_uuid(),
+        ))),
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
@@ -314,12 +327,14 @@ async fn product_resolution(
 ) -> Result<Resolution, ProductSurfaceError> {
     match outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
+            let artifact = completed_artifact_metadata(&completed);
             persist_product_output(
                 results,
                 scope,
                 invocation_id,
                 completed.output,
                 "capability completed",
+                artifact,
             )
             .await
         }
@@ -389,6 +404,7 @@ async fn persist_product_output(
     invocation_id: InvocationId,
     output: serde_json::Value,
     summary: &'static str,
+    artifact: Option<ProductResultArtifactMetadata>,
 ) -> Result<Resolution, ProductSurfaceError> {
     let body = serde_json::to_vec(&output).map_err(ProductSurfaceError::internal_from)?;
     if body.len() > PRODUCT_RESULT_MAX_BYTES {
@@ -398,22 +414,58 @@ async fn persist_product_output(
     }
     let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
     results
-        .persist(scope, result_ref, body.clone(), summary)
+        .persist(scope, result_ref, body.clone(), summary, artifact.clone())
         .await?;
     Ok(Resolution::Done(Outcome {
-        refs: OutcomeRefs {
-            result: result_ref,
-            byte_len: body.len() as u64,
-            preview: None,
-            preview_meta: ResultPreviewMeta::default(),
-            origin: None,
-            output_digest: None,
-        },
+        refs: product_outcome_refs(result_ref, body.len(), artifact),
         verdict: ToolVerdict::Success,
         summary: fixed_summary(summary),
         progress: ResultProgress::MadeProgress,
         terminate_hint: TerminateHint::Continue,
     }))
+}
+
+fn completed_artifact_metadata(
+    completed: &ironclaw_host_runtime::RuntimeCapabilityCompleted,
+) -> Option<ProductResultArtifactMetadata> {
+    completed
+        .completed_artifact
+        .as_ref()
+        .map(|artifact| ProductResultArtifactMetadata {
+            artifact_ref: artifact.artifact_ref,
+            byte_len: artifact.byte_len,
+            output_digest: completed.canonical_output_digest,
+        })
+}
+
+/// The one place artifact metadata becomes outcome refs. A spilled result's
+/// durable body is only a bounded preview, so the sidecar owns the real byte
+/// length and canonical digest; a fresh completion and its later replay must
+/// not disagree about them.
+fn product_outcome_refs(
+    result_ref: ResultRef,
+    preview_bytes: usize,
+    artifact: Option<ProductResultArtifactMetadata>,
+) -> OutcomeRefs {
+    let (byte_len, artifact_ref, output_digest) =
+        artifact.map_or((preview_bytes as u64, None, None), |metadata| {
+            (
+                metadata.byte_len,
+                Some(metadata.artifact_ref),
+                metadata.output_digest,
+            )
+        });
+    OutcomeRefs {
+        result: result_ref,
+        byte_len,
+        preview: None,
+        preview_meta: ResultPreviewMeta {
+            artifact_ref,
+            ..ResultPreviewMeta::default()
+        },
+        origin: None,
+        output_digest,
+    }
 }
 
 fn recoverable_failure(
@@ -506,10 +558,14 @@ impl ProductResultFilesystem {
         result_ref: ResultRef,
         body: Vec<u8>,
         summary: &'static str,
+        artifact: Option<ProductResultArtifactMetadata>,
     ) -> Result<(), ProductSurfaceError> {
         match self {
             Self::Composite(filesystem) => {
-                persist_product_result(filesystem, scope, result_ref, body, summary).await
+                persist_product_result_with_metadata(
+                    filesystem, scope, result_ref, body, summary, artifact,
+                )
+                .await
             }
         }
     }
@@ -555,6 +611,27 @@ where
     .map_err(ProductSurfaceError::internal_from)
 }
 
+async fn persist_product_result_with_metadata<F>(
+    filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
+    result_ref: ResultRef,
+    body: Vec<u8>,
+    summary: &'static str,
+    artifact: Option<ProductResultArtifactMetadata>,
+) -> Result<(), ProductSurfaceError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    persist_product_result(filesystem, scope, result_ref, body, summary).await?;
+    let Some(artifact) = artifact else {
+        return Ok(());
+    };
+    let path = ScopedPath::new(format!("{PRODUCT_RESULT_ROOT}/{result_ref}.artifact.json"))
+        .map_err(ProductSurfaceError::internal_from)?;
+    let encoded = serde_json::to_vec(&artifact).map_err(ProductSurfaceError::internal_from)?;
+    persist_product_result_entry(filesystem, scope, path, encoded).await
+}
+
 async fn persist_product_result_metadata<F>(
     filesystem: &ScopedFilesystem<F>,
     scope: &ResourceScope,
@@ -570,7 +647,19 @@ where
         summary: summary.to_string(),
     })
     .map_err(ProductSurfaceError::internal_from)?;
-    let write_metadata = metadata.clone();
+    persist_product_result_entry(filesystem, scope, path, metadata).await
+}
+
+async fn persist_product_result_entry<F>(
+    filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
+    path: ScopedPath,
+    body: Vec<u8>,
+) -> Result<(), ProductSurfaceError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    let write_body = body.clone();
     cas_update(
         filesystem,
         scope,
@@ -580,15 +669,13 @@ where
             Ok::<_, String>(Entry::bytes(stored.clone()).with_content_type(ContentType::json()))
         },
         move |existing| {
-            let write_metadata = write_metadata.clone();
+            let write_body = write_body.clone();
             async move {
                 match existing {
-                    None => Ok(CasApply::new(write_metadata, ())),
-                    Some(existing) if existing == write_metadata => {
-                        Ok(CasApply::no_op(existing, ()))
-                    }
+                    None => Ok(CasApply::new(write_body, ())),
+                    Some(existing) if existing == write_body => Ok(CasApply::no_op(existing, ())),
                     Some(_) => Err(
-                        "product result replay produced a different summary for one activity"
+                        "product result replay produced different bytes for one activity"
                             .to_string(),
                     ),
                 }
@@ -618,6 +705,26 @@ where
         Ok(None) | Err(FilesystemError::NotFound { .. }) => return Ok(None),
         Err(error) => return Err(ProductSurfaceError::internal_from(error)),
     };
+    let artifact_path =
+        ScopedPath::new(format!("{PRODUCT_RESULT_ROOT}/{result_ref}.artifact.json"))
+            .map_err(ProductSurfaceError::internal_from)?;
+    let artifact = match filesystem
+        .read_bytes_bounded(scope, &artifact_path, PRODUCT_RESULT_METADATA_MAX_BYTES)
+        .await
+    {
+        Ok(Some(encoded)) => {
+            let metadata = serde_json::from_slice::<ProductResultArtifactMetadata>(&encoded)
+                .map_err(ProductSurfaceError::internal_from)?;
+            if metadata.byte_len < body.len() as u64 {
+                return Err(ProductSurfaceError::internal_from(
+                    "product artifact metadata is shorter than its bounded preview",
+                ));
+            }
+            Some(metadata)
+        }
+        Ok(None) | Err(FilesystemError::NotFound { .. }) => None,
+        Err(error) => return Err(ProductSurfaceError::internal_from(error)),
+    };
     let metadata_path = ScopedPath::new(format!("{PRODUCT_RESULT_ROOT}/{result_ref}.meta.json"))
         .map_err(ProductSurfaceError::internal_from)?;
     let summary = match filesystem
@@ -633,14 +740,7 @@ where
         Err(error) => return Err(ProductSurfaceError::internal_from(error)),
     };
     Ok(Some(Resolution::Done(Outcome {
-        refs: OutcomeRefs {
-            result: result_ref,
-            byte_len: body.len() as u64,
-            preview: None,
-            preview_meta: ResultPreviewMeta::default(),
-            origin: None,
-            output_digest: None,
-        },
+        refs: product_outcome_refs(result_ref, body.len(), artifact),
         verdict: ToolVerdict::Success,
         summary: SafeSummary::new(summary).unwrap_or_else(|_| SafeSummary::placeholder()),
         progress: ResultProgress::MadeProgress,
@@ -649,345 +749,5 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{
-        action::{NetworkScheme, NetworkTargetPattern},
-        capability::{
-            EffectKind, PermissionMode, RuntimeCredentialRequirement,
-            RuntimeCredentialRequirementSource,
-        },
-        http::RuntimeCredentialTarget,
-        ids::SecretHandle,
-        mount::{MountGrant, MountPermissions},
-        path::{MountAlias, VirtualPath},
-        runtime::{RuntimeKind, TrustClass},
-    };
-
-    use super::*;
-
-    #[test]
-    fn product_gesture_grant_keeps_no_egress_policy_unconstrained() {
-        let descriptor = descriptor_with_network(Vec::new(), Vec::new());
-
-        let grant = product_gesture_grant(
-            &descriptor,
-            &ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID).unwrap(),
-            MountView::default(),
-        );
-
-        assert_eq!(grant.constraints.network, NetworkPolicy::default());
-    }
-
-    #[test]
-    fn product_gesture_grant_uses_dev_wildcard_for_networked_gesture_without_targets() {
-        let mut descriptor = descriptor_with_network(Vec::new(), Vec::new());
-        descriptor.effects.push(EffectKind::Network);
-
-        let grant = product_gesture_grant(
-            &descriptor,
-            &ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID).unwrap(),
-            MountView::default(),
-        );
-
-        assert_eq!(
-            grant.constraints.network,
-            crate::builtin_capability_policy::dev_wildcard_network_policy()
-        );
-    }
-
-    #[test]
-    fn product_gesture_grant_constrains_manifest_declared_egress() {
-        let target = NetworkTargetPattern {
-            scheme: Some(NetworkScheme::Https),
-            host_pattern: "api.example.com".to_string(),
-            port: None,
-        };
-        let descriptor = descriptor_with_network(vec![target.clone()], Vec::new());
-
-        let grant = product_gesture_grant(
-            &descriptor,
-            &ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID).unwrap(),
-            MountView::default(),
-        );
-
-        assert_eq!(grant.constraints.network.allowed_targets, vec![target]);
-        assert!(grant.constraints.network.deny_private_ip_ranges);
-        assert_eq!(grant.constraints.network.max_egress_bytes, None);
-    }
-
-    #[test]
-    fn product_gesture_grant_folds_credential_audience_into_egress_policy() {
-        let target = NetworkTargetPattern {
-            scheme: Some(NetworkScheme::Https),
-            host_pattern: "oauth.example.com".to_string(),
-            port: None,
-        };
-        let credential = RuntimeCredentialRequirement {
-            handle: SecretHandle::new("oauth_token").unwrap(),
-            source: RuntimeCredentialRequirementSource::SecretHandle,
-            provider_scopes: Vec::new(),
-            audience: target.clone(),
-            target: RuntimeCredentialTarget::Header {
-                name: "authorization".to_string(),
-                prefix: Some("Bearer ".to_string()),
-            },
-            required: true,
-        };
-        let descriptor = descriptor_with_network(Vec::new(), vec![credential]);
-
-        let grant = product_gesture_grant(
-            &descriptor,
-            &ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID).unwrap(),
-            MountView::default(),
-        );
-
-        assert_eq!(grant.constraints.network.allowed_targets, vec![target]);
-        assert!(grant.constraints.network.deny_private_ip_ranges);
-        assert_eq!(
-            grant.constraints.secrets,
-            vec![SecretHandle::new("oauth_token").unwrap()]
-        );
-    }
-
-    #[test]
-    fn product_invocation_mounts_grants_extension_lifecycle_mounts() {
-        let skill_mount_resolver = |_scope: &ResourceScope| Ok(MountView::default());
-        for capability in [
-            EXTENSION_INSTALL_CAPABILITY_ID,
-            EXTENSION_ACTIVATE_CAPABILITY_ID,
-            EXTENSION_REMOVE_CAPABILITY_ID,
-        ] {
-            let descriptor = descriptor_with_id(capability);
-            let lifecycle_mounts = crate::runtime_mounts::system_extensions_lifecycle_mount_view()
-                .expect("expected extension lifecycle mounts");
-            let mounts = product_invocation_mounts(
-                &resource_scope(),
-                Some(&descriptor),
-                &skill_mount_resolver,
-                &lifecycle_mounts,
-            )
-            .expect("extension lifecycle product mounts");
-
-            assert_eq!(mounts, lifecycle_mounts);
-
-            let production_lifecycle_mounts =
-                crate::factory::production_system_extensions_lifecycle_mount_view()
-                    .expect("expected production extension lifecycle mounts");
-            let production_mounts = product_invocation_mounts(
-                &resource_scope(),
-                Some(&descriptor),
-                &skill_mount_resolver,
-                &production_lifecycle_mounts,
-            )
-            .expect("production extension lifecycle product mounts");
-            assert_eq!(production_mounts, production_lifecycle_mounts);
-        }
-    }
-
-    #[test]
-    fn product_invocation_mounts_keeps_skill_mounts_scoped() {
-        let scope = resource_scope();
-        let descriptor = descriptor_with_id(SKILL_REMOVE_CAPABILITY_ID);
-        let skill_mount_resolver = |scope: &ResourceScope| {
-            crate::runtime_mounts::db_backed_skill_management_mount_view(scope)
-        };
-        let lifecycle_mounts = MountView::default();
-        let mounts = product_invocation_mounts(
-            &scope,
-            Some(&descriptor),
-            &skill_mount_resolver,
-            &lifecycle_mounts,
-        )
-        .expect("skill product mounts");
-
-        assert_eq!(
-            mounts,
-            crate::runtime_mounts::db_backed_skill_management_mount_view(&scope)
-                .expect("expected skill mounts")
-        );
-    }
-
-    #[test]
-    fn product_invocation_mounts_leaves_unclassified_capabilities_empty() {
-        let descriptor = descriptor_with_id("builtin.product-gesture-test");
-        let skill_mount_resolver = |_scope: &ResourceScope| Ok(MountView::default());
-        let lifecycle_mounts = MountView::default();
-        let mounts = product_invocation_mounts(
-            &resource_scope(),
-            Some(&descriptor),
-            &skill_mount_resolver,
-            &lifecycle_mounts,
-        )
-        .expect("product mounts");
-
-        assert_eq!(mounts, MountView::default());
-    }
-
-    #[tokio::test]
-    async fn product_result_replay_returns_persisted_resolution() {
-        let filesystem = scoped_product_results_filesystem();
-        let scope = resource_scope();
-        let invocation_id = InvocationId::new();
-        let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
-        let body = br#"{"status":"installed"}"#.to_vec();
-
-        persist_product_result(
-            &filesystem,
-            &scope,
-            result_ref,
-            body.clone(),
-            "capability completed",
-        )
-        .await
-        .expect("product result persists");
-        let replayed = replay_product_result(&filesystem, &scope, invocation_id)
-            .await
-            .expect("product result replays")
-            .expect("persisted result should replay");
-
-        let Resolution::Done(outcome) = replayed else {
-            panic!("persisted product result should replay as a completed outcome");
-        };
-        assert_eq!(outcome.refs.result, result_ref);
-        assert_eq!(outcome.refs.byte_len, body.len() as u64);
-        assert_eq!(outcome.verdict, ToolVerdict::Success);
-    }
-
-    #[tokio::test]
-    async fn product_result_replay_preserves_completion_summary() {
-        let filesystem = scoped_product_results_filesystem();
-        let scope = resource_scope();
-        let invocation_id = InvocationId::new();
-        let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
-        let body = br#"{"status":"submitted"}"#.to_vec();
-
-        persist_product_result(&filesystem, &scope, result_ref, body, "automation started")
-            .await
-            .expect("product result persists");
-        let replayed = replay_product_result(&filesystem, &scope, invocation_id)
-            .await
-            .expect("product result replays")
-            .expect("persisted result should replay");
-
-        let Resolution::Done(replayed) = replayed else {
-            panic!("replayed product result should be completed");
-        };
-        assert_eq!(replayed.summary.as_str(), "automation started");
-    }
-
-    #[tokio::test]
-    async fn failed_runtime_outcome_inlines_full_model_visible_cause() {
-        let cause = "failed reading /workspace/project/config.json";
-        let outcome = RuntimeCapabilityOutcome::Failed(
-            ironclaw_host_runtime::RuntimeCapabilityFailure::new(
-                CapabilityId::new("demo.read").unwrap(),
-                FailureKind::Backend,
-                Some("capability invocation failed".to_string()),
-            )
-            .with_model_visible_cause(cause),
-        );
-
-        let resolution = product_resolution(
-            &empty_product_result_filesystem(),
-            &resource_scope(),
-            InvocationId::new(),
-            outcome,
-        )
-        .await
-        .expect("runtime failure remains model-recoverable");
-
-        assert_eq!(model_visible_failure_text(&resolution), cause);
-    }
-
-    #[tokio::test]
-    async fn missing_runtime_failure_detail_uses_explicit_fallback() {
-        let failed =
-            RuntimeCapabilityOutcome::Failed(ironclaw_host_runtime::RuntimeCapabilityFailure::new(
-                CapabilityId::new("demo.read").unwrap(),
-                FailureKind::Backend,
-                Some("capability invocation failed".to_string()),
-            ));
-        let failed_resolution = product_resolution(
-            &empty_product_result_filesystem(),
-            &resource_scope(),
-            InvocationId::new(),
-            failed,
-        )
-        .await
-        .expect("runtime failure remains model-recoverable");
-        assert_eq!(
-            model_visible_failure_text(&failed_resolution),
-            "capability invocation failed"
-        );
-    }
-
-    fn model_visible_failure_text(resolution: &Resolution) -> &str {
-        let Resolution::Done(outcome) = resolution else {
-            panic!("expected recoverable failure outcome, got {resolution:?}");
-        };
-        outcome
-            .verdict
-            .diagnostic()
-            .and_then(ModelFailureDiagnostic::model_visible_text)
-            .expect("recoverable failure must carry model-visible text")
-    }
-
-    fn empty_product_result_filesystem() -> ProductResultFilesystem {
-        ProductResultFilesystem::Composite(crate::wrap_scoped(Arc::new(
-            CompositeRootFilesystem::new(),
-        )))
-    }
-
-    fn descriptor_with_id(id: &str) -> CapabilityDescriptor {
-        let mut descriptor = descriptor_with_network(Vec::new(), Vec::new());
-        descriptor.id = CapabilityId::new(id).unwrap();
-        descriptor
-    }
-
-    fn resource_scope() -> ResourceScope {
-        ResourceScope {
-            tenant_id: ironclaw_host_api::ids::TenantId::new("tenant-test").unwrap(),
-            user_id: ironclaw_host_api::ids::UserId::new("user-test").unwrap(),
-            agent_id: Some(ironclaw_host_api::ids::AgentId::new("agent-test").unwrap()),
-            project_id: Some(ironclaw_host_api::ids::ProjectId::new("project-test").unwrap()),
-            mission_id: None,
-            thread_id: None,
-            invocation_id: InvocationId::new(),
-        }
-    }
-
-    fn descriptor_with_network(
-        network_targets: Vec<NetworkTargetPattern>,
-        runtime_credentials: Vec<RuntimeCredentialRequirement>,
-    ) -> CapabilityDescriptor {
-        CapabilityDescriptor {
-            id: CapabilityId::new("builtin.product-gesture-test").unwrap(),
-            provider: ExtensionId::new("builtin").unwrap(),
-            runtime: RuntimeKind::FirstParty,
-            trust_ceiling: TrustClass::UserTrusted,
-            description: "product gesture test".to_string(),
-            parameters_schema: serde_json::json!({}),
-            effects: vec![EffectKind::DispatchCapability],
-            default_permission: PermissionMode::Allow,
-            runtime_credentials,
-            network_targets,
-            max_egress_bytes: None,
-            resource_profile: None,
-            origin_gate_matrix: None,
-            standard_op: None,
-        }
-    }
-
-    fn scoped_product_results_filesystem() -> ScopedFilesystem<InMemoryBackend> {
-        ScopedFilesystem::with_fixed_view(
-            Arc::new(InMemoryBackend::new()),
-            MountView::new(vec![MountGrant::new(
-                MountAlias::new(PRODUCT_RESULT_ROOT).unwrap(),
-                VirtualPath::new(PRODUCT_RESULT_ROOT).unwrap(),
-                MountPermissions::read_write_list_delete(),
-            )])
-            .expect("product results mount view"),
-        )
-    }
-}
+#[path = "product_capability_tests.rs"]
+mod tests;

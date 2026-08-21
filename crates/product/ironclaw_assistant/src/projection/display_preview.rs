@@ -531,6 +531,7 @@ fn output_preview(value: &serde_json::Value) -> OutputPreview {
         .get("content")
         .or_else(|| value.get("text"))
         .or_else(|| value.get("stdout"))
+        .or_else(|| value.get("output"))
         .and_then(serde_json::Value::as_str)
     {
         ("text".to_string(), text.to_string(), false)
@@ -618,7 +619,10 @@ fn input_summary(capability_id: &str, value: &serde_json::Value) -> Option<Capab
         }
     }
 
-    if capability_matches(capability_id, "read_file")
+    // The pinned coding `read` engine is the single live filesystem-read surface; the
+    // retired `read_file` builtin no longer exists. `memory_read` and
+    // `memory_tree` share the same path/offset/limit summary shape.
+    if capability_matches(capability_id, "read")
         || capability_matches(capability_id, "memory_read")
         || capability_matches(capability_id, "memory_tree")
     {
@@ -639,7 +643,13 @@ fn input_summary(capability_id: &str, value: &serde_json::Value) -> Option<Capab
         }
     }
 
-    if capability_matches(capability_id, "write_file") {
+    // The pinned coding `write` engine carries `path` + `content`; summarize the path
+    // and the content byte count only — never the content itself. The retired
+    // `write_file` builtin no longer exists. `memory_write` keeps its dedicated
+    // branch below, so it is excluded here.
+    if capability_matches(capability_id, "write")
+        && !capability_matches(capability_id, "memory_write")
+    {
         let mut summary = SummaryBuilder::default();
         if let Some(path) = safe_path_arg(value, &["path", "file_path", "target"]) {
             summary.push("path", path);
@@ -652,16 +662,14 @@ fn input_summary(capability_id: &str, value: &serde_json::Value) -> Option<Capab
         }
     }
 
-    if capability_matches(capability_id, "list_dir") {
+    // The pinned coding hashline `edit` engine takes a single `input` grammar string
+    // that embeds target paths, snapshot tags, and verbatim replacement rows
+    // (file contents). Only the grammar byte count is display-safe; the
+    // retired `list_dir`/`apply_patch` builtins no longer exist.
+    if capability_matches(capability_id, "edit") {
         let mut summary = SummaryBuilder::default();
-        if let Some(path) = safe_path_arg(value, &["path"]) {
-            summary.push("path", path);
-        }
-        if let Some(recursive) = bool_arg(value, &["recursive"]) {
-            summary.push("recursive", recursive.to_string());
-        }
-        if let Some(max_depth) = u64_arg(value, &["max_depth"]) {
-            summary.push("max_depth", max_depth.to_string());
+        if let Some(input) = string_arg(value, &["input"]) {
+            summary.push("input_bytes", input.len().to_string());
         }
         if let Some(summary) = summary.finish() {
             return Some(summary);
@@ -692,25 +700,6 @@ fn input_summary(capability_id: &str, value: &serde_json::Value) -> Option<Capab
         push_text_arg(&mut summary, value, "output_mode", &["output_mode"]);
         push_number_arg(&mut summary, value, "head_limit", &["head_limit"]);
         push_number_arg(&mut summary, value, "offset", &["offset"]);
-        if let Some(summary) = summary.finish() {
-            return Some(summary);
-        }
-    }
-
-    if capability_matches(capability_id, "apply_patch") {
-        let mut summary = SummaryBuilder::default();
-        if let Some(path) = safe_path_arg(value, &["path", "file_path", "target"]) {
-            summary.push("path", path);
-        }
-        if let Some(old_string) = string_arg(value, &["old_string"]) {
-            summary.push("old_bytes", old_string.len().to_string());
-        }
-        if let Some(new_string) = string_arg(value, &["new_string"]) {
-            summary.push("new_bytes", new_string.len().to_string());
-        }
-        if let Some(replace_all) = bool_arg(value, &["replace_all"]) {
-            summary.push("replace_all", replace_all.to_string());
-        }
         if let Some(summary) = summary.finish() {
             return Some(summary);
         }
@@ -883,7 +872,7 @@ fn safe_path_subtitle(value: &serde_json::Value) -> Option<String> {
 
 /// A compact, display-safe "primary argument" for the activity row's inline
 /// detail — the single most salient input for a tool, so the row reads like
-/// `nearai.web_search   <query>` / `shell   <command>` / `read_file   <path>`
+/// `nearai.web_search   <query>` / `shell   <command>` / `read   <path>`
 /// instead of a bare tool name. Reuses the same sanitizing formatters as
 /// `input_summary` (URL stripping, shell redaction, byte bounds) and falls back
 /// to the path subtitle for tools without a recognized primary argument.
@@ -922,8 +911,9 @@ fn primary_arg_subtitle(capability_id: &str, value: &serde_json::Value) -> Optio
         return non_empty(bounded_summary_value(pattern).text);
     }
 
-    // Everything else (read_file, write_file, list_dir, apply_patch, memory_*)
-    // → the path/target.
+    // Everything else (read, write, edit, glob, grep, memory_*) → the
+    // path/target. pinned coding `edit` carries no path key (only the hashline `input`
+    // grammar, which is never shown), so its row stays title-only.
     safe_path_subtitle(value)
 }
 

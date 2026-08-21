@@ -7,6 +7,7 @@ use ironclaw_host_api::{
         NetworkTarget, NetworkTargetPattern, SecretUseMode,
     },
     approval::InvocationFingerprint,
+    artifact::{ArtifactId, ArtifactNamespaceId, ArtifactOwnerScope, ArtifactRef},
     audit::{ActionSummary, AuditEnvelope, AuditStage},
     capability::{CapabilitySet, EffectKind, RuntimeCredentialAccountSetup},
     capability_profile::CapabilityProfileSchemaRef,
@@ -29,7 +30,7 @@ use ironclaw_host_api::{
     },
     ids::{
         AgentId, CapabilityId, CorrelationId, ExtensionId, InvocationId, PackageId, ProjectId,
-        ResourceReservationId, SecretHandle, SystemServiceId, TenantId, UserId, VendorId,
+        ResourceReservationId, RunId, SecretHandle, SystemServiceId, TenantId, UserId, VendorId,
     },
     ingress::{IngressPolicy, IngressRouteDescriptor},
     messaging::StandardMessagingOp,
@@ -1750,6 +1751,7 @@ fn sample_context() -> ExecutionContext {
     let project_id = ProjectId::new("project1").unwrap();
 
     ExecutionContext {
+        artifact_namespace: None,
         run_id: None,
         origin: None,
         invocation_id,
@@ -1933,5 +1935,66 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
     assert!(
         !debug_with_requirement.contains("google"),
         "provider id must not appear in Debug output; got: {debug_with_requirement}"
+    );
+}
+
+#[test]
+fn artifact_refs_match_the_pinned_numeric_uri_contract() {
+    for (raw, id) in [("artifact://0", 0), ("artifact://42", 42)] {
+        let artifact_ref: ArtifactRef = raw.parse().expect("valid artifact ref");
+        assert_eq!(artifact_ref.id(), ArtifactId::new(id));
+        assert_eq!(artifact_ref.to_string(), raw);
+    }
+
+    assert_eq!(
+        "".parse::<ArtifactRef>().unwrap_err().to_string(),
+        "artifact:// URL requires a numeric ID: artifact://0"
+    );
+    for raw in [
+        "artifact://",
+        "artifact://-1",
+        "artifact://abc",
+        "artifact://1/path",
+        "artifact://1?offset=2",
+        "artifact://1#fragment",
+        " artifact://1",
+    ] {
+        assert!(
+            raw.parse::<ArtifactRef>().is_err(),
+            "{raw:?} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn artifact_namespace_round_trips_the_host_run_identity() {
+    let run_id = RunId::new();
+    let namespace = ArtifactNamespaceId::from_root_run(run_id);
+    assert_eq!(namespace.as_run_id(), run_id);
+    assert_eq!(
+        serde_json::from_value::<ArtifactNamespaceId>(
+            serde_json::to_value(namespace).expect("namespace serializes")
+        )
+        .expect("namespace deserializes"),
+        namespace
+    );
+}
+
+#[test]
+fn artifact_owner_scope_excludes_per_invocation_axes() {
+    let mut first =
+        ResourceScope::local_default(UserId::new("artifact-owner").unwrap(), InvocationId::new())
+            .expect("local scope");
+    first.thread_id = Some(ironclaw_host_api::ids::ThreadId::new("thread-a").unwrap());
+    first.mission_id = Some(ironclaw_host_api::ids::MissionId::new("mission-a").unwrap());
+
+    let mut second = first.clone();
+    second.thread_id = Some(ironclaw_host_api::ids::ThreadId::new("thread-b").unwrap());
+    second.mission_id = Some(ironclaw_host_api::ids::MissionId::new("mission-b").unwrap());
+    second.invocation_id = InvocationId::new();
+
+    assert_eq!(
+        ArtifactOwnerScope::from_resource_scope(&first),
+        ArtifactOwnerScope::from_resource_scope(&second)
     );
 }

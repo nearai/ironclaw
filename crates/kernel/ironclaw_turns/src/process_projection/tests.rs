@@ -138,6 +138,7 @@ fn terminal_metadata_rewrite_preserves_activation_provenance() {
         resolved_run_profile: profile().resolved,
         subagent_depth: 1,
         spawn_tree_descendant_cap: Some(16),
+        spawn_tree_root_run_id: None,
         subagent_activation_provenance: Some(ActivationProvenance::System),
         runner_id: TurnRunnerId::new(),
         lease_token: crate::TurnLeaseToken::new(),
@@ -1317,12 +1318,14 @@ fn claimed_turn_run_projects_to_process_claim() {
         product_context: None,
         resume_disposition: None,
     };
+    let root_run_id = TurnRunId::new();
     let claimed = ClaimedTurnRun {
         subagent_activation_provenance: None,
         state: state.clone(),
         resolved_run_profile: profile().resolved,
         subagent_depth: 3,
         spawn_tree_descendant_cap: Some(17),
+        spawn_tree_root_run_id: Some(root_run_id),
         runner_id: TurnRunnerId::new(),
         lease_token: crate::TurnLeaseToken::new(),
     };
@@ -1332,6 +1335,10 @@ fn claimed_turn_run_projects_to_process_claim() {
     assert_eq!(
         process.state.process_id,
         process_id_from_turn_run_id(state.run_id)
+    );
+    assert_eq!(
+        process.state.root_process_id,
+        Some(process_id_from_turn_run_id(root_run_id))
     );
     assert_eq!(process.state.status, ProcessLifecycleStatus::Running);
     assert_eq!(
@@ -1375,12 +1382,14 @@ fn claimed_process_round_trips_to_turn_executor_view() {
         product_context: None,
         resume_disposition: None,
     };
+    let root_run_id = TurnRunId::new();
     let claimed = ClaimedTurnRun {
         subagent_activation_provenance: None,
         state: state.clone(),
         resolved_run_profile: profile().resolved,
         subagent_depth: 4,
         spawn_tree_descendant_cap: Some(23),
+        spawn_tree_root_run_id: Some(root_run_id),
         runner_id: TurnRunnerId::new(),
         lease_token: crate::TurnLeaseToken::new(),
     };
@@ -1397,6 +1406,7 @@ fn claimed_process_round_trips_to_turn_executor_view() {
     );
     assert_eq!(round_trip.subagent_depth, 4);
     assert_eq!(round_trip.spawn_tree_descendant_cap, Some(23));
+    assert_eq!(round_trip.spawn_tree_root_run_id, Some(root_run_id));
 }
 
 /// The `__system__` owner slot holds BOTH ownerless (unbound) runs and
@@ -1438,6 +1448,7 @@ fn ownerless_scope_round_trips_through_the_process_claim() {
         resolved_run_profile: profile().resolved,
         subagent_depth: 0,
         spawn_tree_descendant_cap: None,
+        spawn_tree_root_run_id: None,
         runner_id: TurnRunnerId::new(),
         lease_token: crate::TurnLeaseToken::new(),
     };

@@ -844,6 +844,26 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // `RuntimeCredentialTarget::Basic` declaration, username validation,
         // and wire-contract vocabulary; RFC 7617 composition remains in
         // ironclaw_host_runtime.
+        // 18_994 -> 19_003 (#7491): `CapabilityDescriptor.provider_tool_name`
+        // carries the already-validated provider spelling as a typed DTO field;
+        // alias resolution and execution remain in ironclaw_loop_host.
+        // 19_003 -> 19_375 (#7491 artifact-read cutover): neutral artifact
+        // identity, selector, scoped access, resumable persistence, and completed
+        // artifact DTOs let first-party tools cross the host boundary without
+        // importing a store. Authorization/binding remains in host_runtime and
+        // persistence/read implementation remains in ironclaw_threads.
+        // 19_375 -> 19_404 (#7491 coding-tool cutover): origin-gate contract tests pin
+        // the transferred read-only `builtin.read` exemption and the absence of
+        // the retired ids. Runtime authorization remains in host_runtime.
+        // 19_404 -> 19_407 (#7491 durable-result repair): one optional count on
+        // the dispatch-result DTO preserves top-level array cardinality when
+        // transport output is bounded. Counting remains in capabilities;
+        // persistence and model rendering remain in composition/loop_host.
+        // 19_407 -> 19_430 (#7491 merged back onto 2026-08-12 main): the fold
+        // lands #7525's invalid-output vocabulary and #7509/#7484's redaction
+        // and watermark DTOs in the same tree; ceiling re-captured at the
+        // merged measured count. Count read from this test's own failure
+        // message.
         // 18_994 -> 19_003 (2026-08-11, unified channel model): +9 lines of
         // VAPID credential-target doc corrections referencing the renamed
         // `ironclaw_web_app` domain crate. Comment-adjacent churn only.
@@ -894,7 +914,13 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // unit variants and a serde derive, no behavior. The 35-line delta is
         // from the merged `turn.rs`; the resulting ceiling is re-captured from
         // this test's own report, never counted by eye.
-        ("ironclaw_host_api", 20_516),
+        // 20_516 -> 20_965 (2026-08-20, #7491 merge from main): the pinned OMP
+        // coding contract adds artifact selectors plus the neutral
+        // command-execution request/output trait used by the `bash` engine.
+        // Process execution remains in `ironclaw_host_runtime`; this crate owns
+        // only the DTO and port vocabulary. Pinned at the measured count on the
+        // merged tree, not at the pre-merge ceiling plus growth slack.
+        ("ironclaw_host_api", 20_965),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
@@ -950,6 +976,18 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // union — the #7147 parallel-baseline lesson applied. Framing/render
         // vocabulary only — scope filtering stays in the memory providers
         // and host runtime. Count read from this test's own failure message.
+        // 13_306 -> 13_521 (#7491 artifact-read cutover): the loop result-write
+        // contract carries completed artifacts and the model-visible observation
+        // vocabulary gains an `ArtifactReference` detail. Artifact creation,
+        // authorization, persistence, and rendering remain in host_runtime,
+        // ironclaw_threads, and loop_host.
+        // 13_306 -> 13_316 (2026-08-11, #7484 context eviction): one bounded
+        // truncation-watermark DTO carried across the existing context and
+        // prompt contracts. Window selection and task-pinning behavior remain
+        // in ironclaw_threads and ironclaw_loop_host.
+        // Merged ceiling re-captured at 13_531 (13_306 + both deltas): the
+        // main merge lands both vocabularies in the crate. Count read from
+        // this test's own failure message.
         // 13_306 -> 13_316 (2026-08-12, #7416 hook-aware parallel batches):
         // one defaulted port capability declares when ordered batch middleware
         // must retain batch entry. Scheduling and hook behavior remain in their
@@ -966,11 +1004,18 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // the batch-ordering port contract now defaults to ordered entry and
         // documents the explicit opt-in required for concurrent singles.
         // Scheduling and wrapper behavior remain in their owning loop crates.
-        // 13_345 -> 13_524 (2026-08-12, #7509 prompt recovery hardening):
-        // production prompt validation checks structural limits and control
-        // characters only; decoded Basic-auth samples remain test-only. Count
-        // read from this test's own failure message after merging #7416.
-        ("ironclaw_loop_contracts", 13_524),
+        // Merged ceiling re-captured on the 2026-08-12 main fold (13_531 + #7416's 29
+        // lines + #7509's prompt-hardening growth): both branches' vocabulary
+        // lands in the same tree; pin re-captured at the merged measured count.
+        // Count read from this test's own failure message.
+        // 13_560 -> 13_758 (2026-08-21, merge of main into #7491): both sides
+        // grew the crate independently -- main's subagent background-delivery
+        // and typed-dispatch vocabulary plus this branch's durable
+        // tool-artifact refs -- so the merged tree lands both deltas at once.
+        // Pure vocabulary on both sides; delivery, dispatch, and artifact
+        // behavior stay in their owning loop, kernel, and threads crates.
+        // Count read from this test's own failure message.
+        ("ironclaw_loop_contracts", 13_758),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
@@ -2200,6 +2245,34 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         "crates/ironclaw_host_api/src/ids.rs",
         "crates/ironclaw_safety/src/lib.rs",
         "crates/ironclaw_safety/src/provider_validation.rs",
+        // Issue #7392 provider-name resolver: the additive declarative field
+        // (`provider_tool_name`) lives on the capability declaration and the
+        // runtime descriptor as plain serialized data, validated as
+        // `ProviderToolName` only where it becomes provider-protocol identity
+        // (manifest parse + the loop boundary). These files are declarative
+        // storage/propagation, not routing or product logic.
+        "crates/ironclaw_host_api/src/capability.rs",
+        "crates/ironclaw_extension_registry/src/v2.rs",
+        "crates/ironclaw_extension_registry/src/v3.rs",
+        "crates/ironclaw_extension_registry/src/package.rs",
+        "crates/ironclaw_extension_registry/src/hosted_mcp_discovery.rs",
+        // Host-owned manifest/descriptor builders that carry the additive
+        // declarative field through to the descriptor (same storage role as
+        // the registry mappings above).
+        "crates/ironclaw_extension_host/src/active.rs",
+        "crates/ironclaw_extension_host/src/generic_host.rs",
+        "crates/ironclaw_extension_host/src/hosted_mcp_manifest.rs",
+        "crates/ironclaw_extension_host/src/mcp.rs",
+        "crates/ironclaw_extension_manager/src/admin_configuration_capability.rs",
+        "crates/ironclaw_extension_manager/src/extension_lifecycle_capabilities.rs",
+        "crates/ironclaw_extension_manager/src/operator_config_capability.rs",
+        "crates/ironclaw_extension_manager/src/skill_auto_activate_capability.rs",
+        "crates/ironclaw_extension_manager/src/ironhub/capabilities.rs",
+        "crates/ironclaw_host_runtime/src/first_party_tools/mod.rs",
+        // TEMPORARY production benchmark seam (issue #7392): builds the
+        // pinned coding surface with exact provider-name overrides. Revert
+        // this unconditional seam when the benchmark arm reaches cutover.
+        "crates/ironclaw_host_runtime/src/first_party_tools/coding.rs",
         // Host loop/run/thread protocol structs that preserve exact model
         // provider names for tool-result roundtrips and historical replay.
         // The provider-tool-call DTOs live in the `capability` submodule of the

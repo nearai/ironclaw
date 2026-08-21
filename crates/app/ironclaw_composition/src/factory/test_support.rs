@@ -465,14 +465,9 @@ impl RebornRuntimeStores {
         Some(Arc::clone(&self.project_service))
     }
 
-    /// Test-support access to the standalone session thread service (durable
-    /// tool-result projection seam, issue #5838). This is the SAME `Arc`
-    /// production's `capability_wiring` passes to
-    /// `StagedCapabilityIo::new_with_durable_previews` and to the
-    /// `result_read` synthetic capability, so a harness built over this
-    /// `RebornServices` can drive its own real `StagedCapabilityIo` through
-    /// `staged_capability_io_for_test`. Returns `None` for production-profile
-    /// compositions without a standalone runtime.
+    /// Test-support access to the standalone session thread service used by
+    /// durable transcript and private historical-result projection. Returns
+    /// `None` for production-profile compositions without a standalone runtime.
     #[cfg(feature = "test-support")]
     pub(crate) fn standalone_thread_service_for_test(
         &self,

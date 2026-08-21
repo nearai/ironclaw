@@ -327,6 +327,51 @@ fn reserve_succeeds_when_budget_is_available() {
 }
 
 #[test]
+fn grow_reservation_checks_quota_before_expanding_active_hold() {
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope("tenant1", "user1", Some("project1"));
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits::default().set_max_output_bytes(10),
+        )
+        .unwrap();
+    let reservation = governor
+        .reserve(scope, ResourceEstimate::default().set_output_bytes(4))
+        .unwrap();
+
+    let grown = governor
+        .grow_reservation(
+            reservation.id,
+            ResourceEstimate::default().set_output_bytes(5),
+        )
+        .expect("growth within quota");
+    assert_eq!(grown.estimate.output_bytes, Some(9));
+    assert_eq!(governor.reserved_for(&account).output_bytes, 9);
+
+    let denied = governor
+        .grow_reservation(
+            reservation.id,
+            ResourceEstimate::default().set_output_bytes(2),
+        )
+        .expect_err("growth beyond quota");
+    assert!(matches!(
+        denied,
+        ResourceError::LimitExceeded { denial, .. }
+            if denial.account == account
+                && denial.dimension == ResourceDimension::OutputBytes
+    ));
+    assert_eq!(governor.reserved_for(&account).output_bytes, 9);
+
+    governor
+        .reconcile(reservation.id, ResourceUsage::default().set_output_bytes(9))
+        .expect("reconcile grown reservation");
+    assert_eq!(governor.reserved_for(&account).output_bytes, 0);
+    assert_eq!(governor.usage_for(&account).output_bytes, 9);
+}
+
+#[test]
 fn reserve_with_id_uses_requested_identifier_and_rejects_duplicates() {
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope("tenant1", "user1", Some("project1"));

@@ -1,4 +1,4 @@
-//! Full-turn proof that the sandbox profile routes `builtin.shell` into Docker.
+//! Full-turn proof that the sandbox profile routes `builtin.bash` into Docker.
 
 #[path = "support/docker_gate.rs"]
 mod docker_gate;
@@ -47,7 +47,7 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
         .with_sandbox_shell_tools()
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.shell",
+                "builtin.bash",
                 json!({
                     "command": format!(
                         "test -f /.dockerenv && printf '{PERSISTENCE_MARKER}' > /workspace/persistence-marker.txt && printf '{EPHEMERAL_MARKER}' > /tmp/container-marker.txt && cat /workspace/persistence-marker.txt /tmp/container-marker.txt && uid=$(id -u) && test \"$uid\" -ne 0 && echo NON_ROOT_UID_OK && echo {CONTAINER_MARKER}"
@@ -90,13 +90,13 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
             "full-turn container carries its dispatch actor user identity"
         );
         harness
-            .assert_model_tools_contains("builtin__shell")
+            .assert_model_tools_contains("bash")
             .await
-            .expect("shell is model-visible");
+            .expect("bash is model-visible");
         harness
-            .assert_tool_invoked("builtin.shell")
+            .assert_tool_invoked("builtin.bash")
             .await
-            .expect("shell dispatches");
+            .expect("bash dispatches");
         harness
             .assert_tool_result_contains(CONTAINER_MARKER)
             .await

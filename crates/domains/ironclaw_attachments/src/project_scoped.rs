@@ -3,8 +3,8 @@
 //! It writes attachment bytes through the project-scoped [`ScopedFilesystem`] —
 //! the same filesystem authority the agent's file tools resolve through — and
 //! returns the transcript references to persist. Going through that one
-//! authority is what makes a landed attachment readable by `file_read` /
-//! `list_dir` at the recorded `storage_key` in this and later turns.
+//! authority is what makes a landed attachment readable by the `read` tool at
+//! the recorded `storage_key` in this and later turns.
 //!
 //! The read counterpart (`ProjectScopedAttachmentReader`) stays in
 //! `ironclaw_assistant`: it also implements `ironclaw_loop_host`'s

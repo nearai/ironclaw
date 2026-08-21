@@ -234,6 +234,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Creating a project through chat persists it | `project_create.rs` |
 | Profile writes reach the real profile source | `profile.rs` |
 | Delivery-target tools resolve through the real outbound service | `outbound_target.rs` |
+| The pinned coding benchmark seam (issue #7392) advertises only the exact pinned `read`/`write`/`edit`/`glob`/`grep`/`bash` coding names with fixture-pinned schemas/descriptions, flows read→edit→read and bash execution through the real path, proves the derived spelling (`builtin__read`) is unresolvable, and gates coding writes | `reborn_integration_coding_registration.rs` |
 
 **Auth** (`tests/integration/auth/`)
 | Behavior | Evidence |
@@ -303,7 +304,7 @@ channel-delivery journeys (two-lane model):
 
 ---
 
-## 5. Binary, parity & QA-trace bins — `tests/*.rs` (39)
+## 5. Binary, parity & QA-trace bins — `tests/*.rs` (41)
 
 **QA workflow phrases** — real manual-QA sentences, replayed against the Reborn binary.
 | The user asks… | Evidence |
@@ -351,6 +352,34 @@ manual-run and scheduled-run denial evidence),
 ceiling × yolo narrowing), `e2e_trace_runtime_policy_serde.rs` (wire-stable policy
 enums), `trace_format.rs`, `trace_llm_tests.rs`,
 `reborn_coverage_lane_stack_headroom.rs` (CI job must declare stack headroom).
+
+**Pinned coding contract**: `reborn_coding_contract_snapshot.rs` validates the
+checked-in snapshot of the eight pinned core coding tools
+(`read`, `write`, `edit`, `glob`, `grep`, `bash`, `ast_grep`, `ast_edit` at
+`can1357/oh-my-pi` commit `08819b2`) — exact commit/provenance/tool inventory
+integrity, offline SHA-256 verification of every vendored and derived asset
+(plus `manifest.json`; unsnapshotted upstream records stay capture-time pins),
+the vendored full MIT license text, the rendered read description for the
+issue-target context, exact selector/error/output case-ID inventories, and the
+reusable differential comparison factory — all offline from
+`tests/fixtures/pinned_coding_contract/` (issue #7392, first delivery slice).
+`reborn_coding_engines.rs` drives the unregistered pinned coding engines
+(`ironclaw_extension_support::coding::pinned::*`, issue #7392 second delivery
+slice) against the same snapshot over an in-memory backend: golden selector
+parity (all 29 cases), read output formats (hashline header/tag, numbered
+rows, elision footer, 3000-line/50KB truncation notices, directory listing),
+write success shape + URI-like-target error, edit snapshot/CAS semantics
+(stale-anchor recognized/not-from-session, chained edits, block resolution,
+noop, line/range errors), glob/grep behavior and exact errors, and the
+`compare_cases` differential seam over the golden error templates.
+`reborn_integration_coding_registration.rs` (issue #7392 third delivery
+slice) registers the six pinned coding engines at the MODEL boundary
+through the existing first-party capability path under the exact pinned
+names (`read`/`write`/`edit`/`glob`/`grep`/`bash`; schemas and supported
+descriptions matched to the fixture snapshot, with `read` and `bash` narrowed
+to IronClaw-supported modes), proves the read→edit→read chain and that the
+derived spelling (`builtin__read`) fails to resolve through a real turn, and
+gates coding writes through the real approval path.
 
 ---
 

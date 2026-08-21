@@ -9,7 +9,7 @@ mod support;
 use std::time::Duration;
 
 use ironclaw_host_api::ids::CapabilityId;
-use ironclaw_host_runtime::READ_FILE_CAPABILITY_ID;
+use ironclaw_host_runtime::CODING_READ_CAPABILITY_ID;
 use ironclaw_loop_host::{
     DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, HostManagedModelMessageRole, HostManagedModelResponse,
 };
@@ -433,7 +433,7 @@ fn spawn_capability_id() -> CapabilityId {
 
 fn subagent_allowed_tool_call(call_id: impl Into<String>) -> RebornScriptedProviderToolCall {
     RebornScriptedProviderToolCall::new(
-        CapabilityId::new(READ_FILE_CAPABILITY_ID).expect("valid capability id"),
+        CapabilityId::new(CODING_READ_CAPABILITY_ID).expect("valid capability id"),
         call_id,
         serde_json::json!({"message": "hi"}),
     )

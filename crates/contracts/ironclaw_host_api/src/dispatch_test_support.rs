@@ -208,6 +208,7 @@ mod tests {
         let capability = CapabilityId::new(cap).unwrap();
         Authorized::seal_for_test(
             Invocation {
+                artifact_namespace: None,
                 activity_id: ActivityId::new(),
                 capability,
                 input: json!({}),

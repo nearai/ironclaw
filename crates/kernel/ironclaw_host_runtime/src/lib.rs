@@ -30,7 +30,7 @@ use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
     dispatch::{CapabilityDisplayOutputPreview, DispatchFailureDetail, ProviderDiagnostic},
     ids::{ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, ProcessId, SecretHandle},
-    resource::{ResourceEstimate, ResourceScope, ResourceUsage},
+    resource::{ResourceEstimate, ResourceReceipt, ResourceScope, ResourceUsage},
     result_meta::{FailureFate, FailureKind},
     runtime::RuntimeKind,
     runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
@@ -89,22 +89,20 @@ pub use first_party::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 pub use first_party_tools::{
-    APPLY_PATCH_CAPABILITY_ID, ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
-    BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools, DOCUMENT_EDIT_CAPABILITY_ID,
-    ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTML_TO_PDF_CAPABILITY_ID,
-    HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
-    MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
-    MEMORY_WRITE_CAPABILITY_ID, MemoryToolProfile, NATIVE_MEMORY_FIRST_PARTY_PROVIDER,
-    NativeMemoryToolHandler, OUTBOUND_DELIVER_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID,
-    READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID,
-    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
-    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
-    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TRIGGER_RUN_CAPABILITY_ID,
-    TriggerCreateHook, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER,
+    BuiltinFirstPartyTools, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID,
+    HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, JSON_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
+    MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
+    MemoryToolProfile, NATIVE_MEMORY_FIRST_PARTY_PROVIDER, NativeMemoryToolHandler,
+    OUTBOUND_DELIVER_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
+    TIME_CAPABILITY_ID, TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
+    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
+    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    TRIGGER_RUN_CAPABILITY_ID, TriggerCreateHook, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook,
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
@@ -115,6 +113,11 @@ pub use first_party_tools::{
     memory_invocation_for_request, memory_tool_profiles, normalize_memory_tool_input,
     register_memory_tool_handler, register_native_memory_tools,
     register_outbound_deliver_first_party_handler, register_reply_attachment_first_party_handler,
+};
+pub use first_party_tools::{
+    CODING_BASH_CAPABILITY_ID, CODING_EDIT_CAPABILITY_ID, CODING_GLOB_CAPABILITY_ID,
+    CODING_GREP_CAPABILITY_ID, CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID, CodingTools,
+    DOCUMENT_EDIT_CAPABILITY_ID, HTML_TO_PDF_CAPABILITY_ID, coding_package, insert_coding_handlers,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use first_party_tools::{
@@ -402,6 +405,13 @@ pub struct RuntimeCapabilityCompleted {
     pub output: Value,
     pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub usage: ResourceUsage,
+    pub receipt: Option<ResourceReceipt>,
+    pub completed_artifact: Option<ironclaw_host_api::artifact::CompletedArtifact>,
+    /// Stable digest of the full canonical output before bounded transport.
+    pub canonical_output_digest: Option<ironclaw_host_api::result_meta::OutputDigest>,
+    /// Number of elements in the full top-level JSON array before bounded
+    /// transport, when the canonical output is an array.
+    pub canonical_item_count: Option<u64>,
 }
 
 /// Approval suspension state.

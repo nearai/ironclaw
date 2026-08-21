@@ -271,6 +271,8 @@ pub struct ProcessAuthorizedInvocation {
     pub scope: ResourceScope,
     pub actor: Actor,
     pub origin: InvocationOrigin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_namespace: Option<crate::artifact::ArtifactNamespaceId>,
     pub estimate: ResourceEstimate,
     pub correlation_id: CorrelationId,
     pub process_id: ProcessId,
@@ -294,6 +296,7 @@ impl ProcessAuthorizedContinuation {
             scope,
             actor,
             origin,
+            artifact_namespace,
             estimate,
             correlation_id,
             // The original process id is the direct spawner for nested process
@@ -308,6 +311,7 @@ impl ProcessAuthorizedContinuation {
                 scope,
                 actor,
                 origin,
+                artifact_namespace,
                 estimate,
                 correlation_id,
                 process_id,

@@ -526,6 +526,7 @@ mod tests {
             resolved_run_profile: resolved,
             subagent_depth: 0,
             spawn_tree_descendant_cap: None,
+            spawn_tree_root_run_id: None,
             runner_id: TurnRunnerId::new(),
             lease_token: TurnLeaseToken::new(),
         };

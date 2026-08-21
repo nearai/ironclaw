@@ -95,6 +95,8 @@ impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for EchoLane {
                 detail: None,
             })?;
         Ok(RuntimeAdapterResult {
+            canonical_output_digest: None,
+            completed_artifact: None,
             output,
             display_preview: None,
             output_bytes: usage.output_bytes,
@@ -108,6 +110,7 @@ fn authorized(request: CapabilityDispatchRequest) -> Authorized {
     let lane = RuntimeLane::from_runtime_kind(RuntimeKind::Wasm)
         .expect("test runtime must map to an execution lane");
     let invocation = Invocation {
+        artifact_namespace: None,
         activity_id: ActivityId::new(),
         capability: request.capability_id,
         input: request.input,
@@ -136,6 +139,7 @@ fn authorized(request: CapabilityDispatchRequest) -> Authorized {
 
 fn wasm_capability_request(input: Value) -> Authorized {
     authorized(CapabilityDispatchRequest {
+        artifact_namespace: None,
         run_id: None,
         origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
         capability_id: CapabilityId::new("test-wasm.run").unwrap(),
@@ -234,6 +238,7 @@ async fn unconfigured_lane_fails_missing_backend_and_releases_prepared_reservati
 
     let err = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("test-wasm.run").unwrap(),
@@ -354,6 +359,7 @@ async fn resolved_binding_survives_registry_swap_mid_flight() {
     let adapter: Arc<dyn BoundCapabilityAdapter> = binding.adapter;
     let result = adapter
         .dispatch_json(CapabilityDispatchRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: echo_id,

@@ -67,6 +67,12 @@
   `ironclaw_loop_host::ThreadScopeResolver::resolve_for_turn` before
   calling `SessionThreadService`; do not append with the runtime/base
   `ThreadScope` directly in multi-user WebUI paths.
+- Production runtime assembly must wire the same durable artifact store as both
+  the accounted result persister and the read port. Large capability results
+  become `artifact://<id>` model references only after resource reconciliation;
+  invocation readers must bind artifact access to the caller's owner scope and
+  root-run namespace so numeric artifact IDs cannot cross tenant or run
+  boundaries.
 
 ## WebUI v2 native surface
 

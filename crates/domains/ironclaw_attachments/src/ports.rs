@@ -36,7 +36,7 @@ pub struct AttachmentCleanupReport {
 /// authority. `message_id` is a stable per-message id (the idempotency key)
 /// used only to disambiguate the storage path; the implementation writes
 /// through the same `MountView` the agent's file tools resolve through, so
-/// landed bytes are readable by `file_read`/`list_dir` in later turns.
+/// landed bytes are readable by the `read` tool in later turns.
 #[async_trait]
 pub trait InboundAttachmentLander: Send + Sync {
     async fn land(

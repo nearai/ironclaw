@@ -1,5 +1,6 @@
 mod support;
 
+use support::host_runtime_harness::WithTestArtifactPersistence;
 use support::legacy_capability_fixture_to_v2;
 
 use std::{path::Path, sync::Arc, time::Duration};
@@ -643,6 +644,7 @@ fn base_services(
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
     )))
+    .with_test_artifact_persistence()
 }
 
 async fn jsonl_event_stores(event_root: &Path) -> RebornEventStores {
@@ -928,6 +930,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
 
 fn execution_context_without_grants_for_scope(scope: ResourceScope) -> ExecutionContext {
     let context = ExecutionContext {
+        artifact_namespace: None,
         run_id: Some(RunId::new()),
         origin: None,
         invocation_id: scope.invocation_id,
@@ -957,6 +960,7 @@ fn execution_context_with_dispatch_grant_for_scope(
     scope: ResourceScope,
 ) -> ExecutionContext {
     let context = ExecutionContext {
+        artifact_namespace: None,
         run_id: Some(RunId::new()),
         origin: None,
         invocation_id: scope.invocation_id,

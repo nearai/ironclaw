@@ -123,7 +123,7 @@ use ironclaw_extension_manager::{
 };
 use ironclaw_extension_registry::{
     ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionLifecycleService,
-    ExtensionRegistry, ManifestSource, SharedExtensionRegistry,
+    ExtensionPackage, ExtensionRegistry, ManifestSource, SharedExtensionRegistry,
 };
 use ironclaw_filesystem::ScopedFilesystem;
 #[cfg(test)]
@@ -228,6 +228,8 @@ pub(crate) use production_backend_assembly::{
 pub(crate) use production_backend_assembly::{
     production_skill_management_mount_view, production_system_extensions_lifecycle_mount_view,
 };
+#[cfg(any(test, feature = "test-support"))]
+use production_build_assembly::build_production_shaped_with_coding_tools_for_test;
 use production_build_assembly::{
     FilesystemProductionHostRuntimeServices, RebornProductionBuildContext, build_production_shaped,
     planned_run_profile_resolver,
@@ -262,6 +264,10 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime>,
     pub(crate) user_sandbox_process_port:
         Option<Arc<ironclaw_host_runtime::UserSandboxProcessPort>>,
+    pub(crate) artifact_persistence:
+        Arc<dyn ironclaw_host_api::artifact::AccountedArtifactPersister>,
+    pub(crate) artifact_governor: Arc<dyn ironclaw_resources::ResourceGovernor>,
+    pub(crate) artifact_store: Arc<ironclaw_threads::DurableToolArtifactStore>,
     #[cfg(test)]
     pub(crate) turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     pub(crate) product_auth: Arc<RebornProductAuthServices>,
@@ -517,6 +523,20 @@ where
 pub(crate) async fn build_runtime_substrate(
     input: RebornHostBindings,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
+    build_runtime_substrate_inner(input, false).await
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) async fn build_runtime_substrate_with_coding_tools_for_test(
+    input: RebornHostBindings,
+) -> Result<RebornRuntimeStores, RebornBuildError> {
+    build_runtime_substrate_inner(input, true).await
+}
+
+async fn build_runtime_substrate_inner(
+    input: RebornHostBindings,
+    coding_tools_for_test: bool,
+) -> Result<RebornRuntimeStores, RebornBuildError> {
     tracing::debug!(
         profile = %input.profile(),
         owner_id = %input.owner_id(),
@@ -534,6 +554,12 @@ pub(crate) async fn build_runtime_substrate(
             ),
         }),
         crate::deployment::RuntimeSubstrate::ProductionShaped => {
+            #[cfg(any(test, feature = "test-support"))]
+            if coding_tools_for_test {
+                return build_production_shaped_with_coding_tools_for_test(input).await;
+            }
+            #[cfg(not(any(test, feature = "test-support")))]
+            let _ = coding_tools_for_test;
             build_production_shaped(input).await
         }
     }
@@ -1175,13 +1201,30 @@ fn production_builtin_extension_registry(
     process_backend: ProcessBackendKind,
     memory_package: Option<&ironclaw_extension_registry::ExtensionPackage>,
 ) -> Result<ExtensionRegistry, RebornBuildError> {
-    let mut registry = ExtensionRegistry::new();
     let package =
         builtin_first_party_package_for_process_backend(process_backend).map_err(|error| {
             RebornBuildError::InvalidConfig {
                 reason: format!("built-in first-party package is invalid: {error}"),
             }
         })?;
+    let package = extend_builtin_package(package)?;
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package)
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("built-in first-party registry is invalid: {error}"),
+        })?;
+    insert_bound_memory_package(&mut registry, memory_package)?;
+    Ok(registry)
+}
+
+/// The host-owned extension packages layered on top of the built-in
+/// first-party package (extension lifecycle, IronHub, admin configuration,
+/// operator configuration, skill auto-activation) — shared by the stock and
+/// coding-tools-extended builtin registries so the coding-tools arm differs
+/// ONLY in the five pinned coding capabilities, never in the extension
+/// layers.
+fn extend_builtin_package(package: ExtensionPackage) -> Result<ExtensionPackage, RebornBuildError> {
     let package = extend_builtin_first_party_package(package).map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("extension lifecycle package is invalid: {error}"),
@@ -1207,13 +1250,7 @@ fn production_builtin_extension_registry(
             reason: format!("skill auto-activation package is invalid: {error}"),
         }
     })?;
-    registry
-        .insert(package)
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("built-in first-party registry is invalid: {error}"),
-        })?;
-    insert_bound_memory_package(&mut registry, memory_package)?;
-    Ok(registry)
+    Ok(package)
 }
 
 fn production_first_party_registry_with_trigger_create_hook(
