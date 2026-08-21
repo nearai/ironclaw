@@ -40,7 +40,10 @@ export function PageScroll({
   }
 
   return (
-    <div className={cn("flex h-full flex-col overflow-y-auto", className)} {...rest}>
+    <div
+      className={cn("flex h-full flex-col overflow-y-auto", scrollClassName, className)}
+      {...rest}
+    >
       {overlay ? (<>{content}{overlay}</>) : content}
     </div>
   );

@@ -30,6 +30,16 @@ test("PageScroll preserves the settings-style contained scroll owner", () => {
   assert.match(content.props.className ?? "", /\bv2-page-entrance flex-1 p-4 sm:p-6\b/);
 });
 
+test("PageScroll applies scroll constraints to the full-page scroll owner", () => {
+  const rendered = PageScroll({
+    children: "content",
+    scrollClassName: "overscroll-contain scroll-smooth",
+  }) as ReactElement<ElementProps>;
+
+  assert.match(rendered.props.className ?? "", /\boverscroll-contain\b/);
+  assert.match(rendered.props.className ?? "", /\bscroll-smooth\b/);
+});
+
 test("PageScroll and PageStack append page-specific constraints", () => {
   const scroll = PageScroll({
     children: "content",

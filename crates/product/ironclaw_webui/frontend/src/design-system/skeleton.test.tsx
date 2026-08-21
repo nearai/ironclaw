@@ -9,6 +9,7 @@ type ElementProps = {
   "aria-label"?: string;
   children?: ReactElement[];
   className?: string;
+  role?: string;
 };
 
 test("Skeleton applies the shared styling class and stays decorative by default", () => {
@@ -28,6 +29,7 @@ test("Skeleton keeps a supplied loading label available to assistive technology"
 
   assert.equal(rendered.props["aria-label"], "Loading configuration");
   assert.equal(rendered.props["aria-hidden"], undefined);
+  assert.equal(rendered.props.role, "status");
 });
 
 test("SkeletonList renders the requested number of consistently shaped placeholders", () => {
@@ -45,4 +47,14 @@ test("SkeletonList renders the requested number of consistently shaped placehold
     assert.equal(item.type, Skeleton);
     assert.equal(item.props.className, "h-12 rounded-lg");
   }
+});
+
+test("SkeletonList exposes a supplied loading label as a status", () => {
+  const rendered = SkeletonList({
+    "aria-label": "Loading extensions",
+    count: 2,
+  }) as ReactElement<ElementProps>;
+
+  assert.equal(rendered.props["aria-label"], "Loading extensions");
+  assert.equal(rendered.props.role, "status");
 });
