@@ -415,6 +415,79 @@ async fn filesystem_fallback_unknown_thread_claim_is_not_replayed_as_accepted() 
     assert_eq!(rows[0].message_id, healed.message_id);
 }
 
+// ── One dedupe index, not two ─────────────────────────────────────────────
+
+/// The subagent door reuses the inbound door's `(scope, source_binding_id,
+/// external_event_id)` index rather than opening a second parallel one. Every
+/// other case in this suite drives one door at a time, so a refactor that gave
+/// the subagent door its own index path would leave all of them green — this
+/// is the only case that exercises the two doors against each other.
+///
+/// The same case pins the fail-closed collision guard: a tuple already held by
+/// a user/steering row must be refused with a `Backend` error naming that row,
+/// never handed back to a parent as its child's result.
+async fn a_tuple_the_inbound_door_holds_is_refused(service: Arc<dyn SessionThreadService>) {
+    let thread = ensure_thread(&service).await;
+
+    let inbound = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope(),
+            thread_id: thread.clone(),
+            actor_id: "actor-parent".to_string(),
+            source_binding_id: Some("subagent-result:parent-1".to_string()),
+            reply_target_binding_id: None,
+            external_event_id: Some("child-1".to_string()),
+            content: MessageContent::text("a human steering message"),
+        })
+        .await
+        .expect("the inbound door claims the identity tuple first");
+    assert!(!inbound.idempotent_replay);
+
+    let error = service
+        .accept_subagent_result(result_request(&thread, "child-1", "framed child output"))
+        .await
+        .expect_err(
+            "the subagent door must find the inbound door's claim on the SAME index and refuse",
+        );
+    assert!(
+        matches!(
+            &error,
+            SessionThreadError::Backend(reason)
+                if reason.contains("already held by a non-system row")
+                    && reason.contains("User")
+        ),
+        "expected the collision guard naming the non-system row, got {error:?}"
+    );
+
+    // Refused, not re-minted: the user row stands alone. A second row here
+    // would mean the two doors are keeping separate indexes.
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope(),
+            thread_id: thread,
+        })
+        .await
+        .expect("history");
+    assert_eq!(
+        history.messages.len(),
+        1,
+        "a refused acceptance must append nothing: {:?}",
+        history.messages
+    );
+    assert_eq!(history.messages[0].message_id, inbound.message_id);
+    assert_eq!(history.messages[0].kind, MessageKind::User);
+}
+
+#[tokio::test]
+async fn in_memory_a_tuple_the_inbound_door_holds_is_refused() {
+    a_tuple_the_inbound_door_holds_is_refused(in_memory_service()).await;
+}
+
+#[tokio::test]
+async fn filesystem_a_tuple_the_inbound_door_holds_is_refused() {
+    a_tuple_the_inbound_door_holds_is_refused(filesystem_service()).await;
+}
+
 // ── Identity halves must carry a value ────────────────────────────────────
 
 async fn an_empty_identity_half_is_refused(service: Arc<dyn SessionThreadService>) {
