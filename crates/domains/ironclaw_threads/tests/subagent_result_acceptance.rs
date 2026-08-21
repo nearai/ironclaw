@@ -869,6 +869,96 @@ async fn filesystem_an_empty_identity_half_is_refused() {
     an_empty_identity_half_is_refused(filesystem_service()).await;
 }
 
+// ── The steering ladder does not admit a result row ───────────────────────
+
+/// The `Accepted → Queued → Submitted / RejectedBusy` ladder is the *human*
+/// message admission protocol: it exists so the UI can badge a pending user
+/// message and offer a resend when a busy run rejects it. A subagent result
+/// needs none of that, and the invariant that a child's output lands
+/// `MessageKind::System` — never `User` — means it can never satisfy
+/// `ensure_user_accepted` (`src/filesystem_service.rs:4378`,
+/// `src/in_memory.rs:1820`), on either half of that predicate.
+///
+/// So background delivery (slice 2b) must not bind the appended row to a
+/// queue entry the way steering rows do. `mark_message_queued` would set
+/// `Queued`, which `is_model_visible` excludes
+/// (`src/filesystem_service.rs:4397`) — hiding the delivered result from the
+/// parent's model context — and the queue's best-effort `Submitted` flip
+/// (`crates/loop/ironclaw_loop_host/src/input_queue.rs:572`) would fail
+/// forever, retaining a pending flip that counts against
+/// `MAX_QUEUED_INPUTS_PER_RUN` (`input_queue.rs:385`) and blocks `is_settled`
+/// (`input_queue.rs:549`).
+///
+/// This case pins today's refusal, and its shape, so the 2b implementer meets
+/// the trap as a red test rather than as a wedged parent run. The fix belongs
+/// in these backends — an already-terminal row has nothing to flip, so the
+/// flip returns it unchanged — never in widening `ensure_user_accepted` to
+/// admit system rows: that would re-open `Queued`/`RejectedBusy` onto a result
+/// row and erase the system-vs-user distinction this door exists to hold.
+async fn a_result_row_is_refused_by_the_steering_ladder(service: Arc<dyn SessionThreadService>) {
+    let thread = ensure_thread(&service).await;
+    let accepted = service
+        .accept_subagent_result(result_request(&thread, "child-1", "framed child output"))
+        .await
+        .expect("acceptance succeeds");
+
+    let queued = service
+        .mark_message_queued(&scope(), &thread, accepted.message_id, "run-1".to_string())
+        .await
+        .expect_err("a system/Finalized row is not admissible to the steering ladder");
+    assert!(
+        matches!(
+            &queued,
+            SessionThreadError::InvalidMessageTransition { message_id, from, attempted }
+                if *message_id == accepted.message_id
+                    && *from == MessageStatus::Finalized
+                    && *attempted == "mark_message_queued"
+        ),
+        "expected InvalidMessageTransition from Finalized, got {queued:?}"
+    );
+
+    let submitted = service
+        .mark_message_submitted(
+            &scope(),
+            &thread,
+            accepted.message_id,
+            "turn-1".to_string(),
+            "run-1".to_string(),
+        )
+        .await
+        .expect_err("the queue's best-effort Submitted flip cannot settle a terminal row today");
+    assert!(
+        matches!(
+            &submitted,
+            SessionThreadError::InvalidMessageTransition { message_id, from, attempted }
+                if *message_id == accepted.message_id
+                    && *from == MessageStatus::Finalized
+                    && *attempted == "mark_message_submitted"
+        ),
+        "expected InvalidMessageTransition from Finalized, got {submitted:?}"
+    );
+
+    // Both refusals left the row exactly as accepted — still terminal, still
+    // system-class, still model-visible.
+    let row = service
+        .read_thread_message(&scope(), &thread, accepted.message_id)
+        .await
+        .expect("read succeeds")
+        .expect("row exists");
+    assert_eq!(row.kind, MessageKind::System);
+    assert_eq!(row.status, MessageStatus::Finalized);
+}
+
+#[tokio::test]
+async fn in_memory_a_result_row_is_refused_by_the_steering_ladder() {
+    a_result_row_is_refused_by_the_steering_ladder(in_memory_service()).await;
+}
+
+#[tokio::test]
+async fn filesystem_a_result_row_is_refused_by_the_steering_ladder() {
+    a_result_row_is_refused_by_the_steering_ladder(filesystem_service()).await;
+}
+
 // ── The trait's fail-closed default ───────────────────────────────────────
 
 /// A backend that implements every method `SessionThreadService` requires and

@@ -275,13 +275,28 @@ acceptance identity tuple, here derived from trusted durable identity:
 makes the append idempotent across the hard crash window (acceptance
 succeeded, process died before the edge recorded the ref): replay
 re-accepts and receives the **same** message ref back. The ref persisted
-on the edge (`ResultAppended`) is the fast path, not the proof. The row
-then binds to a queue entry exactly as steering rows do
-(`mark_message_queued` → `enqueue_queued_message`,
-`ironclaw_loop_host/src/{input_queue,durable_input_queue}.rs`). A crash between those two calls leaves the edge in
-`ResultAppended` with the row already marked queued but not yet enqueued;
-re-drive re-marks it (an idempotent status flip) and enqueues, and the
-queue's own identity dedupe makes the double-enqueue attempt safe.
+on the edge (`ResultAppended`) is the fast path, not the proof. The row is
+**terminal on arrival** and stays that way: delivery calls
+`enqueue_queued_message`
+(`ironclaw_loop_host/src/{input_queue,durable_input_queue}.rs`) and **never**
+`mark_message_queued` (correction, 2026-08-21 — this paragraph previously
+said the row "binds to a queue entry exactly as steering rows do"; it cannot,
+see D14). The `Accepted → Queued → Submitted / RejectedBusy` ladder is the
+*human*-message admission protocol, gated by `ensure_user_accepted`
+(`crates/domains/ironclaw_threads/src/filesystem_service.rs:4378`), which a
+system-class `Finalized` row fails on both halves — and `Queued` is excluded
+from `is_model_visible` (`filesystem_service.rs:4397`), so marking the row
+queued would hide the delivered result from the parent's own context,
+contradicting the delivery truth this section is built on. What 2b owes
+instead is one no-op: the queue's best-effort `Submitted` flip
+(`crates/loop/ironclaw_loop_host/src/input_queue.rs:572`) must return an
+already-terminal row unchanged, implemented beside the existing
+idempotent-resubmit early return in **both** thread backends — never by
+widening `ensure_user_accepted` to admit system rows, which would re-open the
+`Queued`/`RejectedBusy` path onto a result row and erase the system-vs-user
+distinction the acceptance door exists to hold. A crash after acceptance and
+before the enqueue leaves the edge in `ResultAppended`; re-drive enqueues, and
+the queue's own identity dedupe makes the double-enqueue attempt safe.
 
 **Attention** — the queue entry or the wake — is a separate durable
 obligation. The edge closes only after attention has a durable outcome:
@@ -352,7 +367,7 @@ intentionally suppressed.
 | `ironclaw_turn_runner` (resolver) | background tail: settle → idempotent append (`ResultAppended{message_ref}` on the edge) → schedule attention (enqueue or activate) → `AttentionScheduled` → close. Reuses `child_terminal_output` / summary framing from the blocking tail. Writes are per-edge (append, transition, enqueue are separate operations on existing interfaces); coalescing attention across simultaneous settles is an optional later optimization, not a normative claim. One typed input per child either way (D6). |
 | `ironclaw_loop_host` (spawn port) | delete both codec rejections and `background_subagents_disabled()`; advertise `mode` in the parameters schema (enum `["blocking","background"]`, default `blocking`); thread `args.mode` through `finish_spawn`; background spawns return the immediate receipt payload instead of `await_dependent_run`, and write their edge with `group_ref = "bg:{parent_thread_id}"` (the thread-indexed recovery key, §4.2). |
 | `ironclaw_processes` (dependency journal) | expected-state/metadata CAS transition on the dependency port, carrying the `ResultAppended`/`AttentionDeferred` substates and payloads; every journal implementation, decorator, and test double enumerated in the same change. |
-| `ironclaw_threads` | typed, idempotent subagent-result acceptance (system-class row, dedupe on the acceptance identity tuple — §4.1). |
+| `ironclaw_threads` | typed, idempotent subagent-result acceptance (system-class row, dedupe on the acceptance identity tuple — §4.1) — shipped, slice 2a. Plus, in 2b: `mark_message_submitted` returns an already-`Finalized` row unchanged in **both** backends (`filesystem_service.rs`, `in_memory.rs`), beside the existing idempotent-resubmit early return. **The result row is never marked `Queued`** (correction, 2026-08-21 — this row previously inherited §4.1's steering-ladder claim; `ensure_user_accepted` refuses it and `Queued` is not model-visible, see D14). `ensure_user_accepted` is **not** widened. Refusal pinned today by `crates/domains/ironclaw_threads/tests/subagent_result_acceptance.rs`. |
 | model-facing description | the spawn descriptor text in `subagent_spawn_port.rs` gains background wording (moves to a `prompts/*.md` file if it goes multi-line, per the repo prompt rule). |
 
 No new `Loop*Port`, no `LOOP_PORT_OWNERS` row, no new crate edge — the
@@ -564,6 +579,47 @@ the append-model design review.
   enums that have no tolerant reader, and slicing readers-before-writers
   turns that rolling-upgrade hazard (§4.3) into a deployment property at
   zero code cost. Reversal: cheap, it is a sequencing choice.
+
+- **D14 (2026-08-21, correction) The delivered result row never enters the
+  steering ladder.** §4.1 previously specified that the appended row "binds
+  to a queue entry exactly as steering rows do (`mark_message_queued` →
+  `enqueue_queued_message`)". That mechanism cannot work, and the obvious
+  patch would cost the invariant the row exists to hold. Verified against the
+  tree: the acceptance writes `kind: MessageKind::System, status:
+  MessageStatus::Finalized`
+  (`crates/domains/ironclaw_threads/src/filesystem_service.rs:2201`), while
+  `ensure_user_accepted` admits only `MessageKind::User` *and* status in
+  `{Accepted, DeferredBusy, Queued}` (`filesystem_service.rs:4378`,
+  `in_memory.rs:1820`) — both halves fail. Both `mark_message_queued`
+  (`filesystem_service.rs:2808`) and `mark_message_submitted`
+  (`filesystem_service.rs:2756`) call it, so the queue's best-effort
+  `flip_submitted` (`crates/loop/ironclaw_loop_host/src/input_queue.rs:572`)
+  would fail permanently, log at `debug!`, and **retain** the pending flip;
+  retained flips count against the ceiling
+  (`input_queue.rs:385`, `MAX_QUEUED_INPUTS_PER_RUN = 32`), so after 32 child
+  settlements a long-lived parent returns `CapacityExhausted` for everything
+  — human steering included — and `is_settled` (`input_queue.rs:549`) never
+  holds, so the durable per-run document is never reclaimed
+  (`durable_input_queue.rs:184`, `:370`). Even a succeeding
+  `mark_message_queued` would be wrong: it sets `Queued`, which
+  `is_model_visible` (`filesystem_service.rs:4397`) excludes, hiding the
+  already-appended result from the parent's model context — against this
+  design's own "delivery truth is the durable thread write".
+  **Resolution:** the row is appended `Finalized` and is never marked
+  `Queued`; 2b calls `enqueue_queued_message` alone, and puts the knowledge in
+  the layer that owns the lifecycle — an already-terminal row has nothing to
+  flip, so `mark_message_submitted` returns it unchanged, beside the existing
+  idempotent-resubmit early return in both thread backends. No new variant, no
+  `Option` on the request, no branch at the enqueue site. **Rejected:**
+  widening `ensure_user_accepted` to admit system rows — it would re-open
+  `Queued`/`RejectedBusy` onto a result row, making untrusted child text
+  indistinguishable from a human instruction on the admission contract; the
+  `System`-not-`User` shape is the point (§7). Today's refusal is pinned at
+  crate tier on both backends
+  (`crates/domains/ironclaw_threads/tests/subagent_result_acceptance.rs`,
+  `a_result_row_is_refused_by_the_steering_ladder`), so 2b meets a red test
+  rather than a wedged parent run. Reversal: cheap — the no-op is two early
+  returns, and the row shape is unchanged.
 
 ## 6. Roadmap
 
@@ -928,6 +984,10 @@ work and belongs to 2b.
   ref. Correction, 2026-08-21: the trait lives in `service.rs`, not
   `contract.rs` — `contract.rs` holds request/response DTOs only
   (`SessionThreadService` is declared at `service.rs:26`).
+- Modify (2b): `crates/domains/ironclaw_threads/src/filesystem_service.rs` +
+  `in_memory.rs` — `mark_message_submitted` returns an already-`Finalized`
+  row unchanged (the queue's best-effort flip has nothing to flip on a
+  terminal row). Not a widening of `ensure_user_accepted` — D14.
 - Modify: `crates/loop/ironclaw_turn_runner/src/subagent/await_edge/resolver.rs`
 - Modify: `crates/loop/ironclaw_loop_host/src/await_edge_port.rs`
   (`AwaitEdgeSettler` gains `bind_input_enqueue(&self, Arc<dyn HostInputEnqueuePort>) -> Result<(), TurnError>`)
@@ -945,8 +1005,15 @@ work and belongs to 2b.
    (replay-safe even when the edge recorded nothing); then
    `record_result_appended`.
 2. **Attend:** live parent run (via the bound
-   `AgentTurnSpawnTreeRuntimePort`) → `mark_message_queued` +
-   `enqueue_queued_message`; accepted → `record_attention(Queued)`.
+   `AgentTurnSpawnTreeRuntimePort`) → `enqueue_queued_message` **only**
+   (correction, 2026-08-21: never `mark_message_queued` — the appended row is
+   `System`/`Finalized`, `ensure_user_accepted` refuses it, and `Queued` is not
+   model-visible; §4.1, D14). Land the terminal-row no-op on
+   `mark_message_submitted` in both thread backends first, or the queue's
+   best-effort flip wedges the parent's input queue; the red test is already in
+   the tree (`crates/domains/ironclaw_threads/tests/subagent_result_acceptance.rs`,
+   `a_result_row_is_refused_by_the_steering_ladder`). Accepted →
+   `record_attention(Queued)`.
    `RunClosed` → re-query, fall through to parked (transition signal).
    No live run → `coordinator.activate(ActivateThreadRequest {
    scope/actor from edge.parent_run_context, accepted_message_ref: the
