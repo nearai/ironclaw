@@ -354,6 +354,87 @@ async fn input_stage_steering_input_is_drained_like_user_message() {
     }
 }
 
+/// The production caller — not the pure consume helper — owns the sequence a
+/// settled subagent result depends on: `InputStage::process` writes a
+/// `BeforeModel` checkpoint of the advanced cursor and only THEN acks, and the
+/// ack is what flips the queued transcript row to `Submitted` (model-visible).
+/// A `GateResolved` parked right behind the settled input pins the other half:
+/// the barrier stops the drain, so its ack token must never be acked and the
+/// cursor must not run past it. Both user-facing drain modes reach the settled
+/// input, so both are driven here.
+#[tokio::test]
+async fn input_stage_drains_subagent_settled_ahead_of_a_barrier_in_both_modes() {
+    for mode in [
+        UserFacingInputDrainMode::Steering,
+        UserFacingInputDrainMode::FollowUp,
+    ] {
+        let host = MockHost::new(Vec::new());
+        let run_context = host.run_context().clone();
+        let host = host.with_input_batches(vec![LoopInputBatch {
+            inputs: vec![
+                LoopInput::SubagentSettled {
+                    child_run_id: TurnRunId::new(),
+                    message_ref: message_ref("msg:child-result-1"),
+                },
+                LoopInput::GateResolved {
+                    gate_ref: LoopGateRef::new("gate:blocks-the-drain").expect("valid gate ref"),
+                },
+            ],
+            input_acks: vec![
+                input_ack(
+                    &run_context,
+                    "input-cursor:after-settled",
+                    "input-ack:settled",
+                ),
+                input_ack(&run_context, "input-cursor:after-gate", "input-ack:gate"),
+            ],
+            next_cursor: input_cursor(&run_context, "input-cursor:after-gate"),
+        }]);
+        let family = crate::families::default();
+        let ctx = StageContext {
+            planner: family.planner(),
+            host: &host,
+        };
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let step = InputStage
+            .process(ctx, DrainInput { state, mode })
+            .await
+            .expect("input stage");
+
+        match step {
+            InputStep::Continue { state, drained } => {
+                assert!(drained, "settled results must drain in {mode:?}");
+                assert_eq!(
+                    state.input_cursor,
+                    input_cursor(&run_context, "input-cursor:after-settled"),
+                    "the cursor stops at the barrier in {mode:?}"
+                );
+            }
+            InputStep::Exit(exit) => panic!("expected continue in {mode:?}, got {exit:?}"),
+        }
+
+        assert_eq!(
+            host.acked_input_tokens(),
+            vec![LoopInputAckToken::new("input-ack:settled").expect("valid ack token")],
+            "only the settled input is acked in {mode:?}; the gate stays queued"
+        );
+        assert_eq!(
+            host.checkpoint_kinds(),
+            vec![LoopCheckpointKind::BeforeModel],
+            "the advanced cursor is checkpointed in {mode:?}"
+        );
+        assert_eq!(
+            host.events(),
+            vec![
+                "checkpoint:before_model".to_string(),
+                "ack_inputs".to_string(),
+            ],
+            "the checkpoint must be durable before the ack in {mode:?}"
+        );
+    }
+}
+
 #[test]
 fn consume_drainable_inputs_empty_batch_short_circuits() {
     let host = MockHost::new(Vec::new());
