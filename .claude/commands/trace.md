@@ -15,6 +15,12 @@ Everything is **Reborn** (`crates/`) — the v1 `src/` monolith and its crates (
 
 ## Reborn flow anchors (verify with the recipe beside each — do not trust this table blindly)
 
+The canonical prose flow-map lives in `.claude/skills/ironclaw-reborn-orientation/SKILL.md` — read
+that first for the one-paragraph version. The table below is this command's own value-add: a
+per-hop, independently re-derivable grep recipe for tracing a specific symptom through each stage,
+not a second copy of the map. If the two ever disagree, the orientation skill is canonical; fix this
+table to match it rather than the other way around.
+
 | Hop | Anchor | Re-derive with |
 |---|---|---|
 | Browser JS | `crates/product/ironclaw_webui/frontend/src` API client and page modules | `rg -n "apiFetch\(" crates/product/ironclaw_webui/frontend/src` |

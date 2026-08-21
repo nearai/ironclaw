@@ -33,7 +33,7 @@ service over thread, turn, and projection ports.
 |------|------|
 | `DefaultProductSurface` | Top-level orchestrator implementing the `ProductSurface` trait |
 | `InboundTurnService` / `DefaultInboundTurnService` | User-message turn submission path |
-| `ConversationBindingService` | Resolves external adapter refs → canonical Reborn identifiers |
+| `ConversationBindingService` | Resolves external adapter refs → canonical Reborn identifiers (trait defined in `ironclaw_conversations`; adapted here) |
 | `ProductConversationBindingService` | Adapter from product workflow bindings to `ironclaw_conversations` with trusted installation→tenant mapping |
 | `StaticProductInstallationResolver` / `ProductInstallationScope` | Host-owned installation registry used by local-dev/tests to select tenant and default agent/project scope |
 | `SharedConversationAdmission` | Host-owned shared-conversation admission — answers only "is this shared conversation connected", fail-closed both without a wired port and for unlisted conversations; product workflow checks it before binding a shared conversation. **Declared in `ironclaw_product_contracts::shared_admission`** — product consumes it, `ironclaw_extension_host` implements it |
@@ -50,15 +50,24 @@ service over thread, turn, and projection ports.
 ## Ports that are no longer declared here
 
 WS2 moved the twelve product-side ports this crate declared whose
-implementation sits outside it (PROPOSAL §6.1.3) — **ten** implemented by
-`ironclaw_extension_host` (the set
-`crates/app/ironclaw_architecture_tests/tests/reborn_extension_host_port_inversion.rs`
-enumerates and pins as `INVERTED_PORTS`; WS2.1 moved nine and WS2.2 added the
-shared-route resolver — since reshaped admission-only as
-`SharedConversationAdmission` — once the boundary error made it
-declarable) and two by `ironclaw_composition` (`AdminUserService`,
-`RebornOperatorToolCatalog`). That test is the enforced inventory; this list is
-prose and defers to it.
+implementation sits outside it (PROPOSAL §6.1.3) — twelve enumerated and
+pinned by `crates/app/ironclaw_architecture_tests/tests/reborn_extension_host_port_inversion.rs`'s
+`INVERTED_PORT_IMPLEMENTORS`: **nine** implemented by `ironclaw_extension_host`
+and **three** by `ironclaw_extension_manager`
+(`ChannelConfigProductService`, `LifecycleProductService`,
+`RebornViewProvider` — moved there when the `ironclaw_extension_manager` split
+took the lifecycle product service, the admin-configuration view provider, and
+the channel-config product service out of the host; WS2.1 moved nine and WS2.2
+added the shared-route resolver — since reshaped admission-only as
+`SharedConversationAdmission` — once the boundary error made it declarable).
+That test is the enforced inventory for those twelve; this list is prose and
+defers to it. Two more ports moved out under the same PROPOSAL §6.1.3 effort
+but are **not** in that gate's inventory: `AdminUserService` (concrete
+implementation `RebornAdminUserDirectory` lives in this crate and is wired in
+by `ironclaw_composition`) and `RebornOperatorToolCatalog` (implemented by
+`ironclaw_composition`). No architecture gate currently pins either as a
+composition-side implementor — treat that pairing as prose, not enforced,
+until one does.
 They now live in `ironclaw_product_contracts` and this crate imports them like
 any other consumer — there is deliberately **no re-export** (the port half of
 `reborn_product_contract_location_scan.rs` fails on one):
@@ -86,7 +95,7 @@ crate.** Its `ironclaw_assistant` dependency is gone from the manifest, which is
 the point: operator is this crate's *sibling*, not its consumer. If you find
 yourself wanting to declare a trait here for the operator to implement, that is
 the inversion coming back — declare it in `ironclaw_product_contracts` and add
-a row to `INVERTED_PORTS` in that gate.
+a row to `INVERTED_PORT_IMPLEMENTORS` in that gate.
 
 What this crate kept from the operator move, and why: the frozen view
 descriptors (`LLM_CONFIG_VIEW`, `LOGS_VIEW`, `OPERATOR_LOGS_VIEW`) because the
@@ -291,7 +300,8 @@ by the sealed validated reply-target binding.
 
 ## `reborn_services` module-charter map
 
-`src/reborn_services.rs` is **7,554 lines** — the largest file in this crate —
+`src/reborn_services.rs` is the largest file in this crate (`wc -l` to
+re-derive the current count) —
 and carries a live `// arch-exempt: large_file` waiver naming plan #5985. This
 map is **not** that split and does not discharge that waiver: PROPOSAL §6.4.15
 calls this shape "module-charter work, **not a split**", and §6.9.1 asks for

@@ -153,8 +153,8 @@ IGNORED_PREFIXES = (
     ".codebase-memory/",
 )
 IGNORED_GUIDANCE_PATHS = {
-    "tests/CLAUDE.md",
-    "tests/integration/CLAUDE.md",
+    "tests/AGENTS.md",
+    "tests/integration/AGENTS.md",
 }
 # Repo-root prose/example files with no build or test surface. Root `*.md` is
 # already handled inline below; this covers the non-`.md` siblings.
@@ -451,9 +451,10 @@ PR_STATIC_CONTROL_PATHS = {
     #     path sweep touched its docstring.
     "scripts/check-type-duplicates.py",
     #   * `render-architecture-video.sh` is a local one-command Remotion
-    #     render for docs/internal/architecture-video; referenced only by the
-    #     `architecture-video` Claude skill, never by a workflow. Same PR,
-    #     same reason: the sweep rewrote its VIDEO_DIR path.
+    #     render for docs/internal/architecture-video; never invoked by a
+    #     workflow (the `architecture-video` Claude skill that used to
+    #     reference it was deleted as stale v1-architecture content — see
+    #     `.claude/skills/`). No lane can exercise a change to it.
     "scripts/render-architecture-video.sh",
     #   * `pre-commit-safety.sh` is a local git hook, not a CI lane.
     "scripts/pre-commit-safety.sh",

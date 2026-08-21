@@ -1,6 +1,11 @@
 # Unified channel model — target architecture
 
-**Status:** Target design (approved direction, 2026-08-10). Not yet built.
+**Status:** Shipped. Originally a target design (approved direction,
+2026-08-10); the channel-adapter contract described here is built (as the
+split `ChannelIngress`/`ChannelReply`/`ChannelDelivery` traits, see
+`crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs`) and
+this document is still cited as the design rationale from
+`delivery_coordinator.rs` and `inbound_turn.rs`.
 **Audience:** Any agent touching channel inbound, outbound/reply, notifications,
 notification enrollment/setup, or the web-app/web-push surface. **Read this
 first** — the code is mid-migration toward it and the old shape (channel-specific
@@ -11,7 +16,7 @@ Owning families: `crates/extensions/` (adapters + host), `crates/contracts/ironc
 (the `ChannelAdapter` + descriptor vocabulary), `crates/product/` (the shared
 inbound/reply/notification core). Cross-ref:
 `docs/internal/reborn/target-architecture/families/extensions.md`,
-`.claude/rules/gateway-events.md`, `.claude/rules/safety-and-sandbox.md`.
+`.claude/rules/events.md`, `.claude/rules/safety-and-sandbox.md`.
 
 ---
 
@@ -131,7 +136,7 @@ channel and vice versa; everything below `submit_turn` is shared unchanged.
 ### Reply model (symmetric — abstract events, channel-declared delivery)
 Turn execution emits **abstract, durable reply events** (`thinking`,
 partial/token, tool-activity, `final`) through the event log → projections
-(`.claude/rules/gateway-events.md`), so replay/reconnect are preserved. The
+(`.claude/rules/events.md`), so replay/reconnect are preserved. The
 channel declares a **reply mode**; the adapter's **reply sink** consumes the
 (live + replayed) stream per mode:
 
@@ -243,7 +248,7 @@ No route names a channel. Enforced by extending the specificity gate (§13).
 - A session channel has no webhook mount (validation + verifier fail-closed).
 - Tenant/actor come from trusted config, never the payload.
 - Reply events are durable before delivery; the reply sink never invents
-  un-replayable state (`.claude/rules/gateway-events.md`).
+  un-replayable state (`.claude/rules/events.md`).
 - Egress credentials + notification-setup secrets are host-managed; the adapter
   gets references/mediated effects, never raw material
   (`.claude/rules/safety-and-sandbox.md`). Web-app VAPID stays host-seeded.

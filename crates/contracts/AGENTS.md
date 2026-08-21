@@ -1,6 +1,6 @@
 # `crates/contracts/` — neutral vocabulary and ports; nothing here runs, stores, or decides
 
-**Layer(s):** `contracts` (all 6 crates) · **Crates:** 6 · **May depend on:** nothing outside this family — the three foundational crates hold zero internal deps; the three port crates hold only the intra-family edges named below · **Depended on by:** every other family (53 workspace manifests name `ironclaw_host_api` alone — `grep -rl '^ironclaw_host_api = ' --include=Cargo.toml crates tests Cargo.toml`).
+**Layer(s):** `contracts` (all 6 crates) · **Crates:** 6 · **May depend on:** nothing outside this family — the three foundational crates hold zero internal deps; the three port crates hold only the intra-family edges named below · **Depended on by:** every other family (re-derive the fan-in with `grep -rl '^ironclaw_host_api = ' --include=Cargo.toml crates tests Cargo.toml | wc -l`).
 
 ## What this family is
 

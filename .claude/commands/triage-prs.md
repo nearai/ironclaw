@@ -22,7 +22,7 @@ If `$ARGUMENTS` contains `--label=<X>`, append `--label '<X>'` to the `gh pr lis
 Also fetch recently merged PRs (last 7 days) to detect superseded/conflicting work:
 
 ```
-gh pr list --state merged --search "merged:>=$(date -v-7d +%Y-%m-%d)" --limit 100 --json number,title,body,mergedAt
+gh pr list --state merged --search "merged:>=$(date -d '7 days ago' +%Y-%m-%d)" --limit 100 --json number,title,body,mergedAt
 ```
 
 ## Step 2: Classify each PR by module
@@ -47,6 +47,8 @@ For each open PR, determine the primary module it touches by examining the `file
 
 If a PR touches multiple modules, assign it to the **primary** module (most files changed) but note the cross-cutting modules.
 
+Note: CI's own scope labeler (`.github/workflows/pr-label-scope.yml` + `.github/labeler.yml`) targets pre-Reborn `src/**` paths that no longer exist, so it never actually fires `scope: *` labels on current PRs — this manual, `crates/`-accurate table is the only working source of module classification today. Do not substitute the `labels` field for this step.
+
 ## Step 3: Assess review state
 
 For each PR, determine its review status:
@@ -64,7 +66,13 @@ Also check:
 
 ## Step 4: Determine scope and risk
 
-Classify each PR by scope:
+CI already classifies every PR on open/sync via `.github/workflows/pr-label-classify.yml`
+(`.github/scripts/pr-labeler.sh`), which sets an exclusive `size: XS|S|M|L|XL` label (by total
+additions+deletions) and an exclusive `risk: *` label. Read these from the `labels` field already
+fetched in Step 1 instead of re-deriving line-count buckets — only fall back to computing size
+yourself (below) if the PR predates the labeler or its label is missing (e.g. CI hasn't run yet).
+
+Fallback scope table (only if `size: *` label absent):
 
 | Scope | Criteria |
 |-------|----------|

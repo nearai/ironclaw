@@ -5,7 +5,7 @@ description: Use when adding or reviewing tests for Reborn behavior — choosing
 
 # Reborn Testing
 
-Pick the tier first; everything else follows. The repo's tier knowledge lives in `tests/integration/CLAUDE.md` (read it before writing harness tests); this skill is the decision layer plus the traps.
+Pick the tier first; everything else follows. The repo's tier knowledge lives in `tests/integration/AGENTS.md` (read it before writing harness tests); this skill is the decision layer plus the traps.
 
 ## Tier decision tree
 

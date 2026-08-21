@@ -29,8 +29,8 @@ Older guidance (including earlier versions of this skill) told you to avoid a "v
 
 ## Two skill systems (do not conflate)
 
-`.claude/skills/` = developer workflow (this skill). Top-level `skills/` = **product runtime skills compiled into the shipping binaries**. Editing `skills/` changes the product. See `ironclaw-reborn-skill-maintainer` before touching either.
+`.claude/skills/` = developer workflow (this skill). Top-level `skills/` = **product runtime skills compiled into the shipping binaries**. Editing `skills/` changes the product. See `.claude/rules/guidance-maintenance.md` before touching either.
 
 ## Sibling skills
 
-`reborn-feature` (build a feature) · `ironclaw-reborn-architecture-review` (boundaries/abstractions) · `ironclaw-reborn-testing` (tiers/harness) · `ironclaw-reborn-skill-maintainer` (guidance hygiene).
+`reborn-feature` (build a feature) · `ironclaw-reborn-architecture-review` (boundaries/abstractions) · `ironclaw-reborn-testing` (tiers/harness) · `.claude/rules/guidance-maintenance.md` (guidance hygiene, auto-loads on `.claude/**`/`AGENTS.md`/`CLAUDE.md`/`skills/**`).

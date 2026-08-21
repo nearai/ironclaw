@@ -330,7 +330,7 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
 - `capability_activity` / `capability_display_preview` frames carry only
   bounded, secret-redacted input/output *summaries* (host paths rejected, URLs
   stripped, byte-bounded) — never raw args/results. Full output stays behind the
-  scoped `result_ref` fetch path. See `.claude/rules/gateway-events.md`.
+  scoped `result_ref` fetch path. See `.claude/rules/events.md`.
 
 ### SPA bundle
 

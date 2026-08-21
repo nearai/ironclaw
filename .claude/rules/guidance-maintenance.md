@@ -1,8 +1,10 @@
 ---
-name: ironclaw-reborn-skill-maintainer
-description: Use when creating or editing agent guidance in this repo — anything under .claude/ (skills, commands, rules), AGENTS.md or CLAUDE.md files, or the runtime skills/ directory — or when guidance is found citing files, branches, or checks that no longer exist.
+paths:
+  - ".claude/**"
+  - "**/AGENTS.md"
+  - "**/CLAUDE.md"
+  - "skills/**"
 ---
-
 # IronClaw Guidance & Skill Maintenance
 
 Every rule below counters a rot pattern this repo's guidance is prone to. Guidance is code: it has callers (agents), it breaks silently, and it needs the same review discipline.
@@ -18,7 +20,7 @@ Every rule below counters a rot pattern this repo's guidance is prone to. Guidan
    - Corollary: the v1-only enclave that older guidance warns about — `ironclaw_engine`, `ironclaw_tui`, `ironclaw_gateway`, `ironclaw_oauth` — **no longer exists**. Never re-introduce those names into a flow/architecture map, and treat any doc that still lists them as drift to fix (check `ironclaw-reborn-orientation` when unsure).
 2. **Verify every concrete reference at write time — and make it re-verifiable.** Branches die silently; prefer in-tree worked examples over branch/PR refs. For each cited path/symbol, keep a one-line grep a maintainer can re-run.
 3. **No universal claims without a count.** Avoid absolute docs coverage claims. Write "most; fall back to Cargo.toml + lib.rs" or generate the list.
-4. **Triggers live in frontmatter `description`, nowhere else.** The runtime surfaces only frontmatter for selection; a "when to use" buried in the body is invisible. Description = triggering conditions only — never a workflow summary (agents will follow the summary and skip the body).
+4. **Triggers live in frontmatter `description`, nowhere else.** The runtime surfaces only frontmatter for selection; a "when to use" buried in the body is invisible. Description = triggering conditions only — never a workflow summary (agents will follow the summary and skip the body). This applies to `.claude/skills/*/SKILL.md` and `.claude/commands/*.md` frontmatter; this rule itself has no `description` because rules auto-load on path match rather than being selected by one.
 5. **Never claim enforcement that doesn't exist.** Before writing "enforced by X", run X. If you add a check to `scripts/pre-commit-safety.sh`, add its self-test — and know there are two hook install paths (`.githooks/` vs `scripts/dev-setup.sh` symlink); a check is only real if both run it.
 6. **After any extraction/move/rename, grep the guidance layer** for old paths in the same PR: `.claude/`, `AGENTS.md`, `CLAUDE.md`, `crates/AGENTS.md`, `docs/internal/reborn/contracts/`, skill bodies.
 7. **Runtime-skill spec must track the parser.** `crates/domains/ironclaw_skills/src/types.rs` supports `requires.config`, `requires.skills`, `activation.setup_marker`, and silently truncates >20 keywords / >5 patterns (`enforce_limits`). If you use or change parser behavior, update `.claude/rules/skills.md` in the same PR.
@@ -30,7 +32,7 @@ Every rule below counters a rot pattern this repo's guidance is prone to. Guidan
 ## Definition of done for a guidance PR
 
 - [ ] Every cited path/symbol/branch verified against HEAD (grep output in PR description)
-- [ ] Frontmatter description = triggers only, third person
+- [ ] Frontmatter description = triggers only, third person (skills and commands only — this rule has no description)
 - [ ] Enforcement claims executed, not assumed
 - [ ] Fresh-agent trap test run for behavior-changing edits (result noted)
 - [ ] Old-path grep clean after moves

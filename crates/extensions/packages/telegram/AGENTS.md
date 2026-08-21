@@ -43,7 +43,7 @@
 ## Dependency Rule
 
 The package's `ironclaw_*` dependency set is exactly Slack's — `host_api`,
-`extension_contracts`, `product_contracts`, `attachments` — and nothing else.
+`extension_contracts`, `attachments` — and nothing else.
 No `ironclaw_assistant`, no registry, no extension host: a concrete package crate
 is linked only by the binary and by tests
 (`concrete_extension_crates_link_only_from_the_binary_and_tests`).
