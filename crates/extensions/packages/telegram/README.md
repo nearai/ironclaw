@@ -39,17 +39,21 @@ authorization, and tool mediation remain host-owned. Working rules:
 
 ## Upgrade behavior
 
-No database migration converts Telegram's retired bot-pairing ceremony into a
-linked personal account, and no compatibility bridge keeps that ceremony's
-rows alive: **the cutover is deliberately breaking for previously paired
-users**. A proof-code binding written before this release stops authorizing
-anything — identity lookups for a device-link channel consult only the
-versioned `device-link-v1` namespace, so the retired row is inert data. A
-previously paired user finds the channel back in setup, receives the
-connect-required notice if they DM the bot, and links their device once; from
-then on the same verified link serves the bot conversation and the personal
-Telegram capabilities. That is the identical first-run ceremony a fresh
-install gets — missing credentials mean setup, exactly like every other
-extension. Inert pre-cutover rows are not bulk-deleted; a user's removal or
-disconnect revokes the personal session and deletes both identity generations
-and the DM target.
+Telegram now keeps its two caller-owned connection paths independent:
+
+- Workspace-bot access uses the generic generated-code pairing service. It
+  binds the verified Bot API actor to an IronClaw user and does not create an
+  MTProto session or grant personal-account tools.
+- Personal-account access uses device link. It creates the caller-owned MTProto
+  credential account and does not connect that caller to the workspace bot.
+
+The host-bundled manifest digest migrates installed Telegram records on restart,
+so no database schema migration is required. Existing unversioned bot-pairing
+bindings become active again because generated-code pairing owns that namespace.
+Existing `device-link-v1` bindings and linked sessions remain available to
+personal tools but no longer satisfy bot-channel admission. Users who only
+completed device link must pair the bot once if they want that entrypoint.
+
+Rollback restores `device_link` as the channel strategy. That makes generated
+bot-pairing bindings inert and lets existing `device-link-v1` bindings satisfy
+channel admission again; linked personal sessions are not deleted.

@@ -227,7 +227,7 @@ host = "api.acme.example"
 methods = ["post"]
 "#;
 
-const DEVICE_LINK_CHANNEL_MANIFEST: &str = r#"
+pub(crate) const DEVICE_LINK_CHANNEL_MANIFEST: &str = r#"
 schema_version = "reborn.extension_manifest.v3"
 id = "acme-link"
 name = "Acme Link"

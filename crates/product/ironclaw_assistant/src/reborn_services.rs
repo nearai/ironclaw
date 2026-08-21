@@ -7391,6 +7391,7 @@ fn map_thread_error(error: SessionThreadError) -> ProductSurfaceError {
         }
         SessionThreadError::InvalidAttachment(_)
         | SessionThreadError::InvalidPreparedContext { .. }
+        | SessionThreadError::InvalidSubagentResult { .. }
         | SessionThreadError::PreparedContextKeyMismatch { .. } => {
             ProductSurfaceError::from_status_kind(
                 ProductSurfaceErrorCode::InvalidRequest,

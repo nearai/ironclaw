@@ -33,6 +33,9 @@ use ironclaw_extension_contracts::external::{
 use ironclaw_extension_contracts::preference_target::{
     PreferenceTargetCodec, PreferenceTargetEncodeRequest,
 };
+use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
+use ironclaw_host_api::path::{MountAlias, VirtualPath};
 use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
 use ironclaw_host_api::product_adapter::{
     AdapterInstallationId, ProductAdapterError, ProductAdapterId,
@@ -46,6 +49,10 @@ use ironclaw_host_api::{
     attachment::WorkspaceFile,
     ids::{AgentId, ExtensionId, TenantId, ThreadId, UserId},
     path::ScopedPath,
+};
+use ironclaw_notifications::{
+    ListNotificationsRequest, NotificationInboxStore, NotificationInboxStorePort, NotificationKind,
+    NotificationRecipient,
 };
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceKey, CommunicationPreferenceRecord,
@@ -125,6 +132,7 @@ struct ScriptedTurnCoordinator {
     clamp_at_last: bool,
     calls: Mutex<usize>,
     cancel_calls: Mutex<Vec<TurnRunId>>,
+    state_override: Mutex<Option<ScriptedRunState>>,
     /// Optional late transition: from call `flip.0` on, `flip.1` is returned
     /// instead of the scripted sequence — used to race a terminal state in
     /// after the wait backstop has already fired. One tuple keeps the flip
@@ -140,6 +148,7 @@ impl ScriptedTurnCoordinator {
             clamp_at_last: true,
             calls: Mutex::new(0),
             cancel_calls: Mutex::new(Vec::new()),
+            state_override: Mutex::new(None),
             flip: None,
         }
     }
@@ -156,12 +165,21 @@ impl ScriptedTurnCoordinator {
             clamp_at_last: true,
             calls: Mutex::new(0),
             cancel_calls: Mutex::new(Vec::new()),
+            state_override: Mutex::new(None),
             flip: Some((flip_after, terminal)),
         }
     }
 
     fn cancel_call_count(&self) -> usize {
         self.cancel_calls.lock().expect("cancel calls").len()
+    }
+
+    fn set_state(&self, state: ScriptedRunState) {
+        *self.state_override.lock().expect("state override") = Some(state);
+    }
+
+    fn call_count(&self) -> usize {
+        *self.calls.lock().expect("calls")
     }
 }
 
@@ -199,16 +217,19 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
         let mut calls = self.calls.lock().expect("calls");
         let call = *calls;
         *calls += 1;
-        let scripted = match self.flip {
-            Some((flip_after, ref terminal)) if call >= flip_after => terminal.clone(),
-            _ => {
-                let idx = if self.clamp_at_last {
-                    call.min(self.states.len() - 1)
-                } else {
-                    call % self.states.len()
-                };
-                self.states[idx].clone()
-            }
+        let scripted = match self.state_override.lock().expect("state override").clone() {
+            Some(state) => state,
+            None => match self.flip {
+                Some((flip_after, ref terminal)) if call >= flip_after => terminal.clone(),
+                _ => {
+                    let idx = if self.clamp_at_last {
+                        call.min(self.states.len() - 1)
+                    } else {
+                        call % self.states.len()
+                    };
+                    self.states[idx].clone()
+                }
+            },
         };
         Ok(TurnRunState {
             scope: request.scope.clone(),
@@ -795,6 +816,69 @@ fn fallback_scope() -> TurnScope {
     )
 }
 
+fn notification_inbox() -> Arc<NotificationInboxStore<InMemoryBackend>> {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/notifications").expect("notification mount alias"),
+        VirtualPath::new("/engine/test/run-delivery-notifications")
+            .expect("notification mount target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("notification mount view");
+    Arc::new(NotificationInboxStore::new(
+        Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::new()),
+            mounts,
+        )),
+        ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
+    ))
+}
+
+async fn inbox_records(
+    inbox: &dyn NotificationInboxStorePort,
+) -> ironclaw_notifications::NotificationPage {
+    inbox
+        .list(ListNotificationsRequest {
+            recipient: NotificationRecipient {
+                tenant_id: tenant(),
+                user_id: user(),
+            },
+            limit: 10,
+            cursor: None,
+            include_archived: false,
+        })
+        .await
+        .expect("notification inbox")
+}
+
+async fn wait_for_inbox_resolution(
+    inbox: &dyn NotificationInboxStorePort,
+    expected_kind: NotificationKind,
+    expected_lifecycle_ref: &str,
+) {
+    for _ in 0..500 {
+        let page = inbox_records(inbox).await;
+        if page
+            .notifications
+            .iter()
+            .find(|notification| {
+                notification.kind == expected_kind
+                    && notification
+                        .source
+                        .lifecycle_ref
+                        .as_ref()
+                        .is_some_and(|reference| reference.as_str() == expected_lifecycle_ref)
+            })
+            .is_some_and(|notification| notification.resolved_at.is_some())
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    panic!(
+        "Inbox notification {expected_kind:?}/{expected_lifecycle_ref} did not resolve before the test deadline"
+    );
+}
+
 fn envelope_for_conversation(
     payload: ProductInboundPayload,
     event_id: &str,
@@ -883,6 +967,7 @@ struct Harness {
     adapter: Arc<RecordingChannelAdapter>,
     store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     route_store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    notification_inbox: Arc<NotificationInboxStore<InMemoryBackend>>,
     turns: Arc<ScriptedTurnCoordinator>,
     threads: Arc<InMemorySessionThreadService>,
 }
@@ -970,6 +1055,7 @@ fn build_harness_with_gate_ports(
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let route_store =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let notification_inbox = notification_inbox();
     let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     let threads = Arc::new(InMemorySessionThreadService::default());
     let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
@@ -995,6 +1081,9 @@ fn build_harness_with_gate_ports(
         outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
+        notification_inbox: Some(
+            Arc::clone(&notification_inbox) as Arc<dyn NotificationInboxStorePort>
+        ),
         project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
         delivery_targets: Arc::new(StaticTargetCatalog {
             targets: Vec::new(),
@@ -1022,6 +1111,7 @@ fn build_harness_with_gate_ports(
         adapter,
         store,
         route_store,
+        notification_inbox,
         turns,
         threads,
     }
@@ -1678,6 +1768,13 @@ async fn observer_marks_needs_input_while_blocked_then_swaps_back_and_completes(
         2,
         "the working indicator is re-posted after the gate cycle: {texts:?}"
     );
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::ApprovalRequired
+    );
+    assert!(inbox.notifications[0].resolved_at.is_some());
 }
 
 /// A long-running run refreshes its working indicator in place with escalating
@@ -1838,6 +1935,13 @@ async fn observer_retracts_working_indicator_and_auth_prompt_after_auth_completi
             .iter()
             .all(|attempt| attempt.status == ironclaw_outbound::OutboundDeliveryStatus::Delivered)
     );
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::AuthenticationRequired
+    );
+    assert!(inbox.notifications[0].resolved_at.is_some());
 }
 
 #[tokio::test]
@@ -1900,6 +2004,13 @@ async fn observer_records_gate_route_after_approval_prompt() {
         .expect("route lookup")
         .expect("gate route recorded");
     assert_eq!(route.run_id, run_id);
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::ApprovalRequired
+    );
+    assert_eq!(inbox.unread_count, 1);
     assert!(
         !route.delivered_conversation_fingerprints.is_empty(),
         "fingerprints recorded"
@@ -2080,6 +2191,14 @@ async fn observer_delivers_a_prompt_for_each_distinct_auth_gate() {
         prompts.len(),
         2,
         "each distinct auth gate must deliver its own prompt: {texts:?}"
+    );
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 2);
+    assert!(
+        inbox
+            .notifications
+            .iter()
+            .all(|notification| { notification.kind == NotificationKind::AuthenticationRequired })
     );
 }
 
@@ -2672,6 +2791,7 @@ struct TriggeredHarness {
     store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     route_store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     delivery_store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    notification_inbox: Arc<NotificationInboxStore<InMemoryBackend>>,
     turns: Arc<ScriptedTurnCoordinator>,
     threads: Arc<InMemorySessionThreadService>,
 }
@@ -2770,6 +2890,7 @@ fn build_triggered_harness_with_turns_catalog(
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let delivery_store =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let notification_inbox = notification_inbox();
     let threads = Arc::new(InMemorySessionThreadService::default());
     let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
     let codecs = Arc::new(GrowableCodecs::with_initial(initially_active));
@@ -2796,6 +2917,9 @@ fn build_triggered_harness_with_turns_catalog(
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: communication_preferences
             .unwrap_or_else(|| Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>),
+        notification_inbox: Some(
+            Arc::clone(&notification_inbox) as Arc<dyn NotificationInboxStorePort>
+        ),
         project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
         delivery_targets: delivery_targets.unwrap_or_else(|| {
             Arc::new(StaticTargetCatalog { targets: catalog })
@@ -2836,6 +2960,7 @@ fn build_triggered_harness_with_turns_catalog(
         store,
         route_store,
         delivery_store,
+        notification_inbox,
         turns,
         threads,
     }
@@ -3303,6 +3428,64 @@ async fn triggered_second_gate_announces_instead_of_deduping_against_the_first()
     }
 }
 
+#[tokio::test]
+async fn triggered_failed_gate_fanout_still_resolves_the_inbox_after_resume() {
+    const GATE: &str = "gate:approval-00000000000000000000000000000023";
+    let harness = build_triggered_harness(
+        vec![
+            scripted_state(TurnStatus::BlockedApproval, Some(GATE)),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Completed, None),
+        ],
+        None,
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    harness
+        .adapter
+        .reports
+        .lock()
+        .expect("reports lock")
+        .push_back(DeliveryReport {
+            prune_registrations: Vec::new(),
+            parts: vec![PartDeliveryOutcome::Permanent {
+                reason: "scripted failure".to_string(),
+            }],
+        });
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Failed
+    );
+    wait_for_inbox_resolution(
+        harness.notification_inbox.as_ref(),
+        NotificationKind::ApprovalRequired,
+        GATE,
+    )
+    .await;
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::ApprovalRequired
+    );
+    assert!(
+        inbox.notifications[0].resolved_at.is_some(),
+        "external fan-out failure must not strand the durable Inbox gate"
+    );
+    assert_eq!(
+        harness.adapter.texts().len(),
+        1,
+        "Inbox-only observation must not retry external delivery"
+    );
+}
+
 /// Spec §7: an OAuth `authorization_url` may only land in a personal DM.
 /// Non-DM notification channels get a redacted "needs re-auth, open the app"
 /// notice instead, and the run is NO LONGER cancelled — it parks so the user
@@ -3694,6 +3877,80 @@ async fn triggered_timeout_notice_delivery_failure_records_failed() {
 }
 
 #[tokio::test]
+async fn triggered_gate_resolves_inbox_after_delivery_wait_timeout() {
+    const GATE: &str = "gate:approval-00000000000000000000000000000024";
+    let turns = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+        TurnStatus::BlockedApproval,
+        Some(GATE),
+    )]));
+    let harness = build_triggered_harness_with_turns(Arc::clone(&turns), None, vec![DM_TARGET]);
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Delivered
+    );
+    turns.set_state(scripted_state(TurnStatus::Completed, None));
+    wait_for_inbox_resolution(
+        harness.notification_inbox.as_ref(),
+        NotificationKind::ApprovalRequired,
+        GATE,
+    )
+    .await;
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::ApprovalRequired
+    );
+    assert!(
+        inbox.notifications[0].resolved_at.is_some(),
+        "the Inbox gate must resolve when the run finishes after max_wait"
+    );
+    assert_eq!(
+        harness.adapter.texts().len(),
+        1,
+        "post-timeout Inbox observation must not send a terminal channel notice"
+    );
+}
+
+#[tokio::test]
+async fn triggered_abandoned_gate_inbox_observer_stops_after_total_deadline() {
+    const GATE: &str = "gate:approval-00000000000000000000000000000025";
+    let turns = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+        TurnStatus::BlockedApproval,
+        Some(GATE),
+    )]));
+    let harness = build_triggered_harness_with_turns(Arc::clone(&turns), None, vec![DM_TARGET]);
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Delivered
+    );
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let calls_after_deadline = turns.call_count();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        turns.call_count(),
+        calls_after_deadline,
+        "an abandoned gate must not retain a polling task after the observation deadline"
+    );
+}
+
+#[tokio::test]
 async fn triggered_run_crossing_terminal_during_timeout_grace_delivers_cancellation_notice() {
     // Regression guard: a run still in flight at the wait backstop but which
     // crosses into a terminal state during the bounded race-grace window
@@ -3749,10 +4006,14 @@ async fn triggered_run_crossing_terminal_during_timeout_grace_delivers_cancellat
 #[tokio::test]
 async fn triggered_empty_notification_set_delivers_nothing() {
     let harness = build_triggered_harness(
-        vec![scripted_state(
-            TurnStatus::BlockedApproval,
-            Some("gate:approval-00000000000000000000000000000010"),
-        )],
+        vec![
+            scripted_state(
+                TurnStatus::BlockedApproval,
+                Some("gate:approval-00000000000000000000000000000010"),
+            ),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Completed, None),
+        ],
         None,
         vec![DM_TARGET, SHARED_TARGET],
     );
@@ -3777,12 +4038,29 @@ async fn triggered_empty_notification_set_delivers_nothing() {
         .await
         .expect("attempts");
     assert!(attempts.is_empty(), "no delivery attempt: {attempts:?}");
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::ApprovalRequired
+    );
+    assert!(
+        inbox.notifications[0].resolved_at.is_some(),
+        "the WebUI-only watcher resolves the gate notification after the run resumes"
+    );
 }
 
 #[tokio::test]
 async fn triggered_notification_preference_read_failure_is_not_reported_as_no_configuration() {
     let harness = build_triggered_harness_with_preferences(
-        vec![scripted_state(TurnStatus::Completed, None)],
+        vec![
+            scripted_state(
+                TurnStatus::BlockedApproval,
+                Some("gate:approval-00000000000000000000000000000011"),
+            ),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Completed, None),
+        ],
         None,
         vec![DM_TARGET],
         vec![DM_TARGET],
@@ -3801,6 +4079,16 @@ async fn triggered_notification_preference_read_failure_is_not_reported_as_no_co
         "a storage outage must stay distinguishable from an intentionally empty channel set"
     );
     assert!(harness.adapter.texts().is_empty(), "nothing was resolved");
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::ApprovalRequired
+    );
+    assert!(
+        inbox.notifications[0].resolved_at.is_some(),
+        "the WebUI gate must still settle after an external preference lookup outage"
+    );
 }
 
 /// Regression: the notifier reads the ACTIVE codec set at every fire.
@@ -4189,6 +4477,7 @@ fn notify_user_fixture(
         outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
+        notification_inbox: None,
         project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
         delivery_targets: Arc::new(StaticTargetCatalog {
             targets: catalog.clone(),

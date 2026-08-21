@@ -32,6 +32,7 @@ mod connect;
 mod container_identity;
 mod credential_firewall;
 mod key_codec;
+mod managed_egress;
 mod mounts;
 mod network_allowlist;
 mod railway;
@@ -39,6 +40,8 @@ mod scope_key;
 pub(crate) mod shell_limits;
 mod user_container;
 mod worker_spec;
+
+use managed_egress::{ManagedEgressBundle, ManagedEgressConfig, ManagedEgressRuntime};
 
 // `user_key` is the shared per-user workspace and local Docker container
 // identity. Railway keeps its existing backend-specific lifecycle.
@@ -52,9 +55,8 @@ pub use broker::{RebornSandboxNetworkBroker, RebornSandboxSecretBroker};
 pub use connect::{SandboxDockerReadiness, connect_docker_with_retry, sandbox_docker_readiness};
 pub use container_identity::{RebornSandboxContainerIdentity, RebornSandboxWorkspaceMode};
 pub use network_allowlist::{
-    DEFAULT_SANDBOX_ALLOWED_DOMAINS, DEFAULT_SANDBOX_MAX_EGRESS_BYTES,
-    SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, SANDBOX_MAX_EGRESS_BYTES_ENV, sandbox_allowed_domains,
-    sandbox_extra_allowed_domains, sandbox_max_egress_bytes, sandbox_network_policy,
+    DEFAULT_SANDBOX_ALLOWED_DOMAINS, SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, sandbox_allowed_domains,
+    sandbox_extra_allowed_domains, sandbox_network_policy,
 };
 pub use railway::{RailwayPreviewSandboxConfig, RailwayPreviewSandboxTransport};
 pub use registry::SandboxActivityRegistry;
@@ -74,10 +76,21 @@ pub const USER_SANDBOX_LABEL_IMAGE: &str = registry::USER_CONTAINER_LABEL_IMAGE;
 /// Stable security-posture label on local per-user sandbox containers.
 pub const USER_SANDBOX_LABEL_SECURITY_POSTURE: &str =
     registry::USER_CONTAINER_LABEL_SECURITY_POSTURE;
+/// Stable tenant label on managed-egress proxy containers.
+pub const USER_SANDBOX_PROXY_LABEL_TENANT: &str = "ironclaw.proxy.tenant";
+/// Stable user label on managed-egress proxy containers.
+pub const USER_SANDBOX_PROXY_LABEL_USER: &str = "ironclaw.proxy.user";
+/// Stable tenant label on managed-egress private networks.
+pub const USER_SANDBOX_NETWORK_LABEL_TENANT: &str = "ironclaw.network.tenant";
+/// Stable user label on managed-egress private networks.
+pub const USER_SANDBOX_NETWORK_LABEL_USER: &str = "ironclaw.network.user";
+/// Digest-pinned managed-egress proxy image used by sandbox profiles.
+pub const DEFAULT_SANDBOX_PROXY_IMAGE: &str = managed_egress::DEFAULT_PROXY_IMAGE;
 
 const DEFAULT_IMAGE: &str = "ironclaw-worker:latest";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(shell_limits::SHELL_TIMEOUT_DEFAULT_SECS);
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const DEFAULT_RETENTION_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 // Cover the longest admitted shell command plus host-kill and reconcile grace.
 const USER_LIFECYCLE_GATE_ACQUIRE_TIMEOUT: Duration =
     Duration::from_secs(shell_limits::SHELL_TIMEOUT_MAX_SECS + 10);
@@ -117,12 +130,13 @@ pub struct RebornSandboxConfig {
     image: String,
     default_timeout: Duration,
     idle_timeout: Duration,
+    retention_timeout: Duration,
     memory_bytes: u64,
     cpu_shares: u32,
     max_output_bytes: usize,
-    disable_network: bool,
     network_broker: Option<RebornSandboxNetworkBroker>,
     secret_broker: Option<RebornSandboxSecretBroker>,
+    managed_egress: Option<ManagedEgressConfig>,
     container_identity: RebornSandboxContainerIdentity,
 }
 
@@ -136,12 +150,13 @@ impl RebornSandboxConfig {
                 .unwrap_or_else(|_| DEFAULT_IMAGE.to_string()),
             default_timeout: DEFAULT_TIMEOUT,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
+            retention_timeout: DEFAULT_RETENTION_TIMEOUT,
             memory_bytes: DEFAULT_MEMORY_BYTES,
             cpu_shares: DEFAULT_CPU_SHARES,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
-            disable_network: true,
             network_broker: None,
             secret_broker: None,
+            managed_egress: None,
             container_identity: RebornSandboxContainerIdentity::workspace_owner(),
         }
     }
@@ -160,28 +175,38 @@ impl RebornSandboxConfig {
         self
     }
 
-    pub fn with_network_enabled(mut self) -> Self {
-        self.disable_network = false;
+    pub fn with_retention_timeout(mut self, timeout: Duration) -> Self {
+        self.retention_timeout = timeout;
         self
     }
 
-    pub fn with_network_broker_proxy_url(
-        mut self,
-        proxy_url: impl Into<String>,
-    ) -> Result<Self, RuntimeProcessError> {
-        self.network_broker = Some(RebornSandboxNetworkBroker::new(proxy_url)?);
+    pub fn with_managed_egress_proxy(mut self) -> Result<Self, RuntimeProcessError> {
+        if self.network_broker.is_some() {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox managed egress and network broker are mutually exclusive".to_string(),
+            ));
+        }
+        let policy = sandbox_network_policy().map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox managed egress policy is invalid: {error}"
+            ))
+        })?;
+        self.managed_egress = Some(ManagedEgressConfig::from_policy(
+            policy,
+            self.workspace_root.join(".managed-egress"),
+        )?);
         Ok(self)
-    }
-
-    pub fn with_network_broker_port(mut self, port: u16) -> Self {
-        self.network_broker = Some(RebornSandboxNetworkBroker::from_port(port));
-        self
     }
 
     pub fn with_network_broker_unix_socket(
         mut self,
         host_socket: impl Into<PathBuf>,
     ) -> Result<Self, RuntimeProcessError> {
+        if self.managed_egress.is_some() {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox managed egress and network broker are mutually exclusive".to_string(),
+            ));
+        }
         self.network_broker = Some(RebornSandboxNetworkBroker::unix_socket(host_socket)?);
         Ok(self)
     }
@@ -228,33 +253,61 @@ impl RebornSandboxConfig {
     }
 
     fn container_network_mode(&self) -> Option<String> {
-        if self.disable_network
-            && !self
-                .network_broker
-                .as_ref()
-                .is_some_and(RebornSandboxNetworkBroker::requires_docker_network)
-        {
-            Some("none".to_string())
-        } else {
-            None
-        }
+        Some("none".to_string())
+    }
+
+    fn managed_container_network_mode(
+        &self,
+        bundle: Option<&ManagedEgressBundle>,
+    ) -> Option<String> {
+        bundle
+            .map(|bundle| bundle.network_name.clone())
+            .or_else(|| self.container_network_mode())
     }
 
     fn command_env(
         &self,
         extra_env: HashMap<String, String>,
     ) -> Result<Vec<String>, RuntimeProcessError> {
-        let mut env = validate_env(extra_env)?;
+        let mut env = validate_env(&extra_env)?;
         broker::push_broker_env(
             self.network_broker.as_ref(),
             self.secret_broker.as_ref(),
-            !self.disable_network,
             &mut env,
         )?;
         Ok(env)
     }
 
+    fn command_env_for_bundle(
+        &self,
+        extra_env: HashMap<String, String>,
+        managed: Option<&ManagedEgressRuntime>,
+        bundle: Option<&ManagedEgressBundle>,
+    ) -> Result<Vec<String>, RuntimeProcessError> {
+        let (Some(managed), Some(bundle)) = (managed, bundle) else {
+            return self.command_env(extra_env);
+        };
+        let mut env = validate_env(&extra_env)?;
+        broker::push_broker_env(None, self.secret_broker.as_ref(), &mut env)?;
+        let mode_prefix = format!("{}=", broker::REBORN_NETWORK_MODE_ENV);
+        env.retain(|entry| !entry.starts_with(&mode_prefix));
+        env.extend(managed.user_environment(bundle)?);
+        let brokered_mode = format!("{}=brokered", broker::REBORN_NETWORK_MODE_ENV);
+        if env.iter().filter(|entry| *entry == &brokered_mode).count() != 1 {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox managed egress did not establish exactly one brokered network mode"
+                    .to_string(),
+            ));
+        }
+        Ok(env)
+    }
+
     fn append_broker_binds(&self, binds: &mut Vec<String>) -> Result<(), RuntimeProcessError> {
+        if self.managed_egress.is_some() && self.network_broker.is_some() {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox managed egress and network broker are mutually exclusive".to_string(),
+            ));
+        }
         broker::append_broker_binds(
             self.network_broker.as_ref(),
             self.secret_broker.as_ref(),
@@ -318,6 +371,7 @@ pub struct RebornScopedSandboxCommandTransport {
     docker: Docker,
     config: RebornSandboxConfig,
     activity: Arc<SandboxActivityRegistry>,
+    managed_egress: Option<Arc<ManagedEgressRuntime>>,
     sweeper: Arc<user_container::UserContainerSweeper>,
     _owner_lock: Arc<LocalDockerOwnerLock>,
 }
@@ -333,6 +387,7 @@ mod test_support {
         RebornScopedSandboxCommandTransport {
             docker,
             config,
+            managed_egress: None,
             activity: Arc::new(SandboxActivityRegistry::new()),
             sweeper: user_container::test_support::disabled_sweeper(),
             _owner_lock: Arc::new(LocalDockerOwnerLock {
@@ -348,9 +403,9 @@ impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
             .debug_struct("RebornScopedSandboxCommandTransport")
             .field("workspace_root", &self.config.workspace_root)
             .field("image", &self.config.image)
-            .field("disable_network", &self.config.disable_network)
             .field("network_broker", &self.config.network_broker)
             .field("secret_broker", &self.config.secret_broker)
+            .field("managed_egress", &self.managed_egress)
             .field("container_identity", &self.config.container_identity)
             .finish_non_exhaustive()
     }
@@ -360,15 +415,28 @@ impl RebornScopedSandboxCommandTransport {
     pub async fn connect(config: RebornSandboxConfig) -> Result<Self, RuntimeProcessError> {
         let owner_lock = LocalDockerOwnerLock::acquire(&config.workspace_root).await?;
         let docker = connect_docker().await?;
+        let managed_egress = match config.managed_egress.clone() {
+            Some(managed) => Some(ManagedEgressRuntime::connect(&docker, managed).await?),
+            None => None,
+        };
         let activity = Arc::new(SandboxActivityRegistry::new());
+        user_container::reconcile_labeled_user_containers(
+            &docker,
+            &activity,
+            managed_egress.as_deref(),
+        )
+        .await;
         let sweeper = user_container::UserContainerSweeper::spawn(
             docker.clone(),
             Arc::clone(&activity),
+            managed_egress.clone(),
             config.idle_timeout,
+            config.retention_timeout,
         );
         Ok(Self {
             docker,
             config,
+            managed_egress,
             activity,
             sweeper,
             _owner_lock: owner_lock,
@@ -463,38 +531,29 @@ impl RebornScopedSandboxCommandTransport {
             })
     }
 
-    async fn user_container_launch_config(
+    fn user_container_launch_config(
         &self,
         request: &CommandExecutionRequest,
-        workspace: &Path,
         resolved_image: &str,
+        bundle: Option<&ManagedEgressBundle>,
+        container_user: String,
+        binds: Vec<String>,
     ) -> Result<user_container::UserContainerLaunch, RuntimeProcessError> {
-        let env = self.config.command_env(request.extra_env.clone())?;
-        let container_user = self
-            .config
-            .container_identity
-            .container_user(workspace)
-            .await?;
-        let security =
-            worker_spec::DockerWorkerSecuritySpec::new(self.config.container_network_mode());
-        let mut binds = self
-            .config
-            .mount_sources
-            .prepare_container_binds(workspace, request.mounts.as_ref())
-            .await?
-            .into_iter()
-            .map(|bind| bind.into_docker_bind())
-            .collect::<Vec<_>>();
-        self.config.append_broker_binds(&mut binds)?;
-        binds.sort();
+        let env = self.config.command_env_for_bundle(
+            request.extra_env.clone(),
+            self.managed_egress.as_deref(),
+            bundle,
+        )?;
+        let security = worker_spec::DockerWorkerSecuritySpec::new(
+            self.config.managed_container_network_mode(bundle),
+        );
         let posture = security_posture_stamp(
+            &self.config,
             &container_user,
-            self.config.container_identity.workspace_mode(),
-            self.config.memory_bytes,
-            self.config.cpu_shares,
             &security,
             &binds,
             &env,
+            bundle.map(|bundle| bundle.posture.as_str()),
         );
         let labels = registry::build_user_container_launch_labels(
             user_container::LABEL_PREFIX,
@@ -503,12 +562,14 @@ impl RebornScopedSandboxCommandTransport {
             resolved_image,
             &posture,
         );
+        let tmpfs = HashMap::from([("/tmp".to_string(), security.tmpfs_options())]);
         let host_config = HostConfig {
             binds: Some(binds),
             memory: Some(self.config.memory_bytes as i64),
             cpu_shares: Some(self.config.cpu_shares as i64),
             auto_remove: Some(false),
             network_mode: security.network_mode(),
+            dns: bundle.map(|bundle| vec![bundle.proxy_ip.clone()]),
             cap_drop: Some(security.cap_drop()),
             security_opt: Some(security.security_options()),
             readonly_rootfs: Some(security.readonly_rootfs()),
@@ -518,11 +579,7 @@ impl RebornScopedSandboxCommandTransport {
                 typ: Some(security.log_driver()),
                 config: Some(security.log_options().into_iter().collect()),
             }),
-            tmpfs: Some(
-                [("/tmp".to_string(), security.tmpfs_options())]
-                    .into_iter()
-                    .collect(),
-            ),
+            tmpfs: Some(tmpfs),
             ..Default::default()
         };
         let config = Config {
@@ -555,36 +612,94 @@ impl RebornScopedSandboxCommandTransport {
             return Err(RuntimeProcessError::Timeout(timeout));
         }
         user_container::exec_helper_timeout_secs(timeout)?;
+        validate_env(&request.extra_env)?;
         let workspace = self.prepare_workspace(&request.scope).await?;
+        let container_user = self
+            .config
+            .container_identity
+            .container_user(&workspace)
+            .await?;
+        let mut binds = self
+            .config
+            .mount_sources
+            .prepare_container_binds(&workspace, request.mounts.as_ref())
+            .await?
+            .into_iter()
+            .map(|bind| bind.into_docker_bind())
+            .collect::<Vec<_>>();
+        self.config.append_broker_binds(&mut binds)?;
+        binds.sort();
         let activity = self.activity.begin(&user_key)?;
         let gate = self.activity.gate(&user_key).ok_or_else(|| {
             RuntimeProcessError::ExecutionFailed(
                 "sandbox user container lifecycle gate disappeared".to_string(),
             )
         })?;
-        // Validate mounts/environment before touching Docker image state so
-        // malformed requests fail at the original trust boundary even when
-        // the worker image is not installed on this host.
-        let mut launch = self
-            .user_container_launch_config(&request, &workspace, &self.config.image)
-            .await?;
         let resolved_image = self.resolve_worker_image().await?;
-        launch.config.image = Some(resolved_image.clone());
-        launch.labels.insert(
-            registry::label_image(user_container::LABEL_PREFIX),
-            resolved_image,
-        );
-        launch.config.labels = Some(launch.labels.clone());
         let _user_lifecycle =
             acquire_user_lifecycle_gate(&gate, USER_LIFECYCLE_GATE_ACQUIRE_TIMEOUT).await?;
-        let container_name =
-            user_container::ensure_user_container(&self, &user_key, launch).await?;
+        let bundle = match self.managed_egress.as_ref() {
+            Some(managed) => Some(
+                managed
+                    .ensure_bundle(
+                        &self.docker,
+                        &user_key,
+                        &request.scope.tenant_id,
+                        &request.scope.user_id,
+                    )
+                    .await?,
+            ),
+            None => None,
+        };
+        let setup = async {
+            if let (Some(managed), Some(bundle)) = (self.managed_egress.as_ref(), bundle.as_ref()) {
+                managed
+                    .set_invocation(bundle, &request.scope.invocation_id)
+                    .await?;
+            }
+            let launch = self.user_container_launch_config(
+                &request,
+                &resolved_image,
+                bundle.as_ref(),
+                container_user,
+                binds,
+            )?;
+            let container_name =
+                user_container::ensure_user_container(&self, &user_key, launch).await?;
+            let exec_env = self.config.command_env_for_bundle(
+                HashMap::new(),
+                self.managed_egress.as_deref(),
+                bundle.as_ref(),
+            )?;
+            Ok::<_, RuntimeProcessError>((container_name, exec_env))
+        }
+        .await;
+        let (container_name, exec_env) = match setup {
+            Ok(setup) => setup,
+            Err(setup_error) => {
+                if let Some(managed) = self.managed_egress.as_ref()
+                    && let Err(cleanup_error) = managed
+                        .rollback_provisioned_bundle(
+                            &self.docker,
+                            &user_key,
+                            &user_key.container_name(),
+                        )
+                        .await
+                {
+                    return Err(RuntimeProcessError::ExecutionFailed(format!(
+                        "sandbox user container setup failed: {setup_error}; managed-egress rollback failed: {cleanup_error}"
+                    )));
+                }
+                return Err(setup_error);
+            }
+        };
         let result = user_container::execute_in_user_container(
             &self,
             &user_key,
             &container_name,
             request.command,
             workdir,
+            exec_env,
             timeout,
         )
         .await;
@@ -635,13 +750,12 @@ async fn connect_docker() -> Result<Docker, RuntimeProcessError> {
 }
 
 fn security_posture_stamp(
+    config: &RebornSandboxConfig,
     container_user: &str,
-    workspace_mode: u32,
-    memory_bytes: u64,
-    cpu_shares: u32,
     security: &worker_spec::DockerWorkerSecuritySpec,
     binds: &[String],
     env: &[String],
+    egress_posture: Option<&str>,
 ) -> String {
     let framed_binds = frame_string_values("bind", binds);
     let mut sorted_env = env.to_vec();
@@ -650,9 +764,12 @@ fn security_posture_stamp(
     let posture = key_codec::encode_parts(&[
         ("generation", "user-exec-v1".to_string()),
         ("container_user", container_user.to_string()),
-        ("workspace_mode", workspace_mode.to_string()),
-        ("memory_bytes", memory_bytes.to_string()),
-        ("cpu_shares", cpu_shares.to_string()),
+        (
+            "workspace_mode",
+            config.container_identity.workspace_mode().to_string(),
+        ),
+        ("memory_bytes", config.memory_bytes.to_string()),
+        ("cpu_shares", config.cpu_shares.to_string()),
         (
             "network_mode",
             security
@@ -682,6 +799,10 @@ fn security_posture_stamp(
         ),
         ("binds", framed_binds),
         ("env", framed_env),
+        (
+            "egress_posture",
+            egress_posture.unwrap_or("disabled").to_string(),
+        ),
     ]);
     key_codec::digest_hex(&posture)
 }
@@ -728,25 +849,13 @@ fn reject_nul(label: &str, value: &str) -> Result<(), RuntimeProcessError> {
     Ok(())
 }
 
-fn validate_env(env: HashMap<String, String>) -> Result<Vec<String>, RuntimeProcessError> {
+fn validate_env(env: &HashMap<String, String>) -> Result<Vec<String>, RuntimeProcessError> {
     if !env.is_empty() {
         return Err(RuntimeProcessError::ExecutionFailed(
             "user sandbox commands do not accept caller-provided environment variables".to_string(),
         ));
     }
-    env.into_iter()
-        .map(|(key, value)| {
-            reject_nul("environment variable name", &key)?;
-            reject_nul("environment variable value", &value)?;
-            if key.contains('=') || key.is_empty() {
-                return Err(RuntimeProcessError::ExecutionFailed(
-                    "environment variable names must be non-empty and cannot contain '='"
-                        .to_string(),
-                ));
-            }
-            Ok(format!("{key}={value}"))
-        })
-        .collect()
+    Ok(Vec::new())
 }
 
 fn validate_relative_workdir(path: &Path) -> Result<(), RuntimeProcessError> {
@@ -872,61 +981,50 @@ mod tests {
     }
 
     #[test]
-    fn explicit_direct_network_uses_docker_networking_and_reports_its_posture() {
-        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox").with_network_enabled();
-        let env = config.command_env(HashMap::new()).unwrap();
+    fn managed_egress_replaces_the_direct_network_posture() {
+        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
+            .with_managed_egress_proxy()
+            .unwrap();
 
-        assert_eq!(config.container_network_mode(), None);
-        assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=direct".to_string()));
-        assert!(env.contains(&"IRONCLAW_REBORN_SECRET_MODE=disabled".to_string()));
+        assert_eq!(config.container_network_mode().as_deref(), Some("none"));
+        assert!(config.network_broker.is_none());
+        assert!(config.managed_egress.is_some());
+    }
+
+    #[test]
+    fn managed_egress_and_network_broker_are_mutually_exclusive_in_both_orders() {
+        let broker_then_managed = RebornSandboxConfig::new("/tmp/reborn-sandbox")
+            .with_network_broker_unix_socket("/tmp/reborn-http-broker.sock")
+            .unwrap()
+            .with_managed_egress_proxy()
+            .unwrap_err();
         assert!(
-            env.iter().all(|entry| {
-                !entry.starts_with("http_proxy=")
-                    && !entry.starts_with("https_proxy=")
-                    && !entry.starts_with("HTTP_PROXY=")
-                    && !entry.starts_with("HTTPS_PROXY=")
-            }),
-            "direct mode must not pretend that traffic is proxy-mediated"
+            broker_then_managed
+                .to_string()
+                .contains("mutually exclusive")
+        );
+
+        let managed_then_broker = RebornSandboxConfig::new("/tmp/reborn-sandbox")
+            .with_managed_egress_proxy()
+            .unwrap()
+            .with_network_broker_unix_socket("/tmp/reborn-http-broker.sock")
+            .unwrap_err();
+        assert!(
+            managed_then_broker
+                .to_string()
+                .contains("mutually exclusive")
         );
     }
 
     #[test]
     fn validate_env_rejects_all_caller_environment_injection() {
-        let error = validate_env(HashMap::from([(
+        let error = validate_env(&HashMap::from([(
             "PLACEHOLDER".to_string(),
             "value".to_string(),
         )]))
-        .expect_err("user sandbox caller env should be rejected");
+        .unwrap_err();
         assert!(error.to_string().contains("caller-provided environment"));
-        assert_eq!(validate_env(HashMap::new()).unwrap(), Vec::<String>::new());
-    }
-
-    #[test]
-    fn network_broker_exposes_proxy_env_without_none_network_mode() {
-        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
-            .with_network_broker_proxy_url("http://broker.internal:8181")
-            .unwrap();
-        let env = config.command_env(HashMap::new()).unwrap();
-
-        assert_eq!(config.container_network_mode(), None);
-        assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=brokered".to_string()));
-        assert!(
-            env.contains(&"IRONCLAW_REBORN_HTTP_PROXY=http://broker.internal:8181".to_string())
-        );
-        assert!(env.contains(&"http_proxy=http://broker.internal:8181".to_string()));
-        assert!(env.contains(&"https_proxy=http://broker.internal:8181".to_string()));
-        assert!(env.contains(&"HTTP_PROXY=http://broker.internal:8181".to_string()));
-        assert!(env.contains(&"HTTPS_PROXY=http://broker.internal:8181".to_string()));
-    }
-
-    #[test]
-    fn network_broker_port_uses_docker_host_gateway_proxy_url() {
-        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox").with_network_broker_port(8181);
-        let env = config.command_env(HashMap::new()).unwrap();
-        let proxy_url = format!("http://{}:8181", broker::docker_host_gateway());
-
-        assert!(env.contains(&format!("IRONCLAW_REBORN_HTTP_PROXY={proxy_url}")));
-        assert!(env.contains(&format!("http_proxy={proxy_url}")));
+        assert_eq!(validate_env(&HashMap::new()).unwrap(), Vec::<String>::new());
     }
 
     #[test]
@@ -995,7 +1093,7 @@ mod tests {
     #[test]
     fn broker_env_rejects_all_caller_overrides_before_reserved_env_is_built() {
         let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
-            .with_network_broker_proxy_url("http://broker.internal:8181")
+            .with_network_broker_unix_socket("/tmp/reborn-http-broker.sock")
             .unwrap()
             .with_secret_broker_url("https://broker.internal/secrets")
             .unwrap();
@@ -1015,8 +1113,7 @@ mod tests {
     }
 
     #[test]
-    fn broker_urls_reject_credentials_fragments_control_characters_and_non_http_schemes() {
-        assert!(RebornSandboxNetworkBroker::new("unix:///tmp/broker.sock").is_err());
+    fn broker_endpoints_reject_credentials_fragments_control_characters_and_bad_schemes() {
         assert!(RebornSandboxSecretBroker::new("https://broker.internal/\nsecrets").is_err());
         assert!(RebornSandboxSecretBroker::new("https://token@broker.internal/secrets").is_err());
         assert!(RebornSandboxSecretBroker::new("https://broker.internal/secrets#token").is_err());
@@ -1045,6 +1142,23 @@ mod tests {
             test_support::transport(Docker::connect_with_local_defaults().unwrap(), config);
         // Config-shape tests inject an immutable identity directly; only the
         // real run path resolves the configured reference through Docker.
+        let container_user = transport
+            .config
+            .container_identity
+            .container_user(&workspace)
+            .await
+            .unwrap();
+        let mut binds = transport
+            .config
+            .mount_sources
+            .prepare_container_binds(&workspace, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|bind| bind.into_docker_bind())
+            .collect::<Vec<_>>();
+        transport.config.append_broker_binds(&mut binds).unwrap();
+        binds.sort();
         let launch = transport
             .user_container_launch_config(
                 &CommandExecutionRequest {
@@ -1055,10 +1169,11 @@ mod tests {
                     timeout_secs: Some(1),
                     extra_env: HashMap::new(),
                 },
-                &workspace,
                 "sha256:test-worker",
+                None,
+                container_user,
+                binds,
             )
-            .await
             .unwrap();
         let launch = launch.config;
         assert_eq!(launch.image.as_deref(), Some("sha256:test-worker"));
@@ -1117,48 +1232,6 @@ mod tests {
             "{}:/tmp/ironclaw-secret-broker.sock:rw",
             secret_socket.display()
         )));
-    }
-
-    #[tokio::test]
-    async fn container_launch_config_applies_http_proxy_broker_env_and_drops_none_network() {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).unwrap();
-        let config = RebornSandboxConfig::new(temp.path().join("workspaces"))
-            .with_network_broker_proxy_url("http://broker.internal:8181")
-            .unwrap();
-        let transport =
-            test_support::transport(Docker::connect_with_local_defaults().unwrap(), config);
-        let launch = transport
-            .user_container_launch_config(
-                &CommandExecutionRequest {
-                    scope: sandbox_scope(),
-                    mounts: None,
-                    command: "true".to_string(),
-                    workdir: None,
-                    timeout_secs: Some(1),
-                    extra_env: HashMap::new(),
-                },
-                &workspace,
-                "sha256:test-worker",
-            )
-            .await
-            .unwrap();
-        let launch = launch.config;
-        let host_config = launch.host_config.unwrap();
-        let binds = host_config.binds.unwrap();
-        let env = launch.env.unwrap();
-
-        assert_eq!(host_config.network_mode, None);
-        assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=brokered".to_string()));
-        assert!(env.contains(&"http_proxy=http://broker.internal:8181".to_string()));
-        assert!(env.contains(&"HTTPS_PROXY=http://broker.internal:8181".to_string()));
-        assert!(binds.contains(&format!("{}:/workspace:rw", workspace.display())));
-        assert!(
-            binds
-                .iter()
-                .all(|bind| !bind.contains("ironclaw-http-broker.sock"))
-        );
     }
 
     #[tokio::test]

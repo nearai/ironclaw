@@ -144,6 +144,31 @@ pub(crate) fn validate_attachment_refs(
     Ok(())
 }
 
+/// Both halves of a subagent-result acceptance identity must carry a value.
+///
+/// The halves are exactly what the dedupe index hashes, and `("", "")` hashes
+/// to a perfectly valid record key — so a producer that forgets to populate
+/// one would collapse every child of every parent onto a single row and get
+/// `idempotent_replay: true` back for all of them. That is a fail-OPEN shape
+/// in the one door whose whole job is fail-closed dedupe, and it would look
+/// like success at every call site, so it is rejected here rather than hashed.
+pub(crate) fn validate_subagent_acceptance_identity(
+    source_binding_id: &str,
+    external_event_id: &str,
+) -> Result<(), crate::error::SessionThreadError> {
+    for (field, value) in [
+        ("source_binding_id", source_binding_id),
+        ("external_event_id", external_event_id),
+    ] {
+        if value.trim().is_empty() {
+            return Err(crate::error::SessionThreadError::InvalidSubagentResult {
+                reason: format!("{field} must not be empty"),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Canonical kind of a transcript message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -377,6 +402,48 @@ pub struct AcceptInboundMessageRequest {
     pub reply_target_binding_id: Option<String>,
     pub external_event_id: Option<String>,
     pub content: MessageContent,
+}
+
+/// One background child's framed result, offered to the **parent's** thread.
+///
+/// Both halves of the acceptance identity arrive already resolved as strings.
+/// This crate cannot see run identity — it must not depend on
+/// `ironclaw_processes` — so it stores and hashes what the caller supplies and
+/// derives nothing. The pair is the same `(scope, source_binding_id,
+/// external_event_id)` tuple [`AcceptInboundMessageRequest`] dedupes on, so
+/// both doors share one index rather than each keeping its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptSubagentResultRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    /// `subagent-result:{parent_run_id}` — the acceptance identity's binding half.
+    pub source_binding_id: String,
+    /// `{child_run_id}` — the acceptance identity's event half.
+    pub external_event_id: String,
+    /// The child's output, already framed as untrusted.
+    ///
+    /// Not [`MessageContent`]: this row is persisted as
+    /// [`MessageKind::System`] and a system-kind row reaches the model's
+    /// *system* role, so raw child text here would promote an injected child
+    /// instruction into host authority. [`FramedSubagentText`] can only be
+    /// built by framing ([`FramedSubagentText::frame`](crate::FramedSubagentText::frame)),
+    /// which makes that state
+    /// unrepresentable instead of leaving it to every future caller to
+    /// remember. Attachments are deliberately absent — a delivered child
+    /// result is text (§2.7 `SpawnedChildRunPayload`).
+    pub content: crate::subagent_result::FramedSubagentText,
+}
+
+/// The durable row a [`AcceptSubagentResultRequest`] landed on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedSubagentResult {
+    pub message_id: ThreadMessageId,
+    pub sequence: u64,
+    /// `true` when this acceptance reused an existing durable claim on the
+    /// identity tuple instead of minting a fresh one — either the row was
+    /// already committed, or a prior attempt claimed the key and died before
+    /// writing it. Same meaning as [`AcceptedInboundMessage::idempotent_replay`].
+    pub idempotent_replay: bool,
 }
 
 /// Internal acceptance metadata that must remain stable across retries and

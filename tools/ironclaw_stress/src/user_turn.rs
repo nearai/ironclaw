@@ -2468,6 +2468,7 @@ fn thread_failure(stage: impl Into<String>, error: SessionThreadError) -> Operat
         }
         SessionThreadError::InvalidMessageTimestamp { .. } => "thread_timestamp_invalid",
         SessionThreadError::InvalidPreparedContext { .. }
+        | SessionThreadError::InvalidSubagentResult { .. }
         | SessionThreadError::PreparedContextKeyMismatch { .. }
         | SessionThreadError::InvalidStructuredFinalization { .. }
         | SessionThreadError::StructuredFinalizationPublishMismatch { .. } => {

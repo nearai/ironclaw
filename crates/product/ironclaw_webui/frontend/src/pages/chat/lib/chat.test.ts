@@ -82,6 +82,8 @@ function renderChat({
   showChatLogsShortcut = true,
   onSelectThread = () => {},
   contextOverrides = {},
+  pendingRenderedNotification = null,
+  onNotificationRendered = () => {},
   // Positional ref slots, shared by reference across repeated renderChat()
   // calls that pass the same array -- lets a test simulate the same
   // component "instance" re-rendering (e.g. a navigation-triggered
@@ -177,9 +179,97 @@ function renderChat({
     isCreatingThread: false,
     gatewayStatus: {},
     globalAutoApproveEnabled,
+    pendingRenderedNotification,
+    onNotificationRendered,
   });
   return { tree, components };
 }
+
+function renderWithPendingNotification(messages, activeThreadId = "thread-1") {
+  const acknowledgements = [];
+  renderChat({
+    activeThreadId,
+    runEffects: true,
+    pendingRenderedNotification: {
+      notificationId: "notification-1",
+      threadId: "thread-1",
+      turnRunId: "run-1",
+    },
+    onNotificationRendered: (source) => acknowledgements.push(source),
+    hookState: {
+      messages,
+      isProcessing: false,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: null,
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+  return JSON.parse(JSON.stringify(acknowledgements));
+}
+
+test("acknowledges a completion notification only after its final reply render", () => {
+  assert.deepEqual(
+    renderWithPendingNotification([{
+      id: "message-final",
+      role: "assistant",
+      isFinalReply: true,
+      turnRunId: "run-1",
+    }]),
+    [{ threadId: "thread-1", turnRunId: "run-1" }],
+  );
+});
+
+test("a pending notification is not acknowledged by a non-final reply", () => {
+  assert.deepEqual(
+    renderWithPendingNotification([{
+      id: "message-partial",
+      role: "assistant",
+      isFinalReply: false,
+      turnRunId: "run-1",
+    }]),
+    [],
+    "the run has not produced its answer yet, so nothing has been shown",
+  );
+});
+
+test("a pending notification is not acknowledged by another run's final reply", () => {
+  assert.deepEqual(
+    renderWithPendingNotification([{
+      id: "message-final",
+      role: "assistant",
+      isFinalReply: true,
+      turnRunId: "run-2",
+    }]),
+    [],
+    "acknowledging here would mark a notification read for a reply it does not describe",
+  );
+});
+
+test("a pending notification is not acknowledged from another active thread", () => {
+  assert.deepEqual(
+    renderWithPendingNotification([{
+      id: "message-final",
+      role: "assistant",
+      isFinalReply: true,
+      turnRunId: "run-1",
+    }], "thread-2"),
+    [],
+    "a matching run id is insufficient when the rendered thread is different",
+  );
+});
 
 test("Chat cancel button routes through active thread run cancellation", async () => {
   const cancelReasons = [];

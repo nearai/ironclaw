@@ -104,7 +104,46 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // eager `en.ts` fallback pack (the restore pill's own markup is lazy —
 // `oobe-restore-pill.tsx` loads only after the drawer is dismissed). Measured
 // /chat closure 222.5 KB gzip; 223.0 KB restores ~0.5 KB of explicit headroom.
-const CHAT_GZIP_BUDGET = 223_000;
+// retained about 1.6 KB of explicit headroom.
+//
+// The server-backed notification center consumed nearly all of that: the
+// inbox hook, its presenters and the panel are eager parts of the gateway
+// layout's header, so they land in the /chat closure and moved the measured
+// total to 221.9 KB. Wiring the archive control (the durable inbox exposes
+// archive at every backend layer, and without a caller a recipient's records
+// only ever accumulate toward the fail-closed retention cap) added the last
+// 0.2 KB. Weight was removed first rather than budgeted around: the
+// mark-read and archive mutations now share one optimistic cache transform
+// (`inboxCacheAfter`/`optimisticHandlers` in `hooks/useNotifications.ts`)
+// instead of carrying two near-identical `onMutate` blocks, and the control
+// reuses the existing `common.dismiss` label rather than minting a
+// `notifications.archive` key in the eagerly loaded `en.ts` fallback pack.
+// What remains is the control's own necessary weight. 223.0 KB restores
+// about 0.9 KB of headroom over the measured 222.1 KB.
+//
+// Re-measured 223.0 -> 224.0 on the merge of this branch with main. Both sides
+// independently set 223.0 for their own eager increment — main for the OOBE
+// drawer's close/restore gate, this branch for the notification centre and its
+// archive control — and on the merged tree those increments add: main alone
+// measures 222.5 KB, the merged tree 224.0 KB. Neither side is spending the
+// other's headroom by mistake; the ceiling simply had two claimants.
+//
+// Re-ratcheted 224.0 -> 223.2 in the same change by taking that split rather
+// than banking the raise: `notification-panel.tsx` now holds the opened panel
+// (rows, load-more, empty/error states) and loads through `React.lazy` from
+// `notification-center.tsx`, the way `CommandPalette` already does in
+// `layout/gateway-layout.tsx`. The bell and its unread dot stay eager because
+// the badge is always on screen. The panel leaves the entry closure as its own
+// 5.39 kB chunk and /chat measures 223.2 KB, so the ceiling follows the
+// measurement down instead of holding headroom this tree does not need.
+//
+// Then raised 223.2 -> 223.4 with a margin, because ratcheting to the measured
+// byte turned out to be a trap: rebasing onto main breached the ceiling by
+// roughly a dozen bytes on commits that touch no frontend code at all. The
+// margin is under a kilobyte, so the ratchet still catches anything that
+// actually ships weight into the entry closure, and the two budgets beside
+// this one were never held to the byte either.
+const CHAT_GZIP_BUDGET = 223_400;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {

@@ -46,14 +46,13 @@ pub use plan::{
 };
 
 pub use sandbox_process::{
-    DEFAULT_SANDBOX_ALLOWED_DOMAINS, DEFAULT_SANDBOX_MAX_EGRESS_BYTES, RailwayPreviewSandboxConfig,
-    RailwayPreviewSandboxTransport, RebornSandboxConfig, RebornSandboxContainerIdentity,
-    RebornSandboxNetworkBroker, RebornSandboxScopeKey, RebornSandboxSecretBroker,
-    RebornSandboxUserKey, RebornSandboxWorkspaceMode, RebornScopedSandboxCommandTransport,
-    SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, SANDBOX_MAX_EGRESS_BYTES_ENV, SandboxActivityRegistry,
-    SandboxDockerReadiness, connect_docker_with_retry, sandbox_allowed_domains,
-    sandbox_docker_readiness, sandbox_extra_allowed_domains, sandbox_max_egress_bytes,
-    sandbox_network_policy,
+    DEFAULT_SANDBOX_ALLOWED_DOMAINS, RailwayPreviewSandboxConfig, RailwayPreviewSandboxTransport,
+    RebornSandboxConfig, RebornSandboxContainerIdentity, RebornSandboxNetworkBroker,
+    RebornSandboxScopeKey, RebornSandboxSecretBroker, RebornSandboxUserKey,
+    RebornSandboxWorkspaceMode, RebornScopedSandboxCommandTransport,
+    SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, SandboxActivityRegistry, SandboxDockerReadiness,
+    connect_docker_with_retry, sandbox_allowed_domains, sandbox_docker_readiness,
+    sandbox_extra_allowed_domains, sandbox_network_policy,
 };
 
 pub use script::{
@@ -63,7 +62,6 @@ pub use script::{
     ScriptRuntimeHttpAdapter,
 };
 
-pub const DEFAULT_PROCESS_SANDBOX_IMAGE: &str = "ironclaw-process-sandbox:dev";
 pub const DEFAULT_WORKSPACE_MOUNT: &str = "/workspace";
 pub const DEFAULT_TOOLS_MOUNT: &str = "/ironclaw/state/tools";
 pub const DEFAULT_CACHE_MOUNT: &str = "/ironclaw/state/cache";

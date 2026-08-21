@@ -1560,11 +1560,7 @@ pub(super) fn encode(
             )
             .with_indexed(
                 index_key("closed")?,
-                IndexValue::Bool(matches!(
-                    record.state,
-                    crate::ProcessDependencyState::Consumed
-                        | crate::ProcessDependencyState::Abandoned
-                )),
+                IndexValue::Bool(record.state.is_closed()),
             );
     }
     if let MaterializedRow::Journal(journal_entry) = row {

@@ -69,6 +69,14 @@ shares this one implementation instead of reimplementing it.
 - Admission is a durability decision, never an authority one; approval/auth
   interactions are strictly redacted and routed through canonical resolution
   ports (`ApprovalResolutionPort`, `AuthFlowManager`, `TurnCoordinator`).
+- Run delivery publishes metadata-only approval/auth gate records to the
+  actor's or trigger creator's durable notification inbox independently of
+  external-channel availability. After external delivery settles, an
+  Inbox-only observer gets one additional bounded `max_wait` window to resolve
+  or replace the stable gate-derived id without retaining a delivery permit;
+  abandoned gates never create process-lifetime polling tasks. An external
+  preference/catalog outage must not be reclassified as "no channel
+  configured."
 - `AGENTS.md` here is **gate-pinned** (the `reborn_services` module-charter
   map) — edit only with `cargo test -p ironclaw_assistant` green.
 

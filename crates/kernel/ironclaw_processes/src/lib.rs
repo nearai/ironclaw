@@ -69,7 +69,7 @@ pub use journal::{
     RecoverExpiredProcessLeasesResponse, ReleaseProcessTreeRequest, ReserveProcessTreeRequest,
     ResumeProcessRequest, SettleProcessDependencyRequest, StopProcessRequest,
     SubmitProcessAtEdgeRequest, SubmitProcessRequest, SubmitProcessWithCheckpointRequest,
-    SuspendProcessRequest,
+    SuspendProcessRequest, TransitionProcessDependencyRequest,
 };
 pub use journal_store::{
     DEFAULT_PROCESS_LEASE_DURATION, MAX_CRASH_RECOVERY_RECLAIMS, ProcessJournalStore,
