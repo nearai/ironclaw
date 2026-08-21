@@ -144,6 +144,31 @@ pub(crate) fn validate_attachment_refs(
     Ok(())
 }
 
+/// Both halves of a subagent-result acceptance identity must carry a value.
+///
+/// The halves are exactly what the dedupe index hashes, and `("", "")` hashes
+/// to a perfectly valid record key — so a producer that forgets to populate
+/// one would collapse every child of every parent onto a single row and get
+/// `idempotent_replay: true` back for all of them. That is a fail-OPEN shape
+/// in the one door whose whole job is fail-closed dedupe, and it would look
+/// like success at every call site, so it is rejected here rather than hashed.
+pub(crate) fn validate_subagent_acceptance_identity(
+    source_binding_id: &str,
+    external_event_id: &str,
+) -> Result<(), crate::error::SessionThreadError> {
+    for (field, value) in [
+        ("source_binding_id", source_binding_id),
+        ("external_event_id", external_event_id),
+    ] {
+        if value.trim().is_empty() {
+            return Err(crate::error::SessionThreadError::InvalidSubagentResult {
+                reason: format!("{field} must not be empty"),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Canonical kind of a transcript message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use ironclaw_filesystem::{
     Fault, FaultInjecting, FaultKind, FilesystemOperation, InMemoryBackend, RootFilesystem,
     ScopedFilesystem,
@@ -18,9 +19,16 @@ use ironclaw_host_api::{
     path::{MountAlias, VirtualPath},
 };
 use ironclaw_threads::{
-    AcceptSubagentResultRequest, EnsureThreadRequest, FilesystemSessionThreadService,
-    InMemorySessionThreadService, LoadContextMessagesRequest, MessageContent, MessageKind,
-    MessageStatus, SessionThreadError, SessionThreadService, ThreadHistoryRequest, ThreadScope,
+    AcceptInboundMessageRequest, AcceptSubagentResultRequest, AcceptedInboundMessage,
+    AcceptedInboundMessageReplay, AppendAssistantDraftRequest,
+    AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest, ContextMessages,
+    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
+    FilesystemSessionThreadService, InMemorySessionThreadService, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 
 fn scope() -> ThreadScope {
@@ -359,11 +367,259 @@ async fn filesystem_fallback_unknown_thread_claim_is_not_replayed_as_accepted() 
     );
 
     let retry = service
-        .accept_subagent_result(request)
+        .accept_subagent_result(request.clone())
         .await
         .expect_err("the orphan claim must not resurface as an accepted replay");
     assert!(
         matches!(&retry, SessionThreadError::UnknownThread { thread_id } if thread_id == &unknown),
         "expected UnknownThread on retry, got {retry:?}"
+    );
+
+    // The sharp end of the same promise, and the only assertion here that a
+    // "an orphan claim counts as a committed row" bug cannot slip past: once
+    // the parent thread does exist, the burned identity must HEAL into the row
+    // it always intended — not report `idempotent_replay` over an empty
+    // thread, which is what claiming-without-writing looks like if the claim
+    // is ever read as an answer.
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope(),
+            thread_id: Some(unknown.clone()),
+            created_by_actor_id: "actor-parent".to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+    let healed = service
+        .accept_subagent_result(request)
+        .await
+        .expect("the claim resumes once its thread exists");
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope(),
+            thread_id: unknown,
+        })
+        .await
+        .expect("history");
+    let rows: Vec<_> = history
+        .messages
+        .iter()
+        .filter(|message| message.kind == MessageKind::System)
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the healed claim must be one real row, not a reported replay of nothing: {rows:?}"
+    );
+    assert_eq!(rows[0].message_id, healed.message_id);
+}
+
+// ── Identity halves must carry a value ────────────────────────────────────
+
+async fn an_empty_identity_half_is_refused(service: Arc<dyn SessionThreadService>) {
+    let thread = ensure_thread(&service).await;
+
+    for (source_binding_id, external_event_id, field) in [
+        ("", "child-1", "source_binding_id"),
+        ("subagent-result:parent-1", "", "external_event_id"),
+        ("   ", "child-1", "source_binding_id"),
+        ("subagent-result:parent-1", "\t", "external_event_id"),
+    ] {
+        let error = service
+            .accept_subagent_result(AcceptSubagentResultRequest {
+                scope: scope(),
+                thread_id: thread.clone(),
+                source_binding_id: source_binding_id.to_string(),
+                external_event_id: external_event_id.to_string(),
+                content: MessageContent::text("framed child output"),
+            })
+            .await
+            .expect_err("an empty identity half must not be hashed into the dedupe index");
+        assert!(
+            matches!(
+                &error,
+                SessionThreadError::InvalidSubagentResult { reason } if reason.contains(field)
+            ),
+            "expected InvalidSubagentResult naming {field}, got {error:?}"
+        );
+    }
+
+    // The rejection is total: nothing was appended, so no later child can be
+    // mistaken for a replay of a row that a blank identity smuggled in.
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope(),
+            thread_id: thread,
+        })
+        .await
+        .expect("history");
+    assert!(
+        history.messages.is_empty(),
+        "a refused acceptance must append nothing: {:?}",
+        history.messages
+    );
+}
+
+#[tokio::test]
+async fn in_memory_an_empty_identity_half_is_refused() {
+    an_empty_identity_half_is_refused(in_memory_service()).await;
+}
+
+#[tokio::test]
+async fn filesystem_an_empty_identity_half_is_refused() {
+    an_empty_identity_half_is_refused(filesystem_service()).await;
+}
+
+// ── The trait's fail-closed default ───────────────────────────────────────
+
+/// A backend that implements every method `SessionThreadService` requires and
+/// overrides nothing else — the exact shape of the 11 test doubles this slice
+/// deliberately left at zero diff. It exists to pin one thing: a backend that
+/// has not implemented the new door must REFUSE, not quietly succeed or return
+/// an empty answer that a caller would read as "the child's result landed".
+struct BackendWithoutTheDoor;
+
+#[async_trait]
+impl SessionThreadService for BackendWithoutTheDoor {
+    async fn ensure_thread(
+        &self,
+        _request: EnsureThreadRequest,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        unimplemented!("ensure_thread is not part of this test")
+    }
+
+    async fn accept_inbound_message(
+        &self,
+        _request: AcceptInboundMessageRequest,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        unimplemented!("accept_inbound_message is not part of this test")
+    }
+
+    async fn replay_accepted_inbound_message(
+        &self,
+        _request: ReplayAcceptedInboundMessageRequest,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+        unimplemented!("replay_accepted_inbound_message is not part of this test")
+    }
+
+    async fn mark_message_submitted(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+        _turn_id: String,
+        _turn_run_id: String,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        unimplemented!("mark_message_submitted is not part of this test")
+    }
+
+    async fn mark_message_rejected_busy(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        unimplemented!("mark_message_rejected_busy is not part of this test")
+    }
+
+    async fn append_assistant_draft(
+        &self,
+        _request: AppendAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        unimplemented!("append_assistant_draft is not part of this test")
+    }
+
+    async fn append_tool_result_reference(
+        &self,
+        _request: AppendToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        unimplemented!("append_tool_result_reference is not part of this test")
+    }
+
+    async fn append_capability_display_preview(
+        &self,
+        _request: AppendCapabilityDisplayPreviewRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        unimplemented!("append_capability_display_preview is not part of this test")
+    }
+
+    async fn update_tool_result_reference(
+        &self,
+        _request: UpdateToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        unimplemented!("update_tool_result_reference is not part of this test")
+    }
+
+    async fn update_assistant_draft(
+        &self,
+        _request: UpdateAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        unimplemented!("update_assistant_draft is not part of this test")
+    }
+
+    async fn finalize_assistant_message(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+        _content: MessageContent,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        unimplemented!("finalize_assistant_message is not part of this test")
+    }
+
+    async fn redact_message(
+        &self,
+        _request: RedactMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        unimplemented!("redact_message is not part of this test")
+    }
+
+    async fn load_context_window(
+        &self,
+        _request: LoadContextWindowRequest,
+    ) -> Result<ContextWindow, SessionThreadError> {
+        unimplemented!("load_context_window is not part of this test")
+    }
+
+    async fn load_context_messages(
+        &self,
+        _request: LoadContextMessagesRequest,
+    ) -> Result<ContextMessages, SessionThreadError> {
+        unimplemented!("load_context_messages is not part of this test")
+    }
+
+    async fn list_thread_history(
+        &self,
+        _request: ThreadHistoryRequest,
+    ) -> Result<ThreadHistory, SessionThreadError> {
+        unimplemented!("list_thread_history is not part of this test")
+    }
+
+    async fn create_summary_artifact(
+        &self,
+        _request: CreateSummaryArtifactRequest,
+    ) -> Result<SummaryArtifact, SessionThreadError> {
+        unimplemented!("create_summary_artifact is not part of this test")
+    }
+}
+
+#[tokio::test]
+async fn a_backend_without_the_door_fails_closed() {
+    let service: Arc<dyn SessionThreadService> = Arc::new(BackendWithoutTheDoor);
+    let thread = ThreadId::new("thread-parent").expect("thread id");
+
+    let error = service
+        .accept_subagent_result(result_request(&thread, "child-1", "framed child output"))
+        .await
+        .expect_err("a backend that never implemented the door must refuse");
+    assert!(
+        matches!(
+            &error,
+            SessionThreadError::Backend(reason)
+                if reason == "accept_subagent_result is not implemented by this \
+                              SessionThreadService backend"
+        ),
+        "expected the fail-closed default's Backend error, got {error:?}"
     );
 }

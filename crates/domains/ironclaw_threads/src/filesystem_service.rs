@@ -2141,6 +2141,12 @@ where
         &self,
         request: AcceptSubagentResultRequest,
     ) -> Result<AcceptedSubagentResult, SessionThreadError> {
+        // Before the identity is hashed into the shared dedupe index: an empty
+        // half hashes just fine and would silently merge unrelated children.
+        crate::contract::validate_subagent_acceptance_identity(
+            &request.source_binding_id,
+            &request.external_event_id,
+        )?;
         let request_fingerprint = subagent_acceptance_fingerprint(&request)?;
         let AcceptSubagentResultRequest {
             scope,
