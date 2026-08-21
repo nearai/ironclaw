@@ -131,7 +131,11 @@ pub use product_auth::device_link::{
     DEVICE_LINK_POLL_INTERVAL_MILLIS, DEVICE_LINK_STEP_TTL_SECONDS, DeviceLinkFlowDriver,
     DeviceLinkStartRequest,
 };
-pub use product_auth::durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
+pub use product_auth::durable::{
+    FilesystemAuthProductServices, OAuthProviderAliasMigrationError,
+    OAuthProviderAliasMigrationReport, UnavailableAuthProviderClient,
+    migrate_legacy_oauth_provider_alias,
+};
 pub use product_auth::oauth::oauth_gate::{
     OAuthGateChallengeRequest, OAuthGateFlowDriver, auth_scope_for_blocked_turn, turn_gate_query,
 };

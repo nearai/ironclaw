@@ -751,6 +751,21 @@ pub(crate) fn build_services_input_with_options(
     let tenant_id = TenantId::new(identity.tenant_id).context("invalid runtime tenant identity")?;
     let agent_id = AgentId::new(identity.agent_id).context("invalid runtime agent identity")?;
     services_input = services_input.with_local_runtime_identity(tenant_id, agent_id);
+    if caller == RuntimeInputCaller::Serve
+        && let Some(snapshot) = optional_path_env("IRONCLAW_REBORN_LEGACY_WORKSPACE_SNAPSHOT")?
+    {
+        services_input = services_input.with_legacy_workspace_snapshot(snapshot);
+    }
+    if caller == RuntimeInputCaller::Serve {
+        let skip_rc1_channel_state_migration = parse_rc1_channel_state_migration_override(
+            std::env::var("IRONCLAW_REBORN_SKIP_RC1_CHANNEL_STATE_MIGRATION"),
+        )?;
+        services_input = if skip_rc1_channel_state_migration {
+            services_input.with_rc1_channel_state_migration_skipped()
+        } else {
+            services_input.with_rc1_channel_state_migration_enabled_by_operator()
+        };
+    }
 
     // Resolve the memory profile binding from the `[memory]` config section +
     // deployment profile and attach it (issue #3537). Fail-closed: a production
@@ -925,8 +940,7 @@ fn build_standalone_local_runtime_services_input(
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RebornHostBindings> {
     let local_runtime_root = local_runtime_storage_root(config, profile);
-    let workspace_root = std::env::current_dir()
-        .with_context(|| format!("failed to resolve current directory for {profile} workspace"))?;
+    let workspace_root = local_runtime_workspace_root(profile)?;
     let mut services_input = local_runtime_build_input_with_options(
         composition_profile(profile),
         owner_id,
@@ -954,8 +968,7 @@ fn build_hosted_single_tenant_services_input(
     config: &RebornBootConfig,
     config_file: Option<&ironclaw_config::RebornConfigFile>,
 ) -> anyhow::Result<RebornHostBindings> {
-    let workspace_root = std::env::current_dir()
-        .context("failed to resolve current directory for hosted single-tenant workspace")?;
+    let workspace_root = local_runtime_workspace_root(profile)?;
     let runtime_policy = hosted_single_tenant_runtime_policy()
         .context("failed to resolve hosted single-tenant runtime policy")?;
     Ok(
@@ -1412,6 +1425,41 @@ fn runtime_identity(
     }
 }
 
+fn optional_path_env(name: &str) -> anyhow::Result<Option<PathBuf>> {
+    match std::env::var_os(name) {
+        None => Ok(None),
+        Some(value) if value.is_empty() => anyhow::bail!("{name} must not be empty when set"),
+        Some(value) => Ok(Some(PathBuf::from(value))),
+    }
+}
+
+fn parse_rc1_channel_state_migration_override(
+    raw: Result<String, std::env::VarError>,
+) -> anyhow::Result<bool> {
+    const NAME: &str = "IRONCLAW_REBORN_SKIP_RC1_CHANNEL_STATE_MIGRATION";
+    match raw {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" => Ok(true),
+            "0" | "false" => Ok(false),
+            _ => anyhow::bail!("{NAME} must be one of 1, true, 0, false"),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(true),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{NAME} contains non-UTF-8 bytes")
+        }
+    }
+}
+
+fn local_runtime_workspace_root(profile: RebornProfile) -> anyhow::Result<PathBuf> {
+    optional_path_env("IRONCLAW_REBORN_WORKSPACE_ROOT")?
+        .map(Ok)
+        .unwrap_or_else(|| {
+            std::env::current_dir().with_context(|| {
+                format!("failed to resolve current directory for {profile} workspace")
+            })
+        })
+}
+
 fn regex_skill_activation_enabled(config_file: Option<&ironclaw_config::RebornConfigFile>) -> bool {
     config_file
         .and_then(|file| file.skills.as_ref())
@@ -1719,8 +1767,9 @@ mod tests {
         GoogleOAuthConfigState, GoogleOAuthEnvInputs, GoogleOAuthResolution, RuntimeInputCaller,
         RuntimeInputOptions, apply_credential_refresh_override, block_on_cli, build_runtime_input,
         build_runtime_input_with_options, initialize_local_runtime_storage_root,
-        no_assistant_text_message, protect_reborn_log_filter, resolve_google_oauth_config,
-        resolve_google_oauth_config_state, resolve_google_oauth_config_state_merged,
+        no_assistant_text_message, parse_rc1_channel_state_migration_override,
+        protect_reborn_log_filter, resolve_google_oauth_config, resolve_google_oauth_config_state,
+        resolve_google_oauth_config_state_merged,
         resolve_google_oauth_config_state_with_store_loader, runner_settings,
         with_binary_host_extension_bindings_from_bundles,
     };
@@ -1771,6 +1820,30 @@ mod tests {
                 .to_string()
                 .contains("must inject the first-party package inventory"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rc1_channel_state_migration_is_skipped_by_default_and_fail_loud() {
+        assert!(
+            parse_rc1_channel_state_migration_override(Err(std::env::VarError::NotPresent))
+                .expect("unset override skips legacy channel-state migration")
+        );
+        assert!(
+            parse_rc1_channel_state_migration_override(Ok(" TRUE ".to_string()))
+                .expect("explicit true enables the emergency override")
+        );
+        assert!(
+            !parse_rc1_channel_state_migration_override(Ok("0".to_string()))
+                .expect("explicit false opts into legacy channel-state migration")
+        );
+
+        let error = parse_rc1_channel_state_migration_override(Ok("".to_string()))
+            .expect_err("blank override must not silently skip or run migration");
+        assert!(
+            error
+                .to_string()
+                .contains("IRONCLAW_REBORN_SKIP_RC1_CHANNEL_STATE_MIGRATION must be one of")
         );
     }
 

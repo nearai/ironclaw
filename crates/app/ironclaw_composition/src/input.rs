@@ -224,6 +224,12 @@ pub struct RebornHostBindings {
     /// build-time wiring can construct and register it. Selection stays in the
     /// binding policy; this only carries the chosen provider's connection.
     pub(crate) memory_provider_connection: Mem0ConnectionConfig,
+    /// Explicit IronClaw 1.0 shared-workspace snapshot to import into the
+    /// configured tenant/user workspace before runtime writers start.
+    pub(crate) legacy_workspace_snapshot: Option<PathBuf>,
+    /// Emergency release-policy override for malformed legacy Slack/Telegram
+    /// state. Core migrations remain enabled and source rows remain retained.
+    pub(crate) skip_rc1_channel_state_migration: bool,
 }
 
 /// One channel extension's binary-assembled vendor binding
@@ -555,6 +561,21 @@ impl RebornHostBindings {
             }
             _ => {}
         }
+        self
+    }
+
+    pub fn with_legacy_workspace_snapshot(mut self, source: PathBuf) -> Self {
+        self.legacy_workspace_snapshot = Some(source);
+        self
+    }
+
+    pub fn with_rc1_channel_state_migration_skipped(mut self) -> Self {
+        self.skip_rc1_channel_state_migration = true;
+        self
+    }
+
+    pub fn with_rc1_channel_state_migration_enabled_by_operator(mut self) -> Self {
+        self.skip_rc1_channel_state_migration = false;
         self
     }
 
@@ -955,6 +976,8 @@ impl RebornHostBindings {
             credential_account_visibility_policy: None,
             memory_binding_policy: None,
             memory_provider_connection: Mem0ConnectionConfig::default(),
+            legacy_workspace_snapshot: None,
+            skip_rc1_channel_state_migration: true,
         }
     }
 

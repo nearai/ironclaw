@@ -78,3 +78,15 @@ fn hex_component(value: &str) -> String {
     }
     encoded
 }
+
+pub(super) fn action_path_suffix(fingerprint: &ActionFingerprintKey) -> String {
+    format!(
+        "/{}/{}/{}/{}/{}/{}.json",
+        hex_component(fingerprint.adapter_id.as_str()),
+        hex_component(fingerprint.installation_id.as_str()),
+        hex_component(fingerprint.external_actor_ref.kind()),
+        hex_component(fingerprint.external_actor_ref.id()),
+        hex_component(fingerprint.source_binding_key.as_str()),
+        hex_component(fingerprint.external_event_id.as_str())
+    )
+}

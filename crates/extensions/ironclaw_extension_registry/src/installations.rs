@@ -28,6 +28,10 @@ use crate::resolved::{PackageRootBinding, ResolvedExtensionManifest};
 use crate::{ExtensionManifestV2, HostApiContractRegistry, ManifestSource, ManifestV2Error};
 use crate::{PackageDefinitionAdmissionOutcome, PackageDefinitionRetention};
 
+mod rc1_snapshot;
+
+pub use rc1_snapshot::Rc1SnapshotMigrationReport;
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct ManifestHash(String);
@@ -614,10 +618,51 @@ impl TryFrom<InstallationOwnerWire> for InstallationOwner {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionActivationState {
+    Installed,
+    Disabled,
+    Enabled,
+}
+
+impl ExtensionActivationState {
+    fn is_enabled(value: &Self) -> bool {
+        *value == Self::Enabled
+    }
+
+    /// Canonical wire spelling for the `V2InstallationRecord` compat field.
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Installed => "installed",
+            Self::Disabled => "disabled",
+            Self::Enabled => "enabled",
+        }
+    }
+
+    /// Parse the `V2InstallationRecord` compat field. Absent or unrecognized
+    /// (a value written by a build with a variant this one doesn't know)
+    /// both fail open to `Enabled` rather than erroring — see the field's
+    /// doc comment on why the string is carried through opaquely.
+    fn from_wire_name(value: Option<&str>) -> Self {
+        match value {
+            Some("installed") => Self::Installed,
+            Some("disabled") => Self::Disabled,
+            _ => Self::Enabled,
+        }
+    }
+}
+
+fn default_enabled_activation_state() -> ExtensionActivationState {
+    ExtensionActivationState::Enabled
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExtensionInstallation {
     installation_id: ExtensionInstallationId,
     extension_id: ExtensionId,
+    #[serde(skip_serializing_if = "ExtensionActivationState::is_enabled")]
+    activation_state: ExtensionActivationState,
     manifest_ref: ExtensionManifestRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     incarnation_id: Option<InstallationIncarnationId>,
@@ -636,6 +681,7 @@ pub struct ExtensionInstallation {
 pub struct ExtensionInstallationPersistedParts {
     pub installation_id: ExtensionInstallationId,
     pub extension_id: ExtensionId,
+    pub activation_state: ExtensionActivationState,
     pub manifest_ref: ExtensionManifestRef,
     pub incarnation_id: Option<InstallationIncarnationId>,
     pub credential_bindings: Vec<ExtensionCredentialBinding>,
@@ -655,6 +701,7 @@ impl ExtensionInstallation {
         Self::from_persisted_parts(ExtensionInstallationPersistedParts {
             installation_id,
             extension_id,
+            activation_state: ExtensionActivationState::Enabled,
             manifest_ref,
             incarnation_id: Some(InstallationIncarnationId::fresh()),
             credential_bindings,
@@ -681,6 +728,7 @@ impl ExtensionInstallation {
         Ok(Self {
             installation_id: parts.installation_id,
             extension_id: parts.extension_id,
+            activation_state: parts.activation_state,
             manifest_ref: parts.manifest_ref,
             incarnation_id: parts.incarnation_id,
             credential_bindings: parts.credential_bindings,
@@ -695,6 +743,10 @@ impl ExtensionInstallation {
 
     pub fn extension_id(&self) -> &ExtensionId {
         &self.extension_id
+    }
+
+    pub fn persisted_activation_state(&self) -> ExtensionActivationState {
+        self.activation_state
     }
 
     pub fn manifest_ref(&self) -> &ExtensionManifestRef {
@@ -724,6 +776,15 @@ impl ExtensionInstallation {
         self.updated_at = Utc::now();
         self
     }
+
+    /// Same installation with an explicit lifecycle state. Keeping this on
+    /// the durable authority prevents disabled legacy extensions from being
+    /// activated merely because the process restarted.
+    pub fn with_activation_state(mut self, state: ExtensionActivationState) -> Self {
+        self.activation_state = state;
+        self.updated_at = Utc::now();
+        self
+    }
 }
 
 impl<'de> Deserialize<'de> for ExtensionInstallation {
@@ -736,6 +797,8 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
         struct Wire {
             installation_id: ExtensionInstallationId,
             extension_id: ExtensionId,
+            #[serde(default = "default_enabled_activation_state")]
+            activation_state: ExtensionActivationState,
             manifest_ref: ExtensionManifestRef,
             #[serde(default)]
             incarnation_id: Option<InstallationIncarnationId>,
@@ -767,6 +830,7 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
         Ok(Self {
             installation_id: wire.installation_id,
             extension_id: wire.extension_id,
+            activation_state: wire.activation_state,
             manifest_ref: wire.manifest_ref,
             incarnation_id: wire.incarnation_id,
             credential_bindings: wire.credential_bindings,
@@ -856,6 +920,22 @@ pub trait ExtensionInstallationStorePort: Send + Sync {
         &self,
         installation: ExtensionInstallation,
     ) -> Result<(), ExtensionInstallationError>;
+
+    /// Persist lifecycle intent without changing membership or credentials.
+    async fn set_persisted_activation_state(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        state: ExtensionActivationState,
+    ) -> Result<(), ExtensionInstallationError> {
+        let installation = self
+            .get_installation(installation_id)
+            .await?
+            .ok_or_else(|| ExtensionInstallationError::InstallationNotFound {
+                installation_id: installation_id.clone(),
+            })?;
+        self.upsert_installation(installation.with_activation_state(state))
+            .await
+    }
 
     /// Conditionally refresh only the manifest embedded in a live installation.
     /// The current installation row is read and retained by the CAS transform,
@@ -1026,6 +1106,16 @@ where
         installation: ExtensionInstallation,
     ) -> Result<(), ExtensionInstallationError> {
         (**self).upsert_installation(installation).await
+    }
+
+    async fn set_persisted_activation_state(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        state: ExtensionActivationState,
+    ) -> Result<(), ExtensionInstallationError> {
+        (**self)
+            .set_persisted_activation_state(installation_id, state)
+            .await
     }
 
     async fn upsert_manifest_only(
@@ -1295,6 +1385,7 @@ pub struct ExtensionInstallationStore {
     host_ports: HostPortCatalog,
     contracts: HostApiContractRegistry,
     cas_retries: usize,
+    rc1_snapshot_report: Rc1SnapshotMigrationReport,
 }
 
 impl fmt::Debug for ExtensionInstallationStore {
@@ -1330,15 +1421,65 @@ impl ExtensionInstallationStore {
             host_ports,
             contracts,
             cas_retries: FILESYSTEM_CAS_RETRIES,
+            rc1_snapshot_report: Rc1SnapshotMigrationReport::default(),
         };
         store.ensure_indexes().await?;
-        store.migrate_legacy_manifest_rows().await?;
         store.ensure_v2_indexes().await?;
+        let mut store = store;
+        // An interrupted import can leave an otherwise-live v2 record leased.
+        // Repair it before snapshot conflict checks, which intentionally treat
+        // invisible records as divergent.
+        store.repair_interrupted_v2_leases().await?;
+        store.rc1_snapshot_report = store.bootstrap_from_rc1_snapshot().await?;
+        store.migrate_legacy_manifest_rows().await?;
         store.bootstrap_v2_from_compatibility_rows().await?;
         store.repair_interrupted_v2_leases().await?;
         store.repair_removed_v2_children().await?;
         store.repair_compatibility_views().await?;
         Ok(store)
+    }
+
+    /// Persist only lifecycle intent on the authoritative v2 core row while
+    /// preserving memberships, credential children, and an in-flight lease.
+    pub async fn set_persisted_activation_state(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        state: ExtensionActivationState,
+    ) -> Result<(), ExtensionInstallationError> {
+        let path = self.v2_scoped_path(&self.v2_installation_path(installation_id)?)?;
+        let installation_id = installation_id.clone();
+        cas_update(
+            self.scoped_filesystem.as_ref(),
+            &ResourceScope::system(),
+            &path,
+            decode_v2_installation_body,
+            entry_for_v2_installation,
+            move |current: Option<V2InstallationRecord>| {
+                let installation_id = installation_id.clone();
+                async move {
+                    let Some(mut record) = current else {
+                        return Err(ExtensionInstallationError::InstallationNotFound {
+                            installation_id,
+                        });
+                    };
+                    if record.installation_id != installation_id {
+                        return Err(invalid_installation_error(
+                            "v2 installation body identity did not match its key",
+                        ));
+                    }
+                    if record.is_removed() {
+                        return Err(ExtensionInstallationError::InstallationNotFound {
+                            installation_id,
+                        });
+                    }
+                    record.activation_state = Some(state.wire_name().to_string());
+                    record.updated_at = Utc::now();
+                    Ok(CasApply::new(record, ()))
+                }
+            },
+        )
+        .await
+        .map_err(|error| map_extension_state_cas_error(error, "installation"))
     }
 
     pub fn default_state_path() -> Result<VirtualPath, ExtensionInstallationError> {
@@ -2954,6 +3095,9 @@ impl ExtensionInstallationStore {
         ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
             installation_id: core.installation_id.clone(),
             extension_id: core.extension_id.clone(),
+            activation_state: ExtensionActivationState::from_wire_name(
+                core.activation_state.as_deref(),
+            ),
             manifest_ref: core.manifest_ref(),
             incarnation_id: core.incarnation_id.clone(),
             credential_bindings,
@@ -3573,6 +3717,15 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
             .put_installation(&installation, CasExpectation::Any)
             .await;
         Ok(())
+    }
+
+    async fn set_persisted_activation_state(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        state: ExtensionActivationState,
+    ) -> Result<(), ExtensionInstallationError> {
+        ExtensionInstallationStore::set_persisted_activation_state(self, installation_id, state)
+            .await
     }
 
     async fn upsert_manifest_only(

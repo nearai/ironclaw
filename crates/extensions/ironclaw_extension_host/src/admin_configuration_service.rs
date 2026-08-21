@@ -23,7 +23,7 @@ use crate::{
     AdminConfigurationStoreError, AdminConfigurationValueRef, FilesystemAdminConfigurationStore,
 };
 
-const MAX_VALUE_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_VALUE_BYTES: usize = 16 * 1024;
 const MAX_TOTAL_VALUE_BYTES: usize = 256 * 1024;
 
 /// One value submitted by an authenticated administrator.
@@ -371,6 +371,143 @@ where
         Ok(render_group(descriptor, Some(&committed)))
     }
 
+    /// Merge a partial legacy configuration into one manifest-declared group.
+    ///
+    /// This is a startup-migration seam, not an operator save: released
+    /// channel setup records may predate fields that are required today, so a
+    /// partial source is valid. Existing equal values are retained, divergent
+    /// values fail closed, and absent values are added through the ordinary
+    /// reservation/secret-staging transaction. The caller must use a stable
+    /// `migration_id`; retries after interruption are idempotent.
+    pub async fn import_legacy_values(
+        &self,
+        scope: &ResourceScope,
+        group_id: &AdminConfigurationGroupId,
+        migration_id: &str,
+        submitted: Vec<AdminConfigurationSubmittedValue>,
+    ) -> Result<usize, AdminConfigurationServiceError> {
+        let descriptor = self
+            .descriptors
+            .get(group_id)
+            .ok_or(AdminConfigurationServiceError::UnknownGroup)?;
+        let previous = self
+            .store
+            .get(scope, group_id)
+            .await
+            .map_err(map_store_error)?;
+        let validated = validate_legacy_submitted(descriptor, submitted)?;
+        let shared_scope = scope.tenant_shared_managed_scope();
+        let mut effective = previous
+            .as_ref()
+            .map(|record| record.values.clone())
+            .unwrap_or_default();
+        let mut additions = BTreeMap::new();
+        for field in &descriptor.fields {
+            let Some(value) = validated.get(&field.handle) else {
+                continue;
+            };
+            match effective.get(&field.handle) {
+                Some(AdminConfigurationValueRef::Inline(current)) if !field.secret => {
+                    if current != value.expose_secret() {
+                        return Err(AdminConfigurationServiceError::IdempotencyConflict);
+                    }
+                }
+                Some(AdminConfigurationValueRef::Secret(handle)) if field.secret => {
+                    let lease = self
+                        .secrets
+                        .lease_once(&shared_scope, handle)
+                        .await
+                        .map_err(|_| AdminConfigurationServiceError::Unavailable)?;
+                    let current = self
+                        .secrets
+                        .consume(&shared_scope, lease.id)
+                        .await
+                        .map_err(|_| AdminConfigurationServiceError::Unavailable)?;
+                    if current.expose_secret() != value.expose_secret() {
+                        return Err(AdminConfigurationServiceError::IdempotencyConflict);
+                    }
+                }
+                Some(_) => return Err(AdminConfigurationServiceError::IdempotencyConflict),
+                None => {
+                    additions.insert(field.handle.clone(), value.expose_secret().to_string());
+                }
+            }
+        }
+        if additions.is_empty() {
+            return Ok(0);
+        }
+
+        let expected_revision = previous.as_ref().map_or(0, |record| record.revision);
+        let request_values = additions
+            .iter()
+            .map(|(handle, value)| (handle.clone(), SecretMaterial::from(value.clone())))
+            .collect::<BTreeMap<_, _>>();
+        let request_digest = request_digest(descriptor, expected_revision, &request_values);
+        let idempotency_key = AdminConfigurationIdempotencyKey::new(format!(
+            "legacy-import:{migration_id}:r{expected_revision}"
+        ))
+        .map_err(map_store_error)?;
+        let reservation = self
+            .store
+            .reserve(
+                scope,
+                group_id,
+                &idempotency_key,
+                request_digest,
+                expected_revision,
+            )
+            .await
+            .map_err(map_store_error)?;
+        let reservation = match reservation {
+            AdminConfigurationReserveOutcome::Replay(_) => return Ok(0),
+            AdminConfigurationReserveOutcome::Reserved(reservation) => reservation,
+        };
+
+        let mut staged_handles = Vec::new();
+        for field in &descriptor.fields {
+            let Some(value) = additions.get(&field.handle) else {
+                continue;
+            };
+            if field.secret {
+                let handle = staged_secret_handle(group_id, &field.handle, reservation.revision)?;
+                staged_handles.push(handle.clone());
+                if let Err(error) = self
+                    .secrets
+                    .put(
+                        shared_scope.clone(),
+                        handle.clone(),
+                        SecretMaterial::from(value.clone()),
+                        None,
+                    )
+                    .await
+                {
+                    tracing::warn!(error = ?error, "legacy admin-configuration secret staging failed");
+                    self.cleanup_staged(&shared_scope, &staged_handles).await;
+                    return Err(AdminConfigurationServiceError::Unavailable);
+                }
+                effective.insert(
+                    field.handle.clone(),
+                    AdminConfigurationValueRef::Secret(handle),
+                );
+            } else {
+                effective.insert(
+                    field.handle.clone(),
+                    AdminConfigurationValueRef::Inline(value.clone()),
+                );
+            }
+        }
+        if let Err(error) = self.store.commit(scope, &reservation, effective).await {
+            if !self
+                .reservation_may_be_published(scope, group_id, reservation.revision)
+                .await
+            {
+                self.cleanup_staged(&shared_scope, &staged_handles).await;
+            }
+            return Err(map_store_error(error));
+        }
+        Ok(additions.len())
+    }
+
     async fn reservation_may_be_published(
         &self,
         scope: &ResourceScope,
@@ -431,6 +568,31 @@ fn validate_submitted(
     previous: Option<&AdminConfigurationRecord>,
     submitted: Vec<AdminConfigurationSubmittedValue>,
 ) -> Result<BTreeMap<SecretHandle, SecretMaterial>, AdminConfigurationServiceError> {
+    let validated = validate_declared_submitted(descriptor, submitted)?;
+    for field in &descriptor.fields {
+        if field.host_managed || !field.required {
+            continue;
+        }
+        let present = match validated.get(&field.handle) {
+            Some(value) if field.secret && !value.expose_secret().is_empty() => true,
+            Some(value) if !field.secret && !value.expose_secret().trim().is_empty() => true,
+            _ if field.secret => matches!(
+                previous.and_then(|record| record.values.get(&field.handle)),
+                Some(AdminConfigurationValueRef::Secret(_))
+            ),
+            _ => false,
+        };
+        if !present {
+            return Err(AdminConfigurationServiceError::MissingRequiredField);
+        }
+    }
+    Ok(validated)
+}
+
+fn validate_declared_submitted(
+    descriptor: &ExtensionAdminConfigurationDescriptor,
+    submitted: Vec<AdminConfigurationSubmittedValue>,
+) -> Result<BTreeMap<SecretHandle, SecretMaterial>, AdminConfigurationServiceError> {
     let declared = descriptor
         .fields
         .iter()
@@ -457,24 +619,14 @@ fn validate_submitted(
             return Err(AdminConfigurationServiceError::DuplicateField);
         }
     }
-    for field in &descriptor.fields {
-        if field.host_managed || !field.required {
-            continue;
-        }
-        let present = match validated.get(&field.handle) {
-            Some(value) if field.secret && !value.expose_secret().is_empty() => true,
-            Some(value) if !field.secret && !value.expose_secret().trim().is_empty() => true,
-            _ if field.secret => matches!(
-                previous.and_then(|record| record.values.get(&field.handle)),
-                Some(AdminConfigurationValueRef::Secret(_))
-            ),
-            _ => false,
-        };
-        if !present {
-            return Err(AdminConfigurationServiceError::MissingRequiredField);
-        }
-    }
     Ok(validated)
+}
+
+fn validate_legacy_submitted(
+    descriptor: &ExtensionAdminConfigurationDescriptor,
+    submitted: Vec<AdminConfigurationSubmittedValue>,
+) -> Result<BTreeMap<SecretHandle, SecretMaterial>, AdminConfigurationServiceError> {
+    validate_declared_submitted(descriptor, submitted)
 }
 
 fn request_digest(

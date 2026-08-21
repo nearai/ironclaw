@@ -58,11 +58,19 @@ fn process_and_thread_request_storage_paths_do_not_enumerate_collections() {
         "pub async fn migrate_transcript_indexes_for_scope",
         "async fn migrate_transcript_page",
     );
-    assert_calls_are_confined_to(
+    assert_calls_are_confined_to_any(
         &transcript_migration,
         "list_dir",
-        "pub async fn migrate_transcript_indexes_for_scope",
-        "async fn migrate_transcript_page",
+        &[
+            (
+                "pub async fn migrate_legacy_append_logs_for_scope",
+                "pub async fn migrate_transcript_indexes_for_scope",
+            ),
+            (
+                "pub async fn migrate_transcript_indexes_for_scope",
+                "async fn migrate_transcript_page",
+            ),
+        ],
     );
 }
 
@@ -129,6 +137,37 @@ fn assert_calls_are_confined_to(source: &str, method: &str, start: &str, end: &s
     );
 }
 
+fn assert_calls_are_confined_to_any(source: &str, method: &str, ranges: &[(&str, &str)]) {
+    let ranges = ranges
+        .iter()
+        .map(|(start, end)| {
+            let start_offset = source
+                .find(start)
+                .unwrap_or_else(|| panic!("migration boundary `{start}` must exist"));
+            let end_offset = source[start_offset..]
+                .find(end)
+                .map(|offset| start_offset + offset)
+                .unwrap_or_else(|| panic!("migration boundary `{end}` must exist after `{start}`"));
+            (start_offset, end_offset)
+        })
+        .collect::<Vec<_>>();
+
+    let violations = call_offsets(source, method)
+        .into_iter()
+        .filter(|offset| {
+            !ranges
+                .iter()
+                .any(|(start, end)| *offset >= *start && *offset < *end)
+        })
+        .map(|offset| line_number(source, offset))
+        .collect::<Vec<_>>();
+    assert!(
+        violations.is_empty(),
+        "`.{method}(` may only appear in the explicit offline migration boundaries; \
+         found request/startup uses on lines {violations:?}"
+    );
+}
+
 fn line_number(source: &str, offset: usize) -> usize {
     source[..offset]
         .bytes()
@@ -159,6 +198,39 @@ mod self_tests {
             "query",
             "pub async fn migrate_x",
             "async fn after_migration",
+        );
+    }
+
+    #[test]
+    fn calls_inside_either_explicit_migration_range_are_allowed() {
+        let source = scannable(
+            "pub async fn migrate_a() { self.fs.list_dir(); }\n\
+             async fn after_a() {}\n\
+             pub async fn migrate_b() { self.fs.list_dir(); }\n\
+             async fn after_b() {}\n",
+        );
+        assert_calls_are_confined_to_any(
+            &source,
+            "list_dir",
+            &[
+                ("pub async fn migrate_a", "async fn after_a"),
+                ("pub async fn migrate_b", "async fn after_b"),
+            ],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "explicit offline migration boundaries")]
+    fn a_call_outside_all_explicit_migration_ranges_is_rejected() {
+        let source = scannable(
+            "async fn request_path() { self.fs.list_dir(); }\n\
+             pub async fn migrate_a() {}\n\
+             async fn after_a() {}\n",
+        );
+        assert_calls_are_confined_to_any(
+            &source,
+            "list_dir",
+            &[("pub async fn migrate_a", "async fn after_a")],
         );
     }
 

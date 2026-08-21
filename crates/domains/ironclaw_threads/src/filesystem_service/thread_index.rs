@@ -106,7 +106,7 @@ where
             ))
     }
 
-    async fn ensure_thread_index_query(
+    pub(super) async fn ensure_thread_index_query(
         &self,
         scope: &ThreadScope,
         required: bool,

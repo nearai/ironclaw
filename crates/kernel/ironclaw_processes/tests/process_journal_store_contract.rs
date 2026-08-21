@@ -1183,6 +1183,25 @@ async fn deployed_turn_blob_and_run_state_import_before_first_process_request() 
             "spawn_tree_root_run_id": root_run_id,
             "product_context": null
         }],
+        "active_locks": [{
+            "run_id": run_id,
+            "key": {"scope": turn_scope},
+            "status": "BlockedApproval",
+            "lock_version": 1,
+            "acquired_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:01Z"
+        }],
+        "checkpoints": [{
+            "checkpoint_id": checkpoint_id,
+            "run_id": run_id,
+            "scope": turn_scope,
+            "sequence": 1,
+            "status": "BlockedApproval",
+            "gate_ref": "gate:migration-approval",
+            "kind": "before_block",
+            "state_ref": "state:migration",
+            "created_at": "2026-01-01T00:00:01Z"
+        }],
         "loop_checkpoints": [
             {
                 "checkpoint_id": checkpoint_id,
@@ -1226,6 +1245,19 @@ async fn deployed_turn_blob_and_run_state_import_before_first_process_request() 
                 "created_at": "2026-01-01T00:00:00Z"
             }
         ],
+        "events": [{
+            "cursor": 41,
+            "scope": turn_scope,
+            "run_id": run_id,
+            "status": "BlockedApproval",
+            "kind": "status_changed"
+        }],
+        "admission_reservations": [{
+            "run_id": run_id,
+            "admission_class": "interactive",
+            "buckets": [],
+            "released": false
+        }],
         "spawn_tree_reservations": [{
             "scope": turn_scope,
             "root_run_id": root_run_id,
@@ -1316,13 +1348,16 @@ async fn deployed_turn_blob_and_run_state_import_before_first_process_request() 
         .expect("seed deployed per-user capability run");
 
     let store = ProcessJournalStore::new(Arc::clone(&filesystem));
-    assert_eq!(
-        store
-            .migrate_legacy_journal()
-            .await
-            .expect("pre-start deployed migration"),
-        3
-    );
+    let migration = store
+        .migrate_legacy_journal_with_report()
+        .await
+        .expect("pre-start deployed migration");
+    assert_eq!(migration.imported_journal_entries, 3);
+    assert!(!migration.already_complete);
+    assert_eq!(migration.disposition.legacy_events_superseded, 1);
+    assert_eq!(migration.disposition.active_locks_expired, 1);
+    assert_eq!(migration.disposition.checkpoint_metadata_superseded, 1);
+    assert_eq!(migration.disposition.admission_reservations_expired, 1);
     let imported_rows = filesystem
         .query(
             &ResourceScope::system(),
@@ -1433,13 +1468,13 @@ async fn deployed_turn_blob_and_run_state_import_before_first_process_request() 
         per_user_capability.status,
         ProcessLifecycleStatus::Completed
     );
-    assert_eq!(
-        store
-            .migrate_legacy_journal()
-            .await
-            .expect("migration rerun is idempotent"),
-        0
-    );
+    let rerun = store
+        .migrate_legacy_journal_with_report()
+        .await
+        .expect("migration rerun is idempotent");
+    assert!(rerun.already_complete);
+    assert_eq!(rerun.imported_journal_entries, 0);
+    assert_eq!(rerun.disposition, Default::default());
 }
 
 #[tokio::test]

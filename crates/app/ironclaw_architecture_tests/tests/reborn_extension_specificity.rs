@@ -1418,6 +1418,36 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     ("crates/ironclaw_composition/src/runtime.rs", "nearai_mcp"),
     // lane-4: migration — one-time forward-migration call sites naming the v1 vocabulary they fold forward — correct-by-design (same pattern the retired-taxonomy gate sanctions); would become a SANCTIONED_PATHS carve if the sites move into a dedicated migration module
+    // 1.2 release compatibility: these exact call sites must name the retired
+    // Slack/Telegram authorities to preserve or explicitly disposition their
+    // state. Delete all eight rows when the documented direct-upgrade and
+    // rollback window expires; no general runtime routing is sanctioned.
+    (
+        "crates/app/ironclaw_composition/src/factory/production_backend_assembly.rs",
+        "slack",
+    ),
+    (
+        "crates/app/ironclaw_composition/src/factory/production_backend_assembly.rs",
+        "telegram",
+    ),
+    ("crates/app/ironclaw_composition/src/input.rs", "slack"),
+    ("crates/app/ironclaw_composition/src/input.rs", "telegram"),
+    (
+        "crates/app/ironclaw_composition/src/release_migration/rc1_to_1_1.rs",
+        "slack",
+    ),
+    (
+        "crates/app/ironclaw_composition/src/release_migration/rc1_to_1_1.rs",
+        "telegram",
+    ),
+    (
+        "crates/extensions/ironclaw_extension_host/src/legacy_channel_state_migration/oauth_channel.rs",
+        "slack",
+    ),
+    (
+        "crates/extensions/ironclaw_extension_host/src/legacy_channel_state_migration/proof_code_channel.rs",
+        "telegram",
+    ),
     // lane-4: doc-str — incidental doc-comment / error-string / tool-description examples that NAME an extension but branch on nothing — the code routes by a manifest field (display_name/provider/effects); reword or leave (Ben's call)
     (
         "crates/ironclaw_extension_contracts/src/surface.rs",
@@ -1694,7 +1724,16 @@ const ALLOWLIST: &[(&str, &str)] = &[
 // `loop_driver_host.rs`/"slack" carve-out was retired when the channel-context
 // forwarding it described was reworked, so its now-stale allowlist entry was
 // deleted — the ratchet only ever shrinks.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 112;
+// 117 -> 112, 2026-08-11..2026-08-20 (unrelated upstream shrinkage on
+// release/2026-08-17 while this branch's own baseline sat at 112).
+// 112 -> 120, 2026-08-20 (port of Firat's rc1/1.2 legacy-state and Railway
+// workspace-artifact preservation commits from release/2026-08-11 onto
+// release/2026-08-17): the ported migration code names vendor-specific
+// legacy-state shapes (`legacy_channel_state_migration/{oauth_channel,
+// proof_code_channel}.rs`, the rc1 Slack/Telegram fixtures) that the
+// pre-port scanner had never seen. Measured, not chosen — see
+// `reborn_extension_specificity_allowlist_ratchets_down_only` below.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 120;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///

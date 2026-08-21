@@ -30,6 +30,7 @@ mkdir -p "${WORK}/bin"
 cat > "${WORK}/bin/ironclaw" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" > "${IRONCLAW_STUB_ARGV_PATH}"
+printf '%s\n' "${IRONCLAW_REBORN_WORKSPACE_ROOT}" > "${IRONCLAW_STUB_WORKSPACE_PATH}"
 exit 0
 STUB
 chmod +x "${WORK}/bin/ironclaw"
@@ -104,8 +105,10 @@ run_entrypoint() {
     # validates the path prefix before it decides that.
     export IRONCLAW_REBORN_DEFAULT_CONFIG=/opt/ironclaw/reborn/config.toml
     export IRONCLAW_STUB_ARGV_PATH="${home}/argv"
+    export IRONCLAW_STUB_WORKSPACE_PATH="${home}/workspace-root"
     # Keep the Railway persistence guard out of the way.
     unset RAILWAY_ENVIRONMENT RAILWAY_PROJECT_ID RAILWAY_SERVICE_ID RAILWAY_VOLUME_MOUNT_PATH
+    unset IRONCLAW_REBORN_WORKSPACE_ROOT IRONCLAW_REBORN_LEGACY_WORKSPACE_SNAPSHOT
     for assignment in "$@"; do
       export "${assignment?}"
     done
@@ -164,6 +167,16 @@ out="$(run_entrypoint plain "$LEGACY_DISABLED")"
 expect_absent plain 'signing_secret_env' "$out"
 expect_absent plain 'bot_token_env' "$out"
 expect_present plain 'enabled = false' "$out"
+if [ "$(cat "${WORK}/plain/workspace-root")" != "${WORK}/plain/workspace" ]; then
+  echo "FAIL[plain]: workspace root did not default beneath IRONCLAW_REBORN_HOME" >&2
+  failures=$((failures + 1))
+fi
+
+out="$(run_entrypoint custom_workspace "$LEGACY_DISABLED" "IRONCLAW_REBORN_WORKSPACE_ROOT=${WORK}/durable-workspace")"
+if [ "$(cat "${WORK}/custom_workspace/workspace-root")" != "${WORK}/durable-workspace" ]; then
+  echo "FAIL[custom_workspace]: explicit durable workspace root was not preserved" >&2
+  failures=$((failures + 1))
+fi
 
 # 2. The regression itself. Every truthy spelling the entrypoint's `is_truthy`
 #    accepts used to suppress the migration; the docs taught `=true`.

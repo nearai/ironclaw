@@ -104,10 +104,24 @@ pub fn canonicalize_installation_rows(
                     reason: "installation group unexpectedly empty".to_string(),
                 })?;
             let installation_id = ExtensionInstallationId::new(extension_id.as_str())?;
+            let activation_state = if rows.iter().all(|installation| {
+                installation.persisted_activation_state()
+                    == crate::ExtensionActivationState::Enabled
+            }) {
+                crate::ExtensionActivationState::Enabled
+            } else if rows.iter().any(|installation| {
+                installation.persisted_activation_state()
+                    == crate::ExtensionActivationState::Disabled
+            }) {
+                crate::ExtensionActivationState::Disabled
+            } else {
+                crate::ExtensionActivationState::Installed
+            };
 
             ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
                 installation_id,
                 extension_id,
+                activation_state,
                 manifest_ref,
                 incarnation_id,
                 credential_bindings,
@@ -159,5 +173,30 @@ mod tests {
             error,
             ExtensionInstallationError::ConflictingInstallationIncarnation { .. }
         ));
+    }
+
+    #[test]
+    fn canonicalization_never_widens_activation() {
+        let enabled = pending();
+        let disabled = enabled
+            .clone()
+            .with_activation_state(crate::ExtensionActivationState::Disabled);
+        let installed = enabled
+            .clone()
+            .with_activation_state(crate::ExtensionActivationState::Installed);
+
+        let disabled_result = canonicalize_installation_rows(vec![enabled.clone(), disabled])
+            .expect("canonicalize disabled duplicate");
+        assert_eq!(
+            disabled_result[0].persisted_activation_state(),
+            crate::ExtensionActivationState::Disabled
+        );
+
+        let installed_result = canonicalize_installation_rows(vec![enabled, installed])
+            .expect("canonicalize installed duplicate");
+        assert_eq!(
+            installed_result[0].persisted_activation_state(),
+            crate::ExtensionActivationState::Installed
+        );
     }
 }

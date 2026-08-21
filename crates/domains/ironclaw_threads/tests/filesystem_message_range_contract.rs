@@ -19,10 +19,10 @@ use ironclaw_host_api::{
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendFinalizedAssistantMessageRequest, BoundedThreadMessages,
     BoundedThreadMessagesRequest, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    FilesystemSessionThreadService, InMemorySessionThreadService, MessageContent, MessageStatus,
-    RedactMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
+    FilesystemSessionThreadService, InMemorySessionThreadService, MessageContent, MessageKind,
+    MessageStatus, RedactMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
     SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRangeRequest,
-    ThreadScope,
+    ThreadMessageRecord, ThreadScope,
 };
 
 #[tokio::test]
@@ -374,6 +374,56 @@ async fn filesystem_store_range_read_includes_finalized_message_row() {
         fixture.range_contents(2, 3).await,
         vec!["assistant reply".to_string()]
     );
+}
+
+/// IronClaw 1.0 persisted finalized assistant replies only in the per-thread
+/// append log. A newer reader must materialize those events before relying on
+/// the individual-message projection or the visible reply disappears.
+#[tokio::test]
+async fn filesystem_history_materializes_1_0_append_only_assistant_message() {
+    let fixture = RangeFixture::new("fs-legacy-append", "tenant-legacy-append").await;
+    let message_id = ThreadMessageId::new();
+    let timestamp = chrono::Utc::now();
+    let legacy_message = ThreadMessageRecord {
+        message_id,
+        thread_id: fixture.thread_id.clone(),
+        sequence: 1,
+        kind: MessageKind::Assistant,
+        status: MessageStatus::Finalized,
+        created_at: Some(timestamp),
+        updated_at: Some(timestamp),
+        actor_id: None,
+        source_binding_id: None,
+        reply_target_binding_id: None,
+        turn_id: None,
+        turn_run_id: Some("legacy-run".to_string()),
+        tool_result_ref: None,
+        tool_result_provider_call: None,
+        content: Some("legacy finalized reply".to_string()),
+        attachments: Vec::new(),
+        redaction_ref: None,
+    };
+    fixture
+        .scoped
+        .append(
+            &fixture.scope.to_resource_scope(),
+            &ScopedPath::new(format!("{}/message_appends", fixture.thread_root())).unwrap(),
+            serde_json::to_vec(&legacy_message).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let history = fixture
+        .service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(history.messages, vec![legacy_message]);
+    assert!(fixture.message_file_exists(&message_id).await);
 }
 
 /// The finalized message and its ordered projection are one row, while the

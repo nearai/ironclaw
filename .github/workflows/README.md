@@ -203,6 +203,16 @@ hand-maintained CI list. The musl entries also use `readelf` to reject a program
 interpreter or dynamic-library dependency, which prevents an installed musl
 loader on the build runner from hiding a non-portable artifact.
 
+Before `host` receives permission to publish, the tag workflow runs two
+blocking release-upgrade canaries against the exact checksummed Linux cargo-dist
+archive: `ironclaw-v1.0.0` to the candidate and the published
+`ironclaw-v1.1.1-rc.1` candidate to the new candidate. Each predecessor artifact
+creates threads, finalized messages,
+scheduled and paused routines, and a workspace sentinel through the shipping
+binary. The candidate must preserve exact API read-back on first boot, restart,
+and re-upgrade; the predecessor must also reopen the retained authorities for
+the rollback check. A failed matrix leg prevents GitHub Release creation.
+
 The scheduled Postgres capacity lane complements that portable gate by building
 the same canonical binary with `--profile dist`, starting `serve`, applying the
 Postgres-backed runtime migrations, and driving its authenticated API against a

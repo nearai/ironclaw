@@ -142,6 +142,15 @@ views:
 /system/extensions/.installations/installations/<hashed_installation_id>.json
 ```
 
+Startup discovers retained 1.0/1.1 monolithic snapshots at
+`/tenants/{tenant}/system/extensions/.installations/state.json` (plus the local
+store's adjacent `state.json`), compiles them into global compatibility rows,
+then runs the ordinary v2 bootstrap. Sources remain for rollback; exact replay
+is a no-op, while malformed input or a divergent target fails startup. The
+reader preserves `installed`/`disabled`/`enabled` activation intent, and
+restore never enables or publishes a disabled or not-yet-enabled package. The
+released `health` field remains diagnostic-only.
+
 Store startup imports each legacy manifest+installation pair only when no v2
 authority record exists; an orphaned legacy manifest with no installation is
 the legacy flow's durable cleanup tombstone and imports as a
@@ -167,6 +176,13 @@ prefix `/extension-admin-configuration/groups`. Its stable key is the
 identical group. Secrets are referenced by opaque handles and only presence is
 projected. Admin configuration is deployment state: saving it does not add any
 user to an extension's membership set.
+
+The retained channel-state importer copies Slack and Telegram setup, active
+identity bindings, Slack routes, and DM targets from retired tenant-shared
+roots into generic stores without deleting the source. Equal values are
+idempotent; malformed rows or divergent targets fail startup. Telegram pairing
+challenges and incomplete legacy completion notices are validated, retained,
+and reported as redacted expirations rather than presented as live challenges.
 
 Recommended package layout:
 

@@ -7,15 +7,15 @@ use std::{
 
 use chrono::Utc;
 use ironclaw_extension_registry::{
-    CapabilityProviderHostApiContract, ExtensionCredentialBinding, ExtensionCredentialHandle,
-    ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
-    ExtensionInstallationPersistedParts, ExtensionInstallationStore,
+    CapabilityProviderHostApiContract, ExtensionActivationState, ExtensionCredentialBinding,
+    ExtensionCredentialHandle, ExtensionInstallation, ExtensionInstallationError,
+    ExtensionInstallationId, ExtensionInstallationPersistedParts, ExtensionInstallationStore,
     ExtensionInstallationStorePort, ExtensionManifestRecord, ExtensionManifestRef,
     HostApiContractRegistry, InstallationIncarnationId, InstallationOwner, MANIFEST_SCHEMA_VERSION,
     ManifestHash, ManifestSource, ManifestV2Error, MembershipDeactivation,
 };
 use ironclaw_filesystem::{
-    CasExpectation, Fault, FaultInjecting, FilesystemOperation, Filter, InMemoryBackend,
+    CasExpectation, Entry, Fault, FaultInjecting, FilesystemOperation, Filter, InMemoryBackend,
     LibSqlRootFilesystem, Page, PostgresRootFilesystem, RootFilesystem,
 };
 use ironclaw_host_api::{
@@ -78,6 +78,133 @@ prompt_doc_ref = "prompts/acme/echo.md"
 "#,
         schema = MANIFEST_SCHEMA_VERSION,
     )
+}
+
+/// Frozen from `ironclaw-v1.0.0-rc.1`. The released schema declared
+/// capabilities at the top level instead of under `capability_provider`.
+fn exact_rc1_web_access_manifest() -> &'static str {
+    r#"schema_version = "reborn.extension_manifest.v2"
+id = "web-access"
+name = "Web Access"
+version = "0.1.0"
+description = "Zero-config web search through Exa MCP for Reborn."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "web-access"
+
+[[capabilities]]
+id = "web-access.search"
+description = "Search the web."
+effects = ["dispatch_capability", "network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/web-access/search.input.v1.json"
+output_schema_ref = "schemas/web-access/search.output.v1.json"
+prompt_doc_ref = "prompts/web-access/search.md"
+"#
+}
+
+#[tokio::test]
+async fn startup_imports_exact_rc1_monolithic_extension_snapshot_idempotently() {
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+    let root = VirtualPath::new("/system/extensions/.installations/rc1-exact").unwrap();
+    let snapshot_path =
+        VirtualPath::new("/tenants/acme/system/extensions/.installations/state.json").unwrap();
+    let snapshot = serde_json::json!({
+        "manifests": [{
+            "raw_toml": exact_rc1_web_access_manifest(),
+            "source": "host_bundled",
+            "manifest_hash": "sha256:web-access-rc1"
+        }],
+        "installations": [{
+            "installation_id": "web-access",
+            "extension_id": "web-access",
+            "activation_state": "disabled",
+            "manifest_ref": {
+                "extension_id": "web-access",
+                "manifest_hash": "sha256:web-access-rc1"
+            },
+            "credential_bindings": [],
+            "health": null,
+            "updated_at": "2026-07-01T00:00:00Z"
+        }]
+    });
+    filesystem
+        .put(
+            &snapshot_path,
+            Entry::bytes(serde_json::to_vec(&snapshot).unwrap()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    let mut store = ExtensionInstallationStore::load_at(
+        Arc::clone(&filesystem),
+        root.clone(),
+        HostPortCatalog::empty(),
+        contracts(),
+    )
+    .await
+    .unwrap();
+    let first = store.import_rc1_snapshot_at(&snapshot_path).await.unwrap();
+    assert_eq!(first.sources_migrated, 1);
+    assert_eq!(first.installations_migrated, 1);
+    let manifest = store
+        .get_manifest(&extension_id("web-access"))
+        .await
+        .unwrap()
+        .expect("rc1 manifest is visible through the normalized store");
+    assert!(
+        manifest
+            .raw_toml()
+            .contains("[[capability_provider.tools.capabilities]]")
+    );
+    assert!(!manifest.raw_toml().contains("[[capabilities]]"));
+    let installation = store
+        .get_installation(&installation_id("web-access"))
+        .await
+        .unwrap()
+        .expect("rc1 installation is visible through the normalized store");
+    assert_eq!(
+        installation.persisted_activation_state(),
+        ExtensionActivationState::Disabled,
+        "migration must never widen a disabled extension to enabled"
+    );
+    assert!(filesystem.get(&snapshot_path).await.unwrap().is_some());
+
+    let mut reopened = ExtensionInstallationStore::load_at(
+        Arc::clone(&filesystem),
+        root,
+        HostPortCatalog::empty(),
+        contracts(),
+    )
+    .await
+    .unwrap();
+    let second = reopened
+        .import_rc1_snapshot_at(&snapshot_path)
+        .await
+        .unwrap();
+    assert_eq!(second.sources_unchanged, 1);
+
+    let mut changed = snapshot;
+    changed["installations"][0]["updated_at"] =
+        serde_json::Value::String("2026-07-02T00:00:00Z".to_string());
+    filesystem
+        .put(
+            &snapshot_path,
+            Entry::bytes(serde_json::to_vec(&changed).unwrap()),
+            CasExpectation::Any,
+        )
+        .await
+        .unwrap();
+    assert!(
+        reopened
+            .import_rc1_snapshot_at(&snapshot_path)
+            .await
+            .is_err()
+    );
 }
 
 fn contracts() -> HostApiContractRegistry {
@@ -419,6 +546,7 @@ fn persisted_reconstruction_preserves_timestamp_and_bindings() {
         ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
             installation_id: installation_id("acme-tools"),
             extension_id: extension_id.clone(),
+            activation_state: ExtensionActivationState::Enabled,
             manifest_ref: ExtensionManifestRef::new(extension_id, None),
             incarnation_id: None,
             credential_bindings: vec![binding.clone()],

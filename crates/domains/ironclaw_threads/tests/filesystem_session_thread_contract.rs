@@ -44,8 +44,8 @@ use ironclaw_threads::{
     PREPARED_CONTEXT_METADATA_MARKER_KEY, ProviderToolCallReferenceEnvelope,
     PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
-    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
-    ToolResultIntrinsicOutcome, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord,
+    ThreadScope, ToolResultIntrinsicOutcome, ToolResultReferenceEnvelope, ToolResultSafeSummary,
     UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 use tokio::{
@@ -3315,7 +3315,7 @@ async fn filesystem_transcript_migration_retries_writer_admission_contention() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v3.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -3374,7 +3374,7 @@ async fn filesystem_transcript_migration_retries_a_lost_cas_race() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v3.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -3398,7 +3398,7 @@ async fn filesystem_transcript_migration_retries_a_lost_cas_race() {
     let marker_writes = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .filter(|path| path.as_str().contains("transcript-index-v2.complete"))
+        .filter(|path| path.as_str().contains("transcript-index-v3.complete"))
         .count();
     assert_eq!(
         marker_writes, 2,
@@ -3437,7 +3437,7 @@ async fn filesystem_transcript_migration_conflict_retries_are_bounded() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v3.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -3469,6 +3469,112 @@ async fn filesystem_transcript_migration_conflict_retries_are_bounded() {
     assert_eq!(
         message_row_attempts, 6,
         "conflict retries are bounded, not unbounded"
+    );
+}
+
+/// A source install running the pre-append-migration build already completed
+/// `migrate_transcript_indexes_for_scope` alone and wrote the
+/// `transcript-index-v2.complete` marker — before this crate materialized
+/// rc1's per-thread `message_appends` log into per-message rows.
+/// `migrate_transcript_for_scope` must not treat that legacy marker as proof
+/// append materialization already ran, or every upgraded install with a
+/// completed scope silently loses rc1 append-only assistant messages from
+/// its timeline forever. Regression for PR #7790 codex review comment
+/// 3827449526.
+#[tokio::test]
+async fn filesystem_transcript_migration_rematerializes_appends_behind_legacy_v2_marker() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-legacy-marker", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("legacy-marker");
+    let thread_id = ThreadId::new("thread-legacy-marker").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // Seed an rc1-style append-only message: present only in the legacy
+    // append log, never materialized as a per-message row.
+    let legacy_message_id = ThreadMessageId::new();
+    let legacy_message = ThreadMessageRecord {
+        message_id: legacy_message_id,
+        thread_id: thread_id.clone(),
+        sequence: 1,
+        kind: MessageKind::Assistant,
+        status: MessageStatus::Finalized,
+        created_at: Some(Utc::now()),
+        updated_at: Some(Utc::now()),
+        actor_id: None,
+        source_binding_id: None,
+        reply_target_binding_id: None,
+        turn_id: None,
+        turn_run_id: Some("run-legacy-marker".into()),
+        tool_result_ref: None,
+        tool_result_provider_call: None,
+        content: Some("rc1 append-only reply".into()),
+        attachments: Vec::new(),
+        redaction_ref: None,
+    };
+    let append_path = ScopedPath::new(format!(
+        "{}/message_appends",
+        thread_root_path_for_test(&scope, thread_id.as_str()).as_str()
+    ))
+    .unwrap();
+    scoped
+        .append(
+            &scope.to_resource_scope(),
+            &append_path,
+            serde_json::to_vec(&legacy_message).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Seed the exact marker an earlier transcript-index-only migration
+    // wrote, simulating a box that already completed that migration before
+    // this build's append-log materialization existed.
+    let marker = legacy_transcript_index_v2_migration_marker_path_for_test(&scope);
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &marker,
+            Entry::bytes(b"transcript-index-v2".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    let report = service
+        .migrate_transcript_for_scope(&scope)
+        .await
+        .expect("transcript migration must run, not error, behind a legacy v2 marker");
+    assert!(
+        !report.already_complete,
+        "a legacy transcript-index-only marker must not short-circuit append materialization"
+    );
+    assert_eq!(
+        report.append.materialized, 1,
+        "the rc1 append-only message must be materialized into a per-message row"
+    );
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+        })
+        .await
+        .expect("history read succeeds after materialization");
+    assert!(
+        history
+            .messages
+            .iter()
+            .any(|message| message.message_id == legacy_message_id),
+        "the append-only assistant message must be visible in the timeline after upgrade"
     );
 }
 
@@ -5769,6 +5875,29 @@ async fn wait_for_thread_index_projection_repair<F>(
 }
 
 fn transcript_index_migration_marker_path_for_test(scope: &ThreadScope) -> ScopedPath {
+    ScopedPath::new(format!(
+        "/threads/agents/{}/projects/{}/owners/{}/index-migrations/transcript-index-v3.complete",
+        scope.agent_id.as_str(),
+        scope
+            .project_id
+            .as_ref()
+            .expect("test scope has project")
+            .as_str(),
+        scope
+            .owner_user_id
+            .as_ref()
+            .expect("test scope has owner")
+            .as_str()
+    ))
+    .unwrap()
+}
+
+/// The marker path a pre-append-migration build wrote after completing
+/// `migrate_transcript_indexes_for_scope` alone, before this crate's
+/// append-log materialization existed. Used only to seed that legacy state
+/// for the marker-reuse regression test — current code writes
+/// [`transcript_index_migration_marker_path_for_test`] instead.
+fn legacy_transcript_index_v2_migration_marker_path_for_test(scope: &ThreadScope) -> ScopedPath {
     ScopedPath::new(format!(
         "/threads/agents/{}/projects/{}/owners/{}/index-migrations/transcript-index-v2.complete",
         scope.agent_id.as_str(),
