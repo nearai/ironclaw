@@ -19,23 +19,23 @@ use crate::tool_result_records::{
     validate_tool_result_record_read, validate_tool_result_record_ref,
 };
 use crate::{
-    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-    AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
-    BoundedThreadMessageSnapshot, BoundedThreadMessages, BoundedThreadMessagesRequest,
-    CapabilityDisplayPreviewEnvelope, ContextMessage, ContextMessages, ContextWindow,
-    CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
-    InboundMessageReplayMetadata, LatestThreadMessageRequest, ListThreadsForScopeRequest,
-    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, MessageKind, MessageStatus, PublishStructuredFinalizationMessageRequest,
-    PutStructuredFinalizationRequest, PutToolResultRecordRequest,
-    ReadStructuredFinalizationRequest, ReadToolResultRecordRequest, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, StructuredFinalizationRecord, SummaryArtifact, SummaryModelContextPolicy,
-    ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange,
-    ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, ToolResultRecordChunk,
-    ToolResultReferenceEnvelope, UpdateAssistantDraftRequest, UpdateToolResultRecordRequest,
-    UpdateToolResultReferenceRequest,
+    AcceptInboundMessageRequest, AcceptSubagentResultRequest, AcceptedInboundMessage,
+    AcceptedInboundMessageReplay, AcceptedSubagentResult, AppendAssistantDraftRequest,
+    AppendCapabilityDisplayPreviewRequest, AppendFinalizedAssistantMessageRequest,
+    AppendToolResultReferenceRequest, BoundedThreadMessageSnapshot, BoundedThreadMessages,
+    BoundedThreadMessagesRequest, CapabilityDisplayPreviewEnvelope, ContextMessage,
+    ContextMessages, ContextWindow, CreateSummaryArtifactRequest, DeleteToolResultRecordRequest,
+    EnsureThreadRequest, InboundMessageReplayMetadata, LatestThreadMessageRequest,
+    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
+    PublishStructuredFinalizationMessageRequest, PutStructuredFinalizationRequest,
+    PutToolResultRecordRequest, ReadStructuredFinalizationRequest, ReadToolResultRecordRequest,
+    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, SessionThreadService, StructuredFinalizationRecord, SummaryArtifact,
+    SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
+    ToolResultRecordChunk, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -286,6 +286,99 @@ impl SessionThreadService for InMemorySessionThreadService {
             sequence,
             idempotent_replay: false,
             replay_metadata,
+        })
+    }
+
+    async fn accept_subagent_result(
+        &self,
+        request: AcceptSubagentResultRequest,
+    ) -> Result<AcceptedSubagentResult, SessionThreadError> {
+        let mut state = self.state.lock().await;
+        // The SAME index the inbound door writes: one dedupe index for the
+        // whole acceptance boundary. Both halves of the identity arrive
+        // already resolved — this crate derives neither.
+        let key = InboundIdempotencyKey {
+            scope: request.scope.clone(),
+            source_binding_id: request.source_binding_id.clone(),
+            external_event_id: request.external_event_id.clone(),
+        };
+        if let Some(record) = state.inbound_idempotency.get(&key) {
+            if record.thread_id != request.thread_id {
+                return Err(SessionThreadError::IdempotentReplayThreadMismatch {
+                    stored_thread_id: record.thread_id.clone(),
+                    requested_thread_id: request.thread_id,
+                });
+            }
+            let message_id = record.message_id;
+            let thread = get_thread(&state, &request.scope, &record.thread_id)?;
+            let existing = thread
+                .messages
+                .iter()
+                .find(|message| message.message_id == message_id)
+                .ok_or(SessionThreadError::UnknownMessage { message_id })?;
+            // A hit that landed on a user/steering row is an identity
+            // collision, not a replay.
+            if existing.kind != MessageKind::System {
+                return Err(SessionThreadError::Backend(format!(
+                    "subagent-result acceptance identity is already held by a non-system row \
+                     ({:?})",
+                    existing.kind
+                )));
+            }
+            return Ok(AcceptedSubagentResult {
+                message_id,
+                sequence: existing.sequence,
+                idempotent_replay: true,
+            });
+        }
+
+        let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
+        let message_id = ThreadMessageId::new();
+        // Validate the payload before mutating any thread state, exactly as
+        // the inbound door does: a rejected attachment must not burn a
+        // sequence or bump the activity stamp.
+        let (content_text, attachments) = request.content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
+        let sequence = thread.next_sequence;
+        thread.next_sequence += 1;
+        let now = Utc::now();
+        thread.record.updated_at = Some(now);
+        let message = ThreadMessageRecord {
+            message_id,
+            thread_id: request.thread_id.clone(),
+            sequence,
+            // System-class, never `MessageKind::User`: a child's output is
+            // untrusted agent text, not a human instruction.
+            kind: MessageKind::System,
+            status: MessageStatus::Finalized,
+            created_at: Some(now),
+            updated_at: Some(now),
+            actor_id: None,
+            source_binding_id: Some(request.source_binding_id),
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: None,
+            tool_result_ref: None,
+            tool_result_provider_call: None,
+            content: Some(content_text),
+            attachments,
+            redaction_ref: None,
+        };
+        crate::contract::validate_new_message_timestamps(&message, "subagent result")?;
+        thread.messages.push(message);
+        state.inbound_idempotency.insert(
+            key,
+            InboundIdempotencyRecord {
+                thread_id: request.thread_id,
+                message_id,
+                replay_metadata: InboundMessageReplayMetadata::default(),
+            },
+        );
+
+        Ok(AcceptedSubagentResult {
+            message_id,
+            sequence,
+            idempotent_replay: false,
         })
     }
 

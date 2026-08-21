@@ -379,6 +379,37 @@ pub struct AcceptInboundMessageRequest {
     pub content: MessageContent,
 }
 
+/// One background child's framed result, offered to the **parent's** thread.
+///
+/// Both halves of the acceptance identity arrive already resolved as strings.
+/// This crate cannot see run identity — it must not depend on
+/// `ironclaw_processes` — so it stores and hashes what the caller supplies and
+/// derives nothing. The pair is the same `(scope, source_binding_id,
+/// external_event_id)` tuple [`AcceptInboundMessageRequest`] dedupes on, so
+/// both doors share one index rather than each keeping its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptSubagentResultRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    /// `subagent-result:{parent_run_id}` — the acceptance identity's binding half.
+    pub source_binding_id: String,
+    /// `{child_run_id}` — the acceptance identity's event half.
+    pub external_event_id: String,
+    pub content: MessageContent,
+}
+
+/// The durable row a [`AcceptSubagentResultRequest`] landed on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedSubagentResult {
+    pub message_id: ThreadMessageId,
+    pub sequence: u64,
+    /// `true` when this acceptance reused an existing durable claim on the
+    /// identity tuple instead of minting a fresh one — either the row was
+    /// already committed, or a prior attempt claimed the key and died before
+    /// writing it. Same meaning as [`AcceptedInboundMessage::idempotent_replay`].
+    pub idempotent_replay: bool,
+}
+
 /// Internal acceptance metadata that must remain stable across retries and
 /// accepted-message replay. This is deliberately separate from transcript
 /// content so product/UI history never renders submission-routing state.
