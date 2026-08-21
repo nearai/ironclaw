@@ -29,8 +29,10 @@ pub(super) fn decode_text(
         FileEncoding::Utf16Le => {
             let data = bytes.get(2..).unwrap_or_default();
             let units = data
-                .chunks_exact(2)
-                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_le_bytes(*pair))
                 .collect::<Vec<_>>();
             String::from_utf16(&units).map_err(|_| operation_error())?
         }
@@ -81,8 +83,10 @@ pub(super) fn decode_text_lossy(bytes: &[u8]) -> (String, FileEncoding, LineEndi
         FileEncoding::Utf16Le => {
             let data = bytes.get(2..).unwrap_or_default();
             let units = data
-                .chunks_exact(2)
-                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_le_bytes(*pair))
                 .collect::<Vec<_>>();
             String::from_utf16_lossy(&units)
         }
