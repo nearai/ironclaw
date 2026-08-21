@@ -1797,6 +1797,7 @@ async fn process_observer_receives_commits_once_not_idempotency_replays() {
         created_at: Utc::now(),
         metadata: serde_json::Value::Null,
     };
+    let process_id = request.process_id;
 
     store
         .submit_process(request.clone())
@@ -1807,15 +1808,27 @@ async fn process_observer_receives_commits_once_not_idempotency_replays() {
         .await
         .expect("replay process submission");
 
+    let journal = store
+        .read_process_journal_log_after(None, 16)
+        .await
+        .expect("read source journal entry");
+    let expected_occurred_at = journal
+        .entries
+        .iter()
+        .find(|entry| entry.process_id == process_id)
+        .and_then(|entry| entry.occurred_at)
+        .expect("source journal entry carries its timestamp");
+
     let commits = observer.commits.lock().expect("observer commits");
     assert_eq!(commits.len(), 1);
     assert_eq!(
         commits[0].kind,
         ironclaw_processes::ProcessJournalKind::Submitted
     );
-    assert!(
-        commits[0].occurred_at.is_some(),
-        "live observer delivery carries the durable journal timestamp"
+    assert_eq!(
+        commits[0].occurred_at,
+        Some(expected_occurred_at),
+        "live observer delivery preserves the source journal timestamp"
     );
 }
 
@@ -1878,6 +1891,15 @@ async fn observer_registration_replays_commits_durably_after_restart() {
         })
         .await
         .expect("submit before observer registration");
+    let expected_occurred_at = store
+        .read_process_journal_log_after(None, 16)
+        .await
+        .expect("read source journal entry")
+        .entries
+        .into_iter()
+        .find(|entry| entry.process_id == process_id)
+        .and_then(|entry| entry.occurred_at)
+        .expect("source journal entry carries its timestamp");
 
     let reopened = ProcessJournalStore::new(filesystem);
     let observer = Arc::new(RecordingProcessObserver::default());
@@ -1902,13 +1924,13 @@ async fn observer_registration_replays_commits_durably_after_restart() {
     .await
     .expect("durable observer replay");
     let commits = observer.commits.lock().expect("observer commits");
-    assert!(
+    assert_eq!(
         commits
             .iter()
             .find(|commit| commit.state.process_id == process_id)
-            .and_then(|commit| commit.occurred_at)
-            .is_some(),
-        "replayed observer delivery preserves the journal timestamp"
+            .and_then(|commit| commit.occurred_at),
+        Some(expected_occurred_at),
+        "replayed observer delivery preserves the source journal timestamp"
     );
 }
 

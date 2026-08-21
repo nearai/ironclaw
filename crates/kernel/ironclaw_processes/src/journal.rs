@@ -1494,6 +1494,52 @@ mod tests {
     }
 
     #[test]
+    fn process_journal_commit_without_occurred_at_remains_readable() {
+        let commit = ProcessJournalCommit {
+            state: JournaledProcessSnapshot {
+                process_id: ProcessId::new(),
+                process_kind: ProcessKind::Internal,
+                scope: ResourceScope {
+                    tenant_id: TenantId::new("tenant-legacy-commit").expect("tenant"),
+                    user_id: UserId::new("user-legacy-commit").expect("user"),
+                    agent_id: None,
+                    project_id: None,
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+                },
+                status: ProcessLifecycleStatus::Completed,
+                suspension: None,
+                checkpoint_ref: None,
+                checkpoint_kind: None,
+                input_ref: None,
+                failure: None,
+                journal_cursor: ProcessJournalCursor(1),
+                lease: None,
+                crash_reclaim_count: 0,
+                created_at: chrono::Utc::now(),
+                owner_user_id: None,
+                concurrency_class: None,
+                parent_process_id: None,
+                root_process_id: None,
+                metadata: Value::Null,
+            },
+            kind: ProcessJournalKind::Completed,
+            occurred_at: Some(chrono::Utc::now()),
+            sanitized_reason: None,
+        };
+        let mut legacy = serde_json::to_value(commit).expect("serialize current commit");
+        legacy
+            .as_object_mut()
+            .expect("commit object")
+            .remove("occurred_at");
+
+        let decoded: ProcessJournalCommit =
+            serde_json::from_value(legacy).expect("legacy commit remains readable");
+        assert_eq!(decoded.occurred_at, None);
+    }
+
+    #[test]
     fn opaque_refs_reject_empty_oversized_and_control_values() {
         assert!(ProcessCheckpointRef::new("").is_err());
         assert!(ProcessWorkerId::new("worker\none").is_err());

@@ -178,22 +178,16 @@ impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
                     })
                     .await
                     .map_err(|error| format!("read finalized run reply failed: {error}"))?;
-                let Some(final_reply) = final_reply else {
+                let Some(_final_reply) = final_reply else {
                     // The loop host appends the finalized reply, with retry,
                     // before the turn can report completion, so an absent one
                     // here is a contract miss rather than a routine race —
-                    // `run_delivery::observer` warns on the same condition.
-                    tracing::warn!(
-                        %run_id,
-                        "completed background run has no finalized assistant reply; \
-                         skipping its completion notification"
-                    );
-                    return Ok(());
+                    // returning an error retains the durable observer cursor
+                    // so replay can try again after the reply is persisted.
+                    return Err(format!(
+                        "completed background run {run_id} has no finalized assistant reply"
+                    ));
                 };
-                let occurred_at = final_reply
-                    .updated_at
-                    .or(final_reply.created_at)
-                    .unwrap_or(occurred_at);
                 self.publish(
                     &commit.state,
                     run_id,
@@ -328,8 +322,11 @@ mod tests {
         NotificationSource, PublishNotificationRequest,
     };
     use ironclaw_processes::{
-        JournaledProcessSnapshot, ProcessJournalCommit, ProcessJournalCommitObserver,
-        ProcessJournalCursor, ProcessJournalKind, ProcessKind, ProcessLifecycleStatus,
+        ClaimProcessesRequest, JournaledProcessSnapshot, ProcessJournalCommit,
+        ProcessJournalCommitObserver, ProcessJournalCursor, ProcessJournalKind,
+        ProcessJournalObserverRegistry, ProcessJournalSource, ProcessJournalStore, ProcessKind,
+        ProcessLeaseRequest, ProcessLifecycleStatus, ProcessStateTransitionRequest,
+        ProcessSubmissionPort, ProcessTransitionPort, ProcessWorkerId, SubmitProcessRequest,
     };
     use ironclaw_threads::{
         AppendFinalizedAssistantMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
@@ -379,6 +376,19 @@ mod tests {
                 mounts,
             )),
             ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
+        ))
+    }
+
+    fn process_filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/processes").expect("process mount alias"),
+            VirtualPath::new("/engine/test/run-outcome-processes").expect("process mount target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("process mount view");
+        Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::new()),
+            mounts,
         ))
     }
 
@@ -528,6 +538,18 @@ mod tests {
                 .await
                 .expect("seed the timed-out block");
 
+            if status == ProcessLifecycleStatus::Completed {
+                threads
+                    .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+                        scope: thread_scope(),
+                        thread_id: thread(),
+                        turn_run_id: run_id.to_string(),
+                        content: MessageContent::text("durable final reply"),
+                    })
+                    .await
+                    .expect("completed run final reply");
+            }
+
             let observer = RunOutcomeProcessCommitObserver::new(
                 Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
                 Arc::clone(&threads) as Arc<dyn SessionThreadService>,
@@ -583,15 +605,18 @@ mod tests {
             Arc::clone(&threads) as Arc<dyn SessionThreadService>,
         );
 
-        observer
-            .observe_process_commit(commit(
-                run_id,
-                ProcessLifecycleStatus::Completed,
-                ProcessJournalKind::Completed,
-                "scheduled_trigger",
-            ))
+        let completion = commit(
+            run_id,
+            ProcessLifecycleStatus::Completed,
+            ProcessJournalKind::Completed,
+            "scheduled_trigger",
+        );
+        let committed_at = completion.occurred_at.expect("committed timestamp");
+        let error = observer
+            .observe_process_commit(completion.clone())
             .await
-            .expect("missing final reply advances the observer");
+            .expect_err("missing final reply must retain the observer cursor for retry");
+        assert!(error.contains("no finalized assistant reply"), "{error}");
         assert!(records(inbox.as_ref()).await.is_empty());
 
         threads
@@ -604,19 +629,162 @@ mod tests {
             .await
             .expect("final reply");
         observer
-            .observe_process_commit(commit(
-                run_id,
-                ProcessLifecycleStatus::Completed,
-                ProcessJournalKind::Completed,
-                "scheduled_trigger",
-            ))
+            .observe_process_commit(completion)
             .await
             .expect("completion notification");
 
+        let page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: false,
+            })
+            .await
+            .expect("list completion notification");
+        assert_eq!(page.notifications.len(), 1);
+        assert_eq!(page.notifications[0].kind, NotificationKind::RunCompleted);
         assert_eq!(
-            records(inbox.as_ref()).await,
-            vec![NotificationKind::RunCompleted]
+            page.notifications[0].created_at, committed_at,
+            "completion ordering uses the committed journal transition timestamp"
         );
+    }
+
+    #[tokio::test]
+    async fn durable_journal_retries_completion_after_the_final_reply_is_persisted() {
+        let inbox = inbox();
+        let threads = Arc::new(InMemorySessionThreadService::default());
+        threads
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope(),
+                thread_id: Some(thread()),
+                created_by_actor_id: user().to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("thread");
+        let process_filesystem = process_filesystem();
+        let store = ProcessJournalStore::new(Arc::clone(&process_filesystem));
+        store
+            .subscribe_process_observer(Arc::new(RunOutcomeProcessCommitObserver::new(
+                Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+                Arc::clone(&threads) as Arc<dyn SessionThreadService>,
+            )))
+            .expect("subscribe outcome observer");
+        let run_id = TurnRunId::new();
+        let process_id = ProcessId::from_uuid(run_id.as_uuid());
+        let resource_scope = ResourceScope {
+            tenant_id: tenant(),
+            user_id: user(),
+            agent_id: Some(agent()),
+            project_id: None,
+            mission_id: None,
+            thread_id: Some(thread()),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+        };
+        store
+            .submit_process(SubmitProcessRequest {
+                process_id,
+                process_kind: ProcessKind::AgentTurn,
+                scope: resource_scope.clone(),
+                exclusive_within_scope: false,
+                operation_id: None,
+                owner_user_id: Some(user()),
+                concurrency_class: None,
+                parent_process_id: None,
+                root_process_id: None,
+                spawn_tree_descendant_cap: None,
+                dependency: None,
+                checkpoint_ref: None,
+                input: None,
+                created_at: Utc::now(),
+                metadata: json!({
+                    "agent_turn": {
+                        "product_context": { "origin": "scheduled_trigger" },
+                        "execution_outcome": "result_available"
+                    }
+                }),
+            })
+            .await
+            .expect("submit process");
+        let claimed = store
+            .claim_next_processes(ClaimProcessesRequest {
+                worker_id: ProcessWorkerId::from_trusted("outcome-observer-worker"),
+                scope_filter: Some(resource_scope),
+                process_id_filter: Some(process_id),
+                process_kind_filter: Some(ProcessKind::AgentTurn),
+                max_processes: 1,
+            })
+            .await
+            .expect("claim process")
+            .pop()
+            .expect("process is claimable");
+        store
+            .complete_process(ProcessStateTransitionRequest {
+                lease: ProcessLeaseRequest {
+                    process_id,
+                    worker_id: claimed.worker_id,
+                    lease_token: claimed.lease_token,
+                },
+                metadata: None,
+            })
+            .await
+            .expect("terminal process commit remains successful");
+        let committed_at = store
+            .read_process_journal_log_after(None, 16)
+            .await
+            .expect("read committed journal row")
+            .entries
+            .into_iter()
+            .find(|entry| {
+                entry.process_id == process_id && entry.kind == ProcessJournalKind::Completed
+            })
+            .and_then(|entry| entry.occurred_at)
+            .expect("committed journal timestamp");
+        assert!(
+            records(inbox.as_ref()).await.is_empty(),
+            "the first delivery attempt cannot publish before the exact reply exists"
+        );
+
+        threads
+            .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+                scope: thread_scope(),
+                thread_id: thread(),
+                turn_run_id: run_id.to_string(),
+                content: MessageContent::text("durable final reply"),
+            })
+            .await
+            .expect("persist final reply before observer retry");
+
+        let page = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let page = inbox
+                    .list(ListNotificationsRequest {
+                        recipient: NotificationRecipient {
+                            tenant_id: tenant(),
+                            user_id: user(),
+                        },
+                        limit: 10,
+                        cursor: None,
+                        include_archived: false,
+                    })
+                    .await
+                    .expect("list completion notification");
+                if !page.notifications.is_empty() {
+                    break page;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("durable observer retries the commit");
+        assert_eq!(page.notifications.len(), 1);
+        assert_eq!(page.notifications[0].kind, NotificationKind::RunCompleted);
+        assert_eq!(page.notifications[0].created_at, committed_at);
     }
 
     #[tokio::test]

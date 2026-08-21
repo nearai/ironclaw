@@ -1744,8 +1744,8 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
         "ordinary scheduled completions notify, while NothingToReport stays suppressed"
     );
 
-    // The identities themselves are what dedupe on replay; a count survives even
-    // if the observer re-mints every id under a new name.
+    // The identities themselves are what dedupe on replay.
+    let record_count_before_restart = inbox.notifications.len();
     let identities_before_restart = inbox
         .notifications
         .iter()
@@ -1788,6 +1788,11 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
             .expect("replayed notification payload"),
     )
     .expect("decode replayed Inbox");
+    assert_eq!(
+        replayed.notifications.len(),
+        record_count_before_restart,
+        "restart/replay must not add a second record under an already-existing id"
+    );
     assert_eq!(
         replayed
             .notifications
