@@ -16,6 +16,7 @@ use ironclaw_loop_contracts::{
     AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest,
     AgentLoopHostError, LoopBlocked, LoopBlockedKind, LoopExit, LoopModelUsage,
 };
+use ironclaw_loop_host::AwaitEdgeSettler;
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_processes::ProcessTransitionPort;
 use ironclaw_turns::{TurnError, TurnStatus, runner::ClaimedTurnRun};
@@ -166,6 +167,12 @@ pub struct RebornTurnRunExecutor {
     /// `DefaultPlannedRuntimeParts`).
     // arch-exempt: optional_arc, deferred production wiring, issue #5013
     after_turn_memory_recorder: Option<Arc<AfterTurnMemoryRecorder>>,
+    /// Run-start sweep target (§4.2): heals background await-edges left
+    /// mid-delivery on the claimed run's thread before `invoke_driver` runs.
+    /// Required — every production composition wires the same resolver it
+    /// registers as the process-commit observer (`runtime.rs`); tests wire a
+    /// no-op fake.
+    await_edge_settler: Arc<dyn AwaitEdgeSettler>,
 }
 
 impl RebornTurnRunExecutor {
@@ -174,6 +181,7 @@ impl RebornTurnRunExecutor {
         driver_registry: Arc<DriverRegistry>,
         host_factory: Arc<dyn HostFactory>,
         gate_record_store: Option<Arc<dyn GateRecordStorePort>>,
+        await_edge_settler: Arc<dyn AwaitEdgeSettler>,
     ) -> Self {
         Self {
             loop_exit_applier,
@@ -181,6 +189,7 @@ impl RebornTurnRunExecutor {
             host_factory,
             gate_record_store,
             after_turn_memory_recorder: None,
+            await_edge_settler,
         }
     }
 

@@ -191,6 +191,8 @@ async fn process_dependency_journal_stress_closes_each_record_and_releases_capac
             dependent_process_id: Some(parent_id),
             group_ref: Some("stress-group".to_string()),
             include_closed: true,
+            after: None,
+            limit: None,
         })
         .await
         .expect("closed dependency query");

@@ -21,6 +21,7 @@ use ironclaw_loop_contracts::{
     LoopPromptBundleRequest, LoopPromptPort, LoopRequest, LoopRequestBatch, LoopRunContext,
     LoopRunInfoPort, LoopTranscriptPort, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
+use ironclaw_loop_host::AwaitEdgeSettler;
 use ironclaw_turn_runner::{
     driver_registry::{DriverKind, DriverRegistry, DriverRequirements},
     loop_exit_applier::InMemoryLoopExitEvidencePort,
@@ -32,6 +33,89 @@ use ironclaw_turns::{
     TurnRunState, loop_exit::LoopExitApplier, runner::ClaimedTurnRun,
     test_support::in_memory_agent_turn_process_system,
 };
+
+/// No-op `AwaitEdgeSettler` test double (per the task brief: executor tests
+/// that don't exercise the sweep wire a no-op fake rather than the real
+/// resolver, which needs a live process journal/thread service this test
+/// doesn't stand up).
+struct NoOpAwaitEdgeSettler;
+
+#[async_trait]
+impl AwaitEdgeSettler for NoOpAwaitEdgeSettler {
+    async fn on_child_terminal(
+        &self,
+        _event: &ironclaw_turns::TurnLifecycleEvent,
+    ) -> Result<ironclaw_loop_host::ResolveOutcome, AgentLoopHostError> {
+        Ok(ironclaw_loop_host::ResolveOutcome::NotApplicable)
+    }
+
+    async fn sweep_thread_on_run_start(
+        &self,
+        _scope: &ironclaw_turns::TurnScope,
+        _human_initiated: bool,
+    ) -> Result<(), AgentLoopHostError> {
+        Ok(())
+    }
+
+    fn bind_coordinator(
+        &self,
+        _coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+
+    fn bind_turn_tree_store(
+        &self,
+        _store: Arc<dyn ironclaw_turns::AgentTurnSpawnTreeRuntimePort>,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+
+    fn bind_result_writer(
+        &self,
+        _result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+
+    fn bind_input_enqueue(
+        &self,
+        _port: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+
+    fn as_turn_committed_event_observer(
+        self: Arc<Self>,
+    ) -> Arc<dyn ironclaw_turns::TurnCommittedEventObserver> {
+        self
+    }
+}
+
+#[async_trait::async_trait]
+impl ironclaw_turns::TurnCommittedEventObserver for NoOpAwaitEdgeSettler {
+    fn observes_state(&self, _state: &ironclaw_turns::TurnRunState) -> bool {
+        false
+    }
+
+    fn observes_event(&self, _event: &ironclaw_turns::TurnLifecycleEvent) -> bool {
+        false
+    }
+
+    async fn observe_committed_state(
+        &self,
+        _state: ironclaw_turns::TurnRunState,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+
+    async fn observe_committed_event(
+        &self,
+        _event: ironclaw_turns::TurnLifecycleEvent,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+}
 
 /// The executor test must reach the caller-level error mapping without making
 /// any host-port calls. Keeping those ports fail-closed makes the test prove
@@ -330,6 +414,7 @@ async fn execute_claimed_run_preserves_finalizer_usage_on_host_failure() {
             supplemental_usage,
         }),
         None,
+        Arc::new(NoOpAwaitEdgeSettler) as Arc<dyn AwaitEdgeSettler>,
     );
 
     let error = executor

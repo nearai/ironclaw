@@ -1,3 +1,4 @@
+// arch-exempt: large_file, the bounded dependency-query page loop stays beside the row-native query helpers it pages over, plan #7788
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     time::Duration,
@@ -250,6 +251,17 @@ where
         ordered_index(
             "process_dependency_unresolved_v3",
             &["closed", "created_at", "dependency_id"],
+        )?,
+        // Canonical-order index for bounded/keyset queries (`ProcessDependencyQuery::after`):
+        // sorted by the same `(dependent_process_id, dependency_process_id)` key
+        // `query_process_dependencies` already re-sorts its unbounded results by, so a
+        // paged read walks rows in final order directly instead of buffering the whole
+        // scope to sort in memory. `dependent_id`/`dependency_id` are already indexed
+        // fields on every dependency row (see the `MaterializedRow::Dependency` arm
+        // below) — this index declares no new field, so it needs no backfill.
+        ordered_index(
+            "process_dependency_canonical_v1",
+            &["lineage_scope_key", "dependent_id", "dependency_id"],
         )?,
     ] {
         filesystem
@@ -873,6 +885,109 @@ where
     )
     .await?;
     decode_dependency_rows(&rows)
+}
+
+/// Bounded, keyset-paginated read over one scope's dependencies (optionally
+/// narrowed to one `dependent_process_id`), used only when the caller passes
+/// `after`/`limit` (`ProcessDependencyQuery`'s bounded mode). Walks
+/// `process_dependency_canonical_v1`, already sorted in the exact
+/// `(dependent_process_id, dependency_process_id)` order `query_process_dependencies`
+/// returns, applying the `group_ref`/`closed` filters to each page's rows
+/// before counting them against `limit` — the bound is over the *filtered*
+/// sequence, matching `ProcessDependencyQuery`'s documented ordering
+/// contract — so the read stops as soon as `limit` matching rows are
+/// collected instead of draining the whole scope.
+pub(super) async fn dependencies_for_scope_canonical_order<F>(
+    filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
+    dependent_process_id: Option<ProcessId>,
+    group_ref: Option<&str>,
+    include_closed: bool,
+    after: Option<(ProcessId, ProcessId)>,
+    limit: u32,
+) -> Result<Vec<ProcessDependencyRecord>, ProcessJournalStoreError>
+where
+    F: RootFilesystem,
+{
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut filters = vec![eq_value(
+        "lineage_scope_key",
+        IndexValue::Text(lineage_scope_key(scope)?),
+    )?];
+    if let Some(dependent_process_id) = dependent_process_id {
+        filters.push(eq_text(
+            "dependent_id",
+            &dependent_process_id.as_uuid().to_string(),
+        )?);
+    }
+    let filter = if filters.len() == 1 {
+        filters.into_iter().next().ok_or_else(|| {
+            ProcessJournalStoreError::InvalidRequest(
+                "canonical dependency query lost its required filter".to_string(),
+            )
+        })?
+    } else {
+        Filter::And(filters)
+    };
+    let index = index_name("process_dependency_canonical_v1")?;
+    let sort_key = index_key("dependent_id")?;
+    let tie_breaker = index_key("dependency_id")?;
+    let prefix = scoped_path(&format!("{MATERIALIZED_PREFIX}/dependency"))?;
+
+    let mut cursor = after.map(
+        |(dependent, dependency)| ironclaw_filesystem::OrderedQueryCursor {
+            value: IndexValue::Text(dependent.as_uuid().to_string()),
+            tie_breaker: IndexValue::Text(dependency.as_uuid().to_string()),
+        },
+    );
+    // Over-fetch per page like `recent_agent_turn_processes_for_scope`: the
+    // group_ref/closed filters below aren't index-level, so one page can be
+    // filtered away entirely — fetching more than `limit` rows per round trip
+    // keeps that case from degenerating into one round trip per matching row.
+    let page_limit = limit.saturating_mul(4).clamp(1, Page::MAX_LIMIT);
+    let mut collected: Vec<ProcessDependencyRecord> = Vec::new();
+    loop {
+        let mut page = ironclaw_filesystem::OrderedPage::new(
+            index.clone(),
+            sort_key.clone(),
+            tie_breaker.clone(),
+            SortDirection::Ascending,
+            page_limit,
+        );
+        if let Some(cursor) = cursor.clone() {
+            page = page.after(cursor);
+        }
+        let batch = filesystem
+            .query_ordered(&ResourceScope::system(), &prefix, &filter, &page)
+            .await?;
+        let exhausted = (batch.len() as u32) < page_limit;
+        cursor = batch.last().and_then(|row| {
+            Some(ironclaw_filesystem::OrderedQueryCursor {
+                value: row.entry.indexed.get(&sort_key)?.clone(),
+                tie_breaker: row.entry.indexed.get(&tie_breaker)?.clone(),
+            })
+        });
+        for record in decode_dependency_rows(&batch)? {
+            if let Some(group_ref) = group_ref
+                && record.group_ref.as_deref() != Some(group_ref)
+            {
+                continue;
+            }
+            if !include_closed && record.state.is_closed() {
+                continue;
+            }
+            collected.push(record);
+            if collected.len() >= limit as usize {
+                return Ok(collected);
+            }
+        }
+        if exhausted || cursor.is_none() {
+            break;
+        }
+    }
+    Ok(collected)
 }
 
 pub(super) async fn unresolved_dependencies<F>(

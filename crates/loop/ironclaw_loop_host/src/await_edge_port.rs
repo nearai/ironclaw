@@ -160,6 +160,22 @@ pub trait AwaitEdgeSettler: Send + Sync {
         port: Arc<dyn crate::HostInputEnqueuePort>,
     ) -> Result<(), TurnError>;
 
+    /// Run-start sweep (§4.2): heals background await-edges left mid-delivery
+    /// for `scope`'s thread — a crash between settle and delivery, or a
+    /// streak-capped edge waiting for a permitted start. Bounded (at most
+    /// `MAX_QUEUED_INPUTS_PER_RUN` edges); implemented by
+    /// `AwaitEdgeResolver::sweep_thread_on_run_start`. `human_initiated` is
+    /// whether the run now starting is human/permitted (absent or `Human`
+    /// activation provenance) rather than `System`/`ParentAgent` — only a
+    /// permitted start may drain an `AttentionDeferredStreakCap` edge forward.
+    /// The caller (`RebornTurnRunExecutor::execute_claimed_run`) treats any
+    /// `Err` as non-fatal to the run start: log and continue.
+    async fn sweep_thread_on_run_start(
+        &self,
+        scope: &TurnScope,
+        human_initiated: bool,
+    ) -> Result<(), AgentLoopHostError>;
+
     /// Adapter to the turn projection observer seam
     /// (the process journal observer needs a `TurnCommittedEventObserver`, not
     /// this trait) — implemented as

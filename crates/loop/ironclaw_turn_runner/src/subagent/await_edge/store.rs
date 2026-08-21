@@ -47,6 +47,8 @@ impl AwaitEdgeStore {
             dependent_process_id: parent_run_id.map(Self::process_id),
             group_ref,
             include_closed,
+            after: None,
+            limit: None,
         }
     }
 
@@ -315,6 +317,38 @@ impl AwaitEdgeStore {
     ) -> Result<Vec<(TurnRunId, TurnRunId, AwaitEdge)>, AwaitEdgeStoreError> {
         self.dependencies
             .query_process_dependencies(Self::query(scope, None, None, false))
+            .await
+            .map_err(map_process_error)?
+            .into_iter()
+            .map(|record| {
+                let parent = Self::run_id(record.dependent_process_id);
+                let child = Self::run_id(record.dependency_process_id);
+                Self::edge_from_record(record).map(|edge| (parent, child, edge))
+            })
+            .collect()
+    }
+
+    /// Bounded read of one thread's background-mode dependency edges
+    /// (`group_ref = "bg:{thread_id}"`, the exact tag `finish_spawn` writes
+    /// for `SpawnSubagentMode::Background` — `subagent_spawn_port.rs`).
+    /// Scope-wide (no `dependent_process_id` filter): a thread's outstanding
+    /// background children may have been spawned by any of its historical
+    /// runs, not just the one now starting. Used by the run-start sweep
+    /// (`AwaitEdgeResolver::sweep_thread_on_run_start`).
+    pub async fn list_background_for_thread(
+        &self,
+        scope: &TurnScope,
+        limit: u32,
+    ) -> Result<Vec<(TurnRunId, TurnRunId, AwaitEdge)>, AwaitEdgeStoreError> {
+        self.dependencies
+            .query_process_dependencies(ProcessDependencyQuery {
+                scope: scope.to_resource_scope(),
+                dependent_process_id: None,
+                group_ref: Some(format!("bg:{}", scope.thread_id)),
+                include_closed: false,
+                after: None,
+                limit: Some(limit),
+            })
             .await
             .map_err(map_process_error)?
             .into_iter()

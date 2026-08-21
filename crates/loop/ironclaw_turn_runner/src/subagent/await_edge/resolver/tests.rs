@@ -1,3 +1,4 @@
+// arch-exempt: large_file, run-start sweep tests share this file's fixtures and doubles with the delivery-chain tests they extend, plan #7788
 use super::*;
 
 #[test]
@@ -1554,7 +1555,11 @@ async fn bg_fixture(
             dependency: Some(ProcessDependencySubmission {
                 dependent_process_id: parent_process_id,
                 root_process_id: parent_process_id,
-                group_ref: Some(gate_ref.as_str().to_string()),
+                // The exact tag `finish_spawn` writes for
+                // `SpawnSubagentMode::Background` (`subagent_spawn_port.rs`),
+                // not the per-child `gate_ref` — the run-start sweep queries
+                // by this thread-scoped group, not by gate.
+                group_ref: Some(format!("bg:{parent_thread_id}")),
                 metadata: serde_json::to_value(submitted).expect("edge metadata"),
             }),
             checkpoint_ref: None,
@@ -2391,5 +2396,603 @@ async fn background_delivery_closes_without_second_activate_after_crash_before_c
         coordinator.activations().len(),
         1,
         "the re-drive must not call activate() a second time"
+    );
+}
+
+// ─── Run-start sweep (§4.2, Task 7/2c) ─────────────────────────────────────
+
+/// Minimal harness for `sweep_thread_on_run_start` tests: one parent
+/// thread/scope/run, plus a resolver wired the same way production wires
+/// one (`ironclaw_turn_runner::runtime.rs`). `open_background_edge` opens
+/// one background-mode dependency edge directly against the real process
+/// journal (`store/tests.rs`'s `settled_background_edge` pattern, not the
+/// reactive `handle_child_terminal` path) so each test drives its edge(s)
+/// to an exact target state before sweeping — the sweep must never re-derive
+/// or repeat delivery steps a state already carries.
+struct SweepFixture {
+    resolver: Arc<AwaitEdgeResolver<ironclaw_threads::InMemorySessionThreadService>>,
+    edge_store: Arc<AwaitEdgeStore>,
+    process_store:
+        Arc<ironclaw_processes::ProcessJournalStore<ironclaw_filesystem::InMemoryBackend>>,
+    parent_scope: TurnScope,
+    parent_run_id: TurnRunId,
+    parent_context: LoopRunContext,
+}
+
+impl SweepFixture {
+    /// Opens one `Open` background-mode dependency edge under this
+    /// fixture's parent, returning `(child_run_id, child_scope)` — the pair
+    /// every `AwaitEdgeStore` state-transition call needs.
+    async fn open_background_edge(&self, suffix: &str) -> (TurnRunId, TurnScope) {
+        use ironclaw_host_api::ids::{AgentId, ProcessId, TenantId, ThreadId};
+        use ironclaw_processes::{
+            ProcessDependencySubmission, ProcessKind, ProcessOperationId, ProcessSubmissionPort,
+            SubmitProcessRequest,
+        };
+
+        let child_run_id = TurnRunId::new();
+        let child_thread_id =
+            ThreadId::new(format!("sweep-child-thread-{suffix}")).expect("child thread");
+        let tenant_id = TenantId::new("sweep-tenant").expect("tenant");
+        let agent_id = AgentId::new("sweep-agent").expect("agent");
+        let owner_user_id = UserId::new("sweep-owner").expect("owner");
+        let child_scope = TurnScope::new_with_owner(
+            tenant_id,
+            Some(agent_id),
+            None,
+            child_thread_id.clone(),
+            Some(owner_user_id.clone()),
+        );
+        let parent_process_id = ProcessId::from_uuid(self.parent_run_id.as_uuid());
+        let gate_ref =
+            TurnGateRef::new(format!("gate:sweep-{suffix}")).expect("gate ref for sweep edge");
+        let result_ref =
+            ironclaw_host_api::turn::LoopResultRef::new(format!("result:sweep-{suffix}"))
+                .expect("result ref");
+        let submitted = ironclaw_loop_host::AwaitedChildSetRecord {
+            gate_ref,
+            parent_run_context: self.parent_context.clone(),
+            tree_root_run_id: self.parent_run_id,
+            child_scope: child_scope.clone(),
+            child_run_id,
+            child_thread_id: child_thread_id.clone(),
+            subagent_kind: ironclaw_loop_host::SubagentKindId::new("general").expect("kind"),
+            spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+                .expect("capability"),
+            spawn_provider_call_id: Some(format!("spawn-call-sweep-{suffix}")),
+            result_ref,
+            mode: SpawnSubagentMode::Background,
+        };
+        self.process_store
+            .submit_process(SubmitProcessRequest {
+                process_id: ProcessId::from_uuid(child_run_id.as_uuid()),
+                process_kind: ProcessKind::AgentTurn,
+                scope: child_scope.to_resource_scope(),
+                exclusive_within_scope: false,
+                operation_id: Some(ProcessOperationId::from_trusted(format!(
+                    "sweep-child-{suffix}"
+                ))),
+                owner_user_id: Some(owner_user_id),
+                concurrency_class: None,
+                parent_process_id: Some(parent_process_id),
+                root_process_id: Some(parent_process_id),
+                spawn_tree_descendant_cap: Some(64),
+                dependency: Some(ProcessDependencySubmission {
+                    dependent_process_id: parent_process_id,
+                    root_process_id: parent_process_id,
+                    // The exact tag `finish_spawn` writes for
+                    // `SpawnSubagentMode::Background` — the run-start sweep
+                    // queries by this thread-scoped group.
+                    group_ref: Some(format!("bg:{}", self.parent_scope.thread_id)),
+                    metadata: serde_json::to_value(submitted).expect("edge metadata"),
+                }),
+                checkpoint_ref: None,
+                input: None,
+                created_at: chrono::Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .expect("submit child process");
+        (child_run_id, child_scope)
+    }
+}
+
+async fn sweep_fixture(
+    enqueue: Arc<RecordingEnqueue>,
+    live_run: Option<(TurnRunId, ironclaw_host_api::turn::TurnId)>,
+    coordinator: Arc<dyn TurnCoordinator>,
+) -> SweepFixture {
+    use ironclaw_host_api::ids::{AgentId, ProcessId, TenantId, ThreadId};
+    use ironclaw_processes::{ProcessKind, ProcessSubmissionPort, SubmitProcessRequest};
+
+    let tenant_id = TenantId::new("sweep-tenant").expect("tenant");
+    let agent_id = AgentId::new("sweep-agent").expect("agent");
+    let owner_user_id = UserId::new("sweep-owner").expect("owner");
+    let parent_thread_id = ThreadId::new("sweep-parent-thread").expect("parent thread");
+    let parent_scope = TurnScope::new_with_owner(
+        tenant_id,
+        Some(agent_id),
+        None,
+        parent_thread_id,
+        Some(owner_user_id.clone()),
+    );
+    let parent_run_id = TurnRunId::new();
+    let parent_process_id = ProcessId::from_uuid(parent_run_id.as_uuid());
+
+    let process_store = Arc::new(ironclaw_processes::ProcessJournalStore::new(
+        recon_scoped_fs(),
+    ));
+    process_store
+        .submit_process(SubmitProcessRequest {
+            process_id: parent_process_id,
+            process_kind: ProcessKind::AgentTurn,
+            scope: parent_scope.to_resource_scope(),
+            exclusive_within_scope: false,
+            operation_id: None,
+            owner_user_id: Some(owner_user_id.clone()),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at: chrono::Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("submit parent process");
+
+    let dependencies = Arc::clone(&process_store)
+        as Arc<
+            dyn ironclaw_processes::ProcessDependencyPort<
+                    Error = ironclaw_processes::ProcessJournalStoreError,
+                >,
+        >;
+    let edge_store = Arc::new(AwaitEdgeStore::new(dependencies));
+
+    let mut parent_context = ironclaw_agent_loop::test_support::test_run_context("sweep-parent");
+    parent_context.scope = parent_scope.clone();
+    parent_context.thread_id = parent_scope.thread_id.clone();
+    parent_context.run_id = parent_run_id;
+    parent_context.actor = Some(TurnActor::new(owner_user_id));
+
+    // `sweep_thread_on_run_start` never calls `get_run_record` (only the
+    // reactive `handle_child_terminal_inner` path does), so this value is
+    // never read by these tests — a well-formed placeholder is enough to
+    // satisfy `StubBackgroundRuntime`'s field.
+    let placeholder_child_record = TurnRunRecord {
+        subagent_activation_provenance: None,
+        run_id: TurnRunId::new(),
+        turn_id: ironclaw_host_api::turn::TurnId::new(),
+        scope: parent_context.scope.clone(),
+        accepted_message_ref: ironclaw_host_api::turn::AcceptedMessageRef::new(
+            "msg:sweep-placeholder",
+        )
+        .expect("accepted message ref"),
+        status: TurnStatus::Completed,
+        profile: ironclaw_turns::TurnRunProfile::from_resolved(
+            parent_context.resolved_run_profile.clone(),
+        ),
+        output_contract: Default::default(),
+        resolved_model_route: None,
+        model_usage: None,
+        execution_outcome: None,
+        checkpoint_id: None,
+        gate_ref: None,
+        blocked_activity_id: None,
+        credential_requirements: Vec::new(),
+        failure: None,
+        event_cursor: ironclaw_host_api::turn::EventCursor(1),
+        runner_id: None,
+        lease_token: None,
+        lease_expires_at: None,
+        last_heartbeat_at: None,
+        claim_count: 0,
+        received_at: chrono::Utc::now(),
+        parent_run_id: None,
+        subagent_depth: 0,
+        spawn_tree_root_run_id: None,
+        product_context: None,
+        resume_disposition: None,
+    };
+    let recent_runs = match live_run {
+        Some((live_run_id, live_turn_id)) => vec![TurnRunRecord {
+            subagent_activation_provenance: None,
+            run_id: live_run_id,
+            turn_id: live_turn_id,
+            scope: parent_scope.clone(),
+            accepted_message_ref: ironclaw_host_api::turn::AcceptedMessageRef::new(
+                "msg:sweep-live",
+            )
+            .expect("accepted message ref"),
+            status: TurnStatus::Running,
+            profile: ironclaw_turns::TurnRunProfile::from_resolved(
+                parent_context.resolved_run_profile.clone(),
+            ),
+            output_contract: Default::default(),
+            resolved_model_route: None,
+            model_usage: None,
+            execution_outcome: None,
+            checkpoint_id: None,
+            gate_ref: None,
+            blocked_activity_id: None,
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor: ironclaw_host_api::turn::EventCursor(1),
+            runner_id: None,
+            lease_token: None,
+            lease_expires_at: None,
+            last_heartbeat_at: None,
+            claim_count: 0,
+            received_at: chrono::Utc::now(),
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+            product_context: None,
+            resume_disposition: None,
+        }],
+        None => Vec::new(),
+    };
+    let runtime = Arc::new(StubBackgroundRuntime {
+        child_record: placeholder_child_record,
+        recent_runs,
+    }) as Arc<dyn AgentTurnSpawnTreeRuntimePort>;
+
+    let result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter> =
+        Arc::new(RecordingUpdateWriter::default());
+    let thread_service = Arc::new(ironclaw_threads::InMemorySessionThreadService::default());
+    let resolver = Arc::new(AwaitEdgeResolver::new_unbound(
+        Arc::clone(&edge_store),
+        runtime,
+        result_writer,
+        thread_service,
+    ));
+    resolver
+        .bind_input_enqueue(Arc::clone(&enqueue) as Arc<dyn HostInputEnqueuePort>)
+        .expect("bind input enqueue");
+    resolver
+        .bind_coordinator(coordinator)
+        .expect("bind coordinator");
+
+    SweepFixture {
+        resolver,
+        edge_store,
+        process_store,
+        parent_scope,
+        parent_run_id,
+        parent_context,
+    }
+}
+
+/// (a) One `ResultAppended` background edge: the sweep re-attends — enqueues
+/// into the just-starting live run — then closes.
+#[tokio::test]
+async fn sweep_result_appended_edge_enqueues_into_starting_run_and_closes() {
+    let enqueue = Arc::new(RecordingEnqueue::accepting());
+    let live_run_id = TurnRunId::new();
+    let live_turn_id = ironclaw_host_api::turn::TurnId::new();
+    let coordinator = Arc::new(RecordingResumeCoordinator::default());
+    let fixture = sweep_fixture(
+        Arc::clone(&enqueue),
+        Some((live_run_id, live_turn_id)),
+        Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+    )
+    .await;
+    let (child_run_id, child_scope) = fixture.open_background_edge("a").await;
+    fixture
+        .edge_store
+        .settle(
+            &child_scope,
+            fixture.parent_run_id,
+            child_run_id,
+            EdgeTerminalKind::Completed,
+            Some(9),
+            None,
+        )
+        .await
+        .expect("settle")
+        .expect("edge exists");
+    fixture
+        .edge_store
+        .record_result_appended(
+            &child_scope,
+            fixture.parent_run_id,
+            child_run_id,
+            LoopMessageRef::new(format!(
+                "msg:{}",
+                ironclaw_threads::ThreadMessageId::new().as_uuid()
+            ))
+            .expect("valid ref"),
+        )
+        .await
+        .expect("append")
+        .expect("edge exists");
+
+    fixture
+        .resolver
+        .sweep_thread_on_run_start(&fixture.parent_scope, true)
+        .await
+        .expect("sweep succeeds");
+
+    let requests = enqueue.requests();
+    assert_eq!(requests.len(), 1, "the sweep must enqueue exactly once");
+    assert_eq!(requests[0].run_id, live_run_id);
+    assert!(
+        fixture
+            .edge_store
+            .peek(&child_scope, fixture.parent_run_id, child_run_id)
+            .await
+            .expect("peek edge")
+            .is_none(),
+        "a delivered edge must close"
+    );
+    assert!(
+        coordinator.activations().is_empty(),
+        "a live starting run must never be woken by activate()"
+    );
+}
+
+/// (b) `MAX_QUEUED_INPUTS_PER_RUN + 1` pending `ResultAppended` edges: the
+/// sweep's own bounded query drains exactly the cap, leaving the remainder
+/// untouched and unclosed.
+#[tokio::test]
+async fn sweep_caps_at_max_queued_inputs_per_run_leaving_the_remainder_unclosed() {
+    let enqueue = Arc::new(RecordingEnqueue::accepting());
+    let live_run_id = TurnRunId::new();
+    let live_turn_id = ironclaw_host_api::turn::TurnId::new();
+    let coordinator = Arc::new(RecordingResumeCoordinator::default());
+    let fixture = sweep_fixture(
+        Arc::clone(&enqueue),
+        Some((live_run_id, live_turn_id)),
+        Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+    )
+    .await;
+
+    let total = ironclaw_loop_host::MAX_QUEUED_INPUTS_PER_RUN + 1;
+    let mut edges = Vec::with_capacity(total);
+    for index in 0..total {
+        let suffix = format!("cap-{index}");
+        let (child_run_id, child_scope) = fixture.open_background_edge(&suffix).await;
+        fixture
+            .edge_store
+            .settle(
+                &child_scope,
+                fixture.parent_run_id,
+                child_run_id,
+                EdgeTerminalKind::Completed,
+                Some(1),
+                None,
+            )
+            .await
+            .expect("settle")
+            .expect("edge exists");
+        fixture
+            .edge_store
+            .record_result_appended(
+                &child_scope,
+                fixture.parent_run_id,
+                child_run_id,
+                LoopMessageRef::new(format!(
+                    "msg:{}",
+                    ironclaw_threads::ThreadMessageId::new().as_uuid()
+                ))
+                .expect("valid ref"),
+            )
+            .await
+            .expect("append")
+            .expect("edge exists");
+        edges.push((child_run_id, child_scope));
+    }
+
+    fixture
+        .resolver
+        .sweep_thread_on_run_start(&fixture.parent_scope, true)
+        .await
+        .expect("sweep succeeds");
+
+    let mut closed = 0;
+    let mut still_pending = 0;
+    for (child_run_id, child_scope) in &edges {
+        match fixture
+            .edge_store
+            .peek(child_scope, fixture.parent_run_id, *child_run_id)
+            .await
+            .expect("peek edge")
+        {
+            None => closed += 1,
+            Some(edge) => {
+                assert_eq!(
+                    edge.state,
+                    AwaitEdgeState::ResultAppended,
+                    "an edge the sweep didn't reach must be untouched"
+                );
+                still_pending += 1;
+            }
+        }
+    }
+    assert_eq!(
+        closed,
+        ironclaw_loop_host::MAX_QUEUED_INPUTS_PER_RUN,
+        "the sweep must drain exactly its cap"
+    );
+    assert_eq!(still_pending, 1, "exactly the remainder stays unclosed");
+    assert_eq!(
+        enqueue.requests().len(),
+        ironclaw_loop_host::MAX_QUEUED_INPUTS_PER_RUN
+    );
+}
+
+/// (c) An `AttentionDeferredStreakCap` edge drains only when the starting
+/// run's provenance is human/permitted; an autonomous (System/ParentAgent)
+/// start must leave it parked.
+#[tokio::test]
+async fn sweep_drains_a_streak_capped_edge_only_when_human_initiated() {
+    let enqueue = Arc::new(RecordingEnqueue::accepting());
+    let coordinator = Arc::new(
+        RecordingResumeCoordinator::default()
+            .with_activation_result(activation_accepted(TurnRunId::new())),
+    );
+    let fixture = sweep_fixture(
+        Arc::clone(&enqueue),
+        None,
+        Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+    )
+    .await;
+    let (child_run_id, child_scope) = fixture.open_background_edge("c").await;
+    fixture
+        .edge_store
+        .settle(
+            &child_scope,
+            fixture.parent_run_id,
+            child_run_id,
+            EdgeTerminalKind::Completed,
+            Some(4),
+            None,
+        )
+        .await
+        .expect("settle")
+        .expect("edge exists");
+    fixture
+        .edge_store
+        .record_result_appended(
+            &child_scope,
+            fixture.parent_run_id,
+            child_run_id,
+            LoopMessageRef::new(format!(
+                "msg:{}",
+                ironclaw_threads::ThreadMessageId::new().as_uuid()
+            ))
+            .expect("valid ref"),
+        )
+        .await
+        .expect("append")
+        .expect("edge exists");
+    fixture
+        .edge_store
+        .defer_streak_capped(&child_scope, fixture.parent_run_id, child_run_id)
+        .await
+        .expect("deferral recorded")
+        .expect("edge exists");
+
+    // Not human-initiated (System/ParentAgent wake): the sweep must skip it.
+    fixture
+        .resolver
+        .sweep_thread_on_run_start(&fixture.parent_scope, false)
+        .await
+        .expect("sweep succeeds");
+    let still_parked = fixture
+        .edge_store
+        .peek(&child_scope, fixture.parent_run_id, child_run_id)
+        .await
+        .expect("peek edge")
+        .expect("edge exists");
+    assert_eq!(
+        still_parked.state,
+        AwaitEdgeState::AttentionDeferredStreakCap,
+        "an autonomous start must not drain a streak-capped edge"
+    );
+    assert!(
+        coordinator.activations().is_empty(),
+        "an autonomous start must never call activate() on a parked edge"
+    );
+
+    // Human/permitted start: the sweep must drain it forward and close it.
+    fixture
+        .resolver
+        .sweep_thread_on_run_start(&fixture.parent_scope, true)
+        .await
+        .expect("sweep succeeds");
+    assert!(
+        fixture
+            .edge_store
+            .peek(&child_scope, fixture.parent_run_id, child_run_id)
+            .await
+            .expect("peek edge")
+            .is_none(),
+        "a permitted start must drain and close the parked edge"
+    );
+    assert_eq!(
+        coordinator.activations().len(),
+        1,
+        "a permitted start drains through exactly one activate() call"
+    );
+}
+
+/// (d) An `AttentionScheduled` edge is closed with no re-enqueue and no
+/// re-activation — its attention is already durable.
+#[tokio::test]
+async fn sweep_closes_attention_scheduled_edge_without_re_enqueue_or_re_activate() {
+    let enqueue = Arc::new(RecordingEnqueue::accepting());
+    let coordinator = Arc::new(RecordingResumeCoordinator::default());
+    let fixture = sweep_fixture(
+        Arc::clone(&enqueue),
+        None,
+        Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+    )
+    .await;
+    let (child_run_id, child_scope) = fixture.open_background_edge("d").await;
+    fixture
+        .edge_store
+        .settle(
+            &child_scope,
+            fixture.parent_run_id,
+            child_run_id,
+            EdgeTerminalKind::Completed,
+            Some(3),
+            None,
+        )
+        .await
+        .expect("settle")
+        .expect("edge exists");
+    fixture
+        .edge_store
+        .record_result_appended(
+            &child_scope,
+            fixture.parent_run_id,
+            child_run_id,
+            LoopMessageRef::new(format!(
+                "msg:{}",
+                ironclaw_threads::ThreadMessageId::new().as_uuid()
+            ))
+            .expect("valid ref"),
+        )
+        .await
+        .expect("append")
+        .expect("edge exists");
+    fixture
+        .edge_store
+        .record_attention(
+            &child_scope,
+            fixture.parent_run_id,
+            child_run_id,
+            crate::subagent::await_edge::AttentionOutcome::Queued,
+        )
+        .await
+        .expect("attention recorded")
+        .expect("edge exists");
+
+    fixture
+        .resolver
+        .sweep_thread_on_run_start(&fixture.parent_scope, true)
+        .await
+        .expect("sweep succeeds");
+
+    assert!(
+        fixture
+            .edge_store
+            .peek(&child_scope, fixture.parent_run_id, child_run_id)
+            .await
+            .expect("peek edge")
+            .is_none(),
+        "an already-attended edge must close"
+    );
+    assert!(
+        enqueue.requests().is_empty(),
+        "attention is already durable — the sweep must not re-enqueue"
+    );
+    assert!(
+        coordinator.activations().is_empty(),
+        "attention is already durable — the sweep must not re-activate"
     );
 }

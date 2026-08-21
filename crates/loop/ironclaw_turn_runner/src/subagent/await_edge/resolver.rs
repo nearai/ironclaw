@@ -578,13 +578,19 @@ where
     ///
     /// Re-drive entry: a peeked edge already at `AttentionScheduled` closes
     /// without repeating append/attend/activate; one already
-    /// `AttentionDeferredStreakCap` returns untouched — sweeps own its retry,
-    /// not the reactive settle path.
-    async fn deliver_background(
+    /// `AttentionDeferredStreakCap` returns untouched UNLESS `retry_deferred`
+    /// is set, in which case it falls through to the attend step exactly like
+    /// `ResultAppended` — the run-start sweep's one permitted path to drain a
+    /// streak-capped edge forward (§4.2). The reactive settle path
+    /// (`settle_and_maybe_drain`) always passes `false`: autonomous re-drive
+    /// never retries a deferred edge; only an explicit, permitted sweep entry
+    /// does.
+    pub(super) async fn deliver_background(
         &self,
         edge: &AwaitEdge,
         parent_run_id: TurnRunId,
         child_run_id: TurnRunId,
+        retry_deferred: bool,
     ) -> Result<ResolveOutcome, TurnError> {
         let owner_user_id = edge
             .parent_run_context
@@ -660,7 +666,7 @@ where
                     .map_err(store_error)?;
                 return Ok(ResolveOutcome::Drained);
             }
-            AwaitEdgeState::AttentionDeferredStreakCap => {
+            AwaitEdgeState::AttentionDeferredStreakCap if !retry_deferred => {
                 return Ok(ResolveOutcome::Drained);
             }
             _ => {}
@@ -943,7 +949,7 @@ where
                 return Ok(ResolveOutcome::AlreadyClosed);
             };
             return self
-                .deliver_background(&settled_edge, parent_run_id, child_run_id)
+                .deliver_background(&settled_edge, parent_run_id, child_run_id, false)
                 .await;
         }
 
@@ -1060,6 +1066,69 @@ where
                 reason: error.to_string(),
             })
     }
+
+    /// Run-start sweep (§4.2): heals background await-edges left mid-delivery
+    /// on `scope`'s thread. Queries at most `MAX_QUEUED_INPUTS_PER_RUN`
+    /// background edges (`AwaitEdgeStore::list_background_for_thread`) and
+    /// drives each through `deliver_background`'s idempotent re-drive by
+    /// state:
+    ///
+    /// - `Settled` / `ResultAppended` / `AttentionScheduled` — full re-drive
+    ///   (append is a no-op replay past `Settled`; `AttentionScheduled`
+    ///   closes only, per `deliver_background`'s own re-drive contract).
+    /// - `AttentionDeferredStreakCap` — only when `human_initiated`: drained
+    ///   forward via `retry_deferred`. An autonomous (System/ParentAgent)
+    ///   start leaves it parked.
+    /// - `Open` / `Drained` / `Abandoned` — nothing to do.
+    ///
+    /// One edge's failure is logged and does not stop the sweep from trying
+    /// the rest; the caller (`RebornTurnRunExecutor::execute_claimed_run`)
+    /// treats the whole sweep as non-fatal to the run start.
+    pub async fn sweep_thread_on_run_start(
+        &self,
+        scope: &TurnScope,
+        human_initiated: bool,
+    ) -> Result<(), TurnError> {
+        // silent-ok: MAX_QUEUED_INPUTS_PER_RUN is a compile-time constant
+        // (32) that always fits u32; `unwrap_or(u32::MAX)` is unreachable
+        // dead code on any value that constant could ever hold, not a
+        // swallowed runtime error.
+        let batch_limit =
+            u32::try_from(ironclaw_loop_host::MAX_QUEUED_INPUTS_PER_RUN).unwrap_or(u32::MAX);
+        let edges = self
+            .store
+            .list_background_for_thread(scope, batch_limit)
+            .await
+            .map_err(store_error)?;
+        for (parent_run_id, child_run_id, edge) in edges {
+            let retry_deferred = match edge.state {
+                AwaitEdgeState::Open | AwaitEdgeState::Drained | AwaitEdgeState::Abandoned => {
+                    continue;
+                }
+                AwaitEdgeState::AttentionDeferredStreakCap => {
+                    if !human_initiated {
+                        continue;
+                    }
+                    true
+                }
+                AwaitEdgeState::Settled
+                | AwaitEdgeState::ResultAppended
+                | AwaitEdgeState::AttentionScheduled => false,
+            };
+            if let Err(error) = self
+                .deliver_background(&edge, parent_run_id, child_run_id, retry_deferred)
+                .await
+            {
+                tracing::debug!(
+                    error = %error,
+                    %parent_run_id,
+                    %child_run_id,
+                    "background await-edge run-start sweep failed for one edge"
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 fn store_error(error: super::AwaitEdgeStoreError) -> TurnError {
@@ -1151,6 +1220,21 @@ where
         event: &TurnLifecycleEvent,
     ) -> Result<ResolveOutcome, AgentLoopHostError> {
         self.handle_child_terminal(event).await
+    }
+
+    async fn sweep_thread_on_run_start(
+        &self,
+        scope: &TurnScope,
+        human_initiated: bool,
+    ) -> Result<(), AgentLoopHostError> {
+        AwaitEdgeResolver::sweep_thread_on_run_start(self, scope, human_initiated)
+            .await
+            .map_err(|error| {
+                AgentLoopHostError::new(
+                    ironclaw_loop_contracts::AgentLoopHostErrorKind::Unavailable,
+                    error.to_string(),
+                )
+            })
     }
 
     fn bind_coordinator(&self, coordinator: Arc<dyn TurnCoordinator>) -> Result<(), TurnError> {
