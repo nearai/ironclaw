@@ -2,7 +2,7 @@
 
 **Status:** Canonical — the one current document for subagent architecture,
 design decisions, and roadmap.
-**Last verified against code:** 2026-08-20, workspace @ `e4225c442`.
+**Last verified against code:** 2026-08-21, workspace @ `e4225c442`.
 **Replaces (deleted 2026-08-20, recoverable from git history):**
 `phase-1-contracts.md`, `phase-2-mechanisms.md`, `phase-3-integration.md`,
 `thread-harness-design.md`, `pr2-pr6-shape.md`,
@@ -873,8 +873,9 @@ therefore land in the kernel record, not in projection metadata.
   dependency port gains one domain-neutral operation:
   `transition_process_dependency(scope, dependent, dependency, expected: ProcessDependencyState, next: ProcessDependencyState, metadata: Option<Value>)`
   — an expected-state/metadata CAS; `ProcessDependencyState` gains
-  `ResultAppended` and `AttentionDeferred` (domain-neutral names; the
-  streak-cap meaning lives in the edge metadata).
+  `ResultAppended`, `AttentionScheduled`, and `AttentionDeferred`
+  (domain-neutral names; three variants, not two — see D12 in §5 for why —
+  the streak-cap meaning lives in the edge metadata).
 - Modify: every implementation and double of the port. Correction,
   2026-08-21: this is a small, enumerable set, not a large fan-out — the
   `ProcessDependencyPort` trait (`crates/kernel/ironclaw_processes/src/journal.rs`)
