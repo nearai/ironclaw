@@ -197,11 +197,12 @@ async fn replaying_a_subagent_result_returns_the_same_row(service: Arc<dyn Sessi
 
 /// A child agent can be prompt-injected, and this door's row is persisted as
 /// `MessageKind::System` — which `ironclaw_loop_host::model_role_for_kind`
-/// (`src/lib.rs:3462`) maps to `HostManagedModelMessageRole::System`, which
-/// `model_gateway::convert_messages` (`src/model_gateway.rs:2354`) turns into
-/// `ChatMessage::system`, which the Anthropic adapter lifts into the
-/// request's top-level `system` field (`anthropic_oauth.rs:1249`). Raw child
-/// text arriving here would therefore read to the model as host instruction.
+/// (`src/lib.rs`) maps to `HostManagedModelMessageRole::System`, which
+/// `model_gateway::convert_messages` (`src/model_gateway.rs`) turns into
+/// `ChatMessage::system`, which the Anthropic adapter's own
+/// `convert_messages` (`ironclaw_llm::anthropic_oauth`) lifts into the
+/// request's top-level `system` field. Raw child text arriving here would
+/// therefore read to the model as host instruction.
 ///
 /// So the door must not depend on the caller having framed first: the request
 /// carries `FramedSubagentText`, whose only constructor frames, and this case
@@ -962,18 +963,17 @@ async fn filesystem_an_empty_identity_half_is_refused() {
 /// message and offer a resend when a busy run rejects it. A subagent result
 /// needs none of that, and the invariant that a child's output lands
 /// `MessageKind::System` — never `User` — means it can never satisfy
-/// `ensure_user_accepted` (`src/filesystem_service.rs:4378`,
-/// `src/in_memory.rs:1820`), on either half of that predicate.
+/// `ensure_user_accepted` (`src/filesystem_service.rs`, `src/in_memory.rs`),
+/// on either half of that predicate.
 ///
 /// So background delivery (slice 2b) must not bind the appended row to a
 /// queue entry the way steering rows do. `mark_message_queued` would set
-/// `Queued`, which `is_model_visible` excludes
-/// (`src/filesystem_service.rs:4397`) — hiding the delivered result from the
-/// parent's model context — and the queue's best-effort `Submitted` flip
-/// (`crates/loop/ironclaw_loop_host/src/input_queue.rs:572`) would fail
-/// forever, retaining a pending flip that counts against
-/// `MAX_QUEUED_INPUTS_PER_RUN` (`input_queue.rs:385`) and blocks `is_settled`
-/// (`input_queue.rs:549`).
+/// `Queued`, which `is_model_visible` excludes (`src/filesystem_service.rs`)
+/// — hiding the delivered result from the parent's model context — and the
+/// queue's best-effort `Submitted` flip (`flip_submitted` in
+/// `crates/loop/ironclaw_loop_host/src/input_queue.rs`) would fail forever,
+/// retaining a pending flip that counts against `MAX_QUEUED_INPUTS_PER_RUN`
+/// and blocks `is_settled` (both `input_queue.rs`).
 ///
 /// This case pins today's refusal, and its shape, so the 2b implementer meets
 /// the trap as a red test rather than as a wedged parent run. The fix belongs
