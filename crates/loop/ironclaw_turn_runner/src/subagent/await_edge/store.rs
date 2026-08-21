@@ -50,68 +50,58 @@ impl AwaitEdgeStore {
         }
     }
 
+    /// Rebuild the edge from the one blob production ever writes into
+    /// dependency metadata: `AwaitedChildSetRecord` (`subagent_spawn_port.rs`),
+    /// which the delivery-chain CAS then merges `appended_message_ref` and
+    /// `attention_outcome` into as sibling top-level keys — never replacing the
+    /// shape, only widening it. Those two keys are read back off the raw blob
+    /// because `AwaitedChildSetRecord` does not carry them.
     fn edge_from_record(record: ProcessDependencyRecord) -> Result<AwaitEdge, AwaitEdgeStoreError> {
-        let mut edge = match serde_json::from_value::<AwaitEdge>(record.metadata.clone()) {
-            Ok(edge) => edge,
-            Err(_) => {
-                // The blob every production edge is actually born with:
-                // `AwaitedChildSetRecord` (subagent_spawn_port.rs), which the
-                // delivery-chain CAS writes then merge `appended_message_ref`
-                // and `attention_outcome` into as sibling top-level keys —
-                // never replacing this shape, only widening it (§ merge, not
-                // substitute). `from_value::<AwaitEdge>` above always misses
-                // it (this record has none of `AwaitEdge`'s required fields),
-                // so this is the only branch production ever actually takes;
-                // it must recover those two merged keys, not default them away.
-                let appended_message_ref = record
-                    .metadata
-                    .get("appended_message_ref")
-                    .cloned()
-                    .map(serde_json::from_value::<LoopMessageRef>)
-                    .transpose()
-                    .map_err(|error| AwaitEdgeStoreError::Backend {
-                        reason: format!("appended_message_ref deserialize failed: {error}"),
-                    })?;
-                let attention_outcome = record
-                    .metadata
-                    .get("attention_outcome")
-                    .cloned()
-                    .map(serde_json::from_value::<AttentionOutcome>)
-                    .transpose()
-                    .map_err(|error| AwaitEdgeStoreError::Backend {
-                        reason: format!("attention_outcome deserialize failed: {error}"),
-                    })?;
-                let submitted: ironclaw_loop_host::AwaitedChildSetRecord =
-                    serde_json::from_value(record.metadata).map_err(|error| {
-                        AwaitEdgeStoreError::Backend {
-                            reason: format!(
-                                "process dependency metadata deserialize failed: {error}"
-                            ),
-                        }
-                    })?;
-                AwaitEdge {
-                    child_scope: submitted.child_scope,
-                    child_thread_id: submitted.child_thread_id,
-                    parent_thread_id: submitted.parent_run_context.thread_id.clone(),
-                    parent_run_context: submitted.parent_run_context,
-                    tree_root_run_id: submitted.tree_root_run_id,
-                    gate_ref: submitted.gate_ref,
-                    subagent_kind: submitted.subagent_kind,
-                    spawn_capability_id: submitted.spawn_capability_id,
-                    spawn_provider_call_id: submitted.spawn_provider_call_id,
-                    result_ref: submitted.result_ref,
-                    mode: submitted.mode,
-                    state: AwaitEdgeState::Open,
-                    terminal_kind: None,
-                    terminal_byte_len: None,
-                    terminal_reason: None,
-                    reservation_release: ReservationReleaseState::Unclaimed,
-                    appended_message_ref,
-                    attention_outcome,
-                    created_at: record.created_at,
-                    settled_at: None,
+        let appended_message_ref = record
+            .metadata
+            .get("appended_message_ref")
+            .cloned()
+            .map(serde_json::from_value::<LoopMessageRef>)
+            .transpose()
+            .map_err(|error| AwaitEdgeStoreError::Backend {
+                reason: format!("appended_message_ref deserialize failed: {error}"),
+            })?;
+        let attention_outcome = record
+            .metadata
+            .get("attention_outcome")
+            .cloned()
+            .map(serde_json::from_value::<AttentionOutcome>)
+            .transpose()
+            .map_err(|error| AwaitEdgeStoreError::Backend {
+                reason: format!("attention_outcome deserialize failed: {error}"),
+            })?;
+        let submitted: ironclaw_loop_host::AwaitedChildSetRecord =
+            serde_json::from_value(record.metadata).map_err(|error| {
+                AwaitEdgeStoreError::Backend {
+                    reason: format!("process dependency metadata deserialize failed: {error}"),
                 }
-            }
+            })?;
+        let mut edge = AwaitEdge {
+            child_scope: submitted.child_scope,
+            child_thread_id: submitted.child_thread_id,
+            parent_thread_id: submitted.parent_run_context.thread_id.clone(),
+            parent_run_context: submitted.parent_run_context,
+            tree_root_run_id: submitted.tree_root_run_id,
+            gate_ref: submitted.gate_ref,
+            subagent_kind: submitted.subagent_kind,
+            spawn_capability_id: submitted.spawn_capability_id,
+            spawn_provider_call_id: submitted.spawn_provider_call_id,
+            result_ref: submitted.result_ref,
+            mode: submitted.mode,
+            state: AwaitEdgeState::Open,
+            terminal_kind: None,
+            terminal_byte_len: None,
+            terminal_reason: None,
+            reservation_release: ReservationReleaseState::Unclaimed,
+            appended_message_ref,
+            attention_outcome,
+            created_at: record.created_at,
+            settled_at: None,
         };
         edge.state = match record.state {
             ProcessDependencyState::Open => AwaitEdgeState::Open,
@@ -124,10 +114,7 @@ impl AwaitEdgeStore {
             ProcessDependencyState::Consumed => AwaitEdgeState::Drained,
             ProcessDependencyState::Abandoned => AwaitEdgeState::Abandoned,
         };
-        edge.reservation_release = if matches!(
-            record.state,
-            ProcessDependencyState::Consumed | ProcessDependencyState::Abandoned
-        ) {
+        edge.reservation_release = if record.state.is_closed() {
             ReservationReleaseState::Released
         } else {
             ReservationReleaseState::Unclaimed
@@ -200,7 +187,6 @@ impl AwaitEdgeStore {
             scope,
             parent_run_id,
             child_run_id,
-            ProcessDependencyState::Settled,
             ProcessDependencyState::ResultAppended,
             Some(serde_json::json!({"appended_message_ref": message_ref.as_str()})),
         )
@@ -215,14 +201,7 @@ impl AwaitEdgeStore {
     /// unclosed "until a permitted or human-initiated run start drains it").
     /// Without the second one `AttentionDeferredStreakCap` would be a dead end:
     /// no forward path, and `consume` takes only `Settled | AttentionScheduled`.
-    ///
-    /// The kernel CAS asserts one expected state, so read which of the two this
-    /// edge is standing on and hand that observation back as the expectation.
-    /// The read does not weaken the guard: the expectation is still checked
-    /// against the stored state inside the journal command, so a concurrent
-    /// writer that moved the row in between makes this write lose. An edge on
-    /// any other state falls through to `ResultAppended` and is refused by that
-    /// same check — this never advances an edge whose result was never appended.
+    /// The kernel owns that relation, so this caller names only its target.
     pub async fn record_attention(
         &self,
         scope: &TurnScope,
@@ -234,17 +213,10 @@ impl AwaitEdgeStore {
             serde_json::to_value(outcome).map_err(|error| AwaitEdgeStoreError::Backend {
                 reason: format!("attention outcome serialize failed: {error}"),
             })?;
-        let expected = match self.peek(scope, parent_run_id, child_run_id).await? {
-            Some(edge) if edge.state == AwaitEdgeState::AttentionDeferredStreakCap => {
-                ProcessDependencyState::AttentionDeferred
-            }
-            _ => ProcessDependencyState::ResultAppended,
-        };
         self.transition(
             scope,
             parent_run_id,
             child_run_id,
-            expected,
             ProcessDependencyState::AttentionScheduled,
             Some(serde_json::json!({"attention_outcome": outcome_value})),
         )
@@ -264,22 +236,21 @@ impl AwaitEdgeStore {
             scope,
             parent_run_id,
             child_run_id,
-            ProcessDependencyState::ResultAppended,
             ProcessDependencyState::AttentionDeferred,
             None,
         )
         .await
     }
 
-    /// One expected-state CAS over the kernel's state column. `metadata` is
-    /// merged into the stored blob — which *is* the serialized edge — never
-    /// substituted for it.
+    /// One CAS over the kernel's state column: the write lands only if the
+    /// stored state is a legal predecessor of `next`. `metadata` is merged into
+    /// the stored blob — which *is* the serialized edge — never substituted for
+    /// it.
     async fn transition(
         &self,
         scope: &TurnScope,
         parent_run_id: TurnRunId,
         child_run_id: TurnRunId,
-        expected: ProcessDependencyState,
         next: ProcessDependencyState,
         metadata: Option<serde_json::Value>,
     ) -> Result<Option<AwaitEdge>, AwaitEdgeStoreError> {
@@ -288,7 +259,6 @@ impl AwaitEdgeStore {
                 dependent_process_id: Self::process_id(parent_run_id),
                 dependency_process_id: Self::process_id(child_run_id),
                 scope: scope.to_resource_scope(),
-                expected,
                 next,
                 metadata,
                 transitioned_at: Utc::now(),

@@ -723,6 +723,47 @@ pub enum ProcessDependencyState {
     Abandoned,
 }
 
+impl ProcessDependencyState {
+    /// The states a dependency may hold immediately before entering `self` —
+    /// the dependent-notification lifecycle expressed as a relation instead of
+    /// as an expectation each caller has to assert correctly.
+    ///
+    /// Total over the enum on purpose: a new variant cannot compile without
+    /// naming its predecessors, and both closing doors (the state-column CAS
+    /// and consume/abandon) read this one relation rather than each carrying
+    /// its own list.
+    pub fn legal_predecessors(self) -> &'static [Self] {
+        match self {
+            // An edge is born here; nothing precedes it.
+            Self::Open => &[],
+            Self::Settled => &[Self::Open],
+            Self::ResultAppended => &[Self::Settled],
+            // Two predecessors: making a deferred dependent attentive *is*
+            // scheduling attention, so a parked edge has a forward path.
+            Self::AttentionScheduled => &[Self::ResultAppended, Self::AttentionDeferred],
+            Self::AttentionDeferred => &[Self::ResultAppended],
+            // `ResultAppended` has no attention recorded yet and
+            // `AttentionDeferred` is parked for a later sweep; closing either
+            // would strand the dependent with an undelivered result.
+            Self::Consumed => &[Self::Settled, Self::AttentionScheduled],
+            // Giving up is legal from anywhere still in flight.
+            Self::Abandoned => &[
+                Self::Open,
+                Self::Settled,
+                Self::ResultAppended,
+                Self::AttentionScheduled,
+                Self::AttentionDeferred,
+            ],
+        }
+    }
+
+    /// Whether the edge has reached a terminal state and its descendant
+    /// reservation has already been released.
+    pub fn is_closed(self) -> bool {
+        matches!(self, Self::Consumed | Self::Abandoned)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessTerminalEvidence {
     pub status: ProcessLifecycleStatus,
@@ -748,7 +789,7 @@ pub struct ProcessDependencyRecord {
     pub settled_at: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumed_at: Option<Timestamp>,
-    /// When the state column last moved under an expected-state transition.
+    /// When the state column last moved under a delivery transition.
     /// Absent on rows written before delivery substates existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transitioned_at: Option<Timestamp>,
@@ -787,13 +828,15 @@ pub struct CloseProcessDependencyRequest {
 }
 
 /// A compare-and-swap over one dependency's state column: the write lands only
-/// if the stored state still equals `expected`.
+/// if the stored state is a legal predecessor of `next`
+/// (`ProcessDependencyState::legal_predecessors`). A caller does not assert
+/// which state it is advancing from — the relation derives it, so a step
+/// cannot be skipped by naming the wrong one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransitionProcessDependencyRequest {
     pub dependent_process_id: ProcessId,
     pub dependency_process_id: ProcessId,
     pub scope: ResourceScope,
-    pub expected: ProcessDependencyState,
     pub next: ProcessDependencyState,
     /// Merged into the record's metadata object when present; `None` leaves the
     /// recorded payload untouched.

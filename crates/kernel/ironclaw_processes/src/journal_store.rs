@@ -1188,14 +1188,7 @@ where
                 .as_ref()
                 .is_none_or(|group_ref| record.group_ref.as_ref() == Some(group_ref))
         })
-        .filter(|record| {
-            request.include_closed
-                || !matches!(
-                    record.state,
-                    crate::ProcessDependencyState::Consumed
-                        | crate::ProcessDependencyState::Abandoned
-                )
-        })
+        .filter(|record| request.include_closed || !record.state.is_closed())
         .collect::<Vec<_>>();
         records.sort_by_key(|record| {
             (
@@ -1213,13 +1206,7 @@ where
         let mut records = rows::unresolved_dependencies(self.filesystem.as_ref())
             .await?
             .into_iter()
-            .filter(|record| {
-                !matches!(
-                    record.state,
-                    crate::ProcessDependencyState::Consumed
-                        | crate::ProcessDependencyState::Abandoned
-                )
-            })
+            .filter(|record| !record.state.is_closed())
             .collect::<Vec<_>>();
         records.sort_by_key(|record| {
             (

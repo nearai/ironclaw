@@ -1152,12 +1152,13 @@ impl ProcessJournalMaterializedState {
         Ok(StoredCommandOutcome::Dependency(Some(record.clone())))
     }
 
-    /// Expected-state compare-and-swap over one dependency's state column.
+    /// Compare-and-swap over one dependency's state column, gated by
+    /// `ProcessDependencyState::legal_predecessors`.
     ///
     /// A transition that already landed replays as a success without
-    /// re-applying its payload; any other stored state is a typed error rather
-    /// than a silent no-op, because the caller's view of the lifecycle is
-    /// wrong.
+    /// re-applying its payload; a stored state that is not a legal predecessor
+    /// of `next` is a typed error rather than a silent no-op, because either
+    /// the caller's view of the lifecycle is wrong or it lost a race.
     fn apply_transition_dependency(
         &mut self,
         request: crate::TransitionProcessDependencyRequest,
@@ -1201,13 +1202,17 @@ impl ProcessJournalMaterializedState {
         if !same_lineage_scope(&record.scope, &request.scope) {
             return Err(ProcessJournalStoreError::UnauthorizedScope);
         }
+        // A double-drive of the same step lands here; a racer that arrives
+        // late finds a state the relation below refuses.
         if record.state == request.next {
             return Ok(StoredCommandOutcome::Dependency(Some(record.clone())));
         }
-        if record.state != request.expected {
+        let legal = request.next.legal_predecessors();
+        if !legal.contains(&record.state) {
             return Err(ProcessJournalStoreError::InvalidRequest(format!(
-                "process dependency transition to {:?} expected state {:?} but found {:?}",
-                request.next, request.expected, record.state
+                "process dependency transition to {:?} is legal only from {:?}, but the \
+                 dependency is {:?}",
+                request.next, legal, record.state
             )));
         }
         record.state = request.next;
@@ -1240,27 +1245,19 @@ impl ProcessJournalMaterializedState {
         } else {
             crate::ProcessDependencyState::Consumed
         };
-        if matches!(
-            existing.state,
-            crate::ProcessDependencyState::Consumed | crate::ProcessDependencyState::Abandoned
-        ) {
+        if existing.state.is_closed() {
             return Ok(StoredCommandOutcome::Dependency(Some(existing.clone())));
         }
-        // `ResultAppended` has no attention recorded yet and `AttentionDeferred`
-        // is parked for a later sweep; closing either would strand the
-        // dependent with an undelivered result.
-        if !abandon
-            && !matches!(
-                existing.state,
-                crate::ProcessDependencyState::Settled
-                    | crate::ProcessDependencyState::AttentionScheduled
-            )
-        {
-            return Err(ProcessJournalStoreError::InvalidRequest(
-                "a process dependency can only be consumed while settled or with its attention \
-                 scheduled"
-                    .to_string(),
-            ));
+        // The same relation the state-column CAS reads: one lifecycle, both
+        // closing doors. Abandoning is legal from every in-flight state;
+        // consuming is not, because `ResultAppended` has no attention recorded
+        // yet and `AttentionDeferred` is parked for a later sweep.
+        let legal = target.legal_predecessors();
+        if !legal.contains(&existing.state) {
+            return Err(ProcessJournalStoreError::InvalidRequest(format!(
+                "a process dependency can only enter {:?} from {:?}, but it is {:?}",
+                target, legal, existing.state
+            )));
         }
         let root_process_id = existing.root_process_id;
         self.release_dependency_reservation(root_process_id, request.dependency_process_id)?;

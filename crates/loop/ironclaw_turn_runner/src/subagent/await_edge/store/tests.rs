@@ -117,7 +117,8 @@ fn record(
         settled_at: Some(Utc::now()),
         consumed_at: None,
         transitioned_at: None,
-        metadata: serde_json::to_value(edge).expect("serialize edge"),
+        metadata: serde_json::to_value(awaited_child_set_record(child_run_id, edge))
+            .expect("serialize the production blob"),
     }
 }
 
@@ -205,19 +206,22 @@ fn edge_projection_matrix_covers_every_dependency_and_terminal_state() {
     }
 }
 
+/// The projection decodes exactly one shape — the `AwaitedChildSetRecord`
+/// blob production opens every edge with — and everything else fails closed.
+/// A serialized `AwaitEdge` is deliberately *not* accepted: nothing writes
+/// one, and accepting it was how the merged delivery keys got defaulted away
+/// (commit 80663bea7).
 #[test]
-fn legacy_edge_metadata_fallback_and_malformed_metadata_fail_closed() {
+fn only_the_production_metadata_blob_decodes_and_anything_else_fails_closed() {
     let (parent_run_id, child_run_id, edge) = edge_fixture();
-    let submitted = awaited_child_set_record(child_run_id, &edge);
-    let mut legacy = record(
+    let projected = AwaitEdgeStore::edge_from_record(record(
         parent_run_id,
         child_run_id,
         &edge,
         ProcessDependencyState::Open,
         ProcessLifecycleStatus::Completed,
-    );
-    legacy.metadata = serde_json::to_value(submitted).expect("serialize legacy metadata");
-    let projected = AwaitEdgeStore::edge_from_record(legacy).expect("project legacy edge");
+    ))
+    .expect("project the production blob");
     assert_eq!(projected.state, AwaitEdgeState::Open);
     assert_eq!(projected.gate_ref, edge.gate_ref);
 
@@ -231,11 +235,25 @@ fn legacy_edge_metadata_fallback_and_malformed_metadata_fail_closed() {
     malformed.metadata = serde_json::json!({"unexpected": true});
     assert!(AwaitEdgeStore::edge_from_record(malformed).is_err());
 
+    let mut serialized_edge = record(
+        parent_run_id,
+        child_run_id,
+        &edge,
+        ProcessDependencyState::Open,
+        ProcessLifecycleStatus::Completed,
+    );
+    serialized_edge.metadata = serde_json::to_value(&edge).expect("serialize edge");
+    assert!(
+        AwaitEdgeStore::edge_from_record(serialized_edge).is_err(),
+        "the two shapes are disjoint: an `AwaitEdge` blob is not a metadata shape production \
+         ever writes, so it must not decode"
+    );
+
     // A blob that still parses as `AwaitedChildSetRecord` but carries junk
     // under one of the two keys the delivery chain merges in. Recovering
-    // these is the whole point of the fallback branch, so a junk value must
-    // refuse — never silently default the key away — and must name the key
-    // it choked on.
+    // these is the whole point of reading them off the raw blob, so a junk
+    // value must refuse — never silently default the key away — and must name
+    // the key it choked on.
     for key in ["appended_message_ref", "attention_outcome"] {
         let mut poisoned = record(
             parent_run_id,
@@ -384,20 +402,19 @@ async fn the_delivery_chain_refuses_to_skip_the_append() {
     let (scope, parent, child) = settled_background_edge(&store, &journal).await;
 
     // Attention before the result is durably appended would make the parent
-    // attentive to nothing. The expected-state CAS refuses it, and the
-    // store propagates that refusal with the kernel's cause intact.
-    //
-    // This also pins that `record_attention`'s two legal predecessors did
-    // not become "advance from anywhere": it reads the edge to pick which
-    // expectation to assert, and an edge on neither legal predecessor still
-    // falls through to `ResultAppended` and is refused right here.
+    // attentive to nothing. `Settled` is not a legal predecessor of
+    // `AttentionScheduled`, so the kernel CAS refuses it no matter what this
+    // caller asks for — the guard lives there, not in this caller's choice of
+    // arguments — and the store propagates that refusal with the cause intact.
     let error = store
         .record_attention(&scope, parent, child, AttentionOutcome::Activated)
         .await
         .expect_err("attention before the append must be refused");
     let AwaitEdgeStoreError::Backend { reason } = &error;
     assert!(
-        reason.contains("expected state") && reason.contains("Settled"),
+        reason.contains("AttentionScheduled")
+            && reason.contains("ResultAppended")
+            && reason.contains("Settled"),
         "refusal must carry the kernel's cause, got: {reason}"
     );
 

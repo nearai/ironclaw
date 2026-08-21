@@ -3102,17 +3102,6 @@ async fn consuming_dependency_atomically_releases_tree_capacity() {
         .expect("consumed dependency releases capacity");
 }
 
-/// The delivery chain a dependency walks between `Settled` and closure, in
-/// order. `force_state` steps along it one legal transition at a time so the
-/// tests below exercise the real port rather than a back door into stored
-/// state.
-const DEPENDENCY_DELIVERY_CHAIN: [ProcessDependencyState; 4] = [
-    ProcessDependencyState::Settled,
-    ProcessDependencyState::ResultAppended,
-    ProcessDependencyState::AttentionScheduled,
-    ProcessDependencyState::AttentionDeferred,
-];
-
 fn new_store() -> ProcessJournalStore<InMemoryBackend> {
     ProcessJournalStore::new(in_memory_backed_processes_filesystem())
 }
@@ -3181,8 +3170,9 @@ where
         .expect("dependency exists")
 }
 
-/// Walks the dependency forward to `target` through the real port, one adjacent
-/// transition at a time.
+/// Walks a freshly settled dependency to `target` through the real port, one
+/// legal edge at a time — never a back door into stored state. The route is a
+/// path through `legal_predecessors`, which is a branch, not a line.
 async fn force_state<F>(
     store: &ProcessJournalStore<F>,
     dependent: ProcessId,
@@ -3191,36 +3181,43 @@ async fn force_state<F>(
 ) where
     F: RootFilesystem + Send + Sync + 'static,
 {
-    let current = stored_dependency(store, dependent, dependency).await.state;
-    let from = DEPENDENCY_DELIVERY_CHAIN
-        .iter()
-        .position(|state| *state == current)
-        .expect("current state is on the delivery chain");
-    let to = DEPENDENCY_DELIVERY_CHAIN
-        .iter()
-        .position(|state| *state == target)
-        .expect("target state is on the delivery chain");
-    assert!(to >= from, "the delivery chain only moves forward");
-    for step in from..to {
+    let route: &[ProcessDependencyState] = match target {
+        ProcessDependencyState::Settled => &[],
+        ProcessDependencyState::ResultAppended => &[ProcessDependencyState::ResultAppended],
+        ProcessDependencyState::AttentionScheduled => &[
+            ProcessDependencyState::ResultAppended,
+            ProcessDependencyState::AttentionScheduled,
+        ],
+        ProcessDependencyState::AttentionDeferred => &[
+            ProcessDependencyState::ResultAppended,
+            ProcessDependencyState::AttentionDeferred,
+        ],
+        other => panic!("{other:?} is not reachable through the state-column CAS"),
+    };
+    assert_eq!(
+        stored_dependency(store, dependent, dependency).await.state,
+        ProcessDependencyState::Settled,
+        "force_state routes from a freshly settled edge; give each target its own edge"
+    );
+    for next in route {
         let advanced = store
             .transition_process_dependency(TransitionProcessDependencyRequest {
                 dependent_process_id: dependent,
                 dependency_process_id: dependency,
                 scope: scope(),
-                expected: DEPENDENCY_DELIVERY_CHAIN[step],
-                next: DEPENDENCY_DELIVERY_CHAIN[step + 1],
+                next: *next,
                 metadata: None,
                 transitioned_at: Utc::now(),
             })
             .await
             .expect("transition succeeds")
             .expect("record exists");
-        assert_eq!(advanced.state, DEPENDENCY_DELIVERY_CHAIN[step + 1]);
+        assert_eq!(advanced.state, *next);
     }
 }
 
 #[tokio::test]
-async fn dependency_transition_advances_only_from_the_expected_state() {
+async fn dependency_transition_advances_from_a_legal_predecessor_and_replays_idempotently() {
     let store = new_store();
     let (dependent, dependency) = open_settled_dependency(&store).await;
 
@@ -3229,7 +3226,6 @@ async fn dependency_transition_advances_only_from_the_expected_state() {
             dependent_process_id: dependent,
             dependency_process_id: dependency,
             scope: scope(),
-            expected: ProcessDependencyState::Settled,
             next: ProcessDependencyState::ResultAppended,
             metadata: Some(json!({"message_ref": "msg:r1"})),
             transitioned_at: Utc::now(),
@@ -3254,7 +3250,6 @@ async fn dependency_transition_advances_only_from_the_expected_state() {
             dependent_process_id: dependent,
             dependency_process_id: dependency,
             scope: scope(),
-            expected: ProcessDependencyState::Settled,
             next: ProcessDependencyState::ResultAppended,
             metadata: None,
             transitioned_at: Utc::now(),
@@ -3279,32 +3274,159 @@ async fn dependency_transition_advances_only_from_the_expected_state() {
     );
 }
 
-#[tokio::test]
-async fn dependency_transition_from_a_wrong_expected_state_is_rejected() {
-    let store = new_store();
-    let (dependent, dependency) = open_settled_dependency(&store).await;
-
-    let error = store
-        .transition_process_dependency(TransitionProcessDependencyRequest {
-            dependent_process_id: dependent,
-            dependency_process_id: dependency,
-            scope: scope(),
-            expected: ProcessDependencyState::AttentionScheduled,
-            next: ProcessDependencyState::AttentionDeferred,
-            metadata: None,
-            transitioned_at: Utc::now(),
-        })
-        .await
-        .expect_err("wrong expected state must be rejected");
-    assert!(
-        format!("{error}").contains("expected"),
-        "error must name the expectation mismatch: {error}"
-    );
-    assert_eq!(
-        stored_dependency(&store, dependent, dependency).await.state,
+/// Every ordered pair of non-terminal states the state-column CAS can be asked
+/// for, and whether `legal_predecessors` admits it. A table, not a line: the
+/// lifecycle branches at `ResultAppended` (attention now, or parked for later),
+/// and both branches rejoin at `AttentionScheduled`.
+///
+/// `Settled -> AttentionScheduled` is the load-bearing refusal: accepting it
+/// would let a dependent be made attentive with nothing on record saying its
+/// result was ever appended, and `consume` would then release the descendant
+/// reservation over that hole.
+const DEPENDENCY_TRANSITION_EDGES: &[(ProcessDependencyState, ProcessDependencyState, bool)] = &[
+    // From `Settled`, the only way forward is through the append.
+    (
         ProcessDependencyState::Settled,
-        "a rejected transition must leave the stored state untouched"
-    );
+        ProcessDependencyState::ResultAppended,
+        true,
+    ),
+    (
+        ProcessDependencyState::Settled,
+        ProcessDependencyState::AttentionScheduled,
+        false,
+    ),
+    (
+        ProcessDependencyState::Settled,
+        ProcessDependencyState::AttentionDeferred,
+        false,
+    ),
+    // From `ResultAppended`, attention either happens or is parked.
+    (
+        ProcessDependencyState::ResultAppended,
+        ProcessDependencyState::AttentionScheduled,
+        true,
+    ),
+    (
+        ProcessDependencyState::ResultAppended,
+        ProcessDependencyState::AttentionDeferred,
+        true,
+    ),
+    (
+        ProcessDependencyState::ResultAppended,
+        ProcessDependencyState::Settled,
+        false,
+    ),
+    // A parked edge rejoins at `AttentionScheduled` — draining it *is*
+    // scheduling attention — but cannot walk back to the append.
+    (
+        ProcessDependencyState::AttentionDeferred,
+        ProcessDependencyState::AttentionScheduled,
+        true,
+    ),
+    (
+        ProcessDependencyState::AttentionDeferred,
+        ProcessDependencyState::ResultAppended,
+        false,
+    ),
+    (
+        ProcessDependencyState::AttentionDeferred,
+        ProcessDependencyState::Settled,
+        false,
+    ),
+    // Attention is scheduled; delivery is done and only closure remains.
+    (
+        ProcessDependencyState::AttentionScheduled,
+        ProcessDependencyState::ResultAppended,
+        false,
+    ),
+    (
+        ProcessDependencyState::AttentionScheduled,
+        ProcessDependencyState::AttentionDeferred,
+        false,
+    ),
+    (
+        ProcessDependencyState::AttentionScheduled,
+        ProcessDependencyState::Settled,
+        false,
+    ),
+];
+
+#[tokio::test]
+async fn dependency_transition_walks_only_legal_edges() {
+    for (from, to, allowed) in DEPENDENCY_TRANSITION_EDGES.iter().copied() {
+        let store = new_store();
+        let (dependent, dependency) = open_settled_dependency(&store).await;
+        force_state(&store, dependent, dependency, from).await;
+
+        let outcome = store
+            .transition_process_dependency(TransitionProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: dependency,
+                scope: scope(),
+                next: to,
+                metadata: None,
+                transitioned_at: Utc::now(),
+            })
+            .await;
+        let stored = stored_dependency(&store, dependent, dependency).await.state;
+
+        if allowed {
+            let advanced = outcome
+                .unwrap_or_else(|error| panic!("{from:?} -> {to:?} must be legal: {error}"))
+                .expect("record exists");
+            assert_eq!(advanced.state, to);
+            assert_eq!(stored, to, "{from:?} -> {to:?} must be durable");
+        } else {
+            let error = outcome.expect_err(&format!("{from:?} -> {to:?} must be refused"));
+            let rendered = format!("{error}");
+            assert!(
+                rendered.contains(&format!("{to:?}")) && rendered.contains(&format!("{from:?}")),
+                "the refusal must name both ends of the illegal edge: {rendered}"
+            );
+            assert_eq!(
+                stored, from,
+                "a refused transition must leave the stored state untouched"
+            );
+        }
+    }
+}
+
+/// Replaying a step that already landed is not an illegal edge — it is the
+/// same command driven twice — so it returns the stored record unchanged
+/// rather than erroring, and does not restamp or overwrite what is recorded.
+#[tokio::test]
+async fn dependency_transition_replays_a_landed_step_without_clobbering_it() {
+    for state in [
+        ProcessDependencyState::ResultAppended,
+        ProcessDependencyState::AttentionScheduled,
+        ProcessDependencyState::AttentionDeferred,
+    ] {
+        let store = new_store();
+        let (dependent, dependency) = open_settled_dependency(&store).await;
+        force_state(&store, dependent, dependency, state).await;
+        let before = stored_dependency(&store, dependent, dependency).await;
+
+        let replay = store
+            .transition_process_dependency(TransitionProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: dependency,
+                scope: scope(),
+                next: state,
+                metadata: Some(json!({"owner": "a second driver"})),
+                transitioned_at: Utc::now(),
+            })
+            .await
+            .expect("replaying a landed step is not an error")
+            .expect("record exists");
+        assert_eq!(
+            replay, before,
+            "{state:?} replay must return the record untouched, metadata included"
+        );
+        assert_eq!(
+            stored_dependency(&store, dependent, dependency).await,
+            before
+        );
+    }
 }
 
 /// Consume/abandon and the reservation release are one journal command
@@ -3332,7 +3454,6 @@ async fn dependency_transition_refuses_to_write_a_terminal_state() {
                 dependent_process_id: dependent,
                 dependency_process_id: dependency,
                 scope: scope(),
-                expected: ProcessDependencyState::Settled,
                 next: target,
                 metadata: None,
                 transitioned_at: Utc::now(),
@@ -3401,7 +3522,7 @@ async fn consume_closes_a_delivered_edge_only_once_attention_is_scheduled() {
             .await
             .expect_err("consume must be refused");
         assert!(
-            format!("{error}").contains("attention"),
+            format!("{error}").contains("AttentionScheduled"),
             "the refusal must name what closing actually requires: {error}"
         );
         assert_eq!(
@@ -3439,7 +3560,6 @@ async fn dependency_transition_rejects_a_metadata_payload_that_is_not_an_object(
             dependent_process_id: dependent,
             dependency_process_id: dependency,
             scope: scope(),
-            expected: ProcessDependencyState::Settled,
             next: ProcessDependencyState::ResultAppended,
             metadata: Some(json!("msg:r1")),
             transitioned_at: Utc::now(),
@@ -3471,7 +3591,6 @@ async fn dependency_transition_is_scope_bound() {
             dependent_process_id: dependent,
             dependency_process_id: dependency,
             scope: foreign_scope,
-            expected: ProcessDependencyState::Settled,
             next: ProcessDependencyState::ResultAppended,
             metadata: None,
             transitioned_at: Utc::now(),
@@ -3490,7 +3609,6 @@ async fn dependency_transition_on_an_unknown_edge_reports_no_record() {
             dependent_process_id: ProcessId::new(),
             dependency_process_id: ProcessId::new(),
             scope: scope(),
-            expected: ProcessDependencyState::Settled,
             next: ProcessDependencyState::ResultAppended,
             metadata: None,
             transitioned_at: Utc::now(),
@@ -3505,13 +3623,15 @@ async fn dependency_transition_on_an_unknown_edge_reports_no_record() {
 /// recovery sweeps will skip them forever.
 #[tokio::test]
 async fn new_substates_are_not_treated_as_closed() {
-    let store = new_store();
-    let (dependent, dependency) = open_settled_dependency(&store).await;
     for state in [
         ProcessDependencyState::ResultAppended,
         ProcessDependencyState::AttentionScheduled,
         ProcessDependencyState::AttentionDeferred,
     ] {
+        // A fresh edge per state: the lifecycle branches at `ResultAppended`,
+        // so these three are not one walk a single edge can take in order.
+        let store = new_store();
+        let (dependent, dependency) = open_settled_dependency(&store).await;
         force_state(&store, dependent, dependency, state).await;
         let unclosed = store
             .query_process_dependencies(ProcessDependencyQuery {
