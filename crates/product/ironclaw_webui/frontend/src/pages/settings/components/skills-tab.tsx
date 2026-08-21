@@ -122,7 +122,7 @@ export function SkillsTab({ searchQuery = "" }) {
     );
   } else if (query.error) {
     body = (
-      <InlineNotice tone="danger" role="alert">
+      <InlineNotice tone="danger" role="alert" data-testid="skills-load-error">
         {t("skills.failedLoad", { message: query.error.message })}
       </InlineNotice>
     );
