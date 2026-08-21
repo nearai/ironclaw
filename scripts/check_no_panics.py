@@ -444,6 +444,11 @@ def has_cfg_test_module_declaration(
     source_parent = repository_root / parent
     if source_parent.is_dir():
         candidates.extend(source_parent.glob("*.rs"))
+        repository_root_resolved = repository_root.resolve()
+        for ancestor in source_parent.resolve().parents:
+            if ancestor == repository_root_resolved.parent:
+                break
+            candidates.extend(ancestor.glob("*.rs"))
     if posix_path.parent.name == "src":
         candidates.extend(
             [
@@ -458,6 +463,7 @@ def has_cfg_test_module_declaration(
     path_declaration = re.compile(
         rf"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*"
         r"#\s*\[\s*path\s*=\s*[\"']([^\"']+)[\"']\s*\]\s*"
+        r"(?:#\s*\[[^\]]+\]\s*)*"
         r"(?:pub(?:\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*;"
     )
     target = (repository_root / pathlib.Path(*posix_path.parts)).resolve()
@@ -1263,6 +1269,41 @@ class CheckNoPanicsTests(unittest.TestCase):
         self.assertFalse(
             is_test_only_path("crates/extensions/packages/memory-native/src/contract_tests.rs")
         )
+
+    def test_cfg_path_declaration_walks_ancestor_modules(self) -> None:
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as directory:
+            root = pathlib.Path(directory)
+            (root / "src/outer/inner").mkdir(parents=True)
+            source = root / "src/lib.rs"
+            source.write_text(
+                "#[cfg(test)]\n"
+                '#[path = "outer/inner/fixture_tests.rs"]\n'
+                "mod fixture_tests;\n",
+                encoding="utf-8",
+            )
+
+            target = root / "src/outer/inner/fixture_tests.rs"
+            self.assertTrue(
+                has_cfg_test_module_declaration(target.as_posix(), root)
+            )
+
+    def test_cfg_path_declaration_allows_intervening_attributes(self) -> None:
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as directory:
+            root = pathlib.Path(directory)
+            (root / "src/with_attrs").mkdir(parents=True)
+            source = root / "src/with_attrs.rs"
+            source.write_text(
+                "#[cfg(test)]\n"
+                '#[path = "with_attrs/tests.rs"]\n'
+                "#[allow(dead_code)]\n"
+                "mod tests;\n",
+                encoding="utf-8",
+            )
+
+            target = root / "src/with_attrs/tests.rs"
+            self.assertTrue(
+                has_cfg_test_module_declaration(target.as_posix(), root)
+            )
 
     def test_lifetime_annotations_do_not_desync_braces(self) -> None:
         """Lifetime annotations ('a, 'static) must not be parsed as char literals.

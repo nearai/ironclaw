@@ -643,8 +643,8 @@ impl NearAiChatProvider {
                 if let Some(reasoning_delta) = choice
                     .delta
                     .reasoning_content
-                    .filter(|s| !s.is_empty())
-                    .or(choice.delta.reasoning.filter(|s| !s.is_empty()))
+                    .filter(|s| !s.trim().is_empty())
+                    .or(choice.delta.reasoning.filter(|s| !s.trim().is_empty()))
                 {
                     semantic_progress = true;
                     parsed.reasoning.push_str(&reasoning_delta);
@@ -2401,7 +2401,7 @@ data: [DONE]
             let (mut socket, _) = accept_chat_request(&listener).await;
             socket
                 .write_all(
-                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"reasoning_content\":\"\",\"reasoning\":\"fallback reasoning\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"reasoning_content\":\"   \",\"reasoning\":\"fallback reasoning\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
                 )
                 .await
                 .expect("write reasoning response");
