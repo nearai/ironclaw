@@ -325,3 +325,45 @@ async fn in_memory_subagent_result_into_an_unknown_thread_fails_closed() {
 async fn filesystem_subagent_result_into_an_unknown_thread_fails_closed() {
     subagent_result_into_an_unknown_thread_fails_closed(filesystem_service()).await;
 }
+
+/// The same fail-closed promise on the backend whose window actually exists.
+/// The two cases above both commit (or reject) the identity claim and the row
+/// together, so neither reaches the orphan-claim state the doc comment above
+/// describes. Refusing `BeginTxn` forces the two-phase fallback: the claim
+/// lands, `reserve_sequence` then rejects the unknown thread, and a durable
+/// claim is left behind pointing at a row that will never exist. The retry
+/// must still be rejected — an orphan claim must never be mistaken for a
+/// committed row and replayed back as an accepted result.
+#[tokio::test]
+async fn filesystem_fallback_unknown_thread_claim_is_not_replayed_as_accepted() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let service: Arc<dyn SessionThreadService> = Arc::new(FilesystemSessionThreadService::new(
+        scoped_threads_fs(Arc::clone(&backend)),
+    ));
+    let unknown = ThreadId::new("thread-never-created").expect("thread id");
+    let request = result_request(&unknown, "child-1", "framed child output");
+
+    backend.add_fault(
+        Fault::on(FilesystemOperation::BeginTxn)
+            .nth(1)
+            .returning(FaultKind::Unsupported),
+    );
+
+    let error = service
+        .accept_subagent_result(request.clone())
+        .await
+        .expect_err("an unknown thread must not accept a subagent result");
+    assert!(
+        matches!(&error, SessionThreadError::UnknownThread { thread_id } if thread_id == &unknown),
+        "expected UnknownThread, got {error:?}"
+    );
+
+    let retry = service
+        .accept_subagent_result(request)
+        .await
+        .expect_err("the orphan claim must not resurface as an accepted replay");
+    assert!(
+        matches!(&retry, SessionThreadError::UnknownThread { thread_id } if thread_id == &unknown),
+        "expected UnknownThread on retry, got {retry:?}"
+    );
+}
