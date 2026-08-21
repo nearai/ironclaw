@@ -6,12 +6,17 @@
 //! fail-closed default, which would leave the door shut in production without
 //! a compile error.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    Fault, FaultInjecting, FaultKind, FilesystemOperation, InMemoryBackend, RootFilesystem,
-    ScopedFilesystem,
+    BackendCapabilities, CasExpectation, DirEntry, Entry, Fault, FaultInjecting, FaultKind,
+    FileStat, FilesystemError, FilesystemOperation, Filter, InMemoryBackend, IndexSpec,
+    OrderedPage, Page, RecordVersion, RootFilesystem, ScopedFilesystem, SeqNo, StorageTxn,
+    VersionedEntry,
 };
 use ironclaw_host_api::{
     ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
@@ -30,6 +35,7 @@ use ironclaw_threads::{
     ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
     UpdateToolResultReferenceRequest,
 };
+use tokio::sync::Barrier;
 
 fn scope() -> ThreadScope {
     ThreadScope {
@@ -223,6 +229,77 @@ async fn filesystem_distinct_children_get_distinct_rows() {
     distinct_children_get_distinct_rows(filesystem_service()).await;
 }
 
+/// The replay case the suite above does not reach: the same child identity
+/// arrives a second time carrying *different* content. Both production
+/// backends key acceptance on the identity tuple alone, so the durable row is
+/// first-writer-wins — the retry must be answered with the row that already
+/// exists, never by appending a second row and never by rewriting the
+/// transcript under a caller who re-sent the tuple with new text.
+///
+/// This is the parity case: filesystem records a `request_fingerprint` and
+/// in-memory does not, so it is exactly here that the two backends could
+/// diverge on whether changed content is accepted. The fingerprint is a
+/// recovery guard for the claimed-but-unwritten window (see
+/// `filesystem_subagent_result_recovery_refuses_a_changed_payload`) and must
+/// not turn a committed replay into a rejection on one backend only.
+async fn a_replay_with_changed_content_returns_the_original_row(
+    service: Arc<dyn SessionThreadService>,
+) {
+    let thread = ensure_thread(&service).await;
+
+    let first = service
+        .accept_subagent_result(result_request(&thread, "child-1", "framed child output"))
+        .await
+        .expect("first acceptance");
+
+    let replay = service
+        .accept_subagent_result(result_request(&thread, "child-1", "tampered child output"))
+        .await
+        .expect("a changed payload under a committed identity replays, it does not fail");
+    assert!(
+        replay.idempotent_replay,
+        "a changed payload is still a replay of the committed identity"
+    );
+    assert_eq!(replay.message_id, first.message_id, "same durable row");
+    assert_eq!(replay.sequence, first.sequence);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope(),
+            thread_id: thread,
+        })
+        .await
+        .expect("history");
+    assert_eq!(
+        history.messages.len(),
+        1,
+        "a changed payload must not append a second row: {:?}",
+        history.messages
+    );
+    let row = &history.messages[0];
+    assert_eq!(row.message_id, first.message_id);
+    assert_eq!(
+        row.kind,
+        MessageKind::System,
+        "a replay must not reclassify the row"
+    );
+    assert_eq!(
+        row.content.as_deref(),
+        Some("framed child output"),
+        "the committed transcript wins; a retry cannot rewrite it"
+    );
+}
+
+#[tokio::test]
+async fn in_memory_a_replay_with_changed_content_returns_the_original_row() {
+    a_replay_with_changed_content_returns_the_original_row(in_memory_service()).await;
+}
+
+#[tokio::test]
+async fn filesystem_a_replay_with_changed_content_returns_the_original_row() {
+    a_replay_with_changed_content_returns_the_original_row(filesystem_service()).await;
+}
+
 /// The hard crash window that only exists on a backend without transactions:
 /// the durable idempotency claim landed, the transcript row did not. A retry
 /// must resume the claim — same message id, one row — not mint an orphan or
@@ -292,6 +369,88 @@ async fn filesystem_subagent_result_resumes_a_claim_whose_row_never_landed() {
         "the crash must not duplicate the row: {rows:?}"
     );
     assert_eq!(rows[0].message_id, resumed.message_id);
+}
+
+/// The other half of the crash window, and the only place the filesystem
+/// backend's `request_fingerprint` actually decides anything: the claim landed
+/// without its row, and the retry carries a *different* payload. Resuming it
+/// would commit content the claim was never made for under an identity a
+/// caller already believes failed, so the door must fail closed — and leave
+/// the claim intact, so the retry that does carry the original payload still
+/// heals into the row it always intended.
+#[tokio::test]
+async fn filesystem_subagent_result_recovery_refuses_a_changed_payload() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let service: Arc<dyn SessionThreadService> = Arc::new(FilesystemSessionThreadService::new(
+        scoped_threads_fs(Arc::clone(&backend)),
+    ));
+    let thread = ensure_thread(&service).await;
+    let request = result_request(&thread, "child-1", "framed child output");
+
+    backend.add_fault(
+        Fault::on(FilesystemOperation::BeginTxn)
+            .nth(1)
+            .returning(FaultKind::Unsupported),
+    );
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path("/messages/")
+            .nth(1)
+            .backend("crash between the idempotency claim and the transcript row"),
+    );
+
+    service
+        .accept_subagent_result(request.clone())
+        .await
+        .expect_err("the injected row write must fail the first acceptance");
+
+    let error = service
+        .accept_subagent_result(result_request(&thread, "child-1", "tampered child output"))
+        .await
+        .expect_err("a changed payload must not resume someone else's claim");
+    assert!(
+        matches!(
+            &error,
+            SessionThreadError::Backend(reason)
+                if reason.contains("does not match its recovery intent")
+        ),
+        "expected the recovery-intent guard, got {error:?}"
+    );
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope(),
+            thread_id: thread.clone(),
+        })
+        .await
+        .expect("history");
+    assert!(
+        history.messages.is_empty(),
+        "the refused retry must commit nothing: {:?}",
+        history.messages
+    );
+
+    // The refusal is a guard, not a poison pill: the original payload still
+    // resumes the claim it belongs to.
+    let resumed = service
+        .accept_subagent_result(request)
+        .await
+        .expect("the original payload still resumes the claim");
+    assert!(resumed.idempotent_replay);
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope(),
+            thread_id: thread,
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages.len(), 1, "{:?}", history.messages);
+    assert_eq!(history.messages[0].message_id, resumed.message_id);
+    assert_eq!(history.messages[0].kind, MessageKind::System);
+    assert_eq!(
+        history.messages[0].content.as_deref(),
+        Some("framed child output")
+    );
 }
 
 /// A child's result may only land in a thread that already exists under the
@@ -413,6 +572,172 @@ async fn filesystem_fallback_unknown_thread_claim_is_not_replayed_as_accepted() 
         "the healed claim must be one real row, not a reported replay of nothing: {rows:?}"
     );
     assert_eq!(rows[0].message_id, healed.message_id);
+}
+
+// ── Two deliveries racing for one claim ───────────────────────────────────
+
+/// Backend double for the fallback race. Refuses the first two `BeginTxn`
+/// calls behind a two-party barrier, so both racers are forced onto the
+/// non-transactional claim-then-write protocol *and* are guaranteed to have
+/// already read "no idempotency record" before either writes its claim. Sibling
+/// of `FallbackRaceBackend` in the inbound suite
+/// (`filesystem_session_thread_contract.rs`), which pins the same race for
+/// `accept_inbound_message`.
+struct SubagentFallbackRaceBackend {
+    inner: InMemoryBackend,
+    begin_barrier: Barrier,
+    begin_count: AtomicUsize,
+}
+
+impl SubagentFallbackRaceBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+            begin_barrier: Barrier::new(2),
+            begin_count: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for SubagentFallbackRaceBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn query_ordered(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: &OrderedPage,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query_ordered(path, filter, page).await
+    }
+
+    async fn ensure_index(
+        &self,
+        path: &VirtualPath,
+        spec: &IndexSpec,
+    ) -> Result<(), FilesystemError> {
+        self.inner.ensure_index(path, spec).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+        if self.begin_count.fetch_add(1, Ordering::SeqCst) < 2 {
+            self.begin_barrier.wait().await;
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::BeginTxn,
+            });
+        }
+        self.inner.begin(path).await
+    }
+
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        self.inner.reserve_sequence(path).await
+    }
+}
+
+/// Two deliveries of the same child result race for the same claim on the
+/// backend that has no transaction to serialize them. Every other case in this
+/// suite is sequential, so the loser's path — CAS conflict on the claim, then
+/// re-classify the winner's record — is only exercised here. Both callers must
+/// converge on one durable System row with one identity, and exactly one of
+/// them must report `idempotent_replay`: a `false` on both would tell two
+/// callers they each appended, and a `true` on both would mean no one wrote.
+#[tokio::test]
+async fn filesystem_fallback_concurrent_subagent_results_converge_on_one_row() {
+    let backend = Arc::new(SubagentFallbackRaceBackend::new());
+    let service: Arc<dyn SessionThreadService> = Arc::new(FilesystemSessionThreadService::new(
+        scoped_threads_fs(backend),
+    ));
+    let thread = ensure_thread(&service).await;
+    let request = result_request(&thread, "child-1", "framed child output");
+
+    let (left, right) = tokio::join!(
+        service.accept_subagent_result(request.clone()),
+        service.accept_subagent_result(request)
+    );
+    let left = left.expect("first concurrent subagent-result accept converges");
+    let right = right.expect("second concurrent subagent-result accept converges");
+
+    assert_eq!(
+        left.message_id, right.message_id,
+        "a race must not hand two callers divergent message ids"
+    );
+    assert_eq!(left.sequence, right.sequence);
+    assert_ne!(
+        left.idempotent_replay, right.idempotent_replay,
+        "exactly one racer wrote the row and exactly one replayed it: \
+         left={left:?} right={right:?}"
+    );
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope(),
+            thread_id: thread.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(
+        history.messages.len(),
+        1,
+        "the race must leave exactly one durable row: {:?}",
+        history.messages
+    );
+    assert_eq!(history.messages[0].message_id, left.message_id);
+    assert_eq!(
+        history.messages[0].kind,
+        MessageKind::System,
+        "never MessageKind::User"
+    );
+    assert_eq!(history.messages[0].sequence, left.sequence);
+
+    // The loser must not have burned a durable sequence on its way to the
+    // replay: the next real row lands immediately after the winner's.
+    let next = service
+        .accept_subagent_result(result_request(&thread, "child-2", "second child output"))
+        .await
+        .expect("a later child still appends");
+    assert_eq!(
+        next.sequence,
+        left.sequence + 1,
+        "a losing racer must not reserve a durable sequence"
+    );
 }
 
 // ── One dedupe index, not two ─────────────────────────────────────────────
